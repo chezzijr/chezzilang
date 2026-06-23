@@ -217,6 +217,13 @@ pub enum Op {
     },
     CallBuiltin(String, usize),
     CallPrint(usize),
+    /// `print(..., sep=, end=)` — stack `[arg0, …, argN-1, sep, end]`: the positional args, then the
+    /// `sep` and `end` strings (user exprs or their `" "` / `"\n"` defaults), pushed last. Pops
+    /// `argc + 2`, joins the positional args with `sep`, appends `end`, writes to stdout. Plain
+    /// `print(...)` (no kwargs) stays on `CallPrint` and is byte-identical to before.
+    CallPrintSep {
+        argc: usize,
+    },
     Return,
     /// `yield <expr>` (experimental generators) — stack top holds the yielded value. Suspends the
     /// running generator: returns control out of the generator's private `run_until` to the host's

@@ -5004,9 +5004,9 @@ impl Checker {
             ExprKind::Call {
                 callee,
                 args,
+                named,
                 type_args,
-                ..
-            } => self.infer_call(callee, args, type_args, expr.span),
+            } => self.infer_call(callee, args, named, type_args, expr.span),
             ExprKind::Field { obj, name } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
@@ -6043,7 +6043,33 @@ impl Checker {
 
     // ===== calls =====
 
-    fn infer_call(&mut self, callee: &Expr, args: &[Expr], type_args: &[Type], span: Span) -> Ty {
+    fn infer_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        type_args: &[Type],
+        span: Span,
+    ) -> Ty {
+        // `print(..., sep=, end=)` is the only call whose named args survive desugar. Type-check the
+        // `sep`/`end` value(s) as `str` here (desugar already validated the key names). Any other
+        // call should have an empty `named` post-desugar.
+        if !named.is_empty()
+            && let ExprKind::Ident(name) = &callee.kind
+            && name == "print"
+            && self.lookup(name).is_none()
+        {
+            for a in args {
+                self.infer_value(a);
+            }
+            for (_, v) in named {
+                let t = self.infer_value(v);
+                if t != Ty::Str && !t.is_unknown() {
+                    self.error(v.span, format!("print() sep/end must be str, found {t}"));
+                }
+            }
+            return Ty::Nil;
+        }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
         let targs: Vec<Ty> = type_args

@@ -18,7 +18,7 @@ Conventions used below:
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `print` | `print(...args) -> nil` | Write each argument (any type) to stdout, then a newline. Variadic. |
+| `print` | `print(...args, sep=" ", end="\n") -> nil` | Write each argument (any type) to stdout. Variadic. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. |
 | `len` | `len(x) -> int` | Length of a `list`, `str`, `bytes`, or `bytearray`. (Types also have a `.len()` method.) |
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> list[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |

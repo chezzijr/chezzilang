@@ -1507,8 +1507,40 @@ impl Walker<'_> {
         };
 
         let Some(params) = module_spec.or(method_spec) else {
-            // Not a registered callable. Named args here are unsupported (closures / builtin methods).
+            // Not a registered callable. Named args here are unsupported (closures / builtin methods)
+            // — EXCEPT the `print` builtin, which accepts `sep=`/`end=` (str expressions). For print
+            // we validate the keys here and LEAVE them in `named` (un-rewritten) so the checker and
+            // both engines can read them off the Call AST.
             if !named.is_empty() {
+                if let ExprKind::Ident(n) = &callee.kind
+                    && n == "print"
+                    && !self.is_local(n)
+                {
+                    let mut seen_sep = false;
+                    let mut seen_end = false;
+                    for (k, _) in named.iter() {
+                        let dup = match k.as_str() {
+                            "sep" => std::mem::replace(&mut seen_sep, true),
+                            "end" => std::mem::replace(&mut seen_end, true),
+                            _ => {
+                                return Err(err(
+                                    span,
+                                    "print() only accepts the named arguments 'sep' and 'end'"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+                        if dup {
+                            return Err(err(
+                                span,
+                                "print() only accepts the named arguments 'sep' and 'end'"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    // Keys are valid (subset of {sep,end}, no dups): keep `named` intact.
+                    return Ok(());
+                }
                 return Err(err(
                     span,
                     "named arguments are only supported on functions, struct constructors, and struct methods"
@@ -1809,6 +1841,55 @@ mod tests {
             desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
                 .message
                 .contains("only supported on functions, struct constructors, and struct methods")
+        );
+    }
+
+    /// Pull the named-arg keys off the call inside the last statement.
+    fn call_named_keys(stmts: &[Stmt]) -> Vec<String> {
+        let last = stmts.last().expect("a statement");
+        let expr = match &last.kind {
+            StmtKind::Let { value, .. } => value,
+            StmtKind::Expr(e) => e,
+            other => panic!("expected let/expr, got {other:?}"),
+        };
+        let ExprKind::Call { named, .. } = &expr.kind else {
+            panic!("expected a Call, got {:?}", expr.kind)
+        };
+        named.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    #[test]
+    fn print_end_kwarg_is_kept_in_named() {
+        // `print` is special-cased: its `sep`/`end` named args survive desugar (not rewritten to
+        // positional), so the checker and engines can read them off the Call.
+        let s = desugar_ok("print(\"a\", end=\"\")\n");
+        assert_eq!(call_named_keys(&s), vec!["end".to_string()]);
+    }
+
+    #[test]
+    fn print_sep_and_end_kwargs_kept() {
+        let s = desugar_ok("print(\"a\", \"b\", sep=\"-\", end=\"!\")\n");
+        assert_eq!(
+            call_named_keys(&s),
+            vec!["sep".to_string(), "end".to_string()]
+        );
+    }
+
+    #[test]
+    fn print_unknown_kwarg_errors() {
+        assert!(
+            desugar_err("print(\"a\", foo=\"x\")\n")
+                .message
+                .contains("only accepts the named arguments 'sep' and 'end'")
+        );
+    }
+
+    #[test]
+    fn print_duplicate_kwarg_errors() {
+        assert!(
+            desugar_err("print(\"a\", sep=\"-\", sep=\".\")\n")
+                .message
+                .contains("only accepts the named arguments 'sep' and 'end'")
         );
     }
 

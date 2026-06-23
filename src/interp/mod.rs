@@ -967,7 +967,12 @@ impl Interp {
                 expr.span,
             ),
             // `type_args` are type-erased — the interpreter ignores them (checker already used them).
-            ExprKind::Call { callee, args, .. } => self.eval_call(callee, args, expr.span),
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => self.eval_call(callee, args, named, expr.span),
             ExprKind::Match { scrutinee, arms } => self.eval_match_expr(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => {
                 if as_bool(self.eval(cond)?, cond.span)? {
@@ -1289,11 +1294,21 @@ impl Interp {
         Ok(out)
     }
 
+    /// Evaluate a `print` `sep=`/`end=` argument to a `String`. The checker guarantees it is `str`;
+    /// a non-str falls back to the empty string (defensive, mirroring the VM's `val_str` fallback).
+    fn eval_str_kwarg(&mut self, e: &Expr) -> Result<String, RuntimeError> {
+        match self.eval(e)? {
+            Value::Str(s) => Ok(s.to_string()),
+            _ => Ok(String::new()),
+        }
+    }
+
     /// Evaluate a call expression: builtins by name, otherwise a user function value.
     fn eval_call(
         &mut self,
         callee: &Expr,
         args: &[Expr],
+        named: &[(String, Expr)],
         span: Span,
     ) -> Result<Value, RuntimeError> {
         // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
@@ -1359,8 +1374,18 @@ impl Interp {
                 for v in &arg_vals {
                     parts.push(self.stringify(v, span, 0)?);
                 }
-                self.out.push_str(&parts.join(" "));
-                self.out.push('\n');
+                // `sep`/`end` named args (kept on the Call by desugar, validated str by the checker).
+                // Eval order matches the VM: positional args, then sep, then end. Defaults: " ", "\n".
+                let sep = match named.iter().find(|(k, _)| k == "sep") {
+                    Some((_, e)) => self.eval_str_kwarg(e)?,
+                    None => " ".to_string(),
+                };
+                let end = match named.iter().find(|(k, _)| k == "end") {
+                    Some((_, e)) => self.eval_str_kwarg(e)?,
+                    None => "\n".to_string(),
+                };
+                self.out.push_str(&parts.join(&sep));
+                self.out.push_str(&end);
                 return Ok(Value::Nil);
             }
             // `str(x)` dispatches to a `Stringable` struct's `str` method (else default repr).
@@ -4956,7 +4981,7 @@ impl Interp {
                 if matches!(c, Value::Bool(false)) {
                     let message = match msg {
                         Some(m) => match self.eval(m)? {
-                            Value::Str(s) => s.to_string(),
+                            Value::Str(s) => format!("assertion failed: {s}"),
                             _ => "assertion failed".to_string(),
                         },
                         None => "assertion failed".to_string(),
@@ -7375,6 +7400,39 @@ mod tests {
     }
 
     #[test]
+    fn interp_print_sep_end_byte_identical_across_engines() {
+        // The headline parity guarantee for print kwargs: VM and interp produce IDENTICAL stdout
+        // for every sep/end form (and the no-kwarg default).
+        for src in [
+            "print(\"a\")\n",
+            "print(\"a\", \"b\")\n",
+            "print(\"a\", end=\"\")\n",
+            "print(\"a\", \"b\", sep=\"-\")\n",
+            "print(\"a\", \"b\", sep=\"-\", end=\"!\")\n",
+            "print(\"a\", \"b\", end=\"\")\n",
+            "e := \"?\"\nprint(\"a\", end=e)\n",
+            "print(1, true, sep=\", \", end=\".\\n\")\n",
+        ] {
+            let vm_out = crate::vm::run_capture(src).expect("vm run");
+            let interp_out = run_capture(src).expect("interp run");
+            assert_eq!(vm_out, interp_out, "stdout parity for {src:?}");
+        }
+    }
+
+    #[test]
+    fn interp_assert_false_default_message() {
+        // Bare `assert false` keeps the exact legacy text — byte-identical to the VM.
+        let err = run_capture("assert false\n").unwrap_err();
+        assert_eq!(err.message, "assertion failed");
+    }
+
+    #[test]
+    fn interp_assert_true_with_msg_does_not_evaluate_msg() {
+        // A passing assert never evaluates the message expr (laziness) — matches the VM.
+        assert_eq!(run("assert true, \"never\"\nprint(\"ok\")\n"), "ok\n");
+    }
+
+    #[test]
     fn interp_raw_string_is_verbatim_no_interpolation() {
         // A raw string is NOT interpolated even with `x` in scope — braces stay literal.
         assert_eq!(run("x := 5\nprint(r\"{x}\")\n"), "{x}\n");
@@ -7405,7 +7463,7 @@ mod tests {
     #[test]
     fn interp_assert_false_faults_with_msg_and_line() {
         let err = run_capture("print(\"a\")\nassert false, \"boom\"\n").unwrap_err();
-        assert_eq!(err.message, "boom");
+        assert_eq!(err.message, "assertion failed: boom");
         assert_eq!(err.span.line, 2);
     }
 
@@ -8620,6 +8678,19 @@ b := Buf([10, 20, 30])
         let expected = include_str!("../../examples/range_step.expected");
         assert_eq!(
             run_capture(source).expect("range_step.chz should run"),
+            expected
+        );
+    }
+
+    /// `print` kwargs golden: `examples/print_kwargs.chz` (default form, `end=""`, `sep=`, both, and
+    /// runtime str exprs) — the interpreter must match `.expected` byte-for-byte (VM parity asserted
+    /// on the VM side).
+    #[test]
+    fn golden_print_kwargs_chz() {
+        let source = include_str!("../../examples/print_kwargs.chz");
+        let expected = include_str!("../../examples/print_kwargs.expected");
+        assert_eq!(
+            run_capture(source).expect("print_kwargs.chz should run"),
             expected
         );
     }

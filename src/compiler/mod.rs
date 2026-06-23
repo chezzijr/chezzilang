@@ -2647,9 +2647,12 @@ impl Compiler {
                 });
             }
             // `type_args` are type-erased — the compiler never sees them (checker already used them).
-            ExprKind::Call { callee, args, .. } => {
-                self.compile_call(fc, callee, args, expr.span)?
-            }
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => self.compile_call(fc, callee, args, named, expr.span)?,
             ExprKind::Field { obj, name } => {
                 // `module.Enum.Variant` (nullary, qualified value form) → construct the variant.
                 if let ExprKind::Field {
@@ -3019,6 +3022,7 @@ impl Compiler {
         fc: &mut FnComp,
         callee: &Expr,
         args: &[Expr],
+        named: &[(String, Expr)],
         span: Span,
     ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
@@ -3168,7 +3172,25 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                fc.emit(Op::CallPrint(args.len()), span);
+                if named.is_empty() {
+                    // Plain `print(...)`: byte-identical to before (space-join, trailing newline).
+                    fc.emit(Op::CallPrint(args.len()), span);
+                } else {
+                    // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or its
+                    // default str), then a dedicated op joins+terminates. Eval order matches the
+                    // interpreter: positional args, then sep, then end.
+                    let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
+                    let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
+                    match sep {
+                        Some(e) => self.compile_expr(fc, e)?,
+                        None => fc.emit(Op::ConstStr(" ".to_string()), span),
+                    }
+                    match end {
+                        Some(e) => self.compile_expr(fc, e)?,
+                        None => fc.emit(Op::ConstStr("\n".to_string()), span),
+                    }
+                    fc.emit(Op::CallPrintSep { argc: args.len() }, span);
+                }
                 return Ok(());
             }
             if is_builtin(name) {
