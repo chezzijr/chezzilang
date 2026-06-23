@@ -936,6 +936,14 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
 ### Robustness pass (landed, both engines)
+- **Bounded infinite-recursion stack trace (gap #8, 2026-06-23).** At `MAX_CALL_DEPTH` (10_000) a
+  recursion fault used to print one `  at <fn> (called at …)` line per frame → ~10_001 lines flooding
+  the terminal. `format_trace` (rendered byte-identically in `vm/mod.rs` + `interp/mod.rs`) now (1)
+  collapses runs of consecutive same-name frames to the innermost `at` line + `  … (× N more identical
+  frames) …`, and (2) caps the collapsed list to head `TRACE_HEAD=10` / tail `TRACE_TAIL=10` with a
+  `  … (M frames elided) …` marker. A recursion fault now prints ~4 lines; the captured `Vec<TraceFrame>`
+  is untouched (debuggers/tests still see every frame). No-op for small distinct-name traces, so the
+  exact-trace golden (`examples/stack_trace.chz`) is unchanged. Parity-tested both engines.
 - **Cyclic-data depth guard + order-independent map `==`.** Two fuzzing-found bugs: a cyclic struct made
   `print`/`==` recurse unbounded on the host stack (uncatchable SIGABRT, even inside `recover:`); and map
   `==` was order-dependent while set `==` was order-independent. Fix: `MAX_STRUCTURAL_DEPTH = 10_000`

@@ -69,15 +69,60 @@ impl std::fmt::Display for RunError {
     }
 }
 
+/// When rendering a stack trace, after run-collapsing show at most this many collapsed lines from
+/// the head (innermost — closest to the fault) and tail (outermost — includes `main`); the middle is
+/// elided. Bounds deep non-recursive chains. Mirrored byte-identically in `vm::format_trace`.
+const TRACE_HEAD: usize = 10;
+const TRACE_TAIL: usize = 10;
+
 /// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
 /// `  at <function> (<call site>)` line per frame, innermost first. Mirrors `vm::format_trace`.
+///
+/// Two bounding transforms keep an infinite-recursion fault from flooding ~10_001 lines (gap #8):
+/// (1) runs of consecutive frames with the SAME function name collapse to the run's innermost `at`
+/// line plus a `  … (× N more identical frames) …` marker when the run length N>1; (2) if the
+/// collapsed line list still exceeds `TRACE_HEAD + TRACE_TAIL`, the head and tail collapsed lines are
+/// kept and the middle replaced by a `  … (M frames elided) …` marker. Both transforms are no-ops on
+/// small traces with distinct names, so existing exact-trace goldens are unchanged.
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
-    for frame in trace {
-        s.push_str(&format!(
-            "\n  at {} (called at {})",
+    // (1) Collapse consecutive same-name runs into one line (+ a `× N` marker for the rest).
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < trace.len() {
+        let frame = &trace[i];
+        let mut j = i + 1;
+        while j < trace.len() && trace[j].function == frame.function {
+            j += 1;
+        }
+        lines.push(format!(
+            "  at {} (called at {})",
             frame.function, frame.span
         ));
+        let run = j - i;
+        if run > 1 {
+            lines.push(format!("  … (× {} more identical frames) …", run - 1));
+        }
+        i = j;
+    }
+    // (2) Cap the collapsed-line list: keep head + tail, elide the middle.
+    if lines.len() > TRACE_HEAD + TRACE_TAIL {
+        let elided = lines.len() - TRACE_HEAD - TRACE_TAIL;
+        let tail_start = lines.len() - TRACE_TAIL;
+        for line in &lines[..TRACE_HEAD] {
+            s.push('\n');
+            s.push_str(line);
+        }
+        s.push_str(&format!("\n  … ({elided} frames elided) …"));
+        for line in &lines[tail_start..] {
+            s.push('\n');
+            s.push_str(line);
+        }
+    } else {
+        for line in &lines {
+            s.push('\n');
+            s.push_str(line);
+        }
     }
     s
 }

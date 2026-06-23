@@ -83,15 +83,60 @@ impl std::fmt::Display for RunError {
     }
 }
 
+/// When rendering a stack trace, after run-collapsing show at most this many collapsed lines from
+/// the head (innermost — closest to the fault) and tail (outermost — includes `main`); the middle is
+/// elided. Bounds deep non-recursive chains. Mirrored byte-identically in `interp::format_trace`.
+const TRACE_HEAD: usize = 10;
+const TRACE_TAIL: usize = 10;
+
 /// Render a runtime error plus its stack trace for the CLI: the error line, then one indented
 /// `  at <function> (<call site>)` line per frame, innermost first. Shared by both engines' drivers.
+///
+/// Two bounding transforms keep an infinite-recursion fault from flooding ~10_001 lines (gap #8):
+/// (1) runs of consecutive frames with the SAME function name collapse to the run's innermost `at`
+/// line plus a `  … (× N more identical frames) …` marker when the run length N>1; (2) if the
+/// collapsed line list still exceeds `TRACE_HEAD + TRACE_TAIL`, the head and tail collapsed lines are
+/// kept and the middle replaced by a `  … (M frames elided) …` marker. Both transforms are no-ops on
+/// small traces with distinct names, so existing exact-trace goldens are unchanged.
 pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     let mut s = format!("runtime error ({span}): {message}");
-    for frame in trace {
-        s.push_str(&format!(
-            "\n  at {} (called at {})",
+    // (1) Collapse consecutive same-name runs into one line (+ a `× N` marker for the rest).
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < trace.len() {
+        let frame = &trace[i];
+        let mut j = i + 1;
+        while j < trace.len() && trace[j].function == frame.function {
+            j += 1;
+        }
+        lines.push(format!(
+            "  at {} (called at {})",
             frame.function, frame.span
         ));
+        let run = j - i;
+        if run > 1 {
+            lines.push(format!("  … (× {} more identical frames) …", run - 1));
+        }
+        i = j;
+    }
+    // (2) Cap the collapsed-line list: keep head + tail, elide the middle.
+    if lines.len() > TRACE_HEAD + TRACE_TAIL {
+        let elided = lines.len() - TRACE_HEAD - TRACE_TAIL;
+        let tail_start = lines.len() - TRACE_TAIL;
+        for line in &lines[..TRACE_HEAD] {
+            s.push('\n');
+            s.push_str(line);
+        }
+        s.push_str(&format!("\n  … ({elided} frames elided) …"));
+        for line in &lines[tail_start..] {
+            s.push('\n');
+            s.push_str(line);
+        }
+    } else {
+        for line in &lines {
+            s.push('\n');
+            s.push_str(line);
+        }
     }
     s
 }
@@ -28796,6 +28841,103 @@ main()
         let ie = ip_res.expect_err("program should fault");
         let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
         assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
+    }
+
+    /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
+    /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
+    #[cfg(test)]
+    fn deep_recursion_fixture() -> std::path::PathBuf {
+        let src = "fn rec(n: int) -> int:\n    return rec(n + 1)\nfn main():\n    print(rec(0))\nmain()\n";
+        let dir = std::env::temp_dir().join("chezzi_deep_recursion_trace_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rec.chz");
+        std::fs::write(&path, src).unwrap();
+        path
+    }
+
+    /// Gap #8: an infinite-recursion fault must NOT print one frame per call (~10_001 lines). The
+    /// renderer collapses consecutive identical frames into a `× N` form and caps the printed trace,
+    /// so the output stays a couple dozen lines while the raw captured trace is still ~10_000 frames.
+    #[test]
+    fn recursion_trace_is_bounded_and_collapsed() {
+        let path = deep_recursion_fixture();
+        let (_out, _err, res, _) = run_file(&path);
+        let e = res.expect_err("deep recursion should fault");
+        // Raw trace really is huge.
+        assert!(
+            e.trace.len() > 1000,
+            "expected a deep raw trace, got {}",
+            e.trace.len()
+        );
+        let fmt = format_trace(&e.message, e.span, &e.trace);
+        let nlines = fmt.lines().count();
+        assert!(
+            nlines < 30,
+            "trace should be bounded, got {nlines} lines:\n{fmt}"
+        );
+        // Collapse marker present (the `× N more identical frames` run elision).
+        assert!(
+            fmt.contains("identical frames"),
+            "expected a collapse marker, got:\n{fmt}"
+        );
+        // Innermost frame still visible.
+        assert!(
+            fmt.contains("at rec (called at"),
+            "innermost frame must be shown, got:\n{fmt}"
+        );
+        // Outermost frame (main) still visible.
+        assert!(
+            fmt.contains("at main (called at"),
+            "outermost frame must be shown, got:\n{fmt}"
+        );
+    }
+
+    /// Gap #8 parity: the bounded/collapsed trace must be byte-identical across both engines.
+    #[test]
+    fn recursion_trace_parity_vm_vs_interp() {
+        let path = deep_recursion_fixture();
+        let (_o, _e, res, _) = run_file(&path);
+        let e = res.expect_err("deep recursion should fault");
+        let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+        let (_o2, _e2, ip_res, _) = crate::interp::run_file(&path);
+        let ie = ip_res.expect_err("deep recursion should fault");
+        let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+        assert_eq!(
+            vm_fmt, ip_fmt,
+            "engines must produce the same bounded/collapsed trace"
+        );
+    }
+
+    /// Gap #8 cap path: a deep chain of DISTINCT-named frames (no collapse possible) is still bounded
+    /// by the head/tail cap with a `frames elided` marker, and stays byte-identical across engines.
+    #[test]
+    fn format_trace_caps_distinct_name_chain() {
+        let span = Span { line: 1, col: 1 };
+        let trace: Vec<TraceFrame> = (0..50)
+            .map(|n| TraceFrame {
+                function: format!("f{n}"),
+                span,
+            })
+            .collect();
+        let vm_fmt = format_trace("boom", span, &trace);
+        let nlines = vm_fmt.lines().count();
+        // 1 header + 10 head + 1 elision marker + 10 tail = 22.
+        assert_eq!(nlines, 22, "got:\n{vm_fmt}");
+        assert!(vm_fmt.contains("frames elided"), "got:\n{vm_fmt}");
+        assert!(vm_fmt.contains("at f0 (called at"), "head, got:\n{vm_fmt}");
+        assert!(vm_fmt.contains("at f49 (called at"), "tail, got:\n{vm_fmt}");
+        // No collapse marker — all names distinct.
+        assert!(!vm_fmt.contains("identical frames"), "got:\n{vm_fmt}");
+
+        // Parity: interp renders the identical synthetic trace.
+        let ip_trace: Vec<crate::interp::TraceFrame> = (0..50)
+            .map(|n| crate::interp::TraceFrame {
+                function: format!("f{n}"),
+                span,
+            })
+            .collect();
+        let ip_fmt = crate::interp::format_trace("boom", span, &ip_trace);
+        assert_eq!(vm_fmt, ip_fmt, "engines must agree on the capped trace");
     }
 
     /// A `recover:`-caught fault leaves no stale frames: a *later* uncaught fault's trace shows only
