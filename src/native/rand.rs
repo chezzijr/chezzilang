@@ -280,6 +280,7 @@ mod tests {
     /// in-range draws. Cannot assert a value (entropy), only shape.
     #[test]
     fn auto_seed_without_seed_call_yields_in_range() {
+        let _g = TEST_RNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // NB: relies on the process-global lazy init; if an earlier test already seeded, this is
         // still a valid range check (it never asserts a specific value).
         let f = match float(&mut host(vec![])).unwrap() {
