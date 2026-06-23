@@ -1,10 +1,14 @@
-//! `std.fs` — filesystem queries (M8), extending `std.io`'s whole-file read/write.
+//! `std.fs` — filesystem queries + mutations (M8), extending `std.io`'s whole-file read/write.
 //!
 //! `list_dir` returns entry names (not full paths), sorted for determinism. `exists`/`is_file`/
 //! `is_dir` are booleans; `size` returns the byte length as a `Result[int]`. `glob` supports the
 //! common `*` (any run) and `?` (single char) wildcards in the **final** path component only — no
-//! `**`, no brace expansion (a focused, dependency-free matcher). All filesystem access is real
-//! (like `std.io.read_file`).
+//! `**`, no brace expansion (a focused, dependency-free matcher).
+//!
+//! Mutations (each `Result[nil]`, recoverable fault on error): `mkdir` (recursive, idempotent),
+//! `remove_file`, `remove_dir` (empty-only — no recursive `rm -rf`), `rename`, `copy` (file), and
+//! `append` (create-or-append, never truncates). All filesystem access is real (like
+//! `std.io.read_file`).
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::path::Path;
