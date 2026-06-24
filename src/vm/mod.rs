@@ -22436,6 +22436,12 @@ main()";
             vm_out, interp_out,
             "vm/interp divergence on newtype_generic"
         );
+        // 3-engine bar (M21/M19): the M:N --parallel engine must agree too.
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel drifted from vm on newtype_generic"
+        );
     }
 
     /// A raw string is an ordinary `str` end-to-end: usable as a match-arm literal pattern

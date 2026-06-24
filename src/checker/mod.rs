@@ -10634,7 +10634,9 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
                 map.insert(n.clone(), a.clone());
             }
         }
-        (Ty::List(d), Ty::List(a)) | (Ty::Option(d), Ty::Option(a)) => unify(d, a, map),
+        (Ty::List(d), Ty::List(a)) | (Ty::Set(d), Ty::Set(a)) | (Ty::Option(d), Ty::Option(a)) => {
+            unify(d, a, map)
+        }
         (Ty::Result(dt, de), Ty::Result(at, ae)) => {
             unify(dt, at, map);
             unify(de, ae, map);

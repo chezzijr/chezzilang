@@ -7902,6 +7902,15 @@ fn generic_newtype_ctor_turbofish_ok() {
 }
 
 #[test]
+fn generic_newtype_ctor_infer_set_underlying_ok() {
+    // A set-underlying generic newtype infers its param from the arg just like list/map —
+    // `Bag({1, 2, 3})` ⇒ Bag[int] with NO turbofish (regression: `unify` lacked a `Ty::Set` arm).
+    ok(
+        "newtype Bag[T: Hashable] = set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: set[int] = set(b)\n    print(s)\nmain()\n",
+    );
+}
+
+#[test]
 fn generic_newtype_ctor_wrong_arg_rejected() {
     // `Stack[int](["a"])` — arg element str vs declared int.
     rejects(
