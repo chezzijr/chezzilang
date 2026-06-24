@@ -686,8 +686,8 @@ name **always wins** over a static-method name on `Enum.x` — so a variant and 
 **not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
 variant.
 
-**Generic static methods** are reached with a **type-level turbofish** — the type argument sits on the
-**type**, because in v1 a static method's type parameters come from the enclosing generic type:
+**Generic static methods** are reached with a **type-level turbofish** — the enclosing type's args sit
+on the **type**:
 
 ```chezzi
 struct Box[T]:
@@ -699,11 +699,30 @@ b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
 ```
 
 The type-level turbofish takes **one or more** type args — multi-param types use the comma form
-(`Pair[K, V].empty()`, `Result[int, str].Ok(5)`). A static method may **not** declare its own `[U]`
-type parameters yet, and the **method-level** turbofish `Box.empty[int]()` is **reserved** for a
-future method-generics feature (one rule: turbofish sits where the parameter is declared). Static
-methods do **not** participate in **protocol** satisfaction — protocols stay instance-only. Static
-methods on `newtype` are not supported yet (struct + enum only).
+(`Pair[K, V].empty()`, `Result[int, str].Ok(5)`).
+
+A static method may **also declare its OWN `[U]`** type parameters — they sit on the **member**
+(`make[U]`), the **declaration-site rule**: a type argument is written where its parameter is
+declared. Member-level args are **inferred** from the call by default; a **member-level turbofish**
+pins them only when they can't be (`Box.make[str]("hi")`). The two compose — `Box[int].make[str](x)`
+supplies the enclosing `T = int` *and* the method `U = str`:
+
+```chezzi
+struct Box[T]:
+    val: T
+    fn make[U](x: U) -> Box[U]:       # member declares its own [U]
+        return Box(x)
+
+a := Box[int].make(5)                 # U inferred from the arg ⇒ Box[int]
+b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Box[str]
+```
+
+A method param name may **not shadow** an enclosing type param (`fn make[T]` inside `Box[T]` is an
+error). A method-level turbofish on a member that declares **no** type params (or a builtin like
+`xs.len[int]()` / `xs.iter[int]()`) is an arity error. **Instance** methods take the same member-level
+turbofish, multi-arg: `pair.first[int, str](1, "x")`. Static methods do **not** participate in
+**protocol** satisfaction — protocols stay instance-only. Static methods on `newtype` are not
+supported yet (struct + enum only).
 
 ## 7b. Generics & protocols  (M7)
 

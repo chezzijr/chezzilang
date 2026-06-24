@@ -408,7 +408,18 @@
             | <typeApply> "DOT" "IDENT"
             | <typeApply> "DOT" "IDENT" "LPAREN" "RPAREN"
             | <typeApply> "DOT" "IDENT" "LPAREN" <argList> "RPAREN"
-            | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
+            # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
+            # `s.first[int, str](1, "x")`). The receiver is a VALUE head (`Field{obj: Ident}`); the
+            # parser steals the type list + arg list here. The COMBINED form `Box[int].make[str](x)`
+            # (enclosing-type args from PART 1 + this method `[str]`) is NOT a distinct production: it
+            # parses as `<postfix> LBRACKET <subscript> RBRACKET LPAREN <argList> RPAREN` — an index
+            # over the `Box[int].make` member access — because the parser cannot tell it from
+            # `value[i].field[k](x)`. The CHECKER reinterprets it (head a known type ⇒ member-turbofish;
+            # head a value ⇒ ordinary index-then-call). The combined form carries a SINGLE method type
+            # arg (the subscript rejects commas; the steal is deliberately not widened to the
+            # index/type-applied receiver, which would misparse `arr[i].field[k](x)`).
+            | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
             | <postfix> "QUESTION"
             # optional chaining `?.` (gap): field, tuple-element, or method call through an Option.
             | <postfix> "QUESTIONDOT" "IDENT"

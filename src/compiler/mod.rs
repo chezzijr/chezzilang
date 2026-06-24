@@ -3298,6 +3298,66 @@ impl Compiler {
             );
             return Ok(());
         }
+        // Combined member-side turbofish: `Type[T].member[U](args)` (and the bare `Type.member[U]`).
+        // The trailing method `[U]` wraps the `Field` in an `Index`, so the callee is an `Index` over
+        // a `Field`, NOT a `Field` — it lands here. The type args (both enclosing AND method) are
+        // RUNTIME-erased, so peel the index and emit the SAME `Op::NewEnum` (variant-first) /
+        // `Op::CallStatic` (generic static) bytecode as the type-side forms above. The head is the
+        // enclosing-type carrier — a type-applied `Box[int]` (`type_apply_head_name`) or a bare
+        // `Ident(Box)`. Gate on a KNOWN, NON-local struct/enum so `arr[i].field[k](x)` (head a value)
+        // stays ordinary index-then-call.
+        if let ExprKind::Index {
+            obj: callee_obj, ..
+        } = &callee.kind
+            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+        {
+            let tname = type_apply_head_name(&head.kind).or(match &head.kind {
+                ExprKind::Ident(n) => Some(n.as_str()),
+                _ => None,
+            });
+            if let Some(tname) = tname
+                && fc.resolve_local(tname).is_none()
+                && !fc.captures(tname)
+            {
+                // VARIANT-FIRST (a same-named static is barred at decl time), mirroring the checker.
+                let ekey = self.enum_bare_key(tname);
+                if self
+                    .program
+                    .variants
+                    .contains_key(&(ekey.clone(), name.clone()))
+                {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    let variant_id = self.variant_id_of_key(&ekey, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+                if let Some(key) = self.bare_types.get(tname).cloned()
+                    && self.static_methods.contains(&static_key(&key, name))
+                {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(
+                        Op::CallStatic {
+                            type_key: key,
+                            method: name.clone(),
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+            }
+        }
         // Bare-ident callees resolve by name in the interpreter's order:
         // print → builtin → struct ctor → variant ctor → value.
         if let ExprKind::Ident(name) = &callee.kind {

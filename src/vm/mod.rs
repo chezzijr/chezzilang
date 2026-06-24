@@ -25741,6 +25741,37 @@ main()
         );
     }
 
+    /// Member-side declaration-site turbofish (PART 2): `examples/turbofish_member_args.chz`
+    /// exercises a generic static method's OWN `[U]` inferred (`Box[int].make(5)`) AND via the
+    /// combined turbofish (`Box[int].make[str]("hi")` + the bare carrier `Box.make[str]`), an
+    /// instance method with multi type-arg + multi value-arg turbofish (`p.first[int, str](…)`),
+    /// AND the regression guard `arr[i].handlers[k](x)` / `arr[0].handlers[0](y)` (a fn-valued field
+    /// on an INDEXED receiver must stay ordinary index-then-call, not a member-turbofish). The change
+    /// is checker resolution + type-erased dispatch, so VM, interp, and `--parallel` must be
+    /// byte-identical to `.expected`. Also asserts it type-checks clean.
+    #[test]
+    fn golden_turbofish_member_args_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/turbofish_member_args.chz");
+        let expected = include_str!("../../examples/turbofish_member_args.expected");
+        let module = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
+        assert!(
+            crate::checker::check(&module).is_ok(),
+            "turbofish_member_args.chz must type-check clean"
+        );
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected, "vm output drifted from .expected");
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "interp drifted from vm"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel drifted from vm"
+        );
+    }
+
     /// Tech-debt golden: `examples/set_eq.chz` (order-independent set equality incl. nested in a
     /// struct/list) byte-identical on the VM, the interpreter, and its `.expected`.
     #[test]

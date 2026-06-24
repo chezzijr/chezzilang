@@ -1,0 +1,23 @@
+# rule: postfix, typeApply, structDecl
+# Declaration-site turbofish on a MEMBER (PART 2): a member declares its OWN type args, composing with
+# the type-side args. All parse via <postfix> (the member-turbofish steal / the index-over-member-access
+# combined form that the checker reinterprets).
+#   Box[int].make(5)          — generic static own [U] inferred (type-side turbofish only)
+#   Box[int].make[str]("hi")  — COMBINED: enclosing T + method U (index over the member access)
+#   Box.make[str]("bare")     — bare member-side carrier (the steal: <postfix> DOT IDENT [typeList] (...))
+#   p.first[int, str](1, "x") — instance method multi type-arg + multi value-arg turbofish
+struct Box[T]:
+    val: T
+    fn make[U](x: U) -> Box[U]:
+        return Box(x)
+
+struct Pair:
+    tag: int
+    fn first[A, B](self, x: A, y: B) -> A:
+        return x
+
+a := Box[int].make(5)
+b := Box[int].make[str]("hi")
+c := Box.make[str]("bare")
+p := Pair(0)
+r := p.first[int, str](1, "x")

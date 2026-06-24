@@ -8566,12 +8566,55 @@ fn enum_variant_static_collision_errors() {
     );
 }
 
-/// A static method declaring its own `[U]` type params is rejected in v1 (turbofish is type-level).
+/// PART 2: a static method declaring its OWN `[U]` type params is now ALLOWED; `U` is inferred from
+/// the argument like a generic free fn. `Box[int].make(5)` (make[U](x:U)->Box[U]) checks to Box[int]
+/// (the method param wins the value's type), and a non-generic `Plain.make(5)` infers `U` too.
 #[test]
-fn static_method_own_type_params_rejected() {
+fn static_own_type_params_inferred_ok() {
+    ok(
+        "struct Box[T]:\n    val: T\n    fn make[U](x: U) -> Box[U]:\n        return Box(x)\nfn main():\n    b := Box[int].make(5)\n    n: int = b.val\n    print(n)\n",
+    );
+    ok(
+        "struct Plain:\n    val: int\n    fn make[U](x: U) -> U:\n        return x\nfn main():\n    n: int = Plain.make(5)\n    print(n)\n",
+    );
+}
+
+/// PART 2 (no-leak): a static method param that cannot be bound by any argument or turbofish degrades
+/// to `Ty::Unknown`, never a free `Ty::Param`. `Box[int].make()` for `make[U]()->list[U]` (U unbound)
+/// must type-check and push refine cleanly (mirrors `generic_static_no_turbofish_degrades_param`).
+#[test]
+fn static_own_type_params_no_leak_unknown() {
+    ok(
+        "struct Box[T]:\n    val: T\n    fn make[U]() -> list[U]:\n        return []\nfn main():\n    xs := Box[int].make()\n    xs.push(\"x\")\n    print(xs.len())\n",
+    );
+}
+
+/// PART 2 (combined turbofish): `Box[int].make[str](\"hi\")` — enclosing-type targs from `Box[int]`
+/// AND the method targ from `.make[str]` compose. `make[U](x:U)->Box[U]` ⇒ Box[str].
+#[test]
+fn combined_type_and_method_turbofish_ok() {
+    ok(
+        "struct Box[T]:\n    val: T\n    fn make[U](x: U) -> Box[U]:\n        return Box(x)\nfn main():\n    b := Box[int].make[str](\"hi\")\n    s: str = b.val\n    print(s)\n",
+    );
+}
+
+/// PART 2 (combined mismatch): the explicit method turbofish targ that conflicts with the argument
+/// type is an error (`Box[int].make[str](5)` — U=str but the arg is int).
+#[test]
+fn combined_method_turbofish_mismatch_errors() {
     rejects(
-        "struct Box[T]:\n    items: list[T]\n    fn make[U](x: U) -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box[int].make(5)\n",
-        "cannot declare its own type parameters",
+        "struct Box[T]:\n    val: T\n    fn make[U](x: U) -> Box[U]:\n        return Box(x)\nfn main():\n    _ := Box[int].make[str](5)\n",
+        "expected str",
+    );
+}
+
+/// PART 2: a static method param that SHADOWS the enclosing struct's type param name is rejected
+/// (the existing `fn_sig` guard fires for static methods now that they're allowed).
+#[test]
+fn static_method_param_shadows_enclosing_rejected() {
+    rejects(
+        "struct Box[T]:\n    val: T\n    fn make[T](x: T) -> Box[T]:\n        return Box(x)\nfn main():\n    print(1)\n",
+        "shadows the struct's type parameter",
     );
 }
 
@@ -8603,13 +8646,52 @@ fn generic_static_turbofish_box_int_empty_typechecks() {
     );
 }
 
-/// The METHOD-level turbofish `Box.empty[int]()` is RESERVED for a future feature — it must error
-/// (turbofish is type-level only in v1: `Box[int].empty()`).
+/// PART 2: a method-level turbofish on a static method that declares NO `[U]` is an arity error —
+/// `Box.empty[int]()` for `fn empty()->Box[T]` (no own type params) takes no method type arguments.
 #[test]
-fn method_level_turbofish_on_static_reserved() {
+fn method_level_turbofish_on_non_generic_static_errors() {
     rejects(
         "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box.empty[int]()\n",
-        "are reserved",
+        "type argument",
+    );
+}
+
+/// PART 2 (instance multi-turbofish): an instance method declaring its OWN `[A, B]` takes a multi
+/// type-arg + multi value-arg turbofish `s.m[int, str](1, "x")`.
+#[test]
+fn instance_method_multi_turbofish_ok() {
+    ok(
+        "struct S:\n    n: int\n    fn m[A, B](self, x: A, y: B) -> A:\n        return x\nfn main():\n    s := S(0)\n    r: int = s.m[int, str](1, \"x\")\n    print(r)\n",
+    );
+}
+
+/// PART 2 (instance turbofish mismatch): the explicit instance-method turbofish targ that conflicts
+/// with the arg is an error (previously the targs were DROPPED, so this was silently accepted).
+#[test]
+fn instance_method_turbofish_mismatch_errors() {
+    rejects(
+        "struct S:\n    n: int\n    fn m[A](self, x: A) -> A:\n        return x\nfn main():\n    s := S(0)\n    _ := s.m[str](5)\n",
+        "expected str",
+    );
+}
+
+/// PART 2 (.iter swallow fix): a method-level turbofish on a BUILTIN/non-generic member must error
+/// like `xs.len[int]()` — including the `.iter` fast-path (`xs.iter[int]()` was silently accepted).
+#[test]
+fn iter_method_turbofish_errors() {
+    rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    _ := xs.iter[int]()\n",
+        "type argument",
+    );
+}
+
+/// PART 2 regression GUARD: indexing a fn-valued field on an INDEXED receiver and calling it
+/// (`arr[i].handlers[k](x)`, `arr[0].handlers[0](y)`) must stay ordinary index-then-call — NOT a
+/// member-turbofish (head `arr` is a LOCAL). Must type-check (this is the exact prior-run regression).
+#[test]
+fn index_then_call_on_indexed_receiver_stays() {
+    ok(
+        "struct Cell:\n    handlers: list[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n    print(arr[0].handlers[0](20))\n",
     );
 }
 

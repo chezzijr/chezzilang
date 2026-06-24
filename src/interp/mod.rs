@@ -1444,6 +1444,39 @@ impl Interp {
             }
             return self.eval_method_call(obj, name, args, span);
         }
+        // Combined member-side turbofish: `Type[T].member[U](args)` / bare `Type.member[U](args)`.
+        // The trailing method `[U]` wraps the `Field` in an `Index`, so the callee is an `Index` over
+        // a `Field` (NOT a `Field`). The type args (enclosing AND method) are RUNTIME-erased, so peel
+        // the index and dispatch VARIANT-first then generic static — byte-identical to the type-side
+        // turbofish. The head is the enclosing-type carrier: a type-applied `Box[int]` or a bare
+        // `Ident(Box)`. Gate on a known, NON-local type name so `arr[i].field[k](x)` stays an
+        // ordinary index-then-call (handled by the value path below).
+        if let ExprKind::Index {
+            obj: callee_obj, ..
+        } = &callee.kind
+            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+        {
+            let tname = type_apply_head_name(&head.kind).or(match &head.kind {
+                ExprKind::Ident(n) => Some(n.as_str()),
+                _ => None,
+            });
+            if let Some(tname) = tname
+                && self.env.get_local(tname).is_none()
+            {
+                // VARIANT-FIRST.
+                let ekey = self.enum_bare_key(tname);
+                if let Some(def) = self.variants.get(&(ekey, name.clone())).cloned() {
+                    return self.build_variant(&def, name, args, span);
+                }
+                if let Some((decl, home)) = self.lookup_static_method(tname, name) {
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return self.call(&decl, &home, arg_vals, span);
+                }
+            }
+        }
 
         let arg_vals = args
             .iter()

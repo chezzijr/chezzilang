@@ -1068,8 +1068,7 @@ one `type_apply_head` helper resolves both carriers to `(type-name, [Type])`; in
 **resolved** type args (not `Unknown`). The single-`Index` path also gained the variant-first check
 (a gap the previous static-methods work left). **Compiler + interp** get matching `type_apply_head_name`
 branches emitting the same `Op::NewEnum`/`Op::CallStatic` as the bare forms (runtime is type-erased).
-**OUT OF SCOPE (PART 2):** a static method declaring its own `[U]` (still rejected), and lifting the
-`obj.method[T](expr)` cap. **Both engines + `--parallel`** byte-identical via golden
+**PART 2 (now landed, below).** **Both engines + `--parallel`** byte-identical via golden
 `examples/turbofish_type_args.chz` + `.expected` (the test also asserts the program type-checks clean);
 checker unit tests for each rule (single/multi-arg variant, seeded-not-Unknown, arity mismatch, nullary,
 old-form redirect, static regression); a parser unit test; a `tests/corpus/accept` file for the
@@ -1078,6 +1077,36 @@ differential conformance check; clippy clean. Migrated the one surface use `exam
 sections — the declaration-site rule; multi-arg lifted), `spec.md` (new milestone note + static-method
 single-arg limit de-staled), `grammar.bnf` (the `<typeApply>` head + `Type[T…].member` postfix
 productions; old gliding production removed from prose).
+
+**✅ Turbofish at the declaration site — member-side (PART 2).** Completes the declaration-site rule: a
+**member** declares its OWN type args (`fn make[U]`, `fn first[A, B](self, …)`), pinned on the member
+and composing with PART 1's type-side args. `Box[int].make[str](x)` supplies the enclosing `T` AND the
+method `U`; `Box.make[str]("hi")` / `s.first[int, str](1, "x")` are bare carriers; inference is the
+default (`Box[int].make(5)` ⇒ `U = int`). **Checker:** `infer_static_call` gained an `mtargs` arg and now
+builds ONE by-name substitution map over BOTH the enclosing type params (seeded from the type turbofish)
+and the method's own `[U]` (seeded from `mtargs`), inferring the rest from the args and degrading EVERY
+un-inferred param — enclosing or method — to `Ty::Unknown` (no leaked `Ty::Param`; mirrors the static
+fix at 7c75ab2). The combined `Box[int].make[str](x)` parses as an **index over the member access**
+(token-identical to `value[i].field[k](x)`), so it is resolved by **checker REINTERPRETATION** (gated on
+the head being a known, non-local struct/enum — a value head stays ordinary index-then-call) — the parser
+steal is deliberately **NOT** widened (that widening was the rejected prior run; it misparsed
+`arr[i].handlers[k](x)`). `infer_method_call` gained a `type_args` arg threaded into `infer_generic_method`
+(instance multi-turbofish `s.m[A, B](x, y)` now seeds + arity-checks + catches an explicit-targ/arg
+conflict, previously silently dropped) plus a top-of-fn guard — BEFORE the `.iter` fast-path — rejecting a
+member-level turbofish on a builtin/non-generic member (fixes the `.iter[int]()` swallow; `len[int]()`
+already errored). The `fn_sig` shadow guard already fires for static methods. **Compiler + interp** get
+matching combined-Index-callee arms (peel the erased index → same `Op::NewEnum`/`Op::CallStatic` /
+`build_variant`/`call` as the bare forms; runtime is type-erased). **OUT OF SCOPE (unchanged):** static
+methods on `newtype`; associated protocol requirements (`T.zero()`); protocols stay instance-only.
+**Both engines + `--parallel`** byte-identical via golden `examples/turbofish_member_args.chz` +
+`.expected` (asserts type-checks clean too) incl. the regression-guard shape; new checker unit tests
+(static own-`[U]` inferred, no-leak degrade, combined ok + mismatch, shadow-static rejected,
+`iter[int]()` errors, instance multi-turbofish ok + mismatch, index-then-call regression);
+`cargo test conformance` re-run after generalizing the `grammar.bnf` method-turbofish production to
+`<typeList>`/`<argList>`; clippy clean. Docs: `syntax.md` §7a (member-level + combined + by-name unified
+substitution; removed the "cannot declare its own `[U]`" / "method-level turbofish reserved" notes),
+`spec.md` (PART 2 milestone note; lifted the static-own-`[U]` limit), `grammar.bnf` (generalized
+production + combined-form checker-reinterpreted comment).
 
 **✅ Static (associated) methods on struct + enum — the "no self ⇒ static" rule.** A struct/enum
 method whose first parameter is **not** `self` (or which has no parameters) is a **static** method,
@@ -1099,9 +1128,9 @@ enum-method slow path **minus the receiver** (`do_static_call`, `arity == argc`,
 generator edge via `alloc_generator`). **Generic statics** via the **type-level turbofish**
 `Box[int].empty()` (reinterprets `Field{obj: Index{Ident, idx}, name}` — indexing a bare type is
 otherwise invalid, so unambiguous). (Multi type-arg + variant-side resolution were generalized by the
-later "Turbofish at the declaration site — type-side" milestone above.) v1 limits (documented): a
-static method may not declare its own `[U]`; the
-method-level turbofish `Box.empty[int]()` is **reserved**; static methods do **not** participate in
+later "Turbofish at the declaration site — type-side" milestone above; a static method declaring its
+own `[U]` + the member-level turbofish landed in the "member-side (PART 2)" milestone above.) v1 limits
+(documented): static methods do **not** participate in
 **protocol** conformance (instance-only); static methods on `newtype` are a follow-up (the newtype
 receiver-error site stays). **Both engines + `--parallel`** byte-identical via golden
 `examples/static_methods.chz` + `.expected` (mirrors `newtype.chz`); checker unit tests for each rule

@@ -6420,17 +6420,10 @@ impl Checker {
                     }
                 } else {
                     // Not a variant — try a STATIC method `Enum.method(args)` (variant check ran
-                    // first, so a variant always wins; disjointness is enforced at decl time). A
-                    // method-level turbofish (`Enum.method[T](...)`) is RESERVED — call-site type
-                    // args here would be method-level, so reject them (turbofish is type-level only:
-                    // `Enum[T].method(...)`).
-                    if !targs.is_empty() {
-                        self.error(
-                            span,
-                            format!("method-level type arguments on static method '{name}' are reserved; put the type argument on the type (`{ename}[T].{name}(...)`)"),
-                        );
-                    }
-                    return self.infer_static_call(&ekey, ename, name, args, &[], span);
+                    // first, so a variant always wins; disjointness is enforced at decl time). The
+                    // member-level turbofish (`Enum.method[U](...)`) is the bare carrier of the
+                    // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
+                    return self.infer_static_call(&ekey, ename, name, args, &[], &targs, span);
                 }
             }
             // `Type.method(args)` — STATIC (associated) method on a bare struct/enum type name. The
@@ -6441,15 +6434,9 @@ impl Checker {
                 && self.struct_names.contains(tname)
             {
                 let key = self.bare_key(tname);
-                // A method-level turbofish (`Type.method[T](...)`) is RESERVED for a future
-                // method-generics feature — turbofish is type-level only (`Type[T].method(...)`).
-                if !targs.is_empty() {
-                    self.error(
-                        span,
-                        format!("method-level type arguments on static method '{name}' are reserved; put the type argument on the type (`{tname}[T].{name}(...)`)"),
-                    );
-                }
-                return self.infer_static_call(&key, tname, name, args, &[], span);
+                // The member-level turbofish (`Type.method[U](...)`) is the bare carrier of the
+                // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
+                return self.infer_static_call(&key, tname, name, args, &[], &targs, span);
             }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
@@ -6470,9 +6457,60 @@ impl Checker {
                 if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
                     return self.infer_variant_call(&v, name, args, &resolved, span);
                 }
-                return self.infer_static_call(&key, &tname, name, args, &resolved, span);
+                return self.infer_static_call(&key, &tname, name, args, &resolved, &[], span);
             }
-            return self.infer_method_call(obj, name, args, span);
+            return self.infer_method_call(obj, name, args, &targs, span);
+        }
+        // Combined member-side turbofish: `Type[T].member[U](args)` (and the bare `Type.member[U]`).
+        // The trailing method `[U]` makes the callee an `Index` over the `Field`, so it does NOT hit
+        // the `Field`-callee dispatch above — it lands here. Reinterpret: the inner `Field`'s `obj` is
+        // the enclosing-type head (a type-applied `Box[int]` or a bare `Ident(Box)`), the trailing
+        // index is the single method type argument. Gate on the head being a KNOWN, NON-local
+        // struct/enum so `arr[i].field[k](x)` (head a value) stays ordinary index-then-call.
+        if let ExprKind::Index {
+            obj: callee_obj,
+            index: mt,
+        } = &callee.kind
+            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+        {
+            // Resolve the enclosing-type head + its type args. A bare `Ident(Box).member[U]` head has
+            // NO enclosing type args; a `Box[int].member[U]` head carries them via `type_apply_head`.
+            let resolved_head = self.type_apply_head(head).or_else(|| match &head.kind {
+                ExprKind::Ident(tn)
+                    if !self.is_local_binding(tn)
+                        && (self.struct_names.contains(tn) || self.enum_names.contains(tn)) =>
+                {
+                    Some((tn.clone(), Vec::new()))
+                }
+                _ => None,
+            });
+            if let Some((tname, type_exprs)) = resolved_head
+                && let Some(mt_ty) = self.index_as_type(mt).map(|t| self.resolve_type(&t, span))
+            {
+                let key = self.bare_key(&tname);
+                let enclosing: Vec<Ty> = type_exprs
+                    .iter()
+                    .map(|t| self.resolve_type(t, span))
+                    .collect();
+                // VARIANT-FIRST (a same-named static is barred at decl time); a variant takes no
+                // method-level type args, so a method turbofish on a variant is an error.
+                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
+                    self.error(
+                        span,
+                        format!("variant '{name}' of '{tname}' takes no method type arguments"),
+                    );
+                    return self.infer_variant_call(&v, name, args, &enclosing, span);
+                }
+                return self.infer_static_call(
+                    &key,
+                    &tname,
+                    name,
+                    args,
+                    &enclosing,
+                    &[mt_ty],
+                    span,
+                );
+            }
         }
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
@@ -6581,11 +6619,14 @@ impl Checker {
 
     /// Type-check a STATIC (associated) method call `Type.method(args)` (the "no self ⇒ static"
     /// rule). `key` is the type's resolved runtime key; `tname` its display name. Looks the method up
-    /// in the struct/enum method maps; rejects calling an INSTANCE method this way, a method with its
-    /// own `[U]` type params (v1 limit), or an unknown method. Substitutes the ENCLOSING type's type
-    /// args (`targs`, supplied by an explicit `Box[int].empty()` turbofish — empty otherwise) into the
-    /// params/ret, then checks the args against ALL params (NO receiver split). Mirrors the
-    /// instance-method arms minus the receiver.
+    /// in the struct/enum method maps; rejects calling an INSTANCE method this way, or an unknown
+    /// method. The enclosing type's params (`targs`, from `Box[int].empty()`) AND the method's OWN
+    /// `[U]` params (`mtargs`, from the combined `Box[int].make[U](x)`) compose into ONE by-name
+    /// substitution map: enclosing seeded from `targs`, method from `mtargs`, the rest inferred by
+    /// unifying the declared param types against the argument types (like a generic free fn). Every
+    /// un-inferred param — enclosing OR method — degrades to `Ty::Unknown` (a free `Ty::Param` must
+    /// never leak). Mirrors the instance-method arms minus the receiver.
+    #[allow(clippy::too_many_arguments)] // enclosing key/name + method + args + enclosing & method targs + span
     fn infer_static_call(
         &mut self,
         key: &str,
@@ -6593,6 +6634,7 @@ impl Checker {
         method: &str,
         args: &[Expr],
         targs: &[Ty],
+        mtargs: &[Ty],
         span: Span,
     ) -> Ty {
         // Resolve the method sig + the enclosing type's params, from either map.
@@ -6633,40 +6675,43 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        // A static method declaring its OWN `[U]` type params is rejected in v1 — turbofish is
-        // type-level only (`Box[int].empty()`), the method-level form (`Box.empty[int]()`) is
-        // reserved for a future method-generics feature.
-        if !sig.type_params.is_empty() {
+        // A method-level turbofish (`Box.empty[int]()`) on a static method that declares NO own
+        // `[U]` is an arity error: it takes no method type arguments.
+        if !mtargs.is_empty() && sig.type_params.is_empty() {
             self.infer_all(args);
             self.error(
                 span,
                 format!(
-                    "static method '{method}' cannot declare its own type parameters yet (only the enclosing type '{tname}' can)"
+                    "method '{method}' takes no type argument(s) (it declares no own type parameters)"
                 ),
             );
             return Ty::Unknown;
         }
-        // Substitute the enclosing type's params (from an explicit turbofish) into the sig.
-        if tps.is_empty() {
+        // Non-generic static (no enclosing AND no method params): the simple substitution-free path.
+        if tps.is_empty() && sig.type_params.is_empty() {
             if !targs.is_empty() {
                 self.error(span, format!("'{tname}' takes no type arguments"));
             }
             self.check_args_w(method, &sig.params, args, span);
             return sig.ret;
         }
-        // Generic enclosing type: infer its params by unifying the method's declared param types
-        // (which may carry the type's `Ty::Param`s) against the argument types — exactly like the
-        // struct/newtype ctor infers from fields — taking explicit turbofish (`Box[int].empty()`)
-        // when given.
+        // Generic: ONE by-name substitution map over BOTH the enclosing type's params and the
+        // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
+        // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
+        // argument types — exactly like the struct/newtype ctor + a generic free fn.
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
         let mut sub = self.seed_targs(tname, &tps, targs, span);
+        let msub = self.seed_targs(method, &sig.type_params, mtargs, span);
+        sub.extend(msub);
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
+        self.recover_iter_elems(&sig.type_params, &mut sub, span);
+        self.recover_index_args(&sig.type_params, &mut sub, span);
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             if !self.assignable(&expected, actual) {
@@ -6677,10 +6722,12 @@ impl Checker {
             }
         }
         self.enforce_bounds(&tps, &sub, span);
+        self.enforce_bounds(&sig.type_params, &sub, span);
         // Any param still un-inferred — no turbofish and not bound by an argument, e.g.
-        // `Box.empty() -> Box[T]` — degrades to the refinable `Ty::Unknown`; a free `Ty::Param` must
-        // never leak into the value's type (mirrors the ctor's `unwrap_or(Ty::Unknown)` targs_out).
-        for tp in &tps {
+        // `Box.empty() -> Box[T]` or a method `[U]` unbindable from args — degrades to the refinable
+        // `Ty::Unknown`; a free `Ty::Param` must never leak into the value's type (mirrors the ctor's
+        // `unwrap_or(Ty::Unknown)` targs_out).
+        for tp in tps.iter().chain(sig.type_params.iter()) {
             sub.entry(tp.name.clone()).or_insert(Ty::Unknown);
         }
         subst(&sig.ret, &sub)
@@ -7363,7 +7410,43 @@ impl Checker {
         }
     }
 
-    fn infer_method_call(&mut self, obj: &Expr, method: &str, args: &[Expr], span: Span) -> Ty {
+    /// Does the method `method` on receiver type `recv_ty` declare its OWN `[U]` type params? Only a
+    /// user struct/enum/newtype method can; a builtin (`str`/`list`/…) member never does. Used to gate
+    /// the member-level turbofish (`obj.method[A](x)`): a turbofish on anything else is an arity error.
+    fn method_has_own_type_params(&self, recv_ty: &Ty, method: &str) -> bool {
+        match recv_ty {
+            Ty::Struct(sname, _) => self
+                .structs
+                .get(sname)
+                .and_then(|info| info.methods.get(method))
+                .is_some_and(|sig| !sig.type_params.is_empty()),
+            Ty::Enum(ename, _) => self
+                .enum_methods
+                .get(ename)
+                .and_then(|ms| ms.get(method))
+                .is_some_and(|sig| !sig.type_params.is_empty()),
+            Ty::NewType(nkey, _) => self
+                .newtype_defs
+                .get(nkey)
+                .and_then(|(_under, methods)| methods.get(method))
+                .is_some_and(|sig| !sig.type_params.is_empty()),
+            _ => false,
+        }
+    }
+
+    /// Type-check an instance method call `obj.method(args)`. `type_args` are the explicit
+    /// member-level turbofish (`obj.method[A, B](x, y)`) — non-empty only when the parser stole a
+    /// type list after the `.method`; they seed a generic method's own `[U]` params. A method-level
+    /// turbofish on a BUILTIN or non-generic member (no own type params) is rejected — including the
+    /// `.iter` fast-path (`xs.iter[int]()`), guarded BEFORE that fast-path runs.
+    fn infer_method_call(
+        &mut self,
+        obj: &Expr,
+        method: &str,
+        args: &[Expr],
+        type_args: &[Ty],
+        span: Span,
+    ) -> Ty {
         let obj_ty = self.infer(obj);
         // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
         // key/value/type-arg slot (an empty literal / nullary variant / native `None`), and this is
@@ -7376,6 +7459,18 @@ impl Checker {
             ExprKind::Ident(name) => self.lookup(name).unwrap_or(obj_ty),
             _ => obj_ty,
         };
+        // A member-level turbofish (`obj.method[A, B](...)`) is only valid on a USER method that
+        // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
+        // non-generic user method it is an arity error — checked BEFORE the `.iter` fast-path below
+        // so `xs.iter[int]()` is rejected like `xs.len[int]()` (it was silently swallowed otherwise).
+        if !type_args.is_empty() && !self.method_has_own_type_params(&obj_ty, method) {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!("method '{method}' takes no type argument(s) (it declares no own type parameters)"),
+            );
+            return Ty::Unknown;
+        }
         // `.iter()` — the formal `Iterable[T]` entry point. Returns a fresh cursor typed as the
         // existing `Iterator[T]` existential (no new `Ty`), `T = iter_elem`. Handled here, BEFORE the
         // per-type dispatch, for every built-in iterable AND for an `Iterator[T]` value (a generator
@@ -7492,7 +7587,7 @@ impl Checker {
                     // mirrors the free generic-fn path (`infer_generic_call`).
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
                         );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
@@ -7579,7 +7674,7 @@ impl Checker {
                     }
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
                         );
                     }
                     match params.split_first() {
@@ -7636,7 +7731,7 @@ impl Checker {
                     }
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &obj_ty, args, span,
+                            method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
                         );
                     }
                     match params.split_first() {
@@ -9600,9 +9695,9 @@ impl Checker {
     /// Infer a generic *method*'s own type parameters from the call arguments. `params`/`ret` are the
     /// method signature already substituted with the receiver struct's type arguments, so only the
     /// method's own `[U]` params remain free; `params[0]` is the receiver (bound from `obj`, not an
-    /// explicit arg). Mirrors `infer_generic_call`'s tail. The parser never attaches call-site type
-    /// args to a method callee, so inference is purely positional.
-    #[allow(clippy::too_many_arguments)] // the method's resolved signature pieces + receiver + call
+    /// explicit arg). `targs` are the EXPLICIT member-level turbofish (`obj.method[A, B](...)`): they
+    /// seed the `[U]` params first; the rest are inferred positionally. Mirrors `infer_generic_call`.
+    #[allow(clippy::too_many_arguments)] // the method's resolved signature pieces + receiver + targs + call
     fn infer_generic_method(
         &mut self,
         method: &str,
@@ -9610,6 +9705,7 @@ impl Checker {
         ret: &Ty,
         mtps: &[TypeParam],
         recv_ty: &Ty,
+        targs: &[Ty],
         args: &[Expr],
         span: Span,
     ) -> Ty {
@@ -9634,7 +9730,10 @@ impl Checker {
             );
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
-        let mut mmap: HashMap<String, Ty> = HashMap::new();
+        // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
+        // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
+        // the per-argument check below.
+        let mut mmap: HashMap<String, Ty> = self.seed_targs(method, mtps, targs, span);
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.
         unify(receiver, recv_ty, &mut mmap);

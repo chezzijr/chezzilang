@@ -1,0 +1,52 @@
+# turbofish at the DECLARATION site (PART 2, member-side). A member declares its OWN type args
+# (`fn make[U]`); they compose with the type-side args from PART 1 (`Box[int].`). Inference is the
+# default — turbofish only when the args can't bind a param. The combined form `Box[int].make[U](x)`
+# is resolved by CHECKER reinterpretation (the parser can't tell it from `value[i].field[k](x)`),
+# then dispatches type-erased to the same static/method path. Three engines must agree byte-for-byte.
+
+struct Box[T]:
+    val: T
+    # A generic STATIC method declaring its OWN `[U]`. `U` is inferred from the argument, or pinned
+    # by the combined turbofish `Box[int].make[str](...)`.
+    fn make[U](x: U) -> Box[U]:
+        return Box(x)
+    fn get(self) -> T:
+        return self.val
+
+# An instance method declaring its OWN `[A, B]` — the multi type-arg + multi value-arg turbofish
+# `pair.first[int, str](1, "x")` returns the first.
+struct Pair:
+    tag: int
+    fn first[A, B](self, x: A, y: B) -> A:
+        return x
+
+# A fn-valued field on a struct, indexed on an INDEXED receiver: `arr[i].handlers[k](x)` must stay an
+# ordinary index-then-call (the head is a LOCAL), NOT a member-turbofish. This is the regression guard.
+struct Cell:
+    handlers: list[fn(int) -> int]
+
+fn main():
+    # Generic static own `[U]` — `U` INFERRED from the argument (no turbofish).
+    a := Box[int].make(5)
+    print(a.get())                      # 5
+
+    # COMBINED turbofish: enclosing `Box[int]` + method `make[str]` compose → Box[str].
+    b := Box[int].make[str]("hi")
+    print(b.get())                      # hi
+
+    # The bare member-side carrier (no enclosing turbofish): `Box.make[str]` pins U=str.
+    c := Box.make[str]("bare")
+    print(c.get())                      # bare
+
+    # Instance method multi type-arg + multi value-arg turbofish.
+    p := Pair(0)
+    print(p.first[int, str](7, "ignored"))   # 7
+
+    # REGRESSION GUARD: index-then-call on an indexed receiver stays index-then-call.
+    arr := [Cell([fn(x: int) -> int: x + 1])]
+    i := 0
+    k := 0
+    print(arr[i].handlers[k](10))       # 11
+    print(arr[0].handlers[0](20))       # 21
+
+main()

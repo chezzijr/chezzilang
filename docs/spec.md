@@ -381,10 +381,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > and a static method are different call shapes — neither is invocable as the other. For enums a
 > **variant** wins over a static-method name on `Enum.x` (variant/static names must be disjoint —
 > enforced at declaration time). Generic statics use the **type-level** turbofish `Box[int].empty()`
-> (the type arg sits on the type). v1 limits: a static method may not declare its own `[U]`; the
-> method-level turbofish `Box.empty[int]()` is reserved; static methods do **not** participate in
-> protocol conformance (protocols stay instance-only); static methods on `newtype` and **associated
-> protocol requirements** (`T.zero()`) remain follow-ups.
+> (the type arg sits on the type); a static method may **also** declare its own `[U]` (PART 2), pinned
+> on the member or inferred (`Box[int].make[str](x)` / `Box.make(5)`). v1 limits: static methods do
+> **not** participate in protocol conformance (protocols stay instance-only); static methods on
+> `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups.
 
 > **Turbofish at the declaration site — type-side (PART 1, landed).** Explicit type args for a generic
 > are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`)
@@ -396,8 +396,23 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > type-side form. Inference is unchanged: `Box.Has(5)` (no turbofish) still infers `Box[int]`; the
 > turbofish is needed only when args can't bind the params (`Box[int].Empty`, multi-param enums). The
 > change is in the checker's resolution + the value's inferred type args only — runtime is type-erased,
-> so all three engines stay byte-identical. (PART 2 — member-side: a static method declaring its own
-> `[U]`, and lifting the `obj.method[T](expr)` cap — is a separate later milestone.)
+> so all three engines stay byte-identical.
+
+> **Turbofish at the declaration site — member-side (PART 2, landed).** Completes the rule: a **member**
+> declares its OWN type args (`fn make[U]`, `fn first[A, B](self, …)`), pinned on the member and
+> composing with the type-side args from PART 1. `Box[int].make[str](x)` supplies the enclosing `T`
+> *and* the method `U`; `Box.make[str]("hi")` / `s.first[int, str](1, "x")` are the bare carriers.
+> Inference is the default — the turbofish is needed only when a param can't be bound by an arg
+> (`Box[int].make(5)` infers `U = int`); an un-inferred member/enclosing param degrades to `Unknown`,
+> never a leaked `Ty::Param`. A method param may not shadow an enclosing type param; a member-level
+> turbofish on a non-generic member or a builtin (`xs.iter[int]()`, `xs.len[int]()`) is an arity error.
+> The combined form parses as an index over the member access (indistinguishable from
+> `value[i].field[k](x)`) and is resolved by **checker reinterpretation** (head a known type ⇒
+> member-turbofish; head a value ⇒ ordinary index-then-call) — the parser steal is **not** widened. The
+> combined form carries a single method type arg; multiple method args are reachable by inference.
+> Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so VM, interp, and
+> `--parallel` are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
+> methods on `newtype` and associated protocol requirements (`T.zero()`).
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
