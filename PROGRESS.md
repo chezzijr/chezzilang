@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — `std.request` nit closed: per-call timeout + query builder (gaps.md "std.request nit") (2026-06-24).**
+Two small independent additions. (A) **Per-call timeout override:** `std.request`'s `get`/`post`/`request`
+now take an OPTIONAL trailing `timeout_ms: int` (mirrors the `std.net` `Socket.read(.., timeout_ms?)`
+idiom) — a positive value applies ureq's per-request `.timeout(Duration)` (a TOTAL deadline overriding
+the agent's hardcoded connect/read/write caps for that one call); `<= 0`/omitted falls back to the
+defaults. A timeout surfaces through the existing `Error::Transport → Err` path (recoverable, never a
+panic). New `expect_args_range(h, name, min, max)` helper in `src/native/mod.rs` (runtime mirror of
+`FnSig::optional_tail`); `read_timeout` reads the guarded optional int. The checker's module-member
+call path (`infer_method_call` `Ty::Module` arm) + the from-imported bare-fn path now route through
+`check_args_range_w(.., min_params, .., widen=true)` so optional-tail arity is honored uniformly for
+every native module fn (behavior-preserving — plain sigs have `min_params == params.len()`). std.request
+`get`/`post`/`request` sigs → `optional_tail(.. + [Int], .., 1)` (installed post-match in
+`native_module_sig` since the `func` closure borrows `sig`). The offload seam needs ZERO change (the
+optional int crosses the airlock via `extract_native_args` generically → 3-engine parity by construction).
+NO network golden for the timeout (non-deterministic); plumbing is asserted by a `do_get(.., Some(Duration))`
+unit smoke + checker arity tests. (B) **Query builder:** `std.encoding.query_encode(params: map[str,str]) -> str`
+builds a `k=v&k2=v2` query string — both key and value percent-encoded (factored a shared `percent_encode`
+helper reused by `url_encode`, no duplicated escaper), **keys sorted by RAW value** for a deterministic
+golden, empty map → `""`. Lives in `std.encoding` (NOT `std.request`) because a native module name shadows
+a same-named `std/<name>.chz` (the rand-task lesson) — no clean place for a pure-Chezzi request helper.
+Pure CPU → NOT `is_blocking`. Golden `examples/encoding.chz` extended (sorted-key + empty + URL-compose
+cases), 3-engine parity verified. Docs: `docs/stdlib.md` (§std.request timeout note + §std.encoding
+query_encode), `gaps.md` (std.request nit struck → ✅ resolved). 2602 tests + conformance green, clippy clean.
+
 **✅ stdlib — `std.path` pure-Chezzi path-STRING ops (gaps.md "path ops") (2026-06-24).** New
 pure-Chezzi module `std/path.chz` (no native Rust, no seam — like `std/str.chz`/`std/iter.chz`) for
 **unix `/` path-STRING manipulation, NOT filesystem I/O** (that stays `std.fs`). Built on the core

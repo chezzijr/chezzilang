@@ -39,3 +39,10 @@ match enc.url_decode("a%20b%2Fc%3Fd"):
 match enc.url_decode("%2G"):
     Ok(s): print("unexpected ok: " + s)
     Err(e): print("url bad     = err")
+
+# --- query string builder (sorted keys, both sides percent-encoded) ---
+print("query 3     = " + enc.query_encode({"q": "a b", "x": "1", "a&b": "c=d"}))
+print("query empty = '" + enc.query_encode({}) + "'")
+empty_val: map[str, str] = {"k": ""}
+print("query kv    = " + enc.query_encode(empty_val))
+print("query url   = https://x.test/s?" + enc.query_encode({"name": "John Doe", "lang": "C++"}))

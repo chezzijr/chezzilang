@@ -13,6 +13,8 @@
 //! - url: RFC 3986 COMPONENT percent-encoding — `url_encode` keeps the unreserved set
 //!   `A-Za-z0-9-._~` literal and `%XX`-escapes everything else (uppercase hex); `url_decode` reverses
 //!   it (strict — `+` is NOT treated as space; that is `application/x-www-form-urlencoded`, not 3986).
+//!   `query_encode(map[str,str])` builds a `k=v&…` query string (both sides percent-encoded, keys
+//!   sorted by raw value for determinism, empty map → "").
 //!
 //! All members are pure CPU str transforms (no I/O), so none are in [`super::is_blocking`] — they run
 //! inline on every engine, giving 3-engine parity by construction at the NativeFn seam.
@@ -189,9 +191,10 @@ fn is_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
 
-fn url_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "url_encode", 1)?;
-    let s = h.arg_str(0)?;
+/// RFC 3986 COMPONENT percent-encoding of `s`: unreserved bytes stay literal, everything else
+/// becomes `%XX` (uppercase hex). The single shared percent-encoder reused by `url_encode` and
+/// `query_encode` (no duplicated escaper).
+fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if is_unreserved(b) {
@@ -209,6 +212,34 @@ fn url_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
                     .to_ascii_uppercase(),
             );
         }
+    }
+    out
+}
+
+fn url_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "url_encode", 1)?;
+    let s = h.arg_str(0)?;
+    Ok(NativeRet::Str(percent_encode(&s)))
+}
+
+/// `query_encode(params: map[str, str]) -> str` — assemble a `k=v&k2=v2` query string. Both key and
+/// value are percent-encoded (reusing [`percent_encode`], the same escaper as `url_encode`), pairs
+/// joined with `&` and key/value with `=`. Keys are SORTED by their RAW (pre-encoding) bytes so the
+/// output is deterministic regardless of map iteration order — giving a stable golden and 3-engine
+/// parity by construction. An empty map yields `""` (no leading `?`); the caller composes
+/// `url + "?" + query_encode(params)`.
+fn query_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "query_encode", 1)?;
+    let mut pairs = h.arg_str_map(0)?;
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(&percent_encode(k));
+        out.push('=');
+        out.push_str(&percent_encode(v));
     }
     Ok(NativeRet::Str(out))
 }
@@ -254,6 +285,7 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("hex_decode", hex_decode),
     ("url_encode", url_encode),
     ("url_decode", url_decode),
+    ("query_encode", query_encode),
 ];
 
 #[cfg(test)]
@@ -265,6 +297,7 @@ mod tests {
     #[derive(Default)]
     struct StrHost {
         strs: Vec<String>,
+        map: Vec<(String, String)>,
     }
 
     impl Host for StrHost {
@@ -290,9 +323,7 @@ mod tests {
             })
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
-            Err(HostError {
-                message: "no map args".into(),
-            })
+            Ok(self.map.clone())
         }
         fn write_stdout(&mut self, _s: &str) {}
         fn write_stderr(&mut self, _s: &str) {}
@@ -313,6 +344,7 @@ mod tests {
     fn host(s: &str) -> StrHost {
         StrHost {
             strs: vec![s.to_string()],
+            map: vec![],
         }
     }
 
@@ -413,5 +445,42 @@ mod tests {
         dec_err(url_decode, "%2"); // truncated
         // %FF decodes to a lone 0xFF byte → non-UTF-8 → Err.
         dec_err(url_decode, "%FF");
+    }
+
+    /// Build a map-carrying host and run `query_encode`, returning the assembled query string.
+    fn qe(pairs: &[(&str, &str)]) -> String {
+        // arg 0 is the map; a single str slot makes `arg_count() == 1` so `expect_args` passes
+        // (the placeholder str is never read — `query_encode` reads `arg_str_map(0)`).
+        let mut h = StrHost {
+            strs: vec![String::new()],
+            map: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        match query_encode(&mut h).unwrap() {
+            NativeRet::Str(out) => out,
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_encode_sorts_and_encodes_both_sides() {
+        // Keys sorted by RAW key (a&b < q < x); both key and value percent-encoded with the
+        // url_encode contract: space->%20, &->%26, ==->%3D.
+        assert_eq!(
+            qe(&[("q", "a b"), ("x", "1"), ("a&b", "c=d")]),
+            "a%26b=c%3Dd&q=a%20b&x=1"
+        );
+    }
+
+    #[test]
+    fn query_encode_empty_map_is_empty_string() {
+        assert_eq!(qe(&[]), "");
+    }
+
+    #[test]
+    fn query_encode_empty_value() {
+        assert_eq!(qe(&[("k", "")]), "k=");
     }
 }

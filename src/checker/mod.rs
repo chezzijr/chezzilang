@@ -576,6 +576,13 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("hex_decode", vec![Ty::Str], Ty::result(Ty::Str));
             func("url_encode", vec![Ty::Str], Ty::Str);
             func("url_decode", vec![Ty::Str], Ty::result(Ty::Str));
+            // `query_encode(params: map[str,str]) -> str` — build a `k=v&...` query string with
+            // sorted keys + both sides percent-encoded (pure CPU, infallible).
+            func(
+                "query_encode",
+                vec![Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
+                Ty::Str,
+            );
         }
         "std.crypto" => {
             // Hand-rolled digests: hash the str's UTF-8 bytes → lowercase-hex `str` (infallible).
@@ -615,21 +622,11 @@ fn native_module_sig(name: &str) -> ModuleSig {
             );
         }
         "std.request" => {
-            // `Response` is the synthetic struct seeded in `seed_stdlib_structs`.
+            // `Response` is the synthetic struct seeded in `seed_stdlib_structs`. `get`/`post`/
+            // `request` carry an OPTIONAL trailing `timeout_ms: int` and are installed AFTER the
+            // match (the `func` closure above can only build fixed-arity sigs); the verb wrappers
+            // below are plain fixed-arity.
             let resp = || Ty::Struct("Response".to_string(), vec![]);
-            func("get", vec![Ty::Str], Ty::result(resp()));
-            func("post", vec![Ty::Str, Ty::Str], Ty::result(resp()));
-            // General verb + custom headers; verb wrappers for the common non-GET/POST methods.
-            func(
-                "request",
-                vec![
-                    Ty::Str,
-                    Ty::Str,
-                    Ty::Str,
-                    Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
-                ],
-                Ty::result(resp()),
-            );
             func("put", vec![Ty::Str, Ty::Str], Ty::result(resp()));
             func("patch", vec![Ty::Str, Ty::Str], Ty::result(resp()));
             func("delete", vec![Ty::Str], Ty::result(resp()));
@@ -701,6 +698,35 @@ fn native_module_sig(name: &str) -> ModuleSig {
             }
         }
         _ => {}
+    }
+    // Post-match: make `std.request`'s `get`/`post`/`request` accept an OPTIONAL trailing
+    // `timeout_ms: int` (a positive value overrides the agent's default timeout caps for that call).
+    // Done here (not in the arm) because the `func` closure above borrows `sig.functions` for the
+    // whole match; once it is dropped we can install the optional-tail signatures directly.
+    if name == "std.request" {
+        let resp = || Ty::Struct("Response".to_string(), vec![]);
+        sig.functions.insert(
+            "get".into(),
+            FnSig::optional_tail(vec![Ty::Str, Ty::Int], Ty::result(resp()), 1),
+        );
+        sig.functions.insert(
+            "post".into(),
+            FnSig::optional_tail(vec![Ty::Str, Ty::Str, Ty::Int], Ty::result(resp()), 1),
+        );
+        sig.functions.insert(
+            "request".into(),
+            FnSig::optional_tail(
+                vec![
+                    Ty::Str,
+                    Ty::Str,
+                    Ty::Str,
+                    Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+                    Ty::Int,
+                ],
+                Ty::result(resp()),
+                1,
+            ),
+        );
     }
     sig
 }
@@ -5748,8 +5774,12 @@ impl Checker {
                     .and_then(|id| self.module_sigs.get(id))
                     .map(|sig| {
                         if let Some(fsig) = sig.functions.get(name) {
+                            // A first-class function VALUE is fixed-arity (Ty::Func carries no
+                            // optional tail), so expose only the REQUIRED params — `f := request.get`
+                            // then `f(url)` keeps working. The optional tail (e.g. timeout_ms) is
+                            // reachable via a direct `request.get(url, ms)` call.
                             Some(Ty::Func {
-                                params: fsig.params.clone(),
+                                params: fsig.params[..fsig.min_params].to_vec(),
                                 ret: Box::new(fsig.ret.clone()),
                             })
                         } else {
@@ -6786,7 +6816,10 @@ impl Checker {
                         return Some(self.infer_generic_call(name, &sig, args, targs, span));
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
-                    self.check_args_w(name, &sig.params, args, span);
+                    // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
+                    // `from`-imported fn with an optional arg); for plain sigs `min_params ==
+                    // params.len()`, so this is identical to the old exact-arity check.
+                    self.check_args_range_w(name, &sig.params, sig.min_params, args, span, true);
                     return Some(sig.ret);
                 }
                 None
@@ -6840,8 +6873,17 @@ impl Checker {
                     if !fsig.type_params.is_empty() {
                         return self.infer_generic_call(method, &fsig, args, &[], span);
                     }
-                    // Float params are coerced at the callee's prologue.
-                    self.check_args_w(method, &fsig.params, args, span);
+                    // Float params are coerced at the callee's prologue. Honor an optional trailing
+                    // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for
+                    // plain sigs `min_params == params.len()`, identical to the old exact check.
+                    self.check_args_range_w(
+                        method,
+                        &fsig.params,
+                        fsig.min_params,
+                        args,
+                        span,
+                        true,
+                    );
                     return fsig.ret;
                 }
                 self.infer_all(args);
