@@ -5157,6 +5157,20 @@ fn rwshared_read_returns_closure_result_type() {
 }
 
 #[test]
+fn rwshared_read_closure_body_error_reported_once() {
+    // A type error inside the read() closure body must be reported ONCE. `read` recovers R by
+    // re-inferring the closure after `check_args` already inferred it; that recovery must not
+    // double-emit the body's errors (regression: `nope` was reported twice).
+    let errs =
+        check_src("fn main():\n    r := RwShared(0)\n    print(r.read(fn(x): nope + x))\nmain()\n");
+    let n = errs.iter().filter(|e| e.message.contains("nope")).count();
+    assert_eq!(
+        n, 1,
+        "expected the 'nope' error exactly once, got: {errs:?}"
+    );
+}
+
+#[test]
 fn rwshared_get_returns_element_type() {
     ok(
         "fn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",

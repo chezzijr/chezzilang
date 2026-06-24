@@ -7208,10 +7208,14 @@ impl Checker {
                 if let Some(sig) = rwshared_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
                     if method == "read" {
-                        // R = the closure argument's actual return type (else `Unknown` on arity error).
-                        if let Some(arg) = args.first()
-                            && let Ty::Func { ret, .. } = self.infer_value(arg)
-                        {
+                        // R = the closure argument's actual return type (else `Unknown` on arity
+                        // error). `check_args` already inferred the closure (emitting any body
+                        // errors); this is a RECOVERY-ONLY re-inference, so snapshot + truncate to
+                        // avoid double-reporting those same body errors.
+                        let mark = self.errors.len();
+                        let recovered = args.first().map(|arg| self.infer_value(arg));
+                        self.errors.truncate(mark);
+                        if let Some(Ty::Func { ret, .. }) = recovered {
                             return *ret;
                         }
                         return Ty::Unknown;

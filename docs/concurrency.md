@@ -567,6 +567,7 @@ captured bindings are **read-only inside the task**.
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
+  a **`RwShared[T]`** handle,
   a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree), and a
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
