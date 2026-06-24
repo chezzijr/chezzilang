@@ -6526,7 +6526,7 @@ impl Checker {
             self.error(
                 span,
                 format!(
-                    "static method '{method}' cannot declare their own type parameters yet (only the enclosing type '{tname}' s)"
+                    "static method '{method}' cannot declare its own type parameters yet (only the enclosing type '{tname}' can)"
                 ),
             );
             return Ty::Unknown;
@@ -6539,12 +6539,35 @@ impl Checker {
             self.check_args_w(method, &sig.params, args, span);
             return sig.ret;
         }
-        // Generic enclosing type: seed the substitution from the explicit turbofish args (an arity
-        // mismatch is reported by `seed_targs`), then substitute into params + return.
-        let sub = self.seed_targs(tname, &tps, targs, span);
-        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &sub)).collect();
-        self.check_args_w(method, &params, args, span);
+        // Generic enclosing type: infer its params by unifying the method's declared param types
+        // (which may carry the type's `Ty::Param`s) against the argument types — exactly like the
+        // struct/newtype ctor infers from fields — taking explicit turbofish (`Box[int].empty()`)
+        // when given.
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        if arg_tys.len() != sig.params.len() {
+            self.check_arity(method, sig.params.len(), args, span);
+        }
+        let mut sub = self.seed_targs(tname, &tps, targs, span);
+        for (decl, actual) in sig.params.iter().zip(&arg_tys) {
+            unify(decl, actual, &mut sub);
+        }
+        self.recover_iter_elems(&tps, &mut sub, span);
+        for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
+            let expected = subst(decl, &sub);
+            if !self.assignable(&expected, actual) {
+                self.error(
+                    arg.span,
+                    format!("argument to '{method}' has type {actual}, expected {expected}"),
+                );
+            }
+        }
         self.enforce_bounds(&tps, &sub, span);
+        // Any param still un-inferred — no turbofish and not bound by an argument, e.g.
+        // `Box.empty() -> Box[T]` — degrades to the refinable `Ty::Unknown`; a free `Ty::Param` must
+        // never leak into the value's type (mirrors the ctor's `unwrap_or(Ty::Unknown)` targs_out).
+        for tp in &tps {
+            sub.entry(tp.name.clone()).or_insert(Ty::Unknown);
+        }
         subst(&sig.ret, &sub)
     }
 

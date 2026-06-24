@@ -8562,7 +8562,27 @@ fn enum_variant_static_collision_errors() {
 fn static_method_own_type_params_rejected() {
     rejects(
         "struct Box[T]:\n    items: list[T]\n    fn make[U](x: U) -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box[int].make(5)\n",
-        "cannot declare their own type parameters",
+        "cannot declare its own type parameters",
+    );
+}
+
+/// A generic static method called WITHOUT the type-level turbofish must NOT leak a free `Ty::Param`
+/// into the value's type. `Box.empty() -> Box[T]` (no turbofish, no arg binding `T`) degrades `T` to
+/// the refinable `Ty::Unknown` (like the ctor), so downstream use refines cleanly instead of erroring
+/// against the internal param name `T` — same behavior as the `Box([])` ctor path.
+#[test]
+fn generic_static_no_turbofish_degrades_param_to_unknown() {
+    ok(
+        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    b := Box.empty()\n    b.items.push(\"x\")\n    print(b.items.len())\n",
+    );
+}
+
+/// A generic static method INFERS the enclosing type's params from its arguments, like the ctor:
+/// `Box.wrap(5)` for `fn wrap(x: T) -> Box[T]` yields `Box[int]` with no turbofish.
+#[test]
+fn generic_static_infers_type_param_from_arg() {
+    ok(
+        "struct Box[T]:\n    items: list[T]\n    fn wrap(x: T) -> Box[T]:\n        return Box([x])\nfn main():\n    b := Box.wrap(5)\n    n: int = b.items[0]\n    print(n)\n",
     );
 }
 
