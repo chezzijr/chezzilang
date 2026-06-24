@@ -525,11 +525,18 @@ unsafe extern "C" fn callback_trampoline(
 /// frees the closure via `ffi_closure_free` — done only AFTER `ffi_call` returns (sync scope).
 struct CallbackClosure<'h> {
     handle: *mut libffi::raw::ffi_closure,
-    _cif: Cif,
+    _cif: Box<Cif>,
     // Patched (its `host` field) after the arg loop, then read by libffi during the call via the
     // userdata pointer; kept alive until drop. Not `_`-prefixed because `Cffi::call` writes it.
     ctx: Box<TrampolineCtx<'h>>,
 }
+
+// NOTE: `_cif` is `Box<Cif>`, NOT `Cif`. `ffi_prep_closure_loc` stores a raw pointer to the `Cif`'s
+// inner `ffi_cif`; libffi dereferences it when C later invokes the closure. A by-value `Cif` here
+// would be MOVED (into this struct, then into the `callback_closures` Vec, which can reallocate),
+// relocating the `ffi_cif` and dangling that stored pointer → `classify_argument` reads freed memory
+// → SIGSEGV (manifests only under some memory layouts — it slipped past the goldens). The `Box` pins
+// the `ffi_cif` at a stable heap address across every move, exactly like `ctx` above.
 
 impl Drop for CallbackClosure<'_> {
     fn drop(&mut self) {
@@ -828,9 +835,15 @@ impl Cffi {
                         ret: ret.as_ref() as *const CType,
                         fault: fault_ptr,
                     });
-                    // The closure's own CIF (callback signature). libffi reads through it during the
-                    // call, so it is kept alive in the `CallbackClosure` until after `ffi_call`.
-                    let cb_cif = Cif::new(params.iter().map(|p| p.ffi_type()), ret.ffi_type());
+                    // The closure's own CIF (callback signature). libffi stores a raw pointer to this
+                    // CIF in the closure and reads through it when C invokes the callback, so the
+                    // `ffi_cif` must stay at a STABLE ADDRESS until after `ffi_call`. `Box` it so the
+                    // later move into `CallbackClosure`/the `callback_closures` Vec can't relocate it
+                    // (a by-value `Cif` here dangled that pointer → SIGSEGV in `classify_argument`).
+                    let cb_cif = Box::new(Cif::new(
+                        params.iter().map(|p| p.ffi_type()),
+                        ret.ffi_type(),
+                    ));
                     let (handle, code) = libffi::low::closure_alloc();
                     // SAFETY: `handle`/`code` are a fresh closure pair from `closure_alloc`; `cb_cif`
                     // is the callback's CIF (kept alive in `CallbackClosure`); `callback_trampoline`
@@ -1193,6 +1206,40 @@ impl std::fmt::Debug for Cffi {
 mod tests {
     use super::*;
     use crate::native::{Host, HostError, NativeRet};
+
+    /// Regression (callback SIGSEGV): `ffi_prep_closure_loc` stores a raw pointer to the callback
+    /// `Cif`'s inner `ffi_cif`; libffi dereferences it when C later invokes the closure. The `Cif` is
+    /// then moved into a `CallbackClosure` and into the `callback_closures` `Vec` (which can
+    /// reallocate). A by-value `Cif` relocated → dangling pointer → SIGSEGV in libffi's
+    /// `classify_argument` (layout-dependent, so it slipped past the 3-engine `ffi_qsort` goldens but
+    /// crashed `chezzi run examples/ffi_qsort.chz`). The fix `Box`es the `Cif`; this pins the address
+    /// across exactly those moves. A by-value `Cif` here makes this assertion fail.
+    #[test]
+    fn boxed_callback_cif_address_is_stable_across_moves() {
+        // (1) Production tie-in: this only compiles while `CallbackClosure::_cif` DEREFS to `Cif`
+        // (i.e. is `Box<Cif>`, not a by-value `Cif`). If someone reverts the field to a bare `Cif`,
+        // `*c._cif` stops compiling and this regression test breaks the build — the whole point.
+        fn _cif_is_heap_pinned(c: &CallbackClosure<'_>) -> *const Cif {
+            &*c._cif
+        }
+        let _ = _cif_is_heap_pinned; // reference it so the compile-time guard isn't dead code
+        // (2) The property that fix relies on: a `Box<Cif>` keeps its `ffi_cif` at a stable address
+        // across the same moves `Cffi::call` performs (into `CallbackClosure`, into the reallocating
+        // `callback_closures` Vec). libffi holds a raw pointer to that `ffi_cif` for the whole call.
+        let cif = Box::new(Cif::new([Type::pointer(), Type::pointer()], Type::i32()));
+        let raw_before = cif.as_raw_ptr();
+        let mut closures: Vec<Box<Cif>> = Vec::with_capacity(0);
+        for _ in 0..64 {
+            closures.push(Box::new(Cif::new([Type::pointer()], Type::void())));
+        }
+        closures.push(cif);
+        assert_eq!(
+            raw_before,
+            closures.last().unwrap().as_raw_ptr(),
+            "the boxed callback Cif's ffi_cif must keep a stable address across the move into the \
+             callback_closures Vec — libffi holds a raw pointer to it for the whole call"
+        );
+    }
 
     /// How a [`MockHost`] callback slot reacts when the C side invokes it (drives the callback
     /// trampoline tests without an engine): a pure scalar transform, an explicit `HostError`, or a
