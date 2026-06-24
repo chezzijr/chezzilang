@@ -11,6 +11,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ stdlib — `std.path` pure-Chezzi path-STRING ops (gaps.md "path ops") (2026-06-24).** New
+pure-Chezzi module `std/path.chz` (no native Rust, no seam — like `std/str.chz`/`std/iter.chz`) for
+**unix `/` path-STRING manipulation, NOT filesystem I/O** (that stays `std.fs`). Built on the core
+`str` methods (`split`/`starts_with`/`ends_with`) + the `str` `join` receiver. Surface:
+`is_abs`/`is_rel`, `basename`/`dirname`/`split` (a `(str, str)` tuple = `(dirname, basename)`),
+`ext`/`stem`/`with_ext`, `normalize`, `join`. Edge-case semantics match Python `os.path` (basename/
+dirname/splitext) and Go `path.Clean`/`path.Join` for `normalize`/`join` (chose Go's simple join, NOT
+Python's absolute-resets-earlier footgun) — every case is contractual in `docs/stdlib.md §5` (the
+hard ones: `basename("a/b/")`→`""`, `dirname("/a")`→`"/"`, `ext(".bashrc")`→`""`, `ext("dir.d/file")`
+→`""`, `normalize("/a/../../b")`→`"/b"`, `normalize("a/../../b")`→`"../b"`, `normalize("")`→`"."`).
+Separator policy: `/` only, no Windows `\`. Pure-Chezzi → 3-engine parity is automatic (same `.chz`
+on all engines); still added `examples/path_test.chz` (9 `test fn` TDD table, `cargo run -- test`) +
+golden `examples/path.chz`/`.expected` wired into `golden_path_via_run_file` (`assert_file_parity` =
+VM == interp). Docs: `docs/stdlib.md` (new `### std.path` in §5), `gaps.md` (path ops struck from the
+pure-Chezzi dogfood list). Full suite + conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ stdlib — `std.process` polish (gaps.md "std.process polish") (2026-06-24).** `std.process` had
 only `cmd(line)` via `sh -c` (injection-prone, stdout discarded on a non-zero exit). Added two
 structured forms in `src/native/process.rs`: `run(line) -> Result[ProcResult]` (still `sh -c`, same

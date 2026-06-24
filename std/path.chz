@@ -1,0 +1,151 @@
+# std.path — unix path-STRING manipulation written in Chezzi (pure-Chezzi dogfood).
+#
+# Filesystem PATH-STRING ops only — NO filesystem I/O (that's std.fs). Every function here is pure
+# string manipulation built on the core `str` methods (split/starts_with/ends_with) and the `str`
+# `join` receiver — no native code, no seam.
+#
+# SEPARATOR POLICY: unix '/' ONLY. The repo targets unix; there is no Windows '\' handling.
+#
+# Edge-case semantics follow Python `os.path` where it is the Chezzi-natural choice (basename/
+# dirname/split/ext/splitext) and Go `path.Clean` for `normalize` (the one fully-specified lexical
+# algorithm). Each function's contract is documented inline and in docs/stdlib.md §5.
+
+# Is `p` absolute (starts with '/')? Empty string is NOT absolute.
+fn is_abs(p: str) -> bool:
+    return p.starts_with("/")
+
+# Is `p` relative (not absolute)? Trivial complement of is_abs.
+fn is_rel(p: str) -> bool:
+    return not is_abs(p)
+
+# Final path component (Python os.path.basename on the RAW string, no pre-normalize):
+# the part after the last '/'. A trailing slash yields "" (empty final component).
+#   basename("a/b") -> "b" · basename("a/b/") -> "" · basename("/") -> "" ·
+#   basename("") -> "" · basename("a") -> "a"
+fn basename(p: str) -> str:
+    parts := p.split("/")
+    return parts[parts.len() - 1]
+
+# Everything before the final component (Python os.path.dirname): the head up to the last '/',
+# with a trailing slash stripped EXCEPT when the head is all slashes (then it stays "/").
+#   dirname("a/b") -> "a" · dirname("a/b/") -> "a/b" · dirname("/a") -> "/" ·
+#   dirname("a") -> "" · dirname("/") -> "/" · dirname("") -> ""
+fn dirname(p: str) -> str:
+    # index of the last '/'
+    cut := -1
+    i := 0
+    while i < p.len():
+        if p[i] == "/":
+            cut = i
+        i += 1
+    if cut < 0:
+        return ""            # no slash -> no directory
+    head := p[0 : cut]       # everything before the last '/'
+    # strip a trailing slash on the head unless the head is entirely slashes
+    allslash := head.len() > 0
+    j := 0
+    while j < head.len():
+        if head[j] != "/":
+            allslash = false
+        j += 1
+    if head.len() == 0 or allslash:
+        return p[0 : cut + 1]   # keep the slashes (e.g. "/a" -> "/")
+    # strip ALL redundant trailing slashes on the head ("a//b" -> head "a/" -> "a")
+    end := head.len()
+    while end > 0 and head[end - 1] == "/":
+        end -= 1
+    return head[0 : end]
+
+# Split `p` into (head, tail) so that head == dirname(p) and tail == basename(p)
+# (Python os.path.split). split("a/b") -> ("a", "b") · split("a/b/") -> ("a/b", "") ·
+# split("/a") -> ("/", "a").
+fn split(p: str) -> (str, str):
+    return (dirname(p), basename(p))
+
+# File extension of the final component, INCLUDING the leading dot, FINAL extension only
+# (Python os.path.splitext). A leading-dot-only hidden file has NO extension (the dot must not be
+# the first char of the basename). Only the basename is inspected, never the dirname.
+#   ext("a/b.tar.gz") -> ".gz" · ext("a.txt") -> ".txt" · ext("README") -> "" ·
+#   ext(".bashrc") -> "" · ext("a.") -> "." · ext("dir.d/file") -> ""
+fn ext(p: str) -> str:
+    b := basename(p)
+    dot := -1
+    i := 0
+    while i < b.len():
+        if b[i] == ".":
+            dot = i
+        i += 1
+    if dot <= 0:             # no dot, or dot is the first char (hidden file) -> no ext
+        return ""
+    return b[dot : b.len()]
+
+# Final component with its extension removed.
+#   stem("a/b.tar.gz") -> "b.tar" · stem(".bashrc") -> ".bashrc" · stem("a.txt") -> "a" ·
+#   stem("a/b") -> "b"
+fn stem(p: str) -> str:
+    b := basename(p)
+    e := ext(p)
+    if e.len() == 0:
+        return b
+    return b[0 : b.len() - e.len()]
+
+# Replace the final extension of `p` with `e`. `e` is normalized to exactly one leading dot when
+# non-empty ("md" and ".md" both yield ".md"); an empty `e` strips the extension.
+#   with_ext("a/b.txt", ".md") -> "a/b.md" · with_ext("a/b", ".md") -> "a/b.md" ·
+#   with_ext("a/b.txt", "") -> "a/b" · with_ext("a/b.txt", "md") -> "a/b.md"
+fn with_ext(p: str, e: str) -> str:
+    ne := e
+    if ne.len() > 0 and not ne.starts_with("."):
+        ne = "." + ne
+    d := dirname(p)
+    newbase := stem(p) + ne
+    if d.len() == 0:
+        return newbase
+    if d == "/" or d.ends_with("/"):
+        return d + newbase
+    return d + "/" + newbase
+
+# Lexically clean `p` (Go path.Clean): collapse runs of '/', drop "." elements, resolve ".."
+# against the preceding real element WITHOUT touching the filesystem. The empty path cleans to ".".
+# Leading ".." is preserved on a RELATIVE path; a ".." that would back up past root on an ABSOLUTE
+# path is dropped. The result keeps a leading '/' iff `p` was absolute and never has a trailing '/'
+# (except the root "/").
+#   normalize("") -> "." · normalize("/") -> "/" · normalize("//") -> "/" · normalize(".") -> "." ·
+#   normalize("..") -> ".." · normalize("a/b/../c") -> "a/c" · normalize("a/./b") -> "a/b" ·
+#   normalize("a/b/") -> "a/b" · normalize("./a") -> "a" · normalize("/..") -> "/" ·
+#   normalize("/a/../../b") -> "/b" · normalize("a/../../b") -> "../b"
+fn normalize(p: str) -> str:
+    abs := is_abs(p)
+    stack := []
+    for seg in p.split("/"):
+        if seg == "" or seg == ".":
+            continue                       # collapse '//' and drop '.'
+        if seg == "..":
+            n := stack.len()
+            if n > 0 and stack[n - 1] != "..":
+                stack.pop()                # resolve against a real preceding element
+            else if not abs:
+                stack.push("..")         # relative: leading ".." is preserved
+            # absolute && nothing to pop: ".." past root is dropped
+            continue
+        stack.push(seg)
+    body := "/".join(stack)
+    if abs:
+        return "/" + body                  # "/" + "" == "/" for the root case
+    if body.len() == 0:
+        return "."                         # empty relative result is the current dir
+    return body
+
+# Join path components with '/' (Go path.Join style — NOT Python's absolute-resets-earlier
+# behavior): drop empty parts, join the rest with '/', then `normalize` the result. An all-empty
+# input yields "".
+#   join(["a","b","c"]) -> "a/b/c" · join(["a/","b"]) -> "a/b" · join(["","b"]) -> "b" ·
+#   join([]) -> "" · join(["a","","c"]) -> "a/c" · join(["/a","b"]) -> "/a/b"
+fn join(parts: list[str]) -> str:
+    kept := []
+    for part in parts:
+        if part.len() > 0:
+            kept.push(part)
+    if kept.len() == 0:
+        return ""
+    return normalize("/".join(kept))

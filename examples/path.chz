@@ -1,0 +1,44 @@
+# examples/path.chz — golden tour of std.path (unix path-STRING ops, pure-Chezzi).
+# Twin of examples/path_test.chz (the assert-based TDD table); this one prints so the golden
+# .expected locks the output AND VM==interp parity.
+
+import std.path as p
+
+fn main():
+    # is_abs / is_rel
+    print(p.is_abs("/usr/bin"))
+    print(p.is_abs("usr/bin"))
+    print(p.is_rel(""))
+
+    # basename / dirname
+    print(p.basename("/a/b/c.txt"))
+    print(p.basename("a/b/"))
+    print(p.dirname("/a/b/c.txt"))
+    print(p.dirname("/a"))
+    print(p.dirname("a"))
+
+    # split (tuple destructure)
+    d, b := p.split("/a/b/c")
+    print(d)
+    print(b)
+
+    # ext / stem / with_ext
+    print(p.ext("archive.tar.gz"))
+    print(p.ext(".bashrc"))
+    print(p.stem("archive.tar.gz"))
+    print(p.with_ext("src/main.chz", ".bak"))
+    print(p.with_ext("src/main.chz", ""))
+
+    # normalize (lexical clean)
+    print(p.normalize("a/b/../c"))
+    print(p.normalize("/a/../../b"))
+    print(p.normalize("a/../../b"))
+    print(p.normalize("//foo///bar/"))
+    print(p.normalize(""))
+
+    # join
+    print(p.join(["usr", "local", "bin"]))
+    print(p.join(["/etc", "passwd"]))
+    print(p.join(["a", "", "c"]))
+
+main()
