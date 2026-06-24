@@ -859,6 +859,21 @@ impl Interp {
                         payload: Vec::new(),
                     });
                 }
+                // `Type[T…].Variant` (nullary, declaration-site turbofish value form) → the variant
+                // value. Type args are RUNTIME-erased — identical to the bare `Enum.Variant` value.
+                // Both carriers converge via `type_apply_head_name`.
+                if let Some(tname) = type_apply_head_name(&obj.kind)
+                    && self.env.get_local(tname).is_none()
+                    && let ekey = self.enum_bare_key(tname)
+                    && let Some(def) = self.variants.get(&(ekey, name.clone()))
+                    && def.arity == 0
+                {
+                    return Ok(Value::Enum {
+                        ty: def.enum_name.clone(),
+                        variant: name.as_str().into(),
+                        payload: Vec::new(),
+                    });
+                }
                 // `Enum.Variant` (nullary) → the variant value, mirroring the bare Ident path. A
                 // binding named like the enum wins, matching the checker/compiler. The enum resolves
                 // to the current module's runtime key (bare unless disambiguated).
@@ -1418,19 +1433,14 @@ impl Interp {
                     .collect::<Result<Vec<_>, _>>()?;
                 return self.call(&decl, &home, arg_vals, span);
             }
-            // `Type[targ].method(args)` → generic-static turbofish (`Box[int].empty()`). Parses as
-            // `Field{obj: Index{obj: Ident(Type), index}, name}` (the `[..]` is followed by `.`). The
-            // type arg is RUNTIME-erased, so ignore `index` and dispatch the static method by name.
-            if let ExprKind::Index { obj: tobj, .. } = &obj.kind
-                && let ExprKind::Ident(tname) = &tobj.kind
-                && self.env.get_local(tname).is_none()
-                && let Some((decl, home)) = self.lookup_static_method(tname, name)
+            // `Type[T…].Variant(args)` / `Type[T…].method(args)` — declaration-site turbofish on a
+            // generic TYPE (VARIANT-first, else generic static). Factored into a non-inlined helper so
+            // its locals do NOT inflate the hot, recursive `eval_call` stack frame (the call-depth
+            // guard is tuned to the frame size — keeping this off-frame preserves the guard headroom).
+            if type_apply_head_name(&obj.kind).is_some()
+                && let Some(res) = self.eval_turbofish_member(obj, name, args, span)
             {
-                let arg_vals = args
-                    .iter()
-                    .map(|a| self.eval(a))
-                    .collect::<Result<Vec<_>, _>>()?;
-                return self.call(&decl, &home, arg_vals, span);
+                return res;
             }
             return self.eval_method_call(obj, name, args, span);
         }
@@ -1689,6 +1699,45 @@ impl Interp {
 
         let callee_val = self.eval(callee)?;
         self.call_value(callee_val, arg_vals, span)
+    }
+
+    /// Resolve a declaration-site turbofish member CALL `Type[T…].member(args)` — a VARIANT
+    /// constructor (`Box[int].Full(9)`, `E[int, str].Pair(…)`) or a generic STATIC method
+    /// (`Box[int].empty()`). VARIANT-FIRST (mirrors the checker + VM); type args are RUNTIME-erased,
+    /// so this emits the same value as the bare `Enum.Variant(args)` / `Type.method(args)` forms.
+    /// Returns `None` when `obj` is not a turbofish head over an enum-variant / static-method, so the
+    /// caller falls back to the ordinary method path. `#[inline(never)]` keeps its locals off the hot,
+    /// recursive `eval_call` frame (the call-depth guard headroom depends on that frame staying small).
+    #[inline(never)]
+    fn eval_turbofish_member(
+        &mut self,
+        obj: &Expr,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Result<Value, RuntimeError>> {
+        let tname = type_apply_head_name(&obj.kind)?;
+        if self.env.get_local(tname).is_some() {
+            return None;
+        }
+        // VARIANT-FIRST.
+        let ekey = self.enum_bare_key(tname);
+        if let Some(def) = self.variants.get(&(ekey, name.to_string())).cloned() {
+            return Some(self.build_variant(&def, name, args, span));
+        }
+        // Else a generic static method.
+        if let Some((decl, home)) = self.lookup_static_method(tname, name) {
+            let arg_vals = match args
+                .iter()
+                .map(|a| self.eval(a))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            return Some(self.call(&decl, &home, arg_vals, span));
+        }
+        None
     }
 
     /// Dispatch an already-evaluated callable value (function or closure) on evaluated args.
@@ -6923,6 +6972,22 @@ fn list_repeat(
             message: "list repeat capacity overflow".to_string(),
             span,
         }),
+    }
+}
+
+/// The TYPE name in a declaration-site turbofish member-access head — the `obj` of a
+/// `Type[T…].member`. Both carriers converge: single-arg `Index{Ident, …}` (the type args ride the
+/// index because the parser can't distinguish `arr[i].field`) and multi-arg `TypeApply{name, …}`.
+/// Type args are runtime-erased, so only the name is needed. `None` for any other shape. Mirrors the
+/// compiler's `type_apply_head_name` byte-for-byte (parity).
+fn type_apply_head_name(kind: &ExprKind) -> Option<&str> {
+    match kind {
+        ExprKind::TypeApply { name, .. } => Some(name),
+        ExprKind::Index { obj, .. } => match &obj.kind {
+            ExprKind::Ident(n) => Some(n),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

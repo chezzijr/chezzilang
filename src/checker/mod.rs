@@ -5207,6 +5207,19 @@ impl Checker {
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
             ExprKind::Recover(block) => self.infer_recover(block),
+            // `Type[T1, T2]` is a type-application HEAD — only valid as the receiver of a member
+            // access / call (`Result[int, str].Ok(5)`, nullary `Box[int].Empty`). The `infer_call`
+            // and `infer_field` paths consume it before it reaches here; a bare one in value
+            // position is a use of a type as a value.
+            ExprKind::TypeApply { name, .. } => {
+                self.error(
+                    expr.span,
+                    format!(
+                        "'{name}' is a type, not a value; access a member (`{name}[…].member`)"
+                    ),
+                );
+                Ty::Unknown
+            }
         }
     }
 
@@ -5841,6 +5854,46 @@ impl Checker {
                 }
             }
         }
+        // `Type[T…].Variant` used as a VALUE (no call) — the declaration-site turbofish on a nullary
+        // variant: `Box[int].Empty`. Mirrors the bare `Enum.Variant` value form above, but returns
+        // the EXPLICIT type args (resolved), not `Unknown`. Both carriers (single-arg `Index`,
+        // multi-arg `TypeApply`) converge through `type_apply_head`.
+        if let Some((tname, type_exprs)) = self.type_apply_head(obj)
+            && self.enum_names.contains(&tname)
+        {
+            let ekey = self.bare_key(&tname);
+            let resolved: Vec<Ty> = type_exprs
+                .iter()
+                .map(|t| self.resolve_type(t, obj.span))
+                .collect();
+            // Arity-check the explicit args against the enum's params (reuse `seed_targs`).
+            let tps = self
+                .enum_type_params
+                .get(&ekey)
+                .cloned()
+                .unwrap_or_default();
+            self.seed_targs(&tname, &tps, &resolved, obj.span);
+            match self
+                .variants
+                .get(&(ekey.clone(), name.to_string()))
+                .cloned()
+            {
+                Some(v) if v.payload.is_empty() => {
+                    return Ty::Enum(ekey, resolved);
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!("variant '{name}' of enum '{tname}' carries a payload; construct it as {tname}[…].{name}(…)"),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    self.error(obj.span, format!("enum '{tname}' has no variant '{name}'"));
+                    return Ty::Unknown;
+                }
+            }
+        }
         let obj_ty = self.infer(obj);
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
@@ -6310,6 +6363,20 @@ impl Checker {
                     .position(|v| v == name)
                     .map(|i| edef.variants[i].clone())
                 {
+                    // The OLD gliding form `module.Enum.Variant[T](args)` (type args on the VARIANT)
+                    // is removed — explicit type args go on the TYPE: `module.Enum[T].Variant(args)`.
+                    if !targs.is_empty() {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "put the type arguments on the type: {}.{ename}[{}].{name}(...)",
+                                mname,
+                                render_targs(&targs)
+                            ),
+                        );
+                        return Ty::Unknown;
+                    }
                     let mut vi = vinfo;
                     // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
                     // genuine clash), matching the layout tables + the declaring module's signatures.
@@ -6335,6 +6402,19 @@ impl Checker {
                     .variants
                     .contains_key(&(ekey.clone(), name.to_string()))
                 {
+                    // The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is
+                    // removed — explicit type args now go on the TYPE: `Enum[T].Variant(args)`.
+                    if !targs.is_empty() {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "put the type arguments on the type: {ename}[{}].{name}(...)",
+                                render_targs(&targs)
+                            ),
+                        );
+                        return Ty::Unknown;
+                    }
                     if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(&ekey)) {
                         return ty;
                     }
@@ -6371,25 +6451,26 @@ impl Checker {
                 }
                 return self.infer_static_call(&key, tname, name, args, &[], span);
             }
-            // `Type[targ].method(args)` — generic-static turbofish (RESOLVED form, e.g.
-            // `Box[int].empty()`). Parses as `Field{obj: Index{obj: Ident(Type), index}, name}`
-            // because the `[..]` is followed by `.` (not `(`), so the turbofish-call steal never
-            // fires. Indexing a bare TYPE name is otherwise invalid, so the pattern is unambiguous:
-            // reinterpret the index as a single type argument. Only single-arg forms parse
-            // (`Pair[K,V].empty()` is rejected by the subscript parser's comma).
-            if let ExprKind::Index { obj: tobj, index } = &obj.kind
-                && let ExprKind::Ident(tname) = &tobj.kind
-                && !self.is_local_binding(tname)
-                && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
-            {
-                let key = self.bare_key(tname);
-                // Reinterpret the index expression as ONE type argument.
-                if let Some(ty) = self.index_as_type(index) {
-                    let resolved = self.resolve_type(&ty, span);
-                    return self.infer_static_call(&key, tname, name, args, &[resolved], span);
+            // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
+            // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
+            // (`Box[int].empty()`). Two carriers converge here:
+            //   • SINGLE type arg — `Field{obj: Index{Ident(Type), idx}, name}` (the `[..]` is
+            //     followed by `.` not `(`, so the turbofish-call steal never fires; the parser can't
+            //     tell `Type[int].x` from `arr[i].field`, so the checker reinterprets the index).
+            //   • MULTI type arg — `Field{obj: TypeApply{name, args}, name}` (the parser committed a
+            //     real type list because of the disambiguating comma).
+            // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
+            // no variant matches the member name, fall to the static-method path.
+            if let Some((tname, type_exprs)) = self.type_apply_head(obj) {
+                let key = self.bare_key(&tname);
+                let resolved: Vec<Ty> = type_exprs
+                    .iter()
+                    .map(|t| self.resolve_type(t, span))
+                    .collect();
+                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
+                    return self.infer_variant_call(&v, name, args, &resolved, span);
                 }
-                // Index wasn't a resolvable type — fall through to the normal index-then-method
-                // path so a genuine bad index still errors clearly.
+                return self.infer_static_call(&key, &tname, name, args, &resolved, span);
             }
             return self.infer_method_call(obj, name, args, span);
         }
@@ -6430,6 +6511,40 @@ impl Checker {
                 self.error(span, format!("{other} is not callable"));
                 Ty::Unknown
             }
+        }
+    }
+
+    /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
+    /// nullary `Type[T…].member` — into `(type-name, type-arg-exprs)` when `obj` is a declaration-site
+    /// turbofish on a KNOWN struct/enum name. Two carriers converge:
+    ///   • `Index{obj: Ident(Type), index}` — the SINGLE-arg form (`Box[int].x`); reinterpret the
+    ///     index expression as one type via `index_as_type`.
+    ///   • `TypeApply{name, args}` — the MULTI-arg form (`Result[int, str].x`); the parser already
+    ///     parsed real `Type`s.
+    /// Returns `None` when `obj` is not such a head (a real index-then-member, a local binding, an
+    /// unknown name, or a non-type index), so the caller falls back to the ordinary method path.
+    fn type_apply_head(&self, obj: &Expr) -> Option<(String, Vec<Type>)> {
+        match &obj.kind {
+            ExprKind::TypeApply { name, args } => {
+                if !self.is_local_binding(name)
+                    && (self.struct_names.contains(name) || self.enum_names.contains(name))
+                {
+                    Some((name.clone(), args.clone()))
+                } else {
+                    None
+                }
+            }
+            ExprKind::Index { obj: tobj, index } => {
+                if let ExprKind::Ident(tname) = &tobj.kind
+                    && !self.is_local_binding(tname)
+                    && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
+                {
+                    Some((tname.clone(), vec![self.index_as_type(index)?]))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -9558,6 +9673,16 @@ fn is_locally_shadowed(name: &str, scopes: &[std::collections::HashSet<String>])
     scopes.iter().any(|s| s.contains(name))
 }
 
+/// Render a resolved type-arg list for a user-facing redirect hint (`int, str`), used by the
+/// removed-gliding-form error to suggest the type-side form `Enum[int, str].Variant(...)`.
+fn render_targs(targs: &[Ty]) -> String {
+    targs
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Collect `spawn` task roots across the whole module — the free functions a `spawn` makes reachable.
 /// A `spawn` inside *any* function roots its target even if that function is only called sequentially
 /// (the spawn still fires when the function runs). Scope-aware: a `spawn f()` whose `f` is shadowed by
@@ -9867,6 +9992,8 @@ fn collect_free_calls_expr(
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        // A type-application head names a type and holds only `Type`s — no free-fn calls.
+        | ExprKind::TypeApply { .. }
         | ExprKind::Ident(_) => {}
     }
 }
@@ -10101,6 +10228,8 @@ fn find_mutations_in_expr(
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        // A type-application head holds only `Type`s — no global mutations.
+        | ExprKind::TypeApply { .. }
         | ExprKind::Ident(_) => {}
     }
 }

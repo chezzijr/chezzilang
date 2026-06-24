@@ -1737,6 +1737,24 @@ impl Parser {
                     }
                 }
                 Token::LBracket => {
+                    // `Type[T1, T2].member` / `Type[T1, T2].member(args)` — declaration-site turbofish
+                    // for a generic TYPE (enum variant ctor or generic static method). Fires ONLY when
+                    // `e` is a bare ident AND the bracket holds a COMMA-separated type list AND `]` is
+                    // immediately followed by `.`. A comma inside a subscript is otherwise ALWAYS a
+                    // parse error, so this multi-arg shape is unambiguous and steals nothing legitimate.
+                    // The SINGLE-arg form (`Box[int].member`) is left on the index path — the parser
+                    // cannot distinguish it from `arr[i].field` without the disambiguating comma, so
+                    // the checker reinterprets that `Index{Ident, …}` instead.
+                    let bare_ident = matches!(e.kind, ExprKind::Ident(_));
+                    let type_apply = if bare_ident {
+                        self.try_parse_type_apply(&e)?
+                    } else {
+                        None
+                    };
+                    if let Some(ta) = type_apply {
+                        e = ta;
+                        continue;
+                    }
                     // `name[Type, …](args)` — explicit call-site type arguments. A bare name can be a
                     // generic fn / struct / variant; a qualified `Enum.Variant` (a `Field` over a bare
                     // ident) can be a generic variant constructor (`Tree.Node[int](…)`). Only try the
@@ -1893,6 +1911,56 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         Ok((args, named))
+    }
+
+    /// Speculatively parse a declaration-site type-application head `Type[T1, T2, …]` that is the
+    /// receiver of a member access (`Result[int, str].Ok(5)` / nullary `Box[int, str].Empty`),
+    /// assuming the `[` has NOT yet been consumed and `name` is a bare ident. Commits ONLY when the
+    /// bracket holds a COMMA-separated type list (≥2 types — the comma is what disambiguates from a
+    /// plain `arr[i].field` index) AND `]` is immediately followed by `.`. Returns `Ok(None)`
+    /// (position restored) otherwise, so the single-arg form and ordinary indexing fall through
+    /// unchanged. Produces an `ExprKind::TypeApply`; the trailing `.member` / `(args)` attach via the
+    /// normal postfix loop.
+    fn try_parse_type_apply(&mut self, name_expr: &Expr) -> PResult<Option<Expr>> {
+        let ExprKind::Ident(name) = &name_expr.kind else {
+            return Ok(None);
+        };
+        let span = name_expr.span;
+        let save = self.pos;
+        // `parse_type` bumps `self.depth` and only unwinds it on success; restore on backtrack.
+        let save_depth = self.depth;
+        self.advance(); // '['
+        let mut args = Vec::new();
+        let mut saw_comma = false;
+        loop {
+            match self.parse_type() {
+                Ok(t) => args.push(t),
+                Err(_) => {
+                    self.pos = save;
+                    self.depth = save_depth;
+                    return Ok(None);
+                }
+            }
+            if self.eat(&Token::Comma) {
+                saw_comma = true;
+            } else {
+                break;
+            }
+        }
+        // Require the disambiguating comma (multi-arg) AND a member access (`] .`); single-arg
+        // `Type[int].x` is indistinguishable from `arr[i].field` here, so leave it to the checker.
+        if !saw_comma || !self.eat(&Token::RBracket) || !self.check(&Token::Dot) {
+            self.pos = save;
+            self.depth = save_depth;
+            return Ok(None);
+        }
+        Ok(Some(Expr {
+            kind: ExprKind::TypeApply {
+                name: name.clone(),
+                args,
+            },
+            span,
+        }))
     }
 
     /// Speculatively parse `[Type, …](args)` as a call with explicit type arguments, assuming the
@@ -3590,6 +3658,55 @@ mod tests {
             panic!("expected Index, got {:?}", e.kind)
         };
         assert!(matches!(obj.kind, ExprKind::Slice { .. }));
+    }
+
+    #[test]
+    fn type_apply_turbofish_at_type() {
+        // Multi-type-arg turbofish on the TYPE: `Result[int, str].Ok(5)` parses as a Call whose
+        // callee is a Field over a `TypeApply` carrying the parsed types.
+        let StmtKind::Expr(e) = only("Result[int, str].Ok(5)\n") else {
+            panic!()
+        };
+        let ExprKind::Call { callee, args, .. } = e.kind else {
+            panic!("expected Call, got {:?}", e.kind)
+        };
+        assert_eq!(args.len(), 1);
+        let ExprKind::Field { obj, name } = callee.kind else {
+            panic!("expected Field callee, got {:?}", callee.kind)
+        };
+        assert_eq!(name, "Ok");
+        let ExprKind::TypeApply { name, args } = obj.kind else {
+            panic!("expected TypeApply obj, got {:?}", obj.kind)
+        };
+        assert_eq!(name, "Result");
+        assert_eq!(args.len(), 2);
+
+        // Single-type-arg in CALL position stays on the Index path (no comma to disambiguate):
+        // `Box[int].Has(5)` → Call{ callee: Field{ obj: Index{Ident(Box), int}, Has } }.
+        let StmtKind::Expr(e) = only("Box[int].Has(5)\n") else {
+            panic!()
+        };
+        let ExprKind::Call { callee, .. } = e.kind else {
+            panic!("expected Call, got {:?}", e.kind)
+        };
+        let ExprKind::Field { obj, name } = callee.kind else {
+            panic!("expected Field callee, got {:?}", callee.kind)
+        };
+        assert_eq!(name, "Has");
+        assert!(matches!(obj.kind, ExprKind::Index { .. }));
+
+        // Nullary value form (multi-arg): `Pair[int, str].Empty` → Field{ obj: TypeApply, Empty }.
+        let StmtKind::Expr(e) = only("Pair[int, str].Empty\n") else {
+            panic!()
+        };
+        let ExprKind::Field { obj, name } = e.kind else {
+            panic!("expected Field, got {:?}", e.kind)
+        };
+        assert_eq!(name, "Empty");
+        let ExprKind::TypeApply { args, .. } = obj.kind else {
+            panic!("expected TypeApply obj, got {:?}", obj.kind)
+        };
+        assert_eq!(args.len(), 2);
     }
 
     #[test]

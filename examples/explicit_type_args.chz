@@ -31,8 +31,8 @@ p := Pair[int, str](1, "one")
 print(p.a)                    # 1
 print(p.b)                    # one
 
-# Generic enum-variant constructor: pin the enum's type arg on the payload-carrying variant.
-b := Box.Full[int](9)
+# Generic enum-variant constructor: pin the enum's type arg ON THE TYPE (declaration-site turbofish).
+b := Box[int].Full(9)
 match b:
     Box.Empty: print("empty")
     Box.Full(n): print(n)     # 9

@@ -381,10 +381,23 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > and a static method are different call shapes — neither is invocable as the other. For enums a
 > **variant** wins over a static-method name on `Enum.x` (variant/static names must be disjoint —
 > enforced at declaration time). Generic statics use the **type-level** turbofish `Box[int].empty()`
-> (the type arg sits on the type). v1 limits: single type-arg generic statics only; a static method
-> may not declare its own `[U]`; the method-level turbofish `Box.empty[int]()` is reserved; static
-> methods do **not** participate in protocol conformance (protocols stay instance-only); static
-> methods on `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups.
+> (the type arg sits on the type). v1 limits: a static method may not declare its own `[U]`; the
+> method-level turbofish `Box.empty[int]()` is reserved; static methods do **not** participate in
+> protocol conformance (protocols stay instance-only); static methods on `newtype` and **associated
+> protocol requirements** (`T.zero()`) remain follow-ups.
+
+> **Turbofish at the declaration site — type-side (PART 1, landed).** Explicit type args for a generic
+> are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`)
+> → pinned on the type (`Box[int]`); declared on a member (`fn m[U]`) → pinned on the member. For a
+> generic TYPE the args go on the TYPE, uniformly for enum **variant constructors** and **static
+> methods**: `Box[int].Has(5)`, `Result[int, str].Ok(5)`, nullary `Box[int].Empty`, generic static
+> `Box[int].empty()`. Multi-param types use the comma form (`Result[int, str].Ok`). The old **gliding**
+> form `Enum.Variant[T](args)` (type args on the variant) is **removed** — the checker redirects to the
+> type-side form. Inference is unchanged: `Box.Has(5)` (no turbofish) still infers `Box[int]`; the
+> turbofish is needed only when args can't bind the params (`Box[int].Empty`, multi-param enums). The
+> change is in the checker's resolution + the value's inferred type args only — runtime is type-erased,
+> so all three engines stay byte-identical. (PART 2 — member-side: a static method declaring its own
+> `[U]`, and lifting the `obj.method[T](expr)` cap — is a separate later milestone.)
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

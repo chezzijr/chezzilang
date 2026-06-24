@@ -8603,3 +8603,75 @@ fn method_level_turbofish_on_static_reserved() {
         "are reserved",
     );
 }
+
+// ===== type-side declaration-site turbofish (PART 1): `Type[T].Variant` / `Type[T].static()` =====
+
+/// `Box[int].Has(5)` — a generic enum VARIANT constructor via the type-level turbofish (single arg,
+/// rides the `Index` reinterpretation path). Resolves to `Box[int]`.
+#[test]
+fn turbofish_type_variant_single_arg_ok() {
+    ok(
+        "enum Box[T]:\n    Has(T)\n    Empty\nfn main():\n    b: Box[int] = Box[int].Has(5)\n    print(1)\nmain()\n",
+    );
+}
+
+/// The resolved variant carries the EXPLICIT type args — `Box[int].Has(5)` is `Box[int]`, so binding
+/// it to `Box[str]` must error (proving the targs are seeded, not left `Unknown`).
+#[test]
+fn turbofish_type_variant_targs_seeded_not_unknown() {
+    rejects(
+        "enum Box[T]:\n    Has(T)\n    Empty\nfn main():\n    b: Box[str] = Box[int].Has(5)\n    print(1)\nmain()\n",
+        "Box[int]",
+    );
+}
+
+/// `E[int, str].Pair(1, \"x\")` — MULTI type-arg turbofish (the `TypeApply` carrier path) on a
+/// 2-param enum resolves to `E[int, str]`.
+#[test]
+fn turbofish_type_variant_multi_arg_ok() {
+    ok(
+        "enum E[T, U]:\n    Pair(T, U)\nfn main():\n    p: E[int, str] = E[int, str].Pair(1, \"x\")\n    print(1)\nmain()\n",
+    );
+}
+
+/// `Box[int, str].Has(5)` — too many type args for a single-param enum errors via the existing
+/// arity check (`seed_targs`).
+#[test]
+fn turbofish_type_variant_arity_mismatch_rejected() {
+    rejects(
+        "enum Box[T]:\n    Has(T)\nfn main():\n    _ := Box[int, str].Has(5)\nmain()\n",
+        "type argument",
+    );
+}
+
+/// Nullary value form `Box[int].Empty` resolves to `Box[int]` (the explicit args seeded), NOT
+/// `Box[Unknown]` — binding to `Box[str]` must error.
+#[test]
+fn turbofish_type_nullary_variant_seeded() {
+    rejects(
+        "enum Box[T]:\n    Has(T)\n    Empty\nfn main():\n    b: Box[str] = Box[int].Empty\n    print(1)\nmain()\n",
+        "Box[int]",
+    );
+    ok(
+        "enum Box[T]:\n    Has(T)\n    Empty\nfn main():\n    b: Box[int] = Box[int].Empty\n    print(1)\nmain()\n",
+    );
+}
+
+/// The OLD gliding form `Box.Full[int](9)` (type args on the VARIANT) is REMOVED — it must error
+/// with a redirect to the type-side form.
+#[test]
+fn old_gliding_variant_turbofish_redirects() {
+    rejects(
+        "enum Box[T]:\n    Full(T)\n    Empty\nfn main():\n    _ := Box.Full[int](9)\nmain()\n",
+        "put the type arguments on the type: Box[int].Full(",
+    );
+}
+
+/// Regression: a generic STATIC method via the type-level turbofish still resolves (variant-first
+/// falls through to the static path when no variant matches the member name).
+#[test]
+fn turbofish_type_static_method_regression() {
+    ok(
+        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\nmain()\n",
+    );
+}

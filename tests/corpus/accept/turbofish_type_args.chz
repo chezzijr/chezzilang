@@ -1,0 +1,21 @@
+# rule: postfix, typeApply, enumDecl
+# Declaration-site turbofish on a generic TYPE: type args go ON THE TYPE.
+#   Box[int].Has(5)          — single type-arg variant ctor (rides the index path)
+#   Pair[int, str].Both(...) — MULTI type-arg variant ctor (the <typeApply> head; comma disambiguates)
+#   Pair[int, str].Neither   — multi-arg nullary value form
+#   Box[int].empty()         — generic static method via the type-level turbofish
+enum Box[T]:
+    Has(T)
+    Empty
+    fn empty() -> Box[T]:
+        return Box.Empty
+
+enum Pair[T, U]:
+    Both(T, U)
+    Neither
+
+b := Box[int].Has(5)
+e := Box[int].Empty
+p := Pair[int, str].Both(1, "x")
+n := Pair[int, str].Neither
+c := Box[int].empty()

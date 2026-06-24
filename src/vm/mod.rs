@@ -25706,6 +25706,35 @@ main()
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
+    /// Type-side declaration-site turbofish (PART 1): `examples/turbofish_type_args.chz` exercises
+    /// `Box[int].Has(5)`, nullary `Box[int].Empty`, the 2-param `Pair[int, str].Both(…)` multi-arg
+    /// carrier, and a generic static `Box[int].empty()`. The change is purely in the checker's
+    /// resolution + the value's inferred type args (runtime is type-erased), so VM, interp, and the
+    /// `--parallel` engine must be byte-identical to `.expected`. Also asserts it type-checks clean.
+    #[test]
+    fn golden_turbofish_type_args_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/turbofish_type_args.chz");
+        let expected = include_str!("../../examples/turbofish_type_args.expected");
+        // The full type-checker accepts the program (the golden run path skips checking).
+        let module = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
+        assert!(
+            crate::checker::check(&module).is_ok(),
+            "turbofish_type_args.chz must type-check clean"
+        );
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected, "vm output drifted from .expected");
+        assert_eq!(
+            vm_out,
+            crate::interp::run_capture(src).expect("interp run"),
+            "interp drifted from vm"
+        );
+        assert_eq!(
+            vm_out,
+            run_capture_parallel(src).expect("parallel run"),
+            "parallel drifted from vm"
+        );
+    }
+
     /// Tech-debt golden: `examples/set_eq.chz` (order-independent set equality incl. nested in a
     /// struct/list) byte-identical on the VM, the interpreter, and its `.expected`.
     #[test]

@@ -698,19 +698,20 @@ struct Box[T]:
 b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
 ```
 
-v1 limits: a single type argument only (`Box[int].empty()`; multi-param `Pair[K, V].empty()` is a
-documented follow-up). A static method may **not** declare its own `[U]` type parameters yet, and the
-**method-level** turbofish `Box.empty[int]()` is **reserved** for a future method-generics feature
-(one rule: turbofish sits where the parameter is declared). Static methods do **not** participate in
-**protocol** satisfaction — protocols stay instance-only. Static methods on `newtype` are not
-supported yet (struct + enum only).
+The type-level turbofish takes **one or more** type args — multi-param types use the comma form
+(`Pair[K, V].empty()`, `Result[int, str].Ok(5)`). A static method may **not** declare its own `[U]`
+type parameters yet, and the **method-level** turbofish `Box.empty[int]()` is **reserved** for a
+future method-generics feature (one rule: turbofish sits where the parameter is declared). Static
+methods do **not** participate in **protocol** satisfaction — protocols stay instance-only. Static
+methods on `newtype` are not supported yet (struct + enum only).
 
 ## 7b. Generics & protocols  (M7)
 
 **Generic functions** take type parameters in `[…]` after the name. A parameter may carry a
 **bound** — a protocol the instantiating type must satisfy. Type arguments are normally **inferred**
-from the call, but may be **given explicitly** at the call site: `id[int](42)`, the struct form
-`Pair[int, str](1, "one")`, and the enum-variant form `Full[int](9)` (see §8). Explicit args pin the
+from the call, but may be **given explicitly** at the call site: `id[int](42)` and the struct form
+`Pair[int, str](1, "one")`. For a generic **enum** the args go on the **type** (the declaration-site
+rule), not the variant — `Box[int].Full(9)`, `Result[int, str].Ok(5)` (see §8). Explicit args pin the
 type; inference fills any that are left off.
 
 ```chezzi
@@ -1047,8 +1048,14 @@ fn sum(t: Tree[int]) -> int:
 ```
 
 A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
-explicitly — `Tree.Node[int](1, Tree.Leaf, Tree.Leaf)` — the same `name[Type, …](…)` form as generic
-fns and structs (§7b).
+explicitly at the **declaration site** — the type args go **on the TYPE**, not on the variant:
+`Tree[int].Node(1, Tree.Leaf, Tree.Leaf)`. This is the declaration-site rule (§7b): a generic
+declared on the type (`enum/struct/newtype [T]`) is pinned on the type (`Tree[int].Node`), and a
+generic declared on the member is pinned on the member. Multi-param enums use the comma form —
+`Result[int, str].Ok(5)`, `Result[int, str].Err("e")`. The same type-level turbofish supplies args
+the payload can't bind (a nullary variant: `Box[int].Empty`) and drives a generic **static** method
+(`Box[int].empty()`). (The old gliding form `Tree.Node[int](…)` — type args on the variant — is no
+longer accepted; the checker redirects you to `Tree[int].Node(…)`.)
 
 Enums may carry **methods** — `fn name(self, …)` blocks written **after all variants**, exactly like
 struct methods. The receiver `self` is the whole enum value (a method body typically `match self`).

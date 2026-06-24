@@ -1050,6 +1050,35 @@ two-engine + `--parallel` test, no escape hatch. Cross-module via `NewTypeSigInf
 scope (follow-up): static / associated methods (`Type.method()` / `T.zero()`). Docs: `syntax.md §7b`
 (out-of-scope claim lifted → methods-only + turbofish), `spec.md` M21 row, `grammar.bnf` `<newtypeDecl>`.
 
+**✅ Turbofish at the declaration site — type-side (PART 1).** Explicit type args for a generic are
+pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`) →
+pinned **on the type** (`Box[int]`); declared on a member (`fn m[U]`) → on the member. For a generic
+TYPE the args go ON THE TYPE, uniformly for enum **variant constructors** and **static methods**:
+`Box[int].Has(5)`, `Result[int, str].Ok(5)`, nullary value `Box[int].Empty`, generic static
+`Box[int].empty()`. Multi-param types use the comma form (`Result[int, str].Ok`). The OLD **gliding**
+form `Enum.Variant[T](args)` (type args on the variant) is **removed** — the checker emits a redirect
+(`put the type arguments on the type: Box[int].Full(...)`); the bare/module-qualified variant branches
+both guard it. **Parser:** the SINGLE-arg head (`Box[int].member`) stays on the index path (the parser
+can't tell it from `arr[i].field`), reinterpreted by the checker; the MULTI-arg head commits a new
+`ExprKind::TypeApply{name, args: Vec<Type>}` carrier (the disambiguating comma — a comma in a subscript
+is otherwise always a parse error, so it steals nothing) parsed via `try_parse_type_apply`. **Checker:**
+one `type_apply_head` helper resolves both carriers to `(type-name, [Type])`; in `infer_call` it is
+**variant-first** (`infer_variant_call` with the resolved targs seeded — arity-checked by
+`seed_targs`), else `infer_static_call`; `infer_field` gains the nullary-value branch returning the
+**resolved** type args (not `Unknown`). The single-`Index` path also gained the variant-first check
+(a gap the previous static-methods work left). **Compiler + interp** get matching `type_apply_head_name`
+branches emitting the same `Op::NewEnum`/`Op::CallStatic` as the bare forms (runtime is type-erased).
+**OUT OF SCOPE (PART 2):** a static method declaring its own `[U]` (still rejected), and lifting the
+`obj.method[T](expr)` cap. **Both engines + `--parallel`** byte-identical via golden
+`examples/turbofish_type_args.chz` + `.expected` (the test also asserts the program type-checks clean);
+checker unit tests for each rule (single/multi-arg variant, seeded-not-Unknown, arity mismatch, nullary,
+old-form redirect, static regression); a parser unit test; a `tests/corpus/accept` file for the
+differential conformance check; clippy clean. Migrated the one surface use `examples/explicit_type_args.chz`
+(`Box.Full[int](9)` → `Box[int].Full(9)`). Docs: `syntax.md` (§7a generic-static + enum/variant
+sections — the declaration-site rule; multi-arg lifted), `spec.md` (new milestone note + static-method
+single-arg limit de-staled), `grammar.bnf` (the `<typeApply>` head + `Type[T…].member` postfix
+productions; old gliding production removed from prose).
+
 **✅ Static (associated) methods on struct + enum — the "no self ⇒ static" rule.** A struct/enum
 method whose first parameter is **not** `self` (or which has no parameters) is a **static** method,
 called `Type.method(args)` instead of `value.method(args)` (the Rust `fn new` ergonomic). **Additive**
@@ -1069,8 +1098,9 @@ New `Op::CallStatic{type_key, method, argc}` (separate variant, mirrored in inte
 enum-method slow path **minus the receiver** (`do_static_call`, `arity == argc`, `push_frame_in_place`,
 generator edge via `alloc_generator`). **Generic statics** via the **type-level turbofish**
 `Box[int].empty()` (reinterprets `Field{obj: Index{Ident, idx}, name}` — indexing a bare type is
-otherwise invalid, so unambiguous; no new parser/AST). v1 limits (documented): single type-arg only
-(`Pair[K,V].empty()` doesn't parse — follow-up); a static method may not declare its own `[U]`; the
+otherwise invalid, so unambiguous). (Multi type-arg + variant-side resolution were generalized by the
+later "Turbofish at the declaration site — type-side" milestone above.) v1 limits (documented): a
+static method may not declare its own `[U]`; the
 method-level turbofish `Box.empty[int]()` is **reserved**; static methods do **not** participate in
 **protocol** conformance (instance-only); static methods on `newtype` are a follow-up (the newtype
 receiver-error site stays). **Both engines + `--parallel`** byte-identical via golden

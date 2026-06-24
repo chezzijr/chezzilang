@@ -515,6 +515,18 @@ pub enum ExprKind {
         obj: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `Type[T1, T2, …]` used ONLY as the head of a member access / call: `Result[int, str].Ok(5)`
+    /// or nullary `Box[int].Empty`. A type-application carrier with REAL parsed `Type`s — the
+    /// declaration-site turbofish for a generic TYPE (enum variant ctor or generic static method).
+    /// Produced by the parser ONLY in the multi-type-arg case (`[T1, T2]`); the single-arg case
+    /// (`Box[int].x`) stays an `Index{Ident, …}` reinterpreted by the checker, because the parser
+    /// cannot distinguish `arr[i].field` from `Type[T].member` without the disambiguating comma.
+    /// Never evaluable on its own: the checker consumes it inside `infer_call`/`infer_field`; the
+    /// compiler/vm/interp never see a bare `TypeApply`.
+    TypeApply {
+        name: String,
+        args: Vec<Type>,
+    },
     /// `obj[start:end:step]` — Python-style slice. Emitted when the subscript holds at least one
     /// `:` (distinct from `Index` so the `Slice` protocol dispatches separately). Each of
     /// `start`/`end`/`step` is `None` when the component is omitted (`xs[:]`, `xs[1:]`, `xs[::2]`).
@@ -660,7 +672,9 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
-        | ExprKind::Ident(_) => {}
+        | ExprKind::Ident(_)
+        // A type-application head carries only `Type`s (no sub-expressions, no recover blocks).
+        | ExprKind::TypeApply { .. } => {}
         ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),
         ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             expr_recover_blocks(k, out);

@@ -277,6 +277,22 @@ fn static_key(type_key: &str, method: &str) -> String {
     format!("{type_key}\u{1}{method}")
 }
 
+/// The TYPE name in a declaration-site turbofish member-access head — the `obj` of a
+/// `Type[T…].member`/`Type[T…].member(args)`. Both carriers converge: the SINGLE-arg `Index{Ident,
+/// …}` (the parser can't tell it from `arr[i].field`, so the type args ride the index) and the
+/// MULTI-arg `TypeApply{name, …}`. The type args are runtime-erased, so the compiler needs only the
+/// name. Returns `None` for any other `obj` shape.
+fn type_apply_head_name(kind: &ExprKind) -> Option<&str> {
+    match kind {
+        ExprKind::TypeApply { name, .. } => Some(name),
+        ExprKind::Index { obj, .. } => match &obj.kind {
+            ExprKind::Ident(n) => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
     let variant_id = program.variants_by_id.len() as u32;
     let def = VariantDef {
@@ -2728,6 +2744,30 @@ impl Compiler {
                     );
                     return Ok(());
                 }
+                // `Type[T…].Variant` (nullary, declaration-site turbofish value form) → construct
+                // the variant. The type args are runtime-erased — identical bytecode to the bare
+                // `Enum.Variant` value form. Both carriers converge via `type_apply_head_name`.
+                if let Some(tname) = type_apply_head_name(&obj.kind)
+                    && fc.resolve_local(tname).is_none()
+                    && !fc.captures(tname)
+                    && let ekey = self.enum_bare_key(tname)
+                    && self
+                        .program
+                        .variants
+                        .get(&(ekey.clone(), name.clone()))
+                        .is_some_and(|d| d.arity == 0)
+                {
+                    let variant_id = self.variant_id_of_key(&ekey, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: 0,
+                        },
+                        expr.span,
+                    );
+                    return Ok(());
+                }
                 // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
                 // A real binding (local/captured) named like the enum wins, matching the checker.
                 // The enum resolves to its bare-visible runtime key (`enum_bare_key`).
@@ -2803,6 +2843,15 @@ impl Compiler {
             // `?.`/`??` carriers are lowered to `match` by the desugar pass before compilation.
             ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
                 unreachable!("`?.`/`??` must be lowered by the desugar pass before compiling")
+            }
+            // A `TypeApply` (`Type[T1, T2]`) is only ever the receiver of a member access / call;
+            // the checker resolves it into a variant ctor / static-method call (`infer_call`) or a
+            // nullary variant value (`infer_field`). Once type-checking passes, the compiler walks
+            // the resolved call/field, so a bare `TypeApply` never reaches codegen.
+            ExprKind::TypeApply { name, .. } => {
+                unreachable!(
+                    "type-application head `{name}[…]` must be consumed by the checker before compiling"
+                )
             }
             ExprKind::DecodeCall { obj, ty, arg } => {
                 // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]), then coerce the
@@ -3182,12 +3231,40 @@ impl Compiler {
                 );
                 return Ok(());
             }
-            // `Type[targ].method(args)` → generic-static turbofish (`Box[int].empty()`). Parses as
-            // `Field{obj: Index{obj: Ident(Type), index}, name}` (the `[..]` is followed by `.`, so
-            // the turbofish-call steal never fires). The type arg is RUNTIME-erased — it only drives
-            // the checker's types — so we ignore `index` and emit `Op::CallStatic` by the bare key.
-            if let ExprKind::Index { obj: tobj, .. } = &obj.kind
-                && let ExprKind::Ident(tname) = &tobj.kind
+            // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor
+            // (`Box[int].Full(9)`, `E[int, str].Pair(…)`). The type args are RUNTIME-erased (they
+            // only drove the checker), so emit `Op::NewEnum` by the bare key — identical bytecode to
+            // the bare `Enum.Variant(args)` form. Both carriers converge: single-arg `Index{Ident}`
+            // and multi-arg `TypeApply{name}`. VARIANT-FIRST (a same-named static is barred at decl
+            // time), mirroring the checker.
+            if let Some(tname) = type_apply_head_name(&obj.kind)
+                && fc.resolve_local(tname).is_none()
+                && !fc.captures(tname)
+                && let ekey = self.enum_bare_key(tname)
+                && self
+                    .program
+                    .variants
+                    .contains_key(&(ekey.clone(), name.clone()))
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                let variant_id = self.variant_id_of_key(&ekey, name);
+                fc.emit(
+                    Op::NewEnum {
+                        variant: name.clone(),
+                        variant_id,
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
+            // `Type[T…].method(args)` → generic-static turbofish (`Box[int].empty()`). Single-arg
+            // parses as `Field{obj: Index{obj: Ident(Type), index}, name}` and multi-arg as
+            // `Field{obj: TypeApply{name}, name}`. The type args are RUNTIME-erased (they only drive
+            // the checker's types) so we ignore them and emit `Op::CallStatic` by the bare key.
+            if let Some(tname) = type_apply_head_name(&obj.kind)
                 && fc.resolve_local(tname).is_none()
                 && !fc.captures(tname)
                 && let Some(key) = self.bare_types.get(tname).cloned()

@@ -327,6 +327,13 @@
              | <type> "QUESTION" | <type> "BANG" | <type> "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 
+# A declaration-site type-application HEAD: a bare TYPE name applied to a MULTI type-arg list
+# (`Result[int, str]`, `Pair[int, str]`). Only ever the receiver of a `.member` access / call. The
+# multi-arg requirement (≥2 types, i.e. a comma) is what makes it unambiguous against a plain index
+# `arr[i]` — a single-arg `Type[int].member` rides the index path and the checker reinterprets it.
+<typeApply>     ::= "IDENT" "LBRACKET" <typeListMulti> "RBRACKET"
+<typeListMulti> ::= <type> "COMMA" <typeList>
+
 # ===== expressions (precedence cascade, loosest -> tightest) =====
 <expr>     ::= <pipeExpr>
 # pipe `|>` (M6) is the loosest operator: it threads its left value as the first argument of the
@@ -361,22 +368,32 @@
 # postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
 # arguments `name[Type, …](args)`, and the scoped `.decode[Type](arg)` form (JSON decode). The
 # `[types](` form is parsed speculatively — only when the callee is a bare IDENT or a qualified
-# `Enum.Variant` (a `DOT IDENT` over a bare ident, for `Tree.Node[int](…)`) and the `[types](` shape
-# is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
+# `Enum.Variant` (a `DOT IDENT` over a bare ident, for a generic FN / struct / newtype ctor) and the
+# `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
 #
-# STATIC (associated) method calls need NO new production — they reuse the existing postfix shapes,
-# reinterpreted by the checker/compiler when the head is a bare struct/enum TYPE name:
+# DECLARATION-SITE TURBOFISH (the whole rule: explicit type args go at the site the generic is
+# DECLARED). For a generic TYPE (enum variant ctor or static method) they go ON THE TYPE, uniformly:
+#   `Type[T, …].Variant(args)` / `Type[T, …].Variant`   — enum-variant constructor / nullary value
+#   `Type[T, …].method(args)`                            — generic static (associated) method
+# The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is REMOVED — the checker
+# emits a redirect to the type-side form. STATIC (associated) calls and the type-side turbofish reuse
+# the existing postfix shapes, reinterpreted by the checker/compiler when the head is a known
+# struct/enum TYPE name; the MULTI-arg head needs one new production (the `<typeApply>` carrier):
 #   `Type.method(args)`        — `<postfix> "DOT" "IDENT" "LPAREN" <argList>? "RPAREN"` where the
 #                                 leading IDENT is a known struct/enum and `method` is a static method
 #                                 (its first param is not `self` — the "no self ⇒ static" rule). For
 #                                 an enum a same-named VARIANT wins (so variant/static names are
 #                                 disjoint, enforced at decl time).
-#   `Type[targ].method(args)`  — `<postfix> "LBRACKET" <subscript> "RBRACKET" "DOT" "IDENT" "LPAREN"
-#                                 <argList>? "RPAREN"`: the type-level turbofish for a generic static
-#                                 (`Box[int].empty()`). Indexing a bare type name is otherwise invalid,
-#                                 so the checker reinterprets the index as one type argument. v1:
-#                                 single type-arg only; the method-level form `Type.method[T](...)` is
-#                                 reserved (rejected by the checker).
+#   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
+#                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
+#                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it
+#                                 stays a plain index and the checker reinterprets the single index as
+#                                 one type argument (VARIANT-first, else static).
+#   `Type[T, …].member(args)?` — MULTI type arg: the disambiguating comma lets the parser commit a
+#                                 `<typeApply>` head (real parsed types); the trailing `.member` /
+#                                 `(args)` attach via the postfix loop. VARIANT-first, else static.
+# The method-level form `Type.method[T](...)` is reserved (rejected by the checker) — turbofish is
+# type-level only.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"
@@ -385,6 +402,12 @@
             | <postfix> "LBRACKET" <subscript> "RBRACKET"   # plain index (no colon) or a Python slice
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
+            # declaration-site turbofish on a generic TYPE — MULTI type-arg head (`<typeApply>`),
+            # followed by a member access / call (`Result[int, str].Ok(5)`) or nullary value
+            # (`Pair[int, str].Neither`). The comma is what disambiguates from a plain index.
+            | <typeApply> "DOT" "IDENT"
+            | <typeApply> "DOT" "IDENT" "LPAREN" "RPAREN"
+            | <typeApply> "DOT" "IDENT" "LPAREN" <argList> "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <type> "RBRACKET" "LPAREN" <expr> "RPAREN"
             | <postfix> "QUESTION"
             # optional chaining `?.` (gap): field, tuple-element, or method call through an Option.

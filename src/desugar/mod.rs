@@ -462,6 +462,8 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
         | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
+        // A type-application head names a TYPE (not a value reference); its args are `Type`s.
+        | ExprKind::TypeApply { .. }
         | ExprKind::Bool(_) => {}
         ExprKind::List(xs) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().for_each(|x| walk_idents(x, f))
@@ -1290,6 +1292,8 @@ impl Walker<'_> {
             | ExprKind::Str(_)
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
+            // A type-application head holds only `Type`s — nothing to walk; the checker consumes it.
+            | ExprKind::TypeApply { .. }
             | ExprKind::Bool(_) => {}
         }
 
