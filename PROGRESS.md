@@ -35,6 +35,26 @@ Pure CPU → NOT `is_blocking`. Golden `examples/encoding.chz` extended (sorted-
 cases), 3-engine parity verified. Docs: `docs/stdlib.md` (§std.request timeout note + §std.encoding
 query_encode), `gaps.md` (std.request nit struck → ✅ resolved). 2602 tests + conformance green, clippy clean.
 
+**✅ stdlib — `std.datetime` pure-Chezzi civil-calendar date/time (gaps.md "duration/date
+decomposition") (2026-06-24).** New pure-Chezzi module `std/datetime.chz` (no native Rust, no seam —
+like `std/path.chz`) layered on the native `std.time` clock (`time.now()` only); everything else is
+pure integer math (Howard Hinnant's branch-free civil-calendar algorithms). Surface: a `DateTime`
+struct (`year`/`month`/`day`/`hour`/`minute`/`second`/`weekday`), `from_epoch`/`to_epoch` (round-trip
+`to_epoch(from_epoch(e))==e`), `now`, `days_from_civil`/`civil_from_days` (a `(int,int,int)` tuple),
+`is_leap_year`/`days_in_month`, `weekday`/`weekday_name`, fixed formatters `to_iso8601`/
+`to_date_string`/`to_time_string`/`to_string`, and epoch-int duration helpers `add_seconds`/`add_days`/
+`diff_seconds`/`diff_days`. **Contractual semantics** (in `docs/stdlib.md §5`): **UTC-only** (timezones/
+DST/tz-database explicitly deferred); **weekday Sunday=0..Saturday=6** (matches native `std.time`:
+epoch 0 == 1970-01-01 is Thursday == wd 4, differs from Python's Monday=0); **negative epochs floored**
+(Chezzi `/`/`%` truncate toward zero, so internal `fdiv`/`fmod` floor-div helpers split the day/seconds
+— `from_epoch(-1)`→1969-12-31 23:59:59 Wed, round-trips). Verified vectors: epoch 0, 1700000000 →
+2023-11-14 22:13:20, `days_from_civil(2024,2,29)`==19782, leap 2000/2024, non-leap 1900/2023.
+Pure-Chezzi → 3-engine parity automatic; still added `examples/datetime_test.chz` (9 `test fn` TDD
+table) + golden `examples/datetime.chz`/`.expected` wired into `golden_datetime_via_run_file` (VM,
+`assert_file_parity`) + `golden_datetime_chz` (interp twin). Docs: `docs/stdlib.md` (new `### std.datetime`
+in §5), `gaps.md` (duration/date struck from the dogfood list — was falsely listed as landed). Full
+suite + conformance + `clippy --all-targets -D warnings` clean.
+
 **✅ stdlib — `std.path` pure-Chezzi path-STRING ops (gaps.md "path ops") (2026-06-24).** New
 pure-Chezzi module `std/path.chz` (no native Rust, no seam — like `std/str.chz`/`std/iter.chz`) for
 **unix `/` path-STRING manipulation, NOT filesystem I/O** (that stays `std.fs`). Built on the core

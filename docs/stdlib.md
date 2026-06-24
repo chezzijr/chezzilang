@@ -431,6 +431,56 @@ dirname/split/splitext) and Go `path.Clean` (`normalize`). `import std.path` (or
 | `normalize` | `(p) -> str` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
 | `join` | `(parts: list[str]) -> str` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
 
+### `std.datetime` — civil-calendar date/time (UTC-only)
+Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native
+`std.time` clock (`time.now()` only). Built from pure integer math (Howard Hinnant's branch-free
+civil-calendar algorithms), so it is **identical across all three engines**. `import std.datetime`
+(or `as dt`).
+
+**CONTRACT — load-bearing semantics (these are contractual, not incidental):**
+- **UTC-ONLY (v1).** Every `DateTime` is UTC. There is **NO timezone / DST handling and NO tz
+  database** — timezones/DST are explicitly **deferred** to a future milestone.
+- **WEEKDAY ORIGIN = `Sunday=0`, Monday=1, …, Saturday=6.** This matches the native `std.time` civil
+  math (epoch 0 == 1970-01-01 is a **Thursday == weekday 4**). NOTE: this differs from Python's
+  `datetime.weekday()` (Monday=0) — chosen for consistency with `std.time`, not Python.
+- **NEGATIVE epochs (pre-1970) are correct.** Chezzi `/` and `%` truncate **toward zero**, which is
+  wrong for splitting a negative epoch into days+seconds, so all such splits route through the
+  internal `fdiv`/`fmod` **floor-division** helpers. `from_epoch(-1)` → 1969-12-31 23:59:59
+  (Wednesday); `to_epoch` round-trips it.
+- **DURATION arithmetic operates on epoch INTS (seconds), not `DateTime`** — calendar-aware work goes
+  through `from_epoch`/`to_epoch`.
+
+```chezzi
+struct DateTime:
+    year: int; month: int; day: int
+    hour: int; minute: int; second: int
+    weekday: int    # 0=Sunday .. 6=Saturday (contractual)
+```
+
+| fn | signature | semantics |
+| --- | --- | --- |
+| `from_epoch` | `(epoch: int) -> DateTime` | Decompose Unix epoch-seconds (UTC) into a `DateTime`. Negative epochs floored. |
+| `to_epoch` | `(dt: DateTime) -> int` | Recompose to Unix epoch-seconds. `to_epoch(from_epoch(e)) == e`. |
+| `now` | `() -> DateTime` | Current UTC date/time (`from_epoch(time.now())`) — the only clock use. |
+| `days_from_civil` | `(y, m, d) -> int` | Days since 1970-01-01 (Hinnant). `(1970,1,1)`→0, `(1969,12,31)`→-1, `(2024,2,29)`→19782. |
+| `civil_from_days` | `(z) -> (int, int, int)` | Inverse: `(year, month, day)` tuple. `0`→`(1970,1,1)`, `-1`→`(1969,12,31)`. |
+| `is_leap_year` | `(y) -> bool` | Proleptic Gregorian: `2000`→true, `1900`→false, `2024`→true. |
+| `days_in_month` | `(y, m) -> int` | Leap-aware. `(2024,2)`→29, `(2023,2)`→28, `(2024,4)`→30. |
+| `weekday` | `(epoch: int) -> int` | Weekday (Sunday=0..Saturday=6) of an epoch value. `weekday(0)`→4 (Thu). |
+| `weekday_name` | `(wd: int) -> str` | English name: `weekday_name(0)`→`"Sunday"`, `weekday_name(4)`→`"Thursday"`. |
+| `to_iso8601` | `(dt) -> str` | `"YYYY-MM-DDTHH:MM:SSZ"`. `from_epoch(0)`→`"1970-01-01T00:00:00Z"`. |
+| `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
+| `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
+| `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
+| `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
+| `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
+| `diff_seconds` | `(a, b) -> int` | `a - b`. |
+| `diff_days` | `(a, b) -> int` | Whole days `b`→`a`, **floored**: `diff_days(-1, 0)` → -1. |
+
+Formatters are **fixed** (no `strftime` pattern in v1). The `DateTime` struct lives in the module
+(`datetime.DateTime`); a user program also defining its own top-level `struct DateTime` could collide
+— use the module-qualified name.
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.

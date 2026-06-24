@@ -1,0 +1,189 @@
+# std.datetime — pure-Chezzi civil-calendar date/time on top of native std.time (clock only).
+#
+# A pure-Chezzi dogfood module: NO native Rust, NO seam. The only system dependency is the clock —
+# `std.time.now() -> int` (Unix epoch SECONDS, UTC). Everything else is pure integer arithmetic
+# (Howard Hinnant's branch-free civil-calendar algorithms), so it is identical across all three
+# engines (interp / VM / --parallel).
+#
+# ===== CONTRACT (read this — these are load-bearing semantics) =====
+# * UTC-ONLY (v1). There is NO timezone or DST handling and NO tz database. Every DateTime is UTC.
+#   Timezones/DST are explicitly DEFERRED to a future milestone.
+# * WEEKDAY ORIGIN = Sunday=0, Monday=1, ..., Saturday=6. This is CONTRACTUAL and matches the native
+#   `std.time` civil math: epoch 0 (1970-01-01) is a Thursday == weekday 4. (NOTE: this differs from
+#   Python's `datetime.weekday()` which uses Monday=0 — chosen for consistency with std.time, not
+#   Python.)
+# * NEGATIVE EPOCHS (pre-1970) are handled correctly. Chezzi `/` and `%` truncate toward zero, which
+#   is WRONG for splitting a negative epoch into days+seconds, so every such split routes through the
+#   `fdiv`/`fmod` floor-division helpers below — never raw `/`/`%`.
+# * DURATION arithmetic operates on epoch INTS (seconds), not DateTime: add_seconds/add_days/
+#   diff_seconds/diff_days. Calendar-aware work goes through from_epoch/to_epoch (decompose/recompose).
+#
+# See docs/stdlib.md §5 for the full contract.
+
+import std.time as time
+import std.str as s
+
+# ---- floor-division helpers (Chezzi /,% truncate toward zero; we need floor for negative epochs) ----
+
+# Floor division: fdiv(-7, 2) == -4  (vs -7/2 == -3 which truncates toward zero).
+fn fdiv(a: int, b: int) -> int:
+    q := a / b
+    # if signs differ and the truncated division left a remainder, round down by one
+    if (a % b != 0) and ((a < 0) != (b < 0)):
+        return q - 1
+    return q
+
+# Floored modulo: result has the sign of `b` (always 0..b-1 for positive b).
+# fmod(-1, 7) == 6, fmod(-7, 2) == 1.
+fn fmod(a: int, b: int) -> int:
+    return a - fdiv(a, b) * b
+
+# ---- the DateTime value (a user-defined struct in this module; access as datetime.DateTime) ----
+
+struct DateTime:
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    weekday: int    # 0=Sunday .. 6=Saturday (contractual)
+
+# ---- leap year / month length ----
+
+# Proleptic Gregorian leap year: divisible by 4, except centuries unless divisible by 400.
+fn is_leap_year(y: int) -> bool:
+    return (y % 4 == 0) and ((y % 100 != 0) or (y % 400 == 0))
+
+# Number of days in month `m` (1..12) of year `y`. February is leap-aware.
+fn days_in_month(y: int, m: int) -> int:
+    if m == 2:
+        if is_leap_year(y):
+            return 29
+        return 28
+    # Apr, Jun, Sep, Nov have 30; the rest 31.
+    if m == 4 or m == 6 or m == 9 or m == 11:
+        return 30
+    return 31
+
+# ---- civil <-> days-since-epoch (Howard Hinnant, proleptic Gregorian, exact incl. negatives) ----
+
+# Days since 1970-01-01 for the civil date (y, m, d). Inverse of civil_from_days.
+# days_from_civil(1970,1,1) == 0, (1969,12,31) == -1.
+fn days_from_civil(y: int, m: int, d: int) -> int:
+    yy := y
+    if m <= 2:
+        yy = y - 1
+    era := fdiv(yy, 400)
+    yoe := yy - era * 400                                   # [0, 399]
+    mp := m - 3
+    if m <= 2:
+        mp = m + 9                                          # [0, 11]
+    doy := (153 * mp + 2) / 5 + d - 1                       # [0, 365]
+    doe := yoe * 365 + yoe / 4 - yoe / 100 + doy            # [0, 146096]
+    return era * 146097 + doe - 719468
+
+# Civil (year, month, day) for `z` days since 1970-01-01. Inverse of days_from_civil.
+fn civil_from_days(z: int) -> (int, int, int):
+    zz := z + 719468
+    era := fdiv(zz, 146097)
+    doe := zz - era * 146097                                # [0, 146096]
+    yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365   # [0, 399]
+    y := yoe + era * 400
+    doy := doe - (365 * yoe + yoe / 4 - yoe / 100)         # [0, 365]
+    mp := (5 * doy + 2) / 153                               # [0, 11]
+    d := doy - (153 * mp + 2) / 5 + 1                       # [1, 31]
+    m := mp + 3
+    if mp >= 10:
+        m = mp - 9                                          # [1, 12]
+    yr := y
+    if m <= 2:
+        yr = y + 1
+    return (yr, m, d)
+
+# ---- weekday ----
+
+# Weekday for `z` days since 1970-01-01: 0=Sunday .. 6=Saturday. Epoch day 0 (Thursday) -> 4.
+fn weekday_from_days(z: int) -> int:
+    return fmod(z + 4, 7)
+
+# Weekday (0=Sunday..6=Saturday) for an epoch-seconds value.
+fn weekday(epoch: int) -> int:
+    return weekday_from_days(fdiv(epoch, 86400))
+
+# Full English weekday name for a weekday index (0=Sunday..6=Saturday).
+fn weekday_name(wd: int) -> str:
+    assert wd >= 0 and wd <= 6, "weekday_name: wd must be 0..6 (0=Sunday)"
+    names := ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    return names[wd]
+
+# ---- epoch <-> DateTime ----
+
+# Decompose a Unix epoch-seconds value (UTC) into a DateTime. Negative epochs handled via floor-div.
+fn from_epoch(epoch: int) -> DateTime:
+    days := fdiv(epoch, 86400)
+    tod := fmod(epoch, 86400)
+    y, m, d := civil_from_days(days)
+    hh := tod / 3600
+    mm := (tod % 3600) / 60
+    ss := tod % 60
+    wd := weekday_from_days(days)
+    return DateTime(y, m, d, hh, mm, ss, wd)
+
+# Recompose a DateTime back into Unix epoch-seconds (UTC). Round-trips from_epoch.
+fn to_epoch(dt: DateTime) -> int:
+    days := days_from_civil(dt.year, dt.month, dt.day)
+    return days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+
+# Current UTC date/time from the system clock (the only system dependency).
+fn now() -> DateTime:
+    return from_epoch(time.now())
+
+# ---- fixed formatters (no strftime pattern; v1 keeps it tight) ----
+
+# ISO-8601 UTC: "YYYY-MM-DDTHH:MM:SSZ".
+fn to_iso8601(dt: DateTime) -> str:
+    return to_date_string(dt) + "T" + to_time_string(dt) + "Z"
+
+# Zero-pad a year to >=4 digits, keeping the sign in front for proleptic negative (BCE) years:
+# 2024 -> "2024", 999 -> "0999", 0 -> "0000", -44 -> "-0044" (pad_left is sign-unaware).
+fn pad_year(y: int) -> str:
+    if y < 0:
+        return "-" + s.pad_left(str(-y), 4, "0")
+    return s.pad_left(str(y), 4, "0")
+
+# Date only: "YYYY-MM-DD".
+fn to_date_string(dt: DateTime) -> str:
+    yr := pad_year(dt.year)
+    mo := s.pad_left(str(dt.month), 2, "0")
+    dy := s.pad_left(str(dt.day), 2, "0")
+    return yr + "-" + mo + "-" + dy
+
+# Time only: "HH:MM:SS".
+fn to_time_string(dt: DateTime) -> str:
+    hh := s.pad_left(str(dt.hour), 2, "0")
+    mm := s.pad_left(str(dt.minute), 2, "0")
+    ss := s.pad_left(str(dt.second), 2, "0")
+    return hh + ":" + mm + ":" + ss
+
+# std.time.format style: "YYYY-MM-DD HH:MM:SS".
+fn to_string(dt: DateTime) -> str:
+    return to_date_string(dt) + " " + to_time_string(dt)
+
+# ---- duration arithmetic (epoch ints, seconds) ----
+
+# Add `n` seconds to an epoch value.
+fn add_seconds(epoch: int, n: int) -> int:
+    return epoch + n
+
+# Add `n` whole days (n*86400 seconds) to an epoch value. Negative `n` subtracts.
+fn add_days(epoch: int, n: int) -> int:
+    return epoch + n * 86400
+
+# Seconds from `b` to `a` (a - b); negative if `a` is earlier.
+fn diff_seconds(a: int, b: int) -> int:
+    return a - b
+
+# Whole days from `b` to `a`, floored (so a one-second-before is -1 day, not 0).
+fn diff_days(a: int, b: int) -> int:
+    return fdiv(a - b, 86400)

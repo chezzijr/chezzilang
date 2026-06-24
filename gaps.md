@@ -79,8 +79,10 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   §std.request / §std.encoding; golden `examples/encoding.chz`.)
 
 **Pure-Chezzi `std/*.chz` now (dogfood):** ~~path ops (`join`/`basename`/`dirname`/`ext`/`normalize`)~~
-✅ landed as `std.path` (2026-06-24), `argparse`, CSV, duration/date decomposition, data structures
-(heap/PQ, deque, counter, ordered map).
+✅ landed as `std.path` (2026-06-24). ~~duration/date decomposition~~ ✅ landed as `std.datetime`
+(2026-06-24, civil-calendar `from_epoch`/`to_epoch`/`now`/formatters/duration/leap, UTC-only,
+Sunday=0 weekday, floor-div pre-1970). Still wanted: `argparse`, CSV, data structures (heap/PQ,
+deque, counter, ordered map).
 
 **Language-level:** `i64`-only (no `byte`/`u8` scalar). `bytes`/`bytearray`/str↔bytes/`list()`/`set()`/
 `map()` ctors/`Iterable[T]`+`.iter()` all SHIPPED. Remaining: no `byte`/`u8` scalar, no non-UTF-8 codecs
