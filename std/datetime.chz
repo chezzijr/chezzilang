@@ -113,6 +113,7 @@ fn weekday(epoch: int) -> int:
 
 # Full English weekday name for a weekday index (0=Sunday..6=Saturday).
 fn weekday_name(wd: int) -> str:
+    assert wd >= 0 and wd <= 6, "weekday_name: wd must be 0..6 (0=Sunday)"
     names := ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     return names[wd]
 
@@ -144,9 +145,16 @@ fn now() -> DateTime:
 fn to_iso8601(dt: DateTime) -> str:
     return to_date_string(dt) + "T" + to_time_string(dt) + "Z"
 
+# Zero-pad a year to >=4 digits, keeping the sign in front for proleptic negative (BCE) years:
+# 2024 -> "2024", 999 -> "0999", 0 -> "0000", -44 -> "-0044" (pad_left is sign-unaware).
+fn pad_year(y: int) -> str:
+    if y < 0:
+        return "-" + s.pad_left(str(-y), 4, "0")
+    return s.pad_left(str(y), 4, "0")
+
 # Date only: "YYYY-MM-DD".
 fn to_date_string(dt: DateTime) -> str:
-    yr := s.pad_left(str(dt.year), 4, "0")
+    yr := pad_year(dt.year)
     mo := s.pad_left(str(dt.month), 2, "0")
     dy := s.pad_left(str(dt.day), 2, "0")
     return yr + "-" + mo + "-" + dy

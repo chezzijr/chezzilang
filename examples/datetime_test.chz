@@ -66,6 +66,10 @@ test fn t_format():
     z := datetime.from_epoch(0)
     assert datetime.to_iso8601(z) == "1970-01-01T00:00:00Z"
     assert datetime.to_string(z) == "1970-01-01 00:00:00"
+    # proleptic year padding: <1000 and negative (BCE) years keep the sign + zero-pad to 4 digits
+    assert datetime.to_date_string(datetime.DateTime(999, 1, 1, 0, 0, 0, 0)) == "0999-01-01"
+    assert datetime.to_date_string(datetime.DateTime(0, 1, 1, 0, 0, 0, 0)) == "0000-01-01"
+    assert datetime.to_date_string(datetime.DateTime(-44, 3, 15, 0, 0, 0, 0)) == "-0044-03-15"
 
 test fn t_duration():
     assert datetime.add_seconds(0, 90) == 90
