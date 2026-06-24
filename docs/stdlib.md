@@ -481,6 +481,64 @@ Formatters are **fixed** (no `strftime` pattern in v1). The `DateTime` struct li
 (`datetime.DateTime`); a user program also defining its own top-level `struct DateTime` could collide
 — use the module-qualified name.
 
+### `std.collections` — generic single-threaded data structures
+Pure-Chezzi generic structs over `T` built on the builtin `list`/`map`, so they are **identical
+across all three engines** (interp / VM / `--parallel`). `import std.collections` (or `as col`).
+
+**EMPTY SEMANTICS (load-bearing, consistent):** every removal/peek returns `Option[T]` — an empty
+container yields `None`, never a fault, matching the builtin `list.pop() -> Option[T]`.
+
+**`Heap[T]`** — a binary heap over a backing `list[T]` with a comparator **closure**. The comparator
+contract (the footgun): `less(a, b) == true` means `a` is **more extreme** than `b`, so `a` pops
+**first**. Pass `fn(a,b): a < b` for a **min-heap** (smallest first) and `fn(a,b): a > b` for a
+**max-heap** — a "reverse" heap is just the flipped comparator. This generalises to any `T` (floats,
+custom priorities, `(priority, item)` tuples) with **no `Comparable` impl** required.
+
+| member | signature | semantics / complexity |
+| --- | --- | --- |
+| `Heap` | `Heap(data: list[T], less: fn(T,T)->bool)` | Raw constructor; `Heap([], cmp)` for an empty heap with comparator `cmp`. |
+| `min_heap` | `() -> Heap[int]` | Int min-heap factory (`a < b`). |
+| `max_heap` | `() -> Heap[int]` | Int max-heap factory (`a > b`). |
+| `from_list` | `(xs, less) -> Heap[T]` | Heapify (push-loop, **O(n log n)**, NOT bottom-up O(n)); `xs` untouched. |
+| `.push(x)` | `(T) -> nil` | Sift-up. **O(log n)**. |
+| `.pop()` | `() -> Option[T]` | Remove+return the extremum (sift-down), `None` if empty. **O(log n)**. |
+| `.peek()` | `() -> Option[T]` | The extremum without removing, `None` if empty. **O(1)**. |
+| `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
+
+**`Deque[T]`** — double-ended queue, **amortized O(1) at both ends** via the **two-stack** design
+(`front`/`back` backing lists; a pop whose near stack is empty drains the far stack into it once, so
+each element moves between stacks at most once). `peek` reads the head/tail without rebalancing, so
+peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is inferred from the first
+`push_front`/`push_back`. (No `deque()` factory: a no-argument generic factory cannot bind `T`.)
+
+| member | signature | semantics / complexity |
+| --- | --- | --- |
+| `.push_front(x)` / `.push_back(x)` | `(T) -> nil` | **O(1)**. |
+| `.pop_front()` / `.pop_back()` | `() -> Option[T]` | Remove+return the head/tail, `None` if empty. **Amortized O(1)**. |
+| `.peek_front()` / `.peek_back()` | `() -> Option[T]` | Head/tail without removing, `None` if empty. **O(1)**. |
+| `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
+
+**`Counter[T: Hashable]`** — a frequency table over `map[T, int]` (`T` must be `Hashable`, like any
+map key). Construct directly: **`Counter({})`** — `T` is inferred from the first `add`/`count`. (No
+`counter()` factory, same `T`-binding reason as `Deque`.)
+
+| member | signature | semantics / complexity |
+| --- | --- | --- |
+| `.add(x)` | `(T) -> nil` | `add_n(x, 1)`. **O(1)**. |
+| `.add_n(x, n)` | `(T, int) -> nil` | Increment by `n` (creates the entry if absent; `n` may be negative). **O(1)**. |
+| `.count(x)` | `(T) -> int` | Count of `x`, **0 if never added**. **O(1)**. |
+| `.total()` | `() -> int` | Sum of all counts. **O(n)**. |
+| `.most_common(k)` | `(int) -> list[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
+
+**Counter tie-break:** equal counts keep **insertion order** — guaranteed because `map.keys()` yields
+insertion order **and** the list `sort_by` is a **stable** merge sort (both engines). This is a
+load-bearing dependency on stable sort; do not swap `sort_by` to an unstable sort.
+
+**No ordered-map wrapper (intentional):** the builtin `map` is **already insertion-ordered**
+(`map.keys()`/`values()`/`for k,v in m` all iterate in insertion order; `std.json`'s round-trip relies
+on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no move-to-end / LRU
+`popitem` primitive; out of scope).
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.

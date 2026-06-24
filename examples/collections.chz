@@ -1,0 +1,65 @@
+# examples/collections.chz — golden showcase for std.collections (pure-Chezzi Heap/Deque/Counter).
+# Print-based; identical stdout across interp / VM / --parallel (pure Chezzi).
+
+import std.collections as col
+
+fn drain_heap(h: col.Heap[int]) -> list[int]:
+    out := []
+    while true:
+        match h.pop():
+            Some(v): out.push(v)
+            None: break
+    return out
+
+fn main():
+    # --- Heap: min and max over the same scramble ---
+    scramble := [5, 3, 8, 1, 9, 2, 7]
+    mn := col.min_heap()
+    mx := col.max_heap()
+    for x in scramble:
+        mn.push(x)
+        mx.push(x)
+    print("min-heap: {drain_heap(mn)}")
+    print("max-heap: {drain_heap(mx)}")
+
+    # heapify via from_list with a custom (reverse) comparator
+    h := col.from_list([3, 1, 2, 5, 4], fn(a: int, b: int) -> bool: a > b)
+    print("from_list (max): {drain_heap(h)}")
+
+    # --- Deque: both ends + interleave ---
+    d := col.Deque([], [])
+    d.push_back(1)
+    d.push_back(2)
+    d.push_front(0)
+    d.push_front(-1)
+    print("deque len: {d.len()}")
+    print("peek_front: {d.peek_front()}, peek_back: {d.peek_back()}")
+    seq := []
+    while true:
+        match d.pop_front():
+            Some(v): seq.push(v)
+            None: break
+    print("deque drained front->back: {seq}")
+
+    # LIFO use of the same structure
+    st := col.Deque([], [])
+    st.push_back(10)
+    st.push_back(20)
+    st.push_back(30)
+    lifo := []
+    while true:
+        match st.pop_back():
+            Some(v): lifo.push(v)
+            None: break
+    print("stack (pop_back): {lifo}")
+
+    # --- Counter: counts, total, most_common with a tie ---
+    c := col.Counter({})
+    for w in ["red", "blue", "red", "green", "blue", "red", "green"]:
+        c.add(w)
+    print("count red: {c.count('red')}, missing: {c.count('purple')}")
+    print("total: {c.total()}")
+    print("most_common(2): {c.most_common(2)}")
+    print("most_common(all): {c.most_common(99)}")
+
+main()
