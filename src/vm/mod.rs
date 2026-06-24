@@ -29607,6 +29607,22 @@ main()
         assert_file_parity("examples/datetime.chz");
     }
 
+    /// std.concurrency.collection golden: `examples/concurrent_collection.chz` — the pure-Chezzi
+    /// thread-safe `ConcurrentMap`/`ConcurrentCounter` wrappers over `RwShared[map[...]]`. The program
+    /// is DETERMINISTIC by construction (single-write-lock RMW for the counter, each-own-key for the
+    /// map), so its output is identical on the VM, the interpreter (assert_file_parity), and (verified
+    /// manually) `--parallel`.
+    #[test]
+    fn golden_concurrent_collection_via_run_file() {
+        let path = fixture("examples/concurrent_collection.chz");
+        let expected =
+            std::fs::read_to_string(fixture("examples/concurrent_collection.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/concurrent_collection.chz");
+    }
+
     /// std.collections golden: `examples/collections.chz` — the pure-Chezzi Heap/Deque/Counter
     /// module (min/max heap + from_list, two-stack deque both ends, Counter most_common ties),
     /// end-to-end on the VM, byte-identical to `.expected` and the interpreter (assert_file_parity).

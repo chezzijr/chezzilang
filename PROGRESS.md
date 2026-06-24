@@ -31,6 +31,28 @@ re-acquires the **same** box's write lock deadlocks. Golden `examples/rwshared.c
 byte-identical on VM/`--serial`/`--parallel`/interp). Docs: `docs/concurrency.md` §6c, `docs/stdlib.md`
 §3, `docs/spec.md`/`docs/syntax.md` reserved-name + sendable enumerations. 2618+ tests + conformance
 green, clippy clean.
+**✅ stdlib — `std.concurrency.collection`: thread-safe collections over `RwShared` (2026-06-24).**
+The capstone of the concurrency-collections work: pure-Chezzi ergonomic wrappers over the just-landed
+`RwShared[map[...]]` primitive, in the **first nested std module** (`std/concurrency/collection.chz` —
+the dotted path resolves generically, no resolver special-casing). Two generic structs:
+**`ConcurrentMap[K: Hashable, V]`** (`get`/`contains`/`len`/`snapshot` concurrent reads; `set`/`remove`/
+`get_or_insert` exclusive writes — `get_or_insert` is COMPOUND-ATOMIC, check-and-insert in one write
+lock) and **`ConcurrentCounter[K: Hashable]`** (`count`/`total` concurrent reads; `increment`/`add`
+exclusive writes doing their read-modify-write in ONE closure → N tasks incrementing one key total
+EXACTLY N, the classic race-free counter). Proven by live probe before building: (1) the nested path
+resolves, (2) a struct whose only field is an `RwShared` crosses the spawn/`parallel:` airlock as a
+SHARED `Arc` handle (NOT a deep copy) — 100 spawned `.increment` + 1 pre-bind → parent reads 101 on
+VM/`--serial`/`--parallel`, (3) the single-write-lock RMW is race-free (exact-100 on `--parallel`,
+5/5 deterministic). Construction is direct (`ConcurrentMap(RwShared({}))` — no `new_*` factory, since
+turbofish can't bind `K`/`V`; same as `Counter({})`). Pure-Chezzi → 3-engine parity automatic; only
+Rust touched is the two golden-test registrations (no engine code). Golden
+`examples/concurrent_collection.chz` (deterministic: 100-task counter race → exactly 100, each-own-key
+map → 285) byte-identical on VM/`--serial`/`--parallel`/interp. Tests: `examples/concurrent_collection_test.chz`
+(6 `test fn`s incl. the airlock-sharing crux guard + `counter_race_exact`), VM
+`golden_concurrent_collection_via_run_file` + interp twin. Docs: `docs/stdlib.md` §5 new
+`### std.concurrency.collection`, `docs/concurrency.md` §6f pointer, `gaps.md` resolved. Resolves the
+concurrent-collections / data-structures-concurrency gap (queue = `Channel`, atomic scalar = `Atomic`;
+no `ConcurrentList`/`Set`/`Queue`). Full suite + conformance + clippy clean.
 **✅ fix — FFI callback SIGSEGV (dangling `Cif`) (2026-06-24).** `chezzi run examples/ffi_qsort.chz`
 segfaulted (libffi `classify_argument`, reachable via the qsort comparator callback) — a use-after-move:
 `ffi_prep_closure_loc` stores a raw pointer to the callback `Cif`'s inner `ffi_cif`, but the `Cif` was

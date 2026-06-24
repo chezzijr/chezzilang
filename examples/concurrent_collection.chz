@@ -1,0 +1,48 @@
+# std.concurrency.collection golden — ergonomic thread-safe wrappers over `RwShared[map[...]]`.
+# DETERMINISTIC on every engine (interp / VM / --parallel): the concurrency is order-independent by
+# construction. The counter shape uses a single-write-lock read-modify-write, so N tasks each
+# incrementing the SAME key once total EXACTLY N (no lost updates). The map shape has each task write
+# its OWN distinct key, so no two writers collide and the parent reads a stable snapshot after the join.
+# Run with: chezzi run examples/concurrent_collection.chz   (also --serial / --parallel — byte-identical)
+import std.concurrency.collection
+
+fn main():
+    # --- ConcurrentCounter: race-free RMW. 100 tasks each increment the same key once -> exactly 100.
+    ctr := collection.ConcurrentCounter(RwShared({}))
+    parallel:
+        for i in range(0, 100):
+            spawn:
+                ctr.increment("hits")
+    print(ctr.count("hits"))            # 100  (single-write-lock RMW; no lost updates)
+    print(ctr.total())                  # 100
+
+    # add (incl. negative) and a second key, single-threaded for a deterministic total.
+    ctr.add("hits", -40)
+    ctr.add("misses", 7)
+    print(ctr.count("hits"))            # 60
+    print(ctr.count("misses"))          # 7
+    print(ctr.total())                  # 67
+
+    # --- ConcurrentMap: each task writes its OWN key i -> i*i. Order-independent; parent reads all.
+    m := collection.ConcurrentMap(RwShared({}))
+    parallel:
+        for i in range(0, 10):
+            spawn:
+                m.set(i, i * i)
+    s := 0
+    for i in range(0, 10):
+        match m.get(i):
+            Some(v): s = s + v
+            None: s = s - 1
+    print(s)                            # 285  (sum of i*i, i in 0..10)
+    print(m.len())                      # 10
+
+    # single-thread map surface: get_or_insert (compound-atomic), contains, remove, snapshot.
+    print(m.get_or_insert(100, -1))     # -1  (absent -> inserts default)
+    print(m.get_or_insert(100, 999))    # -1  (present -> default ignored)
+    print(m.contains(100))              # true
+    m.remove(100)
+    print(m.contains(100))              # false
+    print(m.snapshot().len())           # 10  (back to the 10 own-key entries)
+
+main()

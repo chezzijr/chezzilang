@@ -1,0 +1,134 @@
+# std.concurrency.collection — ergonomic, thread-safe collection wrappers over the `RwShared[T]`
+# runtime primitive (many concurrent readers OR one exclusive writer). Pure Chezzi, so every engine
+# (interp oracle, cooperative VM, real-thread `--parallel`) behaves identically.
+#
+# WHY: `RwShared[map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
+# airlock — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
+# read-modify-write a count) MUST happen inside a SINGLE `write` lock or they race. These wrappers bake
+# the correct single-lock idiom in.
+#
+# AIRLOCK SHARING: a generic struct whose only field is an `RwShared` crosses spawn/parallel as a
+# SHARED Arc handle (RwShared is sendable and shares, and a struct of all-sendable fields does too) —
+# NOT a deep copy. So mutations a spawned task makes are visible to the parent after the join.
+#
+# CONSTRUCTION: there is no `new_map()`/`new_counter()` factory — a no-argument generic factory cannot
+# bind K/V (turbofish does not propagate into the inner `RwShared({})`). Construct DIRECTLY at the use
+# site: `ConcurrentMap(RwShared({}))` / `ConcurrentCounter(RwShared({}))`; K/V are deferred from the
+# empty `{}` and inferred from the first method call. (Same idiom as `Counter({})` in std.collections.)
+#
+# REENTRANCY: like raw `RwShared`, a closure passed to `read`/`write` must not re-enter the SAME box.
+# Every method here is flat (no nested locking), so user code is safe as long as it does not call a
+# wrapper method from inside another wrapper's read/write closure.
+#
+# NOT PROVIDED: a concurrent queue is already `Channel[T]`; an atomic scalar is already `Atomic`.
+
+# ============================================================================
+# ConcurrentMap[K, V] — a thread-safe map over `RwShared[map[K, V]]` (K must be Hashable).
+# ============================================================================
+#
+# CONCURRENCY: get/contains/len/snapshot are CONCURRENT READS (many at once); set/remove/get_or_insert
+# take the EXCLUSIVE WRITE lock. `get_or_insert` is COMPOUND-ATOMIC — its check-and-insert happens in
+# ONE write lock, so it cannot lose a race.
+struct ConcurrentMap[K: Hashable, V]:
+    inner: RwShared[map[K, V]]
+
+    # Look up `key`. CONCURRENT READ. Returns Some(value) or None.
+    fn get(self, key: K) -> Option[V]:
+        return self.inner.read(fn(m): _get(m, key))
+
+    # Insert or overwrite `key` -> `val`. EXCLUSIVE WRITE.
+    fn set(self, key: K, val: V):
+        self.inner.write(fn(m): _put(m, key, val))
+
+    # Remove `key` if present (no-op if absent). EXCLUSIVE WRITE.
+    fn remove(self, key: K):
+        self.inner.write(fn(m): _remove(m, key))
+
+    # True iff `key` is present. CONCURRENT READ.
+    fn contains(self, key: K) -> bool:
+        return self.inner.read(fn(m): m.has(key))
+
+    # Number of entries. CONCURRENT READ.
+    fn len(self) -> int:
+        return self.inner.read(fn(m): m.len())
+
+    # COMPOUND-ATOMIC insert-if-absent: if `key` is present return its value; otherwise insert
+    # `default` and return it. The check-and-insert is done in ONE exclusive write lock (so concurrent
+    # callers cannot both insert), guaranteeing `key` is present afterward; the returned value is then
+    # fetched under a read lock and reflects the post-insert state (insert-if-absent is idempotent, so
+    # a concurrent caller can only have inserted the same default — no lost update).
+    fn get_or_insert(self, key: K, default: V) -> V:
+        self.inner.write(fn(m): _ensure(m, key, default))
+        return self.inner.read(fn(m): _force_get(m, key))
+
+    # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
+    # returned map is independent of later mutations.
+    fn snapshot(self) -> map[K, V]:
+        return self.inner.read(fn(m): m)
+
+fn _get[K: Hashable, V](m: map[K, V], key: K) -> Option[V]:
+    return m.get(key)
+
+fn _put[K: Hashable, V](m: map[K, V], key: K, val: V) -> map[K, V]:
+    m[key] = val
+    return m
+
+fn _remove[K: Hashable, V](m: map[K, V], key: K) -> map[K, V]:
+    m.remove(key)
+    return m
+
+# Insert `default` only if `key` is absent (idempotent). Returns the map (the write closure's value).
+fn _ensure[K: Hashable, V](m: map[K, V], key: K, default: V) -> map[K, V]:
+    if not m.has(key):
+        m[key] = default
+    return m
+
+# Fetch a key that is GUARANTEED present (by a preceding `_ensure` under the same logical operation).
+fn _force_get[K: Hashable, V](m: map[K, V], key: K) -> V:
+    match m.get(key):
+        Some(v): return v
+        None: return _force_get(m, key)   # unreachable: key was just ensured present
+
+# ============================================================================
+# ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[map[K, int]]` (K Hashable).
+# ============================================================================
+#
+# CONCURRENCY: count/total are CONCURRENT READS; increment/add take the EXCLUSIVE WRITE lock and do
+# their read-modify-write inside ONE closure, so N tasks each incrementing the same key produce an
+# EXACT final count (no lost updates). This is the classic race-free concurrent counter.
+struct ConcurrentCounter[K: Hashable]:
+    inner: RwShared[map[K, int]]
+
+    # Increment `key`'s count by 1 (created at 1 if absent). EXCLUSIVE WRITE, atomic RMW.
+    fn increment(self, key: K):
+        self.inner.write(fn(m): _inc(m, key, 1))
+
+    # Add `n` (may be negative) to `key`'s count (created at `n` if absent). EXCLUSIVE WRITE, atomic RMW.
+    fn add(self, key: K, n: int):
+        self.inner.write(fn(m): _inc(m, key, n))
+
+    # `key`'s count, or 0 if absent. CONCURRENT READ.
+    fn count(self, key: K) -> int:
+        return self.inner.read(fn(m): _count(m, key))
+
+    # Sum of all counts. CONCURRENT READ.
+    fn total(self) -> int:
+        return self.inner.read(fn(m): _sum(m))
+
+# Read-modify-write `key` += `n` in ONE pass (called inside the exclusive write closure).
+fn _inc[K: Hashable](m: map[K, int], key: K, n: int) -> map[K, int]:
+    match m.get(key):
+        Some(c): m[key] = c + n
+        None: m[key] = n
+    return m
+
+fn _count[K: Hashable](m: map[K, int], key: K) -> int:
+    match m.get(key):
+        Some(c): return c
+        None: return 0
+
+fn _sum[K: Hashable](m: map[K, int]) -> int:
+    s := 0
+    for k in m.keys():
+        s = s + m[k]
+    return s

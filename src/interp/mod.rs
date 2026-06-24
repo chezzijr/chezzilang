@@ -8896,6 +8896,23 @@ b := Buf([10, 20, 30])
         assert_eq!(out, expected);
     }
 
+    /// std.concurrency.collection: interp-side twin of the VM `golden_concurrent_collection_via_run_file`.
+    /// Imports the nested std module (std.concurrency.collection -> RwShared), so it drives `run_file`.
+    /// Deterministic by construction (single-write-lock RMW counter + each-own-key map).
+    #[test]
+    fn golden_concurrent_collection_chz() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/concurrent_collection.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/concurrent_collection.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("concurrent_collection.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
     /// `Channel.trip()` latch + `std.cancel` (interp twins of the VM `*_via_run_file` goldens). Each
     /// imports a std module, so they drive `run_file` (the module-graph path) and byte-match `.expected`.
     #[test]

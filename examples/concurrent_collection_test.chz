@@ -1,0 +1,94 @@
+# Tests for std.concurrency.collection — ConcurrentMap[K, V] + ConcurrentCounter[K] over RwShared.
+# Covers single-thread semantics AND the load-bearing concurrency cruxes: the struct stays a SHARED
+# handle across the spawn/parallel airlock (NOT deep-copied), and compound read-modify-write mutators
+# (increment/add/get_or_insert) are race-free via a SINGLE exclusive write lock.
+import std.concurrency.collection
+
+# CRUX GUARD — the wrapper struct must cross the airlock as a shared Arc handle, not a deep copy.
+# 1 pre-bind increment + 100 spawned increments on the SAME key under `parallel:` must total exactly
+# 101, observed by the PARENT after the join. If the struct were deep-copied, the parent would see 1.
+# If the RMW raced (get-then-set instead of one write closure), it would be < 101.
+test fn airlock_shares_handle():
+    ctr := collection.ConcurrentCounter(RwShared({}))
+    ctr.increment("k")
+    parallel:
+        for i in range(0, 100):
+            spawn:
+                ctr.increment("k")
+    assert ctr.count("k") == 101
+
+# Single-thread ConcurrentMap surface: set/get (Some/None), contains, len, remove, get_or_insert.
+test fn map_basic():
+    m := collection.ConcurrentMap(RwShared({}))
+    assert m.len() == 0
+    assert m.get("a") == None
+    assert not m.contains("a")
+    m.set("a", 1)
+    m.set("b", 2)
+    assert m.get("a") == Some(1)
+    assert m.contains("a")
+    assert m.len() == 2
+    m.remove("a")
+    assert m.get("a") == None
+    assert not m.contains("a")
+    assert m.len() == 1
+    # get_or_insert: absent -> inserts default and returns it; present -> returns existing.
+    assert m.get_or_insert("c", 9) == 9
+    assert m.get("c") == Some(9)
+    assert m.get_or_insert("c", 100) == 9      # already present: default ignored
+    assert m.get("c") == Some(9)
+    assert m.len() == 2
+
+# snapshot returns a COPY of the map (a concurrent read).
+test fn map_snapshot():
+    m := collection.ConcurrentMap(RwShared({}))
+    m.set("x", 10)
+    m.set("y", 20)
+    snap := m.snapshot()
+    assert snap.len() == 2
+    assert snap["x"] == 10
+    # mutating the original after the snapshot does not change the copy
+    m.set("z", 30)
+    assert snap.len() == 2
+    assert m.len() == 3
+
+# Single-thread ConcurrentCounter surface: increment/add/count/total.
+test fn counter_basic():
+    c := collection.ConcurrentCounter(RwShared({}))
+    assert c.count("a") == 0            # absent -> 0
+    c.increment("a")
+    c.increment("a")
+    assert c.count("a") == 2
+    c.add("a", 5)
+    assert c.count("a") == 7
+    c.add("a", -3)                      # negative add
+    assert c.count("a") == 4
+    c.increment("b")
+    assert c.count("b") == 1
+    assert c.total() == 5               # 4 + 1
+
+# CORRECTNESS CORE: 100 spawned tasks each increment the SAME key once -> exactly 100.
+# The single-write-lock RMW serializes the read-modify-write; any get-then-set race would lose updates.
+test fn counter_race_exact():
+    c := collection.ConcurrentCounter(RwShared({}))
+    parallel:
+        for i in range(0, 100):
+            spawn:
+                c.increment("hit")
+    assert c.count("hit") == 100
+    assert c.total() == 100
+
+# Order-independent concurrent shape: each task writes its OWN key i -> i*i; parent reads them all.
+test fn map_each_own_key():
+    m := collection.ConcurrentMap(RwShared({}))
+    parallel:
+        for i in range(0, 10):
+            spawn:
+                m.set(i, i * i)
+    s := 0
+    for i in range(0, 10):
+        match m.get(i):
+            Some(v): s = s + v
+            None: assert false
+    assert s == 285                     # sum of i*i for i in 0..10
+    assert m.len() == 10
