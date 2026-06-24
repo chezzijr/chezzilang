@@ -29409,6 +29409,19 @@ main()
         }
     }
 
+    /// std.path golden: `examples/path.chz` — the pure-Chezzi unix path-STRING ops
+    /// (is_abs/is_rel/basename/dirname/split/ext/stem/with_ext/normalize/join), end-to-end on the
+    /// VM, byte-identical to `.expected` and the interpreter (assert_file_parity == VM==interp).
+    #[test]
+    fn golden_path_via_run_file() {
+        let path = fixture("examples/path.chz");
+        let expected = std::fs::read_to_string(fixture("examples/path.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/path.chz");
+    }
+
     /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
     /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
     /// Byte-identical on interp + VM.

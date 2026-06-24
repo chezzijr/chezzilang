@@ -1,0 +1,82 @@
+# examples/path_test.chz — TDD table for std.path (unix '/' path-STRING ops).
+# Edge cases mirror Python os.path / Go path.Clean. Run: `cargo run -- test examples/path_test.chz`.
+
+import std.path
+
+test fn t_is_abs():
+    assert path.is_abs("/a") == true
+    assert path.is_abs("a") == false
+    assert path.is_abs("") == false
+    assert path.is_abs("/") == true
+    assert path.is_rel("a") == true
+    assert path.is_rel("/a") == false
+
+test fn t_basename():
+    assert path.basename("a/b") == "b"
+    assert path.basename("a/b/") == ""
+    assert path.basename("/") == ""
+    assert path.basename("") == ""
+    assert path.basename("a") == "a"
+    assert path.basename("/a/b.txt") == "b.txt"
+
+test fn t_dirname():
+    assert path.dirname("a/b") == "a"
+    assert path.dirname("a/b/") == "a/b"
+    assert path.dirname("/a") == "/"
+    assert path.dirname("a") == ""
+    assert path.dirname("/") == "/"
+    assert path.dirname("") == ""
+    assert path.dirname("/a/b") == "/a"
+
+test fn t_split():
+    d, b := path.split("a/b")
+    assert d == "a"
+    assert b == "b"
+    d2, b2 := path.split("a/b/")
+    assert d2 == "a/b"
+    assert b2 == ""
+    d3, b3 := path.split("/a")
+    assert d3 == "/"
+    assert b3 == "a"
+
+test fn t_ext():
+    assert path.ext("a/b.tar.gz") == ".gz"
+    assert path.ext("a.txt") == ".txt"
+    assert path.ext("README") == ""
+    assert path.ext(".bashrc") == ""
+    assert path.ext("a.") == "."
+    assert path.ext("dir.d/file") == ""
+
+test fn t_stem():
+    assert path.stem("a/b.tar.gz") == "b.tar"
+    assert path.stem(".bashrc") == ".bashrc"
+    assert path.stem("a.txt") == "a"
+    assert path.stem("a/b") == "b"
+
+test fn t_with_ext():
+    assert path.with_ext("a/b.txt", ".md") == "a/b.md"
+    assert path.with_ext("a/b", ".md") == "a/b.md"
+    assert path.with_ext("a/b.txt", "") == "a/b"
+    assert path.with_ext("a/b.txt", "md") == "a/b.md"
+
+test fn t_normalize():
+    assert path.normalize("") == "."
+    assert path.normalize("/") == "/"
+    assert path.normalize("//") == "/"
+    assert path.normalize(".") == "."
+    assert path.normalize("..") == ".."
+    assert path.normalize("a/b/../c") == "a/c"
+    assert path.normalize("a/./b") == "a/b"
+    assert path.normalize("a/b/") == "a/b"
+    assert path.normalize("./a") == "a"
+    assert path.normalize("/..") == "/"
+    assert path.normalize("/a/../../b") == "/b"
+    assert path.normalize("a/../../b") == "../b"
+
+test fn t_join():
+    assert path.join(["a", "b", "c"]) == "a/b/c"
+    assert path.join(["a/", "b"]) == "a/b"
+    assert path.join(["", "b"]) == "b"
+    assert path.join([]) == ""
+    assert path.join(["a", "", "c"]) == "a/c"
+    assert path.join(["/a", "b"]) == "/a/b"
