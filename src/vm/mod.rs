@@ -4055,6 +4055,11 @@ impl Vm {
             }
             Op::Call(argc) => self.do_call(*argc, span)?,
             Op::CallMethod { name, argc, ic } => self.do_method_call(name, *argc, *ic, span)?,
+            Op::CallStatic {
+                type_key,
+                method,
+                argc,
+            } => self.do_static_call(type_key, method, *argc, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
@@ -7078,6 +7083,80 @@ impl Vm {
                 span,
             )),
         }
+    }
+
+    /// `Type.method(args)` — STATIC (associated) method dispatch (the "no self ⇒ static" rule).
+    /// Stack: `[arg0, …]` — exactly `argc` values, NO receiver. Resolves `method` in the named
+    /// struct's (`program.structs[key].methods`) or enum's (`program.enum_methods[key]`) method
+    /// table by `type_key`; the body's home module is the type's declaring module. Pushes a frame
+    /// holding just the args (arity == argc, no `self` slot) and runs it via `push_frame_in_place`
+    /// (the dispatch-loop path) — structurally identical to enum-method dispatch minus the receiver.
+    /// A static generator allocates rather than running, mirroring the instance arms.
+    fn do_static_call(
+        &mut self,
+        type_key: &str,
+        method: &str,
+        argc: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let prog = Arc::clone(&self.program);
+        // Resolve the proto + home module from the struct table first, then the enum table. The
+        // compiler only emits `CallStatic` for a static method that exists on a known struct/enum,
+        // so a miss here is an internal invariant break — surface it as a clear runtime error.
+        let (proto, home_idx) = if let Some(def) = prog.structs.get(type_key) {
+            match def.methods.get(method).copied() {
+                Some(p) => (p, def.module_idx),
+                None => {
+                    return Err(self.err(
+                        format!(
+                            "type '{}' has no static method '{method}'",
+                            def.display_name
+                        ),
+                        span,
+                    ));
+                }
+            }
+        } else if let Some(ms) = prog.enum_methods.get(type_key) {
+            match ms.get(method).copied() {
+                Some(p) => (p, self.enum_home_module(type_key)),
+                None => {
+                    let display = crate::compiler::bare_display(type_key);
+                    return Err(self.err(
+                        format!("type {display} has no static method '{method}'"),
+                        span,
+                    ));
+                }
+            }
+        } else {
+            let display = crate::compiler::bare_display(type_key);
+            return Err(self.err(
+                format!("type {display} has no static method '{method}'"),
+                span,
+            ));
+        };
+        // A static method has NO receiver, so its arity equals `argc` exactly (no `+ 1`).
+        if self.program.protos[proto].arity != argc {
+            return Err(self.err(
+                format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    self.program.protos[proto].name, self.program.protos[proto].arity, argc
+                ),
+                span,
+            ));
+        }
+        let home = self.module_objs[home_idx];
+        if self.program.protos[proto].is_generator {
+            let at = self.stack.len() - argc;
+            let gen_args: Vec<Value> = self.stack.split_off(at);
+            let g = self.alloc_generator(proto, home, None, gen_args);
+            self.push(g);
+            return Ok(());
+        }
+        // The `argc` args are already contiguous on the operand stack (pushed by the compiler in
+        // order, no receiver). Install the frame in place over them — the running `run_until`
+        // executes the body and its `Return` pushes the result.
+        let base = self.stack.len() - argc;
+        self.push_frame_in_place(proto, home, None, base, span)
     }
 
     /// Higher-order list methods `map` / `filter` / `fold`. `src_h` is the receiver list.
@@ -22311,6 +22390,30 @@ main()";
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
+    }
+
+    /// Static (associated) methods golden: `examples/static_methods.chz` — a named/alternative struct
+    /// ctor (`Rect.square`), a validating ctor returning `Result` (`Email.parse`), an enum static
+    /// ctor returning `Option` (`Color.from_str`) alongside a variant that wins over a static name,
+    /// and a generic static via the type-level turbofish (`Box[int].empty()`). Static dispatch pushes
+    /// no receiver, so it is behavior-preserving; byte-identical on the VM, interp, and the M:N
+    /// parallel engine, plus the checked-in `.expected`.
+    #[test]
+    fn golden_static_methods_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/static_methods.chz");
+        let expected = include_str!("../../examples/static_methods.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        let par_out = run_capture_parallel(src).expect("parallel run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from static_methods.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on static_methods");
+        assert_eq!(
+            vm_out, par_out,
+            "parallel engine diverged on static_methods"
+        );
     }
 
     /// M21 generic-newtype golden: `examples/newtype_generic.chz` exercises type-parameterized

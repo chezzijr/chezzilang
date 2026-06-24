@@ -215,6 +215,16 @@ pub enum Op {
         argc: usize,
         ic: u32,
     },
+    /// `Type.method(args)` — a STATIC (associated) method call (the "no self ⇒ static" rule). Stack:
+    /// `[arg0, …]` (NO receiver — `argc` values, never `argc + 1`). Resolves `method` in the named
+    /// struct's or enum's method table by `type_key` (the type's runtime key), pushes a frame with
+    /// just the args, and runs the body. The static site is monomorphic by construction (the type is
+    /// named, not a value), so no inline cache. Mirrors the enum-method dispatch minus the receiver.
+    CallStatic {
+        type_key: String,
+        method: String,
+        argc: usize,
+    },
     CallBuiltin(String, usize),
     CallPrint(usize),
     /// `print(..., sep=, end=)` — stack `[arg0, …, argN-1, sep, end]`: the positional args, then the

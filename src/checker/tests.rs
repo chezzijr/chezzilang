@@ -1027,8 +1027,11 @@ n := forward(IntBox([1]))
 
 #[test]
 fn generic_method_without_receiver_rejected() {
-    // Review-panel IMPORTANT: a generic method whose first param isn't a receiver must be rejected,
-    // not silently bind the receiver to the first declared param.
+    // Review-panel IMPORTANT: a method whose first param isn't a receiver must NOT silently bind the
+    // receiver to the first declared param. Under the "no self ⇒ static" rule, a no-`self` method is
+    // a STATIC method — calling it on an INSTANCE (`b.ident()`) is rejected (it is reached only as
+    // `Box.ident(...)`). (`ident` here also declares its own `[U]`, but the instance-call rejection
+    // fires first.)
     let src = "\
 struct Box[T]:
     v: T
@@ -1037,7 +1040,7 @@ struct Box[T]:
 b := Box(5)
 r := b.ident()
 ";
-    rejects(src, "receiver");
+    rejects(src, "is a static method");
 }
 
 #[test]
@@ -1747,12 +1750,12 @@ fn method_call_too_many_args_rejected() {
 
 #[test]
 fn method_without_receiver_param_rejected() {
-    // A method with no params has no receiver slot; calling it on an instance must be rejected at
-    // check time — otherwise the runtime errors ("expects 0 argument(s), got 1") since both engines
-    // prepend the receiver.
+    // A method with no params is a STATIC method (no `self`); calling it on an instance must be
+    // rejected at check time — it is reached only as `Box.ping()`. (Otherwise the runtime would error
+    // "expects 0 argument(s), got 1" since the instance-call path would prepend the receiver.)
     rejects(
         "struct Box:\n    v: int\n    fn ping():\n        print(\"x\")\nb := Box(5)\nb.ping()\n",
-        "no receiver",
+        "is a static method",
     );
 }
 
@@ -1775,10 +1778,16 @@ fn method_call_multi_arg_arity() {
 }
 
 #[test]
-fn method_call_first_param_not_named_self_ok() {
-    // The receiver is positional, not keyed on the name `self`.
+fn static_method_first_param_not_self_is_static() {
+    // The "no self ⇒ static" rule: a method whose first param is NOT named `self` is a STATIC
+    // method — it is NOT an instance method with a positionally-bound receiver. So `Point.getx(p)`
+    // is the (static) call shape; `p.getx()` (the old positional-receiver convention) is now illegal.
     ok(
-        "struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := p.getx()\nm := n + 1\n",
+        "struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := Point.getx(p)\nm := n + 1\n",
+    );
+    rejects(
+        "struct Point:\n    x: int\n    fn getx(p: Point) -> int:\n        return p.x\np := Point(7)\nn := p.getx()\n",
+        "is a static method",
     );
 }
 
@@ -8490,5 +8499,87 @@ fn same_binder_across_arms_ok() {
 fn or_pattern_same_names_across_alts_ok() {
     ok(
         "enum E:\n    A(int)\n    B(int)\nfn f(e: E) -> int:\n    match e:\n        E.A(x) | E.B(x): return x\n",
+    );
+}
+
+// ===== static (associated) methods: the "no self ⇒ static" rule =====
+
+/// BASELINE INVARIANT: a static method (no `self`) called on an INSTANCE must error — calling a
+/// static method on a value remains illegal. It must point at the `Type.method(...)` call form.
+#[test]
+fn static_method_instance_call_still_errors() {
+    rejects(
+        "struct Rect:\n    w: int\n    h: int\n    fn square(s: int) -> Rect:\n        return Rect(s, s)\nfn main():\n    r := Rect(1, 2)\n    _ := r.square(5)\n",
+        "is a static method",
+    );
+}
+
+/// A ZERO-PARAM method is a STATIC method (no `self`); calling it on an INSTANCE errors — it must
+/// be called `Type.method()`. The instance-call remains illegal (the receiver-error sites stay).
+#[test]
+fn zero_param_method_instance_call_errors() {
+    rejects(
+        "struct Rect:\n    w: int\n    h: int\n    fn blank() -> Rect:\n        return Rect(0, 0)\nfn main():\n    r := Rect(1, 2)\n    _ := r.blank()\n",
+        "is a static method",
+    );
+}
+
+/// A struct static method called `Type.method(args)` type-checks to the method's return type.
+#[test]
+fn struct_static_method_call_typechecks() {
+    ok(
+        "struct Rect:\n    w: int\n    h: int\n    fn square(s: int) -> Rect:\n        return Rect(s, s)\nfn main():\n    r := Rect.square(5)\n    print(r.w)\n",
+    );
+}
+
+/// An enum static method called `Enum.method(args)` type-checks (returns Option[Enum] here).
+#[test]
+fn enum_static_method_call_typechecks() {
+    ok(
+        "enum Color:\n    Red\n    Green\n    fn from_str(s: str) -> Option[Color]:\n        if s == \"red\":\n            return Some(Color.Red)\n        return None\nfn main():\n    c := Color.from_str(\"red\")\n    print(c == Some(Color.Red))\n",
+    );
+}
+
+/// A variant name always wins over a static method name: `Color.Red` stays the variant.
+#[test]
+fn enum_variant_wins_over_static() {
+    ok(
+        "enum Color:\n    Red\n    Green\n    fn from_str(s: str) -> Option[Color]:\n        return None\nfn main():\n    c := Color.Red\n    print(c == Color.Red)\n",
+    );
+}
+
+/// A static method whose name collides with a variant is a decl-time error (disjointness).
+#[test]
+fn enum_variant_static_collision_errors() {
+    rejects(
+        "enum E:\n    Red\n    fn Red(x: int) -> E:\n        return E.Red\nfn main():\n    print(1)\n",
+        "is already a variant of enum",
+    );
+}
+
+/// A static method declaring its own `[U]` type params is rejected in v1 (turbofish is type-level).
+#[test]
+fn static_method_own_type_params_rejected() {
+    rejects(
+        "struct Box[T]:\n    items: list[T]\n    fn make[U](x: U) -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box[int].make(5)\n",
+        "cannot declare their own type parameters",
+    );
+}
+
+/// A generic static via the TYPE-level turbofish `Box[int].empty()` type-checks (v1's supported form).
+#[test]
+fn generic_static_turbofish_box_int_empty_typechecks() {
+    ok(
+        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\n",
+    );
+}
+
+/// The METHOD-level turbofish `Box.empty[int]()` is RESERVED for a future feature — it must error
+/// (turbofish is type-level only in v1: `Box[int].empty()`).
+#[test]
+fn method_level_turbofish_on_static_reserved() {
+    rejects(
+        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box.empty[int]()\n",
+        "are reserved",
     );
 }

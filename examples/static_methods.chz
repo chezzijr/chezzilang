@@ -1,0 +1,83 @@
+# Static (associated) methods — the "no self ⇒ static" rule.
+# A struct/enum method whose first param is NOT `self` (or which has no params) is a STATIC method,
+# called `Type.method(args)` instead of `value.method(args)`. The Rust `fn new` ergonomic. This is
+# ADDITIVE — the positional `Name(...)` ctor still works; static methods unlock named/alternative and
+# VALIDATING constructors (returning Result/Option) the positional ctor cannot express.
+# Three-engine parity (VM, --serial, --parallel) — byte-identical, no time-dependent behavior.
+
+# A named/alternative ctor: `Rect.square(s)` builds a Rect — the positional ctor can't name itself.
+struct Rect:
+    w: int
+    h: int
+    fn square(s: int) -> Rect:
+        return Rect(s, s)
+    fn area(self) -> int:        # an ordinary INSTANCE method coexists with the static ones
+        return self.w * self.h
+
+# A VALIDATING ctor returning a Result: parse may fail (a thing the positional ctor cannot do).
+struct Email:
+    addr: str
+    fn parse(s: str) -> Result[Email, str]:
+        if "@" in s:
+            return Ok(Email(s))
+        return Err("missing @")
+
+# An enum with a `from_str` static ctor returning Option — and a variant (Red) that always wins
+# over any static-method name (variant/static disjointness is enforced at declaration time).
+enum Color:
+    Red
+    Green
+    Blue
+    fn from_str(s: str) -> Option[Color]:
+        if s == "red":
+            return Some(Color.Red)
+        if s == "green":
+            return Some(Color.Green)
+        if s == "blue":
+            return Some(Color.Blue)
+        return None
+
+# A generic struct with a generic static ctor reached via the type-level turbofish `Box[int].empty()`
+# (the type arg sits on the TYPE — `[int]` — because the param comes from the enclosing generic type).
+struct Box[T]:
+    items: list[T]
+    fn empty() -> Box[T]:
+        return Box([])
+    fn len(self) -> int:
+        return self.items.len()
+
+fn color_name(c: Color) -> str:
+    match c:
+        Color.Red: return "red"
+        Color.Green: return "green"
+        Color.Blue: return "blue"
+
+fn main():
+    # named ctor + an instance method on the result
+    r := Rect.square(5)
+    print(r.w, r.h, r.area())          # 5 5 25
+
+    # validating ctor: Ok path + Err path
+    match Email.parse("a@b.com"):
+        Ok(e): print("ok", e.addr)     # ok a@b.com
+        Err(m): print("err", m)
+    match Email.parse("nope"):
+        Ok(e): print("ok", e.addr)
+        Err(m): print("err", m)        # err missing @
+
+    # enum static ctor: Some + None
+    match Color.from_str("green"):
+        Some(c): print("some", color_name(c))  # some green
+        None: print("none")
+    match Color.from_str("octarine"):
+        Some(c): print("some", color_name(c))
+        None: print("none")            # none
+
+    # the variant ALWAYS wins over a static method name
+    print(Color.Red == Color.Red)      # true
+
+    # generic static via type-level turbofish
+    b := Box[int].empty()
+    print(b.len())                     # 0
+
+main()

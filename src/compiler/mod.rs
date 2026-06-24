@@ -180,6 +180,12 @@ struct Compiler {
     /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
     /// and resolves a qualified `geo.X` to the right module's key.
     module_types: Vec<std::collections::HashSet<String>>,
+    /// STATIC (associated) methods, keyed `"{type_runtime_key}\u{1}{method}"` — a struct/enum method
+    /// whose first param is not `self` (the "no self ⇒ static" rule). Populated in `hoist_types` (all
+    /// types across all modules are seen there before any body compiles), so a `Type.method(...)` call
+    /// site in any module classifies the call as `Op::CallStatic` exactly like the checker does. The
+    /// checker has already validated the call shape; this only drives compiler dispatch.
+    static_methods: std::collections::HashSet<String>,
     /// The CURRENT module's bound module name → that module's index, rebuilt per `compile_module`
     /// (mirrors the checker's `imported_modules`). Lets `geo.Point(...)` resolve the qualified key.
     imported_modules: HashMap<String, usize>,
@@ -259,6 +265,18 @@ fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
 /// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
 /// (id→def) in lockstep so cold-path id→names resolution is O(1). The map is keyed by the
 /// `(enum, variant)` pair, so two enums may share a variant name yet get distinct ids.
+/// The "no self ⇒ static" classification primitive (must match the checker exactly): a method whose
+/// FIRST param is not named `self` — or which has no params — is a STATIC (associated) method.
+fn is_static_method(m: &FnDecl) -> bool {
+    m.params.first().is_none_or(|p| p.name != "self")
+}
+
+/// Key into [`Compiler::static_methods`]: the type's runtime key + the method name, joined by a
+/// control char that can never appear in a type key or identifier.
+fn static_key(type_key: &str, method: &str) -> String {
+    format!("{type_key}\u{1}{method}")
+}
+
 fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
     let variant_id = program.variants_by_id.len() as u32;
     let def = VariantDef {
@@ -347,6 +365,7 @@ impl Compiler {
             method_ic_next: 0,
             type_keys: HashMap::new(),
             module_types: Vec::new(),
+            static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
             bare_types: HashMap::new(),
@@ -520,8 +539,20 @@ impl Compiler {
     fn hoist_types(&mut self, module_idx: usize, stmts: &[Stmt]) -> Result<(), CompileError> {
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::Struct { name, fields, .. } => {
+                StmtKind::Struct {
+                    name,
+                    fields,
+                    methods,
+                    ..
+                } => {
                     let key = self.type_key(module_idx, name);
+                    // Record each STATIC method (first param not `self`) so a `Type.method(...)` call
+                    // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
+                    for m in methods {
+                        if is_static_method(m) {
+                            self.static_methods.insert(static_key(&key, &m.name));
+                        }
+                    }
                     if self.program.structs.contains_key(&key) {
                         return Err(CompileError {
                             message: format!("type '{name}' is already defined"),
@@ -550,13 +581,23 @@ impl Compiler {
                 }
                 // Type-erased: type parameters are checker-only, the runtime is identical for
                 // `Tree[int]` and `Tree[str]`.
-                StmtKind::Enum { name, variants, .. } => {
+                StmtKind::Enum {
+                    name,
+                    variants,
+                    methods,
+                    ..
+                } => {
                     // M19 lever #2 — assign each variant the next dense `variant_id` (user variants
                     // follow the fixed native ids at `4..`, in declaration order). The enum is keyed
                     // by its module-scoped runtime key (bare unless a cross-module clash).
                     let key = self.type_key(module_idx, name);
                     for v in variants {
                         register_variant(&mut self.program, &key, &v.name, v.payload.len());
+                    }
+                    for m in methods {
+                        if is_static_method(m) {
+                            self.static_methods.insert(static_key(&key, &m.name));
+                        }
                     }
                 }
                 // A newtype's key must be known (via `newtype_home`) BEFORE any method body compiles,
@@ -3112,6 +3153,53 @@ impl Compiler {
                     Op::NewEnum {
                         variant: name.clone(),
                         variant_id,
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
+            // `Type.method(args)` → STATIC method call (the "no self ⇒ static" rule). A bare,
+            // unbound struct/enum type name dotted with a static method. The checker has already
+            // validated the shape; emit `Op::CallStatic` (NO receiver pushed) keyed by the type's
+            // runtime key. The enum-variant branch ran first, so a variant always wins.
+            if let ExprKind::Ident(tname) = &obj.kind
+                && fc.resolve_local(tname).is_none()
+                && !fc.captures(tname)
+                && let Some(key) = self.bare_types.get(tname).cloned()
+                && self.static_methods.contains(&static_key(&key, name))
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(
+                    Op::CallStatic {
+                        type_key: key,
+                        method: name.clone(),
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
+            // `Type[targ].method(args)` → generic-static turbofish (`Box[int].empty()`). Parses as
+            // `Field{obj: Index{obj: Ident(Type), index}, name}` (the `[..]` is followed by `.`, so
+            // the turbofish-call steal never fires). The type arg is RUNTIME-erased — it only drives
+            // the checker's types — so we ignore `index` and emit `Op::CallStatic` by the bare key.
+            if let ExprKind::Index { obj: tobj, .. } = &obj.kind
+                && let ExprKind::Ident(tname) = &tobj.kind
+                && fc.resolve_local(tname).is_none()
+                && !fc.captures(tname)
+                && let Some(key) = self.bare_types.get(tname).cloned()
+                && self.static_methods.contains(&static_key(&key, name))
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(
+                    Op::CallStatic {
+                        type_key: key,
+                        method: name.clone(),
                         argc: args.len(),
                     },
                     span,

@@ -645,6 +645,66 @@ print(p.dist())         # method call
 
 No inheritance (by design). Composition only.
 
+### 7a. Static (associated) methods — the "no self ⇒ static" rule
+
+A method's **first parameter** decides its call shape. If it is named `self`, the method is an
+**instance method**, called `value.method(args)` (unchanged). If the first parameter is **not** `self`
+— or the method takes **no parameters** — it is a **static (associated) method**, called
+`Type.method(args)` on the type name itself (the Rust `fn new` ergonomic). The two are different call
+shapes: an instance method is **not** callable as `Type.method`, and a static method is **not**
+callable as `value.method` (each errors clearly, pointing at the other form).
+
+Static methods are **additive** — the positional all-fields constructor `Name(...)` still works. They
+unlock **named / alternative** constructors and **validating** constructors (returning `Result` /
+`Option`) that the positional ctor cannot express:
+
+```chezzi
+struct Rect:
+    w: int
+    h: int
+    fn square(s: int) -> Rect:        # static: first param is not `self`
+        return Rect(s, s)
+    fn area(self) -> int:             # ordinary instance method coexists
+        return self.w * self.h
+
+struct Email:
+    addr: str
+    fn parse(s: str) -> Result[Email, str]:   # validating ctor
+        if "@" in s:
+            return Ok(Email(s))
+        return Err("missing @")
+
+r := Rect.square(5)        # Type.method(args) — static call
+print(r.area())            # 25
+match Email.parse("a@b"):
+    Ok(e): print(e.addr)
+    Err(m): print(m)
+```
+
+**Enums** get static methods too (e.g. a `from_str(s) -> Option[Color]`). For an enum, a **variant**
+name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
+**not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
+variant.
+
+**Generic static methods** are reached with a **type-level turbofish** — the type argument sits on the
+**type**, because in v1 a static method's type parameters come from the enclosing generic type:
+
+```chezzi
+struct Box[T]:
+    items: list[T]
+    fn empty() -> Box[T]:
+        return Box([])
+
+b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
+```
+
+v1 limits: a single type argument only (`Box[int].empty()`; multi-param `Pair[K, V].empty()` is a
+documented follow-up). A static method may **not** declare its own `[U]` type parameters yet, and the
+**method-level** turbofish `Box.empty[int]()` is **reserved** for a future method-generics feature
+(one rule: turbofish sits where the parameter is declared). Static methods do **not** participate in
+**protocol** satisfaction — protocols stay instance-only. Static methods on `newtype` are not
+supported yet (struct + enum only).
+
 ## 7b. Generics & protocols  (M7)
 
 **Generic functions** take type parameters in `[…]` after the name. A parameter may carry a

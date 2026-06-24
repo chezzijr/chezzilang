@@ -163,6 +163,11 @@ struct FnSig {
     /// (the net socket ops' optional `timeout_ms`). [`Checker::check_args`] accepts any arg count in
     /// `min_params..=params.len()`.
     min_params: usize,
+    /// A struct/enum method whose first parameter is NOT `self` (or which has no params) is a STATIC
+    /// (associated) method — called `Type.method(args)`, not `value.method(args)`. `false` for every
+    /// instance method, free function, closure, and native sig (the default via `plain`/`optional_tail`);
+    /// set only by [`Checker::fn_sig`] from the declaration's first param name.
+    is_static: bool,
 }
 
 impl FnSig {
@@ -174,6 +179,7 @@ impl FnSig {
             ret,
             type_params: Vec::new(),
             min_params,
+            is_static: false,
         }
     }
 
@@ -186,6 +192,7 @@ impl FnSig {
             ret,
             type_params: Vec::new(),
             min_params,
+            is_static: false,
         }
     }
 }
@@ -1947,6 +1954,17 @@ impl Checker {
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
+                    // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always
+                    // resolves the variant first (see `infer_call`), so a static method named after a
+                    // variant could never be reached — a collision is an error, not a silent shadow.
+                    for m in methods {
+                        if names.contains(&m.name) {
+                            self.error(
+                                s.span,
+                                format!("'{}' is already a variant of enum '{name}'", m.name),
+                            );
+                        }
+                    }
                     self.exit_type_params(saved);
                     self.enums.insert(key.clone(), names);
                     self.enum_type_params
@@ -2348,11 +2366,17 @@ impl Checker {
             .map(|t| self.resolve_type(t, span))
             .unwrap_or(Ty::Unknown);
         self.exit_type_params(saved);
+        // STATIC classification (the "no self ⇒ static" rule): a method whose first param is NOT
+        // named `self` — or which has no params at all — is a static (associated) method, dispatched
+        // `Type.method(args)`. This flag is consulted only when the sig is reached as a struct/enum
+        // method; for a free fn it is meaningless (free fns are never reached via the method maps).
+        let is_static = decl.params.first().is_none_or(|p| p.name != "self");
         FnSig {
             min_params: params.len(),
             params,
             ret,
             type_params: decl.type_params.clone(),
+            is_static,
         }
     }
 
@@ -6315,12 +6339,57 @@ impl Checker {
                         return ty;
                     }
                 } else {
-                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
-                    for a in args {
-                        self.infer(a);
+                    // Not a variant — try a STATIC method `Enum.method(args)` (variant check ran
+                    // first, so a variant always wins; disjointness is enforced at decl time). A
+                    // method-level turbofish (`Enum.method[T](...)`) is RESERVED — call-site type
+                    // args here would be method-level, so reject them (turbofish is type-level only:
+                    // `Enum[T].method(...)`).
+                    if !targs.is_empty() {
+                        self.error(
+                            span,
+                            format!("method-level type arguments on static method '{name}' are reserved; put the type argument on the type (`{ename}[T].{name}(...)`)"),
+                        );
                     }
-                    return Ty::Unknown;
+                    return self.infer_static_call(&ekey, ename, name, args, &[], span);
                 }
+            }
+            // `Type.method(args)` — STATIC (associated) method on a bare struct/enum type name. The
+            // enum branch above already handled enums; this covers structs. The type name must be a
+            // known (unbound) struct; a static method is one whose first param is not `self`.
+            if let ExprKind::Ident(tname) = &obj.kind
+                && !self.is_local_binding(tname)
+                && self.struct_names.contains(tname)
+            {
+                let key = self.bare_key(tname);
+                // A method-level turbofish (`Type.method[T](...)`) is RESERVED for a future
+                // method-generics feature — turbofish is type-level only (`Type[T].method(...)`).
+                if !targs.is_empty() {
+                    self.error(
+                        span,
+                        format!("method-level type arguments on static method '{name}' are reserved; put the type argument on the type (`{tname}[T].{name}(...)`)"),
+                    );
+                }
+                return self.infer_static_call(&key, tname, name, args, &[], span);
+            }
+            // `Type[targ].method(args)` — generic-static turbofish (RESOLVED form, e.g.
+            // `Box[int].empty()`). Parses as `Field{obj: Index{obj: Ident(Type), index}, name}`
+            // because the `[..]` is followed by `.` (not `(`), so the turbofish-call steal never
+            // fires. Indexing a bare TYPE name is otherwise invalid, so the pattern is unambiguous:
+            // reinterpret the index as a single type argument. Only single-arg forms parse
+            // (`Pair[K,V].empty()` is rejected by the subscript parser's comma).
+            if let ExprKind::Index { obj: tobj, index } = &obj.kind
+                && let ExprKind::Ident(tname) = &tobj.kind
+                && !self.is_local_binding(tname)
+                && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
+            {
+                let key = self.bare_key(tname);
+                // Reinterpret the index expression as ONE type argument.
+                if let Some(ty) = self.index_as_type(index) {
+                    let resolved = self.resolve_type(&ty, span);
+                    return self.infer_static_call(&key, tname, name, args, &[resolved], span);
+                }
+                // Index wasn't a resolvable type — fall through to the normal index-then-method
+                // path so a genuine bad index still errors clearly.
             }
             return self.infer_method_call(obj, name, args, span);
         }
@@ -6362,6 +6431,121 @@ impl Checker {
                 Ty::Unknown
             }
         }
+    }
+
+    /// Reinterpret the index of a `Type[..]` subscript (in a generic-static turbofish like
+    /// `Box[int].empty()`) as a single type argument. The parser produced an EXPRESSION (the index
+    /// of an `Index` node); only the expression shapes that name a type are convertible: a bare
+    /// ident (`int`/`T`), a generic application (`list[int]`), and a module-qualified name
+    /// (`geo.Point`). Anything else (a literal, an arithmetic expr) is not a type → `None`, and the
+    /// caller falls back to the ordinary index-then-method path so a real index error still surfaces.
+    fn index_as_type(&self, index: &Expr) -> Option<Type> {
+        match &index.kind {
+            ExprKind::Ident(n) => Some(Type::Named(n.clone())),
+            ExprKind::Index { obj, index } => {
+                if let ExprKind::Ident(n) = &obj.kind {
+                    Some(Type::Generic(n.clone(), vec![self.index_as_type(index)?]))
+                } else {
+                    None
+                }
+            }
+            ExprKind::Field { obj, name } => {
+                if let ExprKind::Ident(m) = &obj.kind {
+                    Some(Type::Qualified {
+                        module: m.clone(),
+                        name: name.clone(),
+                        args: Vec::new(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Type-check a STATIC (associated) method call `Type.method(args)` (the "no self ⇒ static"
+    /// rule). `key` is the type's resolved runtime key; `tname` its display name. Looks the method up
+    /// in the struct/enum method maps; rejects calling an INSTANCE method this way, a method with its
+    /// own `[U]` type params (v1 limit), or an unknown method. Substitutes the ENCLOSING type's type
+    /// args (`targs`, supplied by an explicit `Box[int].empty()` turbofish — empty otherwise) into the
+    /// params/ret, then checks the args against ALL params (NO receiver split). Mirrors the
+    /// instance-method arms minus the receiver.
+    fn infer_static_call(
+        &mut self,
+        key: &str,
+        tname: &str,
+        method: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+    ) -> Ty {
+        // Resolve the method sig + the enclosing type's params, from either map.
+        let resolved = self
+            .structs
+            .get(key)
+            .and_then(|info| {
+                info.methods
+                    .get(method)
+                    .cloned()
+                    .map(|s| (s, info.type_params.clone()))
+            })
+            .or_else(|| {
+                self.enum_methods.get(key).and_then(|ms| {
+                    ms.get(method).cloned().map(|s| {
+                        (
+                            s,
+                            self.enum_type_params.get(key).cloned().unwrap_or_default(),
+                        )
+                    })
+                })
+            });
+        let Some((sig, tps)) = resolved else {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!("type '{tname}' has no static method '{method}'"),
+            );
+            return Ty::Unknown;
+        };
+        if !sig.is_static {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "'{method}' is an instance method of '{tname}'; call it on a value (`value.{method}(...)`)"
+                ),
+            );
+            return Ty::Unknown;
+        }
+        // A static method declaring its OWN `[U]` type params is rejected in v1 — turbofish is
+        // type-level only (`Box[int].empty()`), the method-level form (`Box.empty[int]()`) is
+        // reserved for a future method-generics feature.
+        if !sig.type_params.is_empty() {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "static method '{method}' cannot declare their own type parameters yet (only the enclosing type '{tname}' s)"
+                ),
+            );
+            return Ty::Unknown;
+        }
+        // Substitute the enclosing type's params (from an explicit turbofish) into the sig.
+        if tps.is_empty() {
+            if !targs.is_empty() {
+                self.error(span, format!("'{tname}' takes no type arguments"));
+            }
+            self.check_args_w(method, &sig.params, args, span);
+            return sig.ret;
+        }
+        // Generic enclosing type: seed the substitution from the explicit turbofish args (an arity
+        // mismatch is reported by `seed_targs`), then substitute into params + return.
+        let sub = self.seed_targs(tname, &tps, targs, span);
+        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &sub)).collect();
+        self.check_args_w(method, &params, args, span);
+        self.enforce_bounds(&tps, &sub, span);
+        subst(&sig.ret, &sub)
     }
 
     /// Resolve a by-name call (builtin / constructor / variant / global fn). Returns `None` if
@@ -7145,10 +7329,26 @@ impl Checker {
                     info.methods.get(method).map(|sig| {
                         let map = struct_param_map(info, targs);
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        (params, subst(&sig.ret, &map), sig.type_params.clone())
+                        (
+                            params,
+                            subst(&sig.ret, &map),
+                            sig.type_params.clone(),
+                            sig.is_static,
+                        )
                     })
                 });
-                if let Some((params, ret, mtps)) = resolved {
+                if let Some((params, ret, mtps, is_static)) = resolved {
+                    // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
+                    // `Type.method(...)`. Reject the instance call with a pointer at the right form.
+                    if is_static {
+                        self.infer_all(args);
+                        let disp = crate::compiler::bare_display(sname);
+                        self.error(
+                            span,
+                            format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
+                        );
+                        return ret;
+                    }
                     // A generic method introduces its own type params `[U]` (beyond the struct's
                     // `[T]`, already substituted above). Infer them from the call arguments —
                     // mirrors the free generic-fn path (`infer_generic_call`).
@@ -7160,7 +7360,9 @@ impl Checker {
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
                     // receiver slot — both engines prepend the receiver and would error at runtime,
-                    // so reject the call here instead.
+                    // so reject the call here instead. (A zero-param method is classified static
+                    // above, so this `None` arm is now defensive — kept for the FnSig that omits the
+                    // static flag, e.g. a protocol-derived sig.)
                     match params.split_first() {
                         Some((_receiver, expected)) => {
                             self.check_args_w(method, expected, args, span)
@@ -7216,10 +7418,27 @@ impl Checker {
                             })
                             .unwrap_or_default();
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        (params, subst(&sig.ret, &map), sig.type_params.clone())
+                        (
+                            params,
+                            subst(&sig.ret, &map),
+                            sig.type_params.clone(),
+                            sig.is_static,
+                        )
                     })
                 });
-                if let Some((params, ret, mtps)) = resolved {
+                if let Some((params, ret, mtps, is_static)) = resolved {
+                    // Static methods on a newtype are DEFERRED (v1 covers struct + enum only). A
+                    // no-self newtype method is still classified static, so reject the instance call
+                    // with the static-method diagnostic (it is not reachable as `Type.method` yet —
+                    // the static-dispatch branches in `infer_call` gate on struct/enum names only).
+                    if is_static {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!("'{method}' is a static method (static methods on newtypes are not supported yet)"),
+                        );
+                        return ret;
+                    }
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &obj_ty, args, span,
@@ -7257,10 +7476,26 @@ impl Checker {
                             })
                             .unwrap_or_default();
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        (params, subst(&sig.ret, &map), sig.type_params.clone())
+                        (
+                            params,
+                            subst(&sig.ret, &map),
+                            sig.type_params.clone(),
+                            sig.is_static,
+                        )
                     })
                 });
-                if let Some((params, ret, mtps)) = resolved {
+                if let Some((params, ret, mtps, is_static)) = resolved {
+                    // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
+                    // value with a pointer at the right form (mirrors the struct arm).
+                    if is_static {
+                        self.infer_all(args);
+                        let disp = crate::compiler::bare_display(ename);
+                        self.error(
+                            span,
+                            format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
+                        );
+                        return ret;
+                    }
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &obj_ty, args, span,
@@ -8781,6 +9016,7 @@ impl Checker {
                 ret: subst(&msig.ret, &pmap),
                 type_params: Vec::new(),
                 min_params,
+                is_static: false,
             };
             let msig = &want;
             match methods.get(mname) {

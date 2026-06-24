@@ -154,6 +154,12 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
+/// The "no self ⇒ static" classification primitive (must match the checker + compiler exactly): a
+/// method whose FIRST param is not named `self` — or which has no params — is a STATIC method.
+fn is_static_method(m: &FnDecl) -> bool {
+    m.params.first().is_none_or(|p| p.name != "self")
+}
+
 /// One-way int→float coercion (C-like implicit widening) — the tree-walk interpreter's equivalent of
 /// the VM's `Op::CoerceFloat`, applied at the SAME AST annotation boundaries (typed `let`, float
 /// params, float returns, float struct fields, annotated/all-literal float collections) so both
@@ -588,6 +594,32 @@ impl Interp {
             }
         }
         ename.to_string()
+    }
+
+    /// Resolve a `Type.method` STATIC (associated) method on a bare struct/enum type name: return the
+    /// method's `FnDecl` + its home `ModEnv` iff `tname` is a known struct/enum (in the current
+    /// module's `bare_types`) AND `method` exists on it AND is STATIC (first param not `self` — the
+    /// "no self ⇒ static" rule). `None` otherwise, so the caller falls through to the normal
+    /// method-call path. Struct table first, then enum (a variant always won earlier).
+    fn lookup_static_method(
+        &self,
+        tname: &str,
+        method: &str,
+    ) -> Option<(std::rc::Rc<FnDecl>, value::ModEnv)> {
+        let key = self.bare_types.get(tname)?;
+        if let Some(def) = self.structs.get(key)
+            && let Some(decl) = def.methods.get(method)
+            && is_static_method(decl)
+        {
+            return Some((decl.clone(), def.home.clone()));
+        }
+        if let Some(def) = self.enum_defs.get(key)
+            && let Some(decl) = def.methods.get(method)
+            && is_static_method(decl)
+        {
+            return Some((decl.clone(), def.home.clone()));
+        }
+        None
     }
 
     /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
@@ -1370,6 +1402,35 @@ impl Interp {
             {
                 let def = self.variants.get(&(ekey, name.clone())).cloned().unwrap();
                 return self.build_variant(&def, name, args, span);
+            }
+            // `Type.method(args)` → STATIC (associated) method call (the "no self ⇒ static" rule). A
+            // bare, unbound struct/enum type name dotted with a static method. The variant branch ran
+            // first, so a variant always wins; the checker validated the call shape. Invoke the
+            // method body with NO receiver bound (args go straight to the params). Mirrors the VM's
+            // `Op::CallStatic`. Byte-identical output to both VM engines (parity-tested).
+            if let ExprKind::Ident(tname) = &obj.kind
+                && self.env.get_local(tname).is_none()
+                && let Some((decl, home)) = self.lookup_static_method(tname, name)
+            {
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self.call(&decl, &home, arg_vals, span);
+            }
+            // `Type[targ].method(args)` → generic-static turbofish (`Box[int].empty()`). Parses as
+            // `Field{obj: Index{obj: Ident(Type), index}, name}` (the `[..]` is followed by `.`). The
+            // type arg is RUNTIME-erased, so ignore `index` and dispatch the static method by name.
+            if let ExprKind::Index { obj: tobj, .. } = &obj.kind
+                && let ExprKind::Ident(tname) = &tobj.kind
+                && self.env.get_local(tname).is_none()
+                && let Some((decl, home)) = self.lookup_static_method(tname, name)
+            {
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self.call(&decl, &home, arg_vals, span);
             }
             return self.eval_method_call(obj, name, args, span);
         }

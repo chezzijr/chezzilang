@@ -1,0 +1,23 @@
+# rule: postfix, structDecl, enumDecl
+# Static (associated) method calls reuse the existing postfix forms (no new grammar):
+#   Type.method(args)         — DOT IDENT LPAREN ... RPAREN over a bare struct/enum type name
+#   Type[targ].method(args)   — LBRACKET subscript RBRACKET DOT IDENT LPAREN ... RPAREN (type turbofish)
+struct Rect:
+    w: int
+    h: int
+    fn square(s: int) -> Rect:
+        return Rect(s, s)
+
+struct Box[T]:
+    items: list[T]
+    fn empty() -> Box[T]:
+        return Box([])
+
+enum Color:
+    Red
+    fn from_str(s: str) -> Option[Color]:
+        return None
+
+r := Rect.square(5)
+b := Box[int].empty()
+c := Color.from_str("red")

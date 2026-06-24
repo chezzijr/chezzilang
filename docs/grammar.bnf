@@ -363,6 +363,20 @@
 # `[types](` form is parsed speculatively — only when the callee is a bare IDENT or a qualified
 # `Enum.Variant` (a `DOT IDENT` over a bare ident, for `Tree.Node[int](…)`) and the `[types](` shape
 # is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
+#
+# STATIC (associated) method calls need NO new production — they reuse the existing postfix shapes,
+# reinterpreted by the checker/compiler when the head is a bare struct/enum TYPE name:
+#   `Type.method(args)`        — `<postfix> "DOT" "IDENT" "LPAREN" <argList>? "RPAREN"` where the
+#                                 leading IDENT is a known struct/enum and `method` is a static method
+#                                 (its first param is not `self` — the "no self ⇒ static" rule). For
+#                                 an enum a same-named VARIANT wins (so variant/static names are
+#                                 disjoint, enforced at decl time).
+#   `Type[targ].method(args)`  — `<postfix> "LBRACKET" <subscript> "RBRACKET" "DOT" "IDENT" "LPAREN"
+#                                 <argList>? "RPAREN"`: the type-level turbofish for a generic static
+#                                 (`Box[int].empty()`). Indexing a bare type name is otherwise invalid,
+#                                 so the checker reinterprets the index as one type argument. v1:
+#                                 single type-arg only; the method-level form `Type.method[T](...)` is
+#                                 reserved (rejected by the checker).
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"

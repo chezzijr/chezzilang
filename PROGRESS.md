@@ -1050,6 +1050,35 @@ two-engine + `--parallel` test, no escape hatch. Cross-module via `NewTypeSigInf
 scope (follow-up): static / associated methods (`Type.method()` / `T.zero()`). Docs: `syntax.md §7b`
 (out-of-scope claim lifted → methods-only + turbofish), `spec.md` M21 row, `grammar.bnf` `<newtypeDecl>`.
 
+**✅ Static (associated) methods on struct + enum — the "no self ⇒ static" rule.** A struct/enum
+method whose first parameter is **not** `self` (or which has no parameters) is a **static** method,
+called `Type.method(args)` instead of `value.method(args)` (the Rust `fn new` ergonomic). **Additive**
+— the positional `Name(...)` ctor is unchanged; static methods unlock named/alternative ctors
+(`Rect.square(5)`) and validating ctors returning `Result`/`Option` (`Email.parse(s) ->
+Result[Email, str]`, `Color.from_str(s) -> Option[Color]`). Instance vs static are **different call
+shapes** — neither is invocable as the other (clear errors pointing at the right form). **Note — a
+behavior change:** a method like `fn getx(p: Point)` (first param not `self`) is now STATIC, not an
+instance method with a positionally-bound receiver (the old "receiver is positional, any name"
+convention is gone). Classification is a pure decision over the existing AST (`first param != "self"`)
+threaded through all three engines: a new `FnSig.is_static` (checker), a `Compiler.static_methods`
+set populated in `hoist_types`, and `is_static_method()` in interp — so the engines agree by
+construction. **Resolution** mirrors the existing `Enum.Variant(args)` qualified-ctor branch in
+`infer_call`/`compile_call`/`eval_call`: a new static-method branch alongside the variant check (for
+enums the **variant wins first**; variant/static names must be **disjoint**, a new decl-time check).
+New `Op::CallStatic{type_key, method, argc}` (separate variant, mirrored in interp) executes like the
+enum-method slow path **minus the receiver** (`do_static_call`, `arity == argc`, `push_frame_in_place`,
+generator edge via `alloc_generator`). **Generic statics** via the **type-level turbofish**
+`Box[int].empty()` (reinterprets `Field{obj: Index{Ident, idx}, name}` — indexing a bare type is
+otherwise invalid, so unambiguous; no new parser/AST). v1 limits (documented): single type-arg only
+(`Pair[K,V].empty()` doesn't parse — follow-up); a static method may not declare its own `[U]`; the
+method-level turbofish `Box.empty[int]()` is **reserved**; static methods do **not** participate in
+**protocol** conformance (instance-only); static methods on `newtype` are a follow-up (the newtype
+receiver-error site stays). **Both engines + `--parallel`** byte-identical via golden
+`examples/static_methods.chz` + `.expected` (mirrors `newtype.chz`); checker unit tests for each rule
++ the negative cases; clippy clean. Docs: `syntax.md §7a`, `spec.md` (M21 newtype-static note
+de-staled + a new "Static methods" milestone note), `grammar.bnf` (`Type.method` / `Type[t].method`
+postfix forms documented — no new production).
+
 **✅ Raw string literals — `r"…"` / `r'…'` / triple `r"""…"""` (and uppercase `R`).** A verbatim `str`:
 **NO interpolation** (braces `{`/`}` are literal — `r"{}"` prints `{}`, no `{{}}` doubling) and **NO
 escape processing** (`r"\d+"` is literal backslashes — best for regex / Windows paths / brace-heavy
