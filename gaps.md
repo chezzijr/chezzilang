@@ -85,7 +85,11 @@ Sunday=0 weekday, floor-div pre-1970). ~~data structures (heap/PQ, deque, counte
 ✅ landed as `std.collections` (2026-06-24): generic `Heap[T]` (closure comparator — `min_heap`/
 `max_heap`/`from_list`), two-stack amortized-O(1) `Deque[T]`, `Counter[T: Hashable]` (`most_common`
 stable insertion-order tie-break). **Ordered map intentionally NOT added** — the builtin `map` is
-already insertion-ordered (no wrapper needed). Still wanted: `argparse`, CSV.
+already insertion-ordered (no wrapper needed). ~~thread-safe / concurrent data structures~~ ✅ landed as
+`std.concurrency.collection` (2026-06-24): `ConcurrentMap[K,V]` + `ConcurrentCounter[K]` over
+`RwShared[map[...]]` (concurrent-read getters, single-write-lock compound-atomic RMW mutators; first
+nested std module). Queue = `Channel`, atomic scalar = `Atomic` (no `ConcurrentList`/`Set`/`Queue`).
+Still wanted: `argparse`, CSV.
 
 **Language-level:** `i64`-only (no `byte`/`u8` scalar). `bytes`/`bytearray`/str↔bytes/`list()`/`set()`/
 `map()` ctors/`Iterable[T]`+`.iter()` all SHIPPED. Remaining: no `byte`/`u8` scalar, no non-UTF-8 codecs

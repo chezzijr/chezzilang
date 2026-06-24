@@ -354,6 +354,16 @@ running the closure** (a `RwLock` guard is not reentrant), so a closure may free
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is
 simpler).
 
+**Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[map[...]]` is the right primitive
+for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
+(insert-if-absent, increment a count) must be done inside a **single** `write` lock or they race. The
+pure-Chezzi `std.concurrency.collection` module bakes the correct single-lock idiom into two generic
+structs — **`ConcurrentMap[K, V]`** and **`ConcurrentCounter[K]`** — over `RwShared[map[...]]`. A struct
+of all-sendable fields crosses the airlock as a **shared handle** (same as `RwShared` itself), so the
+wrappers preserve the cross-task sharing; `get`/`len`/`count`/`snapshot` are concurrent reads and
+`set`/`increment`/`get_or_insert` are exclusive writes (the compound ones atomic in one lock). See
+**[`docs/stdlib.md` §5 → `std.concurrency.collection`]** and `examples/concurrent_collection.chz`.
+
 ---
 
 ## 6c. `timer(ms)` — the one-shot timeout channel

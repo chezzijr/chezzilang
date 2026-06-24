@@ -546,6 +546,60 @@ load-bearing dependency on stable sort; do not swap `sort_by` to an unstable sor
 on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no move-to-end / LRU
 `popitem` primitive; out of scope).
 
+### `std.concurrency.collection` — thread-safe collections over `RwShared`
+Pure-Chezzi generic structs wrapping the `RwShared[map[...]]` runtime cell (many concurrent readers
+**or** one exclusive writer), so they are **identical across all three engines** (interp / VM /
+`--parallel`). `import std.concurrency.collection` (or `as col`). This is the **first nested std
+module** — the dotted path resolves to `std/concurrency/collection.chz` with no special-casing.
+
+**Why over raw `RwShared`:** raw `read`/`write` closures are verbose, and the **compound** mutations
+(insert-if-absent, increment a count) MUST happen inside a **single** `write` lock or they race — these
+wrappers bake the correct single-lock idiom in.
+
+**Airlock sharing (load-bearing):** a struct whose only field is an `RwShared` crosses the
+`spawn`/`parallel:` airlock as a **shared `Arc` handle, NOT a deep copy** — so a mutation a spawned
+task makes is visible to the parent after the join. (`RwShared` is sendable and shares; a struct of
+all-sendable fields is too.)
+
+**Construction (no factory):** there is **no** `new_map()`/`new_counter()` — a no-argument generic
+factory cannot bind `K`/`V` (turbofish does not propagate into the inner `RwShared({})`). Construct
+**directly** at the use site: **`ConcurrentMap(RwShared({}))`** / **`ConcurrentCounter(RwShared({}))`**;
+`K`/`V` are deferred from the empty `{}` and inferred from the first method call (same idiom as
+`Counter({})`).
+
+**Reentrancy:** like raw `RwShared`, a `read`/`write` closure must not re-enter the **same** box. Every
+wrapper method is flat (no nested locking), so user code is safe as long as it does not call a wrapper
+method from inside another wrapper's closure.
+
+**`ConcurrentMap[K: Hashable, V]`** — thread-safe map over `RwShared[map[K, V]]`. `get`/`contains`/
+`len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` take the **exclusive write
+lock**.
+
+| member | signature | concurrency / semantics |
+| --- | --- | --- |
+| `.get(key)` | `(K) -> Option[V]` | **concurrent read**. `Some(v)` / `None`. |
+| `.set(key, val)` | `(K, V) -> nil` | **exclusive write**. Insert or overwrite. |
+| `.remove(key)` | `(K) -> nil` | **exclusive write**. No-op if absent. |
+| `.contains(key)` | `(K) -> bool` | **concurrent read**. |
+| `.len()` | `() -> int` | **concurrent read**. |
+| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check, the insert, AND capturing the value to return all happen inside ONE **exclusive write** lock (the value is stashed into a captured shared box by the write closure) — so there is no second lock, and no window in which a concurrent `remove` could delete the just-inserted key. Returns the existing value, or `default` if it was absent. |
+| `.snapshot()` | `() -> map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
+
+**`ConcurrentCounter[K: Hashable]`** — thread-safe frequency table over `RwShared[map[K, int]]`.
+`count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do
+their read-modify-write inside **one** closure, so N tasks each incrementing the same key produce an
+**exact** final count (no lost updates — the classic race-free concurrent counter).
+
+| member | signature | concurrency / semantics |
+| --- | --- | --- |
+| `.increment(key)` | `(K) -> nil` | **exclusive write**, atomic RMW `+1` (created at 1 if absent). |
+| `.add(key, n)` | `(K, int) -> nil` | **exclusive write**, atomic RMW `+n` (`n` may be negative; created at `n` if absent). |
+| `.count(key)` | `(K) -> int` | **concurrent read**, **0 if absent**. |
+| `.total()` | `() -> int` | **concurrent read**, sum of all counts. |
+
+**Not provided (intentional):** a concurrent **queue** is already `Channel[T]`; an **atomic scalar** is
+already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`.
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.
