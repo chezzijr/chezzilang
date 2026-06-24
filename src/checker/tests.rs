@@ -7814,6 +7814,34 @@ fn newtype_aggregate_underlying_no_method_inherit() {
 }
 
 #[test]
+fn newtype_scalar_aggregate_cast_unwrap_ok() {
+    // A scalar (non-generic) aggregate newtype crosses the boundary the same explicit way a scalar
+    // newtype does: the matching aggregate cast builtin unwraps it. `list(ns)` for `Names = list[str]`
+    // yields `list[str]` (mirrors `int(uid)` for `UserId = int`) — distinct type, explicit cast.
+    ok(
+        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: list[str] = list(ns)\n    print(len(xs))\nmain()\n",
+    );
+    // set / map underlyings unwrap via set() / map() likewise (the annotated binding is the assertion
+    // that the unwrap yields the matching aggregate type).
+    ok(
+        "newtype Tags = set[str]\nfn main():\n    t := Tags({\"x\"})\n    s: set[str] = set(t)\n    print(s)\nmain()\n",
+    );
+    ok(
+        "newtype Counts = map[str, int]\nfn main():\n    c := Counts({\"a\": 1})\n    m: map[str, int] = map(c)\n    print(m)\nmain()\n",
+    );
+}
+
+#[test]
+fn newtype_scalar_aggregate_cast_unwrap_wrong_target_rejected() {
+    // The unwrap must match the underlying aggregate: `set(ns)` on a list-backed newtype is rejected
+    // (no cross-aggregate coercion) — the explicit cast still respects the underlying's shape.
+    rejects(
+        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\"])\n    s := set(ns)\n    print(s)\nmain()\n",
+        "set",
+    );
+}
+
+#[test]
 fn raw_string_is_str_type() {
     // A raw string is plain `str` everywhere a normal string is — annotating it `str` is clean.
     ok("fn main():\n    s: str = r\"\\d+\"\n    print(s)\nmain()\n");

@@ -809,8 +809,10 @@ n: int = int(uid)      # unwrap via the cast builtin → 10
 ```
 
 Crossing the boundary is always **explicit** — either **construct** (`UserId(10)`) or **cast-unwrap**
-via the existing scalar cast builtins: `int(uid)` / `float(m)` return the inner value (and for a
-`newtype N = str`, `str(n)` unwraps the inner string). There is no `.value` field and no auto-deref.
+via the matching cast builtin: `int(uid)` / `float(m)` return the inner value (and for a
+`newtype N = str`, `str(n)` unwraps the inner string; for an aggregate underlying the matching
+aggregate builtin unwraps too — see *Aggregate underlyings* below). There is no `.value` field and no
+auto-deref.
 From another module the constructor takes the **qualified path** — `geo.UserId(10)`, exactly like a
 qualified enum variant.
 
@@ -841,8 +843,10 @@ print(float(Meters(1.0) + Meters(2.0)))  # 3.0  (same-type +)
 **Aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names = list[str]`), but it
 gets **identity + construct + unwrap + its own methods only** — it does NOT auto-inherit the
 underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not resolve. Reach the
-underlying through an explicit method or an unwrap. (Operation-forwarding for aggregates and `derive`
-remain out of scope.)
+underlying through an explicit method or the **unwrap cast** — the matching aggregate builtin, exactly
+as `int(uid)` unwraps a scalar newtype: `list(names)` returns a copy of the inner `list[str]`
+(likewise `set(..)` / `map(..)` for a set/map underlying). (Operation-forwarding for aggregates and
+`derive` remain out of scope.)
 
 **Generic newtypes.** A `newtype` may carry generic type parameters (`newtype Stack[T] = list[T]`),
 the Go defined-type model extended to generics — the underlying and the method signatures may
