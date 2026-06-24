@@ -1,0 +1,180 @@
+# examples/collections_test.chz — TDD table for std.collections (pure-Chezzi Heap/Deque/Counter).
+# Run: `cargo run -- test examples/collections_test.chz`. Three engines (interp/VM/--parallel)
+# agree automatically (pure Chezzi). Empty-removal/peek = Option[T] (matches builtin list.pop()).
+
+import std.collections as col
+
+# ---- Heap ----
+
+test fn t_heap_min():
+    h := col.min_heap()
+    for x in [5, 3, 8, 1, 9, 2, 7]:
+        h.push(x)
+    assert h.len() == 7
+    assert h.is_empty() == false
+    match h.peek():
+        Some(v): assert v == 1
+        None: assert false, "peek empty"
+    out := []
+    while true:
+        match h.pop():
+            Some(v): out.push(v)
+            None: break
+    assert out == [1, 2, 3, 5, 7, 8, 9]
+    assert h.is_empty() == true
+
+test fn t_heap_max_and_reverse():
+    g := col.max_heap()
+    for x in [5, 3, 8, 1, 9, 2, 7]:
+        g.push(x)
+    out := []
+    while true:
+        match g.pop():
+            Some(v): out.push(v)
+            None: break
+    assert out == [9, 8, 7, 5, 3, 2, 1]
+    # raw custom comparator path (reverse == max-heap)
+    r := col.Heap([], fn(a: int, b: int) -> bool: a > b)
+    for x in [2, 5, 1]:
+        r.push(x)
+    match r.pop():
+        Some(v): assert v == 5
+        None: assert false, "empty"
+
+test fn t_heap_empty():
+    h := col.min_heap()
+    match h.pop():
+        Some(_): assert false, "pop empty should be None"
+        None: assert true
+    match h.peek():
+        Some(_): assert false, "peek empty should be None"
+        None: assert true
+    assert h.is_empty() == true
+    assert h.len() == 0
+
+test fn t_heap_from_list():
+    h := col.from_list([3, 1, 2, 5, 4], fn(a: int, b: int) -> bool: a < b)
+    out := []
+    while true:
+        match h.pop():
+            Some(v): out.push(v)
+            None: break
+    assert out == [1, 2, 3, 4, 5]
+
+# ---- Deque ----
+
+test fn t_deque_fifo():
+    d := col.Deque([], [])
+    d.push_back(1)
+    d.push_back(2)
+    d.push_back(3)
+    assert d.len() == 3
+    out := []
+    while true:
+        match d.pop_front():
+            Some(v): out.push(v)
+            None: break
+    assert out == [1, 2, 3]
+
+test fn t_deque_lifo():
+    d := col.Deque([], [])
+    d.push_back(1)
+    d.push_back(2)
+    d.push_back(3)
+    out := []
+    while true:
+        match d.pop_back():
+            Some(v): out.push(v)
+            None: break
+    assert out == [3, 2, 1]
+
+test fn t_deque_both_ends():
+    d := col.Deque([], [])
+    d.push_back(1)
+    d.push_back(2)
+    d.push_front(0)
+    # peek across the empty-near-stack boundary
+    match d.peek_front():
+        Some(v): assert v == 0
+        None: assert false, "peek_front empty"
+    match d.peek_back():
+        Some(v): assert v == 2
+        None: assert false, "peek_back empty"
+    out := []
+    while true:
+        match d.pop_front():
+            Some(v): out.push(v)
+            None: break
+    assert out == [0, 1, 2]
+
+test fn t_deque_interleaved():
+    d := col.Deque([], [])
+    d.push_back(2)
+    d.push_back(3)
+    d.push_front(1)
+    d.push_front(0)
+    # drain front entirely so pop_back forces a rebalance from front -> back
+    assert d.pop_front() == Some(0)
+    assert d.pop_front() == Some(1)
+    # now front stack is empty; pop_back must drain the front-derived items correctly
+    assert d.pop_back() == Some(3)
+    assert d.pop_front() == Some(2)
+    assert d.is_empty() == true
+
+test fn t_deque_empty():
+    d := col.Deque([], [])
+    match d.pop_front():
+        Some(_): assert false
+        None: assert true
+    match d.pop_back():
+        Some(_): assert false
+        None: assert true
+    match d.peek_front():
+        Some(_): assert false
+        None: assert true
+    match d.peek_back():
+        Some(_): assert false
+        None: assert true
+    assert d.is_empty() == true
+    assert d.len() == 0
+
+# ---- Counter ----
+
+test fn t_counter_counts():
+    c := col.Counter({})
+    for x in ["a", "b", "a", "c", "a", "b"]:
+        c.add(x)
+    assert c.count("a") == 3
+    assert c.count("b") == 2
+    assert c.count("c") == 1
+    assert c.count("missing") == 0
+
+test fn t_counter_add_n_and_total():
+    c := col.Counter({})
+    c.add_n("x", 5)
+    c.add_n("y", 3)
+    c.add("x")
+    assert c.count("x") == 6
+    assert c.count("y") == 3
+    assert c.total() == 9
+
+test fn t_counter_most_common_ties():
+    c := col.Counter({})
+    # insertion order a,b,c,d ; counts a=2,b=2,d=2,c=1 -> ties keep insertion order
+    for x in ["a", "b", "c", "d", "a", "b", "d"]:
+        c.add(x)
+    assert c.most_common(3) == [("a", 2), ("b", 2), ("d", 2)]
+    # k clamp: k > len -> whole, sorted desc with stable ties
+    assert c.most_common(99) == [("a", 2), ("b", 2), ("d", 2), ("c", 1)]
+    # k == 0 -> empty
+    assert c.most_common(0) == []
+    # k < 0 -> empty
+    assert c.most_common(-5) == []
+
+test fn t_counter_most_common_no_overflow():
+    # counts spanning > i64 must NOT trap most_common (compare, not subtract): add_n takes
+    # arbitrary/negative n, so MAX vs negative is a supported state.
+    c := col.Counter({})
+    c.add_n("hi", 9223372036854775807)   # i64::MAX
+    c.add_n("lo", -3)
+    assert c.most_common(2) == [("hi", 9223372036854775807), ("lo", -3)]

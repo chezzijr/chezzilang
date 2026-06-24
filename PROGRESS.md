@@ -35,6 +35,27 @@ Pure CPU → NOT `is_blocking`. Golden `examples/encoding.chz` extended (sorted-
 cases), 3-engine parity verified. Docs: `docs/stdlib.md` (§std.request timeout note + §std.encoding
 query_encode), `gaps.md` (std.request nit struck → ✅ resolved). 2602 tests + conformance green, clippy clean.
 
+**✅ stdlib — `std.collections` pure-Chezzi generic data structures (gaps.md "data structures
+(heap/PQ, deque, counter, ordered map)") (2026-06-24).** New pure-Chezzi module `std/collections.chz`
+(no native Rust, no seam — like `std/datetime.chz`/`std/path.chz`): three generic structs over `T`
+built on the builtin `list`/`map`, so identical across all three engines. **`Heap[T]`** — binary
+heap over a backing `list[T]` with a comparator **closure field** `less: fn(T,T)->bool` (verified a
+generic struct can hold + call a fn-typed field); contract `less(a,b)==true ⇒ a pops first`, so
+`a<b`=min-heap, `a>b`=max-heap (any `T`, no `Comparable` needed); `min_heap()`/`max_heap()` int
+factories, `from_list(xs, less)` heapify (push-loop O(n log n)); push/pop O(log n), peek/len/is_empty
+O(1). **`Deque[T]`** — **two-stack** amortized-O(1) both ends (front/back lists, drain-far-on-empty);
+construct `Deque([], [])` (no `deque()` factory — a no-arg generic factory can't bind `T`).
+**`Counter[T: Hashable]`** — `map[T,int]` frequency table; `add`/`add_n`/`count` (0 if absent)/`total`/
+`most_common(k)` (top-k by descending count, **stable insertion-order tie-break** via `map.keys()`
+order + stable `sort_by`); construct `Counter({})`. **Empty semantics:** every removal/peek returns
+`Option[T]` (`None`, never a fault — matches `list.pop()`). **Ordered map intentionally omitted** —
+builtin `map` is already insertion-ordered (documented note only). TDD: `examples/collections_test.chz`
+(12 `test fn`s — heap min/max/reverse/empty/from_list, deque fifo/lifo/both-ends/interleaved/empty,
+counter counts/total/most_common+ties+k-clamp) RED→GREEN; golden `examples/collections.chz` +
+`.expected` + `#[test] golden_collections_via_run_file` (VM==interp via `assert_file_parity`),
+3-engine parity spot-checked. Docs: `docs/stdlib.md` (new `### std.collections` in §5), `gaps.md`
+(data-structures struck → ✅ landed; ordered-map note). cargo test + conformance green, clippy clean.
+
 **✅ stdlib — `std.datetime` pure-Chezzi civil-calendar date/time (gaps.md "duration/date
 decomposition") (2026-06-24).** New pure-Chezzi module `std/datetime.chz` (no native Rust, no seam —
 like `std/path.chz`) layered on the native `std.time` clock (`time.now()` only); everything else is

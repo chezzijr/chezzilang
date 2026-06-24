@@ -1,0 +1,224 @@
+# std.collections — pure-Chezzi single-threaded generic data structures.
+#
+# A pure-Chezzi dogfood module: NO native Rust, NO seam. Three generic structs over T built on the
+# builtin `list`/`map`, so they are identical across all three engines (interp / VM / --parallel).
+#
+# ===== EMPTY SEMANTICS (load-bearing, consistent across all three types) =====
+# Every removal/peek returns Option[T] — Heap.pop/peek, Deque.pop_front/pop_back/peek_front/peek_back.
+# An empty container yields `None` (never a fault), matching the builtin `list.pop() -> Option[T]`.
+#
+# ===== ORDERED MAP: intentionally NOT provided =====
+# The builtin `map` is ALREADY insertion-ordered (map.keys()/values()/`for k,v in m` all iterate in
+# insertion order; std.json's round-trip relies on it). So there is no ordered-map wrapper here — use
+# the builtin `map` directly. (No move-to-end/popitem LRU primitive is provided either; out of scope.)
+#
+# See docs/stdlib.md §5 for the full contract.
+
+# ============================================================================
+# Heap[T] — a binary heap over a backing `list[T]` with a comparator CLOSURE.
+# ============================================================================
+#
+# COMPARATOR CONTRACT (read this — it is the footgun): `less(a, b) == true` means `a` is MORE extreme
+# than `b`, so `a` is popped FIRST. Pass `fn(a,b): a < b` for a MIN-heap (smallest pops first), and
+# `fn(a,b): a > b` for a MAX-heap. A "reverse" heap is just the flipped comparator. This generalises
+# to any T: floats, custom priorities, (priority, item) tuples — no Comparable impl required.
+#
+# COMPLEXITY: push O(log n) (sift-up), pop O(log n) (sift-down), peek/len/is_empty O(1).
+struct Heap[T]:
+    data: list[T]
+    less: fn(T, T) -> bool
+
+    # Insert `x`, restoring the heap invariant by sifting it up. O(log n).
+    fn push(self, x: T):
+        self.data.push(x)
+        i := self.data.len() - 1
+        while i > 0:
+            parent := (i - 1) / 2
+            if self.less(self.data[i], self.data[parent]):
+                tmp := self.data[i]
+                self.data[i] = self.data[parent]
+                self.data[parent] = tmp
+                i = parent
+            else:
+                break
+
+    # Remove and return the extremum (`Some(top)`), or `None` if empty. O(log n). Sift-down.
+    fn pop(self) -> Option[T]:
+        n := self.data.len()
+        if n == 0:
+            return None
+        top := self.data[0]
+        last := self.data[n - 1]
+        self.data.pop()
+        if n > 1:
+            self.data[0] = last
+            i := 0
+            m := self.data.len()
+            while true:
+                l := 2 * i + 1
+                r := 2 * i + 2
+                best := i
+                if l < m and self.less(self.data[l], self.data[best]):
+                    best = l
+                if r < m and self.less(self.data[r], self.data[best]):
+                    best = r
+                if best == i:
+                    break
+                tmp := self.data[i]
+                self.data[i] = self.data[best]
+                self.data[best] = tmp
+                i = best
+        return Some(top)
+
+    # The extremum without removing it (`Some(top)`), or `None` if empty. O(1), non-mutating.
+    fn peek(self) -> Option[T]:
+        if self.data.len() == 0:
+            return None
+        return Some(self.data[0])
+
+    # Number of elements. O(1).
+    fn len(self) -> int:
+        return self.data.len()
+
+    # Is the heap empty? O(1).
+    fn is_empty(self) -> bool:
+        return self.data.len() == 0
+
+# A MIN-heap of ints (smallest pops first). Ergonomic factory over the `a < b` comparator.
+fn min_heap() -> Heap[int]:
+    return Heap([], fn(a: int, b: int) -> bool: a < b)
+
+# A MAX-heap of ints (largest pops first). Ergonomic factory over the `a > b` comparator.
+fn max_heap() -> Heap[int]:
+    return Heap([], fn(a: int, b: int) -> bool: a > b)
+
+# Heapify a list into a fresh Heap using `less` (see the comparator contract above). Pushes each
+# element, so this is O(n log n), NOT the bottom-up O(n) build. `xs` is left untouched.
+fn from_list[T](xs: list[T], less: fn(T, T) -> bool) -> Heap[T]:
+    h := Heap([], less)
+    for x in xs:
+        h.push(x)
+    return h
+
+# ============================================================================
+# Deque[T] — double-ended queue, amortized O(1) at BOTH ends (two-stack design).
+# ============================================================================
+#
+# Two backing stacks: `front` (head = front[-1]) and `back` (tail = back[-1]). push_front/push_back
+# push onto their stack; a pop whose near stack is empty first DRAINS the far stack into it (reversing
+# it once). Each element is moved between stacks at most once, so the ends are AMORTIZED O(1) (a single
+# pop after a long run of opposite-end pushes is O(n), but the total over any sequence is O(1)/op).
+# peek reads the head/tail without rebalancing, so peek is worst-case O(1).
+#
+# COMPLEXITY: push_front/push_back O(1); pop_front/pop_back amortized O(1); peek_*/len/is_empty O(1).
+struct Deque[T]:
+    front: list[T]
+    back: list[T]
+
+    # Push `x` onto the front (it becomes the new head). O(1).
+    fn push_front(self, x: T):
+        self.front.push(x)
+
+    # Push `x` onto the back (it becomes the new tail). O(1).
+    fn push_back(self, x: T):
+        self.back.push(x)
+
+    # Remove and return the head (`Some`), or `None` if empty. Amortized O(1).
+    fn pop_front(self) -> Option[T]:
+        if self.front.len() == 0:
+            while self.back.len() > 0:
+                match self.back.pop():
+                    Some(v): self.front.push(v)
+                    None: break
+        return self.front.pop()
+
+    # Remove and return the tail (`Some`), or `None` if empty. Amortized O(1).
+    fn pop_back(self) -> Option[T]:
+        if self.back.len() == 0:
+            while self.front.len() > 0:
+                match self.front.pop():
+                    Some(v): self.back.push(v)
+                    None: break
+        return self.back.pop()
+
+    # The head without removing it (`Some`), or `None` if empty. O(1). When the near (`front`) stack
+    # is empty the head lives at the FAR stack's index 0.
+    fn peek_front(self) -> Option[T]:
+        if self.front.len() > 0:
+            return Some(self.front[self.front.len() - 1])
+        if self.back.len() > 0:
+            return Some(self.back[0])
+        return None
+
+    # The tail without removing it (`Some`), or `None` if empty. O(1). When the near (`back`) stack
+    # is empty the tail lives at the FAR stack's index 0.
+    fn peek_back(self) -> Option[T]:
+        if self.back.len() > 0:
+            return Some(self.back[self.back.len() - 1])
+        if self.front.len() > 0:
+            return Some(self.front[0])
+        return None
+
+    # Number of elements. O(1).
+    fn len(self) -> int:
+        return self.front.len() + self.back.len()
+
+    # Is the deque empty? O(1).
+    fn is_empty(self) -> bool:
+        return self.front.len() + self.back.len() == 0
+
+# NOTE: there is no `deque()` factory — a no-argument generic factory cannot bind T (it would return
+# an uninstantiable `Deque[T]` that will not unify with a `Deque[int]` annotation). Construct directly:
+# `Deque([], [])`; T is inferred from the first `push_front`/`push_back` (the empty backing lists
+# recover their element type from use).
+
+# ============================================================================
+# Counter[T] — a frequency table over the builtin `map[T, int]` (T must be Hashable).
+# ============================================================================
+#
+# COMPLEXITY: add/add_n/count O(1); total O(n); most_common O(n log n) (stable sort).
+struct Counter[T: Hashable]:
+    data: map[T, int]
+
+    # Increment the count of `x` by 1. O(1).
+    fn add(self, x: T):
+        self.add_n(x, 1)
+
+    # Increment the count of `x` by `n` (may be negative; the entry is created if absent). O(1).
+    fn add_n(self, x: T, n: int):
+        match self.data.get(x):
+            Some(c): self.data[x] = c + n
+            None: self.data[x] = n
+
+    # The count of `x`, or 0 if `x` was never added. O(1).
+    fn count(self, x: T) -> int:
+        match self.data.get(x):
+            Some(c): return c
+            None: return 0
+
+    # The sum of all counts. O(n).
+    fn total(self) -> int:
+        t := 0
+        for key in self.data.keys():
+            t = t + self.data[key]
+        return t
+
+    # The top `k` (item, count) pairs by DESCENDING count. TIE-BREAK: equal counts keep INSERTION
+    # ORDER (map.keys() yields insertion order AND the list sort is STABLE). `k` is clamped to
+    # [0, len]: k <= 0 -> [], k >= len -> all. O(n log n).
+    fn most_common(self, k: int) -> list[(T, int)]:
+        pairs := []
+        for key in self.data.keys():
+            pairs.push((key, self.data[key]))
+        # Compare (don't subtract): `add_n` accepts arbitrary/negative counts, and `b.1 - a.1`
+        # would trap with "integer overflow in Sub" when the two span > i64. DESCENDING by count.
+        pairs.sort_by(fn(a: (T, int), b: (T, int)) -> int: if a.1 > b.1: -1 else if a.1 < b.1: 1 else: 0)
+        kk := k
+        if kk < 0:
+            kk = 0
+        if kk > pairs.len():
+            kk = pairs.len()
+        return pairs[0:kk]
+
+# NOTE: there is no `counter()` factory — same reason as Deque: a no-argument generic factory cannot
+# bind T. Construct directly: `Counter({})`; T is inferred from the first `add`/`add_n`/`count` call.

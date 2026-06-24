@@ -81,8 +81,11 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
 **Pure-Chezzi `std/*.chz` now (dogfood):** ~~path ops (`join`/`basename`/`dirname`/`ext`/`normalize`)~~
 ✅ landed as `std.path` (2026-06-24). ~~duration/date decomposition~~ ✅ landed as `std.datetime`
 (2026-06-24, civil-calendar `from_epoch`/`to_epoch`/`now`/formatters/duration/leap, UTC-only,
-Sunday=0 weekday, floor-div pre-1970). Still wanted: `argparse`, CSV, data structures (heap/PQ,
-deque, counter, ordered map).
+Sunday=0 weekday, floor-div pre-1970). ~~data structures (heap/PQ, deque, counter, ordered map)~~
+✅ landed as `std.collections` (2026-06-24): generic `Heap[T]` (closure comparator — `min_heap`/
+`max_heap`/`from_list`), two-stack amortized-O(1) `Deque[T]`, `Counter[T: Hashable]` (`most_common`
+stable insertion-order tie-break). **Ordered map intentionally NOT added** — the builtin `map` is
+already insertion-ordered (no wrapper needed). Still wanted: `argparse`, CSV.
 
 **Language-level:** `i64`-only (no `byte`/`u8` scalar). `bytes`/`bytearray`/str↔bytes/`list()`/`set()`/
 `map()` ctors/`Iterable[T]`+`.iter()` all SHIPPED. Remaining: no `byte`/`u8` scalar, no non-UTF-8 codecs
