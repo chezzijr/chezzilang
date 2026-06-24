@@ -152,7 +152,7 @@ snapshot + position on the receiver), exactly like a `list`. A frame-holding **g
 returned by calling a generator `fn`) shares the same `Iterator[T]` existential but is **not**
 sendable — its parked frames reference the producing heap. The checker cannot distinguish the two
 (both are `Iterator[T]`), so the runtime is the enforcement point: a generator crossing **any** task
-airlock — passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`Atomic`, or **merely being
+airlock — passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`RwShared`/`Atomic`, or **merely being
 a module global while a nursery runs** (the M:N engine snapshots all module globals) — raises a
 **graceful, catchable** runtime error (`a generator cannot be sent across tasks`) with the real
 spawn/nursery-site location, **never** a panic. There is **no** compile-time

@@ -237,6 +237,7 @@ fn deep_clone(v: &Value) -> Value {
         // An `Executor` likewise: the handle is copied so every task reaches the one work queue.
         | Value::Channel(_)
         | Value::Shared(_)
+        | Value::RwShared(_)
         | Value::Atomic(_)
         // An opaque `ptr` handle crosses by value: clone the `usize` address (a `Send` plain scalar,
         // never deep-copied — there is nothing behind the address that Chezzi owns).
@@ -1469,6 +1470,23 @@ impl Interp {
                     init,
                 ))));
             }
+            // `RwShared(v)` — a fresh cross-task read-write box owning a copy of `v` (value-first, like
+            // `Shared`). The single-threaded oracle stores it identically to `Shared`.
+            if name == "RwShared" {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "RwShared(v) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
+                        span,
+                    });
+                }
+                let init = deep_clone(&arg_vals[0]);
+                return Ok(Value::RwShared(std::rc::Rc::new(std::cell::RefCell::new(
+                    init,
+                ))));
+            }
             // `Atomic(v)` — a fresh cross-task atomic box owning a copy of `v` (value-first, like `Shared`).
             if name == "Atomic" {
                 if arg_vals.len() != 1 {
@@ -2496,6 +2514,10 @@ impl Interp {
         if let Value::Shared(cell) = &receiver {
             let cell = std::rc::Rc::clone(cell);
             return self.eval_shared_method(&cell, method, arg_vals, span);
+        }
+        if let Value::RwShared(cell) = &receiver {
+            let cell = std::rc::Rc::clone(cell);
+            return self.eval_rwshared_method(&cell, method, arg_vals, span);
         }
         if let Value::Atomic(cell) = &receiver {
             let cell = std::rc::Rc::clone(cell);
@@ -3903,6 +3925,61 @@ impl Interp {
             }
             _ => Err(RuntimeError {
                 message: format!("type Shared has no method '{method}'"),
+                span,
+            }),
+        }
+    }
+
+    /// `RwShared[T]` methods. The box owns its value (copied in/out, like `Shared`). `get`/`read`
+    /// copy the value out; `read(f)` then runs `f` against the snapshot and returns its result with
+    /// NO write-back. `set` copies a new value in; `write(f)` is read-modify-write (read the current
+    /// value out, drop the borrow before calling `f` so the closure may re-enter, then store the
+    /// result). Under the sequential executor a single thread serialises every op, so the
+    /// read/write-lock distinction degenerates to one-at-a-time — no lock is needed. Mirrors
+    /// `vm::rwshared_method`.
+    fn eval_rwshared_method(
+        &mut self,
+        cell: &std::rc::Rc<std::cell::RefCell<Value>>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "get" => {
+                builtins::arity("get", &args, 0, span)?;
+                let cur = cell.borrow();
+                Ok(deep_clone(&cur))
+            }
+            "set" => {
+                builtins::arity("set", &args, 1, span)?;
+                *cell.borrow_mut() = deep_clone(&args[0]);
+                Ok(Value::Nil)
+            }
+            "read" => {
+                builtins::arity("read", &args, 1, span)?;
+                let f = args.into_iter().next().expect("arity checked 1 arg");
+                // Read the value out and release the borrow *before* calling `f` (the closure may
+                // re-enter this same box). `read` returns `f`'s result — no write-back.
+                let cur = {
+                    let g = cell.borrow();
+                    deep_clone(&g)
+                };
+                self.call_value(f, vec![cur], span)
+            }
+            "write" => {
+                builtins::arity("write", &args, 1, span)?;
+                let f = args.into_iter().next().expect("arity checked 1 arg");
+                // Read-modify-write: read out, drop the borrow before `f` (re-entry safe), store result.
+                let cur = {
+                    let g = cell.borrow();
+                    deep_clone(&g)
+                };
+                let next = self.call_value(f, vec![cur], span)?;
+                *cell.borrow_mut() = deep_clone(&next);
+                Ok(Value::Nil)
+            }
+            _ => Err(RuntimeError {
+                message: format!("type RwShared has no method '{method}'"),
                 span,
             }),
         }
@@ -9215,6 +9292,20 @@ b := Buf([10, 20, 30])
     fn shared_update_read_modify_write() {
         let src = "fn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
         assert_eq!(run(src), "21\n");
+    }
+
+    #[test]
+    fn rwshared_get_set_read_write_round_trip() {
+        // Mirrors `vm::vm_rwshared_get_set_read_write_roundtrip` — byte-identical oracle output.
+        let src = "fn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
+        assert_eq!(run(src), "10\n21\n40\n");
+    }
+
+    #[test]
+    fn rwshared_read_no_writeback() {
+        // `read` returns the closure's result and leaves the box unchanged (no write-back).
+        let src = "fn main():\n    r := RwShared(5)\n    print(r.read(fn(x): str(x * 3)))\n    print(r.get())\nmain()\n";
+        assert_eq!(run(src), "15\n5\n");
     }
 
     /// C5 concurrency golden: the `Executor` escape hatch — `submit` enqueues detached work that

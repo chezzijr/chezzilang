@@ -1,0 +1,41 @@
+# `RwShared[T]` golden — the read-write counterpart of `Shared[T]`: MANY concurrent readers OR one
+# exclusive writer. Deterministic-by-construction on every engine: each task `write`s a DISTINCT key
+# into the one shared `RwShared[map]` (under the exclusive write lock), the nursery joins, then the
+# parent `read`s the whole map back. The output is order-independent — no reader observes a mid-write,
+# because every read happens after the join. Reach for `RwShared` over `Shared` when reads dominate.
+# Run with: chezzi run examples/rwshared.chz  (also --serial / --parallel — byte-identical)
+
+fn put(r: RwShared[map[str, int]], k: str, v: int):
+    # exclusive write guard: read-modify-write the map, inserting this task's own key
+    r.write(fn(m): insert(m, k, v))
+
+fn insert(m: map[str, int], k: str, v: int) -> map[str, int]:
+    m[k] = v
+    return m
+
+fn total(r: RwShared[map[str, int]]) -> int:
+    # SHARED read guard: snapshot the map and sum its values, returning the computed result
+    return r.read(fn(m): sum_values(m))
+
+fn sum_values(m: map[str, int]) -> int:
+    s := 0
+    for k in m.keys():
+        s = s + m[k]
+    return s
+
+fn main():
+    r := RwShared({"seed": 0})
+    parallel:
+        spawn put(r, "a", 1)
+        spawn put(r, "b", 2)
+        spawn put(r, "c", 3)
+        spawn put(r, "d", 4)
+    # after the join: every distinct key landed, sum is order-independent (0 + 1 + 2 + 3 + 4)
+    print(total(r))                 # 10
+
+    # concurrent readers after the writers joined: many `read` guards, all see the same snapshot
+    print(r.read(fn(m): m.len()))   # 5 keys: seed, a, b, c, d
+    r.set({"x": 7})                 # exclusive replace
+    print(total(r))                 # 7
+
+main()

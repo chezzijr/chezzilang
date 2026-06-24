@@ -1637,7 +1637,7 @@ fn fetch_all(urls: list[str]):
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
 - **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
-  types (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/a `std.cancel` `Token`)
+  types (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
   cross — not closures, native handles, or `Ref`.
 
 ## 12. Imports & modules  (M4.5)
@@ -1909,7 +1909,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
 resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
 rejects the collision (*'…' is a builtin/reserved name*).
 
