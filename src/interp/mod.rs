@@ -209,6 +209,17 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
     }
 }
 
+/// Cast-unwrap a generic aggregate newtype to its inner value for `list(s)`/`set(s)`/`map(s)`: a
+/// `Value::NewType` (e.g. a `Stack[T] = list[T]`) peels to the wrapped collection so the cast can
+/// iterate it. A non-newtype value passes through unchanged. (Type args are erased at runtime; the
+/// checker has already verified the underlying is the matching aggregate.)
+fn newtype_unwrap_value(v: Value) -> Value {
+    match v {
+        Value::NewType { inner, .. } => *inner,
+        other => other,
+    }
+}
+
 /// Deep-copy a value across a task airlock (`spawn`): data — scalars, `str`, collections, structs,
 /// enums — is recursively cloned into fresh `Rc<RefCell<…>>` cells so a spawned task can't share
 /// mutable state with the spawner. Callables and modules pass by handle (a task's entry point, not
@@ -3258,9 +3269,10 @@ impl Interp {
         let src: Vec<Value> = match args.into_iter().next() {
             // The checker guarantees ≤1 arg; `set()` (0 args) is the empty set.
             None => Vec::new(),
-            // Drain any for-iterable into single-element rows, then flatten to elements.
+            // Drain any for-iterable into single-element rows, then flatten to elements. A generic
+            // aggregate newtype (`newtype S[T] = set[T]`) cast-unwraps to its inner set first.
             Some(it) => self
-                .drain_value_to_rows(it, 1, span)?
+                .drain_value_to_rows(newtype_unwrap_value(it), 1, span)?
                 .into_iter()
                 .flatten()
                 .collect(),
@@ -3288,6 +3300,10 @@ impl Interp {
                 .to_string(),
             span,
         })?;
+        // A generic aggregate newtype (`Stack[T] = list[T]`) cast-unwraps to its inner list — the
+        // checker verified the underlying is a list, so just peel the wrapper (the type args are
+        // erased at runtime). The inner is itself a list, copied like any `list(xs)`.
+        let it = newtype_unwrap_value(it);
         let items: Vec<Value> = self
             .drain_value_to_rows(it, 1, span)?
             .into_iter()
@@ -3307,6 +3323,14 @@ impl Interp {
                 .to_string(),
             span,
         })?;
+        // A generic aggregate newtype (`Tally[T] = map[T, int]`) cast-unwraps to its inner map. When
+        // that inner is a map, the cast yields it DIRECTLY (a copy) — iterating a map gives keys, not
+        // the 2-tuples the general path expects.
+        let it = newtype_unwrap_value(it);
+        if let Value::Map(inner) = &it {
+            let copy = inner.borrow().clone();
+            return Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(copy))));
+        }
         let rows = self.drain_value_to_rows(it, 1, span)?;
         let mut out = MapData::default();
         for row in rows {

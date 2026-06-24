@@ -1027,8 +1027,28 @@ parity** (VM/`--serial`/interp byte-identical) via `examples/newtype.chz` + `new
 new grammar `<newtypeDecl>` + `tests/corpus/accept/newtype.chz` + `cargo test conformance` green; clippy
 clean; ~2347 tests pass. **v1 limits (documented):** an aggregate underlying (`newtype Names =
 list[str]`) gets identity+construct+unwrap+own-methods ONLY — no `.push`/index/iterate forwarding;
-no generic `newtype Box[T]`; no `derive`. Docs: `syntax.md §7`, `spec.md` (M21 row + enum-methods note
-de-staled), `grammar.bnf`.
+no `derive`. Docs: `syntax.md §7`, `spec.md` (M21 row + enum-methods note de-staled), `grammar.bnf`.
+
+**✅ M21+ — Generic newtypes (`newtype Stack[T] = list[T]`).** Type parameters on a `newtype`, the Go
+defined-type model extended to generics — reuses the struct/enum generic plumbing end-to-end:
+`type_params` on `StmtKind::NewType` (`parse_type_params`, the v1 hard-reject removed), a
+`newtype_type_params` map mirroring `enum_type_params`, and `Ty::NewType(key, Vec<Ty>)` carrying the
+instantiated args like `Ty::Enum`. The underlying + method signatures resolve `T` (hoist/body passes
+`enter_type_params`); method dispatch substitutes the value's type args into the sig (`Stack[int].top()`
+⇒ `Option[int]`); ctor infers args by unifying the underlying against the arg (`Stack([1,2])` ⇒
+`Stack[int]`) with **turbofish** for the inference gap (`Stack[int]([])` — the empty `[]` can't bind
+`T`, the documented `ConcurrentMap(RwShared({}))` case). **Methods-only:** a type-parameterized newtype
+gets **no native operator auto-flow** — even `newtype Box[T] = T` over a numeric `T` — gated at every
+auto-flow site (`Div`/`Mod`, `op_overload_result`, `ordering_allowed`, the `satisfies` intrinsic arm)
+by a new `newtype_is_generic`; scalar `UserId=int`/`Meters=float` auto-flow is unchanged. **Cast-unwrap
+propagates the instantiation** (the one genuinely new bit): `list(s)` for `s: Stack[int]` ⇒ `list[int]`
+(via `newtype_unwrap_target` + a runtime peel in `builtin_list`/`set`/`map`, both engines — a
+map-over-map yields the inner map directly). Runtime is **type-erased** (`Obj::NewType`/`Value::NewType`
+carry no args), so generic instantiation / dispatch / hash / str are byte-identical across interp,
+cooperative VM, and `--parallel` — golden `examples/newtype_generic.chz` + `.expected` is a standard
+two-engine + `--parallel` test, no escape hatch. Cross-module via `NewTypeSigInfo.type_params`. Out of
+scope (follow-up): static / associated methods (`Type.method()` / `T.zero()`). Docs: `syntax.md §7b`
+(out-of-scope claim lifted → methods-only + turbofish), `spec.md` M21 row, `grammar.bnf` `<newtypeDecl>`.
 
 **✅ Raw string literals — `r"…"` / `r'…'` / triple `r"""…"""` (and uppercase `R`).** A verbatim `str`:
 **NO interpolation** (braces `{`/`}` are literal — `r"{}"` prints `{}`, no `{{}}` doubling) and **NO

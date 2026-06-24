@@ -1,0 +1,67 @@
+# Generic newtype (M21) — type parameters on a `newtype`, the Go defined-type model with generics.
+# A type-parameterized newtype is METHODS-ONLY: it gets NO native operator auto-flow (even a
+# `newtype Box[T] = T` over a numeric T) — operators come only from its own methods. Its type args
+# ride on the value's type, so a cast-unwrap (`list(s)`) recovers the instantiated underlying.
+
+# A generic stack over `list[T]`, with methods that reference the type param `T`.
+newtype Stack[T] = list[T]:
+    fn size(self) -> int:
+        return len(list(self))
+    fn pushed(self, x: T) -> Stack[T]:
+        xs := list(self)
+        xs.push(x)
+        return Stack(xs)
+    fn top(self) -> Option[T]:
+        xs := list(self)
+        if len(xs) == 0:
+            return None
+        return Some(xs[len(xs) - 1])
+
+# A generic counter map keyed by T (Hashable, as a map key must be), methods-only. `bump` references
+# T; `total` sums the values. The Hashable bound on the param comes along like struct/enum bounds.
+newtype Tally[T: Hashable] = map[T, int]:
+    fn bump(self, k: T) -> Tally[T]:
+        m := map(self)
+        cur := 0
+        if k in m:
+            cur = m[k]
+        m[k] = cur + 1
+        return Tally(m)
+    fn total(self) -> int:
+        m := map(self)
+        sum := 0
+        for _, v in m:
+            sum = sum + v
+        return sum
+
+fn main():
+    # ctor inference: Stack([..]) infers Stack[int]
+    s := Stack([1, 2, 3])
+    print(s.size())                 # 3
+
+    # method that returns the newtype, dispatch with T substituted
+    s2: Stack[int] = s.pushed(4)
+    print(s2.size())                # 4
+
+    # method returning Option[T] (the substituted T)
+    t: Option[int] = s2.top()
+    match t:
+        Some(x): print(x)           # 4
+        None: print(-1)
+
+    # cast-unwrap propagates the instantiation: list(s2) is list[int]
+    xs: list[int] = list(s2)
+    print(xs[0] + xs[3])            # 1 + 4 = 5
+
+    # turbofish construction when args can't bind T (empty list)
+    e: Stack[str] = Stack[str]([])
+    print(e.size())                 # 0
+    e2 := e.pushed("hi")
+    print(e2.size())                # 1
+
+    # a generic newtype over a map, methods referencing the key type T
+    tally: Tally[str] = Tally[str]({})
+    tally = tally.bump("a").bump("b").bump("a")
+    print(tally.total())            # 3
+
+main()

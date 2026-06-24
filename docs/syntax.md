@@ -838,11 +838,42 @@ print(Meters(1.5))                 # 1.5m       (str(self) override)
 print(float(Meters(1.0) + Meters(2.0)))  # 3.0  (same-type +)
 ```
 
-**v1 limit — aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names =
-list[str]`), but it gets **identity + construct + unwrap + its own methods only** — it does NOT
-auto-inherit the underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not
-resolve. Reach the underlying through an explicit method or an unwrap. (Operation-forwarding for
-aggregates, generic newtypes `newtype Box[T]`, and `derive` are out of scope for v1.)
+**Aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names = list[str]`), but it
+gets **identity + construct + unwrap + its own methods only** — it does NOT auto-inherit the
+underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not resolve. Reach the
+underlying through an explicit method or an unwrap. (Operation-forwarding for aggregates and `derive`
+remain out of scope.)
+
+**Generic newtypes.** A `newtype` may carry generic type parameters (`newtype Stack[T] = list[T]`),
+the Go defined-type model extended to generics — the underlying and the method signatures may
+reference `T`, and the type args ride on the value's type so a cast-unwrap recovers the
+instantiation. A type-parameterized newtype is **methods-only**: it gets **no native operator
+auto-flow** — even `newtype Box[T] = T` over a numeric `T` does not get `+`/`<` for free. Operators
+come strictly from the newtype's own methods + protocol satisfaction (the scalar `UserId = int` /
+`Meters = float` numeric auto-flow above is unchanged). Construction infers the type args from the
+argument (`Stack([1, 2])` ⇒ `Stack[int]`); when an argument can't bind them (an empty `[]` can't
+pin `T`), supply them with a **turbofish**: `Stack[int]([])` (the same inference gap as
+`ConcurrentMap(RwShared({}))` — expected, not a bug). A cast-unwrap propagates the instantiation:
+for `s: Stack[int]`, `list(s)` is `list[int]` (not bare `list`), and `int(b)` for `b: Box[int]`
+unwraps to `int`.
+
+```chezzi
+newtype Stack[T] = list[T]:
+    fn size(self) -> int:
+        return len(list(self))
+    fn top(self) -> Option[T]:
+        xs := list(self)
+        return None if len(xs) == 0 else Some(xs[len(xs) - 1])
+
+s := Stack([1, 2, 3])      # inferred Stack[int]
+print(s.size())            # 3
+t: Option[int] = s.top()   # method dispatch substitutes T -> int
+xs: list[int] = list(s)    # cast-unwrap propagates: list[int]
+e: Stack[str] = Stack[str]([])   # turbofish — the empty list can't bind T
+```
+
+(Static / associated methods like `Type.method()` and typeclass-style associated requirements
+`T.zero()` remain out of scope — a separate follow-up.)
 
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
 struct *or enum* that defines `str(self) -> str` overrides its default repr (`Name(field=value, …)`

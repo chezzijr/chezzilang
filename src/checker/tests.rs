@@ -7821,15 +7821,137 @@ fn raw_string_is_str_type() {
     rejects("fn main():\n    n: int = r\"x\"\nmain()\n", "str");
 }
 
+// ---- generic newtype (M21): type params, methods-only, turbofish ctor, cast-unwrap ----
+
 #[test]
-fn newtype_generic_rejected_at_parse_or_check() {
-    // `newtype Box[T] = int` is rejected (parse-time); ensure the checker path is clean of it too.
-    let errs = std::panic::catch_unwind(|| check_src("newtype Box[T] = int\n"));
-    // parse itself errors, so check_src panics in `parse`. Treat a panic (parse error) as the
-    // expected rejection.
-    assert!(
-        errs.is_err(),
-        "expected parse/check to reject a generic newtype"
+fn generic_newtype_decl_ok() {
+    // `newtype Stack[T] = list[T]` with methods referencing T type-checks.
+    ok(
+        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(len(list(s)))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_method_body_and_dispatch_ok() {
+    // Inside a method `self` is Stack[T]; at the call site Stack[int].peek() returns Option[int].
+    ok(
+        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[int] = s.peek()\n    print(x == None)\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_dispatch_substitutes_targs() {
+    // The substituted return type is enforced: assigning Stack[int].peek() to Option[str] is rejected.
+    rejects(
+        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[str] = s.peek()\nmain()\n",
+        "Option[str]",
+    );
+}
+
+#[test]
+fn generic_newtype_ctor_infer_ok() {
+    // `Stack([1, 2])` infers Stack[int].
+    ok(
+        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(len(list(s)))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_ctor_turbofish_ok() {
+    // `Stack[int]([])` — the empty list can't bind T, so the turbofish supplies it.
+    ok(
+        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(len(list(s)))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_ctor_wrong_arg_rejected() {
+    // `Stack[int](["a"])` — arg element str vs declared int.
+    rejects(
+        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack[int]([\"a\"])\nmain()\n",
+        "expected",
+    );
+}
+
+#[test]
+fn generic_newtype_cast_unwrap_propagates() {
+    // `list(s)` for s: Stack[int] yields list[int].
+    ok(
+        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[int] = list(s)\n    print(len(xs))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_cast_unwrap_wrong_elem_rejected() {
+    // `list(s)` for s: Stack[int] is NOT list[str].
+    rejects(
+        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[str] = list(s)\nmain()\n",
+        "list[str]",
+    );
+}
+
+#[test]
+fn generic_newtype_box_scalar_cast_unwrap_ok() {
+    // `newtype Box[T] = T`; int(Box(5)) unwraps to the substituted underlying int.
+    ok(
+        "newtype Box[T] = T\nfn main():\n    b: Box[int] = Box(5)\n    n: int = int(b)\n    print(n)\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_methods_only_no_operator_autoflow() {
+    // `newtype Box[T] = T` — Box(1) + Box(2) is REJECTED (methods-only, no native auto-flow), even
+    // though the underlying int is numeric. Operators come only from the newtype's own methods.
+    rejects(
+        "newtype Box[T] = T\nfn main():\n    a := Box(1)\n    b := Box(2)\n    c := a + b\nmain()\n",
+        "cannot apply",
+    );
+}
+
+#[test]
+fn generic_newtype_not_into_add_bound() {
+    // A generic newtype over a numeric T does NOT satisfy the intrinsic Add bound (methods-only).
+    rejects(
+        "newtype Box[T] = T\nfn twice[U: Add](x: U) -> U:\n    return x + x\nfn main():\n    print(twice(Box(3)))\nmain()\n",
+        "Add",
+    );
+}
+
+#[test]
+fn generic_newtype_own_method_dispatch_ok() {
+    // A generic newtype's OWN method is its only operator surface (methods-only). The method
+    // dispatches with the newtype's type args substituted (`Box[int].combine` returns `Box[int]`).
+    // (NB: satisfying a protocol BOUND from a generic instantiation is a pre-existing limitation
+    // shared with generic structs — `compatible(Box[int], Box[T])` fails — so we test the direct
+    // dispatch, not the `[U: Add]` bound.)
+    ok(
+        "newtype Box[T] = T:\n    fn combine(self, other: Box[T]) -> Box[T]:\n        return self\nfn main():\n    a := Box(1)\n    b := Box(2)\n    c: Box[int] = a.combine(b)\n    print(int(c))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_bound_smoke_ok() {
+    // Bounds on newtype params come along for free via enter_type_params/check_bounds/enforce_bounds.
+    ok(
+        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(len(list(k)))\nmain()\n",
+    );
+}
+
+#[test]
+fn generic_newtype_bound_violation_rejected() {
+    // A type arg that violates the param bound is rejected at the annotation site.
+    rejects(
+        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[fn(int) -> int] = Keyed([])\nmain()\n",
+        "Hashable",
+    );
+}
+
+#[test]
+fn generic_newtype_missing_targs_rejected() {
+    // Bare `Stack` as an annotation (no args) on a generic newtype is rejected.
+    rejects(
+        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack = Stack([1])\nmain()\n",
+        "type argument",
     );
 }
 

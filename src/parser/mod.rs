@@ -841,16 +841,14 @@ impl Parser {
 
     /// `newtype Name = <type>` (the common, method-less case, terminated like a typeAlias) or
     /// `newtype Name = <type>:` followed by an indented `fn` method block (compound, ends at its
-    /// Dedent). A DISTINCT nominal type — not a transparent alias. Non-generic in v1: a `[T]` after
-    /// the name is rejected. `test fn` in the body is rejected (suites aren't wired — enum precedent).
+    /// Dedent). A DISTINCT nominal type — not a transparent alias. May carry generic type params
+    /// (`newtype Stack[T] = list[T]`), reusing the struct/enum generic-param parser; the underlying
+    /// and method signatures may then reference them. `test fn` in the body is rejected (suites
+    /// aren't wired — enum precedent).
     fn parse_newtype(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::NewType)?;
         let name = self.expect_ident()?;
-        if self.check(&Token::LBracket) {
-            return Err(self.err(
-                "generic newtypes (`newtype Name[T] = …`) are not supported in v1".to_string(),
-            ));
-        }
+        let type_params = self.parse_type_params()?;
         self.expect(&Token::Assign)?;
         let underlying = self.parse_type()?;
         let mut methods = Vec::new();
@@ -881,6 +879,7 @@ impl Parser {
         }
         Ok(StmtKind::NewType {
             name,
+            type_params,
             underlying,
             methods,
         })
@@ -3105,9 +3104,11 @@ mod tests {
         match only("newtype UserId = int\n") {
             StmtKind::NewType {
                 name,
+                type_params,
                 underlying,
                 methods,
             } => {
+                assert!(type_params.is_empty());
                 assert_eq!(name, "UserId");
                 assert_eq!(underlying, Type::Named("int".into()));
                 assert!(methods.is_empty());
@@ -3122,9 +3123,11 @@ mod tests {
         {
             StmtKind::NewType {
                 name,
+                type_params,
                 underlying,
                 methods,
             } => {
+                assert!(type_params.is_empty());
                 assert_eq!(name, "Meters");
                 assert_eq!(underlying, Type::Named("float".into()));
                 assert_eq!(methods.len(), 1);
@@ -3144,12 +3147,28 @@ mod tests {
     }
 
     #[test]
-    fn newtype_rejects_generic() {
-        let e = parse_err("newtype Box[T] = int\n");
-        assert!(
-            e.to_string().to_lowercase().contains("generic") || e.to_string().contains("["),
-            "expected a generic rejection, got: {e}"
-        );
+    fn generic_newtype_parses() {
+        match only(
+            "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\n",
+        ) {
+            StmtKind::NewType {
+                name,
+                type_params,
+                underlying,
+                methods,
+            } => {
+                assert_eq!(name, "Stack");
+                assert_eq!(type_params.len(), 1);
+                assert_eq!(type_params[0].name, "T");
+                assert_eq!(
+                    underlying,
+                    Type::Generic("list".into(), vec![Type::Named("T".into())])
+                );
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "peek");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

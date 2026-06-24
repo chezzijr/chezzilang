@@ -279,6 +279,9 @@ struct AliasSig {
 #[derive(Clone)]
 struct NewTypeSigInfo {
     underlying: Ty,
+    /// The newtype's generic type params (empty for a scalar newtype), ferried across the module
+    /// boundary so an imported generic newtype's instantiation/dispatch/cast-unwrap resolves.
+    type_params: Vec<TypeParam>,
     methods: HashMap<String, FnSig>,
 }
 
@@ -776,6 +779,11 @@ struct Checker {
     /// `enum_methods` + the layout tables: drives construct, cast-unwrap, same-type operators,
     /// method dispatch, and protocol satisfaction. NOT cleared per-module (graph-wide, like `enums`).
     newtype_defs: HashMap<String, (Ty, HashMap<String, FnSig>)>,
+    /// newtype runtime key → its generic type parameters (empty for a scalar newtype). Mirrors
+    /// `enum_type_params`: builds the substitution from a `Ty::NewType(key, args)`'s args onto the
+    /// underlying type + method signatures (which may name the params). A non-empty entry marks the
+    /// newtype as generic — gating off the scalar-newtype native operator auto-flow (methods-only).
+    newtype_type_params: HashMap<String, Vec<TypeParam>>,
     /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
     /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
     aliases: HashMap<String, Type>,
@@ -915,6 +923,7 @@ impl Checker {
             enum_names: std::collections::HashSet::new(),
             newtype_names: std::collections::HashSet::new(),
             newtype_defs: HashMap::new(),
+            newtype_type_params: HashMap::new(),
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             ffi_alias_ok: std::collections::HashSet::new(),
@@ -1050,6 +1059,7 @@ impl Checker {
         self.enum_names.clear();
         self.newtype_names.clear();
         self.newtype_defs.clear();
+        self.newtype_type_params.clear();
         self.aliases.clear();
         self.bare_types.clear();
         self.seed_stdlib_structs();
@@ -1196,6 +1206,8 @@ impl Checker {
                             key.clone(),
                             (ntdef.underlying.clone(), ntdef.methods.clone()),
                         );
+                        self.newtype_type_params
+                            .insert(key.clone(), ntdef.type_params.clone());
                         if is_std {
                             self.newtype_names.insert(ntname.clone());
                             self.bare_types.entry(ntname.clone()).or_insert(key);
@@ -1290,6 +1302,8 @@ impl Checker {
                                 key.clone(),
                                 (ntdef.underlying.clone(), ntdef.methods.clone()),
                             );
+                            self.newtype_type_params
+                                .insert(key.clone(), ntdef.type_params.clone());
                             self.newtype_names.insert(bind.clone());
                             self.bare_types.insert(bind.clone(), key);
                         } else if let Some(asig) = sig.type_aliases.get(member) {
@@ -1390,6 +1404,11 @@ impl Checker {
                             name.clone(),
                             NewTypeSigInfo {
                                 underlying: underlying.clone(),
+                                type_params: self
+                                    .newtype_type_params
+                                    .get(&key)
+                                    .cloned()
+                                    .unwrap_or_default(),
                                 methods: methods.clone(),
                             },
                         );
@@ -1936,6 +1955,7 @@ impl Checker {
                 }
                 StmtKind::NewType {
                     name,
+                    type_params,
                     underlying,
                     methods,
                 } => {
@@ -1946,6 +1966,13 @@ impl Checker {
                     if self.newtype_defs.contains_key(&key) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
+                    // A type-parameterized newtype puts its params in scope across the underlying type
+                    // + method signatures (so `newtype Stack[T] = list[T]` and `fn push(self, x: T)`
+                    // resolve `T`), exactly like the struct/enum generic path. Validate each bound.
+                    let saved = self.enter_type_params(type_params);
+                    for tp in type_params {
+                        self.check_bounds(&tp.bounds, &tp.name, s.span);
+                    }
                     let under_ty = self.resolve_type(underlying, s.span);
                     // A newtype cannot wrap itself or another newtype's identity that's still a bare
                     // newtype value — but a newtype OF a newtype is simply nominal nesting (allowed:
@@ -1954,6 +1981,9 @@ impl Checker {
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
+                    self.exit_type_params(saved);
+                    self.newtype_type_params
+                        .insert(key.clone(), type_params.clone());
                     self.newtype_defs.insert(key, (under_ty, method_sigs));
                 }
                 StmtKind::Extern { fns, .. } => {
@@ -2639,7 +2669,21 @@ impl Checker {
                     }
                     Ty::Enum(key, Vec::new())
                 }
-                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n)),
+                _ if self.newtype_names.contains(n) => {
+                    let key = self.bare_key(n);
+                    // A generic newtype written without type arguments is missing them.
+                    let nparams = self
+                        .newtype_type_params
+                        .get(&key)
+                        .map_or(0, |tps| tps.len());
+                    if nparams > 0 {
+                        self.error(
+                            span,
+                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                        );
+                    }
+                    Ty::NewType(key, Vec::new())
+                }
                 // A protocol name used as a value type (existential), e.g. `Error`.
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => {
@@ -2778,16 +2822,32 @@ impl Checker {
                     );
                     Ty::Unknown
                 }
-                // A newtype is non-generic in v1: `Foo[int]` is invalid.
+                // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
                 _ if self.newtype_names.contains(n) => {
-                    for a in args {
-                        let _ = self.resolve_type(a, span);
+                    let key = self.bare_key(n);
+                    let resolved: Vec<Ty> =
+                        args.iter().map(|a| self.resolve_type(a, span)).collect();
+                    let tps = self.newtype_type_params.get(&key).cloned();
+                    if let Some(tps) = tps {
+                        if tps.len() != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{n}' expects {} type argument(s), got {}",
+                                    tps.len(),
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        for (tp, arg) in tps.iter().zip(&resolved) {
+                            for bound in &tp.bounds {
+                                if let Err(msg) = self.satisfies(arg, &bound.name) {
+                                    self.error(span, msg);
+                                }
+                            }
+                        }
                     }
-                    self.error(
-                        span,
-                        format!("newtype '{n}' is not generic (it takes no type arguments)"),
-                    );
-                    Ty::NewType(self.bare_key(n))
+                    Ty::NewType(key, resolved)
                 }
                 _ => {
                     self.error(span, format!("unknown generic type '{n}'"));
@@ -2835,14 +2895,18 @@ impl Checker {
                         );
                     }
                     Ty::Enum(self.type_key(&mid, name), resolved)
-                } else if sig.newtype_defs.contains_key(name) {
-                    if !resolved.is_empty() {
+                } else if let Some(ntdef) = sig.newtype_defs.get(name) {
+                    if ntdef.type_params.len() != resolved.len() {
                         self.error(
                             span,
-                            format!("newtype '{module}.{name}' is not generic (it takes no type arguments)"),
+                            format!(
+                                "type '{module}.{name}' expects {} type argument(s), got {}",
+                                ntdef.type_params.len(),
+                                resolved.len()
+                            ),
                         );
                     }
-                    Ty::NewType(self.type_key(&mid, name))
+                    Ty::NewType(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     asig.body.clone()
                 } else {
@@ -3022,9 +3086,17 @@ impl Checker {
                 self.exit_type_params(saved);
             }
             // Newtype method bodies are checked here, mirroring the enum path (`self` is the newtype).
-            StmtKind::NewType { name, methods, .. } => {
+            StmtKind::NewType {
+                name,
+                type_params,
+                methods,
+                ..
+            } => {
                 let self_ty = self.newtype_self_ty(name);
                 let key = self.bare_key(name);
+                // The newtype's type parameters are in scope across its method bodies (like the
+                // struct/enum path), so a generic `fn peek(self) -> Option[T]` resolves `T`.
+                let saved = self.enter_type_params(type_params);
                 for m in methods {
                     if m.is_test {
                         // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
@@ -3040,6 +3112,7 @@ impl Checker {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
+                self.exit_type_params(saved);
             }
             // Imports and protocols carry nothing to check in pass 2 (protocol method
             // signatures are validated during hoisting).
@@ -5426,12 +5499,14 @@ impl Checker {
             Div | Mod => {
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
-                } else if let (Ty::NewType(a), Ty::NewType(b)) = (&l, &r)
+                } else if let (Ty::NewType(a, _), Ty::NewType(b, _)) = (&l, &r)
                     && a == b
+                    && !self.newtype_is_generic(a)
                     && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
                 {
-                    // Same numeric newtype: `/`/`%` auto-flow the underlying op like `+ - *`
-                    // (unwrap→op→rewrap), keeping the checker in step with the runtime.
+                    // Same SCALAR numeric newtype: `/`/`%` auto-flow the underlying op like `+ - *`
+                    // (unwrap→op→rewrap), keeping the checker in step with the runtime. A generic
+                    // newtype is methods-only — no native operator auto-flow even over a numeric T.
                     l.clone()
                 } else if either_unknown {
                     Ty::Unknown
@@ -6191,8 +6266,8 @@ impl Checker {
             {
                 let key = self.type_key(&mid, name);
                 let under = info.underlying.clone();
-                self.check_args(name, std::slice::from_ref(&under), args, span);
-                return Ty::NewType(key);
+                let tps = info.type_params.clone();
+                return self.infer_newtype_call(name, &key, &under, &tps, args, &targs, span);
             }
             // `module.Enum.Variant(args)` — qualified payload-variant constructor.
             if let ExprKind::Field {
@@ -6396,26 +6471,137 @@ impl Checker {
         Ty::Struct(key.to_string(), targs_out)
     }
 
-    /// For a numeric/scalar cast builtin (`int`/`float`/`bool`), if the single arg is a NEWTYPE,
-    /// require its underlying to be exactly the cast target — `int(uid)` unwraps a `newtype X=int`
-    /// but `int(meters)` (underlying float) is rejected. A non-newtype arg is left to the normal
-    /// permissive cast. (`str` is handled separately — it is dual cast+display, never rejected.)
-    fn check_newtype_cast_unwrap(&mut self, cast: &str, arg: &Expr, target: Ty) {
-        let aty = self.infer_value(arg);
-        if let Ty::NewType(k) = &aty {
-            let under = self
-                .newtype_defs
-                .get(k)
-                .map(|(u, _)| u.clone())
-                .unwrap_or(Ty::Unknown);
-            if !matches!(under, Ty::Unknown) && !compatible(&target, &under) {
+    /// Type-check a newtype constructor `Name(arg)` (bare or `module.Name`) given its resolved
+    /// underlying `Ty`, generic type params, and runtime `key`. Mirrors the struct ctor path: a
+    /// scalar newtype checks the single arg against the underlying and returns `NewType(key, [])`; a
+    /// generic newtype infers (or takes via turbofish) its type args by unifying the underlying
+    /// (which contains the `Ty::Param`s) against the arg type, then returns `NewType(key, targs)`.
+    /// Turbofish (`Stack[int]([])`) supplies args the empty `[]` can't bind — the documented
+    /// inference gap shared with `ConcurrentMap(RwShared({}))`.
+    #[allow(clippy::too_many_arguments)] // the newtype's resolved shape pieces + call args + span
+    fn infer_newtype_call(
+        &mut self,
+        name: &str,
+        key: &str,
+        underlying: &Ty,
+        tps: &[TypeParam],
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+    ) -> Ty {
+        if tps.is_empty() {
+            if !targs.is_empty() {
+                self.error(span, format!("'{name}' takes no type arguments"));
+            }
+            self.check_args(name, std::slice::from_ref(underlying), args, span);
+            return Ty::NewType(key.to_string(), Vec::new());
+        }
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        if arg_tys.len() != 1 {
+            self.check_arity(name, 1, args, span);
+        }
+        let mut sub = self.seed_targs(name, tps, targs, span);
+        if let Some(actual) = arg_tys.first() {
+            unify(underlying, actual, &mut sub);
+        }
+        self.recover_iter_elems(tps, &mut sub, span);
+        if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
+            let expected = subst(underlying, &sub);
+            if !self.assignable(&expected, actual) {
                 self.error(
                     arg.span,
-                    format!(
-                        "{cast}() cannot unwrap newtype {aty} (its underlying type is {under}, not {target})"
-                    ),
+                    format!("argument to '{name}' has type {actual}, expected {expected}"),
                 );
             }
+        }
+        self.enforce_bounds(tps, &sub, span);
+        let targs_out = tps
+            .iter()
+            .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
+            .collect();
+        Ty::NewType(key.to_string(), targs_out)
+    }
+
+    /// For a numeric/scalar cast builtin (`int`/`float`/`bool`), if the single arg is a NEWTYPE,
+    /// require its underlying to be exactly the cast target — `int(uid)` unwraps a `newtype X=int`
+    /// but `int(meters)` (underlying float) is rejected. A generic newtype's underlying is
+    /// substituted with its instantiated type args first (concrete for a scalar newtype — trivial).
+    /// A non-newtype arg is left to the normal permissive cast. (`str` is handled separately — it is
+    /// dual cast+display, never rejected.)
+    fn check_newtype_cast_unwrap(&mut self, cast: &str, arg: &Expr, target: Ty) {
+        let aty = self.infer_value(arg);
+        if matches!(aty, Ty::NewType(..))
+            && let Some(under) = self.newtype_unwrap_target(&aty)
+            && !matches!(under, Ty::Unknown)
+            && !compatible(&target, &under)
+        {
+            self.error(
+                arg.span,
+                format!(
+                    "{cast}() cannot unwrap newtype {aty} (its underlying type is {under}, not {target})"
+                ),
+            );
+        }
+    }
+
+    /// The substituted underlying `Ty` of a `Ty::NewType(key, targs)` — the type a cast-unwrap
+    /// (`int(uid)` / `list(s)`) yields. Builds the param→targs map from the newtype's declared type
+    /// params and substitutes it into the stored underlying, so `list(s)` for `s: Stack[int]` yields
+    /// `list[int]` (not bare `list[T]`). `None` if `ty` is not a known newtype.
+    fn newtype_unwrap_target(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::NewType(key, targs) = ty else {
+            return None;
+        };
+        let under = self.newtype_defs.get(key).map(|(u, _)| u.clone())?;
+        let map: HashMap<String, Ty> = self
+            .newtype_type_params
+            .get(key)
+            .map(|tps| {
+                tps.iter()
+                    .map(|tp| tp.name.clone())
+                    .zip(targs.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(subst(&under, &map))
+    }
+
+    /// Aggregate cast-unwrap (`list(s)`/`set(s)`/`map(s)`) of a newtype: if `it` is a `Ty::NewType`,
+    /// unwrap to its substituted underlying and require that to be the matching aggregate kind
+    /// (`list`→list, `set`→set, `map`→map) — `list(s)` for `s: Stack[int]` yields exactly `list[int]`,
+    /// and `list(b)` for a non-list `Box[T]` errors. Returns `Some(result_ty)` when `it` is a newtype
+    /// (handled here); `None` lets the caller fall through to the ordinary iterable cast.
+    fn newtype_aggregate_cast(&mut self, cast: &str, it: &Ty, span: Span) -> Option<Ty> {
+        if !matches!(it, Ty::NewType(..)) {
+            return None;
+        }
+        let under = self.newtype_unwrap_target(it).unwrap_or(Ty::Unknown);
+        let ok = match cast {
+            "list" => matches!(under, Ty::List(_) | Ty::Unknown),
+            "set" => matches!(under, Ty::Set(_) | Ty::Unknown),
+            "map" => matches!(under, Ty::Map(..) | Ty::Unknown),
+            _ => false,
+        };
+        if ok {
+            Some(if under.is_unknown() {
+                match cast {
+                    "list" => Ty::list(Ty::Unknown),
+                    "set" => Ty::set(Ty::Unknown),
+                    _ => Ty::map(Ty::Unknown, Ty::Unknown),
+                }
+            } else {
+                under
+            })
+        } else {
+            self.error(
+                span,
+                format!("{cast}() cannot unwrap newtype {it} (its underlying type is {under})"),
+            );
+            Some(match cast {
+                "list" => Ty::list(Ty::Unknown),
+                "set" => Ty::set(Ty::Unknown),
+                _ => Ty::map(Ty::Unknown, Ty::Unknown),
+            })
         }
     }
 
@@ -6551,6 +6737,9 @@ impl Checker {
                     return Some(Ty::list(Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
+                if let Some(result) = self.newtype_aggregate_cast("list", &it, args[0].span) {
+                    return Some(result);
+                }
                 let elem = match self.iter_elem(&it) {
                     Some(e) => e,
                     None if it.is_unknown() => Ty::Unknown,
@@ -6572,6 +6761,10 @@ impl Checker {
                     0 => Some(Ty::set(Ty::Unknown)),
                     1 => {
                         let it = self.infer_value(&args[0]);
+                        if let Some(result) = self.newtype_aggregate_cast("set", &it, args[0].span)
+                        {
+                            return Some(result);
+                        }
                         let elem = match self.iter_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
@@ -6610,6 +6803,9 @@ impl Checker {
                     return Some(Ty::map(Ty::Unknown, Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
+                if let Some(result) = self.newtype_aggregate_cast("map", &it, args[0].span) {
+                    return Some(result);
+                }
                 let elem = match self.iter_elem(&it) {
                     Some(e) => e,
                     None if it.is_unknown() => return Some(Ty::map(Ty::Unknown, Ty::Unknown)),
@@ -6744,7 +6940,9 @@ impl Checker {
             "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),
             _ => {
                 // Newtype constructor? `UserId(x)` — one arg of the underlying type, returns the
-                // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype.
+                // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype. A
+                // generic newtype (`Stack([1,2])` / turbofish `Stack[int]([])`) infers/takes its type
+                // args via `infer_newtype_call`.
                 if self.newtype_names.contains(name) {
                     let key = self.bare_key(name);
                     let under = self
@@ -6752,8 +6950,14 @@ impl Checker {
                         .get(&key)
                         .map(|(u, _)| u.clone())
                         .unwrap_or(Ty::Unknown);
-                    self.check_args(name, std::slice::from_ref(&under), args, span);
-                    return Some(Ty::NewType(key));
+                    let tps = self
+                        .newtype_type_params
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default();
+                    return Some(
+                        self.infer_newtype_call(name, &key, &under, &tps, args, targs, span),
+                    );
                 }
                 // Struct constructor? Only a BARE-resolvable struct (`struct_names`): a locally
                 // declared, `from`-imported, or std type. A whole-module-imported USER struct's layout
@@ -6996,12 +7200,25 @@ impl Checker {
             // A newtype dispatches its own (non-generic) methods by name, like an enum. The
             // underlying's methods are NOT inherited (an aggregate underlying's `.push`/index/iter
             // never resolve here — that is the v1 distinct-type contract).
-            Ty::NewType(ntkey) => {
-                let resolved = self
-                    .newtype_defs
-                    .get(ntkey)
-                    .and_then(|(_, ms)| ms.get(method))
-                    .map(|sig| (sig.params.clone(), sig.ret.clone(), sig.type_params.clone()));
+            Ty::NewType(ntkey, targs) => {
+                // Substitute the newtype's own type arguments into the method signature, so
+                // `Stack[int].peek()` returns `Option[int]`, not `Option[T]` (mirrors the enum arm).
+                let resolved = self.newtype_defs.get(ntkey).and_then(|(_, ms)| {
+                    ms.get(method).map(|sig| {
+                        let map: HashMap<String, Ty> = self
+                            .newtype_type_params
+                            .get(ntkey)
+                            .map(|tps| {
+                                tps.iter()
+                                    .map(|tp| tp.name.clone())
+                                    .zip(targs.iter().cloned())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        (params, subst(&sig.ret, &map), sig.type_params.clone())
+                    })
+                });
                 if let Some((params, ret, mtps)) = resolved {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
@@ -7733,9 +7950,17 @@ impl Checker {
         Ty::Enum(key, args)
     }
 
-    /// The `Ty::NewType` of a newtype's own `self`, keyed by its runtime key. Non-generic in v1.
+    /// The `Ty::NewType` of a newtype's own `self`: keyed by its runtime key, parameterized by its
+    /// own generic type params as `Ty::Param`s (so `fn peek(self) -> Option[T]` inside
+    /// `newtype Stack[T]` resolves `T`). Mirrors `enum_self_ty`.
     fn newtype_self_ty(&self, name: &str) -> Ty {
-        Ty::NewType(self.bare_key(name))
+        let key = self.bare_key(name);
+        let args = self
+            .newtype_type_params
+            .get(&key)
+            .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+            .unwrap_or_default();
+        Ty::NewType(key, args)
     }
 
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
@@ -8120,7 +8345,7 @@ impl Checker {
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
-                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n)),
+                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n), Vec::new()),
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => Ty::Unknown,
             },
@@ -8148,6 +8373,12 @@ impl Checker {
                         .collect(),
                 ),
                 _ if self.enum_names.contains(n) => Ty::Enum(
+                    self.bare_key(n),
+                    args.iter()
+                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
+                        .collect(),
+                ),
+                _ if self.newtype_names.contains(n) => Ty::NewType(
                     self.bare_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
@@ -8191,6 +8422,8 @@ impl Checker {
             Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
             Ty::Enum(self.type_key(mid, name), args.to_vec())
+        } else if sig.newtype_defs.contains_key(name) {
+            Ty::NewType(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
         } else {
@@ -8502,10 +8735,14 @@ impl Checker {
             // (`Add`/`Sub`/`Mul`/`Comparable`) — its same-type `+`/`<` use the underlying's native op
             // (unwrap→op→rewrap), so a `newtype Meters = float` flows into a `[T: Add]` generic with
             // no user `add` method. Hashable/Stringable stay strictly opt-in (the user's own method).
-            Ty::NewType(ntkey) => {
-                let numeric = self
-                    .newtype_underlying(ntkey)
-                    .is_some_and(|u| u.is_numeric());
+            Ty::NewType(ntkey, _) => {
+                // The intrinsic numeric-operator satisfaction is for SCALAR newtypes only. A generic
+                // newtype is methods-only — even `newtype Box[T] = T` gets no native Add/Sub/Mul/
+                // Comparable; operators come strictly from its own methods (checked below).
+                let numeric = !self.newtype_is_generic(ntkey)
+                    && self
+                        .newtype_underlying(ntkey)
+                        .is_some_and(|u| u.is_numeric());
                 if numeric && matches!(protocol, "Add" | "Sub" | "Mul" | "Comparable") {
                     return Ok(());
                 }
@@ -8572,8 +8809,9 @@ impl Checker {
         // `Meters + Seconds` don't match (different/non-newtype operands) → the caller's "cannot
         // apply" error. (A user-defined `add` method also works via the satisfies() path below, but
         // the native numeric op is the no-method common case.)
-        if let (Ty::NewType(a), Ty::NewType(b)) = (l, r)
+        if let (Ty::NewType(a, _), Ty::NewType(b, _)) = (l, r)
             && a == b
+            && !self.newtype_is_generic(a)
             && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
         {
             return Some(l.clone());
@@ -8581,7 +8819,7 @@ impl Checker {
         let same = match (l, r) {
             (Ty::Struct(a, _), Ty::Struct(b, _)) => a == b,
             (Ty::Enum(a, _), Ty::Enum(b, _)) => a == b,
-            (Ty::NewType(a), Ty::NewType(b)) => a == b,
+            (Ty::NewType(a, _), Ty::NewType(b, _)) => a == b,
             (Ty::Param(a), Ty::Param(b)) => a == b,
             _ => false,
         };
@@ -8597,6 +8835,15 @@ impl Checker {
         self.newtype_defs.get(key).map(|(u, _)| u.clone())
     }
 
+    /// Is the newtype (by runtime key) type-parameterized? A generic newtype is METHODS-ONLY — it
+    /// gets no native operator auto-flow (even over a numeric/`T` underlying); operators come strictly
+    /// from its own methods + protocol satisfaction. Gates the scalar-newtype auto-flow paths.
+    fn newtype_is_generic(&self, key: &str) -> bool {
+        self.newtype_type_params
+            .get(key)
+            .is_some_and(|t| !t.is_empty())
+    }
+
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
     fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
@@ -8609,10 +8856,12 @@ impl Checker {
                 self.satisfies(l, "Comparable").is_ok()
             }
             (Ty::Enum(a, _), Ty::Enum(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
-            // Same newtype with a numeric underlying: `Meters < Meters` uses the underlying's native
-            // ordering (returns bool). A user `compare` method also enables it via satisfies().
-            (Ty::NewType(a), Ty::NewType(b)) if a == b => {
-                self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
+            // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
+            // native ordering (returns bool). A user `compare` method also enables it via satisfies()
+            // (the only path for a generic newtype — methods-only, no native ordering auto-flow).
+            (Ty::NewType(a, _), Ty::NewType(b, _)) if a == b => {
+                (!self.newtype_is_generic(a)
+                    && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
                     || self.satisfies(l, "Comparable").is_ok()
             }
             _ => false,
@@ -8728,13 +8977,14 @@ impl Checker {
             }
             // A newtype is sendable iff its underlying type is (it crosses by deep-copy of the inner
             // value, like a 1-field struct). Cycle-guarded by the newtype key.
-            Ty::NewType(name) => {
+            Ty::NewType(name, _) => {
                 if stack.contains(name) {
                     return true;
                 }
-                match self.newtype_defs.get(name) {
-                    Some((under, _)) => {
-                        let under = under.clone();
+                // Substitute the newtype's instantiated type args into its underlying, so a generic
+                // `Stack[int]` checks `list[int]` (not bare `list[T]`) for sendability.
+                match self.newtype_unwrap_target(ty) {
+                    Some(under) => {
                         stack.push(name.clone());
                         let ok = self.sendable_rec(&under, stack);
                         stack.pop();
@@ -8753,6 +9003,11 @@ impl Checker {
         }
         if let Some(i) = self.structs.get(name) {
             return !i.type_params.is_empty();
+        }
+        // A generic newtype constructor takes turbofish type args (`Stack[int]([])`) — report it so
+        // the args aren't pre-rejected by `infer_named_call`'s non-generic gate.
+        if self.newtype_names.contains(name) && self.newtype_is_generic(&self.bare_key(name)) {
+            return true;
         }
         // Bare-name query (the qualified path resolves genericity directly). A variant name may now
         // belong to several enums; treat it as generic if any owner enum is generic.
@@ -9932,6 +10187,13 @@ fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
                 .map(|(x, y)| merge_unknown(x, y))
                 .collect(),
         ),
+        (NewType(an, aa), NewType(sn, sa)) if an == sn && aa.len() == sa.len() => NewType(
+            an.clone(),
+            aa.iter()
+                .zip(sa)
+                .map(|(x, y)| merge_unknown(x, y))
+                .collect(),
+        ),
         // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
         _ => a.clone(),
     }
@@ -9954,6 +10216,9 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         },
         Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         Ty::Enum(n, args) => Ty::Enum(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
+        Ty::NewType(n, args) => {
+            Ty::NewType(n.clone(), args.iter().map(|t| subst(t, map)).collect())
+        }
         other => other.clone(),
     }
 }
@@ -9990,7 +10255,9 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
             unify(dk, ak, map);
             unify(dv, av, map);
         }
-        (Ty::Struct(dn, da), Ty::Struct(an, aa)) | (Ty::Enum(dn, da), Ty::Enum(an, aa))
+        (Ty::Struct(dn, da), Ty::Struct(an, aa))
+        | (Ty::Enum(dn, da), Ty::Enum(an, aa))
+        | (Ty::NewType(dn, da), Ty::NewType(an, aa))
             if dn == an && da.len() == aa.len() =>
         {
             da.iter().zip(aa).for_each(|(d, a)| unify(d, a, map));
@@ -10577,6 +10844,42 @@ mod graph_tests {
             check_entry(&entry).is_ok(),
             "qualified newtype ctor should resolve cross-module: {:?}",
             errors(&entry)
+        );
+    }
+
+    // A GENERIC newtype declared in module A is importable in B: constructed (ctor inference) and
+    // dispatched with the right instantiation, type-checks clean cross-module.
+    #[test]
+    fn generic_newtype_cross_module_ok() {
+        let t = TmpDir::new();
+        t.write(
+            "types.chz",
+            "newtype Stack[T] = list[T]:\n    fn size(self) -> int:\n        return len(list(self))\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import Stack from types\nfn main():\n    s: Stack[int] = Stack([1, 2, 3])\n    print(s.size())\n    xs: list[int] = list(s)\n    print(xs[0])\nmain()\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "generic newtype should resolve cross-module: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // The cross-module generic newtype's type-arg arity is enforced through the import.
+    #[test]
+    fn generic_newtype_cross_module_arity_rejected() {
+        let t = TmpDir::new();
+        t.write("types.chz", "newtype Stack[T] = list[T]\n");
+        let entry = t.write(
+            "main.chz",
+            "import types\nfn main():\n    s: types.Stack[int, str] = types.Stack([1])\n    print(1)\nmain()\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|e| e.contains("type argument")),
+            "expected an arity error, got: {errs:?}"
         );
     }
 

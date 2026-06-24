@@ -3,5 +3,9 @@ newtype UserId = int
 newtype Meters = float:
     fn double(self) -> Meters:
         return self + self
+newtype Stack[T] = list[T]
+newtype Boxed[T] = T:
+    fn same(self) -> Boxed[T]:
+        return self
 uid := UserId(10)
 print(int(uid))

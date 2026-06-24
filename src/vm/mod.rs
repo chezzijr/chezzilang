@@ -13788,7 +13788,10 @@ impl Vm {
     fn builtin_set(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let src: Vec<Value> = match args {
             [] => Vec::new(),
-            [one] => self.drain_iterable(*one, span)?,
+            [one] => {
+                let it = self.unwrap_newtype_value(*one);
+                self.drain_iterable(it, span)?
+            }
             _ => {
                 return Err(self.err(
                     format!("set() expects 0 or 1 argument(s), got {}", args.len()),
@@ -13822,6 +13825,18 @@ impl Vm {
         Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
     }
 
+    /// Cast-unwrap a generic aggregate newtype to its inner value for `list(s)`/`set(s)`/`map(s)`: a
+    /// `Obj::NewType` (e.g. a `Stack[T] = list[T]`) peels to the wrapped collection. A non-newtype
+    /// value passes through. Type args are erased at runtime; the checker verified the underlying.
+    fn unwrap_newtype_value(&self, v: Value) -> Value {
+        if let Value::Obj(h) = v
+            && let Obj::NewType { inner, .. } = self.heap.get(h)
+        {
+            return *inner;
+        }
+        v
+    }
+
     /// `list(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
     fn builtin_list(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let [one] = args else {
@@ -13830,7 +13845,8 @@ impl Vm {
                 span,
             ));
         };
-        let items = self.drain_iterable(*one, span)?;
+        let it = self.unwrap_newtype_value(*one);
+        let items = self.drain_iterable(it, span)?;
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
     }
 
@@ -13844,7 +13860,16 @@ impl Vm {
                 span,
             ));
         };
-        let drained = self.drain_iterable(*one, span)?;
+        let it = self.unwrap_newtype_value(*one);
+        // Cast-unwrapping a generic newtype over `map[K, V]` (`Tally[T] = map[T, int]`) yields the
+        // inner map DIRECTLY — a copy, not a re-iteration as 2-tuples (iterating a map gives keys).
+        if let Value::Obj(h) = it
+            && let Obj::Map(inner) = self.heap.get(h)
+        {
+            let copy = inner.clone();
+            return Ok(Value::Obj(self.heap.alloc(Obj::Map(copy))));
+        }
+        let drained = self.drain_iterable(it, span)?;
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
         let src_obj = Value::Obj(self.heap.alloc(Obj::List(drained.clone())));
         self.push(src_obj);
@@ -22286,6 +22311,28 @@ main()";
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
+    }
+
+    /// M21 generic-newtype golden: `examples/newtype_generic.chz` exercises type-parameterized
+    /// newtypes — `Stack[T] = list[T]` / `Tally[T: Hashable] = map[T, int]` with methods that
+    /// reference `T`, ctor inference + turbofish construction (`Stack[str]([])`), method dispatch with
+    /// the type args substituted (`Option[int]`), and cast-unwrap propagation (`list(s)`→`list[int]`,
+    /// `map(t)`→the inner map). Runtime is type-erased, so byte-identical on the VM, interp, and the
+    /// checked-in `.expected`.
+    #[test]
+    fn golden_newtype_generic_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/newtype_generic.chz");
+        let expected = include_str!("../../examples/newtype_generic.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from newtype_generic.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on newtype_generic"
+        );
     }
 
     /// A raw string is an ordinary `str` end-to-end: usable as a match-arm literal pattern

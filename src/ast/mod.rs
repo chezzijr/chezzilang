@@ -79,9 +79,13 @@ pub enum StmtKind {
     /// `newtype Name = <type>` (optionally with a trailing-colon method block) — a DISTINCT nominal
     /// type that wraps `underlying`. Unlike `TypeAlias` it is NOT interchangeable with the
     /// underlying: only an explicit construct (`Name(x)`) or cast-unwrap (`int(n)`) crosses the
-    /// boundary. Non-generic in v1. `methods` are name-keyed like struct/enum methods.
+    /// boundary. `type_params` is empty for a scalar newtype (`newtype UserId = int`); for
+    /// `newtype Stack[T] = list[T]` the underlying + method signatures may reference `T`. A
+    /// type-parameterized newtype is METHODS-ONLY: no native operator auto-flow (operators come only
+    /// from its own methods + protocol satisfaction). `methods` are name-keyed like struct/enum.
     NewType {
         name: String,
+        type_params: Vec<TypeParam>,
         underlying: Type,
         methods: Vec<FnDecl>,
     },
