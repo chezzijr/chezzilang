@@ -8803,6 +8803,22 @@ b := Buf([10, 20, 30])
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// std.datetime: interp-side twin of the VM `golden_datetime_via_run_file`. Imports std modules
+    /// (std.datetime -> std.time + std.str), so it drives `run_file` and byte-matches `.expected`.
+    /// Fully deterministic (fixed epochs, no clock).
+    #[test]
+    fn golden_datetime_chz() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/datetime.chz");
+        let expected = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/datetime.expected"),
+        )
+        .unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        res.expect("datetime.chz should run on the interp");
+        assert_eq!(out, expected);
+    }
+
     /// `Channel.trip()` latch + `std.cancel` (interp twins of the VM `*_via_run_file` goldens). Each
     /// imports a std module, so they drive `run_file` (the module-graph path) and byte-match `.expected`.
     #[test]

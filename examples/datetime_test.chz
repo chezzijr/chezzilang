@@ -1,0 +1,94 @@
+# examples/datetime_test.chz — TDD table for std.datetime (pure-Chezzi civil-calendar, UTC-only).
+# Published vectors. WEEKDAY ORIGIN is Sunday=0..Saturday=6 (contractual; matches native std.time:
+# epoch 0 == 1970-01-01 is Thursday == weekday 4). Run: `cargo run -- test examples/datetime_test.chz`.
+
+import std.datetime
+
+test fn t_leap():
+    assert datetime.is_leap_year(2000) == true
+    assert datetime.is_leap_year(1900) == false
+    assert datetime.is_leap_year(2024) == true
+    assert datetime.is_leap_year(2023) == false
+    assert datetime.days_in_month(2024, 2) == 29
+    assert datetime.days_in_month(2023, 2) == 28
+    assert datetime.days_in_month(2024, 4) == 30
+    assert datetime.days_in_month(2024, 1) == 31
+    assert datetime.days_in_month(2024, 12) == 31
+
+test fn t_days_from_civil():
+    assert datetime.days_from_civil(1970, 1, 1) == 0
+    assert datetime.days_from_civil(2023, 11, 14) == 19675
+    assert datetime.days_from_civil(1969, 12, 31) == -1
+    assert datetime.days_from_civil(2024, 2, 29) == 19782
+
+test fn t_civil_from_days():
+    y, m, d := datetime.civil_from_days(0)
+    assert y == 1970 and m == 1 and d == 1
+    y2, m2, d2 := datetime.civil_from_days(19675)
+    assert y2 == 2023 and m2 == 11 and d2 == 14
+    y3, m3, d3 := datetime.civil_from_days(-1)
+    assert y3 == 1969 and m3 == 12 and d3 == 31
+    # 2000-02-29 (leap)
+    z := datetime.days_from_civil(2000, 2, 29)
+    y4, m4, d4 := datetime.civil_from_days(z)
+    assert y4 == 2000 and m4 == 2 and d4 == 29
+
+test fn t_from_epoch():
+    a := datetime.from_epoch(0)
+    assert a.year == 1970 and a.month == 1 and a.day == 1
+    assert a.hour == 0 and a.minute == 0 and a.second == 0
+    assert a.weekday == 4    # Thursday (Sunday=0)
+    b := datetime.from_epoch(1700000000)
+    assert b.year == 2023 and b.month == 11 and b.day == 14
+    assert b.hour == 22 and b.minute == 13 and b.second == 20
+    c := datetime.from_epoch(-1)
+    assert c.year == 1969 and c.month == 12 and c.day == 31
+    assert c.hour == 23 and c.minute == 59 and c.second == 59
+    assert c.weekday == 3    # Wednesday
+
+test fn t_to_epoch_roundtrip():
+    # spread incl. negatives, leap day, day boundaries
+    assert datetime.to_epoch(datetime.from_epoch(0)) == 0
+    assert datetime.to_epoch(datetime.from_epoch(1700000000)) == 1700000000
+    assert datetime.to_epoch(datetime.from_epoch(-1)) == -1
+    assert datetime.to_epoch(datetime.from_epoch(86399)) == 86399
+    assert datetime.to_epoch(datetime.from_epoch(-86400)) == -86400
+    assert datetime.to_epoch(datetime.from_epoch(951782400)) == 951782400   # 2000-02-29 00:00:00
+    assert datetime.to_epoch(datetime.from_epoch(1709164800)) == 1709164800 # 2024-02-29 00:00:00
+
+test fn t_format():
+    dt := datetime.from_epoch(1700000000)
+    assert datetime.to_iso8601(dt) == "2023-11-14T22:13:20Z"
+    assert datetime.to_date_string(dt) == "2023-11-14"
+    assert datetime.to_time_string(dt) == "22:13:20"
+    assert datetime.to_string(dt) == "2023-11-14 22:13:20"
+    # zero-pad: epoch 0
+    z := datetime.from_epoch(0)
+    assert datetime.to_iso8601(z) == "1970-01-01T00:00:00Z"
+    assert datetime.to_string(z) == "1970-01-01 00:00:00"
+
+test fn t_duration():
+    assert datetime.add_seconds(0, 90) == 90
+    assert datetime.add_days(0, 1) == 86400
+    assert datetime.diff_seconds(90, 0) == 90
+    assert datetime.diff_days(172800, 0) == 2
+    assert datetime.diff_days(-1, 0) == -1   # floor
+
+test fn t_weekday():
+    assert datetime.weekday(0) == 4    # Thursday
+    assert datetime.weekday(-1) == 3   # Wednesday
+    assert datetime.weekday(1700000000) == 2   # 2023-11-14 is Tuesday
+    assert datetime.weekday_name(4) == "Thursday"
+    assert datetime.weekday_name(0) == "Sunday"
+    assert datetime.weekday_name(6) == "Saturday"
+
+test fn t_now():
+    # smoke: deterministic bounds only, NOT an exact value (clock-dependent).
+    n := datetime.now()
+    assert n.year >= 2024
+    assert n.month >= 1 and n.month <= 12
+    assert n.day >= 1 and n.day <= 31
+    assert n.hour >= 0 and n.hour <= 23
+    assert n.minute >= 0 and n.minute <= 59
+    assert n.second >= 0 and n.second <= 59
+    assert n.weekday >= 0 and n.weekday <= 6

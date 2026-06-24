@@ -29422,6 +29422,19 @@ main()
         assert_file_parity("examples/path.chz");
     }
 
+    /// std.datetime golden: `examples/datetime.chz` — the pure-Chezzi civil-calendar module
+    /// (from_epoch/to_epoch/formatters/duration/leap/weekday on FIXED epochs only, no clock),
+    /// end-to-end on the VM, byte-identical to `.expected` and the interpreter (assert_file_parity).
+    #[test]
+    fn golden_datetime_via_run_file() {
+        let path = fixture("examples/datetime.chz");
+        let expected = std::fs::read_to_string(fixture("examples/datetime.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/datetime.chz");
+    }
+
     /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
     /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
     /// Byte-identical on interp + VM.
