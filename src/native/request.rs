@@ -4,12 +4,15 @@
 //! transport/DNS/TLS failures lower to `Err`. `Response` is the synthetic struct
 //! `{ status: int, body: str, headers: map[str, str] }` (header names are lowercased by `ureq`).
 //!
-//! Surface: `get(url)` / `post(url, body)`, the verb wrappers `put(url, body)` / `patch(url, body)`
-//! / `delete(url)` / `head(url)`, and the general `request(method, url, body, headers)` carrying a
-//! `map[str, str]` of custom request headers (read in insertion order). Redirect configuration and
-//! streaming bodies are still deferred.
+//! Surface: `get(url, timeout_ms?)` / `post(url, body, timeout_ms?)`, the verb wrappers
+//! `put(url, body)` / `patch(url, body)` / `delete(url)` / `head(url)`, and the general
+//! `request(method, url, body, headers, timeout_ms?)` carrying a `map[str, str]` of custom request
+//! headers (read in insertion order). The optional trailing `timeout_ms: int` sets a per-request
+//! total deadline overriding the agent's default caps for that call (`<= 0`/omitted = defaults; a
+//! timeout lowers to `Err` like any transport failure). Redirect configuration and streaming bodies
+//! are still deferred.
 
-use super::{Host, HostError, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, NativeFn, NativeRet, expect_args, expect_args_range};
 use std::time::Duration;
 
 thread_local! {
@@ -73,23 +76,46 @@ fn lower_result(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
     }
 }
 
-fn do_get(url: &str) -> NativeRet {
-    AGENT.with(|a| lower_result(a.get(url).call()))
+fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
+    AGENT.with(|a| {
+        let mut req = a.get(url);
+        if let Some(d) = timeout {
+            req = req.timeout(d);
+        }
+        lower_result(req.call())
+    })
 }
 
-fn do_post(url: &str, body: &str) -> NativeRet {
-    AGENT.with(|a| lower_result(a.post(url).send_string(body)))
+fn do_post(url: &str, body: &str, timeout: Option<Duration>) -> NativeRet {
+    AGENT.with(|a| {
+        let mut req = a.post(url);
+        if let Some(d) = timeout {
+            req = req.timeout(d);
+        }
+        lower_result(req.send_string(body))
+    })
 }
 
 /// The general request path shared by `request`/`put`/`patch`/`delete`/`head`: build a request for
 /// `method` (UPPERCASE verb), apply each custom header via `set`, then send. An empty `body` uses
 /// `.call()` (no request body — correct for `DELETE`/`HEAD`/header-only calls); a non-empty `body`
-/// uses `.send_string(body)`. Lowers to `Result[Response]` exactly like `get`/`post`.
-fn do_request(method: &str, url: &str, body: &str, headers: &[(String, String)]) -> NativeRet {
+/// uses `.send_string(body)`. A `Some(timeout)` applies a per-request total deadline overriding the
+/// agent's default caps for this one call (a hit lowers to `Err` like any transport failure). Lowers
+/// to `Result[Response]` exactly like `get`/`post`.
+fn do_request(
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+    timeout: Option<Duration>,
+) -> NativeRet {
     AGENT.with(|a| {
         let mut req = a.request(method, url);
         for (k, v) in headers {
             req = req.set(k, v);
+        }
+        if let Some(d) = timeout {
+            req = req.timeout(d);
         }
         lower_result(if body.is_empty() {
             req.call()
@@ -99,49 +125,65 @@ fn do_request(method: &str, url: &str, body: &str, headers: &[(String, String)])
     })
 }
 
+/// Read an optional trailing `timeout_ms: int` at arg index `idx` (guarded by `arg_count`): absent
+/// or `<= 0` → `None` (fall back to the agent's default caps); a positive value → `Some(Duration)`.
+fn read_timeout(h: &mut dyn Host, idx: usize) -> Result<Option<Duration>, HostError> {
+    if h.arg_count() > idx {
+        let ms = h.arg_int(idx)?;
+        if ms > 0 {
+            return Ok(Some(Duration::from_millis(ms as u64)));
+        }
+    }
+    Ok(None)
+}
+
 fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "get", 1)?;
+    expect_args_range(h, "get", 1, 2)?;
     let url = h.arg_str(0)?;
-    Ok(do_get(&url))
+    let timeout = read_timeout(h, 1)?;
+    Ok(do_get(&url, timeout))
 }
 
 fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "post", 2)?;
+    expect_args_range(h, "post", 2, 3)?;
     let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
-    Ok(do_post(&url, &body))
+    let timeout = read_timeout(h, 2)?;
+    Ok(do_post(&url, &body, timeout))
 }
 
-/// `request(method, url, body, headers)` — the general verb + custom-header entry point. `headers`
-/// is a `map[str, str]` read in insertion order (deterministic across engines).
+/// `request(method, url, body, headers, timeout_ms?)` — the general verb + custom-header entry
+/// point. `headers` is a `map[str, str]` read in insertion order (deterministic across engines);
+/// the optional trailing `timeout_ms: int` overrides the agent default caps for this call.
 fn request(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "request", 4)?;
+    expect_args_range(h, "request", 4, 5)?;
     let (method, url, body) = (h.arg_str(0)?, h.arg_str(1)?, h.arg_str(2)?);
     let headers = h.arg_str_map(3)?;
-    Ok(do_request(&method, &url, &body, &headers))
+    let timeout = read_timeout(h, 4)?;
+    Ok(do_request(&method, &url, &body, &headers, timeout))
 }
 
 fn put(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "put", 2)?;
     let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
-    Ok(do_request("PUT", &url, &body, &[]))
+    Ok(do_request("PUT", &url, &body, &[], None))
 }
 
 fn patch(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "patch", 2)?;
     let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
-    Ok(do_request("PATCH", &url, &body, &[]))
+    Ok(do_request("PATCH", &url, &body, &[], None))
 }
 
 fn delete(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "delete", 1)?;
     let url = h.arg_str(0)?;
-    Ok(do_request("DELETE", &url, "", &[]))
+    Ok(do_request("DELETE", &url, "", &[], None))
 }
 
 fn head(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "head", 1)?;
     let url = h.arg_str(0)?;
-    Ok(do_request("HEAD", &url, "", &[]))
+    Ok(do_request("HEAD", &url, "", &[], None))
 }
 
 /// Callable members. `(name, fn)`.
@@ -221,9 +263,20 @@ mod tests {
     }
 
     #[test]
+    fn get_with_timeout_arg_threads_through() {
+        // A generous per-call timeout is plumbed to the ureq Request (Some) and a normal 200 still
+        // comes back — proves the optional Duration is threaded without breaking the happy path.
+        let (url, handle) = serve_once("hello");
+        let ret = do_get(&url, Some(Duration::from_secs(5)));
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("hello".into()));
+    }
+
+    #[test]
     fn get_against_local_server_parses_status_body_headers() {
         let (url, handle) = serve_once("hello");
-        let ret = do_get(&url);
+        let ret = do_get(&url, None);
         handle.join().unwrap();
 
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
@@ -258,7 +311,7 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
                 .unwrap();
         });
-        let ret = do_get(&format!("http://{addr}/"));
+        let ret = do_get(&format!("http://{addr}/"), None);
         handle.join().unwrap();
         assert!(
             matches!(ret, NativeRet::Err(_)),
@@ -269,7 +322,7 @@ mod tests {
     #[test]
     fn transport_error_is_err() {
         // Nothing is listening on this port → a transport failure → chezzi Err.
-        let ret = do_get("http://127.0.0.1:1/");
+        let ret = do_get("http://127.0.0.1:1/", None);
         assert!(
             matches!(ret, NativeRet::Err(_)),
             "expected Err, got {ret:?}"
@@ -306,7 +359,7 @@ mod tests {
     #[test]
     fn put_reaches_server_with_put_request_line() {
         let (url, handle, recorded) = serve_once_recording("ok");
-        let ret = do_request("PUT", &url, "payload", &[]);
+        let ret = do_request("PUT", &url, "payload", &[], None);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
         assert!(
@@ -325,7 +378,7 @@ mod tests {
     #[test]
     fn delete_reaches_server_with_delete_request_line_and_no_body() {
         let (url, handle, recorded) = serve_once_recording("ok");
-        let ret = do_request("DELETE", &url, "", &[]);
+        let ret = do_request("DELETE", &url, "", &[], None);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
         assert!(
@@ -339,7 +392,7 @@ mod tests {
     fn custom_header_is_sent_via_request_helper() {
         let (url, handle, recorded) = serve_once_recording("ok");
         let headers = vec![("X-Custom".to_string(), "value".to_string())];
-        let ret = do_request("POST", &url, "", &headers);
+        let ret = do_request("POST", &url, "", &headers, None);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
         assert!(

@@ -263,9 +263,13 @@ Returns use `struct Response { status: int, body: str, headers: map[str, str] }`
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine).
 `Match`, `Response`, and `ProcResult` are reserved (program-global) struct names.
-`get(url) -> Result[Response]` · `post(url, body) -> Result[Response]` ·
+`get(url, timeout_ms?: int) -> Result[Response]` · `post(url, body, timeout_ms?: int) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·
-`request(method, url, body, headers: map[str, str]) -> Result[Response]` (method in UPPERCASE).
+`request(method, url, body, headers: map[str, str], timeout_ms?: int) -> Result[Response]` (method in UPPERCASE).
+The optional trailing `timeout_ms` sets a **per-request total deadline** that overrides the agent's
+default caps (connect 10s / read 30s / write 30s) for that one call; `timeout_ms <= 0` or omitted falls
+back to the defaults. A timeout (like any transport failure) surfaces as a recoverable `Err`, never a
+panic. Build a query string with `std.encoding.query_encode` and compose `url + "?" + query_encode(params)`.
 
 ### `std.net`
 Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
@@ -366,6 +370,11 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   `A-Za-z0-9-._~` literal and `%XX`-escapes everything else (uppercase hex) · `url_decode(s) ->
   Result[str]` reverses it. **Strict 3986** — `+` is *not* treated as a space (that's
   `application/x-www-form-urlencoded`, a different scheme).
+- query string builder: `query_encode(params: map[str, str]) -> str` assembles a `k=v&k2=v2` query
+  string — both key and value are percent-encoded with the same `url_encode` escaper. Keys are
+  **sorted by their RAW (pre-encoding) value** so the output is deterministic regardless of map
+  iteration order (a stable golden + 3-engine parity). An empty map yields `""` (no leading `?`);
+  `{"k": ""}` yields `"k="`. Compose `url + "?" + query_encode(params)`.
 
 **Seam limit (deferred, not a bug):** the native FFI seam carries only `str` (no raw-bytes arg/return),
 so base64/hex `decode` UTF-8-validate their output and surface non-UTF-8 results as `Err`. Round-tripping

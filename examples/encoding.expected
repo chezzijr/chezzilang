@@ -11,3 +11,7 @@ url enc     = a%20b%2Fc%3Fd%3De%26f
 url unres   = keep~these-chars_.ok
 url decode  = a b/c?d
 url bad     = err
+query 3     = a%26b=c%3Dd&q=a%20b&x=1
+query empty = ''
+query kv    = k=
+query url   = https://x.test/s?lang=C%2B%2B&name=John%20Doe

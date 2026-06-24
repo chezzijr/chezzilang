@@ -72,7 +72,11 @@ Current: `fs`/`io`/`os`/`process`/`time`/`request`/`regex`/`json`/`math`/`cmp`/`
   `run`/`run_args` wired into `is_blocking` so the M:N engine offloads. `cmd(line)` kept unchanged for
   back-compat. **Deferred:** stdin piping, output streaming, per-process env/cwd overrides. (See
   docs/stdlib.md §std.process; golden `examples/process_polish.chz`.)
-- **`std.request` nit** — remaining: per-call timeout override + query (`?k=v`) builder (timeouts hardcoded).
+- ~~**`std.request` nit** — per-call timeout override + query (`?k=v`) builder~~ ✅ **resolved**
+  (2026-06-24): `get`/`post`/`request` take an optional trailing `timeout_ms: int` (per-request total
+  deadline overriding the agent caps; `<= 0`/omitted = defaults), and `std.encoding.query_encode(map)`
+  builds a sorted-key, both-sides-percent-encoded `k=v&…` query string. (See docs/stdlib.md
+  §std.request / §std.encoding; golden `examples/encoding.chz`.)
 
 **Pure-Chezzi `std/*.chz` now (dogfood):** ~~path ops (`join`/`basename`/`dirname`/`ext`/`normalize`)~~
 ✅ landed as `std.path` (2026-06-24), `argparse`, CSV, duration/date decomposition, data structures
