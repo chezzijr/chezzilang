@@ -582,7 +582,7 @@ lock**.
 | `.remove(key)` | `(K) -> nil` | **exclusive write**. No-op if absent. |
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
-| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check-and-insert is one **exclusive write** lock (so concurrent callers cannot both insert); returns the existing value, or `default` if it was absent. The insertion is atomic; the returned value reflects the post-insert state. |
+| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check, the insert, AND capturing the value to return all happen inside ONE **exclusive write** lock (the value is stashed into a captured shared box by the write closure) — so there is no second lock, and no window in which a concurrent `remove` could delete the just-inserted key. Returns the existing value, or `default` if it was absent. |
 | `.snapshot()` | `() -> map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 
 **`ConcurrentCounter[K: Hashable]`** — thread-safe frequency table over `RwShared[map[K, int]]`.

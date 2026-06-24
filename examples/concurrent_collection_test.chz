@@ -92,3 +92,20 @@ test fn map_each_own_key():
             None: assert false
     assert s == 285                     # sum of i*i for i in 0..10
     assert m.len() == 10
+
+# Regression: `get_or_insert` raced against `remove` must NOT fault. Pre-fix it did the insert and the
+# value read-back in TWO separate locks; a `remove` landing in the window made the read-back recurse
+# forever -> "maximum call depth exceeded". Now the check+insert+capture are one write lock, so this
+# can't happen. Reaching the asserts at all proves no task faulted; the only legal present value is 7.
+test fn get_or_insert_race_no_fault():
+    m := collection.ConcurrentMap(RwShared({}))
+    parallel:
+        for i in range(0, 50):
+            spawn:
+                m.get_or_insert("k", 7)
+        for i in range(0, 50):
+            spawn:
+                m.remove("k")
+    match m.get("k"):
+        Some(v): assert v == 7
+        None: assert true
