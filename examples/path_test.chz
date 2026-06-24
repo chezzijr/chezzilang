@@ -27,6 +27,11 @@ test fn t_dirname():
     assert path.dirname("/") == "/"
     assert path.dirname("") == ""
     assert path.dirname("/a/b") == "/a"
+    # redundant interior/trailing slashes in the head are collapsed (posixpath)
+    assert path.dirname("a//b") == "a"
+    assert path.dirname("a///b") == "a"
+    assert path.dirname("a///") == "a"
+    assert path.dirname("/a//b") == "/a"
 
 test fn t_split():
     d, b := path.split("a/b")
@@ -38,6 +43,9 @@ test fn t_split():
     d3, b3 := path.split("/a")
     assert d3 == "/"
     assert b3 == "a"
+    d4, b4 := path.split("a//b")
+    assert d4 == "a"
+    assert b4 == "b"
 
 test fn t_ext():
     assert path.ext("a/b.tar.gz") == ".gz"

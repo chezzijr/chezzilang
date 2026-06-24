@@ -50,7 +50,11 @@ fn dirname(p: str) -> str:
         j += 1
     if head.len() == 0 or allslash:
         return p[0 : cut + 1]   # keep the slashes (e.g. "/a" -> "/")
-    return head
+    # strip ALL redundant trailing slashes on the head ("a//b" -> head "a/" -> "a")
+    end := head.len()
+    while end > 0 and head[end - 1] == "/":
+        end -= 1
+    return head[0 : end]
 
 # Split `p` into (head, tail) so that head == dirname(p) and tail == basename(p)
 # (Python os.path.split). split("a/b") -> ("a", "b") · split("a/b/") -> ("a/b", "") ·
