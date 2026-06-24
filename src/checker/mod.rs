@@ -9744,6 +9744,17 @@ impl Checker {
         self.recover_iter_elems(mtps, &mut mmap, span);
         self.recover_index_args(mtps, &mut mmap, span);
         self.enforce_bounds(mtps, &mmap, span);
+        // The receiver must still match its declared type AFTER substitution. Without this, a method
+        // type param in receiver position (`fn m[U](self: U)`) turbofished to a contradicting type
+        // (`b.m[str]()` on a `Box[int]`) is unchecked — `unify` silently drops the conflict once `[str]`
+        // is seeded — and a wrong static type escapes onto the value (a soundness hole).
+        let want_recv = subst(receiver, &mmap);
+        if !self.assignable(&want_recv, recv_ty) {
+            self.error(
+                span,
+                format!("receiver of '{method}' has type {recv_ty}, expected {want_recv}"),
+            );
+        }
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
             if !self.assignable(&want, actual) {

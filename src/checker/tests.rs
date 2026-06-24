@@ -8675,6 +8675,17 @@ fn instance_method_turbofish_mismatch_errors() {
     );
 }
 
+/// PART 2 (soundness): a method type param in RECEIVER position (`fn m[U](self: U)`) turbofished to a
+/// type that contradicts the actual receiver must ERROR — without the post-subst receiver check the
+/// turbofish `b.idret[str]()` on a `Box[int]` certified `str` for a struct value (a soundness hole).
+#[test]
+fn method_param_in_receiver_turbofish_contradiction_errors() {
+    rejects(
+        "struct Box[T]:\n    val: T\n    fn idret[U](self: U) -> U:\n        return self\nfn main():\n    b := Box(5)\n    x: str = b.idret[str]()\n    print(x)\n",
+        "receiver",
+    );
+}
+
 /// PART 2 (.iter swallow fix): a method-level turbofish on a BUILTIN/non-generic member must error
 /// like `xs.len[int]()` — including the `.iter` fast-path (`xs.iter[int]()` was silently accepted).
 #[test]
