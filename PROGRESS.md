@@ -11,6 +11,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ fix — FFI callback SIGSEGV (dangling `Cif`) (2026-06-24).** `chezzi run examples/ffi_qsort.chz`
+segfaulted (libffi `classify_argument`, reachable via the qsort comparator callback) — a use-after-move:
+`ffi_prep_closure_loc` stores a raw pointer to the callback `Cif`'s inner `ffi_cif`, but the `Cif` was
+held **by value** in `CallbackClosure` (`src/native/cffi.rs`) and then moved into the
+`callback_closures` `Vec`, relocating the `ffi_cif` and dangling that pointer. Layout-dependent, so the
+3-engine `ffi_qsort` goldens (cooperative VM + interp + M:N `--parallel`) all passed while the CLI binary
+crashed deterministically. Fix: `Box` the `Cif` (`_cif: Box<Cif>`) so its address is pinned across the
+moves — exactly what the sibling `ctx: Box<TrampolineCtx>` already does. Regression guard:
+`native::cffi::tests::boxed_callback_cif_address_is_stable_across_moves` (a compile-time check that the
+field still derefs to `Cif` + the address-stability property). Full suite + conformance + clippy clean.
+
 **✅ stdlib — `std.request` nit closed: per-call timeout + query builder (gaps.md "std.request nit") (2026-06-24).**
 Two small independent additions. (A) **Per-call timeout override:** `std.request`'s `get`/`post`/`request`
 now take an OPTIONAL trailing `timeout_ms: int` (mirrors the `std.net` `Socket.read(.., timeout_ms?)`
