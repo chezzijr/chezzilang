@@ -5774,8 +5774,12 @@ impl Checker {
                     .and_then(|id| self.module_sigs.get(id))
                     .map(|sig| {
                         if let Some(fsig) = sig.functions.get(name) {
+                            // A first-class function VALUE is fixed-arity (Ty::Func carries no
+                            // optional tail), so expose only the REQUIRED params — `f := request.get`
+                            // then `f(url)` keeps working. The optional tail (e.g. timeout_ms) is
+                            // reachable via a direct `request.get(url, ms)` call.
                             Some(Ty::Func {
-                                params: fsig.params.clone(),
+                                params: fsig.params[..fsig.min_params].to_vec(),
                                 ret: Box::new(fsig.ret.clone()),
                             })
                         } else {
