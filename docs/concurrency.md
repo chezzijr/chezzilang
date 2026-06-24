@@ -315,6 +315,47 @@ vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is 
 
 ---
 
+## 6f. `RwShared[T]` — the cross-task read-write box
+
+`RwShared[T]` is `Shared[T]`'s read-write counterpart: **MANY concurrent readers OR one exclusive
+writer**. Same shape as `Shared` — one box, many tasks; the **handle is sendable**, the value is
+copied in/out under a lock; constructed value-first (`RwShared(v)`, `T` inferred) — but the lock is a
+`RwLock` instead of a `Mutex`. **Reach for `RwShared` over `Shared` when reads dominate**: read-heavy
+workloads (a shared config/registry/map read on every request) scale because read guards don't exclude
+each other; `Shared`'s `get`/`update` serialise *every* access.
+
+```chezzi
+fn put(r: RwShared[map[str, int]], k: str, v: int):
+    r.write(fn(m): insert(m, k, v))      # exclusive write lock
+
+fn total(r: RwShared[map[str, int]]) -> int:
+    return r.read(fn(m): sum_values(m))  # shared read lock (concurrent with other readers)
+```
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `get`   | `get(self) -> T` | shared read guard; snapshot copy out (== `read(identity)`) |
+| `set`   | `set(self, v: T) -> nil` | exclusive write guard; overwrite |
+| `read`  | `read(self, f: fn(T) -> R) -> R` | **shared** read guard: run `f` against the current value, return `f`'s result; **no** write-back. Many `read`s run concurrently |
+| `write` | `write(self, f: fn(T) -> T) -> nil` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
+
+`write`'s read-modify-write is atomic across threads (the box's contract, exactly like
+`Shared.update`): under `--parallel` the whole `write` is serialised so concurrent writers can't lose
+each other's updates. `read` and `write` copy the value out of the lock and **drop the guard before
+running the closure** (a `RwLock` guard is not reentrant), so a closure may freely re-enter
+`get`/`set`/`read`/`write` on a **different** box.
+
+> **Reentrancy limit (same class as `Shared.update`):** a closure passed to `read`/`write` that
+> re-acquires the **same** `RwShared`'s **write** lock — `write` inside `read`/`write`, or `set` inside
+> `write` under `--parallel` — **deadlocks/UB**. Don't re-enter the same box's writer from within its
+> own `read`/`write` callback. (Re-entering a *different* box, or a same-box `read`/`get`, is fine.)
+
+`RwShared` vs `Shared`: reach for `RwShared` when reads vastly outnumber writes (concurrent readers
+matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is
+simpler).
+
+---
+
 ## 6c. `timer(ms)` — the one-shot timeout channel
 
 `timer(ms)` returns a `Channel[bool]` that becomes ready (`recv()` → `true`) once `ms` milliseconds have

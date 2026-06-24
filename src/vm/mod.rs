@@ -15,12 +15,14 @@ mod timer;
 pub mod value;
 pub mod wire;
 
-use core::{AtomicCore, ChannelCore, ExecutorCore, ListenerCore, SharedCore, SocketCore};
+use core::{
+    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, RwSharedCore, SharedCore, SocketCore,
+};
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use value::{GcRef, Value};
 use wire::WireValue;
 
@@ -4493,6 +4495,17 @@ impl Vm {
                 })));
                 self.push(Value::Obj(h));
             }
+            Op::NewRwShared => {
+                let init = self.pop();
+                // The box holds the wire form (single serialization == the old deep_clone-in). A
+                // non-sendable init (a frame-holding generator) faults gracefully with this Op's span.
+                let init = self.to_wire_at(init, span)?;
+                let h = self.heap.alloc(Obj::RwShared(Arc::new(RwSharedCore {
+                    v: RwLock::new(init),
+                    ..Default::default()
+                })));
+                self.push(Value::Obj(h));
+            }
             // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's
             // `Instant`/`Duration` math) do NOT inflate `step`'s stack frame — `step` is on the per-op
             // recursion path, so a fatter frame here multiplies across a deep call chain (debug builds
@@ -6736,6 +6749,11 @@ impl Vm {
         }
         if matches!(self.heap.get(h), Obj::Shared(_)) {
             let result = self.shared_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
+        if matches!(self.heap.get(h), Obj::RwShared(_)) {
+            let result = self.rwshared_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
@@ -10133,6 +10151,7 @@ impl Vm {
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
                 Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
+                Obj::RwShared(core) => WireValue::RwShared(Arc::clone(core)),
                 Obj::Atomic(core) => WireValue::Atomic(Arc::clone(core)),
                 Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
                 // D6: a socket/listener handle crosses as its shared `Arc` core (a spawned fiber
@@ -10259,6 +10278,7 @@ impl Vm {
             // drives the program-exit auto-drain and shares this core, so the alias needs no entry.
             WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
             WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
+            WireValue::RwShared(core) => Value::Obj(self.heap.alloc(Obj::RwShared(core))),
             WireValue::Atomic(core) => Value::Obj(self.heap.alloc(Obj::Atomic(core))),
             WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
             // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
@@ -10884,6 +10904,7 @@ impl Vm {
             | Obj::ByteArray(_)
             | Obj::Channel(_)
             | Obj::Shared(_)
+            | Obj::RwShared(_)
             | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
@@ -11097,6 +11118,13 @@ impl Vm {
         match self.heap.get(h) {
             Obj::Shared(core) => Arc::clone(core),
             _ => unreachable!("shared_core on non-shared"),
+        }
+    }
+
+    fn rwshared_core(&self, h: GcRef) -> Arc<RwSharedCore> {
+        match self.heap.get(h) {
+            Obj::RwShared(core) => Arc::clone(core),
+            _ => unreachable!("rwshared_core on non-rwshared"),
         }
     }
 
@@ -12242,6 +12270,85 @@ impl Vm {
                 Ok(Value::Nil)
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
+        }
+    }
+
+    /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
+    /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
+    /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
+    /// `RwLock`). Mirrors `interp::eval_rwshared_method`. As with `Shared.update`, the lock guard is
+    /// dropped across the user closure (a `RwLock` guard is not reentrant) and the receiver is
+    /// re-rooted on the operand stack so the nested call's GC keeps the core's contents traced (the
+    /// receiver was popped off the stack in `do_method_call`). `write`'s whole RMW is serialised
+    /// across threads by a separate `update_lock` (held only under `--parallel`) — the `RwLock` write
+    /// guard alone is NOT enough because it is dropped across the closure, so two writers could clone
+    /// the same base and lose an update (same discipline as `Shared.update`). A closure that
+    /// re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a documented edge,
+    /// mirroring `Shared.update`'s same-box re-entry limit.
+    fn rwshared_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "get" => {
+                self.arity_err("get", args, 0, span)?;
+                // Clone the wire form out under the SHARED read guard, reconstruct into this heap.
+                let w = self.rwshared_core(h).v.read().unwrap().clone();
+                Ok(self.from_wire(w))
+            }
+            "set" => {
+                self.arity_err("set", args, 1, span)?;
+                let w = self.to_wire_at(args[0], span)?;
+                *self.rwshared_core(h).v.write().unwrap() = w;
+                Ok(Value::Nil)
+            }
+            "read" => {
+                self.arity_err("read", args, 1, span)?;
+                let f = args[0];
+                let core = self.rwshared_core(h);
+                // SHARED read guard: clone the value out, then DROP the guard before invoking `f`
+                // (the guard is not reentrant; dropping it also lets other readers/a writer proceed).
+                // No write-back — `read` returns `f`'s result.
+                let w = core.v.read().unwrap().clone();
+                let cur = self.from_wire(w);
+                self.push(Value::Obj(h));
+                let result = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
+                self.pop();
+                result
+            }
+            "write" => {
+                self.arity_err("write", args, 1, span)?;
+                let f = args[0];
+                let core = self.rwshared_core(h);
+                // Serialise the whole read-modify-write so concurrent OS-thread writes can't lose each
+                // other (the box's contract, exactly like `Shared.update`). The `RwLock` write guard
+                // alone is NOT enough: it must be DROPPED across the user closure (not reentrant), so
+                // two `write`s could clone the same base and lose an update — hence a separate
+                // `update_lock` held for the entire RMW *only under `--parallel`*. The cooperative
+                // engine is single-thread, so it never takes `update_lock` (taking it would needlessly
+                // deadlock a same-box nested write). The value lock `v` is taken only briefly (read
+                // here, write at the end), so the closure may freely re-enter `get`/`set`/`read` (or
+                // `write` on a *different* box). The handle is re-rooted on the operand stack so the
+                // nested call's GC keeps the core's contents traced.
+                let _serialise = if self.parallel {
+                    Some(core.update_lock.lock().unwrap())
+                } else {
+                    None
+                };
+                let w = core.v.write().unwrap().clone();
+                let cur = self.from_wire(w);
+                self.push(Value::Obj(h));
+                let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
+                self.pop();
+                let next = next?;
+                let stored = self.to_wire_at(next, span)?;
+                *core.v.write().unwrap() = stored;
+                Ok(Value::Nil)
+            }
+            _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
         }
     }
 
@@ -14138,6 +14245,7 @@ impl Vm {
                 Obj::Ptr(_) => "ptr",
                 Obj::Channel(_) => "Channel",
                 Obj::Shared(_) => "Shared",
+                Obj::RwShared(_) => "RwShared",
                 Obj::Atomic(_) => "Atomic",
                 Obj::Executor(_) => "Executor",
                 Obj::Socket(_) => "Socket",
@@ -14284,6 +14392,10 @@ impl Vm {
                     "Shared({})",
                     self.display_wire(&core.v.lock().unwrap())
                 )),
+                Obj::RwShared(core) => Ok(format!(
+                    "RwShared({})",
+                    self.display_wire(&core.v.read().unwrap())
+                )),
                 Obj::Atomic(core) => Ok(format!(
                     "Atomic({})",
                     self.display_wire(&core.v.lock().unwrap())
@@ -14408,6 +14520,9 @@ impl Vm {
             }
             WireValue::Shared(core) => {
                 format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))
+            }
+            WireValue::RwShared(core) => {
+                format!("RwShared({})", self.display_wire(&core.v.read().unwrap()))
             }
             WireValue::Atomic(core) => {
                 format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))
@@ -14702,6 +14817,7 @@ impl Vm {
             // (matches the interpreter's `stringify` catch-all falling back to `Display`).
             Obj::Channel(_)
             | Obj::Shared(_)
+            | Obj::RwShared(_)
             | Obj::Atomic(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
@@ -17198,10 +17314,13 @@ main()
             .heap
             .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
         let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore::default())));
+        let rw = vm
+            .heap
+            .alloc(Obj::RwShared(Arc::new(RwSharedCore::default())));
         let ex = vm
             .heap
             .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
-        for h in [ch, sh, ex] {
+        for h in [ch, sh, rw, ex] {
             let v = Value::Obj(h);
             let w = vm.to_wire(v).expect("core handle should serialize");
             let wired = vm.from_wire(w);
@@ -17216,6 +17335,7 @@ main()
             ) {
                 (Obj::Channel(a), Obj::Channel(b)) => Arc::ptr_eq(a, b),
                 (Obj::Shared(a), Obj::Shared(b)) => Arc::ptr_eq(a, b),
+                (Obj::RwShared(a), Obj::RwShared(b)) => Arc::ptr_eq(a, b),
                 (Obj::Executor(a), Obj::Executor(b)) => Arc::ptr_eq(a, b),
                 _ => false,
             };
@@ -23036,6 +23156,32 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(run_capture(src).expect("vm run"), expected);
     }
 
+    /// `RwShared[T]` golden: N tasks each `write` a distinct key into one shared `RwShared[map]`
+    /// (exclusive write lock; the whole RMW is serialised under `--parallel` so no update is lost),
+    /// the nursery joins, then the parent `read`s the whole map back. Order-independent → identical on
+    /// the cooperative default engine, the M:N `--parallel` engine, AND the interpreter oracle.
+    #[test]
+    fn golden_rwshared_concurrent_matches_expected() {
+        let src = include_str!("../../examples/rwshared.chz");
+        let expected = include_str!("../../examples/rwshared.expected");
+        assert_eq!(run_capture(src).expect("vm run"), expected);
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+        assert_eq!(
+            crate::interp::run_capture(src).expect("interp run"),
+            expected
+        );
+    }
+
+    /// Airlock identity: a `RwShared` mutated from a spawned task is observed by the parent — the
+    /// handle crosses as a SHARED `Arc` core (not a deep-copy), so both reach the one box.
+    #[test]
+    fn rwshared_mutation_from_spawn_is_observed_by_parent() {
+        let src = "fn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n    print(r.get())\nmain()\n";
+        assert_eq!(run_capture(src).expect("vm run"), "1\n");
+        assert_eq!(run_capture_parallel(src).expect("parallel run"), "1\n");
+        assert_eq!(crate::interp::run_capture(src).expect("interp"), "1\n");
+    }
+
     /// B3.3-threads golden: the collector task `recv`s before any producer runs, so on the real-thread
     /// engine it BLOCKS on the channel condvar and is woken by producer `send`s from pool threads.
     /// It sorts what it gathers → the printed order is fixed however threads interleave
@@ -24667,6 +24813,32 @@ main()
     fn shared_get_does_not_alias_box() {
         // `get` copies out: mutating the returned list must not change what the box holds.
         let src = "fn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
+        assert_eq!(run(src), "[1, 2]\n");
+    }
+
+    #[test]
+    fn vm_rwshared_get_set_read_write_roundtrip() {
+        // `get`/`set` (write-lock replace) + `read` (R-poly snapshot) + `write` (write-locked RMW).
+        let src = "fn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
+        assert_eq!(run(src), "10\n21\n40\n");
+        // Byte-identical on the interpreter (the frozen oracle).
+        assert_eq!(
+            run(src),
+            crate::interp::run_capture(src).expect("interp run")
+        );
+    }
+
+    #[test]
+    fn vm_rwshared_read_returns_closure_result_no_writeback() {
+        // `read` returns the closure's value and does NOT write back (the box is unchanged).
+        let src = "fn main():\n    r := RwShared(5)\n    print(r.read(fn(x): str(x * 3)))\n    print(r.get())\nmain()\n";
+        assert_eq!(run(src), "15\n5\n");
+    }
+
+    #[test]
+    fn vm_rwshared_get_does_not_alias_box() {
+        // `get`/`read` copy out: mutating the returned list must not change what the box holds.
+        let src = "fn main():\n    r := RwShared([1, 2])\n    xs := r.get()\n    xs.push(3)\n    print(r.get())\nmain()\n";
         assert_eq!(run(src), "[1, 2]\n");
     }
 

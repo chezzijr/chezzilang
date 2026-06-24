@@ -3149,6 +3149,14 @@ impl Compiler {
                 fc.emit(Op::NewShared, span);
                 return Ok(());
             }
+            // `RwShared(v)` → a fresh read-write box over the deep-copied init value (checker: 1 arg).
+            if name == "RwShared" {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewRwShared, span);
+                return Ok(());
+            }
             // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
             if name == "Atomic" {
                 for a in args {

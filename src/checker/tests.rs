@@ -5138,6 +5138,77 @@ fn shared_handle_sendable_regardless_of_element() {
     );
 }
 
+// ----- concurrency: RwShared[T], the cross-task read-write box -----
+
+#[test]
+fn rwshared_construct_and_methods_ok() {
+    // `RwShared(v)` infers its element type from the value (value-first, like `Shared`).
+    ok(
+        "fn main():\n    r := RwShared(0)\n    r.set(5)\n    r.write(fn(x): x + 1)\n    print(r.read(fn(x): x))\n    print(r.get())\nmain()\n",
+    );
+}
+
+#[test]
+fn rwshared_read_returns_closure_result_type() {
+    // `read(f: fn(T) -> R) -> R` — R is the closure's return type, distinct from T here (int -> str).
+    ok(
+        "fn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
+    );
+}
+
+#[test]
+fn rwshared_get_returns_element_type() {
+    ok(
+        "fn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",
+    );
+}
+
+#[test]
+fn rwshared_set_wrong_type_rejected() {
+    rejects(
+        "fn main():\n    r := RwShared(0)\n    r.set(\"x\")\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
+fn rwshared_write_fn_arity_rejected() {
+    rejects(
+        "fn main():\n    r := RwShared(0)\n    r.write(fn(x, y): x + y)\nmain()\n",
+        "argument 1 of 'write'",
+    );
+}
+
+#[test]
+fn rwshared_unknown_method_rejected() {
+    rejects(
+        "fn main():\n    r := RwShared(0)\n    r.update(fn(x): x + 1)\nmain()\n",
+        "has no method 'update'",
+    );
+}
+
+#[test]
+fn rwshared_rejects_type_arg() {
+    rejects(
+        "fn main():\n    r := RwShared[int](0)\n    print(r.get())\nmain()\n",
+        "'RwShared' takes no type arguments",
+    );
+}
+
+#[test]
+fn rwshared_is_sendable() {
+    ok(
+        "fn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n        spawn bump(r)\n    print(r.get())\nmain()\n",
+    );
+}
+
+#[test]
+fn rwshared_annotation_with_map_ok() {
+    ok(
+        "fn put(r: RwShared[map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
+    );
+}
+
 // ===== `ref T` transparent reference bindings (coercion table) =====
 
 /// The desugar pass (run inside `build_graph`) enforces the `ref` call-arg coercion table. Resolve

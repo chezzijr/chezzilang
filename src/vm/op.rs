@@ -419,6 +419,8 @@ pub enum Op {
     NewChannel,
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
     NewShared,
+    /// `RwShared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::RwShared(init)`.
+    NewRwShared,
     /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
     NewAtomic,
     /// `timer(ms)` — stack `[ms]`; pop it, push a fresh `Channel[bool]` whose deadline is `now + ms`.

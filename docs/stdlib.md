@@ -149,6 +149,13 @@ Iterate received values with `for v in ch:` (ends when closed and drained).
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`.
 
+### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
+`get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
+result, no write-back) · `write(f: fn(T) -> T) -> nil` (exclusive write guard; `Shared.update` under
+the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
+`Shared.update`: a closure that re-acquires the **same** box's write lock deadlocks. Constructed
+value-first: `RwShared(v)`.
+
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
 `add(x: T) -> T` · `sub(x: T) -> T` (return the **new** value).

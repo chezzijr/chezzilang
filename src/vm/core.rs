@@ -17,7 +17,7 @@ use super::wire::WireValue;
 use std::collections::VecDeque;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 /// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
 /// locks + `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len.
@@ -83,6 +83,28 @@ pub struct ChanState {
 #[derive(Debug, Default)]
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
+    pub update_lock: Mutex<()>,
+}
+
+/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`]. The value lives behind a
+/// `RwLock` instead of a `Mutex`, so MANY concurrent `read` guards (or ONE exclusive `write` guard)
+/// can be held at once — the point of the type is that read-heavy workloads scale. `read(f)` takes a
+/// SHARED read guard, clones the value out, drops the guard, then runs `f` (no write-back). `write(f)`
+/// (and `set`) take the EXCLUSIVE write guard.
+///
+/// `write`'s read-modify-write must be **atomic across threads** (the box's contract, exactly like
+/// `Shared.update`). The value lock `v` cannot be held across the user closure (a `RwLock` write guard
+/// is not reentrant — it would deadlock a closure that re-enters `get`/`set`/`read` on the same box),
+/// so a **separate** `update_lock` serialises whole writes: held for the entire RMW *only under
+/// `--parallel`*, while `v` is taken only for the brief read-out and the brief write-back. The
+/// `RwLock` alone is NOT enough — because the write guard is dropped across the closure, two
+/// concurrent `write`s could otherwise clone the same base value and lose an update. The cooperative
+/// engine never takes `update_lock` (single-thread; it would needlessly deadlock a same-box nested
+/// write). A `--parallel` closure that re-enters `write` on the SAME box still deadlocks (a documented
+/// edge, mirroring `Shared.update`); a write-inside-a-read on the same box likewise deadlocks.
+#[derive(Debug, Default)]
+pub struct RwSharedCore {
+    pub v: RwLock<WireValue>,
     pub update_lock: Mutex<()>,
 }
 
@@ -202,6 +224,9 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         }),
         WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
+        }),
+        WireValue::RwShared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
+            collect_core_gcrefs(&core.v.read().unwrap(), out, s)
         }),
         WireValue::Atomic(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)

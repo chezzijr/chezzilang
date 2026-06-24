@@ -1909,7 +1909,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
 resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
 rejects the collision (*'…' is a builtin/reserved name*).
 

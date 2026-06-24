@@ -107,7 +107,7 @@ fn describe_extern_type(t: &Type) -> String {
 }
 
 /// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
-/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`Atomic`/`timer`/`Executor`). Both
+/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). Both
 /// backends resolve these names to a special op *before* a plain named call (`compiler::compile_call`
 /// / `interp::eval_call`), so an extern fn with one of these names is silently shadowed — dead code
 /// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
@@ -123,7 +123,7 @@ fn is_reserved_name(name: &str) -> bool {
         // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
         | "panic"
         // runtime constructors the backends special-case before a plain call
-        | "Channel" | "Shared" | "Atomic" | "timer" | "Executor"
+        | "Channel" | "Shared" | "RwShared" | "Atomic" | "timer" | "Executor"
     )
 }
 
@@ -2681,6 +2681,9 @@ impl Checker {
                 // isn't gated on sendability — the value lives in one owner and is copied in/out
                 // through `get`/`set`; the *handle* is what crosses (always sendable).
                 ("Shared", [inner]) => Ty::shared(self.resolve_type(inner, span)),
+                // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
+                // element type isn't gated on sendability — the handle is what crosses.
+                ("RwShared", [inner]) => Ty::rwshared(self.resolve_type(inner, span)),
                 // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
                 // type isn't gated on sendability — the handle is what crosses.
                 ("Atomic", [inner]) => Ty::atomic(self.resolve_type(inner, span)),
@@ -6707,6 +6710,13 @@ impl Checker {
                 let elem = self.one_arg("Shared", args, span);
                 Some(Ty::shared(elem))
             }
+            "RwShared" => {
+                // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
+                // type is inferred from the value (value-first, like `Shared`); a `[T]` type arg is
+                // rejected upstream by the `name_is_generic` gate.
+                let elem = self.one_arg("RwShared", args, span);
+                Some(Ty::rwshared(elem))
+            }
             "Atomic" => {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; a `[T]` type arg is rejected upstream by the `name_is_generic` gate.
@@ -7183,6 +7193,29 @@ impl Checker {
                 // but reachable across tasks.
                 if let Some(sig) = shared_method_sig(method, elem) {
                     self.check_args(method, &sig.params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+            Ty::RwShared(elem) => {
+                // `get()->T`, `set(T)->nil`, `write(fn(T)->T)->nil` mirror `Shared`. `read` is the
+                // read-only twin: `read(fn(T)->R)->R` — R-polymorphic in the closure's return type.
+                // `rwshared_method_sig` types `read`'s param as `fn(T)->Unknown` (any closure return
+                // is accepted) and ret `Unknown`; here we recover R from the supplied closure so the
+                // call site sees the real return type (not `Unknown`).
+                if let Some(sig) = rwshared_method_sig(method, elem) {
+                    self.check_args(method, &sig.params, args, span);
+                    if method == "read" {
+                        // R = the closure argument's actual return type (else `Unknown` on arity error).
+                        if let Some(arg) = args.first()
+                            && let Ty::Func { ret, .. } = self.infer_value(arg)
+                        {
+                            return *ret;
+                        }
+                        return Ty::Unknown;
+                    }
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -8093,6 +8126,7 @@ impl Checker {
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Channel", [x]) => Ty::channel(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Shared", [x]) => Ty::shared(self.resolve_ty_ro_d(x, depth + 1)),
+                ("RwShared", [x]) => Ty::rwshared(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Atomic", [x]) => Ty::atomic(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Result", [x]) => Ty::result(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Result", [x, e]) => Ty::result_e(
@@ -8618,6 +8652,9 @@ impl Checker {
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,
+            // A `RwShared[T]` handle crosses for the same reason as `Shared` — one box, many tasks;
+            // the element type is not a constraint (only the handle crosses).
+            Ty::RwShared(_) => true,
             // An `Atomic[T]` handle crosses for the same reason as `Shared` — one box, many tasks;
             // the element type is not a constraint (only the handle crosses).
             Ty::Atomic(_) => true,
@@ -9826,6 +9863,7 @@ fn contains_unknown_in_slot(t: &Ty) -> bool {
             | Ty::Set(x)
             | Ty::Channel(x)
             | Ty::Shared(x)
+            | Ty::RwShared(x)
             | Ty::Atomic(x) => has_unknown(x),
             Ty::Map(k, v) => has_unknown(k) || has_unknown(v),
             Ty::Result(a, b) => has_unknown(a) || has_unknown(b),
@@ -9860,6 +9898,7 @@ fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
         (Option(ae), Option(se)) => Option(Box::new(merge_unknown(ae, se))),
         (Channel(ae), Channel(se)) => Channel(Box::new(merge_unknown(ae, se))),
         (Shared(ae), Shared(se)) => Shared(Box::new(merge_unknown(ae, se))),
+        (RwShared(ae), RwShared(se)) => RwShared(Box::new(merge_unknown(ae, se))),
         (Atomic(ae), Atomic(se)) => Atomic(Box::new(merge_unknown(ae, se))),
         (Map(ak, av), Map(sk, sv)) => Map(
             Box::new(merge_unknown(ak, sk)),
@@ -10186,6 +10225,36 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
                 ret: Box::new(elem.clone()),
             }],
             Ty::Nil,
+        ),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// Built-in method signatures on `RwShared[T]` — the cross-task read-write box. `elem` is the box's
+/// element type. `get`/`set`/`write` mirror `Shared`'s `get`/`set`/`update` (a write-locked RMW).
+/// `read(f: fn(T) -> R) -> R` is R-polymorphic: its param is typed `fn(T) -> Unknown` (accepting any
+/// closure return) and its `ret` is `Unknown` here — the dispatch arm recovers the real `R` from the
+/// supplied closure (`Ty::RwShared` in `infer_method_call`), so the call site sees the true type.
+fn rwshared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
+    let (params, ret) = match method {
+        "get" => (vec![], elem.clone()),
+        "set" => (vec![elem.clone()], Ty::Nil),
+        "write" => (
+            vec![Ty::Func {
+                params: vec![elem.clone()],
+                ret: Box::new(elem.clone()),
+            }],
+            Ty::Nil,
+        ),
+        // `read(fn(T) -> R) -> R` — the param's return is `Unknown` (any `R` is accepted), and the
+        // real `R` is recovered at the call site by the dispatch arm.
+        "read" => (
+            vec![Ty::Func {
+                params: vec![elem.clone()],
+                ret: Box::new(Ty::Unknown),
+            }],
+            Ty::Unknown,
         ),
         _ => return None,
     };

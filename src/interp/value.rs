@@ -253,6 +253,11 @@ pub enum Value {
     /// `set`/construction and out on `get`. Under the sequential executor a single thread already
     /// serialises every write, so no locking is needed.
     Shared(Rc<RefCell<Value>>),
+    /// `RwShared[T]` — the cross-task read-write box. Like `Shared` (the handle is what `spawn`
+    /// copies; the value lives in the one box, copied in/out), but presents `read`/`write` (a
+    /// read-write lock) instead of `update`. Under the sequential executor a single thread serialises
+    /// every op, so the `read`/`write` distinction degenerates to one-at-a-time — no locking needed.
+    RwShared(Rc<RefCell<Value>>),
     /// `Atomic[T]` — the cross-task atomic box. Like `Shared` (the handle is what `spawn` copies; the
     /// value lives in the one box, copied in/out), but presents atomic-operation methods. Under the
     /// sequential executor a single thread serialises every op, so no locking is needed.
@@ -347,6 +352,7 @@ impl Value {
             Value::NewType { .. } => "newtype",
             Value::Channel(_) => "Channel",
             Value::Shared(_) => "Shared",
+            Value::RwShared(_) => "RwShared",
             Value::Atomic(_) => "Atomic",
             Value::Executor(_) => "Executor",
             Value::Iter(_) => "iterator",
@@ -449,6 +455,7 @@ impl std::fmt::Display for Value {
             }
             Value::Channel(q) => write!(f, "Channel(len={})", q.borrow().queue.len()),
             Value::Shared(cell) => write!(f, "Shared({})", cell.borrow()),
+            Value::RwShared(cell) => write!(f, "RwShared({})", cell.borrow()),
             Value::Atomic(cell) => write!(f, "Atomic({})", cell.borrow()),
             Value::Executor(ex) => write!(f, "Executor(pending={})", ex.borrow().queue.len()),
             // A cursor prints as `<iterator>` — byte-identical to the VM's `Obj::Iter` stringify.

@@ -63,6 +63,12 @@ pub enum Ty {
     /// (`load`/`store`/`exchange`/`cas`, plus `add`/`sub` on numeric `T`) instead of `Shared`'s
     /// `get`/`set`/`update`. Constructed value-first as `Atomic(v)` (`T` = `typeof v`).
     Atomic(Box<Ty>),
+    /// `RwShared[T]` — the cross-task read-write box. Like `Shared[T]` (one box, many tasks; the
+    /// handle is sendable, the value is copied in/out under a lock), but the lock is a `RwLock`:
+    /// `read(fn(T) -> R) -> R` acquires a SHARED read guard (many concurrent readers) and `write`/
+    /// `set` acquire the EXCLUSIVE write guard. Reach for it over `Shared` when reads dominate.
+    /// Constructed value-first as `RwShared(v)` (`T` = `typeof v`).
+    RwShared(Box<Ty>),
     /// `Executor` — the C5 escape hatch: an explicitly-owned work queue for detached tasks that
     /// outlive a `parallel:` scope. Non-generic; the handle is sendable (like `Channel`/`Shared`).
     Executor,
@@ -122,6 +128,9 @@ impl Ty {
     pub fn atomic(inner: Ty) -> Ty {
         Ty::Atomic(Box::new(inner))
     }
+    pub fn rwshared(inner: Ty) -> Ty {
+        Ty::RwShared(Box::new(inner))
+    }
     /// A non-generic struct type (no type arguments) — the common case.
     pub fn strukt(name: impl Into<String>) -> Ty {
         Ty::Struct(name.into(), Vec::new())
@@ -154,6 +163,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         | (Option(a), Option(b))
         | (Channel(a), Channel(b))
         | (Shared(a), Shared(b))
+        | (RwShared(a), RwShared(b))
         | (Atomic(a), Atomic(b)) => compatible(a, b),
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
@@ -238,6 +248,7 @@ impl fmt::Display for Ty {
             Ty::Option(t) => write!(f, "Option[{t}]"),
             Ty::Channel(t) => write!(f, "Channel[{t}]"),
             Ty::Shared(t) => write!(f, "Shared[{t}]"),
+            Ty::RwShared(t) => write!(f, "RwShared[{t}]"),
             Ty::Atomic(t) => write!(f, "Atomic[{t}]"),
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),

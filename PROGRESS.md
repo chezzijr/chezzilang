@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ runtime — `RwShared[T]`: the cross-task read-write box (2026-06-24).** New VM-core primitive
+pairing with `Shared[T]`: **MANY concurrent readers OR one exclusive writer** (`RwSharedCore` wraps
+`std::sync::RwLock<WireValue>` exactly where `SharedCore` wraps `Mutex`). Constructed value-first
+(`RwShared(v)`, `T` inferred). Methods: `get() -> T` (shared read guard, snapshot), `set(x) -> nil`
+(exclusive write guard, replace), `read(f: fn(T) -> R) -> R` (**shared** read guard — runs `f` against
+the current value and returns its result, R-polymorphic in the closure's return, **no** write-back;
+many `read`s run concurrently), `write(f: fn(T) -> T) -> nil` (**exclusive** write guard — `Shared.update`
+under the write lock). Mirrored `Shared` end-to-end across BOTH engines: `Op::NewRwShared`,
+`Obj::RwShared`/`WireValue::RwShared` (crosses the airlock as a SHARED `Arc` handle, NOT deep-copied —
+the spawn/Channel airlock + GC trace + `to_wire`/`from_wire` twins), `Ty::RwShared` (sendable, new
+reserved name), checker `rwshared_method_sig` + the `read` R-polymorphism recovered at the dispatch
+seam, interp `Value::RwShared` + `eval_rwshared_method`. **`write`'s RMW is atomic across threads** via
+a separate `update_lock` held for the whole write under `--parallel` (the `RwLock` write guard alone is
+NOT enough — it's dropped across the user closure, so two writers could otherwise lose an update; same
+discipline as `Shared.update`). Reentrancy limit (documented, mirrors `Shared.update`): a closure that
+re-acquires the **same** box's write lock deadlocks. Golden `examples/rwshared.chz` (N tasks each
+`write` a distinct key into one `RwShared[map]`, join, parent `read`s — order-independent →
+byte-identical on VM/`--serial`/`--parallel`/interp). Docs: `docs/concurrency.md` §6c, `docs/stdlib.md`
+§3, `docs/spec.md`/`docs/syntax.md` reserved-name + sendable enumerations. 2618+ tests + conformance
+green, clippy clean.
+
 **✅ stdlib — `std.request` nit closed: per-call timeout + query builder (gaps.md "std.request nit") (2026-06-24).**
 Two small independent additions. (A) **Per-call timeout override:** `std.request`'s `get`/`post`/`request`
 now take an OPTIONAL trailing `timeout_ms: int` (mirrors the `std.net` `Socket.read(.., timeout_ms?)`
