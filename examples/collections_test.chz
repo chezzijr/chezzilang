@@ -170,3 +170,11 @@ test fn t_counter_most_common_ties():
     assert c.most_common(0) == []
     # k < 0 -> empty
     assert c.most_common(-5) == []
+
+test fn t_counter_most_common_no_overflow():
+    # counts spanning > i64 must NOT trap most_common (compare, not subtract): add_n takes
+    # arbitrary/negative n, so MAX vs negative is a supported state.
+    c := col.Counter({})
+    c.add_n("hi", 9223372036854775807)   # i64::MAX
+    c.add_n("lo", -3)
+    assert c.most_common(2) == [("hi", 9223372036854775807), ("lo", -3)]

@@ -210,7 +210,9 @@ struct Counter[T: Hashable]:
         pairs := []
         for key in self.data.keys():
             pairs.push((key, self.data[key]))
-        pairs.sort_by(fn(a: (T, int), b: (T, int)) -> int: b.1 - a.1)
+        # Compare (don't subtract): `add_n` accepts arbitrary/negative counts, and `b.1 - a.1`
+        # would trap with "integer overflow in Sub" when the two span > i64. DESCENDING by count.
+        pairs.sort_by(fn(a: (T, int), b: (T, int)) -> int: if a.1 > b.1: -1 else if a.1 < b.1: 1 else: 0)
         kk := k
         if kk < 0:
             kk = 0
