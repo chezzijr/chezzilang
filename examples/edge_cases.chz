@@ -70,7 +70,7 @@ fn collections():
     print("-- collections --")
     print([])
     print({})
-    print(set())
+    print(Set())
     print([].len())
     print([[1, 2], [3]])              # nested list
     print({"a": [1, 2], "b": []})     # map of lists; keys printed unquoted

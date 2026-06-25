@@ -215,7 +215,7 @@
 
 # A nominal `newtype`: a DISTINCT type wrapping <type> (NOT interchangeable with it — only an explicit
 # construct `Name(x)` or cast-unwrap `int(n)` crosses). May carry generic type params
-# (`newtype Stack[T] = list[T]`): the underlying + method signatures may then reference them, and a
+# (`newtype Stack[T] = List[T]`): the underlying + method signatures may then reference them, and a
 # type-parameterized newtype is METHODS-ONLY (no native operator auto-flow — operators come only from
 # its own methods + protocol satisfaction). The method-less one-liner is the common case; an optional
 # trailing-colon block adds `fn` methods (no `test fn`, like enums). Contrast `<typeAliasDecl>` above,
@@ -353,7 +353,7 @@
              | <relExpr> "GT" <bitOrExpr>   | <relExpr> "GTEQ" <bitOrExpr>
 # Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
 # looser than the shifts, which sit just above range. Int-only on int operands; `| & ^` ALSO do set
-# algebra (union/intersection/symmetric-difference) on two `set[T]` (gap #3). `<< >>` stay int-only.
+# algebra (union/intersection/symmetric-difference) on two `Set[T]` (gap #3). `<< >>` stay int-only.
 # (Type-directed by the checker; same tokens, no grammar change.)
 <bitOrExpr> ::= <bitXorExpr> | <bitOrExpr> "BITOR" <bitXorExpr>
 <bitXorExpr>::= <bitAndExpr> | <bitXorExpr> "CARET" <bitAndExpr>
@@ -487,7 +487,7 @@
             | <recoverExpr>
 
 # Brace literals: `{}` is the empty map; `{k: v, …}` (entries with COLON) is a map; `{a, b, …}`
-# (bare exprs, no COLON) is a set. The empty set is `set()`, since `{}` is taken by the map.
+# (bare exprs, no COLON) is a set. The empty set is `Set()`, since `{}` is taken by the map.
 <mapEntries> ::= <mapEntry> | <mapEntry> "COMMA" <mapEntries>
 <mapEntry>   ::= <expr> "COLON" <expr>
 

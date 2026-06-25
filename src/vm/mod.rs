@@ -148,7 +148,7 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
 const MAX_CALL_DEPTH: usize = 10_000;
 
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
-/// a struct with a `list[Self]` field forming a cycle) would otherwise recurse unbounded on the
+/// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
 const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 
@@ -474,7 +474,7 @@ impl MethodIcCell {
 }
 
 /// Number of ways in the polymorphic method-call IC. A bounded-megamorphic site (e.g. a
-/// `list[Shape]` walked at one `.area()` call across N≤4 distinct struct types) keeps every receiver
+/// `List[Shape]` walked at one `.area()` call across N≤4 distinct struct types) keeps every receiver
 /// type cached so each call HITS a way and flattens — no monomorphic-refill thrash. Four covers the
 /// common protocol fan-out; a 5th+ distinct type tips the site sticky-generic (see [`MethodIcSite`]).
 const METHOD_IC_WAYS: usize = 4;
@@ -5525,7 +5525,7 @@ impl Vm {
                     hr.finish()
                 }
                 // `bytes` is Hashable (immutable, value-compared). Hash the raw slice — mandatory so
-                // `map[bytes, T]`/`set[bytes]` keys distribute instead of all colliding on `0`.
+                // `Map[bytes, T]`/`Set[bytes]` keys distribute instead of all colliding on `0`.
                 Obj::Bytes(b) => {
                     let mut hr = std::collections::hash_map::DefaultHasher::new();
                     b.as_ref().hash(&mut hr);
@@ -6193,7 +6193,7 @@ impl Vm {
                 Value::Bool(b) => Some(A::Bool(*b)),
                 Value::Obj(h) => match self.heap.get(*h) {
                     Obj::Str(s) => Some(A::Str(s.to_string())),
-                    // A `map[str, str]` arg (today only `request`'s headers) is snapshotted into
+                    // A `Map[str, str]` arg (today only `request`'s headers) is snapshotted into
                     // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
                     // to `None` → run inline (safe fallback; the checker guarantees str/str for
                     // typed code, so this is unreachable from a well-typed program).
@@ -6212,7 +6212,7 @@ impl Vm {
                         }
                         Some(A::Map(pairs))
                     }
-                    // A `list[str]` arg (today only `run_args`'s argv) is snapshotted into owned
+                    // A `List[str]` arg (today only `run_args`'s argv) is snapshotted into owned
                     // strings so it survives the off-heap handoff. Any non-str element reverts to
                     // `None` → run inline (the checker guarantees str for typed code).
                     Obj::List(items) => {
@@ -8241,7 +8241,7 @@ impl Vm {
     }
 
     /// Built-in methods on a `bytearray` receiver (`h` is the heap handle): `len`, `push(int 0..=255)`,
-    /// `pop() -> Option[int]`, `extend(bytes|bytearray|list[int])`. Mirrors the interp's
+    /// `pop() -> Option[int]`, `extend(bytes|bytearray|List[int])`. Mirrors the interp's
     /// `eval_bytearray_method` and the checker's `bytearray_method_sig` — keep all three in lockstep.
     /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
     /// second binding to the same `bytearray` observes the change.
@@ -13658,9 +13658,9 @@ impl Vm {
             "str" => self.builtin_str(&args, span)?,
             "ord" => self.builtin_ord(&args, span)?,
             "chr" => self.builtin_chr(&args, span)?,
-            "set" => self.builtin_set(&args, span)?,
-            "list" => self.builtin_list(&args, span)?,
-            "map" => self.builtin_map(&args, span)?,
+            "Set" => self.builtin_set(&args, span)?,
+            "List" => self.builtin_list(&args, span)?,
+            "Map" => self.builtin_map(&args, span)?,
             "bytearray" => self.builtin_bytearray(&args, span)?,
             "bytes" => self.builtin_bytes(&args, span)?,
             _ => unreachable!("unknown builtin {name}"),
@@ -13769,7 +13769,7 @@ impl Vm {
                     return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
                 }
                 // A cursor drains its REMAINING snapshot (`items[pos..]`) directly — it IS an
-                // `Iterator[T]`, so `list(xs.iter())`/`set(...)` round-trip for free.
+                // `Iterator[T]`, so `List(xs.iter())`/`Set(...)` round-trip for free.
                 Obj::Iter { items, pos } => {
                     return Ok(items[(*pos).min(items.len())..].to_vec());
                 }
@@ -13884,7 +13884,7 @@ impl Vm {
         Ok(out)
     }
 
-    /// `set()` → empty set; `set(it)` → a deduped hash set drained from ANY for-iterable.
+    /// `Set()` → empty set; `Set(it)` → a deduped hash set drained from ANY for-iterable.
     fn builtin_set(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let src: Vec<Value> = match args {
             [] => Vec::new(),
@@ -13894,7 +13894,7 @@ impl Vm {
             }
             _ => {
                 return Err(self.err(
-                    format!("set() expects 0 or 1 argument(s), got {}", args.len()),
+                    format!("Set() expects 0 or 1 argument(s), got {}", args.len()),
                     span,
                 ));
             }
@@ -13925,8 +13925,8 @@ impl Vm {
         Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
     }
 
-    /// Cast-unwrap a generic aggregate newtype to its inner value for `list(s)`/`set(s)`/`map(s)`: a
-    /// `Obj::NewType` (e.g. a `Stack[T] = list[T]`) peels to the wrapped collection. A non-newtype
+    /// Cast-unwrap a generic aggregate newtype to its inner value for `List(s)`/`Set(s)`/`Map(s)`: a
+    /// `Obj::NewType` (e.g. a `Stack[T] = List[T]`) peels to the wrapped collection. A non-newtype
     /// value passes through. Type args are erased at runtime; the checker verified the underlying.
     fn unwrap_newtype_value(&self, v: Value) -> Value {
         if let Value::Obj(h) = v
@@ -13937,11 +13937,11 @@ impl Vm {
         v
     }
 
-    /// `list(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
+    /// `List(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
     fn builtin_list(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let [one] = args else {
             return Err(self.err(
-                "list() takes exactly one iterable argument — use [] for an empty list".to_string(),
+                "List() takes exactly one iterable argument — use [] for an empty list".to_string(),
                 span,
             ));
         };
@@ -13950,18 +13950,18 @@ impl Vm {
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
     }
 
-    /// `map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
+    /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
     /// `{k: v}` literal). Mirrors `interp::Interp::builtin_map`. A struct key's `hash()` re-enters the
     /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
     fn builtin_map(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let [one] = args else {
             return Err(self.err(
-                "map() takes exactly one iterable argument — use {} for an empty map".to_string(),
+                "Map() takes exactly one iterable argument — use {} for an empty map".to_string(),
                 span,
             ));
         };
         let it = self.unwrap_newtype_value(*one);
-        // Cast-unwrapping a generic newtype over `map[K, V]` (`Tally[T] = map[T, int]`) yields the
+        // Cast-unwrapping a generic newtype over `Map[K, V]` (`Tally[T] = Map[T, int]`) yields the
         // inner map DIRECTLY — a copy, not a re-iteration as 2-tuples (iterating a map gives keys).
         if let Value::Obj(h) = it
             && let Obj::Map(inner) = self.heap.get(h)
@@ -13982,7 +13982,7 @@ impl Vm {
                             Obj::Tuple(parts) if parts.len() == 2 => (parts[0], parts[1]),
                             _ => return Err(self.err(
                                 format!(
-                                    "map() expects an iterable of (key, value) 2-tuples, got {}",
+                                    "Map() expects an iterable of (key, value) 2-tuples, got {}",
                                     self.type_name(*elem)
                                 ),
                                 span,
@@ -13991,7 +13991,7 @@ impl Vm {
                         other => {
                             return Err(self.err(
                                 format!(
-                                    "map() expects an iterable of (key, value) 2-tuples, got {}",
+                                    "Map() expects an iterable of (key, value) 2-tuples, got {}",
                                     self.type_name(*other)
                                 ),
                                 span,
@@ -14017,7 +14017,7 @@ impl Vm {
     }
 
     /// Collect raw bytes from a byte-sequence-shaped argument for the `bytes`/`bytearray`
-    /// constructors: a `bytes`, a `bytearray` (copy), or a `list[int]` (each element 0..=255, else a
+    /// constructors: a `bytes`, a `bytearray` (copy), or a `List[int]` (each element 0..=255, else a
     /// recoverable fault). The `what` label names the constructor in error messages.
     fn collect_bytes_arg(&self, what: &str, v: Value, span: Span) -> Result<Vec<u8>, RuntimeError> {
         match v {
@@ -14049,7 +14049,7 @@ impl Vm {
                     }
                     _ => Err(self.err(
                         format!(
-                            "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                            "{what}() expects a bytes, a bytearray, or a List[int], got {}",
                             self.type_name(v)
                         ),
                         span,
@@ -14058,7 +14058,7 @@ impl Vm {
             }
             other => Err(self.err(
                 format!(
-                    "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                    "{what}() expects a bytes, a bytearray, or a List[int], got {}",
                     self.type_name(other)
                 ),
                 span,
@@ -14330,10 +14330,10 @@ impl Vm {
                 Obj::Str(_) => "str",
                 Obj::Bytes(_) => "bytes",
                 Obj::ByteArray(_) => "bytearray",
-                Obj::List(_) => "list",
+                Obj::List(_) => "List",
                 Obj::Tuple(_) => "tuple",
-                Obj::Map(_) => "map",
-                Obj::Set(_) => "set",
+                Obj::Map(_) => "Map",
+                Obj::Set(_) => "Set",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
                 Obj::NewType { .. } => "newtype",
@@ -14410,7 +14410,7 @@ impl Vm {
                 }
                 Obj::Set(s) => {
                     if s.entries.is_empty() {
-                        Ok("set()".to_string())
+                        Ok("Set()".to_string())
                     } else {
                         let mut parts = Vec::with_capacity(s.entries.len());
                         for (_, v) in &s.entries {
@@ -14567,7 +14567,7 @@ impl Vm {
             }
             WireValue::Set(entries) => {
                 if entries.is_empty() {
-                    "set()".to_string()
+                    "Set()".to_string()
                 } else {
                     let inner = entries
                         .iter()
@@ -14801,7 +14801,7 @@ impl Vm {
             }
             Obj::Set(s) => {
                 if s.entries.is_empty() {
-                    out.push_str("set()");
+                    out.push_str("Set()");
                 } else {
                     out.push('{');
                     for (i, (_, e)) in s.entries.iter().enumerate() {
@@ -14992,7 +14992,7 @@ impl crate::native::Host for OffloadHost {
             Some(crate::native::NativeArg::Map(pairs)) => Ok(pairs.clone()),
             Some(_) => Err(crate::native::HostError::arg_type(
                 i,
-                "map[str, str]",
+                "Map[str, str]",
                 "other",
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -15002,7 +15002,7 @@ impl crate::native::Host for OffloadHost {
         match self.args.get(i) {
             // Pre-extracted on the worker (heap live) into owned strings; served back off-thread.
             Some(crate::native::NativeArg::List(items)) => Ok(items.clone()),
-            Some(_) => Err(crate::native::HostError::arg_type(i, "list[str]", "other")),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "List[str]", "other")),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -15202,7 +15202,7 @@ impl crate::native::Host for VmHost<'_> {
                         let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
                             return Err(crate::native::HostError::arg_type(
                                 i,
-                                "map[str, str]",
+                                "Map[str, str]",
                                 "other",
                             ));
                         };
@@ -15211,7 +15211,7 @@ impl crate::native::Host for VmHost<'_> {
                         else {
                             return Err(crate::native::HostError::arg_type(
                                 i,
-                                "map[str, str]",
+                                "Map[str, str]",
                                 "other",
                             ));
                         };
@@ -15221,12 +15221,12 @@ impl crate::native::Host for VmHost<'_> {
                 }
                 _ => {
                     let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "map[str, str]", got))
+                    Err(crate::native::HostError::arg_type(i, "Map[str, str]", got))
                 }
             },
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
-                "map[str, str]",
+                "Map[str, str]",
                 self.vm.type_name(*other),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -15242,14 +15242,14 @@ impl crate::native::Host for VmHost<'_> {
                         let Value::Obj(eh) = v else {
                             return Err(crate::native::HostError::arg_type(
                                 i,
-                                "list[str]",
+                                "List[str]",
                                 "other",
                             ));
                         };
                         let Obj::Str(s) = self.vm.heap.get(*eh) else {
                             return Err(crate::native::HostError::arg_type(
                                 i,
-                                "list[str]",
+                                "List[str]",
                                 "other",
                             ));
                         };
@@ -15259,12 +15259,12 @@ impl crate::native::Host for VmHost<'_> {
                 }
                 _ => {
                     let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "list[str]", got))
+                    Err(crate::native::HostError::arg_type(i, "List[str]", got))
                 }
             },
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
-                "list[str]",
+                "List[str]",
                 self.vm.type_name(*other),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -15714,7 +15714,7 @@ mod tests {
         run_capture(src).unwrap_or_else(|e| panic!("unexpected runtime error: {e}"))
     }
 
-    /// Build a VM `map[str, str]` value with the given pairs (insertion order preserved), so the
+    /// Build a VM `Map[str, str]` value with the given pairs (insertion order preserved), so the
     /// host-side map readers can be unit-tested without compiling a program.
     fn build_str_map(vm: &mut Vm, pairs: &[(&str, &str)]) -> Value {
         let span = Span { line: 1, col: 1 };
@@ -15750,7 +15750,7 @@ mod tests {
         assert!(host.arg_str_map(9).is_err(), "a missing arg must error");
     }
 
-    /// `extract_native_args` snapshots a `map[str, str]` Value into `NativeArg::Map` (insertion
+    /// `extract_native_args` snapshots a `Map[str, str]` Value into `NativeArg::Map` (insertion
     /// order) so `request()` can offload; a non-str-valued map reverts to `None` (run inline).
     #[test]
     fn extract_native_args_snapshots_str_map() {
@@ -15815,7 +15815,7 @@ mod tests {
         assert!(host.arg_str_list(9).is_err(), "a missing arg must error");
     }
 
-    /// `extract_native_args` snapshots a `list[str]` Value into `NativeArg::List` (order preserved)
+    /// `extract_native_args` snapshots a `List[str]` Value into `NativeArg::List` (order preserved)
     /// so `run_args` can offload; a list with a non-str element reverts to `None` (run inline).
     #[test]
     fn extract_native_args_snapshots_str_list() {
@@ -15837,7 +15837,7 @@ mod tests {
         assert_eq!(vm.extract_native_args(&[bad]), None);
     }
 
-    /// `VmHost::arg_str_list` reads a live heap `list[str]` in order; a non-list / non-str arg errors.
+    /// `VmHost::arg_str_list` reads a live heap `List[str]` in order; a non-list / non-str arg errors.
     #[test]
     fn vm_host_arg_str_list_reads_live_list() {
         use crate::native::Host;
@@ -16258,7 +16258,7 @@ mod tests {
     #[test]
     fn fxhash_set_dedup_and_ops() {
         // Set dedup + union/intersection/difference over the index hasher.
-        let src = "a := set([1, 2, 3, 2, 1])\nb := set([3, 4, 5])\n\
+        let src = "a := Set([1, 2, 3, 2, 1])\nb := Set([3, 4, 5])\n\
                    print(a.len())\nprint(a.union(b).len())\nprint(a.intersection(b).len())\nprint(a.difference(b).len())\n";
         assert_eq!(run_parity(src), "3\n5\n1\n2\n");
     }
@@ -16319,7 +16319,7 @@ mod tests {
     fn idxspec_struct_index_protocol_via_fallback() {
         // THE TRAP: an Int key on a struct receiver must dispatch the `index`/`set_index` protocol,
         // NOT the List/Map Int fast path. The receiver kind (Struct) gates the fast path, not the key.
-        let src = "struct Buf:\n    xs: list[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\n    fn set_index(self, k: int, v: int):\n        self.xs[k] = v\n\
+        let src = "struct Buf:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\n    fn set_index(self, k: int, v: int):\n        self.xs[k] = v\n\
                    b := Buf([10, 20, 30])\nprint(b[0])\nb[1] = 99\nprint(b[1])\n";
         idx_parity(src);
     }
@@ -16755,7 +16755,7 @@ mod tests {
 
     // ---- M19 — N-way polymorphic method-call IC (CALLMETHOD ADAPTIVE) correctness guards ----
     // The single `MethodIcCell` per site is widened to a small N-way poly cache: a megamorphic site
-    // (a `list[Shape]` walked at one `.area()` call) must HIT a way for each distinct receiver `tid`
+    // (a `List[Shape]` walked at one `.area()` call) must HIT a way for each distinct receiver `tid`
     // — never thrash the monomorphic refill, never dispatch a wrong body. Each way is tid+arity
     // re-guarded on every hit (a way can never enter a frame with the wrong slot count or body). A
     // 5th+ distinct tid sets a one-way sticky-generic bit so the site stops probing the ways and goes
@@ -16764,14 +16764,14 @@ mod tests {
     #[test]
     fn mega_dispatch_correctness_parity() {
         // A `Shape` protocol with `.area()` on FOUR distinct struct types (distinct layouts/tids).
-        // A heterogeneous `list[Shape]` is walked at ONE call site, repeatedly (each type hit many
+        // A heterogeneous `List[Shape]` is walked at ONE call site, repeatedly (each type hit many
         // times). The right body must dispatch per type across repeated calls; VM == interp.
         let src = "protocol Shape:\n    fn area(self) -> int\n\
                    struct Sq:\n    s: int\n\n    fn area(self) -> int:\n        return self.s * self.s\n\
                    struct Rect:\n    w: int\n    h: int\n\n    fn area(self) -> int:\n        return self.w * self.h\n\
                    struct Tri:\n    b: int\n    hh: int\n\n    fn area(self) -> int:\n        return self.b * self.hh / 2\n\
                    struct Circ:\n    r: int\n\n    fn area(self) -> int:\n        return self.r + self.r\n\
-                   fn total(shapes: list[Shape]) -> int:\n    acc := 0\n    for s in shapes:\n        acc = acc + s.area()\n    return acc\n\
+                   fn total(shapes: List[Shape]) -> int:\n    acc := 0\n    for s in shapes:\n        acc = acc + s.area()\n    return acc\n\
                    shapes := []\nshapes.push(Sq(3))\nshapes.push(Rect(2, 4))\nshapes.push(Tri(4, 5))\nshapes.push(Circ(3))\n\
                    out := 0\ni := 0\nwhile i < 8:\n    out = out + total(shapes)\n    i = i + 1\nprint(out)\n";
         // per pass: 9 + 8 + 10 + 6 = 33 ; *8 = 264
@@ -16789,7 +16789,7 @@ mod tests {
                    struct B:\n    n: int\n\n    fn id(self) -> int:\n        return 2\n\
                    struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
                    struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 8\n\
-                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   fn sum(xs: List[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
                    xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\n\
                    out := 0\ni := 0\nwhile i < 5:\n    out = out + sum(xs)\n    i = i + 1\nprint(out)\n";
         // per pass 1+2+4+8 = 15 ; *5 = 75 (a stale-way bug would smear the bits)
@@ -16808,7 +16808,7 @@ mod tests {
                    struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 1000\n\
                    struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 10000\n\
                    struct F:\n    n: int\n\n    fn id(self) -> int:\n        return 100000\n\
-                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   fn sum(xs: List[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
                    xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\nxs.push(F(0))\n\
                    out := 0\ni := 0\nwhile i < 6:\n    out = out + sum(xs)\n    i = i + 1\nprint(out)\n";
         // per pass 111111 ; *6 = 666666
@@ -16826,7 +16826,7 @@ mod tests {
                    struct C:\n    n: int\n\n    fn id(self) -> int:\n        return 3\n\
                    struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
                    struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 5\n\
-                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   fn sum(xs: List[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
                    xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\n\
                    print(sum(xs))\n";
         let tokens = lexer::tokenize(src).unwrap();
@@ -16861,7 +16861,7 @@ mod tests {
                    struct D:\n    n: int\n\n    fn id(self) -> int:\n        return 4\n\
                    struct E:\n    n: int\n\n    fn id(self) -> int:\n        return 5\n\
                    struct H:\n    op: fn(int) -> int\n\
-                   fn sum(xs: list[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
+                   fn sum(xs: List[Tag]) -> int:\n    acc := 0\n    for x in xs:\n        acc = acc + x.id()\n    return acc\n\
                    xs := []\nxs.push(A(0))\nxs.push(B(0))\nxs.push(C(0))\nxs.push(D(0))\nxs.push(E(0))\n\
                    double := fn(x: int) -> int: x * 2\nh := H(double)\n\
                    out := 0\ni := 0\nwhile i < 3:\n    out = out + sum(xs) + h.op(i)\n    i = i + 1\nprint(out)\n";
@@ -16965,7 +16965,7 @@ mod tests {
             "{a: 1, b: 2}\n"
         );
         assert_eq!(run("print(str({1, 2}))\n"), "{1, 2}\n");
-        assert_eq!(run("s: set[int] = set()\nprint(str(s))\n"), "set()\n");
+        assert_eq!(run("s: Set[int] = Set()\nprint(str(s))\n"), "Set()\n");
         // Struct default repr + a multi-part f-string mixing literal text and several holes.
         assert_eq!(
             run("struct P:\n    x: int\n    y: int\nprint(\"p={P(3, 4)} end\")\n"),
@@ -20197,7 +20197,7 @@ main()
         let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_qbad_{}", std::process::id()));
         let core = dir.join("core");
         std::fs::create_dir_all(&core).unwrap();
-        std::fs::write(core.join("bag.chz"), "struct Bag:\n    items: list[int]\n").unwrap();
+        std::fs::write(core.join("bag.chz"), "struct Bag:\n    items: List[int]\n").unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(
             &entry,
@@ -22191,7 +22191,7 @@ main()";
         let src = concat!(
             "fn gen() -> Iterator[int]:\n",
             "    yield 1\n",
-            "fn work(g: list[Iterator[int]]):\n",
+            "fn work(g: List[Iterator[int]]):\n",
             "    print(\"hi\")\n",
             "fn main():\n",
             "    parallel:\n",
@@ -22470,10 +22470,10 @@ main()";
     }
 
     /// M21 generic-newtype golden: `examples/newtype_generic.chz` exercises type-parameterized
-    /// newtypes — `Stack[T] = list[T]` / `Tally[T: Hashable] = map[T, int]` with methods that
+    /// newtypes — `Stack[T] = List[T]` / `Tally[T: Hashable] = Map[T, int]` with methods that
     /// reference `T`, ctor inference + turbofish construction (`Stack[str]([])`), method dispatch with
-    /// the type args substituted (`Option[int]`), and cast-unwrap propagation (`list(s)`→`list[int]`,
-    /// `map(t)`→the inner map). Runtime is type-erased, so byte-identical on the VM, interp, and the
+    /// the type args substituted (`Option[int]`), and cast-unwrap propagation (`List(s)`→`List[int]`,
+    /// `Map(t)`→the inner map). Runtime is type-erased, so byte-identical on the VM, interp, and the
     /// checked-in `.expected`.
     #[test]
     fn golden_newtype_generic_chz_matches_expected_and_interp() {
@@ -22713,7 +22713,7 @@ main()";
     /// fix the VM faulted with `'?' expects Result or Option, found enum`.
     #[test]
     fn try_operator_works_on_native_option_under_variant_shadow() {
-        let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: list[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
+        let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(
@@ -22788,7 +22788,7 @@ main()";
     #[test]
     fn enum_with_hash_is_usable_as_map_set_key() {
         // Regression: an enum defining `hash(self) -> int` satisfies Hashable at the CHECKER, so
-        // `set[E]`/`map[E,V]` type-check — but both engines must also DISPATCH the enum's hash at
+        // `Set[E]`/`Map[E,V]` type-check — but both engines must also DISPATCH the enum's hash at
         // runtime (previously they raised "enum is not hashable", crashing a check-clean program).
         let src = "enum Color:\n    Red\n    Green\n    Blue\n\
                    \n    fn hash(self) -> int:\n        match self:\n            Color.Red: return 1\n            Color.Green: return 2\n            Color.Blue: return 3\n\
@@ -22846,9 +22846,9 @@ main()";
     }
 
     /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
-    /// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode under `recover:`, list() over
-    /// every for-iterable shape — list/set/str/bytes/bytearray/range/user-iterator — set() dedup, and
-    /// map() from 2-tuples with a last-wins dup key) byte-identical on the VM, the interpreter, and its
+    /// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode under `recover:`, List() over
+    /// every for-iterable shape — list/set/str/bytes/bytearray/range/user-iterator — Set() dedup, and
+    /// Map() from 2-tuples with a last-wins dup key) byte-identical on the VM, the interpreter, and its
     /// `.expected` (three-engine parity gate).
     #[test]
     fn golden_conversions_chz_matches_expected_and_interp() {
@@ -22894,11 +22894,11 @@ main()";
         assert_eq!(it_res.unwrap_err().message, "invalid UTF-8 in decode()");
     }
 
-    /// `list()`/`set()`/`map()` over a user `.next()` iterator + dedup + last-wins, byte-identical
+    /// `List()`/`Set()`/`Map()` over a user `.next()` iterator + dedup + last-wins, byte-identical
     /// VM/interp. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
     #[test]
     fn constructors_over_user_iterator_and_dupkey() {
-        let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(list(C(0, 4)).sum())\n    print(set(C(0, 4)).len())\n    m := map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
+        let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
         let out = run(src);
         assert_eq!(out, "6\n4\n1\nb\n");
         assert_eq!(out, crate::interp::run_capture(src).expect("interp run"));
@@ -22948,7 +22948,7 @@ main()";
         assert_eq!(vm_out, "Red\n");
     }
 
-    /// Polymorphic method-IC golden: `examples/poly_method.chz` (a `list[Shape]` walked at one
+    /// Polymorphic method-IC golden: `examples/poly_method.chz` (a `List[Shape]` walked at one
     /// `.area()` call site across FIVE distinct struct types — four fill the N-way method-call IC,
     /// the fifth overflows it to the sticky-generic slow path) byte-identical on the VM, the
     /// interpreter, and its `.expected`. Pins that the N-way IC is behavior-preserving (the interp,
@@ -24960,7 +24960,7 @@ main()
     #[test]
     fn channel_send_deep_copies_value() {
         // Mutating the original list after send must NOT change what the channel holds (airlock).
-        let src = "fn main():\n    ch := Channel[list[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
+        let src = "fn main():\n    ch := Channel[List[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
         assert_eq!(run(src), "[1, 2]\n");
     }
 
@@ -25557,7 +25557,7 @@ main()
         assert_eq!(run_capture("print([1] * 0)").expect("vm"), "[]\n");
         assert_eq!(run_capture("print([1] * -2)").expect("vm"), "[]\n");
         // set algebra (insertion-order preserved)
-        let setops = "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\nprint(\"{a | b}\")\nprint(\"{a & b}\")\nprint(\"{a - b}\")\nprint(\"{a ^ b}\")\n";
+        let setops = "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\nprint(\"{a | b}\")\nprint(\"{a & b}\")\nprint(\"{a - b}\")\nprint(\"{a ^ b}\")\n";
         assert_eq!(
             run_capture(setops).expect("vm"),
             "{1, 2, 3, 4}\n{2, 3}\n{1}\n{1, 4}\n"
@@ -25573,19 +25573,19 @@ main()
             ("xs := [1, 2]\nxs += [3, 4]\nprint(xs)", "[1, 2, 3, 4]\n"),
             ("xs := [7]\nxs *= 3\nprint(xs)", "[7, 7, 7]\n"),
             (
-                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na |= b\nprint(\"{a}\")",
+                "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\na |= b\nprint(\"{a}\")",
                 "{1, 2, 3, 4}\n",
             ),
             (
-                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na &= b\nprint(\"{a}\")",
+                "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\na &= b\nprint(\"{a}\")",
                 "{2, 3}\n",
             ),
             (
-                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na -= b\nprint(\"{a}\")",
+                "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\na -= b\nprint(\"{a}\")",
                 "{1}\n",
             ),
             (
-                "a: set[int] = {1, 2, 3}\nb: set[int] = {2, 3, 4}\na ^= b\nprint(\"{a}\")",
+                "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\na ^= b\nprint(\"{a}\")",
                 "{1, 4}\n",
             ),
         ];
@@ -25863,17 +25863,17 @@ main()
 
     /// Tech-debt parity: a `set` nested inside a struct / list must compare unordered on BOTH
     /// engines (top-level set `==` already did). Previously the interp's derived `SetData::eq` was
-    /// order-sensitive, so `W(set([1,2,3])) == W(set([3,2,1]))` was `true` on the VM but `false` on
+    /// order-sensitive, so `W(Set([1,2,3])) == W(Set([3,2,1]))` was `true` on the VM but `false` on
     /// the interp.
     #[test]
     fn nested_set_equality_parity() {
         let src = "\
 struct W:
-    s: set[int]
-a := W(set([1, 2, 3]))
-b := W(set([3, 2, 1]))
+    s: Set[int]
+a := W(Set([1, 2, 3]))
+b := W(Set([3, 2, 1]))
 print(a == b)
-print([set([1, 2])] == [set([2, 1])])
+print([Set([1, 2])] == [Set([2, 1])])
 ";
         let vm = run_capture(src).expect("vm");
         let interp = crate::interp::run_capture(src).expect("interp");
@@ -26117,7 +26117,7 @@ print(rec(3))
     fn cyclic_print_errors_not_crashes() {
         let src = "\
 struct Node:
-    next: list[Node]
+    next: List[Node]
 a := Node([])
 b := Node([])
 a.next.push(b)
@@ -26134,7 +26134,7 @@ print(a)
     fn cyclic_equality_errors_not_crashes() {
         let src = "\
 struct Node:
-    next: list[Node]
+    next: List[Node]
 a := Node([])
 b := Node([])
 a.next.push(b)
@@ -26155,7 +26155,7 @@ print(a == c)
     fn cyclic_print_is_recoverable() {
         let src = "\
 struct Node:
-    next: list[Node]
+    next: List[Node]
 a := Node([])
 b := Node([])
 a.next.push(b)
@@ -26266,8 +26266,8 @@ main()";
     #[test]
     fn set_algebra_survives_gc_stress() {
         let src = "\
-a := set([\"al\" + \"pha\", \"be\" + \"ta\", \"gam\" + \"ma\"])
-b := set([\"be\" + \"ta\", \"de\" + \"lta\"])
+a := Set([\"al\" + \"pha\", \"be\" + \"ta\", \"gam\" + \"ma\"])
+b := Set([\"be\" + \"ta\", \"de\" + \"lta\"])
 print(a.union(b).len())
 print(a.intersection(b).len())
 print(a.difference(b).len())
@@ -26290,7 +26290,7 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c), str(o.c)]
         return self.c - o.c
-fn make() -> list[M]:
+fn make() -> List[M]:
     xs := []
     i := 0
     while i < 8:
@@ -26322,8 +26322,8 @@ struct K:
     fn hash(self) -> int:
         junk := [str(self.n), str(self.n + 1)]
         return self.n
-fn make_map() -> map[K, str]:
-    m: map[K, str] = {}
+fn make_map() -> Map[K, str]:
+    m: Map[K, str] = {}
     i := 0
     while i < 8:
         m[K(i)] = str(i)
@@ -26347,7 +26347,7 @@ main()";
         );
     }
 
-    /// Set construction (`set([..])`) + `add` over structs whose `hash()` allocates, including
+    /// Set construction (`Set([..])`) + `add` over structs whose `hash()` allocates, including
     /// algebra — none of the elements may be collected mid-hash.
     #[test]
     fn set_struct_hash_survives_gc_stress() {
@@ -26358,12 +26358,12 @@ struct K:
         junk := [str(self.n)]
         return self.n
 fn main():
-    a := set([K(1), K(2), K(2), K(3)])
+    a := Set([K(1), K(2), K(2), K(3)])
     print(a.len())
     a.add(K(3))
     a.add(K(4))
     print(a.len())
-    b := set([K(3), K(4), K(5)])
+    b := Set([K(3), K(4), K(5)])
     print(a.union(b).len())
     print(a.intersection(b).len())
     print(a.difference(b).len())
@@ -26381,7 +26381,7 @@ struct M:
     fn compare(self, o: M) -> int:
         junk := [str(self.c)]
         return self.c - o.c
-fn make() -> list[M]:
+fn make() -> List[M]:
     xs := []
     i := 0
     while i < 6:
@@ -26530,10 +26530,10 @@ main()";
     #[test]
     fn shared_box_survives_gc_stress() {
         let src = "\
-fn appended(xs: list[str], v: str) -> list[str]:
+fn appended(xs: List[str], v: str) -> List[str]:
     xs.push(v)
     return xs
-fn push_one(s: Shared[list[str]], v: str):
+fn push_one(s: Shared[List[str]], v: str):
     s.update(fn(xs): appended(xs, v))
 fn main():
     s := Shared([str(0)])
@@ -27494,7 +27494,7 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     #[test]
     fn field_named_decode_is_indexable_parity() {
         let out = parity_entry(
-            "struct Box:\n    decode: list[int]\nb := Box([10, 20, 30])\nprint(b.decode[1])\nprint(b.decode[0] + b.decode[2])\n",
+            "struct Box:\n    decode: List[int]\nb := Box([10, 20, 30])\nprint(b.decode[1])\nprint(b.decode[0] + b.decode[2])\n",
         );
         assert_eq!(out, "20\n40\n");
     }
@@ -27560,14 +27560,14 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     #[test]
     fn set_mutation_and_iteration_parity() {
         assert_parity_out(
-            "s := set()\ns.add(10)\ns.add(10)\ns.add(20)\nprint(s.len())\nprint(s.remove(10))\nprint(s.remove(10))\ntotal := 0\nfor x in {5, 15, 25}:\n    total += x\nprint(total)\n",
+            "s := Set()\ns.add(10)\ns.add(10)\ns.add(20)\nprint(s.len())\nprint(s.remove(10))\nprint(s.remove(10))\ntotal := 0\nfor x in {5, 15, 25}:\n    total += x\nprint(total)\n",
             "2\ntrue\nfalse\n45\n",
         );
     }
 
     #[test]
     fn set_display_parity() {
-        assert_parity_out("print({1, 2, 3})\nprint(set())\n", "{1, 2, 3}\nset()\n");
+        assert_parity_out("print({1, 2, 3})\nprint(Set())\n", "{1, 2, 3}\nSet()\n");
     }
 
     #[test]
@@ -29317,7 +29317,7 @@ main()
     #[test]
     fn parity_list_map_to_nested_list_gc_stress() {
         // Maps each element to a nested list (heap); the result list holds heap children.
-        let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> list[int]: [x, x])\nprint(ys[1][0])\n";
+        let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> List[int]: [x, x])\nprint(ys[1][0])\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "2\n");
         assert_eq!(
@@ -29381,7 +29381,7 @@ main()
     fn parity_list_sort_by_nested_list_gc_stress() {
         // Elements are nested lists (heap); sort by first element. Exercises rooting of heap children
         // across comparator calls under stress.
-        let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: list[int], b: list[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
+        let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: List[int], b: List[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
         assert_eq!(
@@ -29928,7 +29928,7 @@ main()
     }
 
     /// std.concurrency.collection golden: `examples/concurrent_collection.chz` — the pure-Chezzi
-    /// thread-safe `ConcurrentMap`/`ConcurrentCounter` wrappers over `RwShared[map[...]]`. The program
+    /// thread-safe `ConcurrentMap`/`ConcurrentCounter` wrappers over `RwShared[Map[...]]`. The program
     /// is DETERMINISTIC by construction (single-write-lock RMW for the counter, each-own-key for the
     /// map), so its output is identical on the VM, the interpreter (assert_file_parity), and (verified
     /// manually) `--parallel`.
@@ -30568,7 +30568,7 @@ main()
 
     /// `Iterable[T]` + `.iter()` — a list flows into the Take/Mapped adapter pipeline, `.iter()`+manual
     /// `.next()` on every collection, a pure-`Iterable` struct drives `for`, an `[S: Iterable[T]]` fn
-    /// over a list AND a struct iterator, empty/idempotent cursors, `list(xs.iter())` round-trip. Byte-
+    /// over a list AND a struct iterator, empty/idempotent cursors, `List(xs.iter())` round-trip. Byte-
     /// identical on VM + interp (the `--serial` third engine is asserted in the regression script).
     #[test]
     fn golden_iterable_via_run_file() {
@@ -30726,7 +30726,7 @@ struct P:
     fn hash(self) -> int:
         return self.x * 31 + self.y
 fn main():
-    m: map[P, str] = {}
+    m: Map[P, str] = {}
     m[P(1, 2)] = \"a\"
     m[P(3, 4)] = \"b\"
     m[P(1, 2)] = \"z\"
@@ -30751,8 +30751,8 @@ struct P:
     fn hash(self) -> int:
         return self.x
 fn main():
-    a: set[P] = set([P(1), P(2), P(2), P(3)])
-    b: set[P] = set([P(2), P(3), P(4)])
+    a: Set[P] = Set([P(1), P(2), P(2), P(3)])
+    b: Set[P] = Set([P(2), P(3), P(4)])
     print(a.len())
     print(a.union(b).len())
     print(a.intersection(b).len())
@@ -30772,7 +30772,7 @@ main()";
 struct P:
     x: int
 fn main():
-    m: map[P, int] = {}
+    m: Map[P, int] = {}
     m[P(1)] = 5
 main()";
         assert_parity(src);
@@ -30931,12 +30931,12 @@ main()";
 
     const BUF_PROG: &str = "\
 struct Buf:
-    xs: list[int]
+    xs: List[int]
     fn index(self, key: int) -> int:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
             (Some(s), Some(e), Some(c)): return self.xs[s:e:c]
             (Some(s), Some(e), None): return self.xs[s:e]
@@ -31379,7 +31379,7 @@ main()";
 
     #[test]
     fn iter_empty_collection_none_immediately() {
-        let src = "fn main():\n    xs: list[int] = []\n    it := xs.iter()\n    print(it.next())\nmain()\n";
+        let src = "fn main():\n    xs: List[int] = []\n    it := xs.iter()\n    print(it.next())\nmain()\n";
         assert_parity_out(src, "None\n");
     }
 
@@ -31419,11 +31419,11 @@ main()";
     #[test]
     fn list_of_cursor_roundtrip_both_engines() {
         assert_parity_out(
-            "fn main():\n    print(list([5, 6, 7].iter()))\nmain()\n",
+            "fn main():\n    print(List([5, 6, 7].iter()))\nmain()\n",
             "[5, 6, 7]\n",
         );
         assert_parity_out(
-            "fn main():\n    print(set({1, 2}.iter()).len())\nmain()\n",
+            "fn main():\n    print(Set({1, 2}.iter()).len())\nmain()\n",
             "2\n",
         );
     }
@@ -31453,7 +31453,7 @@ main()";
         // A struct with ONLY iter() drives `for`; one with BOTH still uses next() (sentinel).
         let only_iter = concat!(
             "struct Wrap:\n",
-            "    xs: list[int]\n",
+            "    xs: List[int]\n",
             "    fn iter(self) -> Iterator[int]:\n",
             "        return self.xs.iter()\n",
             "fn main():\n",
@@ -31594,24 +31594,24 @@ main()";
         widen_three_engines("f := fn(z: float): z / 2\nprint(f(3))\n", "1.5\n");
     }
 
-    /// (A) Annotated `list[float] = [1, 2.3]` — `xs[0]` is a genuine float (`1 / 2 == 0.5`).
+    /// (A) Annotated `List[float] = [1, 2.3]` — `xs[0]` is a genuine float (`1 / 2 == 0.5`).
     /// (B) Un-annotated all-literal mix `[1, 2.3]` widens its int LITERAL via the peephole.
     /// (C) A map VALUE float position likewise widens.
     #[test]
     fn widen_collection_annotated_and_literal() {
-        widen_three_engines("xs: list[float] = [1, 2.3]\nprint(xs[0] / 2)\n", "0.5\n");
+        widen_three_engines("xs: List[float] = [1, 2.3]\nprint(xs[0] / 2)\n", "0.5\n");
         widen_three_engines(
             "ys := [1, 2.3]\nprint(ys[0] / 2)\nprint(ys[1])\n",
             "0.5\n2.3\n",
         );
         widen_three_engines(
-            "m: map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m[\"a\"] / 2)\n",
+            "m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m[\"a\"] / 2)\n",
             "0.5\n",
         );
     }
 
     /// An all-int literal collection must NOT widen (the peephole only fires when ≥1 float literal is
-    /// present): `[1, 2, 3]` stays `list[int]`, so `xs[0] / 2` is int division (`0`).
+    /// present): `[1, 2, 3]` stays `List[int]`, so `xs[0] / 2` is int division (`0`).
     #[test]
     fn widen_all_int_literal_collection_stays_int() {
         widen_three_engines("xs := [1, 2, 3]\nprint(xs[0] / 2)\n", "0\n");
@@ -31624,12 +31624,12 @@ main()";
         widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
     }
 
-    /// An ANNOTATED `list[float]` widens a NON-LITERAL int element too (all elements coerced): both
+    /// An ANNOTATED `List[float]` widens a NON-LITERAL int element too (all elements coerced): both
     /// engines must agree (`a` is an int variable, not a literal).
     #[test]
     fn widen_annotated_list_widens_nonliteral_element() {
         widen_three_engines(
-            "a := 1\nxs: list[float] = [a, 2.3]\nprint(xs[0] / 2)\n",
+            "a := 1\nxs: List[float] = [a, 2.3]\nprint(xs[0] / 2)\n",
             "0.5\n",
         );
     }

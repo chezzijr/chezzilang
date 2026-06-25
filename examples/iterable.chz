@@ -41,7 +41,7 @@ struct Counter:
 # A PURE-`Iterable` struct: it has `iter()` but NO `next()`. It is for-iterable via a one-time
 # `.iter()` that hands back a cursor.
 struct Wrap:
-    xs: list[int]
+    xs: List[int]
     fn iter(self) -> Iterator[int]:
         return self.xs.iter()
 
@@ -86,7 +86,7 @@ fn main():
     print(bai.next())                     # Some(9)
 
     # --- empty-collection cursor → None immediately ---
-    empty: list[int] = []
+    empty: List[int] = []
     print(empty.iter().next())            # None
 
     # --- iter() is idempotent on an Iterator value (returns self) ---
@@ -101,8 +101,8 @@ fn main():
     for x in Wrap([100, 200]):
         print(x)                          # 100, 200
 
-    # --- list(xs.iter()) round-trips (a cursor IS an Iterator[T], drained for free) ---
-    print(list([5, 6, 7].iter()))         # [5, 6, 7]
-    print(set({2, 2, 3}.iter()).len())    # 2  (deduped)
+    # --- List(xs.iter()) round-trips (a cursor IS an Iterator[T], drained for free) ---
+    print(List([5, 6, 7].iter()))         # [5, 6, 7]
+    print(Set({2, 2, 3}.iter()).len())    # 2  (deduped)
 
 main()

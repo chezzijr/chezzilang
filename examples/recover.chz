@@ -1,5 +1,5 @@
 # Panic recovery: a runtime fault beneath `recover:` becomes Err, not a process kill.
-fn risky(i: int, xs: list[int]) -> int:
+fn risky(i: int, xs: List[int]) -> int:
     return xs[i]          # may panic (index out of bounds)
 
 fn parse_int(s: str) -> int!:

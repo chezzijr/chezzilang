@@ -3,7 +3,7 @@ newtype UserId = int
 newtype Meters = float:
     fn double(self) -> Meters:
         return self + self
-newtype Stack[T] = list[T]
+newtype Stack[T] = List[T]
 newtype Boxed[T] = T:
     fn same(self) -> Boxed[T]:
         return self

@@ -7,19 +7,19 @@
 
 import std.concurrency
 
-fn put(r: RwShared[map[str, int]], k: str, v: int):
+fn put(r: RwShared[Map[str, int]], k: str, v: int):
     # exclusive write guard: read-modify-write the map, inserting this task's own key
     r.write(fn(m): insert(m, k, v))
 
-fn insert(m: map[str, int], k: str, v: int) -> map[str, int]:
+fn insert(m: Map[str, int], k: str, v: int) -> Map[str, int]:
     m[k] = v
     return m
 
-fn total(r: RwShared[map[str, int]]) -> int:
+fn total(r: RwShared[Map[str, int]]) -> int:
     # SHARED read guard: snapshot the map and sum its values, returning the computed result
     return r.read(fn(m): sum_values(m))
 
-fn sum_values(m: map[str, int]) -> int:
+fn sum_values(m: Map[str, int]) -> int:
     s := 0
     for k in m.keys():
         s = s + m[k]

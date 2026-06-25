@@ -1,6 +1,6 @@
 # examples/knapsack.chz — 0/1 knapsack via a 2D DP table (Domain D).
 #
-# Showcases nested mutable collections: a `list[list[int]]` DP table built with push, then
+# Showcases nested mutable collections: a `List[List[int]]` DP table built with push, then
 # filled in place with `dp[i][w] = ...` (nested index assignment — gaps #1 reaching two levels).
 #
 # `cmp.max` (std.cmp, generic over Comparable) handles the int DP recurrence directly:
@@ -8,7 +8,7 @@
 
 import std.cmp
 
-fn build_table(rows: int, cols: int) -> list[list[int]]:
+fn build_table(rows: int, cols: int) -> List[List[int]]:
     dp := []
     for i in 0..rows:
         row := []

@@ -2,7 +2,7 @@
 # runtime primitive (many concurrent readers OR one exclusive writer). Pure Chezzi, so every engine
 # (interp oracle, cooperative VM, real-thread `--parallel`) behaves identically.
 #
-# WHY: `RwShared[map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
+# WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
 # airlock — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
 # read-modify-write a count) MUST happen inside a SINGLE `write` lock or they race. These wrappers bake
 # the correct single-lock idiom in.
@@ -36,14 +36,14 @@ struct _Cell[T]:
         self.value = v
 
 # ============================================================================
-# ConcurrentMap[K, V] — a thread-safe map over `RwShared[map[K, V]]` (K must be Hashable).
+# ConcurrentMap[K, V] — a thread-safe map over `RwShared[Map[K, V]]` (K must be Hashable).
 # ============================================================================
 #
 # CONCURRENCY: get/contains/len/snapshot are CONCURRENT READS (many at once); set/remove/get_or_insert
 # take the EXCLUSIVE WRITE lock. `get_or_insert` is COMPOUND-ATOMIC — its check-and-insert happens in
 # ONE write lock, so it cannot lose a race.
 struct ConcurrentMap[K: Hashable, V]:
-    inner: RwShared[map[K, V]]
+    inner: RwShared[Map[K, V]]
 
     # Look up `key`. CONCURRENT READ. Returns Some(value) or None.
     fn get(self, key: K) -> Option[V]:
@@ -77,17 +77,17 @@ struct ConcurrentMap[K: Hashable, V]:
 
     # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
     # returned map is independent of later mutations.
-    fn snapshot(self) -> map[K, V]:
+    fn snapshot(self) -> Map[K, V]:
         return self.inner.read(fn(m): m)
 
-fn _get[K: Hashable, V](m: map[K, V], key: K) -> Option[V]:
+fn _get[K: Hashable, V](m: Map[K, V], key: K) -> Option[V]:
     return m.get(key)
 
-fn _put[K: Hashable, V](m: map[K, V], key: K, val: V) -> map[K, V]:
+fn _put[K: Hashable, V](m: Map[K, V], key: K, val: V) -> Map[K, V]:
     m[key] = val
     return m
 
-fn _remove[K: Hashable, V](m: map[K, V], key: K) -> map[K, V]:
+fn _remove[K: Hashable, V](m: Map[K, V], key: K) -> Map[K, V]:
     m.remove(key)
     return m
 
@@ -95,7 +95,7 @@ fn _remove[K: Hashable, V](m: map[K, V], key: K) -> map[K, V]:
 # freshly inserted `default`) into `out` — ALL inside the one write lock. Returns the map (the write
 # closure's value). Because the value is captured here, get_or_insert needs no second lock: it is
 # compound-atomic with no remove-in-the-window race.
-fn _ensure_capture[K: Hashable, V](m: map[K, V], key: K, default: V, out: _Cell[V]) -> map[K, V]:
+fn _ensure_capture[K: Hashable, V](m: Map[K, V], key: K, default: V, out: _Cell[V]) -> Map[K, V]:
     match m.get(key):
         Some(v): out.set(v)
         None:
@@ -104,14 +104,14 @@ fn _ensure_capture[K: Hashable, V](m: map[K, V], key: K, default: V, out: _Cell[
     return m
 
 # ============================================================================
-# ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[map[K, int]]` (K Hashable).
+# ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable).
 # ============================================================================
 #
 # CONCURRENCY: count/total are CONCURRENT READS; increment/add take the EXCLUSIVE WRITE lock and do
 # their read-modify-write inside ONE closure, so N tasks each incrementing the same key produce an
 # EXACT final count (no lost updates). This is the classic race-free concurrent counter.
 struct ConcurrentCounter[K: Hashable]:
-    inner: RwShared[map[K, int]]
+    inner: RwShared[Map[K, int]]
 
     # Increment `key`'s count by 1 (created at 1 if absent). EXCLUSIVE WRITE, atomic RMW.
     fn increment(self, key: K):
@@ -130,18 +130,18 @@ struct ConcurrentCounter[K: Hashable]:
         return self.inner.read(fn(m): _sum(m))
 
 # Read-modify-write `key` += `n` in ONE pass (called inside the exclusive write closure).
-fn _inc[K: Hashable](m: map[K, int], key: K, n: int) -> map[K, int]:
+fn _inc[K: Hashable](m: Map[K, int], key: K, n: int) -> Map[K, int]:
     match m.get(key):
         Some(c): m[key] = c + n
         None: m[key] = n
     return m
 
-fn _count[K: Hashable](m: map[K, int], key: K) -> int:
+fn _count[K: Hashable](m: Map[K, int], key: K) -> int:
     match m.get(key):
         Some(c): return c
         None: return 0
 
-fn _sum[K: Hashable](m: map[K, int]) -> int:
+fn _sum[K: Hashable](m: Map[K, int]) -> int:
     s := 0
     for k in m.keys():
         s = s + m[k]

@@ -438,7 +438,7 @@ mod tests {
         // the hook order it should observe, and after_each runs even when a test fails.
         let src = "\
 struct Suite:
-    log: list[str] = []
+    log: List[str] = []
     fn before_all(self):
         self.log.push(\"before_all\")
     fn after_all(self):
@@ -503,7 +503,7 @@ struct Suite:
         // proves it), i.e. after_each fires even when the test method faulted.
         let src = "\
 struct Suite:
-    log: list[str] = []
+    log: List[str] = []
     fn after_each(self):
         self.log.push(\"ae\")
 

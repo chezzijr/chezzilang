@@ -34,7 +34,7 @@ fn pad_left(s: str, width: int, fill: str) -> str:
     return out
 
 # Split `s` on newlines into a list of lines.
-fn split_lines(s: str) -> list[str]:
+fn split_lines(s: str) -> List[str]:
     return s.split("\n")
 
 # Does `s` end with `suffix`? (mirror of the native `starts_with`). The empty suffix ends every

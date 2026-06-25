@@ -216,10 +216,10 @@ pub fn ref_display(ty: &Ty) -> String {
         Ty::Struct(n, args) if n == "Ref" && args.len() == 1 => {
             format!("ref {}", ref_display(&args[0]))
         }
-        Ty::List(t) => format!("list[{}]", ref_display(t)),
-        Ty::Set(t) => format!("set[{}]", ref_display(t)),
+        Ty::List(t) => format!("List[{}]", ref_display(t)),
+        Ty::Set(t) => format!("Set[{}]", ref_display(t)),
         Ty::Option(t) => format!("Option[{}]", ref_display(t)),
-        Ty::Map(k, v) => format!("map[{}, {}]", ref_display(k), ref_display(v)),
+        Ty::Map(k, v) => format!("Map[{}, {}]", ref_display(k), ref_display(v)),
         Ty::Tuple(elems) => {
             let parts: Vec<String> = elems.iter().map(ref_display).collect();
             format!("({})", parts.join(", "))
@@ -239,9 +239,9 @@ impl fmt::Display for Ty {
             Ty::Bytes => write!(f, "bytes"),
             Ty::ByteArray => write!(f, "bytearray"),
             Ty::Nil => write!(f, "nil"),
-            Ty::List(t) => write!(f, "list[{t}]"),
-            Ty::Map(k, v) => write!(f, "map[{k}, {v}]"),
-            Ty::Set(t) => write!(f, "set[{t}]"),
+            Ty::List(t) => write!(f, "List[{t}]"),
+            Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
+            Ty::Set(t) => write!(f, "Set[{t}]"),
             // `Result[T]` when the error is the default `Error` or still unconstrained (`?`);
             // `Result[T, E]` for an explicit error type.
             Ty::Result(t, e) => match e.as_ref() {
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn display_renders_source_forms() {
-        assert_eq!(Ty::list(Ty::Int).to_string(), "list[int]");
+        assert_eq!(Ty::list(Ty::Int).to_string(), "List[int]");
         assert_eq!(Ty::result(Ty::Int).to_string(), "Result[int]");
         assert_eq!(Ty::strukt("Point").to_string(), "Point");
         assert_eq!(
@@ -387,7 +387,7 @@ mod tests {
         // Nested inside a generic — every embedded nominal type strips too.
         assert_eq!(
             Ty::list(Ty::Struct("geo::Point".into(), vec![])).to_string(),
-            "list[Point]"
+            "List[Point]"
         );
         // A bare (unqualified) key is unchanged.
         assert_eq!(Ty::strukt("Point").to_string(), "Point");

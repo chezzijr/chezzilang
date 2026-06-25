@@ -141,7 +141,7 @@ fn normalize(p: str) -> str:
 # input yields "".
 #   join(["a","b","c"]) -> "a/b/c" · join(["a/","b"]) -> "a/b" · join(["","b"]) -> "b" ·
 #   join([]) -> "" · join(["a","","c"]) -> "a/c" · join(["/a","b"]) -> "/a/b"
-fn join(parts: list[str]) -> str:
+fn join(parts: List[str]) -> str:
     kept := []
     for part in parts:
         if part.len() > 0:

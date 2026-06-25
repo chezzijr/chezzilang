@@ -542,7 +542,7 @@ impl Parser {
 
     /// Optional `[T, U: Bound, …]` generic-parameter list immediately after a `fn`/`struct` name.
     /// Returns an empty vec when there's no `[`. Decl-site only — distinct from `parse_type`'s use
-    /// of `[` for generic *arguments* (`list[int]`).
+    /// of `[` for generic *arguments* (`List[int]`).
     fn parse_type_params(&mut self) -> PResult<Vec<TypeParam>> {
         let mut params = Vec::new();
         if self.eat(&Token::LBracket) {
@@ -675,7 +675,7 @@ impl Parser {
                 let name = self.expect_ident()?;
                 // A `ref` modifier is legal only directly after the `:` of a param annotation
                 // (`x: ref int`). `parse_type` never consumes `ref`, so it is a parse error in any
-                // nested type position (`x: list[ref int]`, `x: (ref int, int)`).
+                // nested type position (`x: List[ref int]`, `x: (ref int, int)`).
                 let mut is_ref = false;
                 let ty = if self.eat(&Token::Colon) {
                     is_ref = self.eat(&Token::Ref);
@@ -842,7 +842,7 @@ impl Parser {
     /// `newtype Name = <type>` (the common, method-less case, terminated like a typeAlias) or
     /// `newtype Name = <type>:` followed by an indented `fn` method block (compound, ends at its
     /// Dedent). A DISTINCT nominal type — not a transparent alias. May carry generic type params
-    /// (`newtype Stack[T] = list[T]`), reusing the struct/enum generic-param parser; the underlying
+    /// (`newtype Stack[T] = List[T]`), reusing the struct/enum generic-param parser; the underlying
     /// and method signatures may then reference them. `test fn` in the body is rejected (suites
     /// aren't wired — enum precedent).
     fn parse_newtype(&mut self) -> PResult<StmtKind> {
@@ -2105,7 +2105,7 @@ impl Parser {
             Token::LBrace => {
                 // `{}` is the empty map. Otherwise the first element decides: a `key: value` pair
                 // makes it a map (or, before `for`, a map comprehension); a bare expression makes
-                // it a set (or a set comprehension before `for`). The empty set is `set()`.
+                // it a set (or a set comprehension before `for`). The empty set is `Set()`.
                 if self.check(&Token::RBrace) {
                     self.advance();
                     ExprKind::Map(Vec::new())
@@ -3217,7 +3217,7 @@ mod tests {
     #[test]
     fn generic_newtype_parses() {
         match only(
-            "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\n",
+            "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\n",
         ) {
             StmtKind::NewType {
                 name,
@@ -3230,7 +3230,7 @@ mod tests {
                 assert_eq!(type_params[0].name, "T");
                 assert_eq!(
                     underlying,
-                    Type::Generic("list".into(), vec![Type::Named("T".into())])
+                    Type::Generic("List".into(), vec![Type::Named("T".into())])
                 );
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "peek");
@@ -4018,17 +4018,17 @@ mod tests {
     /// Generic types with multiple arguments parse (the comma loop in `parse_type`).
     #[test]
     fn generic_type_multiple_args() {
-        let StmtKind::Fn(f) = only("fn g(m: map[str, list[int]]):\n    return\n") else {
+        let StmtKind::Fn(f) = only("fn g(m: Map[str, List[int]]):\n    return\n") else {
             panic!()
         };
         match &f.params[0].ty {
             Some(Type::Generic(name, args)) => {
-                assert_eq!(name, "map");
+                assert_eq!(name, "Map");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], Type::Named("str".into()));
                 assert_eq!(
                     args[1],
-                    Type::Generic("list".into(), vec![Type::Named("int".into())])
+                    Type::Generic("List".into(), vec![Type::Named("int".into())])
                 );
             }
             other => panic!("{other:?}"),
@@ -4142,10 +4142,10 @@ mod tests {
         );
     }
 
-    /// The shorthand applies to a fully-parsed base type, including a generic like `list[int]`.
+    /// The shorthand applies to a fully-parsed base type, including a generic like `List[int]`.
     #[test]
     fn optional_shorthand_on_generic_base() {
-        let StmtKind::Fn(decl) = only("fn f(x: list[int]?):\n    return x\n") else {
+        let StmtKind::Fn(decl) = only("fn f(x: List[int]?):\n    return x\n") else {
             panic!()
         };
         assert_eq!(
@@ -4153,7 +4153,7 @@ mod tests {
             Some(Type::Generic(
                 "Option".into(),
                 vec![Type::Generic(
-                    "list".into(),
+                    "List".into(),
                     vec![Type::Named("int".into())]
                 )]
             ))
@@ -4192,16 +4192,16 @@ mod tests {
         );
     }
 
-    /// A qualified type nested inside a generic: `list[geo.Point]`.
+    /// A qualified type nested inside a generic: `List[geo.Point]`.
     #[test]
     fn qualified_type_inside_generic() {
-        let StmtKind::Fn(decl) = only("fn f(x: list[geo.Point]):\n    return x\n") else {
+        let StmtKind::Fn(decl) = only("fn f(x: List[geo.Point]):\n    return x\n") else {
             panic!()
         };
         assert_eq!(
             decl.params[0].ty,
             Some(Type::Generic(
-                "list".into(),
+                "List".into(),
                 vec![Type::Qualified {
                     module: "geo".into(),
                     name: "Point".into(),
@@ -4368,7 +4368,7 @@ mod tests {
                 .contains("too deeply")
         );
 
-        let generic = format!("z: {}int{} = w\n", "list[".repeat(500), "]".repeat(500));
+        let generic = format!("z: {}int{} = w\n", "List[".repeat(500), "]".repeat(500));
         assert!(
             parse(lexer::tokenize(&generic).unwrap())
                 .unwrap_err()
@@ -4857,7 +4857,7 @@ mod tests {
     #[test]
     fn const_collection_default_ok() {
         // literal collections of constants are allowed
-        parse_ok("fn f(xs: list[int] = [1, 2]):\n    print(xs)\n");
+        parse_ok("fn f(xs: List[int] = [1, 2]):\n    print(xs)\n");
         parse_ok("fn f(b: bool = false, s: str = \"hi\"):\n    print(b)\n");
     }
 
@@ -5186,7 +5186,7 @@ mod tests {
         // parse error in any other type position (the lexer keyword can't start a <type>).
         for src in [
             "fn f() -> ref int:\n    return 0\n", // return type
-            "xs: list[ref int] = []\n",           // generic arg / collection element
+            "xs: List[ref int] = []\n",           // generic arg / collection element
             "struct S:\n    count: ref int\n",    // struct field
             "p: (ref int, int) = (0, 1)\n",       // tuple element
         ] {

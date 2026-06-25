@@ -26,7 +26,7 @@ struct Token:
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
     parent: Token?         # the live derivation link (None for a root); cancelled()/reason() recurse it
-    kids: Shared[list[Channel[bool]]]  # done()-channels of ALL transitive descendants (each derive()
+    kids: Shared[List[Channel[bool]]]  # done()-channels of ALL transitive descendants (each derive()
                                        # registers into every ancestor) — cancel() trips each (fan-out)
 
     # True once this token is cancelled (manually) or its deadline has passed, OR any ancestor is —

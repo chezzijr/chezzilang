@@ -174,12 +174,12 @@ fn coerce_float(v: Value) -> Value {
 }
 
 /// One-way int→float widening at a typed `let` binding — coerce `v` IN PLACE to match a `float`-shaped
-/// annotation: a scalar `float` coerces the whole value; a `list[float]` coerces every int element; a
-/// `map[_, float]` coerces every int VALUE (keys untouched). Mirrors the VM, where the typed-`let`
-/// sink emits `Op::CoerceFloat` (scalar) and the `list[float]`/`map[_, float]` element hint coerces
+/// annotation: a scalar `float` coerces the whole value; a `List[float]` coerces every int element; a
+/// `Map[_, float]` coerces every int VALUE (keys untouched). Mirrors the VM, where the typed-`let`
+/// sink emits `Op::CoerceFloat` (scalar) and the `List[float]`/`Map[_, float]` element hint coerces
 /// each int element at the literal-compile site. The element walk runs ONLY when `is_literal` (the
 /// value was a list/map LITERAL) — exactly matching the VM, which coerces elements at the literal
-/// compile site, so a non-literal value (`xs: list[float] = f()`) is element-coerced by neither
+/// compile site, so a non-literal value (`xs: List[float] = f()`) is element-coerced by neither
 /// engine. Any other annotation is a no-op.
 fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: bool) {
     if crate::ast::is_float_ty(ty) {
@@ -192,7 +192,7 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
     }
     match ty {
         crate::ast::Type::Generic(n, args)
-            if n == "list" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
+            if n == "List" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
         {
             if let Value::List(items) = v {
                 for elem in items.borrow_mut().iter_mut() {
@@ -202,7 +202,7 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
             }
         }
         crate::ast::Type::Generic(n, args)
-            if n == "map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
+            if n == "Map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
         {
             if let Value::Map(map) = v {
                 for entry in map.borrow_mut().entries.iter_mut() {
@@ -215,8 +215,8 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
     }
 }
 
-/// Cast-unwrap a generic aggregate newtype to its inner value for `list(s)`/`set(s)`/`map(s)`: a
-/// `Value::NewType` (e.g. a `Stack[T] = list[T]`) peels to the wrapped collection so the cast can
+/// Cast-unwrap a generic aggregate newtype to its inner value for `List(s)`/`Set(s)`/`Map(s)`: a
+/// `Value::NewType` (e.g. a `Stack[T] = List[T]`) peels to the wrapped collection so the cast can
 /// iterate it. A non-newtype value passes through unchanged. (Type args are erased at runtime; the
 /// checker has already verified the underlying is the matching aggregate.)
 fn newtype_unwrap_value(v: Value) -> Value {
@@ -271,7 +271,7 @@ fn deep_clone(v: &Value) -> Value {
         // A cursor deep-copies into a FRESH `Rc<RefCell>` (an independent copy, like `List`) — its
         // elements are deep-cloned too. This is also the airlock copy: a cursor IS sendable (it is a
         // snapshot `Vec` + index, plain data), so this arm fires both for in-task `deep_clone` (e.g.
-        // inside `set()`/`map()` building) AND when a cursor crosses a `spawn`/channel boundary. The
+        // inside `Set()`/`Map()` building) AND when a cursor crosses a `spawn`/channel boundary. The
         // VM's `to_wire`/`from_wire` deep-copy a cursor identically, keeping VM↔interp parity.
         Value::Iter(c) => {
             let src = c.borrow();
@@ -506,7 +506,7 @@ enum Deferred {
 const MAX_CALL_DEPTH: usize = 10_000;
 
 /// Maximum structural recursion depth for display (`stringify`) and equality (`values_equal_guarded`).
-/// A cyclic data structure (e.g. a struct with a `list[Self]` field that points back at itself) would
+/// A cyclic data structure (e.g. a struct with a `List[Self]` field that points back at itself) would
 /// otherwise recurse unbounded on the *host* stack inside these routines and SIGABRT — uncatchable by
 /// `recover:`. Tripping this contained guard surfaces a recoverable `RuntimeError` instead. The limit
 /// matches the VM engine's (parity tested).
@@ -1522,17 +1522,17 @@ impl Interp {
                 let s = self.stringify(&arg_vals[0], span, 0)?;
                 return Ok(Value::Str(s.into()));
             }
-            // `set(it)` can take an iterable of structs whose `hash()` re-enters the engine (and may
+            // `Set(it)` can take an iterable of structs whose `hash()` re-enters the engine (and may
             // drain a user iterator's `next()`), so it can't live in the pure `builtins` table — route
-            // it here. `list(it)` / `map(it)` likewise drain any for-iterable (re-entrant). Other
+            // it here. `List(it)` / `Map(it)` likewise drain any for-iterable (re-entrant). Other
             // builtins stay pure.
-            if name == "set" {
+            if name == "Set" {
                 return self.builtin_set(arg_vals, span);
             }
-            if name == "list" {
+            if name == "List" {
                 return self.builtin_list(arg_vals, span);
             }
-            if name == "map" {
+            if name == "Map" {
                 return self.builtin_map(arg_vals, span);
             }
             // `bytearray(...)` / `bytes(...)` — constructors + conversion bridge. Routed on `Interp`
@@ -2728,7 +2728,7 @@ impl Interp {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         // Slicing a range literal `(a..b)[start:end:step]` materializes the (ascending, step-1) range
-        // to a `list[int]` first, then slices that list — reusing the shared `slice_indices` path. A
+        // to a `List[int]` first, then slices that list — reusing the shared `slice_indices` path. A
         // bare range has no value elsewhere; only this slice-receiver position unblocks it.
         let target = if let ExprKind::Range { start: rs, end: re } = &obj.kind {
             let lo = self.eval_int(rs)?;
@@ -2987,7 +2987,7 @@ impl Interp {
             Value::Set(s) => {
                 let entries = s.borrow().entries.clone();
                 if entries.is_empty() {
-                    Ok("set()".to_string())
+                    Ok("Set()".to_string())
                 } else {
                     let elems: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
                     Ok(format!(
@@ -3404,16 +3404,16 @@ impl Interp {
         }
     }
 
-    /// `set()` → empty set; `set(it)` → a deduped hash set drained from ANY for-iterable
+    /// `Set()` → empty set; `Set(it)` → a deduped hash set drained from ANY for-iterable
     /// (list/set/str/bytes/bytearray/map-keys/range/user-iterator). On `Interp` (not `builtins`)
     /// because a struct element's `hash()` and a user iterator's `next()` re-enter the engine.
     /// Mirrors `vm::Vm::builtin_set`.
     fn builtin_set(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let src: Vec<Value> = match args.into_iter().next() {
-            // The checker guarantees ≤1 arg; `set()` (0 args) is the empty set.
+            // The checker guarantees ≤1 arg; `Set()` (0 args) is the empty set.
             None => Vec::new(),
             // Drain any for-iterable into single-element rows, then flatten to elements. A generic
-            // aggregate newtype (`newtype S[T] = set[T]`) cast-unwraps to its inner set first.
+            // aggregate newtype (`newtype S[T] = Set[T]`) cast-unwraps to its inner set first.
             Some(it) => self
                 .drain_value_to_rows(newtype_unwrap_value(it), 1, span)?
                 .into_iter()
@@ -3435,17 +3435,17 @@ impl Interp {
         Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
     }
 
-    /// `list(it)` → a list drained from ANY for-iterable. On `Interp` because a user iterator's
+    /// `List(it)` → a list drained from ANY for-iterable. On `Interp` because a user iterator's
     /// `next()` re-enters the engine. Mirrors `vm::Vm::builtin_list`.
     fn builtin_list(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "list() takes exactly one iterable argument — use [] for an empty list"
+            message: "List() takes exactly one iterable argument — use [] for an empty list"
                 .to_string(),
             span,
         })?;
-        // A generic aggregate newtype (`Stack[T] = list[T]`) cast-unwraps to its inner list — the
+        // A generic aggregate newtype (`Stack[T] = List[T]`) cast-unwraps to its inner list — the
         // checker verified the underlying is a list, so just peel the wrapper (the type args are
-        // erased at runtime). The inner is itself a list, copied like any `list(xs)`.
+        // erased at runtime). The inner is itself a list, copied like any `List(xs)`.
         let it = newtype_unwrap_value(it);
         let items: Vec<Value> = self
             .drain_value_to_rows(it, 1, span)?
@@ -3457,16 +3457,16 @@ impl Interp {
         ))))
     }
 
-    /// `map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on duplicate keys, like the
+    /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on duplicate keys, like the
     /// `{k: v}` literal). On `Interp` because a struct key's `hash()` and a user iterator's `next()`
     /// re-enter the engine. Mirrors `vm::Vm::builtin_map`.
     fn builtin_map(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
         let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "map() takes exactly one iterable argument — use {} for an empty map"
+            message: "Map() takes exactly one iterable argument — use {} for an empty map"
                 .to_string(),
             span,
         })?;
-        // A generic aggregate newtype (`Tally[T] = map[T, int]`) cast-unwraps to its inner map. When
+        // A generic aggregate newtype (`Tally[T] = Map[T, int]`) cast-unwraps to its inner map. When
         // that inner is a map, the cast yields it DIRECTLY (a copy) — iterating a map gives keys, not
         // the 2-tuples the general path expects.
         let it = newtype_unwrap_value(it);
@@ -3486,7 +3486,7 @@ impl Interp {
                 Some(other) => {
                     return Err(RuntimeError {
                         message: format!(
-                            "map() expects an iterable of (key, value) 2-tuples, got {}",
+                            "Map() expects an iterable of (key, value) 2-tuples, got {}",
                             other.type_name()
                         ),
                         span,
@@ -3501,7 +3501,7 @@ impl Interp {
     }
 
     /// Collect raw bytes from a byte-sequence-shaped argument (a `bytes`, a `bytearray`, or a
-    /// `list[int]` with each element 0..=255). Mirrors the VM's `collect_bytes_arg`. `what` names the
+    /// `List[int]` with each element 0..=255). Mirrors the VM's `collect_bytes_arg`. `what` names the
     /// constructor/method in error messages.
     fn collect_bytes_arg(
         &self,
@@ -3540,7 +3540,7 @@ impl Interp {
             }
             other => Err(RuntimeError {
                 message: format!(
-                    "{what}() expects a bytes, a bytearray, or a list[int], got {}",
+                    "{what}() expects a bytes, a bytearray, or a List[int], got {}",
                     other.type_name()
                 ),
                 span,
@@ -3604,7 +3604,7 @@ impl Interp {
     }
 
     /// Built-in methods on a `bytearray`: `len`, `push(int 0..=255)`, `pop() -> Option[int]`,
-    /// `extend(bytes|bytearray|list[int])`. Mirrors the VM's `bytearray_method` and the checker's
+    /// `extend(bytes|bytearray|List[int])`. Mirrors the VM's `bytearray_method` and the checker's
     /// `bytearray_method_sig`. Mutators write IN PLACE via the shared `Rc<RefCell>` (`borrow_mut`).
     fn eval_bytearray_method(
         &mut self,
@@ -3692,7 +3692,7 @@ impl Interp {
         }
     }
 
-    /// Built-in methods on `map[K, V]`. Mirrors the VM's `core_method` Map arm and the checker's
+    /// Built-in methods on `Map[K, V]`. Mirrors the VM's `core_method` Map arm and the checker's
     /// `map_method_sig` (keep the three in lockstep, error strings included). Lives on `Interp` (not
     /// the pure `builtins` table) because a struct key's `hash()` re-enters the engine. `get`/`remove`
     /// return `Option[V]`.
@@ -3816,7 +3816,7 @@ impl Interp {
         }
     }
 
-    /// Built-in methods on `set[T]`. Mirrors the VM's `core_method` Set arm and the checker's
+    /// Built-in methods on `Set[T]`. Mirrors the VM's `core_method` Set arm and the checker's
     /// `set_method_sig`. On `Interp` (not `builtins`) for struct-key `hash()` access. Set algebra
     /// reuses each operand's per-element cached hash, so it never re-enters the engine.
     fn eval_set_method(
@@ -5182,9 +5182,9 @@ impl Interp {
                 // One-way int→float widening — coerce from the binding's annotation, mirroring the
                 // VM's `Op::CoerceFloat` at the typed-`let` sink. A scalar `float` coerces the value
                 // unconditionally (the VM coerces after the value expr, whatever its shape). A
-                // `list[float]`/`map[_, float]` annotation coerces int ELEMENTS only when the value is
+                // `List[float]`/`Map[_, float]` annotation coerces int ELEMENTS only when the value is
                 // a LITERAL collection — the VM's element coercion is emitted at the literal-compile
-                // site, so a non-literal value (`xs: list[float] = f()`) is NOT element-coerced by
+                // site, so a non-literal value (`xs: List[float] = f()`) is NOT element-coerced by
                 // either engine (it stays whatever `f()` returned).
                 if names.len() == 1
                     && let Some(t) = ty
@@ -5711,11 +5711,11 @@ impl Interp {
     }
 
     /// Materialize an already-evaluated iterable VALUE into per-iteration rows (the post-eval body of
-    /// `eval_comp_clauses`' struct-iterator path, factored out so the `list()`/`set()`/`map()` builtin constructors reuse the
+    /// `eval_comp_clauses`' struct-iterator path, factored out so the `List()`/`Set()`/`Map()` builtin constructors reuse the
     /// SAME "drain any for-iterable" logic — no duplicated iteration semantics). Handles (a) a user
     /// struct with `next(self) -> Option[T]` (call lazily until `None`, may run user code) and (b) the
     /// built-in collections via `iter_rows_from_value`. `vars` is the loop-variable count (1 for the
-    /// constructors; map() post-processes the single-element rows into (k, v) pairs itself).
+    /// constructors; Map() post-processes the single-element rows into (k, v) pairs itself).
     fn drain_value_to_rows(
         &mut self,
         iter_val: Value,
@@ -5723,7 +5723,7 @@ impl Interp {
         span: Span,
     ) -> Result<Vec<Vec<Value>>, RuntimeError> {
         // PURE-`Iterable` struct (has `iter`, lacks `next`): convert to its cursor via a one-time
-        // `.iter()`, then drain the cursor below. Mirrors `exec_for` (so `list(w)`/`for x in w` agree).
+        // `.iter()`, then drain the cursor below. Mirrors `exec_for` (so `List(w)`/`for x in w` agree).
         let iter_val = match &iter_val {
             Value::Struct { name, .. }
                 if self.structs.get(name.as_ref()).is_some_and(|d| {
@@ -6554,7 +6554,7 @@ impl crate::native::Host for InterpCallbackHost<'_> {
                     let (Value::Str(ks), Value::Str(vs)) = (k, v) else {
                         return Err(crate::native::HostError::arg_type(
                             i,
-                            "map[str, str]",
+                            "Map[str, str]",
                             "other",
                         ));
                     };
@@ -6564,7 +6564,7 @@ impl crate::native::Host for InterpCallbackHost<'_> {
             }
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
-                "map[str, str]",
+                "Map[str, str]",
                 other.type_name(),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -6715,7 +6715,7 @@ impl crate::native::Host for InterpHost<'_> {
                     let (Value::Str(ks), Value::Str(vs)) = (k, v) else {
                         return Err(crate::native::HostError::arg_type(
                             i,
-                            "map[str, str]",
+                            "Map[str, str]",
                             "other",
                         ));
                     };
@@ -6725,7 +6725,7 @@ impl crate::native::Host for InterpHost<'_> {
             }
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
-                "map[str, str]",
+                "Map[str, str]",
                 other.type_name(),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -6740,7 +6740,7 @@ impl crate::native::Host for InterpHost<'_> {
                 let mut out = Vec::with_capacity(items.len());
                 for v in items.iter() {
                     let Value::Str(s) = v else {
-                        return Err(crate::native::HostError::arg_type(i, "list[str]", "other"));
+                        return Err(crate::native::HostError::arg_type(i, "List[str]", "other"));
                     };
                     out.push(s.to_string());
                 }
@@ -6748,7 +6748,7 @@ impl crate::native::Host for InterpHost<'_> {
             }
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
-                "list[str]",
+                "List[str]",
                 other.type_name(),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
@@ -6840,7 +6840,7 @@ fn iter_rows_from_value(
             .map(|&x| vec![Value::Int(x as i64)])
             .collect(),
         // A cursor yields its REMAINING snapshot (`items[pos..]`) as single-var rows — drains a
-        // `for x in pure_iterable_struct` (lowered to a cursor) and `list(xs.iter())`.
+        // `for x in pure_iterable_struct` (lowered to a cursor) and `List(xs.iter())`.
         Value::Iter(c) => {
             let c = c.borrow();
             c.items[c.pos.min(c.items.len())..]
@@ -7846,7 +7846,7 @@ mod tests {
         assert_eq!(vm_out, "a\nb\n");
     }
 
-    /// `InterpHost::arg_str_map` reads a `map[str, str]` Value in insertion order; a non-map arg
+    /// `InterpHost::arg_str_map` reads a `Map[str, str]` Value in insertion order; a non-map arg
     /// errors. Parity twin of `vm::tests::vm_host_arg_str_map_reads_live_map` — both iterate
     /// `MapData.entries` so header order is identical across engines.
     #[test]
@@ -7874,7 +7874,7 @@ mod tests {
         assert!(host.arg_str_map(1).is_err(), "a non-map arg must error");
     }
 
-    /// `InterpHost::arg_str_list` reads a `list[str]` Value in order; a non-list / non-str arg errors.
+    /// `InterpHost::arg_str_list` reads a `List[str]` Value in order; a non-list / non-str arg errors.
     /// Parity twin of `vm::tests::vm_host_arg_str_list_reads_live_list`.
     #[test]
     fn interp_host_arg_str_list_reads_list() {
@@ -8717,11 +8717,11 @@ fn safe_div(a: int, b: int) -> Result[int]:
         assert!(run_capture(src).is_err());
     }
 
-    /// A cyclic data structure (`list[Self]` field forming a cycle) must error gracefully on
+    /// A cyclic data structure (`List[Self]` field forming a cycle) must error gracefully on
     /// `print` rather than overflowing the host stack (SIGABRT), via the structural-depth guard.
     #[test]
     fn cyclic_print_errors_not_crashes() {
-        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nprint(a)\n";
+        let src = "struct Node:\n    next: List[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nprint(a)\n";
         let err = run_capture(src).unwrap_err();
         assert!(
             err.message.contains("maximum structural depth"),
@@ -8734,7 +8734,7 @@ fn safe_div(a: int, b: int) -> Result[int]:
     /// recursing forever on the host stack.
     #[test]
     fn cyclic_equality_errors_not_crashes() {
-        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nc := Node([])\nd := Node([])\nc.next.push(d)\nd.next.push(c)\nprint(a == c)\n";
+        let src = "struct Node:\n    next: List[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nc := Node([])\nd := Node([])\nc.next.push(d)\nd.next.push(c)\nprint(a == c)\n";
         let err = run_capture(src).unwrap_err();
         assert!(
             err.message.contains("maximum structural depth"),
@@ -8747,7 +8747,7 @@ fn safe_div(a: int, b: int) -> Result[int]:
     /// offending `print` in `recover:` catches it.
     #[test]
     fn cyclic_print_is_recoverable() {
-        let src = "struct Node:\n    next: list[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nr := recover:\n    print(a)\nmatch r:\n    Ok(v): print(\"ok\")\n    Err(e): print(\"caught: {e.message()}\")\n";
+        let src = "struct Node:\n    next: List[Node]\na := Node([])\nb := Node([])\na.next.push(b)\nb.next.push(a)\nr := recover:\n    print(a)\nmatch r:\n    Ok(v): print(\"ok\")\n    Err(e): print(\"caught: {e.message()}\")\n";
         let out = run(src);
         assert!(out.contains("caught: maximum structural depth"), "{out}");
     }
@@ -8872,12 +8872,12 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     const BUF_PROG: &str = "\
 struct Buf:
-    xs: list[int]
+    xs: List[int]
     fn index(self, key: int) -> int:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         # Forward each component straight to the backing list's slice; an omitted
         # component stays omitted so the built-in Python defaults apply per direction.
         match (start, end, step):
@@ -9746,7 +9746,7 @@ b := Buf([10, 20, 30])
     #[test]
     fn channel_send_deep_copies_value() {
         // Mutating the original list after send must NOT change what the channel holds (airlock).
-        let src = "fn main():\n    ch := Channel[list[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
+        let src = "fn main():\n    ch := Channel[List[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
         assert_eq!(run(src), "[1, 2]\n");
     }
 
@@ -10699,7 +10699,7 @@ mod module_tests {
     }
 
     // conversions golden (interp side): `examples/conversions.chz` (str<->bytes UTF-8 methods +
-    // list()/set()/map() constructors over any for-iterable) must produce exactly `.expected`.
+    // List()/Set()/Map() constructors over any for-iterable) must produce exactly `.expected`.
     #[test]
     fn golden_conversions_chz() {
         let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/conversions.chz");

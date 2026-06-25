@@ -14,7 +14,7 @@ struct Point:
 
 fn main():
     # --- scalar keys still work (regression) ---
-    counts: map[str, int] = {}
+    counts: Map[str, int] = {}
     for w in ["a", "b", "a", "c", "a", "b"]:
         if counts.has(w):
             counts[w] = counts[w] + 1
@@ -24,11 +24,11 @@ fn main():
     for k in counts:
         print("  {k} -> {counts[k]}")
 
-    nums: set[int] = set([3, 1, 3, 2, 1])
+    nums: Set[int] = Set([3, 1, 3, 2, 1])
     print("nums.len: {nums.len()}")
 
     # --- struct keys (the new capability) ---
-    label: map[Point, str] = {}
+    label: Map[Point, str] = {}
     label[Point(0, 0)] = "origin"
     label[Point(1, 0)] = "east"
     label[Point(0, 1)] = "north"
@@ -43,14 +43,14 @@ fn main():
     print("len after remove: {label.len()}")
 
     # --- set of structs: dedup via custom hash + structural eq ---
-    pts: set[Point] = set()
+    pts: Set[Point] = Set()
     pts.add(Point(2, 2))
     pts.add(Point(2, 2))                  # duplicate — deduped
     pts.add(Point(3, 3))
     print("pts.len: {pts.len()}")
 
-    a: set[Point] = set([Point(1, 1), Point(2, 2)])
-    b: set[Point] = set([Point(2, 2), Point(3, 3)])
+    a: Set[Point] = Set([Point(1, 1), Point(2, 2)])
+    b: Set[Point] = Set([Point(2, 2), Point(3, 3)])
     print("a | b: {a.union(b).len()}")
     print("a & b: {a.intersection(b).len()}")
     print("a - b: {a.difference(b).len()}")

@@ -6,7 +6,7 @@ protocol Container[T]:
     fn size(self) -> int
 
 struct IntBox:
-    items: list[int]
+    items: List[int]
     fn get(self, i: int) -> int:
         return self.items[i]
     fn size(self) -> int:

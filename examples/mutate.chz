@@ -6,7 +6,7 @@ struct Stats:
     total: int
 
 # In-place counting sort over small non-negative ints (0..=9).
-fn counting_sort(xs: list[int]) -> list[int]:
+fn counting_sort(xs: List[int]) -> List[int]:
     counts := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     for v in xs:
         counts[v] += 1            # index compound-assign

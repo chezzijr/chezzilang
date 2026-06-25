@@ -4,4 +4,4 @@ struct Pair[A, B]:
     second: B
 
 struct Stack[T]:
-    items: list[T]
+    items: List[T]

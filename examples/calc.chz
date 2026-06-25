@@ -12,7 +12,7 @@
 # or digit. So the scanner stage has to be faked by the caller.
 
 struct Parser:
-    toks: list[str]
+    toks: List[str]
     pos: int
 
     fn peek(self) -> str:

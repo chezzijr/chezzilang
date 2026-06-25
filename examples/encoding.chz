@@ -43,6 +43,6 @@ match enc.url_decode("%2G"):
 # --- query string builder (sorted keys, both sides percent-encoded) ---
 print("query 3     = " + enc.query_encode({"q": "a b", "x": "1", "a&b": "c=d"}))
 print("query empty = '" + enc.query_encode({}) + "'")
-empty_val: map[str, str] = {"k": ""}
+empty_val: Map[str, str] = {"k": ""}
 print("query kv    = " + enc.query_encode(empty_val))
 print("query url   = https://x.test/s?" + enc.query_encode({"name": "John Doe", "lang": "C++"}))

@@ -1,3 +1,3 @@
 # rule: type, typeList
-fn g(m: map[str, list[int]]) -> Result[int]:
+fn g(m: Map[str, List[int]]) -> Result[int]:
     return Ok(1)

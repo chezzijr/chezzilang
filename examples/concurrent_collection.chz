@@ -1,4 +1,4 @@
-# std.concurrency.collection golden — ergonomic thread-safe wrappers over `RwShared[map[...]]`.
+# std.concurrency.collection golden — ergonomic thread-safe wrappers over `RwShared[Map[...]]`.
 # DETERMINISTIC on every engine (interp / VM / --parallel): the concurrency is order-independent by
 # construction. The counter shape uses a single-write-lock read-modify-write, so N tasks each
 # incrementing the SAME key once total EXACTLY N (no lost updates). The map shape has each task write

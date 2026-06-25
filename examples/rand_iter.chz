@@ -20,7 +20,7 @@ fn main():
         Some(v): print(v)
         None: print("none")
 
-    empty: list[int] = []
+    empty: List[int] = []
     print("choice empty:")
     match iter.choice(empty):
         Some(v): print(v)

@@ -76,15 +76,15 @@ pub fn from_type(
             }
         },
         Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
-            ("list", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(
+            ("List", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(
                 t,
                 call_module,
                 env,
                 visiting,
             )?))),
-            ("map", [k, v]) => {
+            ("Map", [k, v]) => {
                 if !matches!(k, Type::Named(s) if s == "str") {
-                    return Err("decode: map keys must be str, found a non-str key".to_string());
+                    return Err("decode: Map keys must be str, found a non-str key".to_string());
                 }
                 Ok(TypeDescriptor::Map(Box::new(from_type(
                     v,
