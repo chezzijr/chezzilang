@@ -5952,7 +5952,10 @@ fn type_param_named_like_concurrency_type_not_shadowed() {
             "Listener",
         ),
         (
-            "fn id[owned_str](x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(id(\"h\"))\nmain()\n",
+            // Int arg (not a str literal) so this is a GENUINE red-before-green guard: pre-fix
+            // `owned_str` hijacks to Ty::Str, making `id(1)` an int-vs-str error; the fix makes it a
+            // free type param so `id(1)` type-checks. A str arg would pass in BOTH states (no guard).
+            "fn id[owned_str](x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
             "owned_str",
         ),
     ] {

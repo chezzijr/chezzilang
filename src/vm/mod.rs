@@ -26770,7 +26770,10 @@ main()
             ("ptr", "3", "3\n"),
             ("Socket", "3", "3\n"),
             ("Listener", "3", "3\n"),
-            ("owned_str", "\"h\"", "h\n"),
+            // Int arg (not a str literal): pre-fix `owned_str` hijacks to Ty::Str so `id(1)` fails
+            // check_graph (int vs str) — a GENUINE red-before-green gate. A str arg would pass in
+            // both the hijacked and fixed states, guarding nothing.
+            ("owned_str", "1", "1\n"),
         ] {
             let src = format!(
                 "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id({arg}))\nmain()\n"
