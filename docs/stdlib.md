@@ -144,8 +144,10 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all four) or
 > `import Shared from std.concurrency` (per-name) before it can use them; bare use otherwise is an
 > `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
-> stay **reserved names** (a user `struct Shared`/`struct Executor` is rejected). `Channel` and `timer`
-> stay global (no import needed).
+> stay **reserved names** (a user `struct Shared`/`struct Executor` is rejected). `Channel` stays global
+> (no import needed). `timer(ms)` now requires **`import std.time`** (whole-module, or `import timer from
+> std.time`) — bare use otherwise is an `unknown function 'timer' (import it from std.time: \`import
+> std.time\`)` error. `timer` stays a reserved name too (no user `struct timer`/`fn timer`).
 
 ### `Channel[T]` — FIFO mailbox
 `send(x: T) -> nil` · `try_send(x: T) -> bool` · `recv() -> T` · `try_recv() -> Option[T]` ·
@@ -233,6 +235,9 @@ if you need it.
 ### `std.time`
 `now() -> int` (Unix epoch seconds, UTC) · `monotonic() -> float` (seconds, immune to clock changes) ·
 `sleep_ms(ms: int) -> nil` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
+Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot timeout channel; see
+[§3](#3-runtime-types-concurrency--iteration) and `concurrency.md §6c`): `import std.time` (whole-module)
+or `import timer from std.time` (per-name; `timer` cannot be renamed on import).
 
 ### `std.process`
 `cmd(line: str) -> Result[str]` — run `sh -c <line>`, capture stdout; `Err(stderr)` on non-zero exit

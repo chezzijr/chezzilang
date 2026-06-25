@@ -249,8 +249,9 @@ n := ch.len()              # current queued count
 > builtins — a module must `import std.concurrency` (whole-module licenses all four) or
 > `import Shared from std.concurrency` (per-name) before using them; bare use is an
 > `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
-> stay **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` and `timer` stay
-> global. (`std.concurrency` is a file-less native module that exists only to license these four names;
+> stay **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global;
+> `timer(ms)` now requires **`import std.time`** (whole-module, or `import timer from std.time`) — see
+> §6c. (`std.concurrency` is a file-less native module that exists only to license these four names;
 > the constructors are lowered by the compiler, so there is zero runtime cost to the import.)
 
 Captured values are **copies** ([§7](#7-sendability)), so a task can't mutate the parent's state. When
@@ -383,7 +384,13 @@ elapsed. It is the **composable timeout primitive**: instead of a bespoke timeou
 timeout is just another channel you can receive from — and, once `wait` lands (§6d), race against real
 channels.
 
+`timer` requires **`import std.time`** (whole-module, or `import timer from std.time`) — it is NOT a
+global builtin (it stays a reserved name: no user `struct timer`/`fn timer`). `timer` is opcode-backed,
+so the import is checker-only licensing with zero runtime cost; bare use without the import is an
+`unknown function 'timer' (import it from std.time: \`import std.time\`)` error.
+
 ```chezzi
+import std.time
 t := timer(500)
 print(t.recv())            # true — blocks ~500ms, then delivers
 ```

@@ -1738,16 +1738,19 @@ fn fetch_all(urls: List[str]):
   `value` (copied) → `Ref[T]` (in-task, unsynchronized) → `Shared[T]` (cross-task, synchronized).
   `Shared`/`RwShared`/`Atomic`/`Executor` require `import std.concurrency` (whole-module licenses all
   four; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
-  **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` and `timer` remain global.
+  **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global; `timer` now
+  requires `import std.time` (it stays a reserved name too — see below).
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
   `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
   like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
   arbitrary-transform updates.
-- **`timer(ms) -> Channel[bool]`** — a one-shot timeout channel: `timer(500).recv()` blocks ~500ms then
-  yields `true` (level-triggered — ready on any recv at/after the deadline). The composable timeout
-  primitive; it races against real channels inside a `wait:` — there is **no separate `recv_timeout`**
-  (a `wait` over a channel and a `timer` subsumes it).
+- **`timer(ms) -> Channel[bool]`** (`import std.time`) — a one-shot timeout channel: `timer(500).recv()`
+  blocks ~500ms then yields `true` (level-triggered — ready on any recv at/after the deadline). The
+  composable timeout primitive; it races against real channels inside a `wait:` — there is **no separate
+  `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` requires `import std.time`
+  (whole-module, or `import timer from std.time`) — it is NOT a global builtin, but it stays a **reserved
+  name** (no user `struct timer`/`fn timer`).
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on

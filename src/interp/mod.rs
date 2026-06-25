@@ -4872,6 +4872,13 @@ impl Interp {
                     {
                         continue;
                     }
+                    // `std.time`'s `timer` is an opcode-backed builtin with NO runtime module-member
+                    // value (the call lowers via the compiler name→opcode path). Skip it — std.time is a
+                    // REAL native module, so this MUST be `timer`-specific, not a blanket std.time skip
+                    // (now/monotonic/sleep_ms/format DO bind normally). Mirrors the VM `bind_import` skip.
+                    if &*ns.name == "std.time" && member == "timer" {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no

@@ -78,11 +78,12 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
   `resolver` (module paths).
 - Keep modules small and single-purpose.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
-  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`/`timer`,
-  `Result`/`Option`/`Iterator`, structural protocols. Register in the module's `native_module_sig` and
-  gate the bare name behind `import` via the per-module licensing set (mirror FFI `imported_ffi_types`
-  / `imported_concurrency`); keep runtime ctor/opcode dispatch unchanged (the gate is checker-only name
-  resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
+  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`,
+  `Result`/`Option`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/
+  `RwShared`/`Atomic`/`Executor` to `import std.concurrency` — all stay reserved names.) Register in the
+  module's `native_module_sig` and gate the bare name behind `import` via the per-module licensing set
+  (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
+  dispatch unchanged (the gate is checker-only name resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
   BOTH vm + interp, or `from M import X` faults at runtime — cover it with a test that RUNS both engines.
   A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree

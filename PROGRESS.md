@@ -34,6 +34,28 @@ helpers, and list/map/set **literal** syntax (`[…]`/`{…}`). TDD: `pascal_con
 corpus, `docs/grammar.bnf` prose, and all docs. `cargo test` (2711) + conformance + clippy clean;
 three-engine parity green. **Global-namespace cleanup batch COMPLETE (5/5).**
 
+**✅ global-namespace cleanup — `timer`→`import std.time` (2026-06-25).** The opcode-backed `timer(ms)
+-> Channel[bool]` builtin is no longer global — it now requires `import std.time` (whole-module) or
+`import timer from std.time` (per-name); bare use otherwise is `unknown function 'timer' (import it from
+std.time: \`import std.time\`)`. Mirrors the `std.concurrency` gate but for a SINGLE opcode builtin and a
+REAL native module: a NEW per-module `imported_time` set (parallel to `imported_concurrency`), populated
+in `bind_import` (whole-module on the exact `[std, time]` len-2 path; per-name on the from-import,
+rename-rejected), gates ONLY the `infer_named_call` `"timer"` arm via `time_licensed` (`current_module_is_stdlib`
+exempts std/* — `std/cancel.chz` keeps bare use). `timer` is added to `native_module_sig("std.time")`'s
+`sig.types` (NOT `func()` — opcode-backed, no runtime member) so `import timer from std.time` validates
+membership. **Enforcement is checker-only** — compiler/interp/vm opcode dispatch untouched, so three-engine
+parity is preserved by construction. **Two baked-in fixes:** (1) `timer` STAYS a reserved name — added to
+`is_reserved_type` (`struct timer`/`enum timer` rejected) AND a NEW reserved-name guard in the `fn` hoist
+(`is_reserved_name` — closes a pre-existing silent-shadow hole where `fn timer()` was dead code shadowed by
+the opcode). The import gate and the reserved-name gate are SEPARATE and BOTH apply. (2) a `timer`-SPECIFIC
+runtime `bind_import` SKIP on BOTH engines (vm + interp) — `module=="std.time" && member=="timer"`, NOT a
+blanket std.time skip (now/monotonic/sleep_ms/format DO bind normally) — so `import timer from std.time`
+(type-checks green, no runtime member) binds nothing instead of faulting `module 'std.time' has no member
+'timer'`. New tests RUN both engines (not check-only): whole-module + from-import `timer(50).recv()`→`true`
+byte-identical VM↔interp; plus require-import / per-name-rename-reject / still-reserved checker tests.
+Examples `examples/timer.chz` + `examples/wait_select.chz` now `import std.time` (byte-identical goldens both
+engines). Docs (stdlib/syntax/concurrency/CLAUDE.md) updated. `cargo test` + conformance + clippy clean.
+
 **✅ global-namespace cleanup — task 4/5: `Shared`/`RwShared`/`Atomic`/`Executor`→`std.concurrency`
 (2026-06-25).** The four runtime concurrency ctor/TYPE names are no longer global builtins — they now
 require `import std.concurrency` (whole-module licenses all four) or `import Shared from std.concurrency`

@@ -3273,6 +3273,14 @@ impl Vm {
                     {
                         continue;
                     }
+                    // `std.time`'s `timer` is an opcode-backed builtin with NO runtime module-member
+                    // value (the call lowers via the compiler's name→opcode dispatch). Skip it — std.time
+                    // is a REAL native module, so this MUST be `timer`-specific, not a blanket std.time
+                    // skip (now/monotonic/sleep_ms/format DO bind normally). Without this, `import timer
+                    // from std.time` faults `module 'std.time' has no member 'timer'`.
+                    if self.module_name(target_obj) == "std.time" && member == "timer" {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no
@@ -19888,6 +19896,56 @@ main()
             "interp faulted (bind_import skip missing?): {ir:?}"
         );
         assert_eq!(vo, "0\n", "cooperative VM output");
+        assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
+    /// Gate `timer` behind `import std.time` — a whole-module `import std.time` then `timer(50).recv()`
+    /// must RUN end-to-end byte-identically on the cooperative VM AND the interp (the deprecated parity
+    /// oracle). The import gate is checker-only, so the opcode-dispatched `timer` runtime is unchanged;
+    /// the timer fires after 50ms and `recv()` yields `true`.
+    #[test]
+    fn timer_whole_module_runs_both_engines() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_vm_timer_whole_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import std.time\nfn main():\n    print(timer(50).recv())\nmain()\n",
+        )
+        .unwrap();
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "interp faulted: {ir:?}");
+        assert_eq!(vo, "true\n", "cooperative VM output");
+        assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
+    /// CRITICAL — a SELECTIVE `import timer from std.time` must RUN on both engines. `timer` is opcode-
+    /// backed with NO runtime module-member value, so the from-import type-checks green but BOTH engines
+    /// would fault `module 'std.time' has no member 'timer'` WITHOUT the timer-specific `bind_import`
+    /// skip. The call resolves via the compiler name→opcode dispatch, not a bound member.
+    #[test]
+    fn timer_from_import_runs_both_engines() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_timer_from_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import timer from std.time\nfn main():\n    print(timer(50).recv())\nmain()\n",
+        )
+        .unwrap();
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
+        assert!(
+            ir.is_ok(),
+            "interp faulted (bind_import skip missing?): {ir:?}"
+        );
+        assert_eq!(vo, "true\n", "cooperative VM output");
         assert_eq!(vo, io, "VM vs interp divergence");
     }
 

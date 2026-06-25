@@ -95,6 +95,11 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "RwShared"
         || name == "Atomic"
         || name == "Executor"
+        // `timer` is a runtime ctor/builtin name (not a real type), but it STAYS reserved here so a
+        // user `struct timer` / `enum timer` / `type timer` is rejected at declaration rather than
+        // silently shadowed by the opcode-backed builtin. SEPARATE from the `import std.time` gate
+        // (which governs USE): the name is reserved AND requires the import to call `timer(ms)`.
+        || name == "timer"
 }
 
 /// True iff `{a, b}` is an `int`/`float` mix in either order — the trigger for one-way int→float
@@ -646,6 +651,13 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("monotonic", vec![], Ty::Float);
             func("sleep_ms", vec![Ty::Int], Ty::Nil);
             func("format", vec![Ty::Int], Ty::Str);
+            // `timer` is an opcode-backed builtin (NOT a callable native member): it carries NO runtime
+            // value — it lowers via the compiler's name→opcode dispatch. It lives in `sig.types` ONLY so
+            // `import timer from std.time` validates membership and the checker's `bind_import` records
+            // it into the per-module `imported_time` set; `infer_named_call` then accepts the bare
+            // `timer(ms)` call only in a module that imported it. NOT a `func()` — that would add it to
+            // `sig.functions` and bind a (nonexistent) runtime value that faults at runtime.
+            sig.types.insert("timer".to_string());
         }
         "std.regex" => {
             // `Match` is the synthetic struct seeded in `seed_stdlib_structs`.
@@ -973,6 +985,13 @@ struct Checker {
     /// with the `import std.concurrency` hint). Per-module: cleared in `begin_module`. std/* modules
     /// are EXEMPT (they may use the four bare) via `current_module_is_stdlib`.
     imported_concurrency: std::collections::HashSet<String>,
+    /// The opcode-backed `timer` builtin licensed into the *current* module from `std.time` (whole-
+    /// module `import std.time` OR selective `import timer from std.time`). Like `imported_concurrency`,
+    /// this is NOT a callable value — it only gates `infer_named_call`, which accepts the bare
+    /// `timer(ms)` call iff `"timer"` is in this set (else an unknown-function error with the
+    /// `import std.time` hint). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
+    /// may call `timer` bare) via `current_module_is_stdlib`.
+    imported_time: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -1051,6 +1070,7 @@ impl Checker {
             imported_poly: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
+            imported_time: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -1162,6 +1182,7 @@ impl Checker {
         self.imported_poly.clear();
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
+        self.imported_time.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -1346,6 +1367,13 @@ impl Checker {
                         self.imported_concurrency.insert(tn.to_string());
                     }
                 }
+                // A whole-module `import std.time` licenses the opcode-backed `timer(ms)` builtin.
+                // Keyed on the EXACT len-2 path. std.time is a REAL native module, so `Import::Plain`
+                // already binds the module object (and its now/monotonic/sleep_ms/format members); we
+                // only ADD the `timer` licensing insert here.
+                if path.as_slice() == ["std".to_string(), "time".to_string()] {
+                    self.imported_time.insert("timer".to_string());
+                }
             }
             Import::From { path: _, names } => {
                 let sig = self
@@ -1380,7 +1408,25 @@ impl Checker {
                         // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
                         // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
                         // already scoped to it.
-                        if matches!(
+                        if member == "timer" {
+                            // A selective `import timer from std.time` licenses the opcode-backed
+                            // `timer(ms)` builtin in THIS module. `timer` is a reserved name, so ONLY
+                            // `std.time`'s `sig.types` can carry it (no user module can export a member
+                            // named `timer`) — matching the member name alone is unambiguous. Like the
+                            // concurrency ctors, `timer` carries no runtime value (it lowers via
+                            // name→opcode), so an alias would bind nothing usable AND the runtime
+                            // `bind_import` skip keys on the original member name — reject the rename.
+                            if alias.as_ref().is_some_and(|a| a != member) {
+                                self.error(
+                                    imp.span,
+                                    "timer cannot be renamed on import — \
+                                     write `import timer from std.time`"
+                                        .to_string(),
+                                );
+                            } else {
+                                self.imported_time.insert(member.clone());
+                            }
+                        } else if matches!(
                             member.as_str(),
                             "Shared" | "RwShared" | "Atomic" | "Executor"
                         ) {
@@ -1993,7 +2039,16 @@ impl Checker {
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
-                    if self.functions.contains_key(&decl.name) {
+                    // A user `fn` named after a runtime constructor / builtin op (`timer`, `Channel`,
+                    // `range`, …) is silently SHADOWED: `infer_named_call` / the backends resolve the
+                    // builtin arm before a plain named call, so the user fn is dead code. Reject the
+                    // collision with a clear `reserved` error (mirrors the extern-name guard).
+                    if is_reserved_name(&decl.name) {
+                        self.error(
+                            s.span,
+                            format!("function name '{}' is reserved (builtin)", decl.name),
+                        );
+                    } else if self.functions.contains_key(&decl.name) {
                         self.error(
                             s.span,
                             format!("function '{}' is already defined", decl.name),
@@ -2751,6 +2806,15 @@ impl Checker {
     /// shadowed by a user `struct`); this gate is the SEPARATE "must import to USE" requirement.
     fn concurrency_licensed(&self, n: &str) -> bool {
         self.imported_concurrency.contains(n) || self.current_module_is_stdlib
+    }
+
+    /// True iff the opcode-backed `timer` builtin name `n` is usable in the current module: either this
+    /// module imported it from `std.time` (whole-module or per-name), or we're inside a privileged
+    /// stdlib module (std/* may call `timer` bare — e.g. `std/cancel.chz`). `timer` ALSO stays a
+    /// reserved name (can't be shadowed by a user `struct`/`fn`); this gate is the SEPARATE "must import
+    /// to USE" requirement.
+    fn time_licensed(&self, n: &str) -> bool {
+        self.imported_time.contains(n) || self.current_module_is_stdlib
     }
 
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
@@ -7570,9 +7634,21 @@ impl Checker {
             "timer" => {
                 // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
                 // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
-                // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream.
+                // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream. NOT a global
+                // builtin: requires `import std.time` (the arg is still checked on the unlicensed path
+                // so a nested error surfaces; the name STAYS reserved). Returns `Channel[bool]` even on
+                // the unlicensed path so a chained `.recv()` doesn't emit a confusing secondary error.
                 self.check_args("timer", &[Ty::Int], args, span);
-                Some(Ty::channel(Ty::Bool))
+                if self.time_licensed("timer") {
+                    Some(Ty::channel(Ty::Bool))
+                } else {
+                    self.error(
+                        span,
+                        "unknown function 'timer' (import it from std.time: `import std.time`)"
+                            .to_string(),
+                    );
+                    Some(Ty::channel(Ty::Bool))
+                }
             }
             "Executor" => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
