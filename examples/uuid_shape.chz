@@ -17,5 +17,5 @@ print("again u1 = " + uuid.v4())
 
 # SHAPE check on a fresh draw: length 36, char-14 is the version nibble '4'.
 u := uuid.v4()
-print("len = " + str(len(u)))
+print("len = " + str(u.len()))
 print("version = " + u[14:15])

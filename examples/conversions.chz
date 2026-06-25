@@ -20,7 +20,7 @@ fn main():
     # --- str.encode() -> bytes / bytes.decode() -> str round-trip (multi-byte char) ---
     s := "héllo"
     enc := s.encode()
-    print(len(enc))            # 6 bytes: 'h' 0xC3 0xA9 'l' 'l' 'o'
+    print(enc.len())           # 6 bytes: 'h' 0xC3 0xA9 'l' 'l' 'o'
     print(enc.decode())        # héllo (round-trips)
     print(enc.decode() == s)   # true
 

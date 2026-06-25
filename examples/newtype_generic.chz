@@ -6,16 +6,16 @@
 # A generic stack over `list[T]`, with methods that reference the type param `T`.
 newtype Stack[T] = list[T]:
     fn size(self) -> int:
-        return len(list(self))
+        return list(self).len()
     fn pushed(self, x: T) -> Stack[T]:
         xs := list(self)
         xs.push(x)
         return Stack(xs)
     fn top(self) -> Option[T]:
         xs := list(self)
-        if len(xs) == 0:
+        if xs.len() == 0:
             return None
-        return Some(xs[len(xs) - 1])
+        return Some(xs[xs.len() - 1])
 
 # A generic counter map keyed by T (Hashable, as a map key must be), methods-only. `bump` references
 # T; `total` sums the values. The Hashable bound on the param comes along like struct/enum bounds.

@@ -11,6 +11,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ global-namespace cleanup — task 1/5: free `len()` dropped (2026-06-25).** The free `len(x)`
+builtin is removed from all four stages (checker `is_reserved_name` + free-len arm, compiler
+`is_builtin`, interp `builtins::is_builtin`/dispatch/`fn len`, VM dispatch + `fn builtin_len`); `len(x)`
+now resolves as a plain `unknown name 'len'`, and `len` is no longer reserved (a user may declare
+`fn len`). The `.len()` METHOD is kept everywhere (str/list/map/set/bytearray/Channel) and **added to
+`bytes`** (checker `bytes_method_sig` + VM `bytes_method` + interp bytes-method arm, byte count,
+VM↔interp parity). All free-len call sites in `examples/` migrated to `.len()`; docs (stdlib/syntax/
+spec) updated. (4 more namespace-cleanup tasks queued: ptr→std.ffi, Match/Response/ProcResult→modules,
+Shared/RwShared/Atomic/Executor→std.concurrency, list/map/set→List/Map/Set.)
+
 **✅ runtime — `RwShared[T]`: the cross-task read-write box (2026-06-24).** New VM-core primitive
 pairing with `Shared[T]`: **MANY concurrent readers OR one exclusive writer** (`RwSharedCore` wraps
 `std::sync::RwLock<WireValue>` exactly where `SharedCore` wraps `Mutex`). Constructed value-first

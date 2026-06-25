@@ -8322,6 +8322,13 @@ impl Vm {
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
             }
+            "len" => {
+                self.arity_err("len", args, 0, span)?;
+                let Obj::Bytes(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                Ok(Value::Int(b.len() as i64))
+            }
             _ => Err(self.err(format!("type bytes has no method '{method}'"), span)),
         }
     }
@@ -13630,7 +13637,6 @@ impl Vm {
             return Err(self.err(message, span));
         }
         let result = match name {
-            "len" => self.builtin_len(&args, span)?,
             "range" => self.builtin_range(&args, span)?,
             "int" => self.builtin_int(&args, span)?,
             "float" => self.builtin_float(&args, span)?,
@@ -14098,32 +14104,6 @@ impl Vm {
         Ok(Value::Obj(
             self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
         ))
-    }
-
-    fn builtin_len(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        self.arity_err("len", args, 1, span)?;
-        match args[0] {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::List(items) => Ok(Value::Int(items.len() as i64)),
-                Obj::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-                Obj::Bytes(b) => Ok(Value::Int(b.len() as i64)),
-                Obj::ByteArray(b) => Ok(Value::Int(b.len() as i64)),
-                _ => Err(self.err(
-                    format!(
-                        "len() expects a list, str, or bytes, got {}",
-                        self.type_name(args[0])
-                    ),
-                    span,
-                )),
-            },
-            other => Err(self.err(
-                format!(
-                    "len() expects a list, str, or bytes, got {}",
-                    self.type_name(other)
-                ),
-                span,
-            )),
-        }
     }
 
     fn builtin_range(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
@@ -21825,9 +21805,17 @@ main()";
     // ----- builtins -----
 
     #[test]
-    fn builtin_len() {
-        assert_eq!(run("print(len([1, 2, 3]))"), "3\n");
-        assert_eq!(run(r#"print(len("hello"))"#), "5\n");
+    fn method_len() {
+        assert_eq!(run("print([1, 2, 3].len())"), "3\n");
+        assert_eq!(run(r#"print("hello".len())"#), "5\n");
+    }
+
+    #[test]
+    fn bytes_len_method() {
+        assert_eq!(
+            run("fn main():\n    b := b\"\\x01\\x02\\x03\"\n    print(b.len())\nmain()\n"),
+            "3\n"
+        );
     }
 
     #[test]
@@ -28976,7 +28964,7 @@ main()
         // comparison + equality + bool logic
         "print(1 < 2)\nprint(2 == 2.0)\nprint(true and false)\nprint(false or true)\nprint(not true)",
         // lists, indexing, len
-        "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint(len([1, 2]))",
+        "print([1, 2, 3])\nprint([10, 20, 30][2])\nprint([1, 2].len())",
         // structs + methods
         "struct P:\n    x: int\n    y: int\n    fn sum(self) -> int:\n        return self.x + self.y\nfn main():\n    p := P(3, 4)\n    print(p)\n    print(p.sum())\nmain()",
         // enums + match + payload binding
@@ -28990,7 +28978,7 @@ main()
         // for + while loops
         "fn main():\n    t := 0\n    for i in 0..100:\n        t += i\n    print(t)\n    n := 5\n    while n > 0:\n        n -= 1\n    print(n)\nmain()",
         // builtins
-        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint(len([1, 2, 3]))\nprint(str(42))",
+        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
         // recursion
         "fn fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nfn main():\n    print(fib(15))\nmain()",
         // inferred return type (no `-> T`): runtime is unaffected, both engines agree
@@ -31048,7 +31036,7 @@ main()";
             "    for x in b:\n",
             "        s = s + x\n",
             "    print(s)\n",                  // 6
-            "    print(len(b))\n",             // 3
+            "    print(b.len())\n",            // 3
             "    print(b\"ab\" == b\"ab\")\n", // true
             "    print(b\"ab\" == b\"ac\")\n", // false
             "    print(b\"ab\" != b\"ac\")\n", // true
@@ -31142,8 +31130,8 @@ main()";
             "    s := 0\n",
             "    for x in ba:\n",
             "        s = s + x\n",
-            "    print(s)\n",       // 6
-            "    print(len(ba))\n", // 3
+            "    print(s)\n",        // 6
+            "    print(ba.len())\n", // 3
             "    ba.push(4)\n",
             "    print(ba)\n",       // bytearray(b'\x01\x02\x03\x04')
             "    print(ba.pop())\n", // Some(4)

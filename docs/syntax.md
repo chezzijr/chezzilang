@@ -50,7 +50,7 @@ digits → one byte `0x00`–`0xFF`, the only way to write a byte ≥ 0x80) plus
 `\u{…}` is **rejected** (a byte literal is byte-exact, not UTF-8), as is a raw non-ASCII source char.
 No interpolation. Operations: `b[i]` → `int` 0–255 (Index protocol; out-of-range is a recoverable
 panic), `b[a:b:c]` → `bytes` (Slice protocol over byte offsets — open bounds / step / reverse /
-negative), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and `bytes`
+negative), `for x in b` yields `int`, `b.len()` is the byte count, `==`/`!=` are structural, and `bytes`
 is `Hashable` (valid `map`/`set` key). `str(b)` / `print(b)` / interpolation use the Python `b'...'`
 repr (printable ASCII literal, others `\xHH`). `bytes` is immutable — `b[i] = x` is a type error.
 
@@ -73,7 +73,7 @@ prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form 
 `bytearray([ints])` (each element 0–255). Operations: `ba[i]` → `int` 0–255, **`ba[i] = x`** mutates
 in place (`IndexSet`; the value must be 0–255 and the index in range, else a recoverable panic — the
 new capability `bytes` lacks), `ba[a:b:c]` → a NEW `bytearray` (mutable copy, byte offsets),
-`for x in ba` yields `int`, `len(ba)`, `.push(int)` (append one byte 0–255), `.pop() -> Option[int]`,
+`for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> Option[int]`,
 `.extend(bytes | bytearray | list[int])` (append in place). `==`/`!=` are structural; cross-type
 `b"a" == bytearray([97])` is **content-equal** (Python parity). `bytearray` is **NOT `Hashable`**
 (mutable ⇒ not a `map`/`set` key, like `list`/`set`/`map`). `str(ba)` / `print(ba)` / interpolation
@@ -944,10 +944,10 @@ unwraps to `int`.
 ```chezzi
 newtype Stack[T] = list[T]:
     fn size(self) -> int:
-        return len(list(self))
+        return list(self).len()
     fn top(self) -> Option[T]:
         xs := list(self)
-        return None if len(xs) == 0 else Some(xs[len(xs) - 1])
+        return None if xs.len() == 0 else Some(xs[xs.len() - 1])
 
 s := Stack([1, 2, 3])      # inferred Stack[int]
 print(s.size())            # 3
@@ -1372,7 +1372,7 @@ for path in paths:
 ```
 
 `defer` targets a **method call** or a call to a **first-class callable value** (a function or
-closure, or a name bound to one). Built-ins (`print`, `len`, …) and constructors aren't first-class
+closure, or a name bound to one). Built-ins (`print`, `range`, …) and constructors aren't first-class
 values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`. `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
@@ -2029,7 +2029,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
-(`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
+(`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
 (`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
 resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
 rejects the collision (*'…' is a builtin/reserved name*).
@@ -2073,7 +2073,7 @@ returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-s
 > **The complete library reference — every global builtin, type method, runtime type, and `std.*`
 > module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
 
-Always available (no import): `print`, `len`, `range`, `int()`/`float()`/`str()`,
+Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
 `ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `set()`/`set(list)`,
 `panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
 (`list`/`map`/`set`/`str`/`bytes`/`bytearray`).

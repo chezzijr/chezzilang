@@ -15,7 +15,7 @@ fn main():
     io.print("max(3.0, 9.0) = " + str(cmp.max(3.0, 9.0)))
     io.print(text.reverse("chezzi"))
     io.print(text.pad_left("42", 5, "."))
-    io.print("args: " + str(len(os.args())))
+    io.print("args: " + str(os.args().len()))
     match os.env("THIS_IS_NOT_SET_12345"):
         Some(v): io.print(v)
         None: io.print("env unset")

@@ -10,7 +10,7 @@ struct IntBox:
     fn get(self, i: int) -> int:
         return self.items[i]
     fn size(self) -> int:
-        return len(self.items)
+        return self.items.len()
 
 # `c.get(0)` is `T` = int here, recovered from the bound's argument.
 fn total[X: Container[int]](c: X) -> int:

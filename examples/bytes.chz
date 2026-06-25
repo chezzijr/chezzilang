@@ -30,7 +30,7 @@ fn main():
     print(total)
 
     # len(b) = byte count.
-    print(len(b))
+    print(b.len())
 
     # == / != are structural byte-equality.
     print(b"ab" == b"ab")

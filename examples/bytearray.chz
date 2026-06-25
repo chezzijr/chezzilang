@@ -40,7 +40,7 @@ fn main():
     print(total)
 
     # len.
-    print(len(ba))
+    print(ba.len())
 
     # Mutating methods: push (one byte), pop (-> Option[int]), extend (bytes / bytearray / list[int]).
     ba.push(10)
