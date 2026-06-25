@@ -11,6 +11,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ global-namespace cleanup — task 2/5: FFI `ptr` gated behind `import std.ffi` (2026-06-25).** The
+opaque C-ABI `ptr` type is no longer a global builtin — it now requires an import, **consistent with
+the fixed-width integer types `int8`..`uint64`**. The `"ptr"` arm in `resolve_type` (checker) is gated:
+it resolves to `Ty::Ptr` only if the module imported it (`imported_ffi_types`) or via a licensed alias
+body, else `unknown type 'ptr' (import it from std.ffi: \`import std.ffi\`)`. Gating fires for ordinary
+annotations AND `extern` param/return signatures (both go through `resolve_type`). Licensing: `ptr` is
+added to `native_module_sig("std.ffi").types`; whole-module `import std.ffi` licenses `ptr` (keyed on
+the exact `[std, ffi]` path — extern blocks use `ptr` pervasively, so whole-module licensing is the
+default, UNLIKE the per-name-only widths), and `import ptr from std.ffi` licenses it per-name; `import
+ptr as P` is rejected (no rename — backends key off the literal surface name). The runtime from-import
+member check (interp + VM) skips `ptr` like the width names (type-only import, no runtime value). The
+ungated C-marshalling paths (`resolve_ctype_d`, `resolve_ty_ro_d`) are untouched. `examples/ffi_ptr.chz`
+now imports `ptr`; docs (stdlib/syntax/spec) updated. New tests + VM↔interp parity green. (3 cleanup
+tasks remain: Match/Response/ProcResult→modules, Shared/RwShared/Atomic/Executor→std.concurrency,
+list/map/set→List/Map/Set.)
+
 **✅ global-namespace cleanup — task 1/5: free `len()` dropped (2026-06-25).** The free `len(x)`
 builtin is removed from all four stages (checker `is_reserved_name` + free-len arm, compiler
 `is_builtin`, interp `builtins::is_builtin`/dispatch/`fn len`, VM dispatch + `fn builtin_len`); `len(x)`
@@ -2044,7 +2060,9 @@ branch names) is in the git log.
   width imports (parity by construction). Per-module: A's int32 struct field is usable from B with no B
   import; a width name written in B's own source needs B's import. **No runtime/marshalling change** —
   `cffi.rs` `CType` + both `ctype_of` untouched, the same C calls run, goldens byte-identical. FFI-special
-  + minimal: NOT a general user type-export mechanism; `ptr`/`owned_str` stay bare builtins. Five new
+  + minimal: NOT a general user type-export mechanism; `ptr`/`owned_str` stay bare builtins (NOTE:
+  later superseded for `ptr` — see "task 2/5: FFI `ptr` gated behind `import std.ffi`" above; `ptr` now
+  requires the import too, `owned_str` stays bare). Five new
   checker tests (no-import-rejected, import-then-extern+struct-ok, bogus-import, cross-module isolation
   ±), three existing FFI checker tests converted to `entry_ok` + import line, both goldens
   (`examples/ffi_int.chz` + `ffi_struct.chz`) gained the import line (`.expected` unchanged). 2202 tests

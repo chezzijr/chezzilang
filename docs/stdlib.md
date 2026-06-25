@@ -283,8 +283,12 @@ Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).
-`null() -> ptr` · `is_null(p: ptr) -> bool`. Also re-exports the fixed-width integer marshalling type
-names: `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`.
+`null() -> ptr` · `is_null(p: ptr) -> bool`. Also exports the marshalling **type names**: the opaque
+pointer handle `ptr` plus the eight fixed-width integers `int8`, `int16`, `int32`, `int64`, `uint8`,
+`uint16`, `uint32`, `uint64`. None of these are global builtins — a module that uses `ptr` or a width
+type (in an annotation **or an `extern` signature**) must import it from `std.ffi`: whole-module
+`import std.ffi` (which also licenses `ptr`) or per-name `import ptr, int32 from std.ffi`. (FFI type
+names cannot be renamed on import — the backends key off the literal surface name.)
 (Sync scalar **callbacks** need no `std.ffi` surface — a callback extern param is just a function-typed
 param spelled `fn(scalars) -> scalar`; see the FFI section of `syntax.md`.)
 

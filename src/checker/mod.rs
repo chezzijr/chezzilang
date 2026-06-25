@@ -706,6 +706,11 @@ fn native_module_sig(name: &str) -> ModuleSig {
             for tn in crate::native::ffi::TYPE_NAMES {
                 sig.types.insert((*tn).to_string());
             }
+            // The opaque `ptr` handle type is ALSO exported by `std.ffi` (kept out of `TYPE_NAMES`,
+            // which routes a name through the ungated C-marshalling path `resolve_ctype_d`). Listing
+            // it in `sig.types` lets `import ptr from std.ffi` validate; the checker licenses it into
+            // `imported_ffi_types` (whole-module on `import std.ffi`, per-name on the from-import).
+            sig.types.insert("ptr".to_string());
         }
         _ => {}
     }
@@ -1221,6 +1226,13 @@ impl Checker {
                         }
                     }
                 }
+                // A whole-module `import std.ffi` licenses the bare opaque `ptr` type (extern blocks
+                // use it pervasively, so whole-module licensing is the ergonomic default — UNLIKE the
+                // width types int8..uint64, which stay per-name-only). Keyed on the EXACT path, NOT
+                // `is_std`, so `import std.ref`/`std.iter`/… do NOT license `ptr`.
+                if path.as_slice() == ["std".to_string(), "ffi".to_string()] {
+                    self.imported_ffi_types.insert("ptr".to_string());
+                }
             }
             Import::From { path: _, names } => {
                 let sig = self
@@ -1249,18 +1261,22 @@ impl Checker {
                     } else if let Some(vty) = sig.values.get(member) {
                         self.declare(bind, vty.clone());
                     } else if sig.types.contains(member) {
-                        // A type name imported from a module. For `std.ffi`'s exported fixed-width
-                        // integer TYPE names this is a special case: record it into the per-module
-                        // `imported_ffi_types` set so `resolve_type` will accept the bare width name in
-                        // THIS module (it's a type, not a callable value).
-                        if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) {
-                            // An FFI width type CANNOT be RENAMED on import: the backends' `ctype_of`
-                            // keys off the literal surface name (`int32`), so an alias would resolve to
-                            // a type the marshaller can't lower. Reject `import int32 as W` (name
-                            // unusable) and `import int8 as int32` (silently the wrong width). A
-                            // redundant identical self-rename (`import int32 as int32`) is harmless —
-                            // the as-name equals the member, carries no wrong-width risk — so it falls
-                            // through to the normal no-op import of `int32`.
+                        // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
+                        // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
+                        // this is a special case: record it into the per-module `imported_ffi_types`
+                        // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
+                        // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
+                        // already scoped to it.
+                        if crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
+                            || member == "ptr"
+                        {
+                            // An FFI marshalling type CANNOT be RENAMED on import: the backends'
+                            // `ctype_of` keys off the literal surface name (`int32`/`ptr`), so an alias
+                            // would resolve to a type the marshaller can't lower. Reject `import int32
+                            // as W` / `import ptr as P` (name unusable) and `import int8 as int32`
+                            // (silently the wrong width). A redundant identical self-rename (`import
+                            // ptr as ptr`) is harmless — the as-name equals the member, no wrong-type
+                            // risk — so it falls through to the normal no-op import of `ptr`.
                             if alias.as_ref().is_some_and(|a| a != member) {
                                 self.error(
                                     imp.span,
@@ -2596,10 +2612,29 @@ impl Checker {
                 "bytes" => Ty::Bytes,
                 "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
-                // An opaque C-ABI pointer handle — a builtin marshalling primitive for `extern "lib":`
-                // signatures (the values/helpers live in `std.ffi`, but the *type* is builtin so it
-                // needs no import). See `Ty::Ptr`.
-                "ptr" => Ty::Ptr,
+                // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
+                // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
+                // builtin: it resolves only in a module that imported `std.ffi` (whole-module
+                // `import std.ffi` OR selective `import ptr from std.ffi`), OR via a LICENSED
+                // transparent alias body (`ffi_alias_ok`). Since extern blocks use `ptr` pervasively,
+                // the hint points at the whole-module form. See `Ty::Ptr`.
+                "ptr" => {
+                    if self.imported_ffi_types.contains("ptr")
+                        || self
+                            .alias_resolving
+                            .last()
+                            .is_some_and(|a| self.ffi_alias_ok.contains(a))
+                    {
+                        Ty::Ptr
+                    } else {
+                        self.error(
+                            span,
+                            "unknown type 'ptr' (import it from std.ffi: `import std.ffi`)"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // A RETURN-ONLY C-ABI marshalling type name (sibling of `ptr`): an OWNED `char*`
                 // the runtime copies into a `str` and then frees. To the program it IS a plain `str`
                 // (the ownership/free is a runtime-only distinction the backends recover via
