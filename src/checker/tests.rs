@@ -5791,6 +5791,86 @@ fn concurrency_types_require_import() {
 }
 
 #[test]
+fn bare_concurrency_type_without_import_hints_import() {
+    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation without the import must give the
+    // SAME unknown-type+import-hint error the parameterized `Shared[T]` form gives — not a bare
+    // hint-less "unknown type" (the catch-all regression).
+    for (src, name) in [
+        ("fn f(s: Shared):\n    print(1)\n", "Shared"),
+        ("fn f(r: RwShared):\n    print(1)\n", "RwShared"),
+        ("fn f(a: Atomic):\n    print(1)\n", "Atomic"),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
+                    && e.message.contains("import std.concurrency")),
+            "expected unknown-type+import hint for bare {name}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn bare_concurrency_type_with_import_needs_type_arg() {
+    // A BARE `Shared`/`RwShared`/`Atomic` annotation WITH the import is licensed but missing its
+    // type argument — it must report the missing-type-arg error (matching the user-generic
+    // precedent), NOT "unknown type".
+    for (src, name) in [
+        (
+            "import std.concurrency\nfn f(s: Shared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "Shared",
+        ),
+        (
+            "import std.concurrency\nfn f(r: RwShared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "RwShared",
+        ),
+        (
+            "import std.concurrency\nfn f(a: Atomic):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "Atomic",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains(&format!("type '{name}' expects 1 type argument(s), got 0"))),
+            "expected missing-type-arg error for licensed bare {name}, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.message.contains("unknown type")),
+            "licensed bare {name} must not report unknown type, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn type_param_named_like_concurrency_type_not_shadowed() {
+    // A user generic type parameter named `Shared`/`RwShared`/`Atomic` must resolve as the type
+    // param, NOT be hijacked by the bare-concurrency arm (regression guard for arm ordering vs the
+    // `type_params` guard). No import, used purely as a parameter type — must type-check clean.
+    for (src, name) in [
+        (
+            "fn id[Shared](x: Shared) -> Shared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Shared",
+        ),
+        (
+            "fn id[RwShared](x: RwShared) -> RwShared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "RwShared",
+        ),
+        (
+            "fn id[Atomic](x: Atomic) -> Atomic:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Atomic",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.is_empty(),
+            "type param named {name} must not be shadowed by the concurrency arm, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn concurrency_whole_module_import_ok() {
     // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
     entry_ok(
