@@ -245,12 +245,22 @@ n := ch.len()              # current queued count
 
 ## 6. `Shared[T]` — the cross-task mutable box
 
+> **`import std.concurrency`.** `Shared`, `RwShared`, `Atomic`, and `Executor` are **not** global
+> builtins — a module must `import std.concurrency` (whole-module licenses all four) or
+> `import Shared from std.concurrency` (per-name) before using them; bare use is an
+> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
+> stay **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` and `timer` stay
+> global. (`std.concurrency` is a file-less native module that exists only to license these four names;
+> the constructors are lowered by the compiler, so there is zero runtime cost to the import.)
+
 Captured values are **copies** ([§7](#7-sendability)), so a task can't mutate the parent's state. When
 you genuinely need shared mutable state *across* tasks, the sanctioned answer is **`Shared[T]`** — a
 box whose writes are serialised by a single owner (Elixir's `Agent` trick), so the torn-write race is
 unrepresentable.
 
 ```chezzi
+import std.concurrency
+
 s := Shared(0)             # one owner holds the value
 parallel:
     spawn bump(s)          # the HANDLE is copied in — both reach the same owner
@@ -658,6 +668,8 @@ precisely Java's "use a separate executor / work queue" and Elixir's `Task.Super
 visibly-owned place.
 
 ```chezzi
+import std.concurrency             # Executor (like Shared/RwShared/Atomic) is not a global builtin
+
 fn main():
     ex := Executor()                  # a long-lived, explicitly-owned task pool
     defer ex.shutdown()               # lifetime tied to a scope YOU pick — graceful reap on every exit path

@@ -3,6 +3,8 @@
 # `main()` returns, exactly as a top-level `defer ex.shutdown()` would reap them. Without this, the
 # submitted work would silently never run. `os.exit` stays a hard halt and does NOT auto-drain.
 
+import std.concurrency
+
 fn job(id: int):
     print("job {id} ran (auto-drained at exit)")
 

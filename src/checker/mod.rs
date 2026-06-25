@@ -83,7 +83,18 @@ fn module_label(import: &Import) -> String {
 /// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
 /// on a phantom `.next()`).
 fn is_reserved_type(name: &str) -> bool {
-    name == "Result" || name == "Option" || name == "Executor" || name == "Iterator"
+    name == "Result"
+        || name == "Option"
+        || name == "Iterator"
+        // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
+        // `struct Executor` is rejected at declaration (a clean `reserved` error), NOT silently
+        // shadowed by the builtin ctor. This is SEPARATE from the `import std.concurrency` gate (which
+        // governs USE): the names are reserved AND require the import to use the builtin. (`Executor`
+        // was already reserved here; `Shared`/`RwShared`/`Atomic` join it so all four behave alike.)
+        || name == "Shared"
+        || name == "RwShared"
+        || name == "Atomic"
+        || name == "Executor"
 }
 
 /// True iff `{a, b}` is an `int`/`float` mix in either order — the trigger for one-way int→float
@@ -618,6 +629,18 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("v4", vec![], Ty::Str);
             func("uuid_seed", vec![Ty::Int], Ty::Nil);
         }
+        "std.concurrency" => {
+            // A type-licensing-only native module: NO functions/values/struct shapes — it exports
+            // ONLY the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
+            // `Executor`). They live in `sig.types` so `import Shared from std.concurrency` validates
+            // membership; the checker's `bind_import` records them into the per-module
+            // `imported_concurrency` set, and `resolve_type`/`infer_named_call` then accept the bare
+            // ctor/type name only in a module that imported it. The ctors carry no runtime value (they
+            // lower via the compiler's name→opcode dispatch), so there are no `sig.functions`/`values`.
+            for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
+                sig.types.insert(tn.to_string());
+            }
+        }
         "std.time" => {
             func("now", vec![], Ty::Int);
             func("monotonic", vec![], Ty::Float);
@@ -942,6 +965,14 @@ struct Checker {
     /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type
     /// error). Per-module: cleared in `begin_module` so module B can't use a name module A imported.
     imported_ffi_types: std::collections::HashSet<String>,
+    /// The four runtime concurrency ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/`Executor`) imported
+    /// into the *current* module from `std.concurrency` (whole-module `import std.concurrency` licenses
+    /// all four; selective `import Shared from std.concurrency` licenses just the named ones). Like
+    /// `imported_ffi_types`, these are NOT callable values — they only gate `resolve_type` /
+    /// `infer_named_call`, which accept the bare name iff it's in this set (else an unknown-type error
+    /// with the `import std.concurrency` hint). Per-module: cleared in `begin_module`. std/* modules
+    /// are EXEMPT (they may use the four bare) via `current_module_is_stdlib`.
+    imported_concurrency: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -1019,6 +1050,7 @@ impl Checker {
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
+            imported_concurrency: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -1129,6 +1161,7 @@ impl Checker {
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
         self.imported_ffi_types.clear();
+        self.imported_concurrency.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -1305,6 +1338,14 @@ impl Checker {
                 if path.as_slice() == ["std".to_string(), "ffi".to_string()] {
                     self.imported_ffi_types.insert("ptr".to_string());
                 }
+                // A whole-module `import std.concurrency` licenses ALL FOUR runtime concurrency ctor/
+                // TYPE names (the ergonomic default). Keyed on the EXACT len-2 path, so the real file
+                // submodule `import std.concurrency.collection` (len-3) does NOT license them.
+                if path.as_slice() == ["std".to_string(), "concurrency".to_string()] {
+                    for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
+                        self.imported_concurrency.insert(tn.to_string());
+                    }
+                }
             }
             Import::From { path: _, names } => {
                 let sig = self
@@ -1339,7 +1380,27 @@ impl Checker {
                         // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
                         // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
                         // already scoped to it.
-                        if crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
+                        if matches!(
+                            member.as_str(),
+                            "Shared" | "RwShared" | "Atomic" | "Executor"
+                        ) {
+                            // A selective `import Shared from std.concurrency` licenses just the named
+                            // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like
+                            // the FFI types these carry no runtime value (ctor lowers via name→opcode),
+                            // so an alias would bind nothing usable AND the runtime `bind_import` skip
+                            // keys on the original member name — reject the rename to keep it honest.
+                            if alias.as_ref().is_some_and(|a| a != member) {
+                                self.error(
+                                    imp.span,
+                                    format!(
+                                        "concurrency type '{member}' cannot be renamed on import — \
+                                         write `import {member} from std.concurrency`"
+                                    ),
+                                );
+                            } else {
+                                self.imported_concurrency.insert(member.clone());
+                            }
+                        } else if crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
                             || member == "ptr"
                         {
                             // An FFI marshalling type CANNOT be RENAMED on import: the backends'
@@ -2683,6 +2744,15 @@ impl Checker {
         }
     }
 
+    /// True iff the bare runtime concurrency ctor/TYPE name `n` (`Shared`/`RwShared`/`Atomic`/
+    /// `Executor`) is usable in the current module: either this module imported it from
+    /// `std.concurrency`, or we're inside a privileged stdlib module (std/* may use the four bare —
+    /// `std/cancel.chz`, `std/concurrency/collection.chz`). The four ALSO stay reserved names (can't be
+    /// shadowed by a user `struct`); this gate is the SEPARATE "must import to USE" requirement.
+    fn concurrency_licensed(&self, n: &str) -> bool {
+        self.imported_concurrency.contains(n) || self.current_module_is_stdlib
+    }
+
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named(n) => match n.as_str() {
@@ -2722,8 +2792,22 @@ impl Checker {
                 // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
                 // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
                 "owned_str" => Ty::Str,
-                // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation).
-                "Executor" => Ty::Executor,
+                // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation). Like
+                // `Shared`/`RwShared`/`Atomic` below, `Executor` is NOT a global builtin: it resolves
+                // only in a module that imported `std.concurrency` (whole-module or per-name). The name
+                // STAYS reserved (no user `struct Executor`); this is the separate import requirement.
+                "Executor" => {
+                    if self.concurrency_licensed("Executor") {
+                        Ty::Executor
+                    } else {
+                        self.error(
+                            span,
+                            "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
                 "Socket" => Ty::Socket,
                 "Listener" => Ty::Listener,
@@ -2863,14 +2947,53 @@ impl Checker {
                 }
                 // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
                 // isn't gated on sendability — the value lives in one owner and is copied in/out
-                // through `get`/`set`; the *handle* is what crosses (always sendable).
-                ("Shared", [inner]) => Ty::shared(self.resolve_type(inner, span)),
+                // through `get`/`set`; the *handle* is what crosses (always sendable). NOT a global
+                // builtin: requires `import std.concurrency` (the inner type is still resolved on the
+                // unlicensed path so a nested error surfaces; the name STAYS reserved). Same for the
+                // RwShared/Atomic siblings below.
+                ("Shared", [inner]) => {
+                    let elem = self.resolve_type(inner, span);
+                    if self.concurrency_licensed("Shared") {
+                        Ty::shared(elem)
+                    } else {
+                        self.error(
+                            span,
+                            "unknown type 'Shared' (import it from std.concurrency: `import std.concurrency`)"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
                 // element type isn't gated on sendability — the handle is what crosses.
-                ("RwShared", [inner]) => Ty::rwshared(self.resolve_type(inner, span)),
+                ("RwShared", [inner]) => {
+                    let elem = self.resolve_type(inner, span);
+                    if self.concurrency_licensed("RwShared") {
+                        Ty::rwshared(elem)
+                    } else {
+                        self.error(
+                            span,
+                            "unknown type 'RwShared' (import it from std.concurrency: `import std.concurrency`)"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
                 // type isn't gated on sendability — the handle is what crosses.
-                ("Atomic", [inner]) => Ty::atomic(self.resolve_type(inner, span)),
+                ("Atomic", [inner]) => {
+                    let elem = self.resolve_type(inner, span);
+                    if self.concurrency_licensed("Atomic") {
+                        Ty::atomic(elem)
+                    } else {
+                        self.error(
+                            span,
+                            "unknown type 'Atomic' (import it from std.concurrency: `import std.concurrency`)"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 ("map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
@@ -7374,22 +7497,51 @@ impl Checker {
             "Shared" => {
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); a `[T]` type arg is
-                // rejected upstream by the `name_is_generic` gate.
+                // rejected upstream by the `name_is_generic` gate. NOT a global builtin: requires
+                // `import std.concurrency` (the arg is still inferred on the unlicensed path so a nested
+                // error surfaces; the name STAYS reserved). Same for RwShared/Atomic/Executor below.
                 let elem = self.one_arg("Shared", args, span);
-                Some(Ty::shared(elem))
+                if self.concurrency_licensed("Shared") {
+                    Some(Ty::shared(elem))
+                } else {
+                    self.error(
+                        span,
+                        "unknown type 'Shared' (import it from std.concurrency: `import std.concurrency`)"
+                            .to_string(),
+                    );
+                    Some(Ty::Unknown)
+                }
             }
             "RwShared" => {
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); a `[T]` type arg is
                 // rejected upstream by the `name_is_generic` gate.
                 let elem = self.one_arg("RwShared", args, span);
-                Some(Ty::rwshared(elem))
+                if self.concurrency_licensed("RwShared") {
+                    Some(Ty::rwshared(elem))
+                } else {
+                    self.error(
+                        span,
+                        "unknown type 'RwShared' (import it from std.concurrency: `import std.concurrency`)"
+                            .to_string(),
+                    );
+                    Some(Ty::Unknown)
+                }
             }
             "Atomic" => {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; a `[T]` type arg is rejected upstream by the `name_is_generic` gate.
                 let elem = self.one_arg("Atomic", args, span);
-                Some(Ty::atomic(elem))
+                if self.concurrency_licensed("Atomic") {
+                    Some(Ty::atomic(elem))
+                } else {
+                    self.error(
+                        span,
+                        "unknown type 'Atomic' (import it from std.concurrency: `import std.concurrency`)"
+                            .to_string(),
+                    );
+                    Some(Ty::Unknown)
+                }
             }
             "timer" => {
                 // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
@@ -7400,9 +7552,19 @@ impl Checker {
             }
             "Executor" => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
-                // Non-generic and zero-arg; a `[T]` type arg is rejected upstream.
+                // Non-generic and zero-arg; a `[T]` type arg is rejected upstream. NOT a global
+                // builtin: requires `import std.concurrency` (the name STAYS reserved).
                 self.check_arity("Executor", 0, args, span);
-                Some(Ty::Executor)
+                if self.concurrency_licensed("Executor") {
+                    Some(Ty::Executor)
+                } else {
+                    self.error(
+                        span,
+                        "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
+                            .to_string(),
+                    );
+                    Some(Ty::Unknown)
+                }
             }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).

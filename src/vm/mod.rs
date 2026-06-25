@@ -3260,6 +3260,19 @@ impl Vm {
                     {
                         continue;
                     }
+                    // `std.concurrency`'s four exported ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/
+                    // `Executor`) likewise carry NO runtime value: they are checker-resolved type
+                    // imports, and the ctor is resolved by the compiler's name→opcode dispatch (not a
+                    // bound module member). Skip them here — the file-less native module has no such
+                    // global by design. (Without this, `import Shared from std.concurrency` faults.)
+                    if self.module_name(target_obj) == "std.concurrency"
+                        && matches!(
+                            member.as_str(),
+                            "Shared" | "RwShared" | "Atomic" | "Executor"
+                        )
+                    {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no
@@ -19825,6 +19838,56 @@ main()
         let expected = "red\ngreen\n16\n9\nG\n";
         assert_eq!(vo, expected, "cooperative VM output");
         assert_eq!(vo, po, "VM vs --parallel divergence");
+        assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
+    /// Task 4 — `import std.concurrency` then construct + use ALL FOUR runtime concurrency ctors must
+    /// RUN end-to-end byte-identically on the cooperative VM AND the interp (the deprecated parity
+    /// oracle). Exercises the native EMPTY-members module-object alloc on both engines + the
+    /// opcode-dispatched ctors (the import gate is checker-only, so runtime is unchanged).
+    #[test]
+    fn concurrency_whole_module_runs_both_engines() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_conc_whole_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    r := RwShared(1)\n    a := Atomic(2)\n    ex := Executor()\n    ex.shutdown()\n    print(s.get())\n    print(r.get())\n    print(a.load())\nmain()\n",
+        )
+        .unwrap();
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "interp faulted: {ir:?}");
+        let expected = "5\n1\n2\n";
+        assert_eq!(vo, expected, "cooperative VM output");
+        assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
+    /// Task 4 — CRITICAL FIX 2: a SELECTIVE `import Shared from std.concurrency` must RUN on both
+    /// engines. This is the exact case the prior attempt crashed: the from-import type-checks green but
+    /// the engine `bind_import` would fault `module 'std.concurrency' has no member 'Shared'` without
+    /// the runtime skip. The ctor is resolved by the compiler name→opcode dispatch, not a bound member.
+    #[test]
+    fn concurrency_from_import_runs_both_engines() {
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_conc_from_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(
+            &entry,
+            "import Shared from std.concurrency\nfn main():\n    print(Shared(0).get())\nmain()\n",
+        )
+        .unwrap();
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
+        assert!(
+            ir.is_ok(),
+            "interp faulted (bind_import skip missing?): {ir:?}"
+        );
+        assert_eq!(vo, "0\n", "cooperative VM output");
         assert_eq!(vo, io, "VM vs interp divergence");
     }
 

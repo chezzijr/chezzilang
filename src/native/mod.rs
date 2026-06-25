@@ -370,6 +370,12 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "encoding" => Some("std.encoding"),
             "crypto" => Some("std.crypto"),
             "uuid" => Some("std.uuid"),
+            // `std.concurrency` is a file-less native module: it has NO callable members — it only
+            // LICENSES the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
+            // `Executor`) so they require `import std.concurrency` to use (the ctors are resolved by
+            // the compiler's name→opcode dispatch, not a bound module member). Only the len-2 path is
+            // native; `import std.concurrency.collection` (len-3) falls through to load the real file.
+            "concurrency" => Some("std.concurrency"),
             _ => None,
         },
         _ => None,
@@ -395,6 +401,9 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn)] {
         "std.encoding" => encoding::MEMBERS,
         "std.crypto" => crypto::MEMBERS,
         "std.uuid" => uuid::MEMBERS,
+        // A type-licensing-only native module: no callable members (it carries the four concurrency
+        // ctor TYPE names, which have no runtime value — they lower via the compiler name→opcode path).
+        "std.concurrency" => &[],
         _ => &[],
     }
 }
@@ -608,6 +617,18 @@ mod tests {
         // user modules are never native.
         assert_eq!(native_name(&["foo".into(), "math".into()]), None);
         assert_eq!(native_name(&["std".into()]), None);
+        // `std.concurrency` is a file-less native (type-licensing-only) module at the len-2 path...
+        assert_eq!(
+            native_name(&["std".into(), "concurrency".into()]),
+            Some("std.concurrency")
+        );
+        // ...but it has NO callable members (it only licenses the four concurrency ctor TYPE names).
+        assert!(native_members("std.concurrency").is_empty());
+        // The len-3 `std.concurrency.collection` is the REAL file — NOT native (no collision).
+        assert_eq!(
+            native_name(&["std".into(), "concurrency".into(), "collection".into()]),
+            None
+        );
     }
 
     /// D5 — the blocking-fn classifier flags exactly the off-heap-safe blocking natives (the work the

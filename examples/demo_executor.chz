@@ -2,6 +2,8 @@
 # Same task as demo_spawn.chz. `submit` enqueues a detached job; nothing runs until the queue is
 # drained by `shutdown()` (FIFO). No lexical scope ties the tasks — you own the reap point.
 
+import std.concurrency
+
 fn square_into(n: int, out: Channel[int]):
     out.send(n * n)
 

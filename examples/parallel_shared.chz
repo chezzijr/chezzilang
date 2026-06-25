@@ -3,6 +3,8 @@
 # count is the spawn count regardless of thread interleaving — the result is order-independent.
 # Run with: chezzi run --parallel examples/parallel_shared.chz
 
+import std.concurrency
+
 fn bump(s: Shared[int]):
     s.update(fn(x): x + 1)
 

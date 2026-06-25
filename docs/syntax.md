@@ -1728,9 +1728,12 @@ fn fetch_all(urls: list[str]):
   one-field struct. It is **not sendable**: copying a `Ref` across a `spawn`/`submit` would silently
   duplicate the box, so the checker rejects it (`non-sendable value of type Ref[T]`). Cross a task
   boundary with `Shared[T]` instead.
-- **`Shared[T]`** — the cross-task mutable box, same `s.get()` / `s.set(v)` / `s.update(fn(x): ...)`
-  API as `Ref` but synchronized and **sendable**. The mutation ladder is `value` (copied) →
-  `Ref[T]` (in-task, unsynchronized) → `Shared[T]` (cross-task, synchronized).
+- **`Shared[T]`** (`import std.concurrency`) — the cross-task mutable box, same `s.get()` / `s.set(v)`
+  / `s.update(fn(x): ...)` API as `Ref` but synchronized and **sendable**. The mutation ladder is
+  `value` (copied) → `Ref[T]` (in-task, unsynchronized) → `Shared[T]` (cross-task, synchronized).
+  `Shared`/`RwShared`/`Atomic`/`Executor` require `import std.concurrency` (whole-module licenses all
+  four; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
+  **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` and `timer` remain global.
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
   `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow

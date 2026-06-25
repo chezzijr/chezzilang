@@ -6,6 +6,7 @@
 # plain copy first; the child then mutates only its own copy, so the parent's binding is unchanged.
 # For genuine cross-task shared mutation use `Shared[T]`, never `ref`.
 
+import std.concurrency
 import std.ref
 
 fn main():

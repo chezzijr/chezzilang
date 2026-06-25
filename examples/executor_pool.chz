@@ -4,6 +4,8 @@
 # so the printed order is fixed however the pool threads interleave (decision A/F, deterministic-by-
 # construction). Run with: chezzi run --parallel examples/executor_pool.chz
 
+import std.concurrency
+
 fn main():
     out := Channel[int]()
     ex := Executor()

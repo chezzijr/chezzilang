@@ -2,6 +2,7 @@
 # Covers single-thread semantics AND the load-bearing concurrency cruxes: the struct stays a SHARED
 # handle across the spawn/parallel airlock (NOT deep-copied), and compound read-modify-write mutators
 # (increment/add/get_or_insert) are race-free via a SINGLE exclusive write lock.
+import std.concurrency
 import std.concurrency.collection
 
 # CRUX GUARD — the wrapper struct must cross the airlock as a shared Arc handle, not a deep copy.

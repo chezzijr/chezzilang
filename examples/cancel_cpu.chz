@@ -9,6 +9,7 @@
 # A self-polling *timeout* would instead stop on every engine (the deadline is read inline); the
 # divergence here is specific to a manual cancel of a non-yielding CPU sibling. Covered by a Rust test.
 import std.cancel
+import std.concurrency
 import std.time
 
 fn worker(tok: Token, out: Shared[int]):
