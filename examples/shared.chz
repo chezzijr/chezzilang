@@ -4,6 +4,8 @@
 # (it's sendable), but the value isn't — every task reaches the same box, whose single owner
 # serialises writes, so the torn-write race is unrepresentable.
 
+import std.concurrency
+
 fn bump(s: Shared[int]):
     s.update(fn(x): x + 1)
 

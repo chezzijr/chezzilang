@@ -11,6 +11,33 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ global-namespace cleanup — task 4/5: `Shared`/`RwShared`/`Atomic`/`Executor`→`std.concurrency`
+(2026-06-25).** The four runtime concurrency ctor/TYPE names are no longer global builtins — they now
+require `import std.concurrency` (whole-module licenses all four) or `import Shared from std.concurrency`
+(per-name); bare use otherwise is `unknown type 'Shared' (import it from std.concurrency: \`import
+std.concurrency\`)`. Mirrors the FFI `ptr` machinery: a NEW per-module `imported_concurrency` set
+(parallel to `imported_ffi_types`), populated in `bind_import` (whole-module on the exact `[std,
+concurrency]` len-2 path; per-name on the from-import), gates the `resolve_type` arms (`Executor` +
+generic `Shared`/`RwShared`/`Atomic`) and the `infer_named_call` ctor arms (`current_module_is_stdlib`
+exempts std/* — `std/cancel.chz`, `std/concurrency/collection.chz` keep bare use). `std.concurrency` is
+a NEW **file-less native module** (`native_name` maps len-2 `[std, concurrency]`; len-3 `import
+std.concurrency.collection` still loads the file — no collision) with EMPTY callable members; its
+`native_module_sig` exports ONLY the four in `sig.types`. **Enforcement is checker-only** — compiler/
+interp opcode dispatch is untouched, so three-engine runtime parity is preserved by construction.
+**Two baked-in fixes over the prior rejected attempt:** (1) the four STAY reserved names — `Executor`
+was already in `is_reserved_type`; `Shared`/`RwShared`/`Atomic` joined it, so `struct Shared`/`struct
+Executor` is now a clean at-declaration `reserved` error instead of the confusing silent-hijack (the
+import gate and the reserved-name gate are SEPARATE and BOTH apply). (2) a runtime `bind_import` SKIP
+on BOTH engines (vm + interp) for `std.concurrency` member ∈ the four, so `import Shared from
+std.concurrency` (which type-checks green but has no runtime module member) binds nothing instead of
+faulting `module 'std.concurrency' has no member 'Shared'`. New tests RUN both engines (not just
+check): whole-module construct+use of all four, and the from-import case that crashed the prior
+attempt; plus reserved-still + per-name-licensing + len-3-does-not-license checker tests. Examples that
+used the four bare now `import std.concurrency` (atomic/executor/executor_pool/executor_autodrain/
+demo_executor/shared/rwshared/parallel_shared/parallel_cancel/ref_airlock/cancel_cpu + the two
+concurrent_collection*). Docs (stdlib/syntax/concurrency) updated. `cargo test` (2708) + conformance +
+clippy clean. (1 cleanup task remains: list/map/set→List/Map/Set.)
+
 **✅ global-namespace cleanup — task 2/5: FFI `ptr` gated behind `import std.ffi` (2026-06-25).** The
 opaque C-ABI `ptr` type is no longer a global builtin — it now requires an import, **consistent with
 the fixed-width integer types `int8`..`uint64`**. The `"ptr"` arm in `resolve_type` (checker) is gated:

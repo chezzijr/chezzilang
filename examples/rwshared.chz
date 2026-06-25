@@ -5,6 +5,8 @@
 # because every read happens after the join. Reach for `RwShared` over `Shared` when reads dominate.
 # Run with: chezzi run examples/rwshared.chz  (also --serial / --parallel — byte-identical)
 
+import std.concurrency
+
 fn put(r: RwShared[map[str, int]], k: str, v: int):
     # exclusive write guard: read-modify-write the map, inserting this task's own key
     r.write(fn(m): insert(m, k, v))

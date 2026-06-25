@@ -4,6 +4,7 @@
 # incrementing the SAME key once total EXACTLY N (no lost updates). The map shape has each task write
 # its OWN distinct key, so no two writers collide and the parent reads a stable snapshot after the join.
 # Run with: chezzi run examples/concurrent_collection.chz   (also --serial / --parallel — byte-identical)
+import std.concurrency
 import std.concurrency.collection
 
 fn main():

@@ -1,3 +1,5 @@
+import std.concurrency
+
 fn main():
     a := Atomic(0)
     print(a.load())          # 0

@@ -4860,6 +4860,18 @@ impl Interp {
                     {
                         continue;
                     }
+                    // `std.concurrency`'s four exported ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/
+                    // `Executor`) likewise carry NO runtime value (checker-resolved type imports; the
+                    // ctor lowers via the compiler name→opcode path). Skip them — the file-less native
+                    // namespace has no such member. Mirrors the VM `bind_import` skip (parity).
+                    if &*ns.name == "std.concurrency"
+                        && matches!(
+                            member.as_str(),
+                            "Shared" | "RwShared" | "Atomic" | "Executor"
+                        )
+                    {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no

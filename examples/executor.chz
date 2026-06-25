@@ -4,6 +4,8 @@
 # `defer ex.shutdown()`. Under the sequential executor submitted work runs at the reap point, not in
 # the background — same surface as real-concurrency C5, deterministic semantics now.
 
+import std.concurrency
+
 fn job(id: int):
     print("job {id} ran")
 

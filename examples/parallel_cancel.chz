@@ -7,6 +7,7 @@
 # whole process, and the post-`parallel:` statement never runs.
 #
 # Run:  chezzi run --parallel examples/parallel_cancel.chz ; echo $?   # prints the line, then 7
+import std.concurrency
 import std.os
 
 fn quitter():

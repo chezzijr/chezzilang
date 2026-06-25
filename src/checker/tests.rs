@@ -5198,21 +5198,23 @@ fn spawn_in_plain_fn_ok() {
 #[test]
 fn shared_construct_and_methods_ok() {
     // `Shared(v)` infers its element type from the value (no `[T]` type arg, unlike Channel).
-    ok(
-        "fn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
     );
 }
 
 #[test]
 fn shared_get_returns_element_type() {
     // `get()` yields `T`, so it must compose where a `T` is expected (here, str concat).
-    ok("fn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n");
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n",
+    );
 }
 
 #[test]
 fn shared_set_wrong_type_rejected() {
-    rejects(
-        "fn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -5220,8 +5222,8 @@ fn shared_set_wrong_type_rejected() {
 #[test]
 fn shared_update_fn_arity_rejected() {
     // `update` takes `fn(T) -> T`; a two-param closure must not type-check.
-    rejects(
-        "fn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
         "argument 1 of 'update'",
     );
 }
@@ -5238,8 +5240,8 @@ fn shared_rejects_type_arg() {
 #[test]
 fn shared_is_sendable() {
     // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
-    ok(
-        "fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -5247,8 +5249,8 @@ fn shared_is_sendable() {
 fn shared_handle_sendable_regardless_of_element() {
     // The asymmetry vs Channel: a `Shared` handle is sendable even when its element type isn't
     // (the value never crosses the airlock — only the handle does). Locks in the intent.
-    ok(
-        "fn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
     );
 }
 
@@ -5257,16 +5259,16 @@ fn shared_handle_sendable_regardless_of_element() {
 #[test]
 fn rwshared_construct_and_methods_ok() {
     // `RwShared(v)` infers its element type from the value (value-first, like `Shared`).
-    ok(
-        "fn main():\n    r := RwShared(0)\n    r.set(5)\n    r.write(fn(x): x + 1)\n    print(r.read(fn(x): x))\n    print(r.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(5)\n    r.write(fn(x): x + 1)\n    print(r.read(fn(x): x))\n    print(r.get())\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_read_returns_closure_result_type() {
     // `read(f: fn(T) -> R) -> R` — R is the closure's return type, distinct from T here (int -> str).
-    ok(
-        "fn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
@@ -5275,8 +5277,9 @@ fn rwshared_read_closure_body_error_reported_once() {
     // A type error inside the read() closure body must be reported ONCE. `read` recovers R by
     // re-inferring the closure after `check_args` already inferred it; that recovery must not
     // double-emit the body's errors (regression: `nope` was reported twice).
-    let errs =
-        check_src("fn main():\n    r := RwShared(0)\n    print(r.read(fn(x): nope + x))\nmain()\n");
+    let errs = check_entry(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    print(r.read(fn(x): nope + x))\nmain()\n",
+    );
     let n = errs.iter().filter(|e| e.message.contains("nope")).count();
     assert_eq!(
         n, 1,
@@ -5286,31 +5289,31 @@ fn rwshared_read_closure_body_error_reported_once() {
 
 #[test]
 fn rwshared_get_returns_element_type() {
-    ok(
-        "fn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_set_wrong_type_rejected() {
-    rejects(
-        "fn main():\n    r := RwShared(0)\n    r.set(\"x\")\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(\"x\")\nmain()\n",
         "expected int",
     );
 }
 
 #[test]
 fn rwshared_write_fn_arity_rejected() {
-    rejects(
-        "fn main():\n    r := RwShared(0)\n    r.write(fn(x, y): x + y)\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.write(fn(x, y): x + y)\nmain()\n",
         "argument 1 of 'write'",
     );
 }
 
 #[test]
 fn rwshared_unknown_method_rejected() {
-    rejects(
-        "fn main():\n    r := RwShared(0)\n    r.update(fn(x): x + 1)\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.update(fn(x): x + 1)\nmain()\n",
         "has no method 'update'",
     );
 }
@@ -5325,15 +5328,15 @@ fn rwshared_rejects_type_arg() {
 
 #[test]
 fn rwshared_is_sendable() {
-    ok(
-        "fn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n        spawn bump(r)\n    print(r.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n        spawn bump(r)\n    print(r.get())\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_annotation_with_map_ok() {
-    ok(
-        "fn put(r: RwShared[map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn put(r: RwShared[map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
     );
 }
 
@@ -5441,7 +5444,7 @@ fn ref_value_copy_crosses_airlock_ok() {
     // The deref-first escape: copy the ref's VALUE into a plain local, then send the copy. No box
     // crosses, so this type-checks (and the child's mutation cannot reach the parent's binding).
     entry_ok(
-        "import std.ref\nfn main():\n    total: ref int = 100\n    snapshot := total\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(snapshot * 2)\n    print(total)\n    print(out.get())\nmain()\n",
+        "import std.concurrency\nimport std.ref\nfn main():\n    total: ref int = 100\n    snapshot := total\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(snapshot * 2)\n    print(total)\n    print(out.get())\nmain()\n",
     );
 }
 
@@ -5613,29 +5616,31 @@ fn explicit_ref_box_keeps_ref_bracket_in_messages() {
 #[test]
 fn atomic_construct_and_methods_ok() {
     // `Atomic(v)` infers its element type from the value (value-first, like `Shared`).
-    ok(
-        "fn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n",
     );
 }
 
 #[test]
 fn atomic_load_returns_element_type() {
     // `load()` yields `T`, so it composes where a `T` is expected (here, str concat).
-    ok(
-        "fn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
 #[test]
 fn atomic_cas_returns_bool() {
     // `cas(expected, new)` reports whether the swap happened.
-    ok("fn main():\n    a := Atomic(0)\n    if a.cas(0, 1):\n        print(\"swapped\")\nmain()\n");
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    if a.cas(0, 1):\n        print(\"swapped\")\nmain()\n",
+    );
 }
 
 #[test]
 fn atomic_store_wrong_type_rejected() {
-    rejects(
-        "fn main():\n    a := Atomic(0)\n    a.store(\"x\")\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -5643,8 +5648,8 @@ fn atomic_store_wrong_type_rejected() {
 #[test]
 fn atomic_add_non_numeric_rejected() {
     // `add`/`sub` are arithmetic — only `int`/`float` boxes have them.
-    rejects(
-        "fn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
         "no method 'add'",
     );
 }
@@ -5661,8 +5666,8 @@ fn atomic_rejects_type_arg() {
 #[test]
 fn atomic_is_sendable() {
     // An `Atomic[T]` handle crosses the airlock — both spawned tasks reach the same box.
-    ok(
-        "fn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
     );
 }
 
@@ -5686,20 +5691,22 @@ fn timer_arg_must_be_int() {
 
 #[test]
 fn executor_construct_and_methods_ok() {
-    ok(
-        "fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n",
     );
 }
 
 #[test]
 fn executor_shutdown_now_ok() {
-    ok("fn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n");
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n",
+    );
 }
 
 #[test]
 fn executor_defer_shutdown_ok() {
-    ok(
-        "fn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n",
     );
 }
 
@@ -5713,8 +5720,8 @@ fn executor_type_arg_rejected() {
 
 #[test]
 fn executor_unknown_method_rejected() {
-    rejects(
-        "fn main():\n    ex := Executor()\n    ex.run()\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.run()\nmain()\n",
         "has no method 'run'",
     );
 }
@@ -5722,8 +5729,8 @@ fn executor_unknown_method_rejected() {
 #[test]
 fn executor_is_sendable() {
     // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
-    ok(
-        "fn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -5733,6 +5740,107 @@ fn executor_user_struct_named_executor_rejected() {
         "struct Executor:\n    n: int\nfn main():\n    print(1)\nmain()\n",
         "reserved",
     );
+}
+
+// ----- Task 4: the four runtime concurrency ctors require `import std.concurrency` -----
+
+#[test]
+fn concurrency_types_require_import() {
+    // Value-position ctor use without the import is an unknown-name error with the import hint.
+    for (src, name) in [
+        (
+            "fn main():\n    s := Shared(0)\n    print(s.get())\nmain()\n",
+            "Shared",
+        ),
+        (
+            "fn main():\n    r := RwShared(0)\n    print(r.get())\nmain()\n",
+            "RwShared",
+        ),
+        (
+            "fn main():\n    a := Atomic(0)\n    print(a.load())\nmain()\n",
+            "Atomic",
+        ),
+        (
+            "fn main():\n    ex := Executor()\n    ex.shutdown()\nmain()\n",
+            "Executor",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
+                    && e.message.contains("import std.concurrency")),
+            "expected unknown-type+import hint for {name}, got: {errs:?}"
+        );
+    }
+    // Type-position annotation use without the import is also an unknown-type error with the hint.
+    for (src, name) in [
+        ("fn f(s: Shared[int]):\n    print(s.get())\n", "Shared"),
+        ("fn f(r: RwShared[int]):\n    print(r.get())\n", "RwShared"),
+        ("fn f(a: Atomic[int]):\n    print(a.load())\n", "Atomic"),
+        ("fn f(ex: Executor):\n    ex.shutdown()\n", "Executor"),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
+                    && e.message.contains("import std.concurrency")),
+            "expected unknown-type+import hint (annotation) for {name}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn concurrency_whole_module_import_ok() {
+    // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn f(s: Shared[int], r: RwShared[int], a: Atomic[int], ex: Executor):\n    print(s.get())\nfn main():\n    print(1)\nmain()\n",
+    );
+}
+
+#[test]
+fn concurrency_from_import_licenses_named() {
+    // A selective `import Shared from std.concurrency` licenses the named member.
+    entry_ok(
+        "import Shared from std.concurrency\nfn main():\n    print(Shared(0).get())\nmain()\n",
+    );
+    // But NOT the others it didn't import.
+    let errs =
+        check_entry("import Shared from std.concurrency\nfn main():\n    a := Atomic(0)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'Atomic'")),
+        "from-importing Shared must not license Atomic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn concurrency_partial_import_collection_does_not_license() {
+    // `import std.concurrency.collection` (len-3, the real file) must NOT license the four bare
+    // ctors — only the whole-module `import std.concurrency` (len-2) does.
+    let errs = check_entry(
+        "import std.concurrency.collection\nfn main():\n    s := Shared(0)\n    print(s.get())\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'Shared'")),
+        "importing the collection submodule must not license bare Shared, got: {errs:?}"
+    );
+}
+
+#[test]
+fn concurrency_names_still_reserved() {
+    // CRITICAL FIX 1 — the four stay RESERVED names: a user cannot declare a struct over them even
+    // after the import gate landed. This is a SEPARATE gate from the import requirement; both apply.
+    for name in ["Shared", "RwShared", "Atomic", "Executor"] {
+        rejects(
+            &format!("struct {name}:\n    n: int\nfn main():\n    print(1)\nmain()\n"),
+            "reserved",
+        );
+    }
 }
 
 // ----- C5 refinement #1: a non-sendable value merely *read* inside a `spawn:` block -----
@@ -5802,7 +5910,7 @@ fn submit_non_sendable_capture_rejected() {
     // A submitted closure reading a non-sendable captured binding (a Ref) crosses the airlock to a
     // pool thread under `--parallel` — rejected exactly like a `spawn` capture.
     entry_rejects(
-        "import std.ref\nfn main():\n    r := Ref(0)\n    ex := Executor()\n    ex.submit(fn(): r.set(1))\n    ex.shutdown()\nmain()\n",
+        "import std.concurrency\nimport std.ref\nfn main():\n    r := Ref(0)\n    ex := Executor()\n    ex.submit(fn(): r.set(1))\n    ex.shutdown()\nmain()\n",
         "non-sendable captured binding 'r'",
     );
 }
@@ -5810,8 +5918,8 @@ fn submit_non_sendable_capture_rejected() {
 #[test]
 fn submit_captured_closure_rejected() {
     // Capturing a function-local closure (non-sendable) and calling it inside the submitted task.
-    rejects(
-        "fn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
         "non-sendable captured binding 'g'",
     );
 }
@@ -5819,16 +5927,16 @@ fn submit_captured_closure_rejected() {
 #[test]
 fn submit_captured_channel_ok() {
     // A Channel handle is sendable — capturing it in a submitted task is fine.
-    ok(
-        "fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n",
     );
 }
 
 #[test]
 fn submit_captured_int_ok() {
     // A sendable capture (int) gets its own copy — reading it in the task is the whole point.
-    ok(
-        "fn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -5838,8 +5946,8 @@ fn submit_captured_closure_through_nested_closure_rejected() {
     // a non-sendable function-local closure smuggled into a submitted task through a *nested* closure
     // must still be rejected. Emergent from `capture_floors` not being reset by `infer_closure` — pin
     // it so a future refactor of the capture machinery can't silently reopen the hole.
-    rejects(
-        "fn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
         "non-sendable captured binding 'g'",
     );
 }
@@ -5850,8 +5958,8 @@ fn top_level_closure_submitted_ok() {
     // global, not a per-task capture — submitting a closure that reads it is fine even when it's
     // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
     // tightening of the gate can't silently flip it without a test failing.
-    ok(
-        "g := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+    entry_ok(
+        "import std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -5911,8 +6019,8 @@ fn spawn_reads_global_ok() {
 #[test]
 fn shared_update_in_spawn_ok() {
     // The prescribed cross-task mutation path: a global `Shared`, mutated via `update()` in a task.
-    ok(
-        "c := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nc := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n",
     );
 }
 

@@ -140,6 +140,13 @@ Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte
 
 These types come from the language/runtime; see [`concurrency.md`](concurrency.md) for the full model.
 
+> **`import std.concurrency` required for `Shared` / `RwShared` / `Atomic` / `Executor`.** These four
+> are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all four) or
+> `import Shared from std.concurrency` (per-name) before it can use them; bare use otherwise is an
+> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
+> stay **reserved names** (a user `struct Shared`/`struct Executor` is rejected). `Channel` and `timer`
+> stay global (no import needed).
+
 ### `Channel[T]` — FIFO mailbox
 `send(x: T) -> nil` · `try_send(x: T) -> bool` · `recv() -> T` · `try_recv() -> Option[T]` ·
 `close() -> nil` · `trip() -> nil` (permanent level-trigger latch) · `len() -> int`.
@@ -577,7 +584,9 @@ all-sendable fields is too.)
 factory cannot bind `K`/`V` (turbofish does not propagate into the inner `RwShared({})`). Construct
 **directly** at the use site: **`ConcurrentMap(RwShared({}))`** / **`ConcurrentCounter(RwShared({}))`**;
 `K`/`V` are deferred from the empty `{}` and inferred from the first method call (same idiom as
-`Counter({})`).
+`Counter({})`). Note the use-site `RwShared({})` means user code also needs **`import std.concurrency`**
+in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
+the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 
 **Reentrancy:** like raw `RwShared`, a `read`/`write` closure must not re-enter the **same** box. Every
 wrapper method is flat (no nested locking), so user code is safe as long as it does not call a wrapper
