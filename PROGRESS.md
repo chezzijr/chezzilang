@@ -60,6 +60,16 @@ used the four bare now `import std.concurrency` (atomic/executor/executor_pool/e
 demo_executor/shared/rwshared/parallel_shared/parallel_cancel/ref_airlock/cancel_cpu + the two
 concurrent_collection*). Docs (stdlib/syntax/concurrency) updated. `cargo test` (2708) + conformance +
 clippy clean. (FINAL cleanup task — list/map/set→List/Map/Set — landed as task 5/5 above.)
+**Checker polish (2026-06-25, follow-up to 4/5):** (a) a BARE (no `[T]`) `Shared`/`RwShared`/`Atomic`
+annotation now hits a dedicated `resolve_type` arm instead of falling to the catch-all — unlicensed →
+the SAME `unknown type '…' (import it from std.concurrency: …)` hint the `Shared[T]` arm gives;
+licensed → the missing-type-arg error `type '…' expects 1 type argument(s), got 0` (matches the
+user-generic struct/enum/newtype precedent). Mirrors the bare `Executor` arm. (b) the
+`current_module_is_stdlib` stamp at `check_program` now calls the canonical `LoadedModule::is_std()`
+(resolver) instead of an inline `dotted.first()==Some("std")` half-reimplementation that dropped the
+`native.is_some()` clause — behavior-preserving (native std modules carry no concurrency annotations),
+de-dups to ONE definition. Checker-only → three-engine parity by construction. New failing-then-green
+tests: bare-without-import → hint; bare-with-import → missing-type-arg.
 
 **✅ global-namespace cleanup — task 2/5: FFI `ptr` gated behind `import std.ffi` (2026-06-25).** The
 opaque C-ABI `ptr` type is no longer a global builtin — it now requires an import, **consistent with

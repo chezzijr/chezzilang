@@ -496,7 +496,7 @@ impl Checker {
             // Stamp the current module's graph index so the extern loop keys its resolved C signatures
             // the SAME way both backends look them up. `None` outside the harvesting pass.
             c.extern_module_idx = if harvest_externs { Some(idx) } else { None };
-            c.current_module_is_stdlib = lm.dotted.first().map(String::as_str) == Some("std");
+            c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
             c.module_sigs.insert(lm.id.clone(), sig);
         }
@@ -2807,6 +2807,28 @@ impl Checker {
                         );
                         Ty::Unknown
                     }
+                }
+                // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation. Like `Executor`
+                // above these names are NOT global builtins and STAY reserved; but they are generic,
+                // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
+                // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
+                // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
+                // can't fall through to a hint-less "unknown type".
+                n @ ("Shared" | "RwShared" | "Atomic") => {
+                    if self.concurrency_licensed(n) {
+                        self.error(
+                            span,
+                            format!("type '{n}' expects 1 type argument(s), got 0"),
+                        );
+                    } else {
+                        self.error(
+                            span,
+                            format!(
+                                "unknown type '{n}' (import it from std.concurrency: `import std.concurrency`)"
+                            ),
+                        );
+                    }
+                    Ty::Unknown
                 }
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
                 "Socket" => Ty::Socket,
