@@ -211,7 +211,7 @@ manifest's `[project] entrypoint` — a **dotted module path**, optionally suffi
 **`:function`** (e.g. `"src.main:main"`). The module runs top-to-bottom like any other file; with a
 `:function` suffix the entry function is then **called** (a missing/non-function name is a clear
 error), so the source needs no trailing call. Without the suffix the module just runs top-to-bottom
-and calls its own `main()`. Running an explicit file (`chezzi run <file>`) is always top-level-only.
+(no entry function is called). Running an explicit file (`chezzi run <file>`) is always top-level-only.
 
 ## Imports & module resolution
 
