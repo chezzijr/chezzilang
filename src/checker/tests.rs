@@ -6065,9 +6065,46 @@ fn extern_non_marshallable_return_rejected() {
 #[test]
 fn extern_ptr_param_and_return_ok() {
     // The opaque `ptr` handle is C-marshallable: an extern fn can return one and take one back.
-    ok(
-        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+    // `ptr` requires `import std.ffi` (one import covers both the extern block and the annotation).
+    entry_ok(
+        "import std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
     );
+}
+
+#[test]
+fn ptr_annotation_requires_ffi_import() {
+    // The opaque `ptr` type is NOT a global builtin: a bare `ptr` annotation without `import std.ffi`
+    // is an unknown type, with an FFI-specific hint. (Consistent with the width types int8..uint64.)
+    rejects(
+        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n",
+        "unknown type 'ptr'",
+    );
+    rejects(
+        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n",
+        "import std.ffi",
+    );
+}
+
+#[test]
+fn ptr_whole_module_import_ok() {
+    // A whole-module `import std.ffi` licenses bare `ptr` in BOTH extern signatures and annotations.
+    entry_ok(
+        "import std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+    );
+}
+
+#[test]
+fn ptr_selective_from_import_ok() {
+    // `from std.ffi import ptr` (selective) also licenses bare `ptr`.
+    entry_ok(
+        "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+    );
+}
+
+#[test]
+fn ptr_rename_on_import_rejected() {
+    // `ptr` CANNOT be renamed on import — the backends key off the literal surface name.
+    entry_rejects("import ptr as P from std.ffi\n", "cannot be renamed");
 }
 
 #[test]
@@ -6889,7 +6926,7 @@ fn extern_generic_struct_by_value_rejected() {
 fn ffi_null_and_is_null_typecheck() {
     // `std.ffi.null()` is `ptr`; `is_null(p)` is `bool`; `ptr == ptr` (incl. vs `null()`) type-checks.
     entry_ok(
-        "import null, is_null from std.ffi\n\
+        "import ptr, null, is_null from std.ffi\n\
          extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n\n\
          fn main():\n    h: ptr = tmpfile()\n    b: bool = is_null(h)\n    print(b)\n    print(h == null())\n",
     );

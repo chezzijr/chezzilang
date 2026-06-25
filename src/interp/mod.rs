@@ -4849,12 +4849,14 @@ impl Interp {
             }
             Import::From { path: _, names } => {
                 for (member, alias) in names {
-                    // `std.ffi`'s exported fixed-width integer TYPE names (`import int32 from std.ffi`)
-                    // carry NO runtime value — they are compile-time type imports the checker resolves.
-                    // Skip them here (the namespace has no such member by design); any other missing
-                    // member is a genuine error.
+                    // `std.ffi`'s exported FFI marshalling TYPE names — the fixed-width integers
+                    // (`import int32 from std.ffi`) and the opaque `ptr` handle — carry NO runtime
+                    // value: they are compile-time type imports the checker resolves. Skip them here
+                    // (the namespace has no such member by design); any other missing member is a
+                    // genuine error.
                     if &*ns.name == "std.ffi"
-                        && crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
+                        && (crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
+                            || member == "ptr")
                     {
                         continue;
                     }

@@ -1,8 +1,8 @@
 # Opaque C-ABI pointer handles (`ptr`) through `extern "lib":`.
 # A C handle (`FILE*`) round-trips through Chezzi as an opaque `ptr` value: returned by one extern
-# call, passed back into another. NULL is a detectable "failed" signal, not a crash. The `null`/
-# `is_null` vocabulary lives in `std.ffi` (the `ptr` type itself is builtin).
-import null, is_null from std.ffi
+# call, passed back into another. NULL is a detectable "failed" signal, not a crash. The `ptr` type
+# and the `null`/`is_null` vocabulary all live in `std.ffi` — import what you use.
+import ptr, null, is_null from std.ffi
 
 extern "libc.so.6":
     fn fopen(path: str, mode: str) -> ptr

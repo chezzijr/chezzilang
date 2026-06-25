@@ -462,11 +462,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   never freed); declare it **`owned_str`** (a return-only marshalling type) to copy **and** free a
 >   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`Option[str]`) to make a `NULL` return
 >   `None` instead of a fault (`owned_str?` composes both). See `examples/ffi_str.chz`. **Opaque `void*`
->   handles shipped:** declare `ptr` (a builtin opaque type, ↔ C `void*`) to hold a C handle
+>   handles shipped:** declare `ptr` (an opaque type imported from `std.ffi`, ↔ C `void*`) to hold a C handle
 >   (`FILE*`/`sqlite3*`/…) across calls — `Obj::Ptr(usize)` / `Value::Ptr(usize)`, a GC leaf, sendable
 >   by value (`WireValue::Ptr`), value-compared by address, `<ptr null>`/`<ptr>` stringify (never the
->   raw address — non-deterministic), never auto-freed (manual destroy). The `std.ffi` module adds the
->   value vocab (`null()`/`is_null`); see `examples/ffi_ptr.chz`. **The memory behind a `ptr` is now
+>   raw address — non-deterministic), never auto-freed (manual destroy). The `ptr` type AND the value
+>   vocab (`null()`/`is_null`) all live in `std.ffi` — using `ptr` (including in an `extern` block)
+>   requires `import std.ffi` (or `import ptr from std.ffi`), exactly like the fixed-width integer
+>   types; see `examples/ffi_ptr.chz`. **The memory behind a `ptr` is now
 >   readable/writable** via `std.ffi` `load_*`/`store_*` (every C scalar width + `load_str`, each with
 >   an `_at(p, off)` byte-offset form) — so struct fields, return buffers, and C output-params a library
 >   hands you can be read/written. **You can also make your OWN C-laid-out buffer** via `std.ffi`
@@ -485,8 +487,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >     limit was *"scalars only: int ↔ long, no fixed-width int type"*). To bind a C function taking or
 >     returning a fixed-width integer (`int32_t`, `uint32_t`, …), declare the parameter/return with one
 >     of the **fixed-width marshalling type names** — `int8`, `int16`, `int32`, `int64`, `uint8`,
->     `uint16`, `uint32`, `uint64`. Unlike `ptr`/`owned_str` (bare builtins), these are **not global**:
->     each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
+>     `uint16`, `uint32`, `uint64`. Like `ptr` (and unlike the still-bare `owned_str`), these are
+>     **not global**: each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
 >     `import int32, uint32 from std.ffi` form as the `null`/`is_null` value members (`std.ffi` exports
 >     both callable members and these eight TYPE names; the declaring list is `native::ffi::TYPE_NAMES`,
 >     no grammar change). A module that names a width type without importing it gets *unknown type

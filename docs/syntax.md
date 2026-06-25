@@ -1896,8 +1896,9 @@ now **is** C `_Bool` (1 byte) — no separate `bool8` type; the classic int-retu
 (`isdigit`, …) bind `-> int` and test `!= 0`.
 
 **Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
-`create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — a
-builtin opaque type (a peer of `int`/`str`; no import needed in a signature). A `ptr` is **untyped**
+`create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — an
+opaque type imported from `std.ffi` (using it, **including in an `extern` block**, requires
+`import std.ffi` or `import ptr from std.ffi`, just like the fixed-width integer types). A `ptr` is **untyped**
 (one `ptr` for every handle — Chezzi never distinguishes a `FILE*` from a `sqlite3*`, exactly like
 `ctypes`), holds no data Chezzi can read (zero-copy — the data stays behind the address), and is
 **never auto-freed**: call the library's own destroy yourself (forgetting **leaks**, like the `char*`
@@ -1927,7 +1928,9 @@ address) — it crosses a `spawn`/channel airlock by value.
 integer TYPE names** — `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64`. The TYPE names
 are Chezzi's first **type imports**: like the value members they are brought in per-name with
 `import int32, uint32 from std.ffi`, and a module that does not import a width name cannot use it (see
-*Fixed-width integers* below). The opaque `ptr` type itself stays a bare builtin (no import).
+*Fixed-width integers* below). The opaque `ptr` type is imported the same way — whole-module
+`import std.ffi` or per-name `import ptr from std.ffi` — and likewise cannot be used (in an annotation
+OR an `extern` signature) without that import.
 
 **`str` returns — owned + nullable (return-only opt-ins).** A plain `str` return is **borrowed**: the
 `char*` is copied into a Chezzi string and never `free`d (a `malloc`'d return would **leak**), and a
@@ -1963,7 +1966,7 @@ frees memory you don't own and corrupts the heap, exactly like a non-NUL-termina
 
 **Fixed-width integers (`int8`..`uint64`) — bidirectional, imported from `std.ffi`.** Bare `int` marshals
 as C `long`; to bind a C function taking or returning a **fixed-width** integer, declare it with one of
-eight marshalling type names. These are **not global builtins** (unlike `ptr`/`owned_str`): a module that
+eight marshalling type names. These are **not global builtins** (like `ptr`, and unlike the still-bare `owned_str`): a module that
 names a width type must **import it per-name from `std.ffi`** — Chezzi's first **type imports**, with the
 same `import <name>, … from std.ffi` form as the `null`/`is_null` value members:
 
