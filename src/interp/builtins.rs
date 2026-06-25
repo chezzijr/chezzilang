@@ -419,7 +419,12 @@ fn list_method(
                 let mut acc = 0_i64;
                 for v in items.iter() {
                     match v {
-                        Value::Int(n) => acc += *n,
+                        Value::Int(n) => {
+                            acc = acc.checked_add(*n).ok_or_else(|| RuntimeError {
+                                message: "integer overflow in Add".to_string(),
+                                span,
+                            })?;
+                        }
                         other => {
                             return Err(RuntimeError {
                                 message: format!(

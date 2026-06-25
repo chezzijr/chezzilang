@@ -1521,6 +1521,14 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   scope exit, LIFO as a unit, free vars snapshot by value at the `defer` point, runs on all exit paths.
   A dedicated `defer_floors` write-gate rejects reassigning an enclosing local inside the block (no
   `SetCaptured` op); a `?` short-circuit inside the block is absorbed on both engines.
+- **Integer `List.sum()` checked-add (2026-06-25).** The integer accumulation in `List.sum()` used a raw
+  `acc += *n` on both engines — `[i64::MAX, 1].sum()` silently wrapped to `i64::MIN` (release) / host-
+  panicked (debug) instead of faulting, while every other integer add (`+`, `+=`, `fold`, `*`, `/`) is
+  checked. Now `acc.checked_add(*n)` raises the same recoverable `integer overflow in Add` at the
+  `.sum()` call-site span, byte-identical to `+` (VM `vm/mod.rs` + interp `interp/builtins.rs`). The
+  any-float path is untouched (accumulates to `float`, may reach `inf`). `examples/overflow.chz` now
+  exercises the `sum` case alongside `math.abs`; two-engine parity tests `parity_list_sum_overflow` /
+  `parity_list_sum_mixed_float`.
 
 ---
 
