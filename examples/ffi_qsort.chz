@@ -27,7 +27,7 @@ fn cmp(a: ptr, b: ptr) -> int:
     return 0
 
 data := [5, 2, 9, 1, 7, 3, 8, 4, 6, 0]
-n := len(data)
+n := data.len()
 
 # Lay out a C int64[n] buffer and fill it from the list.
 buf := ffi.alloc(n * 8)

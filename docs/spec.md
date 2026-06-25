@@ -281,7 +281,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 
 ## Standard library
 
-- **Builtins (no import):** `print`, `len`, `range`, casts (`int()`/`str()`/`float()`),
+- **Builtins (no import):** `print`, `range`, casts (`int()`/`str()`/`float()`),
   `ord`/`chr`, `set()`/`set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
   (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
@@ -311,7 +311,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
-  offsets), `for x in b` yields `int`, `len(b)` is the byte count, `==`/`!=` are structural, and
+  offsets), `for x in b` yields `int`, `b.len()` is the byte count, `==`/`!=` are structural, and
   `bytes` is `Hashable` (valid map/set key). `str(b)` / `print(b)` / interpolation use the Python
   `b'...'` repr. Immutable (no `b[i] = x`). **`bytearray`** is the **mutable sibling** (Python
   `bytearray` model), **shipped**: constructor-only (`bytearray()` empty, `bytearray(N)` N zero bytes,

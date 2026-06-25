@@ -47,8 +47,7 @@ pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "len"
-            | "range"
+        "range"
             | "int"
             | "float"
             | "str"

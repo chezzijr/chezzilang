@@ -993,7 +993,7 @@ struct StrBox:
     fn get(self, i: int) -> str:
         return self.items[i]
     fn size(self) -> int:
-        return len(self.items)
+        return self.items.len()
 fn total[X: Container[int]](c: X) -> int:
     return c.size()
 fn forward[Y: Container[str]](c: Y) -> int:
@@ -1015,7 +1015,7 @@ struct IntBox:
     fn get(self, i: int) -> int:
         return self.items[i]
     fn size(self) -> int:
-        return len(self.items)
+        return self.items.len()
 fn total[X: Container[int]](c: X) -> int:
     return c.size()
 fn forward[Y: Container[int]](c: Y) -> int:
@@ -1350,7 +1350,24 @@ fn struct_ctor_arity_rejected() {
 
 #[test]
 fn builtin_arity_rejected() {
-    rejects("x := len()\n", "len() expects 1 argument");
+    // free `len()` is gone — it is no longer a builtin, so it resolves as an unknown name.
+    rejects("x := len([1, 2, 3])\n", "unknown name 'len'");
+}
+
+#[test]
+fn len_not_reserved() {
+    assert!(!is_reserved_name("len"));
+}
+
+#[test]
+fn user_fn_len_ok() {
+    // `len` is no longer reserved, so a user may declare a top-level `fn len`.
+    ok("fn len(x: int) -> int:\n    return x\nprint(len(5))\n");
+}
+
+#[test]
+fn bytes_len_method_ok() {
+    ok("b := \"hi\".encode()\nn: int = b.len()\nprint(n)\n");
 }
 
 #[test]
@@ -4172,8 +4189,8 @@ fn range_pattern_ok() {
 #[test]
 fn range_three_arg_typechecks() {
     // 1/2/3-arg `range()` of ints all type-check to `list[int]`; 0 or >3 args reject.
-    ok("fn main():\n    a: list[int] = range(0, 10, 2)\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    a: list[int] = range(10, 0, -1)\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = range(0, 10, 2)\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: list[int] = range(10, 0, -1)\n    print(a.len())\nmain()\n");
     rejects("fn main():\n    print(range())\nmain()\n", "range");
     rejects(
         "fn main():\n    print(range(0, 1, 2, 3))\nmain()\n",
@@ -4188,7 +4205,7 @@ fn range_three_arg_typechecks() {
 #[test]
 fn range_slice_typechecks() {
     // Slicing a range literal infers `list[int]` (the SECONDARY range-slicing path).
-    ok("fn main():\n    a: list[int] = (0..10)[::2]\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = (0..10)[::2]\n    print(a.len())\nmain()\n");
 }
 
 // ===== default + named arguments (end-to-end through desugar) =====
@@ -6897,12 +6914,12 @@ fn extern_duplicate_name_rejected() {
 
 #[test]
 fn extern_named_after_builtin_rejected() {
-    // An extern fn named after a builtin (len/range/int/float/str/ord/chr/set) would be silently
+    // An extern fn named after a builtin (range/int/float/str/ord/chr/set) would be silently
     // shadowed: `compile_call`/`eval_call` resolve the name to the builtin op before a plain call,
     // so the extern is dead — and the compiler's eager `MakeCffi` dlsyms a symbol it can never call.
     // Reject the collision at hoist with a clear message.
     rejects(
-        "extern \"libc.so.6\":\n    fn len(x: int) -> int\n",
+        "extern \"libc.so.6\":\n    fn range(x: int) -> int\n",
         "builtin/reserved name",
     );
 }
@@ -7201,7 +7218,7 @@ fn lifecycle_name_in_non_suite_struct_not_validated() {
 fn bytes_literal_infers_bytes_and_protocols() {
     // literal infers `bytes`; b[i] -> int; b[a:b] -> bytes; for c in b -> int; len -> int
     ok(
-        "fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = len(b)\n    print(x + n)\nmain()\n",
+        "fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = b.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -7236,7 +7253,7 @@ fn bytearray_constructor_and_ty() {
     // `bytearray([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
     // for x in ba -> int; len ok.
     ok(
-        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = len(ba)\n    print(x + n)\nmain()\n",
+        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = ba.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -7244,7 +7261,7 @@ fn bytearray_constructor_and_ty() {
 fn bytearray_constructor_overloads_infer_bytearray() {
     // All four constructor forms infer `bytearray`.
     ok(
-        "fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(len(a) + len(b) + len(c) + len(d))\nmain()\n",
+        "fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(a.len() + b.len() + c.len() + d.len())\nmain()\n",
     );
 }
 
@@ -7252,7 +7269,7 @@ fn bytearray_constructor_overloads_infer_bytearray() {
 fn bytearray_conversion_bridge_typechecks() {
     // bytes(ba) -> bytes; bytearray(b) -> bytearray.
     ok(
-        "fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(len(b) + len(ba2))\nmain()\n",
+        "fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(b.len() + ba2.len())\nmain()\n",
     );
 }
 
@@ -7290,7 +7307,7 @@ fn bytearray_not_assignable_to_bytes() {
 fn encode_decode_types() {
     // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
     ok(
-        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(len(b)))\nmain()\n",
+        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(b.len()))\nmain()\n",
     );
 }
 
@@ -7308,12 +7325,12 @@ fn encode_only_on_str_decode_only_on_bytes() {
 #[test]
 fn constructor_iter_types() {
     // list() over every for-iterable shape; element type flows through iter_elem.
-    ok("fn main():\n    a: list[int] = list([1, 2])\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    s := {1, 2}\n    a: list[int] = list(s)\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(b\"hi\")\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    a: list[str] = list(\"ab\")\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(range(3))\n    print(len(a))\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(bytearray([1, 2]))\n    print(len(a))\nmain()\n");
+    ok("fn main():\n    a: list[int] = list([1, 2])\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    s := {1, 2}\n    a: list[int] = list(s)\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(b\"hi\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: list[str] = list(\"ab\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(range(3))\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: list[int] = list(bytearray([1, 2]))\n    print(a.len())\nmain()\n");
     // set() broadened from list-only to any for-iterable.
     ok("fn main():\n    s: set[str] = set(\"abc\")\n    print(s.len())\nmain()\n");
     ok("fn main():\n    s: set[int] = set(range(3))\n    print(s.len())\nmain()\n");
@@ -7828,7 +7845,7 @@ fn newtype_scalar_aggregate_cast_unwrap_ok() {
     // newtype does: the matching aggregate cast builtin unwraps it. `list(ns)` for `Names = list[str]`
     // yields `list[str]` (mirrors `int(uid)` for `UserId = int`) — distinct type, explicit cast.
     ok(
-        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: list[str] = list(ns)\n    print(len(xs))\nmain()\n",
+        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: list[str] = list(ns)\n    print(xs.len())\nmain()\n",
     );
     // set / map underlyings unwrap via set() / map() likewise (the annotated binding is the assertion
     // that the unwrap yields the matching aggregate type).
@@ -7864,7 +7881,7 @@ fn raw_string_is_str_type() {
 fn generic_newtype_decl_ok() {
     // `newtype Stack[T] = list[T]` with methods referencing T type-checks.
     ok(
-        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(len(list(s)))\nmain()\n",
+        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(list(s).len())\nmain()\n",
     );
 }
 
@@ -7889,7 +7906,7 @@ fn generic_newtype_dispatch_substitutes_targs() {
 fn generic_newtype_ctor_infer_ok() {
     // `Stack([1, 2])` infers Stack[int].
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(len(list(s)))\nmain()\n",
+        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(list(s).len())\nmain()\n",
     );
 }
 
@@ -7897,7 +7914,7 @@ fn generic_newtype_ctor_infer_ok() {
 fn generic_newtype_ctor_turbofish_ok() {
     // `Stack[int]([])` — the empty list can't bind T, so the turbofish supplies it.
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(len(list(s)))\nmain()\n",
+        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(list(s).len())\nmain()\n",
     );
 }
 
@@ -7923,7 +7940,7 @@ fn generic_newtype_ctor_wrong_arg_rejected() {
 fn generic_newtype_cast_unwrap_propagates() {
     // `list(s)` for s: Stack[int] yields list[int].
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[int] = list(s)\n    print(len(xs))\nmain()\n",
+        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[int] = list(s)\n    print(xs.len())\nmain()\n",
     );
 }
 
@@ -7979,7 +7996,7 @@ fn generic_newtype_own_method_dispatch_ok() {
 fn generic_newtype_bound_smoke_ok() {
     // Bounds on newtype params come along for free via enter_type_params/check_bounds/enforce_bounds.
     ok(
-        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(len(list(k)))\nmain()\n",
+        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(list(k).len())\nmain()\n",
     );
 }
 

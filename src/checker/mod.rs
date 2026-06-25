@@ -117,7 +117,7 @@ fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
         // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
-        "len" | "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray"
+        "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray"
         // the special print op
         | "print"
         // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
@@ -7024,19 +7024,6 @@ impl Checker {
                 }
                 Some(Ty::Unknown)
             }
-            "len" => {
-                self.check_arity("len", 1, args, span);
-                if let Some(a) = args.first() {
-                    match self.infer_value(a) {
-                        Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        other => self.error(
-                            a.span,
-                            format!("len() expects a list, str, or bytes, got {other}"),
-                        ),
-                    }
-                }
-                Some(Ty::Int)
-            }
             "range" => {
                 for a in args {
                     self.expect_int_val(a);
@@ -11128,11 +11115,12 @@ fn bytearray_method_sig(method: &str) -> Option<FnSig> {
 }
 
 /// Built-in method signatures on `bytes` (the immutable byte sequence). Mirrors the VM's
-/// `bytes_method` and the interp's bytes-method arm — keep all three in lockstep. Only `decode()`
-/// (UTF-8 → str, recoverable fault on invalid UTF-8); `len` is reached via `len(b)` not a method.
+/// `bytes_method` and the interp's bytes-method arm — keep all three in lockstep. `decode()`
+/// (UTF-8 → str, recoverable fault on invalid UTF-8) and `len()` (byte count).
 fn bytes_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "decode" => (vec![], Ty::Str),
+        "len" => (vec![], Ty::Int),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
@@ -11354,7 +11342,7 @@ mod graph_tests {
         let t = TmpDir::new();
         t.write(
             "types.chz",
-            "newtype Stack[T] = list[T]:\n    fn size(self) -> int:\n        return len(list(self))\n",
+            "newtype Stack[T] = list[T]:\n    fn size(self) -> int:\n        return list(self).len()\n",
         );
         let entry = t.write(
             "main.chz",

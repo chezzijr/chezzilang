@@ -71,7 +71,7 @@ fn collections():
     print([])
     print({})
     print(set())
-    print(len([]))
+    print([].len())
     print([[1, 2], [3]])              # nested list
     print({"a": [1, 2], "b": []})     # map of lists; keys printed unquoted
     print((1, "x", true))             # tuple; str element unquoted
@@ -149,12 +149,12 @@ fn index_faults():
 fn truthy():
     print("-- truthiness --")
     xs := []
-    if len(xs) > 0:
+    if xs.len() > 0:
         print("nonempty")
     else:
         print("empty")
     name := ""
-    print(len(name) == 0)
+    print(name.len() == 0)
     print(true and false)
     print(true or false)
     print(not (1 < 2))

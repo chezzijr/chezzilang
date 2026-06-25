@@ -1,4 +1,4 @@
-//! Built-in functions available without any import (`len`, `range`, `int`/`str`/`float`).
+//! Built-in functions available without any import (`range`, `int`/`str`/`float`).
 //! Math intrinsics like `sqrt` are NOT builtins — they live in `std.math` (M6c).
 //! `print` lives in the interpreter itself because it writes to the captured output buffer.
 
@@ -11,8 +11,7 @@ use std::rc::Rc;
 pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "len"
-            | "range"
+        "range"
             | "int"
             | "float"
             | "str"
@@ -32,7 +31,6 @@ pub fn is_builtin(name: &str) -> bool {
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.
 pub fn call(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
     match name {
-        "len" => len(&args, span),
         "range" => range(&args, span),
         "int" => cast_int(&args, span),
         "float" => cast_float(&args, span),
@@ -470,23 +468,6 @@ pub(super) fn arity(name: &str, args: &[Value], n: usize, span: Span) -> Result<
             message: format!("{name}() expects {n} argument(s), got {}", args.len()),
             span,
         })
-    }
-}
-
-fn len(args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-    arity("len", args, 1, span)?;
-    match &args[0] {
-        Value::List(items) => Ok(Value::Int(items.borrow().len() as i64)),
-        Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-        Value::Bytes(b) => Ok(Value::Int(b.len() as i64)),
-        Value::ByteArray(b) => Ok(Value::Int(b.borrow().len() as i64)),
-        other => Err(RuntimeError {
-            message: format!(
-                "len() expects a list, str, or bytes, got {}",
-                other.type_name()
-            ),
-            span,
-        }),
     }
 }
 

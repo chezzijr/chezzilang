@@ -2079,10 +2079,10 @@ print(ffi.load_int32_at(p, 0))\n",
         let src = concat!(
             "import std.ffi\n",
             "data := [10, 20, 30, 40]\n",
-            "p := ffi.alloc(len(data) * 8)\n",
-            "for i in range(len(data)):\n",
+            "p := ffi.alloc(data.len() * 8)\n",
+            "for i in range(data.len()):\n",
             "    ffi.store_int64_at(p, i * 8, data[i])\n",
-            "for i in range(len(data)):\n",
+            "for i in range(data.len()):\n",
             "    print(ffi.load_int64_at(p, i * 8))\n",
             "ffi.free(p)\n",
         );

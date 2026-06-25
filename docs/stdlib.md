@@ -19,7 +19,6 @@ Conventions used below:
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `print` | `print(...args, sep=" ", end="\n") -> nil` | Write each argument (any type) to stdout. Variadic. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. |
-| `len` | `len(x) -> int` | Length of a `list`, `str`, `bytes`, or `bytearray`. (Types also have a `.len()` method.) |
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> list[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
@@ -129,7 +128,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | Type | Method | Signature | Notes |
 |------|--------|-----------|-------|
 | both | `decode` | `() -> str` | UTF-8 decode (recoverable fault on invalid UTF-8). |
-| `bytearray` | `len` | `() -> int` | |
+| both | `len` | `() -> int` | Byte count. |
 | `bytearray` | `push` | `(byte: int) -> nil` | *mutates* — append a byte (0–255). |
 | `bytearray` | `pop` | `() -> Option[int]` | *mutates* — remove & return last byte. |
 
@@ -354,12 +353,12 @@ fn cmp(a: ptr, b: ptr) -> int:           # qsort hands two const void* (each an 
     return 0
 
 data := [5, 2, 9, 1, 7]
-buf := ffi.alloc(len(data) * 8)          # one int64 slot per element
+buf := ffi.alloc(data.len() * 8)         # one int64 slot per element
 defer ffi.free(buf)                      # manual free — never auto-freed
-for i in range(len(data)):
+for i in range(data.len()):
     ffi.store_int64_at(buf, i * 8, data[i])
-qsort(buf, len(data), 8, cmp)            # sorts in place, calling back into `cmp`
-for i in range(len(data)):
+qsort(buf, data.len(), 8, cmp)           # sorts in place, calling back into `cmp`
+for i in range(data.len()):
     print(ffi.load_int64_at(buf, i * 8)) # 1 2 5 7 9
 ```
 

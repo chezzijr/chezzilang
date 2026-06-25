@@ -13,7 +13,7 @@ assert "ab" + "cd" == "abcd"
 
 # message form: `assert <cond>, "<msg>"` — the message is only used on failure
 xs := [1, 2, 3]
-assert len(xs) == 3, "list should have three items"
+assert xs.len() == 3, "list should have three items"
 assert 2 in xs, "2 should be a member"
 
 print("all asserts passed")

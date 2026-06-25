@@ -26,7 +26,7 @@ fn main():
 
     # divide-by-zero, three steps in, is caught the same way.
     c := recover:
-        100 / (len(xs) - 3)
+        100 / (xs.len() - 3)
     match c:
         Ok(v): print("ok: {v}")
         Err(e): print("recovered: {e.message()}")

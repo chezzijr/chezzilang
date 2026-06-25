@@ -3681,6 +3681,10 @@ impl Interp {
                 builtins::arity("decode", &args, 0, span)?;
                 decode_utf8(b, span)
             }
+            "len" => {
+                builtins::arity("len", &args, 0, span)?;
+                Ok(Value::Int(b.len() as i64))
+            }
             _ => Err(RuntimeError {
                 message: format!("type bytes has no method '{method}'"),
                 span,
@@ -8410,9 +8414,18 @@ fn safe_div(a: int, b: int) -> Result[int]:
     }
 
     #[test]
-    fn builtin_len() {
-        assert_eq!(run("print(len([1, 2, 3]))\n"), "3\n");
-        assert_eq!(run("print(len(\"abcd\"))\n"), "4\n");
+    fn method_len() {
+        assert_eq!(run("print([1, 2, 3].len())\n"), "3\n");
+        assert_eq!(run("print(\"abcd\".len())\n"), "4\n");
+    }
+
+    #[test]
+    fn bytes_len_method() {
+        assert_eq!(
+            run_capture("fn main():\n    b := b\"\\x01\\x02\\x03\"\n    print(b.len())\nmain()\n")
+                .unwrap(),
+            "3\n"
+        );
     }
 
     // ===== M6a: core-type methods on str / list =====
@@ -8631,7 +8644,7 @@ fn safe_div(a: int, b: int) -> Result[int]:
 
     #[test]
     fn builtin_wrong_arity_errors() {
-        assert!(run_capture("print(len())\n").is_err());
+        assert!(run_capture("print([1].len(99))\n").is_err());
         assert!(run_capture("print(int())\n").is_err());
     }
 
@@ -10555,7 +10568,7 @@ mod module_tests {
             "    for x in b:\n",
             "        s = s + x\n",
             "    print(s)\n",
-            "    print(len(b))\n",
+            "    print(b.len())\n",
             "    print(b\"ab\" == b\"ab\")\n",
             "    print(b\"ab\" == b\"ac\")\n",
             "    print(b\"ab\" != b\"ac\")\n",
@@ -10602,7 +10615,7 @@ mod module_tests {
             "    for x in ba:\n",
             "        s = s + x\n",
             "    print(s)\n",
-            "    print(len(ba))\n",
+            "    print(ba.len())\n",
             "    ba.push(4)\n",
             "    print(ba)\n",
             "    print(ba.pop())\n",
