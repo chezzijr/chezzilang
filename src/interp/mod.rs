@@ -6289,7 +6289,32 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     let mkeys = crate::resolver::module_keys(&graph);
     for (idx, lm) in graph.modules.iter().enumerate() {
         interp.module_idx_of.insert(lm.id.clone(), idx);
-        if lm.native.is_some() {
+        if let Some(nat) = lm.native {
+            // A native std module has no AST, but `std.regex`/`std.request`/`std.process` each own ONE
+            // synthetic struct (`Match`/`Response`/`ProcResult`) the checker now treats as a module-
+            // owned, user-CONSTRUCTIBLE type. Register its BARE name + its `StructDef` (declaration-
+            // order fields — must match the VM's `Compiler::new` + the native builders) so a
+            // `module.Struct(...)` / bare-imported `Struct(...)` ctor resolves identically to the VM
+            // (parity). Field READS on a native RETURN need no registration (the returned
+            // `Value::Struct` carries its own field names).
+            if let Some((sname, fields)) = match nat {
+                "std.regex" => Some(("Match", &["text", "start", "end", "groups"][..])),
+                "std.request" => Some(("Response", &["status", "body", "headers"][..])),
+                "std.process" => Some(("ProcResult", &["stdout", "stderr", "code"][..])),
+                _ => None,
+            } {
+                interp.type_names.insert(sname.to_string());
+                interp.module_types[idx].insert(sname.to_string());
+                interp.structs.insert(
+                    sname.to_string(),
+                    std::rc::Rc::new(StructDef {
+                        fields: fields.iter().map(|f| f.to_string()).collect(),
+                        methods: std::collections::HashMap::new(),
+                        // No methods → `home` is never dereferenced; an empty env suffices.
+                        home: value::ModEnv::new(),
+                    }),
+                );
+            }
             continue;
         }
         // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the

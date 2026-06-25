@@ -338,9 +338,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `post(url, body)` returning a `Response` struct `{status, body, headers: map[str,str]}`, where a
   ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
   dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).
-  `Match`/`Response` are program-global reserved type names (a user struct of the same name
-  collides). The native seam grew `NativeRet::Struct`/`Map` so a native fn can return a structured
-  value.
+  `Match`/`Response` (and `ProcResult` from `std.process`) are **module-owned** struct types, not
+  program-global reserved names: reading their fields off a returned value works import-free, but
+  naming/constructing the type requires importing the owning module (a user struct of the same name,
+  without that import, is the user's own type). The native seam grew `NativeRet::Struct`/`Map` so a
+  native fn can return a structured value.
 - **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
   protocol — any `Hashable` type is now a valid map/set key.
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs

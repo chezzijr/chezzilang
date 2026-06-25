@@ -238,8 +238,12 @@ permission denied) is `Err`. A signal-killed process has no exit code and report
 argv vector, **NO shell** — so metacharacters in `args` (`$(...)`, `;`, `&&`, …) are passed literally
 and are **injection-safe**. Same `Ok`/`Err` contract as `run`. Prefer `run_args` over `run`/`cmd` when
 any argument comes from untrusted input.
-All three are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is a
-reserved (program-global) struct name.
+All three are blocking subprocess I/O (offloaded under the OS-thread engine). `ProcResult` is **owned
+by `std.process`**: you can read its fields (`.stdout`/`.stderr`/`.code`) off a returned value with no
+import, but to name the type or construct it directly (`p: ProcResult` / `ProcResult(...)`) you must
+import the module (`import std.process`, then `ProcResult(...)` or qualified `process.ProcResult(...)`;
+or `import ProcResult from std.process`). It is **not** a reserved program-global name — a user
+`struct ProcResult` (without the import) is your own type.
 **Security:** `cmd`/`run` hand `line` to the shell — never interpolate untrusted input (shell-injection
 risk); use `run_args` instead.
 **Not yet:** stdin piping, output streaming, per-process env/cwd overrides.
@@ -268,7 +272,12 @@ strings, so a literal backslash is doubled: `"\\d+"`, `"\\."`.
 Returns use `struct Response { status: int, body: str, headers: map[str, str] }` (header names
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine).
-`Match`, `Response`, and `ProcResult` are reserved (program-global) struct names.
+`Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
+and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
+(`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /
+`Match(...)`) requires importing the owning module (whole-module `import std.regex` exposes `Match` bare
+and as `regex.Match(...)`; or `import Match from std.regex`). The names are therefore free for user
+types — a user `struct Response` without `import std.request` is their own type.
 `get(url, timeout_ms?: int) -> Result[Response]` · `post(url, body, timeout_ms?: int) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·
 `request(method, url, body, headers: map[str, str], timeout_ms?: int) -> Result[Response]` (method in UPPERCASE).

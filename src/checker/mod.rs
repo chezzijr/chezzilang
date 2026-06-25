@@ -456,6 +456,20 @@ impl Checker {
                 }
             }
         }
+        // The synthetic native-module structs are module-owned too: register their owning module so a
+        // bare unimported `m: Match` errors with the "import it from std.regex" hint (the native-module
+        // loop above skips them — they have no AST). Pushed after the AST loop so a same-named user
+        // struct (declared in some module) is still hinted first.
+        for (tn, owner) in [
+            ("Match", "std.regex"),
+            ("Response", "std.request"),
+            ("ProcResult", "std.process"),
+        ] {
+            c.types_by_name
+                .entry(tn.to_string())
+                .or_default()
+                .push(owner.to_string());
+        }
         for (idx, lm) in graph.modules.iter().enumerate() {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
@@ -743,6 +757,55 @@ fn native_module_sig(name: &str) -> ModuleSig {
             ),
         );
     }
+    // Post-match: EXPORT the synthetic struct LAYOUT a native module returns (`Match`/`Response`/
+    // `ProcResult`) as a module-owned type. The SAME field lists `seed_stdlib_structs` keeps globally
+    // present for import-free field access live here too as the module's `struct_defs`/`types` so that
+    // importing the module (whole-module `import std.regex` → bare `Match`; `from std.regex import
+    // Match`; or qualified `regex.Match(...)`) is what licenses the bare type name. `type_params`/
+    // `methods` are empty (these are plain data carriers); `origin` is `Builtin`. Done here, after the
+    // `func` closure's borrow of `sig` is dropped, so we can write `sig.struct_defs`/`sig.types`.
+    let export_struct = |sig: &mut ModuleSig, sname: &str, fields: Vec<(&str, Ty)>| {
+        sig.struct_defs.insert(
+            sname.to_string(),
+            StructInfo {
+                type_params: Vec::new(),
+                fields: fields
+                    .into_iter()
+                    .map(|(n, t)| (n.to_string(), t))
+                    .collect(),
+                methods: HashMap::new(),
+                origin: StructOrigin::Builtin,
+            },
+        );
+        sig.types.insert(sname.to_string());
+    };
+    match name {
+        "std.regex" => export_struct(
+            &mut sig,
+            "Match",
+            vec![
+                ("text", Ty::Str),
+                ("start", Ty::Int),
+                ("end", Ty::Int),
+                ("groups", Ty::list(Ty::Str)),
+            ],
+        ),
+        "std.request" => export_struct(
+            &mut sig,
+            "Response",
+            vec![
+                ("status", Ty::Int),
+                ("body", Ty::Str),
+                ("headers", Ty::map(Ty::Str, Ty::Str)),
+            ],
+        ),
+        "std.process" => export_struct(
+            &mut sig,
+            "ProcResult",
+            vec![("stdout", Ty::Str), ("stderr", Ty::Str), ("code", Ty::Int)],
+        ),
+        _ => {}
+    }
     sig
 }
 
@@ -992,9 +1055,12 @@ impl Checker {
     /// Register the synthetic struct shapes that native std modules return (M9): `Match`
     /// (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`). They have no
     /// AST, so their field layouts are seeded here; `infer_field` then types `m.text`, `resp.status`,
-    /// `r.code`, etc. Like all type names in M4.5 these are program-global, so
-    /// `Match`/`Response`/`ProcResult` become reserved names (a user struct of the same name
-    /// collides, as intended).
+    /// `r.code`, etc. — IMPORT-FREE, since the layout lookup is keyed by the name the native return's
+    /// `Ty::Struct(...)` carries. These are MODULE-OWNED, NOT program-global: only the LAYOUT is
+    /// seeded (so field access on a return works without an import); the BARE TYPE NAME for
+    /// annotation/construction is licensed ONLY by importing the owning module (whose
+    /// `native_module_sig` exports the same shape via `struct_defs`). So a user `struct Response`
+    /// (without `import std.request`) is their OWN type — the `Builtin`-origin seed is overwritten.
     fn seed_stdlib_structs(&mut self) {
         let mk = |fields: Vec<(&str, Ty)>| StructInfo {
             type_params: Vec::new(),
@@ -1005,6 +1071,15 @@ impl Checker {
             methods: HashMap::new(),
             origin: StructOrigin::Builtin,
         };
+        // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
+        // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
+        // `infer_field`'s `self.structs[sname]` lookup keyed by the name the native return's
+        // `Ty::Struct("Match",...)` carries). The BARE-NAME reservation (`struct_names`) is NOT
+        // seeded: the bare type name (`m: Match` / `Match(...)`) is licensed ONLY by importing the
+        // owning module (`import std.regex` / `from std.regex import Match`), whose `struct_defs`
+        // flow into `struct_names`/`bare_types` on import. This frees the names for a user `struct
+        // Response` — the always-present `Builtin`-origin seed is overwritten by a user `User`-origin
+        // declaration (see the already-defined gate in the hoist pass).
         self.structs.insert(
             "Match".into(),
             mk(vec![
@@ -1014,7 +1089,6 @@ impl Checker {
                 ("groups", Ty::list(Ty::Str)),
             ]),
         );
-        self.struct_names.insert("Match".into());
         self.structs.insert(
             "Response".into(),
             mk(vec![
@@ -1023,7 +1097,6 @@ impl Checker {
                 ("headers", Ty::map(Ty::Str, Ty::Str)),
             ]),
         );
-        self.struct_names.insert("Response".into());
         self.structs.insert(
             "ProcResult".into(),
             mk(vec![
@@ -1032,7 +1105,6 @@ impl Checker {
                 ("code", Ty::Int),
             ]),
         );
-        self.struct_names.insert("ProcResult".into());
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
@@ -1878,7 +1950,16 @@ impl Checker {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
-                    if self.structs.contains_key(&self.bare_key(name)) {
+                    // A pre-seeded synthetic stdlib struct (`Match`/`Response`/`ProcResult`, always
+                    // present in `self.structs` under its bare key tagged `StructOrigin::Builtin` for
+                    // import-free field access) is NOT a real prior definition — a user `struct
+                    // Response` shadows it (the hoist insert below overwrites the seed with the user's
+                    // `User`-origin layout). Only a genuine User-origin entry is "already defined".
+                    let already_defined = self
+                        .structs
+                        .get(&self.bare_key(name))
+                        .is_some_and(|i| i.origin != StructOrigin::Builtin);
+                    if already_defined {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     // The struct's type parameters are in scope across its field and method

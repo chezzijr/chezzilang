@@ -400,7 +400,21 @@ impl Compiler {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
         let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
-            if lm.native.is_some() {
+            if let Some(nat) = lm.native {
+                // A native std module has no AST, but `std.regex`/`std.request`/`std.process` each own
+                // ONE synthetic struct (`Match`/`Response`/`ProcResult`) the checker now treats as a
+                // module-owned type. Register its bare name so `module.Struct(...)` / a bare import +
+                // `Struct(...)` resolve to the `NewStruct` ctor (the struct's layout is registered in
+                // `Compiler::new`). Name kept BARE (no `type_keys` entry → `type_key` falls back to it).
+                if let Some(sname) = match nat {
+                    "std.regex" => Some("Match"),
+                    "std.request" => Some("Response"),
+                    "std.process" => Some("ProcResult"),
+                    _ => None,
+                } {
+                    self.module_types[idx].insert(sname.to_string());
+                    self.program.type_names.insert(sname.to_string());
+                }
                 continue;
             }
             // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified
