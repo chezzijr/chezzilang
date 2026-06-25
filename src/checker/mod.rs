@@ -2827,6 +2827,15 @@ impl Checker {
                 "bytes" => Ty::Bytes,
                 "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
+                // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
+                // signature/body or a protocol method. Resolved BEFORE every reserved/module name
+                // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
+                // and before user structs/aliases, so an in-scope type param uniformly shadows them
+                // (e.g. `fn id[Executor](x: Executor)`), instead of being hijacked by the builtin
+                // arm or mis-erroring with a bogus import hint. Placed below the scalar primitives
+                // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
+                // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
+                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
                 // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
                 // builtin: it resolves only in a module that imported `std.ffi` (whole-module
@@ -2877,10 +2886,10 @@ impl Checker {
                 // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
                 // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
                 // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
-                // can't fall through to a hint-less "unknown type".
-                // Guard against an in-scope type parameter of the same name (e.g. `fn f[Shared]`):
-                // let those fall through to the `type_params` arm below rather than be shadowed here.
-                n @ ("Shared" | "RwShared" | "Atomic") if !self.type_params.contains_key(n) => {
+                // can't fall through to a hint-less "unknown type". (An in-scope type param of the
+                // same name, e.g. `fn f[Shared]`, was already resolved by the hoisted `type_params`
+                // arm above this match, so no per-arm guard is needed here.)
+                n @ ("Shared" | "RwShared" | "Atomic") => {
                     if self.concurrency_licensed(n) {
                         self.error(
                             span,
@@ -2899,10 +2908,6 @@ impl Checker {
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
                 "Socket" => Ty::Socket,
                 "Listener" => Ty::Listener,
-                // A generic type parameter (`T`) or `Self`, in scope while checking a generic
-                // fn signature/body or a protocol method — checked BEFORE type names so an
-                // in-scope type parameter shadows a same-named struct/enum.
-                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 // A transparent type alias resolves to its underlying type (recursively). The
                 // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
                 _ if self.aliases.contains_key(n) => {

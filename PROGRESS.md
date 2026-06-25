@@ -92,6 +92,24 @@ user-generic struct/enum/newtype precedent). Mirrors the bare `Executor` arm. (b
 `native.is_some()` clause — behavior-preserving (native std modules carry no concurrency annotations),
 de-dups to ONE definition. Checker-only → three-engine parity by construction. New failing-then-green
 tests: bare-without-import → hint; bare-with-import → missing-type-arg.
+**Checker fix (2026-06-25, follow-up to 8fcbb3c — reserved-name-as-type-param hijack):** commit
+8fcbb3c established the rule "a user generic type param named like a reserved/builtin type resolves as
+the type param, not the builtin" but only patched the `Shared`/`RwShared`/`Atomic` arm in `resolve_type`
+with an inline `if !self.type_params.contains_key(n)` guard. Five OTHER reserved-name arms still
+preceded the `type_params` fallthrough and short-circuited it: `Socket`/`Listener`/`owned_str` silently
+hijacked a same-named type param to the builtin (→ later type-mismatch), and the license-gated
+`Executor`/`ptr` arms emitted a bogus `unknown type '…' (import …)`. Fix: HOISTED the `_ if
+self.type_params.contains_key(n) => Ty::Param(n.clone())` arm to sit just below the scalar-primitive
+literals (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`nil`) and ABOVE every reserved/module arm, so
+an in-scope type param uniformly shadows them all (kept below the scalars so `fn id[int](x: int)` still
+resolves `x` to `int`, unchanged). The now-redundant inline guard on the `Shared`/`RwShared`/`Atomic`
+arm was removed (one source of truth). Checker-only name resolution — runtime ctor/opcode dispatch
+untouched, three-engine parity by construction. `is_reserved_type`/declaration-site reservedness
+unchanged (`struct Executor` still reserved; `struct Socket` still allowed). New tests: extended
+`type_param_named_like_concurrency_type_not_shadowed` to all five names, new
+`bare_reserved_type_without_typeparam_still_errors` (negative cases preserved), new RUN parity test
+`type_param_named_like_reserved_runs_both_engines` (check_graph + cooperative VM + OS-thread engine +
+interp all agree).
 
 **✅ global-namespace cleanup — task 2/5: FFI `ptr` gated behind `import std.ffi` (2026-06-25).** The
 opaque C-ABI `ptr` type is no longer a global builtin — it now requires an import, **consistent with

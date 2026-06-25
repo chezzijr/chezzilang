@@ -26757,6 +26757,48 @@ main()
         }
     }
 
+    /// Reserved/builtin type names used as a user generic type parameter must resolve as the type
+    /// param END-TO-END on EVERY engine (regression for the `resolve_type` hijack bug — `Executor`
+    /// and `ptr` mis-errored at check time, `Socket`/`Listener`/`owned_str` silently hijacked to the
+    /// builtin). This drives the FULL pipeline including the checker (`check_graph`, which the bare
+    /// `run_capture` helpers skip): each `fn id[NAME](x: NAME) -> NAME` must type-check clean, then
+    /// round-trip its argument identically on the cooperative VM, the OS-thread engine, and interp.
+    #[test]
+    fn type_param_named_like_reserved_runs_both_engines() {
+        for (name, arg, want) in [
+            ("Executor", "3", "3\n"),
+            ("ptr", "3", "3\n"),
+            ("Socket", "3", "3\n"),
+            ("Listener", "3", "3\n"),
+            ("owned_str", "\"h\"", "h\n"),
+        ] {
+            let src = format!(
+                "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id({arg}))\nmain()\n"
+            );
+            // 1) The checker must accept it (the bug: hijack → bogus error / type mismatch). This is
+            //    the gate the `run_capture` helpers don't exercise — it goes RED without the fix.
+            let t = TmpDir::new();
+            let entry = t.write("main.chz", &src);
+            let graph = crate::resolver::build_graph(&entry).expect("resolve");
+            if let Err(errs) = crate::checker::check_graph(&graph) {
+                panic!("type param named {name} must type-check clean, got: {errs:?}");
+            }
+            // 2) cooperative VM + interp parity (the established oracle pair), and the value round-trips.
+            assert_parity(&src);
+            assert_eq!(
+                run_capture(&src).expect("cooperative VM should run"),
+                want,
+                "cooperative VM output for type param named {name}"
+            );
+            // 3) default OS-thread engine agrees too.
+            assert_eq!(
+                run_capture_parallel(&src).expect("OS-thread engine should run"),
+                want,
+                "OS-thread engine output for type param named {name}"
+            );
+        }
+    }
+
     /// Run a multi-file program (one or more `.chz` files) through BOTH engines via `run_file`,
     /// assert they agree on stdout and on ok/err, and return the agreed stdout. `files` is
     /// `(relative_path, contents)`; `entry` names the file to run. Needed because the single-file

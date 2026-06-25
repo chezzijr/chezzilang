@@ -5917,6 +5917,11 @@ fn type_param_named_like_concurrency_type_not_shadowed() {
     // A user generic type parameter named `Shared`/`RwShared`/`Atomic` must resolve as the type
     // param, NOT be hijacked by the bare-concurrency arm (regression guard for arm ordering vs the
     // `type_params` guard). No import, used purely as a parameter type — must type-check clean.
+    // The same shape covers EVERY reserved/module type name that precedes the `type_params`
+    // fallthrough in `resolve_type` (regression for the hijack bug): the bare-concurrency arm
+    // (Shared/RwShared/Atomic), the license-gated arms (Executor, ptr), and the unconditional
+    // builtin arms (Socket, Listener, owned_str). `owned_str` is a degenerate/return-only name
+    // (≡ str) but a type param named after it must still resolve as the param, not collapse to str.
     for (src, name) in [
         (
             "fn id[Shared](x: Shared) -> Shared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
@@ -5930,13 +5935,63 @@ fn type_param_named_like_concurrency_type_not_shadowed() {
             "fn id[Atomic](x: Atomic) -> Atomic:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
             "Atomic",
         ),
+        (
+            "fn id[Executor](x: Executor) -> Executor:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Executor",
+        ),
+        (
+            "fn id[ptr](x: ptr) -> ptr:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "ptr",
+        ),
+        (
+            "fn id[Socket](x: Socket) -> Socket:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Socket",
+        ),
+        (
+            "fn id[Listener](x: Listener) -> Listener:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Listener",
+        ),
+        (
+            "fn id[owned_str](x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(id(\"h\"))\nmain()\n",
+            "owned_str",
+        ),
     ] {
         let errs = check_entry(src);
         assert!(
             errs.is_empty(),
-            "type param named {name} must not be shadowed by the concurrency arm, got: {errs:?}"
+            "type param named {name} must not be shadowed by the reserved/builtin arm, got: {errs:?}"
         );
     }
+}
+
+#[test]
+fn bare_reserved_type_without_typeparam_still_errors() {
+    // The hoist of the `type_params` arm must NOT over-shadow a reserved/module name that is NOT an
+    // in-scope type param: a bare annotation with no matching type param still emits its import hint
+    // exactly as before. Guards the behavior-preserving half of the fix.
+    let errs = check_entry("fn f(ex: Executor):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'Executor'")
+                && e.message.contains("import std.concurrency")),
+        "bare Executor (no type param) must still emit the std.concurrency import hint, got: {errs:?}"
+    );
+    let errs = check_entry("fn f(p: ptr):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'ptr'")
+                && e.message.contains("import std.ffi")),
+        "bare ptr (no type param) must still emit the std.ffi import hint, got: {errs:?}"
+    );
+    // Declaration-site reservedness is untouched: `struct Executor` still rejected (reserved
+    // builtin); `struct Socket` is deliberately NOT reserved and still type-checks.
+    let errs = check_entry("struct Executor:\n    x: int\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("Executor") && e.message.contains("reserved")),
+        "struct Executor must stay reserved, got: {errs:?}"
+    );
+    entry_ok("struct Socket:\n    x: int\nfn main():\n    print(Socket(1).x)\nmain()\n");
 }
 
 #[test]
