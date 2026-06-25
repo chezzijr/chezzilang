@@ -8565,6 +8565,42 @@ fn all_shipped_examples_typecheck() {
     );
 }
 
+#[test]
+fn all_bench_corpus_typecheck() {
+    // The bench corpus `benches/chz/*.chz` is run by `benches/run.chz` via `chezzi run`, which does
+    // a pre-run type check (src/main.rs) and BLOCKS execution on any type error. `cargo test` does
+    // not otherwise exercise these files, so a stale lowercase `list[...]`/`map[...]`/`set[...]`
+    // type annotation (now rejected after the hard list->List/map->Map/set->Set rename) would ship
+    // FALSELY GREEN and break the documented perf-measurement entrypoint. Route every bench file
+    // through the real checked path so such regressions are caught.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches")
+        .join("chz");
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("benches/chz dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("chz"))
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "no bench corpus found in {dir:?}");
+    let mut failures = Vec::new();
+    for path in &entries {
+        match crate::resolver::build_graph(path) {
+            Ok(graph) => {
+                if let Err(errs) = crate::checker::check_graph(&graph) {
+                    failures.push(format!("{}: {:?}", path.display(), errs));
+                }
+            }
+            Err(e) => failures.push(format!("{}: resolve/parse error: {e}", path.display())),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these bench corpus files fail `chezzi check`:\n{}",
+        failures.join("\n")
+    );
+}
+
 // === Import name collisions (soundness) + duplicate binder in one pattern ===
 
 /// Build a multi-file graph from (rel, src) pairs (first must be `main.chz`) and check it.

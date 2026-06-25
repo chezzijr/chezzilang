@@ -1,5 +1,5 @@
 # Bench: polymorphic (megamorphic) method dispatch throughput. Four distinct struct types each
-# implement Shape.area(); a heterogeneous list[Shape] is walked at ONE call site so `s.area()` sees
+# implement Shape.area(); a heterogeneous List[Shape] is walked at ONE call site so `s.area()` sees
 # four distinct layout `tid`s in rotation — a genuinely megamorphic CallMethod site (the M19
 # N-way method-IC target). ~4M method calls. Prints 34000000.
 
@@ -32,14 +32,14 @@ struct Circ:
     fn area(self) -> int:
         return self.r + self.r + 1
 
-fn total_area(shapes: list[Shape]) -> int:
+fn total_area(shapes: List[Shape]) -> int:
     acc := 0
     for s in shapes:
         acc = acc + s.area()
     return acc
 
 fn main():
-    shapes := []
+    shapes: List[Shape] = []
     shapes.push(Sq(3))      # 9
     shapes.push(Rect(2, 4)) # 8
     shapes.push(Tri(4, 5))  # 10
