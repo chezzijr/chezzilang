@@ -5844,6 +5844,33 @@ fn bare_concurrency_type_with_import_needs_type_arg() {
 }
 
 #[test]
+fn type_param_named_like_concurrency_type_not_shadowed() {
+    // A user generic type parameter named `Shared`/`RwShared`/`Atomic` must resolve as the type
+    // param, NOT be hijacked by the bare-concurrency arm (regression guard for arm ordering vs the
+    // `type_params` guard). No import, used purely as a parameter type — must type-check clean.
+    for (src, name) in [
+        (
+            "fn id[Shared](x: Shared) -> Shared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Shared",
+        ),
+        (
+            "fn id[RwShared](x: RwShared) -> RwShared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "RwShared",
+        ),
+        (
+            "fn id[Atomic](x: Atomic) -> Atomic:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+            "Atomic",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.is_empty(),
+            "type param named {name} must not be shadowed by the concurrency arm, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn concurrency_whole_module_import_ok() {
     // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
     entry_ok(

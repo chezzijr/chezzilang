@@ -2814,7 +2814,9 @@ impl Checker {
                 // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
                 // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
                 // can't fall through to a hint-less "unknown type".
-                n @ ("Shared" | "RwShared" | "Atomic") => {
+                // Guard against an in-scope type parameter of the same name (e.g. `fn f[Shared]`):
+                // let those fall through to the `type_params` arm below rather than be shadowed here.
+                n @ ("Shared" | "RwShared" | "Atomic") if !self.type_params.contains_key(n) => {
                     if self.concurrency_licensed(n) {
                         self.error(
                             span,
