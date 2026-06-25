@@ -8006,7 +8006,11 @@ impl Vm {
                         let mut acc = 0_i64;
                         for v in items.iter() {
                             match v {
-                                Value::Int(n) => acc += *n,
+                                Value::Int(n) => {
+                                    acc = acc.checked_add(*n).ok_or_else(|| {
+                                        self.err("integer overflow in Add".to_string(), span)
+                                    })?;
+                                }
                                 other => {
                                     return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(*other)), span));
                                 }
@@ -29365,6 +29369,27 @@ main()
         let src = "print([1,2,3,4].sum())\n";
         assert_parity(src);
         assert_eq!(vm_outcome(src).unwrap(), "10\n");
+    }
+
+    /// Integer `sum()` must use checked arithmetic and raise the SAME recoverable
+    /// "integer overflow in Add" runtime error as `+`, not silently wrap. Runs both engines.
+    #[test]
+    fn parity_list_sum_overflow() {
+        let src = "print([9223372036854775807, 1].sum())\n";
+        assert_parity(src);
+        let err = vm_outcome(src).expect_err("expected a runtime error, not wraparound");
+        assert!(
+            err.contains("integer overflow in Add"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A list containing any float takes the float path — would-overflow ints must NOT fault and
+    /// both engines must agree (guards against the int checked_add being hoisted above any_float).
+    #[test]
+    fn parity_list_sum_mixed_float() {
+        let src = "print([9223372036854775807, 1, 0.0].sum())\n";
+        assert_parity(src);
     }
 
     #[test]
