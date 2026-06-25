@@ -27,6 +27,23 @@ now imports `ptr`; docs (stdlib/syntax/spec) updated. New tests + VM↔interp pa
 tasks remain: Match/Response/ProcResult→modules, Shared/RwShared/Atomic/Executor→std.concurrency,
 list/map/set→List/Map/Set.)
 
+**✅ global-namespace cleanup — task 3/5: `Match`/`Response`/`ProcResult`→modules (2026-06-25).** The
+three synthetic native-module structs (`Match`/`std.regex`, `Response`/`std.request`,
+`ProcResult`/`std.process`) are no longer global-reserved type names — they are now MODULE-OWNED. Built
+native-module struct-type export: `native_module_sig` now populates `sig.struct_defs` + `sig.types` for
+the owning module (the SAME field lists as the layout seed), and the existing is_std whole-module +
+`import Name from module` import paths flow those into `struct_names`/`bare_types`, so the BARE type name
+(`m: Match` / `Match(...)`) and qualified `regex.Match(...)` resolve ONLY when the module is imported.
+The layout stays globally present (`StructOrigin::Builtin`) so FIELD ACCESS on a native return
+(`regex.find(...).text`) keeps working with **no import**; the unconditional `struct_names` (bare-name)
+reservation in `seed_stdlib_structs` is dropped. The hoist's already-defined gate now exempts a
+`Builtin`-origin seed, so a user `struct Response` (without `import std.request`) shadows the seed and is
+their own `User`-origin type. The names are now user-constructible once imported, so the compiler + interp
+register the synthetic struct under its bare name in `module_types` (+ the interp seeds the `StructDef`)
+to lower the ctor identically (VM↔interp parity). Unknown-type errors hint the owning module
+(`types_by_name`). New checker + VM↔interp parity tests; docs (stdlib/syntax/spec) updated. (2 cleanup
+tasks remain: Shared/RwShared/Atomic/Executor→std.concurrency, list/map/set→List/Map/Set.)
+
 **✅ global-namespace cleanup — task 1/5: free `len()` dropped (2026-06-25).** The free `len(x)`
 builtin is removed from all four stages (checker `is_reserved_name` + free-len arm, compiler
 `is_builtin`, interp `builtins::is_builtin`/dispatch/`fn len`, VM dispatch + `fn builtin_len`); `len(x)`

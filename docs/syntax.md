@@ -2094,8 +2094,12 @@ A few cross-cutting notes (full detail in `stdlib.md`):
   (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.
 - **`std.os.exit(code)`** is a hard, uncatchable exit (does not run `defer`s). **`std.process.cmd`**
   runs a shell line — never interpolate untrusted input.
-- `Match` (from `std.regex`) and `Response` (from `std.request`) are reserved program-global struct
-  names.
+- `Match` (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`) are **module-owned**
+  struct types, not reserved program-global names. Reading their fields off a returned value
+  (`regex.find(…).text`, `request.get(…).status`, `process.run(…).code`) needs **no import**; naming or
+  constructing the type (`m: Match` / `Match(…)`) requires importing the owning module (`import std.regex`
+  exposes `Match` bare and as `regex.Match(…)`; or `import Match from std.regex`). The names are free for
+  user types — a user `struct Response` without `import std.request` is their own type.
 
 ---
 

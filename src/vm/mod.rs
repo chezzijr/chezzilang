@@ -26708,6 +26708,57 @@ main()
         assert_eq!(out, "S(n=7)\n");
     }
 
+    /// Task 3/5: the module-owned synthetic structs (`Match`/`Response`/`ProcResult`) are now
+    /// USER-CONSTRUCTIBLE once their module is imported — the VM and the frozen interp must build +
+    /// field-read them BYTE-IDENTICALLY (the layout seeded in `Compiler::new` ↔ the interp's native
+    /// seed must agree). Qualified ctor + bare ctor on whole-module import.
+    #[test]
+    fn synthetic_struct_qualified_ctor_parity() {
+        let out = parity_entry(
+            "import std.regex\nm := regex.Match(\"hi\", 0, 2, [\"a\"])\nprint(m.text + str(m.start) + str(m.end) + \",\".join(m.groups))\n",
+        );
+        assert_eq!(out, "hi02a\n");
+    }
+
+    #[test]
+    fn synthetic_struct_bare_ctor_on_import_parity() {
+        let out = parity_entry(
+            "import std.regex\nm: Match = Match(\"yo\", 1, 3, [])\nprint(m.text + str(m.end))\n",
+        );
+        assert_eq!(out, "yo3\n");
+    }
+
+    /// from-import `Response` (the `import Name from module` selective form).
+    #[test]
+    fn synthetic_struct_from_import_ctor_parity() {
+        let out = parity_entry(
+            "import Response from std.request\nr := Response(200, \"ok\", {\"k\": \"v\"})\nprint(str(r.status) + r.body + r.headers[\"k\"])\n",
+        );
+        assert_eq!(out, "200okv\n");
+    }
+
+    #[test]
+    fn synthetic_procresult_qualified_ctor_parity() {
+        let out = parity_entry(
+            "import std.process\np := process.ProcResult(\"out\", \"err\", 7)\nprint(p.stdout + p.stderr + str(p.code))\n",
+        );
+        assert_eq!(out, "outerr7\n");
+    }
+
+    /// A user `struct Response` WITHOUT `import std.request` is the user's OWN type on both engines —
+    /// the synthetic name is freed (the `Builtin`-origin seed is shadowed by the user declaration).
+    #[test]
+    fn user_struct_shadows_synthetic_name_parity() {
+        assert_eq!(
+            parity_entry("struct Response:\n    code: int\nr := Response(7)\nprint(str(r.code))\n"),
+            "7\n"
+        );
+        assert_eq!(
+            parity_entry("struct Match:\n    score: int\nm := Match(3)\nprint(str(m.score))\n"),
+            "3\n"
+        );
+    }
+
     /// `import geo` then `geo.Color.Red` (nullary) and `geo.Shape.Circle(5)` (payload) construct.
     #[test]
     fn qualified_enum_ctor_parity() {

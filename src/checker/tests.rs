@@ -3795,6 +3795,94 @@ fn native_request_response_unknown_field_rejected() {
     );
 }
 
+// ===== Task 3/5: Match/Response/ProcResult are module-owned, not global-reserved =====
+
+// (2) The bare TYPE NAME (annotation/construction) requires importing the owning module.
+#[test]
+fn bare_match_unknown_without_import() {
+    entry_rejects(
+        "fn main():\n    m: Match = Match(\"x\", 0, 1, [])\n    print(m.text)\n",
+        "unknown type 'Match'",
+    );
+}
+
+#[test]
+fn bare_response_unknown_without_import() {
+    entry_rejects(
+        "fn main():\n    r: Response = Response(200, \"\", {})\n    print(str(r.status))\n",
+        "unknown type 'Response'",
+    );
+}
+
+#[test]
+fn bare_procresult_unknown_without_import() {
+    entry_rejects(
+        "fn main():\n    p: ProcResult = ProcResult(\"\", \"\", 0)\n    print(str(p.code))\n",
+        "unknown type 'ProcResult'",
+    );
+}
+
+// The unknown-type error hints the owning module.
+#[test]
+fn unknown_match_hint_points_at_module() {
+    entry_rejects(
+        "fn main():\n    m: Match = ProcResult(\"\", \"\", 0)\n    print(m.text)\n",
+        "std.regex",
+    );
+}
+
+// (3) `import std.regex` exposes `Match` bare for annotation AND qualified ctor `regex.Match(...)`.
+#[test]
+fn import_licenses_bare_match() {
+    entry_ok(
+        "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    print(m.text)\n",
+    );
+}
+
+#[test]
+fn import_licenses_bare_response() {
+    entry_ok(
+        "import std.request\nfn main():\n    r: Response = request.Response(200, \"ok\", {})\n    print(r.body)\n",
+    );
+}
+
+#[test]
+fn import_licenses_bare_procresult() {
+    entry_ok(
+        "import std.process\nfn main():\n    p: ProcResult = process.ProcResult(\"o\", \"e\", 0)\n    print(p.stdout)\n",
+    );
+}
+
+// (4) `import Match from std.regex` (selective from-import) exposes the bare name.
+#[test]
+fn from_import_licenses_bare_match() {
+    entry_ok(
+        "import Match from std.regex\nfn main():\n    m: Match = Match(\"x\", 0, 1, [])\n    print(m.text)\n",
+    );
+}
+
+#[test]
+fn from_import_licenses_bare_response() {
+    entry_ok(
+        "import Response from std.request\nfn main():\n    r: Response = Response(200, \"ok\", {})\n    print(r.body)\n",
+    );
+}
+
+// (5) The names are FREED for user types: a user `struct Response` (no import) is their own type.
+#[test]
+fn user_struct_response_without_import_ok() {
+    entry_ok(
+        "struct Response:\n    code: int\nfn main():\n    r := Response(7)\n    print(str(r.code))\n",
+    );
+}
+
+#[test]
+fn user_struct_match_without_import_ok() {
+    entry_ok(
+        "struct Match:\n    score: int\nfn main():\n    m := Match(3)\n    print(str(m.score))\n",
+    );
+}
+
 #[test]
 fn native_time_now_is_int_monotonic_is_float() {
     entry_ok(
