@@ -77,6 +77,17 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
   tree-walk reference, slated for removal), plus `gc`, `native` + `runtime` (builtins / std),
   `resolver` (module paths).
 - Keep modules small and single-purpose.
+- **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
+  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`/`timer`,
+  `Result`/`Option`/`Iterator`, structural protocols. Register in the module's `native_module_sig` and
+  gate the bare name behind `import` via the per-module licensing set (mirror FFI `imported_ffi_types`
+  / `imported_concurrency`); keep runtime ctor/opcode dispatch unchanged (the gate is checker-only name
+  resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
+  BOTH vm + interp, or `from M import X` faults at runtime — cover it with a test that RUNS both engines.
+  A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
+- After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree
+  (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree
+  `target/` dirs (~1.6G each) accumulate and fill the disk. Delete rejected branches too.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 - **Interpreter is DEPRECATED.** The bytecode VM is the engine of record. The tree-walk `interp`
   is deprecated and slated for removal; it's kept *for now* only as the byte-identical parity
