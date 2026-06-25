@@ -2242,6 +2242,20 @@ fn bare_variant_constructor_is_rejected_with_qualify_hint() {
 }
 
 #[test]
+fn bare_generic_variant_turbofish_keeps_qualify_hint_via_graph() {
+    // REGRESSION (same keying class as the name_is_generic struct/newtype fix): a bare GENERIC-enum
+    // variant with a turbofish (`Full[int](5)`) must still get the "write it qualified" hint, not the
+    // misleading "takes no type arguments". `variant_owners` stores bare enum names but
+    // `enum_type_params` is module-keyed, so `name_is_generic`'s variant arm has to go through
+    // `bare_key`. Only the `check_graph` path (module-prefixed keys) exposed this — `rejects()`/
+    // `check_src` keep keys bare and mask it, so this MUST use `entry_rejects`.
+    entry_rejects(
+        "enum Box[T]:\n    Empty\n    Full(T)\nb := Full[int](5)\n",
+        "write it qualified as 'Box.Full'",
+    );
+}
+
+#[test]
 fn bare_variant_match_arm_is_rejected_not_a_silent_binding() {
     // The bare→binding trap: a bare known-variant arm must be a hard error, never silently a
     // catch-all binding that swallows the match.

@@ -9854,11 +9854,17 @@ impl Checker {
             return true;
         }
         // Bare-name query (the qualified path resolves genericity directly). A variant name may now
-        // belong to several enums; treat it as generic if any owner enum is generic.
+        // belong to several enums; treat it as generic if any owner enum is generic. `variant_owners`
+        // stores BARE enum names but `enum_type_params` is module-keyed, so go through `bare_key`
+        // (same keying fix as the struct/newtype arms above — else a bare generic-enum variant like
+        // `Full[int](5)` reports the misleading "takes no type arguments" instead of the
+        // "write it qualified as 'Box.Full'" hint under the real `check_graph` path).
         if let Some(owners) = self.variant_owners.get(name) {
-            return owners
-                .iter()
-                .any(|en| self.enum_type_params.get(en).is_some_and(|t| !t.is_empty()));
+            return owners.iter().any(|en| {
+                self.enum_type_params
+                    .get(&self.bare_key(en))
+                    .is_some_and(|t| !t.is_empty())
+            });
         }
         if let Some(s) = self.functions.get(name) {
             return !s.type_params.is_empty();
