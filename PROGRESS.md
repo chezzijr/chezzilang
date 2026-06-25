@@ -1097,7 +1097,8 @@ member-level turbofish on a builtin/non-generic member (fixes the `.iter[int]()`
 already errored). The `fn_sig` shadow guard already fires for static methods. **Compiler + interp** get
 matching combined-Index-callee arms (peel the erased index → same `Op::NewEnum`/`Op::CallStatic` /
 `build_variant`/`call` as the bare forms; runtime is type-erased). **OUT OF SCOPE (unchanged):** static
-methods on `newtype`; associated protocol requirements (`T.zero()`); protocols stay instance-only.
+methods on `newtype`; associated protocol requirements (`T.zero()`) — **SHELVED** after two rejected
+attempts, see `docs/future.md` §3.13; protocols stay instance-only.
 **Both engines + `--parallel`** byte-identical via golden `examples/turbofish_member_args.chz` +
 `.expected` (asserts type-checks clean too) incl. the regression-guard shape; new checker unit tests
 (static own-`[U]` inferred, no-leak degrade, combined ok + mismatch, shadow-static rejected,

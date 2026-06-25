@@ -43,7 +43,7 @@ cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
-cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (frozen parity oracle)
+cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (DEPRECATED — frozen parity oracle, kept for tests)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
@@ -61,12 +61,13 @@ cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see 
 > clear error). Without the suffix the module top-level runs only. `chezzi run <file>` runs that file
 > (top-level only, scripting model).
 > `chezzi run` defaults to the VM's real-thread OS-thread engine. `--serial` selects the
-> cooperative single-thread VM (the frozen byte-identical parity oracle); `--parallel` is kept as a
-> no-op alias for the default. `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's
-> worker pool — `0`/omitted = all cores, the flag wins over the env, and it errors with `--serial`
-> (not multi-threaded). `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter
-> is **deprecated** and slated for removal — kept for now as the parity oracle for the golden
-> VM-vs-interp tests, with **no CLI flag**.)
+> cooperative single-thread VM (**deprecated** — the frozen byte-identical parity oracle, kept for now
+> for the golden tests, not for normal use); `--parallel` is kept as a no-op alias for the default.
+> `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's worker pool — `0`/omitted = all
+> cores, the flag wins over the env, and it errors with `--serial` (not multi-threaded).
+> `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter is likewise **deprecated**
+> and slated for removal — kept for now as the parity oracle for the golden VM-vs-interp tests, with
+> **no CLI flag**.)
 
 ## Conventions
 

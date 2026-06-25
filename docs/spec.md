@@ -384,7 +384,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > (the type arg sits on the type); a static method may **also** declare its own `[U]` (PART 2), pinned
 > on the member or inferred (`Box[int].make[str](x)` / `Box.make(5)`). v1 limits: static methods do
 > **not** participate in protocol conformance (protocols stay instance-only); static methods on
-> `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups.
+> `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups — the latter
+> **attempted twice and SHELVED** (see `docs/future.md` §3.13; factory-closure is the working alternative).
 
 > **Turbofish at the declaration site — type-side (PART 1, landed).** Explicit type args for a generic
 > are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`)
@@ -412,7 +413,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > combined form carries a single method type arg; multiple method args are reachable by inference.
 > Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so VM, interp, and
 > `--parallel` are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
-> methods on `newtype` and associated protocol requirements (`T.zero()`).
+> methods on `newtype` and associated protocol requirements (`T.zero()`) — the latter **SHELVED**
+> after two rejected attempts (see `docs/future.md` §3.13).
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn

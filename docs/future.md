@@ -127,6 +127,42 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     boundary (a `ref`/`Ref` box can't cross a task — use `Shared[T]`). See `docs/syntax.md` (`ref T`),
     `gaps.md`, and examples `ref_binding.chz` / `ref_airlock.chz`.
 
+13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ⏸️ SHELVED
+    (attempted twice 2026-06-24, both rejected; not worth the cost at the current model).**
+    The goal: a protocol may declare a *static* (no-`self`) requirement, and a generic bounded by it can
+    **construct** through the type param — the one thing instance-only protocols can't express:
+    ```chezzi
+    protocol Default:
+        fn default() -> Self
+    fn make[T: Default]() -> T:
+        return T.default()      # T erased at runtime — needs dictionary passing
+    ```
+    **Direction (if ever revived): dictionary passing, NOT monomorphization** — Chezzi is a type-erased
+    bytecode VM, so `T` has nothing to dispatch on; thread the conforming type's static-method
+    dictionary in as a hidden trailing call arg (kept the one erased body + two-engine parity).
+    **Why shelved:** two full auto-task runs both **rejected** with 5 criticals *each*, all the same
+    class — the **checker's "accept" boundary keeps drifting out of lockstep with the compiler's
+    "can-lower" boundary**, so every run half-covers the lowering surface and a prosecutor finds the next
+    axis (cross-module call, `spawn:`/`parallel:` body, first-class value / `defer` (`g := make; g()`),
+    inferred-T through a container `xs: list[T]`, non-leading bound param). Each shape either crashes the
+    compiler or diverges VM↔interp. Making it sound needs a *complete* lowering contract enforced in one
+    checker gate — a real design pass, not another blind run.
+    **Current behavior on main (the sharp edge): a no-`self` protocol requirement is DECLARABLE but
+    UNUSABLE.** Main does **not** reject the no-`self` rule — `protocol Default: fn default() -> Self`
+    hoists fine, a struct's *static* `default()` satisfies the bound `[T: Default]` (an *instance*
+    `default(self)` does not — `method 'default' has the wrong signature`), so you can declare and bound
+    on it. But you can never **call** it: `T.default()` inside the body fails with `unknown name 'T'`
+    (no dict-passing to dispatch the erased `T`). So such a bound is just a **dead marker** today — not
+    unsound, only inert until the feature is revived. (Verified 2026-06-25 on main @ 503b6b8.)
+    **Why it's low priority anyway:** the workaround already exists and is idiomatic — **pass a factory
+    closure** (first-class-fn style instead of typeclass style), works today with zero new machinery:
+    ```chezzi
+    fn make[T](mk: fn() -> T) -> T: return mk()
+    make(fn(): Counter(0))      # same power; dict-passing only buys the `make[Counter]()` sugar over this
+    ```
+    The two rejected attempts live unmerged as branches `auto-task/protocol-static-req` /
+    `…-v2` (main is clean); discardable. Revisit only with a design-first pass + appetite for the sugar.
+
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.
 
