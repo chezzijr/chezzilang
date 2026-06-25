@@ -5,7 +5,7 @@
 
 struct Node:
     val: int
-    next: list[Node]
+    next: List[Node]
 
 a := Node(1, [])
 b := Node(2, [])

@@ -15,7 +15,7 @@
 # See docs/stdlib.md §5 for the full contract.
 
 # ============================================================================
-# Heap[T] — a binary heap over a backing `list[T]` with a comparator CLOSURE.
+# Heap[T] — a binary heap over a backing `List[T]` with a comparator CLOSURE.
 # ============================================================================
 #
 # COMPARATOR CONTRACT (read this — it is the footgun): `less(a, b) == true` means `a` is MORE extreme
@@ -25,7 +25,7 @@
 #
 # COMPLEXITY: push O(log n) (sift-up), pop O(log n) (sift-down), peek/len/is_empty O(1).
 struct Heap[T]:
-    data: list[T]
+    data: List[T]
     less: fn(T, T) -> bool
 
     # Insert `x`, restoring the heap invariant by sifting it up. O(log n).
@@ -94,7 +94,7 @@ fn max_heap() -> Heap[int]:
 
 # Heapify a list into a fresh Heap using `less` (see the comparator contract above). Pushes each
 # element, so this is O(n log n), NOT the bottom-up O(n) build. `xs` is left untouched.
-fn from_list[T](xs: list[T], less: fn(T, T) -> bool) -> Heap[T]:
+fn from_list[T](xs: List[T], less: fn(T, T) -> bool) -> Heap[T]:
     h := Heap([], less)
     for x in xs:
         h.push(x)
@@ -112,8 +112,8 @@ fn from_list[T](xs: list[T], less: fn(T, T) -> bool) -> Heap[T]:
 #
 # COMPLEXITY: push_front/push_back O(1); pop_front/pop_back amortized O(1); peek_*/len/is_empty O(1).
 struct Deque[T]:
-    front: list[T]
-    back: list[T]
+    front: List[T]
+    back: List[T]
 
     # Push `x` onto the front (it becomes the new head). O(1).
     fn push_front(self, x: T):
@@ -173,12 +173,12 @@ struct Deque[T]:
 # recover their element type from use).
 
 # ============================================================================
-# Counter[T] — a frequency table over the builtin `map[T, int]` (T must be Hashable).
+# Counter[T] — a frequency table over the builtin `Map[T, int]` (T must be Hashable).
 # ============================================================================
 #
 # COMPLEXITY: add/add_n/count O(1); total O(n); most_common O(n log n) (stable sort).
 struct Counter[T: Hashable]:
-    data: map[T, int]
+    data: Map[T, int]
 
     # Increment the count of `x` by 1. O(1).
     fn add(self, x: T):
@@ -206,7 +206,7 @@ struct Counter[T: Hashable]:
     # The top `k` (item, count) pairs by DESCENDING count. TIE-BREAK: equal counts keep INSERTION
     # ORDER (map.keys() yields insertion order AND the list sort is STABLE). `k` is clamped to
     # [0, len]: k <= 0 -> [], k >= len -> all. O(n log n).
-    fn most_common(self, k: int) -> list[(T, int)]:
+    fn most_common(self, k: int) -> List[(T, int)]:
         pairs := []
         for key in self.data.keys():
             pairs.push((key, self.data[key]))

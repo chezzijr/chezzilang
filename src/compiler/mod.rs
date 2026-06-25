@@ -53,9 +53,9 @@ fn is_builtin(name: &str) -> bool {
             | "str"
             | "ord"
             | "chr"
-            | "set"
-            | "list"
-            | "map"
+            | "Set"
+            | "List"
+            | "Map"
             | "bytes"
             | "bytearray"
             // `panic(msg)` compiles to `Op::CallBuiltin("panic", 1)`; the VM's `do_builtin` arm
@@ -204,7 +204,7 @@ struct Compiler {
     /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
     /// One-way int→float widening — the element-coercion hint for the collection literal currently
-    /// being compiled as a typed `let` value (`xs: list[float] = [..]`). Set transiently by
+    /// being compiled as a typed `let` value (`xs: List[float] = [..]`). Set transiently by
     /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
     /// of `compile_expr` so int ELEMENTS widen to float. `None` outside an annotated collection let.
     float_elem_hint: Option<ElemFloatHint>,
@@ -215,9 +215,9 @@ struct Compiler {
 /// a float key is banned anyway).
 #[derive(Clone, Copy, PartialEq)]
 enum ElemFloatHint {
-    /// `list[float]` / (unused for set: float is not Hashable) — widen every element.
+    /// `List[float]` / (unused for set: float is not Hashable) — widen every element.
     Elem,
-    /// `map[_, float]` — widen every VALUE, leave keys untouched.
+    /// `Map[_, float]` — widen every VALUE, leave keys untouched.
     MapValue,
 }
 
@@ -226,7 +226,7 @@ enum ElemFloatHint {
 /// un-annotated mixed collection like `[1, 2.3]`). Only strict `Int`/`Float` AST literals count — a
 /// non-literal element (variable / call) is neither, so an un-annotated NON-literal mixed collection
 /// (`[a, b]` with `a: int`, `b: float`) does NOT fire here (the documented compiler-type-blind
-/// carve-out: the checker infers `list[float]` but the backend can't widen the non-literal `a`).
+/// carve-out: the checker infers `List[float]` but the backend can't widen the non-literal `a`).
 pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> bool {
     let mut has_int = false;
     let mut has_float = false;
@@ -240,18 +240,18 @@ pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> 
     has_int && has_float
 }
 
-/// Derive the collection element-widening hint from a `let` annotation: `list[float]` → `Elem`,
-/// `map[_, float]` → `MapValue`. A non-collection / non-float-element annotation yields `None`.
-/// (`set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
+/// Derive the collection element-widening hint from a `let` annotation: `List[float]` → `Elem`,
+/// `Map[_, float]` → `MapValue`. A non-collection / non-float-element annotation yields `None`.
+/// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
 fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
     match ty {
         Type::Generic(n, args)
-            if n == "list" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
+            if n == "List" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
         {
             Some(ElemFloatHint::Elem)
         }
         Type::Generic(n, args)
-            if n == "map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
+            if n == "Map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
         {
             Some(ElemFloatHint::MapValue)
         }
@@ -1083,8 +1083,8 @@ impl Compiler {
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
             StmtKind::Let { names, value, ty, .. } => {
-                // One-way int→float widening: a collection-element annotation (`list[float]` /
-                // `map[_, float]`) widens int ELEMENTS at the literal-compile site (hint consumed by
+                // One-way int→float widening: a collection-element annotation (`List[float]` /
+                // `Map[_, float]`) widens int ELEMENTS at the literal-compile site (hint consumed by
                 // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
                 // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
                 // strict assign target — so it needs no runtime coercion; see gaps.md carve-out.)
@@ -1875,7 +1875,7 @@ impl Compiler {
             self.patch_loop(fc, inc_target);
         } else {
             // Multi-name `for`: either `for k, v in m` over a MAP (key, value) or tuple-destructuring
-            // `for a, b, … in xs` over a `list[(A, B, …)]`. The compiler is type-erased, so we branch
+            // `for a, b, … in xs` over a `List[(A, B, …)]`. The compiler is type-erased, so we branch
             // at RUNTIME on `IsMap` (mirroring the single-var `IsStruct` split):
             //   - map: snapshot keys + values up front and index them in lockstep (so a body that
             //     mutates the map mid-loop can't perturb the bindings; matches the interpreter);
@@ -2632,7 +2632,7 @@ impl Compiler {
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
             ExprKind::List(items) => {
                 // One-way int→float widening for THIS list: widen an int element when the
-                // `list[float]` annotation says so OR the all-literal peephole fires (≥1 float literal
+                // `List[float]` annotation says so OR the all-literal peephole fires (≥1 float literal
                 // sibling present → widen int LITERAL siblings).
                 let annotated = elem_hint == Some(ElemFloatHint::Elem);
                 let peephole = literal_numeric_mix(items.iter());
@@ -2654,7 +2654,7 @@ impl Compiler {
             ExprKind::Map(entries) => {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
                 // One-way int→float widening on the VALUE position only (keys are never float): the
-                // `map[_, float]` annotation, or the all-literal peephole over the value column.
+                // `Map[_, float]` annotation, or the all-literal peephole over the value column.
                 let annotated = elem_hint == Some(ElemFloatHint::MapValue);
                 let peephole = literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k, v) in entries {
@@ -2829,7 +2829,7 @@ impl Compiler {
                 step,
             } => {
                 // Slicing a range literal `(a..b)[start:end:step]` materializes the (ascending,
-                // step-1) range to a `list[int]` first (via the `range` builtin), then slices that
+                // step-1) range to a `List[int]` first (via the `range` builtin), then slices that
                 // list through the shared `GetSlice` path — reusing the `::step` machinery, not a
                 // parallel one. A bare range still has no value anywhere else (the error below fires
                 // for `let x = 0..10`); only this slice-receiver position is unblocked.

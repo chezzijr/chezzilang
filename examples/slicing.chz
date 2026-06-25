@@ -31,12 +31,12 @@ print(xs[4])           # 50
 # is full Python slicing: `slice(self, start: int?, end: int?, step: int?) -> R`, each component
 # `None` when omitted — so the body forwards them straight to the backing list's slice.
 struct Ring:
-    data: list[int]
+    data: List[int]
     fn index(self, key: int) -> int:
         return self.data[key % self.data.len()]
     fn set_index(self, key: int, val: int):
         self.data[key % self.data.len()] = val
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
             (Some(s), Some(e), Some(c)): return self.data[s:e:c]
             (Some(s), Some(e), None): return self.data[s:e]

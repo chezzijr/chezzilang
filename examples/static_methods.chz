@@ -40,7 +40,7 @@ enum Color:
 # A generic struct with a generic static ctor reached via the type-level turbofish `Box[int].empty()`
 # (the type arg sits on the TYPE — `[int]` — because the param comes from the enclosing generic type).
 struct Box[T]:
-    items: list[T]
+    items: List[T]
     fn empty() -> Box[T]:
         return Box([])
     fn len(self) -> int:

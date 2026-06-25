@@ -1,7 +1,7 @@
 # examples/bits.chz — bitwise operators & | ^ << >> (gap #13), int-only.
 
 # "Single number": every value appears twice except one. XOR-folding cancels the pairs.
-fn single(xs: list[int]) -> int:
+fn single(xs: List[int]) -> int:
     acc := 0
     for x in xs:
         acc = acc ^ x

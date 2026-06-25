@@ -40,8 +40,8 @@ r"""{"k": [1,2]}"""  # str — triple raw: embeds quotes + braces verbatim (best
 b"\x01\x02AB"  # bytes — byte-string literal; \xHH hex byte + \n \t \r \\ \" \' \0; no \u, no interp
 b'\xff'       # bytes — single quotes / uppercase B'…' both work; raw byte >=0x80 must use \xHH
 bytearray([1, 2, 3])  # bytearray — MUTABLE byte buffer; constructor-only (no literal), see below
-[1, 2, 3]     # list[int]
-{"a": 1}      # map[str, int]
+[1, 2, 3]     # List[int]
+{"a": 1}      # Map[str, int]
 ```
 
 **`bytes` — immutable byte sequence (Python `bytes` model).** A `b"..."` / `b'...'` literal holds raw
@@ -74,7 +74,7 @@ prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form 
 in place (`IndexSet`; the value must be 0–255 and the index in range, else a recoverable panic — the
 new capability `bytes` lacks), `ba[a:b:c]` → a NEW `bytearray` (mutable copy, byte offsets),
 `for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> Option[int]`,
-`.extend(bytes | bytearray | list[int])` (append in place). `==`/`!=` are structural; cross-type
+`.extend(bytes | bytearray | List[int])` (append in place). `==`/`!=` are structural; cross-type
 `b"a" == bytearray([97])` is **content-equal** (Python parity). `bytearray` is **NOT `Hashable`**
 (mutable ⇒ not a `map`/`set` key, like `list`/`set`/`map`). `str(ba)` / `print(ba)` / interpolation
 use the Python `bytearray(b'...')` repr (the wrapper distinguishes it from `bytes`' bare `b'...'`).
@@ -89,27 +89,27 @@ the `--parallel` airlock by value (deep copy — a fresh independent buffer, lik
 | str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
 | bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
 | bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
-| any iterable → list | `list(it)` | `list[T]` | `it` is any **for-iterable**; `T` is the element type |
-| any iterable → set | `set(it)` | `set[T]` | dedup; `T` must be `Hashable`; `set()` (0 args) is the empty set |
-| iterable of 2-tuples → map | `map(it)` | `map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable` |
+| any iterable → list | `List(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type |
+| any iterable → set | `Set(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set()` (0 args) is the empty set |
+| iterable of 2-tuples → map | `Map(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable` |
 
 `.encode()`/`.decode()` are **UTF-8 only** — there is no encoding-name argument (latin1/utf16 are an
 explicit future non-goal). `"héllo".encode().decode() == "héllo"` round-trips through a multi-byte
 char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), never a panic.
 
-`list(it)` / `set(it)` / `map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
+`List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
 `list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
 `range`, and a user struct with `next(self) -> Option[T]`. They do **not** require a formal
 `Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The argument is
-**required** (no zero-arg form): an empty `list`/`map` is the `[]`/`{}` literal, so `list()` / `map()`
-are checker errors directing you there (`set()` keeps its empty-set 0-arg form). `map(it)`'s element
+**required** (no zero-arg form): an empty `List`/`Map` is the `[]`/`{}` literal, so `List()` / `Map()`
+are checker errors directing you there (`Set()` keeps its empty-set 0-arg form). `Map(it)`'s element
 must be **exactly a 2-tuple** `(K, V)` — a non-2-tuple is a **static** type error (caught by the
 checker, not at runtime).
 
-> **`map(it)` vs `xs.map(f)` — these do NOT clash.** `map(pairs)` is the free-function **constructor**
-> (a bare-name call). `xs.map(f)` is the `list` higher-order **method** (a field/method call on a
-> receiver). They live in separate namespaces — the parser routes a bare `map(...)` as a builtin call
-> and a `obj.map(...)` as a method dispatch — so `map([(1, "a")])` builds a `map[int, str]` while
+> **`Map(it)` vs `xs.map(f)` — these do NOT clash.** `Map(pairs)` is the free-function **constructor**
+> (a bare-name call). `xs.map(f)` is the `List` higher-order **method** (a field/method call on a
+> receiver). They live in separate namespaces — the parser routes a bare `Map(...)` as a builtin call
+> and a `obj.map(...)` as a method dispatch — so `Map([(1, "a")])` builds a `Map[int, str]` while
 > `[1, 2].map(double)` transforms a list.
 
 **Multi-line literals & trailing commas.** Inside `[]`, `{}`, and `()` the layout (newlines /
@@ -179,7 +179,7 @@ a, b = compute()                         # compute() returns (int, int)
 `ref T` is a **binding modifier** (on **locals and params only**) that makes a binding carry
 *reference* semantics while still being spelled and used as a plain `T`. It is pure sugar over the
 `std.ref` `Ref[T]` box (`import std.ref` to use it). Roughly C++'s `int&`, where the explicit
-`Ref[T]` (`r.get()/.set()/.update()`) is closer to Rust's `Rc`.
+`Ref[T]` (`r.get()/.Set()/.update()`) is closer to Rust's `Rc`.
 
 ```chezzi
 import std.ref
@@ -238,16 +238,21 @@ print(r + 100)     # 106 — usable anywhere its value is
 | `str` | `"hi"` | UTF-8 |
 | `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a:b:c]`→bytes, iterates int; `Hashable` |
 | `bytearray` | `bytearray([1,2])` | MUTABLE byte buffer (constructor-only); `ba[i]`→int, `ba[i]=x`, slice→bytearray, `push`/`pop`/`extend`; NOT `Hashable` |
-| `list[T]` | `[1, 2]` | growable |
-| `map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
-| `set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `set()` |
+| `List[T]` | `[1, 2]` | growable |
+| `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
+| `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
 | `Result[T, E]` | `Ok(x)` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`) |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
 
+> **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
+> `List`/`Map`/`Set` (e.g. `List[int]`, `Set(xs)`). The lowercase `list`/`map`/`set` are no longer
+> type/ctor names. (Literal syntax is unchanged: `[…]`, `{k: v}`, `{a, b}`.) `tuple` is deliberately
+> left lowercase for now — a possible later follow-up.
+
 **Type shorthand.** In any type position, `T?` is sugar for `Option[T]`; `T!E` for `Result[T, E]`;
 and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). Examples: `int?`,
-`list[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
+`List[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
 `Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
 **One-way `int`→`float` widening (C-like).** An `int` value flows into a `float` SLOT automatically and
@@ -256,20 +261,20 @@ fires at every value-DEFINITION boundary: a typed binding (`x: float = 3` → `3
 method / closure parameter (incl. when you pass an `int` *variable*, not just a literal — it is coerced
 at the callee), a `float` parameter DEFAULT value (`fn g(a: float = 3)`), a `-> float` return, a `float`
 struct field (`P(3)` for `v: float`), and a
-**mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `list[float]` /
-`map[_, float]` and coerces its int literals (`xs: list[float] = [1, 2.3]`, a `map[_, float]` value, or
+**mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `List[float]` /
+`Map[_, float]` and coerces its int literals (`xs: List[float] = [1, 2.3]`, a `Map[_, float]` value, or
 a bare `[1, 2.3]`). Because the conversion is real, the stored value behaves as a float everywhere — e.g.
 `x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
 operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule. Anti-lossy cases stay type
-errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a `list[int]`, and an `int`→`float`
+errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a `List[int]`, and an `int`→`float`
 into a **newtype** (a newtype is nominal — no widening across its boundary). Widening is
-**scalar-at-the-sink** — a compound/nested float annotation is NOT widened: `list[list[float]] = [[1]]`,
-`float? = Some(3)`, `float! = Ok(3)`, an all-int literal `list[float] = [1, 2]`, and a non-literal RHS
-(`list[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`)
+**scalar-at-the-sink** — a compound/nested float annotation is NOT widened: `List[List[float]] = [[1]]`,
+`float? = Some(3)`, `float! = Ok(3)`, an all-int literal `List[float] = [1, 2]`, and a non-literal RHS
+(`List[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`)
 or a mixed literal. Two further scoped carve-outs: a plain reassignment `x = 3` to a `float`-declared
 local is rejected (a reassignment target is type-blind, like `p.x = 3`), and an UN-annotated NON-literal
-mixed collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `list[float]` but its non-literal
-`int` element is not widened at runtime (rare; annotate `xs: list[float] = …` for the conversion).
+mixed collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `List[float]` but its non-literal
+`int` element is not widened at runtime (rare; annotate `xs: List[float] = …` for the conversion).
 
 ## 4. Operators & precedence
 
@@ -284,9 +289,9 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 5 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
 | 6 | `..` | range (end-exclusive) |
 | 7 | `<<` `>>` | bitwise shift (int-only) |
-| 8 | `&` | bitwise and (int) / set intersection (`set[T]`) |
-| 9 | `^` | bitwise xor (int) / set symmetric-difference (`set[T]`) |
-| 10 | `\|` | bitwise or (int) / set union (`set[T]`) |
+| 8 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
+| 9 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
+| 10 | `\|` | bitwise or (int) / set union (`Set[T]`) |
 | 11 | `<` `<=` `>` `>=` | |
 | 12 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
 | 13 | `and` | |
@@ -301,10 +306,10 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 >
 > **Collection operators.** `+ *` and `& ^ |` also operate on collections, with behaviour identical
 > to the equivalent methods (so a mismatched element type is a type error, same as the method form):
-> - `list[T] + list[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `list[int]`.
-> - `list[T] * int` / `int * list[T]` → repeat (commutative, Python-style); `n <= 0` → `[]`. A giant
+> - `List[T] + List[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `List[int]`.
+> - `List[T] * int` / `int * List[T]` → repeat (commutative, Python-style); `n <= 0` → `[]`. A giant
 >   `n` raises a recoverable `list repeat capacity overflow`, never a process abort.
-> - `set[T] | set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
+> - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
 >   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
 >
 > The compound-assign forms work too: `xs += ys` / `xs *= n` (list), `s |= t` / `s &= t` / `s ^= t` /
@@ -473,7 +478,7 @@ for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive, ascending o
 
 # `a..b` is always ascending: `for i in 10..0` yields nothing (no auto-reverse). To count down or
 # by N, use the 3-arg `range(start, end, step)` builtin — `step` is a non-zero int, negative counts
-# down (end-exclusive). It returns a materialized `list[int]` (capped at 10M; `step == 0` faults).
+# down (end-exclusive). It returns a materialized `List[int]` (capped at 10M; `step == 0` faults).
 for i in range(10, 0, -1):   # 10, 9, 8, … , 1
     print(i)
 print(range(0, 10, 2))       # [0, 2, 4, 6, 8]   — by-N
@@ -488,7 +493,7 @@ for k in counts:       # iterate a map → its keys (insertion order)
 for k, v in counts:    # iterate a map's entries → key + value
     print("{k}={v}")
 
-for a, b in pairs:     # destructure a list[(A, B)] — N names over a list[tupleN]
+for a, b in pairs:     # destructure a List[(A, B)] — N names over a List[tupleN]
     print("{a}:{b}")   # (one name binds the whole tuple). enumerate/zip live in std.iter.
 
 # A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
@@ -536,7 +541,7 @@ fn total[S: Iterable[int]](src: S) -> int:
         sum = sum + x
     return sum
 total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `next`-struct
-list([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so list()/set() drain it)
+List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/Set() drain it)
 # A cursor SNAPSHOTS the collection at `.iter()` (later mutation doesn't change the sequence). NOTE
 # (no compile-time multi-pass safety, unfixable without ownership): each `.iter()` is a fresh cursor,
 # but reusing one exhausted cursor yields nothing on a second pass. A cursor IS sendable across
@@ -602,7 +607,7 @@ rule follows Python's asymmetry: a plain `xs[-100]` on a short list **faults** (
 bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never faults). Both engines
 emit byte-identical messages.
 
-`list[T]` slices to `list[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
+`List[T]` slices to `List[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
 types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl gets the full Python
 surface via default parameters: `slice(self, start: int? = None, end: int? = None, step: int? = None)
 -> R` (each component arrives as `None` when omitted, `Some(n)` otherwise).
@@ -691,7 +696,7 @@ on the **type**:
 
 ```chezzi
 struct Box[T]:
-    items: list[T]
+    items: List[T]
     fn empty() -> Box[T]:
         return Box([])
 
@@ -799,12 +804,12 @@ protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the
 
 ```chezzi
 struct Ring:
-    data: list[int]
+    data: List[int]
     fn index(self, key: int) -> int:
         return self.data[key % self.data.len()]
     fn set_index(self, key: int, val: int):
         self.data[key % self.data.len()] = val
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> list[int]:
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         s := start ?? 0
         e := end ?? self.data.len()
         return self.data[s:e:step ?? 1]
@@ -844,7 +849,7 @@ then flows into the body's loop variable and the return type. (User protocols ta
 explicitly; only `Iterator` recovers them.)
 
 ```chezzi
-fn to_list[S: Iterator[T], T](xs: S) -> list[T]:
+fn to_list[S: Iterator[T], T](xs: S) -> List[T]:
     out := []
     for x in xs:            # x : T
         out.push(x)
@@ -866,7 +871,7 @@ rejected).
 
 ```chezzi
 type UserId = int
-type Scores = map[str, int]
+type Scores = Map[str, int]
 uid: UserId = 7        # UserId and int are the same type
 ```
 
@@ -920,15 +925,15 @@ print(Meters(1.5))                 # 1.5m       (str(self) override)
 print(float(Meters(1.0) + Meters(2.0)))  # 3.0  (same-type +)
 ```
 
-**Aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names = list[str]`), but it
+**Aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names = List[str]`), but it
 gets **identity + construct + unwrap + its own methods only** — it does NOT auto-inherit the
 underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not resolve. Reach the
 underlying through an explicit method or the **unwrap cast** — the matching aggregate builtin, exactly
-as `int(uid)` unwraps a scalar newtype: `list(names)` returns a copy of the inner `list[str]`
-(likewise `set(..)` / `map(..)` for a set/map underlying). (Operation-forwarding for aggregates and
+as `int(uid)` unwraps a scalar newtype: `List(names)` returns a copy of the inner `List[str]`
+(likewise `Set(..)` / `Map(..)` for a set/map underlying). (Operation-forwarding for aggregates and
 `derive` remain out of scope.)
 
-**Generic newtypes.** A `newtype` may carry generic type parameters (`newtype Stack[T] = list[T]`),
+**Generic newtypes.** A `newtype` may carry generic type parameters (`newtype Stack[T] = List[T]`),
 the Go defined-type model extended to generics — the underlying and the method signatures may
 reference `T`, and the type args ride on the value's type so a cast-unwrap recovers the
 instantiation. A type-parameterized newtype is **methods-only**: it gets **no native operator
@@ -938,21 +943,21 @@ come strictly from the newtype's own methods + protocol satisfaction (the scalar
 argument (`Stack([1, 2])` ⇒ `Stack[int]`); when an argument can't bind them (an empty `[]` can't
 pin `T`), supply them with a **turbofish**: `Stack[int]([])` (the same inference gap as
 `ConcurrentMap(RwShared({}))` — expected, not a bug). A cast-unwrap propagates the instantiation:
-for `s: Stack[int]`, `list(s)` is `list[int]` (not bare `list`), and `int(b)` for `b: Box[int]`
+for `s: Stack[int]`, `List(s)` is `List[int]` (not bare `list`), and `int(b)` for `b: Box[int]`
 unwraps to `int`.
 
 ```chezzi
-newtype Stack[T] = list[T]:
+newtype Stack[T] = List[T]:
     fn size(self) -> int:
-        return list(self).len()
+        return List(self).len()
     fn top(self) -> Option[T]:
-        xs := list(self)
+        xs := List(self)
         return None if xs.len() == 0 else Some(xs[xs.len() - 1])
 
 s := Stack([1, 2, 3])      # inferred Stack[int]
 print(s.size())            # 3
 t: Option[int] = s.top()   # method dispatch substitutes T -> int
-xs: list[int] = list(s)    # cast-unwrap propagates: list[int]
+xs: List[int] = List(s)    # cast-unwrap propagates: List[int]
 e: Stack[str] = Stack[str]([])   # turbofish — the empty list can't bind T
 ```
 
@@ -992,7 +997,7 @@ struct Point:
     fn hash(self) -> int:
         return self.x * 31 + self.y
 
-label: map[Point, str] = {}
+label: Map[Point, str] = {}
 label[Point(1, 2)] = "here"      # struct key — hashed via Point.hash
 print(label[Point(1, 2)])        # here
 ```
@@ -1008,7 +1013,7 @@ struct Pair[A, B]:
         return self.first
 
 struct Stack[T]:
-    items: list[T]
+    items: List[T]
     fn push(self, x: T):
         self.items.push(x)
 
@@ -1602,11 +1607,11 @@ Core-type string methods (built in — no import needed):
 s.len()          s.upper()        s.lower()
 s.trim()         s.strip()        s.split(",")
 s.starts_with("ab")  s.ends_with("yz")  s.contains("b")
-",".join(parts)  # join: separator.join(list[str])
-s.chars()        # → list[str] of 1-char strings; also `for c in s:` iterates them
+",".join(parts)  # join: separator.join(List[str])
+s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates them
 s.replace("a","b")  s.repeat(3)   s.reverse()      s.pad_left(4,"0")
 s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
-s.split_lines()  # → list[str] split on "\n"
+s.split_lines()  # → List[str] split on "\n"
 s.to_int()       s.to_float()     # → int? / float? (Some/None — None on bad input)
 "a" + "b"        # concatenation
 ```
@@ -1625,13 +1630,13 @@ and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/
 with `compare`), stable, in place.
 
 > **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
-> `set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/
+> `Set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/
 > `.insert`/`.extend`, or `m[k]=v` — **pins** the element/key/value type, and later ops are checked
-> against that pinned type. So `out := []; out.push(1)` is `list[int]` and a later `out.push("s")` is a
-> type error (it would read as `list[int]`). A **heterogeneous / protocol** collection therefore needs
-> an explicit annotation — `shapes: list[Shape] = []` — which is also clearer to readers. The
+> against that pinned type. So `out := []; out.push(1)` is `List[int]` and a later `out.push("s")` is a
+> type error (it would read as `List[int]`). A **heterogeneous / protocol** collection therefore needs
+> an explicit annotation — `shapes: List[Shape] = []` — which is also clearer to readers. The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
-> like a `float` is rejected at the insertion site even on an empty `{}`/`set()`). The pin is
+> like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
 > **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the
 > binding's whole scope, even across sibling `if`/`else`/statement-`match` arms and a loop body — so
 > building a heterogeneous collection split across branches/arms is a type error, exactly like the
@@ -1649,7 +1654,7 @@ Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m
 / `for k, v in m`.
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
-set is `set()`; `set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
+set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
 or a struct with `hash(self) -> int`).
 Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)`; iterate with `for x in s`. `==` is order-independent.
@@ -1709,7 +1714,7 @@ main()
   it (the function-boundary rule).
 
 ```chezzi
-fn fetch_all(urls: list[str]):
+fn fetch_all(urls: List[str]):
     for u in urls:
         spawn fetch(u)        # no `parallel:` needed — joins when fetch_all returns
     print("dispatched")       # runs before the tasks; they join at end-of-function
@@ -1784,7 +1789,7 @@ via import, under the same bound last-segment name):
 import core.geo
 p: geo.Point = geo.Point(1, 2)   # qualified construct + annotate
 c := geo.Color.Red               # qualified enum variant
-xs: list[geo.Point] = []         # qualified type inside a generic
+xs: List[geo.Point] = []         # qualified type inside a generic
 print(p)                         # Point(x=1, y=2)  — bare name, no `::`
 
 import Point from core.geo       # named import → bare use
@@ -1991,7 +1996,7 @@ declared (and resolved) in module A is usable from module B with **no** import i
 checked) resolves without re-importing. A `type Len = int32` whose defining module never imported `int32`
 does **not** launder the bare width name — it is still *unknown type 'int32'* (a bare `int32` always needs
 the import; only a *licensed* alias indirection bypasses the per-site requirement). Composite alias bodies
-that *embed* widths (`type Pair = (int32, int32)`, `type Buf = list[uint8]`) follow the same rule, and the
+that *embed* widths (`type Pair = (int32, int32)`, `type Buf = List[uint8]`) follow the same rule, and the
 licence is precise: the alias is licensed only if its defining module imported **every** width it embeds —
 a `type Mixed = (int32, int64)` that imported only `int32` is **not** licensed, so `int64` can't ride in on
 `int32`'s opt-in. To your program each
@@ -2080,7 +2085,7 @@ returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-s
 > module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
 
 Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
-`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `set()`/`set(list)`,
+`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `Set()`/`Set(list)`,
 `panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
 (`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
 

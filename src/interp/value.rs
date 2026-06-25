@@ -337,10 +337,10 @@ impl Value {
             Value::Str(_) => "str",
             Value::Bytes(_) => "bytes",
             Value::ByteArray(_) => "bytearray",
-            Value::List(_) => "list",
+            Value::List(_) => "List",
             Value::Tuple(_) => "tuple",
-            Value::Map(_) => "map",
-            Value::Set(_) => "set",
+            Value::Map(_) => "Map",
+            Value::Set(_) => "Set",
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
@@ -402,7 +402,7 @@ impl std::fmt::Display for Value {
             Value::Set(s) => {
                 let s = s.borrow();
                 if s.entries.is_empty() {
-                    write!(f, "set()")
+                    write!(f, "Set()")
                 } else {
                     let inner = s
                         .entries

@@ -83,12 +83,12 @@ fn widen_int_into_float_struct_field_accepted() {
     ok_desugared("struct P:\n    v: float\np := P(3)\nprint(p.v)\n");
 }
 
-/// An annotated `list[float]` accepts int elements (widened); a `map` VALUE position too. (Float is
-/// not Hashable, so `set[float]` / `map[float, _]` are independently illegal — not a widening case.)
+/// An annotated `List[float]` accepts int elements (widened); a `map` VALUE position too. (Float is
+/// not Hashable, so `Set[float]` / `Map[float, _]` are independently illegal — not a widening case.)
 #[test]
 fn widen_int_elems_into_annotated_float_collection_accepted() {
-    ok("xs: list[float] = [1, 2.3]\nprint(xs)\n");
-    ok("m: map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n");
+    ok("xs: List[float] = [1, 2.3]\nprint(xs)\n");
+    ok("m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n");
 }
 
 /// An int DEFAULT value widens into a `float` parameter (scalar sink; coerced at the callee prologue
@@ -108,7 +108,7 @@ fn widen_float_into_int_still_rejected() {
     rejects("y: int = 2.3\nprint(y)\n", "cannot assign");
     rejects("fn h(p: int):\n    print(p)\nh(2.3)\n", "expected");
     rejects("fn f() -> int:\n    return 2.3\n", "expected return type");
-    rejects("zs: list[int] = [1, 2.3]\nprint(zs)\n", "cannot assign");
+    rejects("zs: List[int] = [1, 2.3]\nprint(zs)\n", "cannot assign");
     rejects("n: int = 0\nn = 2.3\nprint(n)\n", "cannot assign");
     rejects(
         "fn k(a: int = 2.3):\n    print(a)\nk()\n",
@@ -120,26 +120,26 @@ fn widen_float_into_int_still_rejected() {
 /// int-bearing value, because only a scalar `float` sink is coerced by the compiler — widening a
 /// compound would leave an `Int` in a `float` slot (the exact runtime hole this design avoids; the
 /// checker cannot distinguish a safe literal `[1, 2]` from an unsafe non-literal `f()`). Collection
-/// floats come instead from mixed-literal inference (`[1, 2.3]` ⇒ `list[float]`, accepted above).
+/// floats come instead from mixed-literal inference (`[1, 2.3]` ⇒ `List[float]`, accepted above).
 #[test]
 fn widen_compound_float_positions_rejected() {
     rejects(
-        "xs: list[list[float]] = [[1]]\nprint(xs)\n",
+        "xs: List[List[float]] = [[1]]\nprint(xs)\n",
         "cannot assign",
     );
     rejects(
-        "m: map[str, list[float]] = {\"a\": [1]}\nprint(m)\n",
+        "m: Map[str, List[float]] = {\"a\": [1]}\nprint(m)\n",
         "cannot assign",
     );
     rejects(
-        "xs: list[map[str, float]] = [{\"a\": 1}]\nprint(xs)\n",
+        "xs: List[Map[str, float]] = [{\"a\": 1}]\nprint(xs)\n",
         "cannot assign",
     );
     rejects("o: float? = Some(3)\nprint(o)\n", "cannot assign");
     rejects("r: float! = Ok(3)\nprint(r)\n", "cannot assign");
-    // A non-literal RHS (a fn returning list[int]) into list[float]: no literal to coerce → reject.
+    // A non-literal RHS (a fn returning List[int]) into List[float]: no literal to coerce → reject.
     rejects(
-        "fn f() -> list[int]:\n    return [1]\nxs: list[float] = f()\nprint(xs)\n",
+        "fn f() -> List[int]:\n    return [1]\nxs: List[float] = f()\nprint(xs)\n",
         "cannot assign",
     );
 }
@@ -161,11 +161,11 @@ fn widen_typeblind_assign_targets_still_reject() {
         "cannot assign",
     );
     rejects(
-        "xs: list[float] = [1.0]\nxs[0] = 3\nprint(xs)\n",
+        "xs: List[float] = [1.0]\nxs[0] = 3\nprint(xs)\n",
         "cannot assign",
     );
     rejects(
-        "m: map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n",
+        "m: Map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n",
         "cannot assign",
     );
 }
@@ -191,7 +191,7 @@ fn interpolation_undefined_name_rejected() {
 #[test]
 fn interpolation_type_error_rejected() {
     // A type error inside `{...}` (int + list) must be reported by `check`, not deferred to runtime.
-    let errs = check_src("x: int = 1\ny: list[int] = [1]\nprint(\"{x + y}\")\n");
+    let errs = check_src("x: int = 1\ny: List[int] = [1]\nprint(\"{x + y}\")\n");
     assert!(
         !errs.is_empty(),
         "expected a type error for int + list inside interpolation, got none"
@@ -298,7 +298,7 @@ fn in_rejects_non_container() {
 
 #[test]
 fn in_rejects_range_rhs() {
-    // A range types as list[int] but has no runtime value (only valid as a `for` iterable);
+    // A range types as List[int] but has no runtime value (only valid as a `for` iterable);
     // accepting it here would diverge the engines (VM rejects at compile time, interp at runtime).
     rejects("fn main():\n    print(5 in 1..10)\nmain()\n", "range");
 }
@@ -562,42 +562,42 @@ struct Point:
 #[test]
 fn struct_with_hash_is_valid_map_key() {
     ok(&format!(
-        "{POINT_H}m: map[Point, str] = {{}}\nm[Point(1, 2)] = \"a\"\n"
+        "{POINT_H}m: Map[Point, str] = {{}}\nm[Point(1, 2)] = \"a\"\n"
     ));
 }
 
 #[test]
 fn set_of_hashable_struct_ok() {
     ok(&format!(
-        "{POINT_H}s: set[Point] = set()\ns.add(Point(1, 2))\n"
+        "{POINT_H}s: Set[Point] = Set()\ns.add(Point(1, 2))\n"
     ));
 }
 
 #[test]
 fn struct_without_hash_rejected_as_map_key() {
-    let src = "struct Bare:\n    a: int\nm: map[Bare, int] = {}\n";
-    rejects(src, "map key type must implement Hashable");
+    let src = "struct Bare:\n    a: int\nm: Map[Bare, int] = {}\n";
+    rejects(src, "Map key type must implement Hashable");
 }
 
 #[test]
 fn struct_without_hash_rejected_as_set_element() {
-    let src = "struct Bare:\n    a: int\ns: set[Bare] = set()\n";
-    rejects(src, "set element type must implement Hashable");
+    let src = "struct Bare:\n    a: int\ns: Set[Bare] = Set()\n";
+    rejects(src, "Set element type must implement Hashable");
 }
 
 #[test]
 fn float_still_rejected_as_map_key() {
     rejects(
-        "m: map[float, int] = {}\n",
-        "map key type must implement Hashable",
+        "m: Map[float, int] = {}\n",
+        "Map key type must implement Hashable",
     );
 }
 
 #[test]
 fn float_still_rejected_as_set_element() {
     rejects(
-        "s: set[float] = set()\n",
-        "set element type must implement Hashable",
+        "s: Set[float] = Set()\n",
+        "Set element type must implement Hashable",
     );
 }
 
@@ -722,7 +722,7 @@ fn type_alias_mismatch_still_rejected() {
 
 #[test]
 fn type_alias_to_collection_ok() {
-    ok("type Scores = map[str, int]\ns: Scores = {\"a\": 1}\nn: int = s[\"a\"]\n");
+    ok("type Scores = Map[str, int]\ns: Scores = {\"a\": 1}\nn: int = s[\"a\"]\n");
 }
 
 #[test]
@@ -907,7 +907,7 @@ protocol Container[T]:
     fn get(self, i: int) -> T
     fn put(self, x: T)
 struct IntBox:
-    items: list[int]
+    items: List[int]
     fn get(self, i: int) -> int:
         return self.items[i]
     fn put(self, x: int):
@@ -951,7 +951,7 @@ protocol Container[T]:
     fn get(self, i: int) -> T
     fn put(self, x: T)
 struct Half:
-    items: list[int]
+    items: List[int]
     fn get(self, i: int) -> int:
         return self.items[i]
 fn first[X: Container[int]](c: X) -> int:
@@ -969,7 +969,7 @@ fn param_protocol_wrong_substituted_signature_rejected() {
 protocol Container[T]:
     fn get(self, i: int) -> T
 struct StrBox:
-    items: list[str]
+    items: List[str]
     fn get(self, i: int) -> str:
         return self.items[i]
 fn first[X: Container[int]](c: X) -> int:
@@ -989,7 +989,7 @@ protocol Container[T]:
     fn get(self, i: int) -> T
     fn size(self) -> int
 struct StrBox:
-    items: list[str]
+    items: List[str]
     fn get(self, i: int) -> str:
         return self.items[i]
     fn size(self) -> int:
@@ -1011,7 +1011,7 @@ protocol Container[T]:
     fn get(self, i: int) -> T
     fn size(self) -> int
 struct IntBox:
-    items: list[int]
+    items: List[int]
     fn get(self, i: int) -> int:
         return self.items[i]
     fn size(self) -> int:
@@ -1556,7 +1556,7 @@ fn inferred_return_in_if_branch() {
 #[test]
 fn inferred_return_from_accumulator_local() {
     ok(
-        "fn sum(xs: list[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n",
+        "fn sum(xs: List[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n",
     );
 }
 
@@ -2338,27 +2338,27 @@ fn str_upper_is_str() {
 
 #[test]
 fn str_split_returns_list_of_str() {
-    ok("parts := \"a,b,c\".split(\",\")\nx: list[str] = parts\nprint(x)\n");
+    ok("parts := \"a,b,c\".split(\",\")\nx: List[str] = parts\nprint(x)\n");
 }
 
 #[test]
 fn str_split_element_is_str_not_int() {
     rejects(
-        "parts: list[int] = \"a,b\".split(\",\")\n",
-        "list[str] to variable of type list[int]",
+        "parts: List[int] = \"a,b\".split(\",\")\n",
+        "List[str] to variable of type List[int]",
     );
 }
 
 #[test]
 fn str_chars_returns_list_of_str() {
-    ok("cs: list[str] = \"abc\".chars()\nprint(cs)\n");
+    ok("cs: List[str] = \"abc\".chars()\nprint(cs)\n");
 }
 
 #[test]
 fn str_chars_element_is_str_not_int() {
     rejects(
-        "cs: list[int] = \"abc\".chars()\n",
-        "list[str] to variable of type list[int]",
+        "cs: List[int] = \"abc\".chars()\n",
+        "List[str] to variable of type List[int]",
     );
 }
 
@@ -2407,7 +2407,7 @@ fn str_new_methods_infer_types_ok() {
     ok("s := \"aaa\"\nn: int = s.count(\"aa\")\nprint(n)\n");
     ok("s := \"prefix-x\"\nr: str = s.strip_prefix(\"prefix-\")\nprint(r)\n");
     ok("s := \"x-suffix\"\nr: str = s.strip_suffix(\"-suffix\")\nprint(r)\n");
-    ok("s := \"a\\nb\"\nr: list[str] = s.split_lines()\nprint(r)\n");
+    ok("s := \"a\\nb\"\nr: List[str] = s.split_lines()\nprint(r)\n");
     ok("s := \"  x  \"\nr: str = s.strip()\nprint(r)\n");
 }
 
@@ -2461,7 +2461,7 @@ fn list_len_is_int() {
 fn unknown_list_method_rejected() {
     rejects(
         "xs := [1, 2]\nx := xs.frobnicate()\n",
-        "type list[int] has no method 'frobnicate'",
+        "type List[int] has no method 'frobnicate'",
     );
 }
 
@@ -2489,7 +2489,7 @@ fn list_plus_operator_returns_list() {
 
 #[test]
 fn list_plus_empty_infers_element_type() {
-    // An empty `[]` side must not poison the element type — `[] + [1]` is `list[int]`.
+    // An empty `[]` side must not poison the element type — `[] + [1]` is `List[int]`.
     ok("xs := [] + [1, 2]\nn: int = xs[0]\nprint(n)\n");
     ok("xs := [1, 2] + []\nn: int = xs[0]\nprint(n)\n");
 }
@@ -2498,13 +2498,13 @@ fn list_plus_empty_infers_element_type() {
 fn list_plus_mismatched_element_rejected() {
     rejects(
         "xs := [1, 2] + [\"a\"]\n",
-        "cannot apply + to list[int] and list[str]",
+        "cannot apply + to List[int] and List[str]",
     );
 }
 
 #[test]
 fn list_plus_non_list_rejected() {
-    rejects("xs := [1, 2] + 1\n", "cannot apply + to list[int] and int");
+    rejects("xs := [1, 2] + 1\n", "cannot apply + to List[int] and int");
 }
 
 #[test]
@@ -2514,7 +2514,7 @@ fn list_times_int_returns_list() {
 
 #[test]
 fn int_times_list_returns_list() {
-    // Commutative, Python-style: `3 * [1]` is also `list[int]`.
+    // Commutative, Python-style: `3 * [1]` is also `List[int]`.
     ok("xs := 3 * [1]\nn: int = xs[0]\nprint(n)\n");
 }
 
@@ -2522,26 +2522,26 @@ fn int_times_list_returns_list() {
 fn list_times_non_int_rejected() {
     rejects(
         "xs := [1] * [2]\n",
-        "cannot apply * to list[int] and list[int]",
+        "cannot apply * to List[int] and List[int]",
     );
 }
 
 #[test]
 fn set_union_operator_returns_set() {
-    ok("a: set[int] = {1}\nb: set[int] = {2}\nc := a | b\nx: set[int] = c\nprint(x.len())\n");
+    ok("a: Set[int] = {1}\nb: Set[int] = {2}\nc := a | b\nx: Set[int] = c\nprint(x.len())\n");
 }
 
 #[test]
 fn set_intersection_difference_xor_operators_return_set() {
     ok(
-        "a: set[int] = {1, 2}\nb: set[int] = {2, 3}\ni := a & b\nd := a - b\ns := a ^ b\nxi: set[int] = i\nxd: set[int] = d\nxs: set[int] = s\nprint(xi.len() + xd.len() + xs.len())\n",
+        "a: Set[int] = {1, 2}\nb: Set[int] = {2, 3}\ni := a & b\nd := a - b\ns := a ^ b\nxi: Set[int] = i\nxd: Set[int] = d\nxs: Set[int] = s\nprint(xi.len() + xd.len() + xs.len())\n",
     );
 }
 
 #[test]
 fn set_op_mismatched_element_rejected() {
     rejects(
-        "a: set[int] = {1}\nb: set[str] = {\"a\"}\nc := a | b\n",
+        "a: Set[int] = {1}\nb: Set[str] = {\"a\"}\nc := a | b\n",
         "bitwise operator | requires int operands or two sets",
     );
 }
@@ -2549,8 +2549,8 @@ fn set_op_mismatched_element_rejected() {
 #[test]
 fn set_difference_mismatched_element_rejected() {
     rejects(
-        "a: set[int] = {1}\nb: set[str] = {\"a\"}\nc := a - b\n",
-        "cannot apply - to set[int] and set[str]",
+        "a: Set[int] = {1}\nb: Set[str] = {\"a\"}\nc := a - b\n",
+        "cannot apply - to Set[int] and Set[str]",
     );
 }
 
@@ -2566,7 +2566,7 @@ fn list_compound_assign_ops_ok() {
 #[test]
 fn set_compound_assign_ops_ok() {
     ok(
-        "a: set[int] = {1, 2}\nb: set[int] = {2, 3}\na |= b\na &= b\na ^= b\na -= b\nprint(a.len())\n",
+        "a: Set[int] = {1, 2}\nb: Set[int] = {2, 3}\na |= b\na &= b\na ^= b\na -= b\nprint(a.len())\n",
     );
 }
 
@@ -2574,14 +2574,14 @@ fn set_compound_assign_ops_ok() {
 fn list_plus_eq_mismatched_element_rejected() {
     rejects(
         "xs := [1, 2]\nxs += [\"a\"]\n",
-        "cannot apply += to list[int] and list[str]",
+        "cannot apply += to List[int] and List[str]",
     );
 }
 
 #[test]
 fn set_pipe_eq_mismatched_element_rejected() {
     rejects(
-        "a: set[int] = {1}\nb: set[str] = {\"a\"}\na |= b\n",
+        "a: Set[int] = {1}\nb: Set[str] = {\"a\"}\na |= b\n",
         "bitwise operator |= requires int operands or two sets",
     );
 }
@@ -2940,7 +2940,7 @@ fn list_fold_ok() {
 
 #[test]
 fn list_map_changes_element_type() {
-    // map int -> bool produces list[bool]; indexing yields a bool.
+    // map int -> bool produces List[bool]; indexing yields a bool.
     ok("xs := [1,2]\nys := xs.map(fn(x: int) -> bool: x > 0)\nb := ys[0]\n");
 }
 
@@ -3390,13 +3390,13 @@ fn spawn_call_form_unaffected_ok() {
 
 #[test]
 fn map_literal_infers_str_int() {
-    // A `map[str, int]` annotation must accept a `{"a": 1}` literal.
-    ok("m: map[str, int] = {\"a\": 1, \"b\": 2}\n");
+    // A `Map[str, int]` annotation must accept a `{"a": 1}` literal.
+    ok("m: Map[str, int] = {\"a\": 1, \"b\": 2}\n");
 }
 
 #[test]
 fn empty_map_assignable_to_any_map() {
-    ok("m: map[str, int] = {}\n");
+    ok("m: Map[str, int] = {}\n");
 }
 
 #[test]
@@ -3428,7 +3428,7 @@ fn float_map_key_literal_rejected() {
 
 #[test]
 fn float_map_key_annotation_rejected() {
-    rejects("m: map[float, int] = {}\n", "must implement Hashable");
+    rejects("m: Map[float, int] = {}\n", "must implement Hashable");
 }
 
 #[test]
@@ -3443,18 +3443,18 @@ fn heterogeneous_map_keys_rejected() {
 
 #[test]
 fn int_and_bool_map_keys_ok() {
-    ok("m: map[int, str] = {1: \"a\"}\n");
-    ok("m: map[bool, int] = {true: 1}\n");
+    ok("m: Map[int, str] = {1: \"a\"}\n");
+    ok("m: Map[bool, int] = {true: 1}\n");
 }
 
 #[test]
 fn map_keys_method_is_list_of_key() {
-    ok("m := {\"a\": 1}\nks: list[str] = m.keys()\n");
+    ok("m := {\"a\": 1}\nks: List[str] = m.keys()\n");
 }
 
 #[test]
 fn map_values_method_is_list_of_value() {
-    ok("m := {\"a\": 1}\nvs: list[int] = m.values()\n");
+    ok("m := {\"a\": 1}\nvs: List[int] = m.values()\n");
 }
 
 #[test]
@@ -3595,13 +3595,13 @@ fn native_process_run_args_argv_must_be_list_str() {
 
 #[test]
 fn list_comprehension_infers_element_type() {
-    // `[x * 2 for x in [1, 2, 3]]` is a `list[int]` — the loop var binds to the list's element.
-    ok("xs: list[int] = [x * 2 for x in [1, 2, 3]]\n");
+    // `[x * 2 for x in [1, 2, 3]]` is a `List[int]` — the loop var binds to the list's element.
+    ok("xs: List[int] = [x * 2 for x in [1, 2, 3]]\n");
 }
 
 #[test]
 fn list_comprehension_wrong_element_type_rejected() {
-    rejects("xs: list[str] = [x * 2 for x in [1, 2, 3]]\n", "list[int]");
+    rejects("xs: List[str] = [x * 2 for x in [1, 2, 3]]\n", "List[int]");
 }
 
 #[test]
@@ -3614,17 +3614,17 @@ fn comprehension_guard_must_be_bool() {
 
 #[test]
 fn list_comprehension_over_range_is_list_int() {
-    ok("xs: list[int] = [x * x for x in 0..10]\n");
+    ok("xs: List[int] = [x * x for x in 0..10]\n");
 }
 
 #[test]
 fn set_comprehension_infers_element_type() {
-    ok("s: set[int] = {x for x in [1, 2, 3]}\n");
+    ok("s: Set[int] = {x for x in [1, 2, 3]}\n");
 }
 
 #[test]
 fn map_comprehension_over_map_entries() {
-    ok("src: map[str, int] = {\"a\": 1}\nm: map[str, int] = {k: v for k, v in src}\n");
+    ok("src: Map[str, int] = {\"a\": 1}\nm: Map[str, int] = {k: v for k, v in src}\n");
 }
 
 #[test]
@@ -3636,12 +3636,12 @@ fn comprehension_var_out_of_scope_after() {
 #[test]
 fn nested_comp_later_clause_sees_earlier_var_typechecks() {
     // The second clause's iterable references the first clause's binding (a list-of-lists flatten).
-    ok("ys: list[int] = [y for xs in [[1, 2], [3]] for y in xs]\n");
+    ok("ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\n");
 }
 
 #[test]
 fn nested_comp_two_clause_element_type() {
-    ok("ps: list[int] = [x + y for x in [1, 2] for y in [10, 20]]\n");
+    ok("ps: List[int] = [x + y for x in [1, 2] for y in [10, 20]]\n");
 }
 
 #[test]
@@ -3655,7 +3655,7 @@ fn nested_comp_unbound_in_later_clause_errors() {
 
 #[test]
 fn nested_comp_guard_after_nonfinal_clause_typechecks() {
-    ok("ps: list[int] = [x * y for x in [1, 2, 3] if x > 0 for y in [10, 20]]\n");
+    ok("ps: List[int] = [x * y for x in [1, 2, 3] if x > 0 for y in [10, 20]]\n");
 }
 
 #[test]
@@ -3729,7 +3729,7 @@ fn native_regex_is_match_returns_result_bool() {
 #[test]
 fn native_regex_find_returns_match_with_typed_fields() {
     entry_ok(
-        "import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        Ok(opt):\n            match opt:\n                Some(m):\n                    t: str = m.text\n                    st: int = m.start\n                    g: list[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        Err(e): print(e)\n",
+        "import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        Ok(opt):\n            match opt:\n                Some(m):\n                    t: str = m.text\n                    st: int = m.start\n                    g: List[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        Err(e): print(e)\n",
     );
 }
 
@@ -3768,7 +3768,7 @@ fn native_regex_unknown_member_rejected() {
 #[test]
 fn native_request_get_returns_response_with_typed_fields() {
     entry_ok(
-        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp):\n            st: int = resp.status\n            body: str = resp.body\n            h: map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        Err(e): print(e)\n",
+        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        Ok(resp):\n            st: int = resp.status\n            body: str = resp.body\n            h: Map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        Err(e): print(e)\n",
     );
 }
 
@@ -3910,7 +3910,7 @@ fn json_decode_into_struct_is_result_of_struct() {
 #[test]
 fn json_decode_into_typed_map_and_list() {
     entry_ok(
-        "import std.json\nfn main():\n    a := json.decode[map[str, int]](\"x\")\n    b := json.decode[list[float]](\"y\")\n    print(\"ok\")\n",
+        "import std.json\nfn main():\n    a := json.decode[Map[str, int]](\"x\")\n    b := json.decode[List[float]](\"y\")\n    print(\"ok\")\n",
     );
 }
 
@@ -3956,7 +3956,7 @@ fn json_decode_rejects_recursive_struct() {
 #[test]
 fn json_decode_rejects_map_with_non_str_key() {
     entry_rejects(
-        "import std.json\nfn main():\n    x := json.decode[map[int, int]](\"x\")\n",
+        "import std.json\nfn main():\n    x := json.decode[Map[int, int]](\"x\")\n",
         "map keys must be str",
     );
 }
@@ -3965,19 +3965,19 @@ fn json_decode_rejects_map_with_non_str_key() {
 
 #[test]
 fn set_literal_infers_set_of_elem() {
-    ok("s: set[int] = {1, 2, 3}\nprint(s.len())\n");
+    ok("s: Set[int] = {1, 2, 3}\nprint(s.len())\n");
 }
 
 #[test]
 fn set_methods_typecheck() {
     ok(
-        "s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: set[int] = s.union({4})\nprint(u.len())\n",
+        "s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: Set[int] = s.union({4})\nprint(u.len())\n",
     );
 }
 
 #[test]
 fn set_builtin_empty_and_from_list() {
-    ok("e := set()\ne.add(\"x\")\nf: set[int] = set([1, 1, 2])\nprint(f.len())\n");
+    ok("e := Set()\ne.add(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
 }
 
 #[test]
@@ -4002,7 +4002,7 @@ fn set_union_arg_must_be_set() {
 
 #[test]
 fn set_not_indexable() {
-    rejects("s := {1, 2}\nx := s[0]\n", "cannot index into set");
+    rejects("s := {1, 2}\nx := s[0]\n", "cannot index into Set");
 }
 
 // ===== Go-style Result[T, E] + Error protocol (M11 Phase A) =====
@@ -4128,7 +4128,7 @@ fn recover_question_mark_on_option_rejected() {
 
 #[test]
 fn closure_question_mark_on_nonresult_return_rejected() {
-    // A closure declared `-> int` may not use `?` — it would leak an Err into a list[int].
+    // A closure declared `-> int` may not use `?` — it would leak an Err into a List[int].
     rejects(
         "fn parse(s: str) -> int!:\n    return Err(\"x\")\nfn main():\n    ys := [\"2\"].map(fn(s: str) -> int: parse(s)? * 2)\n    print(ys)\nmain()\n",
         "not Result or Option",
@@ -4276,9 +4276,9 @@ fn range_pattern_ok() {
 
 #[test]
 fn range_three_arg_typechecks() {
-    // 1/2/3-arg `range()` of ints all type-check to `list[int]`; 0 or >3 args reject.
-    ok("fn main():\n    a: list[int] = range(0, 10, 2)\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: list[int] = range(10, 0, -1)\n    print(a.len())\nmain()\n");
+    // 1/2/3-arg `range()` of ints all type-check to `List[int]`; 0 or >3 args reject.
+    ok("fn main():\n    a: List[int] = range(0, 10, 2)\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = range(10, 0, -1)\n    print(a.len())\nmain()\n");
     rejects("fn main():\n    print(range())\nmain()\n", "range");
     rejects(
         "fn main():\n    print(range(0, 1, 2, 3))\nmain()\n",
@@ -4292,8 +4292,8 @@ fn range_three_arg_typechecks() {
 
 #[test]
 fn range_slice_typechecks() {
-    // Slicing a range literal infers `list[int]` (the SECONDARY range-slicing path).
-    ok("fn main():\n    a: list[int] = (0..10)[::2]\n    print(a.len())\nmain()\n");
+    // Slicing a range literal infers `List[int]` (the SECONDARY range-slicing path).
+    ok("fn main():\n    a: List[int] = (0..10)[::2]\n    print(a.len())\nmain()\n");
 }
 
 // ===== default + named arguments (end-to-end through desugar) =====
@@ -4473,10 +4473,10 @@ fn iterator_bound_forwards_into_another_iterator_call_ok() {
 
 #[test]
 fn iterator_conflicting_explicit_element_arg_rejected() {
-    // Explicit `[list[int], str]` pins T=str, but the list element is int — the recovered element
-    // must conflict (unsound otherwise: static list[str], runtime list[int]).
+    // Explicit `[List[int], str]` pins T=str, but the list element is int — the recovered element
+    // must conflict (unsound otherwise: static List[str], runtime List[int]).
     rejects(
-        "fn to_list[S: Iterator[T], T](xs: S) -> list[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr := to_list[list[int], str]([1, 2, 3])\n",
+        "fn to_list[S: Iterator[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr := to_list[List[int], str]([1, 2, 3])\n",
         "does not match the declared element type",
     );
 }
@@ -4510,14 +4510,14 @@ main()
 
 #[test]
 fn slice_of_list_types_as_list() {
-    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1:3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1:3]\n");
     // Optional bounds / step still type as the same container type.
-    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[1:]\n");
-    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[:3]\n");
-    ok("xs := [1, 2, 3, 4]\nys: list[int] = xs[::2]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1:]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[:3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[::2]\n");
     rejects(
         "xs := [1, 2, 3, 4]\nys: str = xs[1:3]\n",
-        "cannot assign list[int] to variable of type str",
+        "cannot assign List[int] to variable of type str",
     );
 }
 
@@ -4548,12 +4548,12 @@ fn slice_bounds_must_be_int() {
 
 #[test]
 fn map_is_not_sliceable() {
-    rejects("m: map[int, int] = {}\nx := m[0:2]\n", "cannot slice");
+    rejects("m: Map[int, int] = {}\nx := m[0:2]\n", "cannot slice");
 }
 
 const BUF: &str = "\
 struct Buf:
-    xs: list[int]
+    xs: List[int]
     fn index(self, key: int) -> int:
         return self.xs[key]
     fn set_index(self, key: int, val: int):
@@ -4597,7 +4597,7 @@ fn struct_without_set_index_assign_rejected() {
     // Has `index` (read) but no `set_index` — `b[0] = 9` must be rejected.
     let read_only = "\
 struct RO:
-    xs: list[int]
+    xs: List[int]
     fn index(self, key: int) -> int:
         return self.xs[key]
 ";
@@ -4611,7 +4611,7 @@ struct RO:
 fn struct_without_slice_rejected() {
     let no_slice = "\
 struct NS:
-    xs: list[int]
+    xs: List[int]
     fn index(self, key: int) -> int:
         return self.xs[key]
 ";
@@ -4637,7 +4637,7 @@ fn index_assign_requires_index_not_just_set_index() {
     // `index` first) type-checks then crashes at runtime.
     let set_only = "\
 struct WO:
-    xs: list[int]
+    xs: List[int]
     fn set_index(self, key: int, val: int):
         self.xs[key] = val
 ";
@@ -4654,7 +4654,7 @@ fn struct_slice_wrong_bound_types_rejected() {
     // count as a valid `Slice` impl (would crash).
     let bad = "\
 struct BadSlice:
-    xs: list[int]
+    xs: List[int]
     fn slice(self, start: str, end: str) -> int:
         return self.xs.len()
 ";
@@ -4665,7 +4665,7 @@ struct BadSlice:
     // Old 2-arg `slice(self, int, int)` is no longer a conforming `Slice` impl.
     let two_arg = "\
 struct TwoArg:
-    xs: list[int]
+    xs: List[int]
     fn slice(self, start: int, end: int) -> int:
         return self.xs.len()
 ";
@@ -4699,7 +4699,7 @@ fn generic_over_slice_protocol_ok() {
     // A struct AND a built-in list both satisfy `Slice[R]`; the bound recovers `R`.
     ok(&format!(
         "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1:2]\n\
-         b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: list[int] = mid([1, 2, 3])\n"
+         b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: List[int] = mid([1, 2, 3])\n"
     ));
 }
 
@@ -5336,7 +5336,7 @@ fn rwshared_is_sendable() {
 #[test]
 fn rwshared_annotation_with_map_ok() {
     entry_ok(
-        "import std.concurrency\nfn put(r: RwShared[map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
+        "import std.concurrency\nfn put(r: RwShared[Map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
     );
 }
 
@@ -6245,7 +6245,7 @@ fn extern_void_return_ok() {
 #[test]
 fn extern_non_marshallable_param_rejected() {
     rejects(
-        "extern \"libc.so.6\":\n    fn f(xs: list[int]) -> int\n",
+        "extern \"libc.so.6\":\n    fn f(xs: List[int]) -> int\n",
         "not C-marshallable",
     );
 }
@@ -6253,7 +6253,7 @@ fn extern_non_marshallable_param_rejected() {
 #[test]
 fn extern_non_marshallable_return_rejected() {
     rejects(
-        "extern \"libc.so.6\":\n    fn f(x: int) -> list[int]\n",
+        "extern \"libc.so.6\":\n    fn f(x: int) -> List[int]\n",
         "not C-marshallable",
     );
 }
@@ -6400,14 +6400,14 @@ fn extern_owned_str_param_via_alias_rejected() {
 }
 
 /// The checker is the true marshallability gate for a module-QUALIFIED extern type. A `mod.Struct`
-/// whose field is non-marshallable (`list[int]`) must be rejected at `check` time (the compiler's
+/// whose field is non-marshallable (`List[int]`) must be rejected at `check` time (the compiler's
 /// graceful backstop is only for paths that bypass the checker). Guards that resolving `Qualified`
 /// → struct still runs `assert_marshallable`. Uses a two-file graph so `bag.Bag` carries an
 /// identity key.
 #[test]
 fn extern_qualified_non_marshallable_struct_rejected() {
     let t = TmpDir::new();
-    t.write("bag.chz", "struct Bag:\n    items: list[int]\n");
+    t.write("bag.chz", "struct Bag:\n    items: List[int]\n");
     let entry = t.write(
         "main.chz",
         "import bag\n\nextern \"libc.so.6\":\n    fn use_it(b: bag.Bag) -> int\n",
@@ -7476,7 +7476,7 @@ fn bytes_not_assignable_to_str() {
 #[test]
 fn bytes_key_in_map_ok() {
     // bytes is Hashable — valid map key.
-    ok("fn main():\n    m: map[bytes, int] = {b\"a\": 1}\n    print(m[b\"a\"])\nmain()\n");
+    ok("fn main():\n    m: Map[bytes, int] = {b\"a\": 1}\n    print(m[b\"a\"])\nmain()\n");
 }
 
 // ===== bytearray type (mutable sibling of bytes — constructor-only, Index/IndexSet/Slice/Iterator) =====
@@ -7521,7 +7521,7 @@ fn bytearray_constructor_rejects_str_arg() {
 fn bytearray_not_hashable_map_key_rejected() {
     // bytearray is MUTABLE -> NOT Hashable -> not a valid map key (like list).
     rejects(
-        "fn main():\n    m: map[bytearray, int] = {bytearray(): 1}\nmain()\n",
+        "fn main():\n    m: Map[bytearray, int] = {bytearray(): 1}\nmain()\n",
         "",
     );
 }
@@ -7553,51 +7553,51 @@ fn encode_only_on_str_decode_only_on_bytes() {
     rejects("fn main():\n    x := \"x\".decode()\nmain()\n", "");
 }
 
-// ===== conversions: list()/set()/map() constructors over any for-iterable =====
+// ===== conversions: List()/Set()/Map() constructors over any for-iterable =====
 
 #[test]
 fn constructor_iter_types() {
-    // list() over every for-iterable shape; element type flows through iter_elem.
-    ok("fn main():\n    a: list[int] = list([1, 2])\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    s := {1, 2}\n    a: list[int] = list(s)\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(b\"hi\")\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: list[str] = list(\"ab\")\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(range(3))\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: list[int] = list(bytearray([1, 2]))\n    print(a.len())\nmain()\n");
-    // set() broadened from list-only to any for-iterable.
-    ok("fn main():\n    s: set[str] = set(\"abc\")\n    print(s.len())\nmain()\n");
-    ok("fn main():\n    s: set[int] = set(range(3))\n    print(s.len())\nmain()\n");
-    ok("fn main():\n    s: set[int] = set([1, 1, 2])\n    print(s.len())\nmain()\n");
-    // map() from a list of 2-tuples.
+    // List() over every for-iterable shape; element type flows through iter_elem.
+    ok("fn main():\n    a: List[int] = List([1, 2])\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    s := {1, 2}\n    a: List[int] = List(s)\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(b\"hi\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[str] = List(\"ab\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(range(3))\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(bytearray([1, 2]))\n    print(a.len())\nmain()\n");
+    // Set() broadened from list-only to any for-iterable.
+    ok("fn main():\n    s: Set[str] = Set(\"abc\")\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[int] = Set(range(3))\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[int] = Set([1, 1, 2])\n    print(s.len())\nmain()\n");
+    // Map() from a list of 2-tuples.
     ok(
-        "fn main():\n    m: map[int, str] = map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n",
+        "fn main():\n    m: Map[int, str] = Map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n",
     );
 }
 
 #[test]
 fn list_zero_arg_rejected() {
-    rejects("fn main():\n    a := list()\nmain()\n", "[]");
+    rejects("fn main():\n    a := List()\nmain()\n", "[]");
 }
 
 #[test]
 fn map_requires_two_tuple() {
     // element not a 2-tuple is a static error.
-    rejects("fn main():\n    m := map([1, 2])\nmain()\n", "");
+    rejects("fn main():\n    m := Map([1, 2])\nmain()\n", "");
     // a map's element is its key (not a 2-tuple) -> static error.
     rejects(
-        "fn main():\n    src := {1: \"a\"}\n    m := map(src)\nmain()\n",
+        "fn main():\n    src := {1: \"a\"}\n    m := Map(src)\nmain()\n",
         "",
     );
     // a 3-tuple is not a 2-tuple.
-    rejects("fn main():\n    m := map([(1, 2, 3)])\nmain()\n", "");
+    rejects("fn main():\n    m := Map([(1, 2, 3)])\nmain()\n", "");
 }
 
 #[test]
 fn set_map_hashable_key_gate_preserved() {
     // float is not Hashable -> set/map key must reject it.
-    rejects("fn main():\n    s := set([3.0])\nmain()\n", "Hashable");
+    rejects("fn main():\n    s := Set([3.0])\nmain()\n", "Hashable");
     rejects(
-        "fn main():\n    m := map([(3.0, \"a\")])\nmain()\n",
+        "fn main():\n    m := Map([(3.0, \"a\")])\nmain()\n",
         "Hashable",
     );
 }
@@ -7635,7 +7635,7 @@ fn iter_cursor_drives_existing_adapters() {
 
 #[test]
 fn iterable_bound_accepts_list_and_generator() {
-    // `[S: Iterable[int]]` accepts a list[int] AND a generator (Iterator[int]).
+    // `[S: Iterable[int]]` accepts a List[int] AND a generator (Iterator[int]).
     ok(
         "fn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n",
     );
@@ -7654,7 +7654,7 @@ fn iter_idempotent_on_generator_and_cursor() {
 fn iterable_struct_with_only_iter() {
     // A user struct with iter(self) -> Iterator[E] (but no next) satisfies Iterable and is for-iterable.
     ok(
-        "struct Wrap:\n    xs: list[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n",
+        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n",
     );
 }
 
@@ -7733,7 +7733,7 @@ fn non_void_fn_unannotated_conditional_return_not_rejected() {
     );
     // (b) `find`-style early-return-in-loop, no annotation.
     ok(
-        "fn find(xs: list[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n",
+        "fn find(xs: List[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n",
     );
 }
 
@@ -8051,7 +8051,7 @@ fn newtype_add_into_generic_add_bound_ok() {
 fn newtype_as_map_key_requires_hash() {
     // Without hash(self), a newtype is NOT a map/set key even if underlying int is hashable.
     rejects(
-        "newtype UserId = int\nfn main():\n    m: map[UserId, str] = {}\nmain()\n",
+        "newtype UserId = int\nfn main():\n    m: Map[UserId, str] = {}\nmain()\n",
         "Hashable",
     );
 }
@@ -8059,15 +8059,15 @@ fn newtype_as_map_key_requires_hash() {
 #[test]
 fn newtype_with_hash_is_map_key_ok() {
     ok(
-        "newtype UserId = int:\n    fn hash(self) -> int:\n        return int(self)\nfn main():\n    m: map[UserId, str] = {}\n    m[UserId(1)] = \"a\"\n    print(m.len())\nmain()\n",
+        "newtype UserId = int:\n    fn hash(self) -> int:\n        return int(self)\nfn main():\n    m: Map[UserId, str] = {}\n    m[UserId(1)] = \"a\"\n    print(m.len())\nmain()\n",
     );
 }
 
 #[test]
 fn newtype_aggregate_underlying_no_method_inherit() {
-    // newtype Names = list[str] does NOT inherit .push() (v1 limit).
+    // newtype Names = List[str] does NOT inherit .push() (v1 limit).
     rejects(
-        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\"])\n    ns.push(\"b\")\nmain()\n",
+        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\"])\n    ns.push(\"b\")\nmain()\n",
         "push",
     );
 }
@@ -8075,28 +8075,28 @@ fn newtype_aggregate_underlying_no_method_inherit() {
 #[test]
 fn newtype_scalar_aggregate_cast_unwrap_ok() {
     // A scalar (non-generic) aggregate newtype crosses the boundary the same explicit way a scalar
-    // newtype does: the matching aggregate cast builtin unwraps it. `list(ns)` for `Names = list[str]`
-    // yields `list[str]` (mirrors `int(uid)` for `UserId = int`) — distinct type, explicit cast.
+    // newtype does: the matching aggregate cast builtin unwraps it. `List(ns)` for `Names = List[str]`
+    // yields `List[str]` (mirrors `int(uid)` for `UserId = int`) — distinct type, explicit cast.
     ok(
-        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: list[str] = list(ns)\n    print(xs.len())\nmain()\n",
+        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: List[str] = List(ns)\n    print(xs.len())\nmain()\n",
     );
-    // set / map underlyings unwrap via set() / map() likewise (the annotated binding is the assertion
+    // set / map underlyings unwrap via Set() / Map() likewise (the annotated binding is the assertion
     // that the unwrap yields the matching aggregate type).
     ok(
-        "newtype Tags = set[str]\nfn main():\n    t := Tags({\"x\"})\n    s: set[str] = set(t)\n    print(s)\nmain()\n",
+        "newtype Tags = Set[str]\nfn main():\n    t := Tags({\"x\"})\n    s: Set[str] = Set(t)\n    print(s)\nmain()\n",
     );
     ok(
-        "newtype Counts = map[str, int]\nfn main():\n    c := Counts({\"a\": 1})\n    m: map[str, int] = map(c)\n    print(m)\nmain()\n",
+        "newtype Counts = Map[str, int]\nfn main():\n    c := Counts({\"a\": 1})\n    m: Map[str, int] = Map(c)\n    print(m)\nmain()\n",
     );
 }
 
 #[test]
 fn newtype_scalar_aggregate_cast_unwrap_wrong_target_rejected() {
-    // The unwrap must match the underlying aggregate: `set(ns)` on a list-backed newtype is rejected
+    // The unwrap must match the underlying aggregate: `Set(ns)` on a list-backed newtype is rejected
     // (no cross-aggregate coercion) — the explicit cast still respects the underlying's shape.
     rejects(
-        "newtype Names = list[str]\nfn main():\n    ns := Names([\"a\"])\n    s := set(ns)\n    print(s)\nmain()\n",
-        "set",
+        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\"])\n    s := Set(ns)\n    print(s)\nmain()\n",
+        "Set",
     );
 }
 
@@ -8112,9 +8112,9 @@ fn raw_string_is_str_type() {
 
 #[test]
 fn generic_newtype_decl_ok() {
-    // `newtype Stack[T] = list[T]` with methods referencing T type-checks.
+    // `newtype Stack[T] = List[T]` with methods referencing T type-checks.
     ok(
-        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(list(s).len())\nmain()\n",
+        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(List(s).len())\nmain()\n",
     );
 }
 
@@ -8122,7 +8122,7 @@ fn generic_newtype_decl_ok() {
 fn generic_newtype_method_body_and_dispatch_ok() {
     // Inside a method `self` is Stack[T]; at the call site Stack[int].peek() returns Option[int].
     ok(
-        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[int] = s.peek()\n    print(x == None)\nmain()\n",
+        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[int] = s.peek()\n    print(x == None)\nmain()\n",
     );
 }
 
@@ -8130,7 +8130,7 @@ fn generic_newtype_method_body_and_dispatch_ok() {
 fn generic_newtype_dispatch_substitutes_targs() {
     // The substituted return type is enforced: assigning Stack[int].peek() to Option[str] is rejected.
     rejects(
-        "newtype Stack[T] = list[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[str] = s.peek()\nmain()\n",
+        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[str] = s.peek()\nmain()\n",
         "Option[str]",
     );
 }
@@ -8139,7 +8139,7 @@ fn generic_newtype_dispatch_substitutes_targs() {
 fn generic_newtype_ctor_infer_ok() {
     // `Stack([1, 2])` infers Stack[int].
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(list(s).len())\nmain()\n",
+        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(List(s).len())\nmain()\n",
     );
 }
 
@@ -8147,7 +8147,7 @@ fn generic_newtype_ctor_infer_ok() {
 fn generic_newtype_ctor_turbofish_ok() {
     // `Stack[int]([])` — the empty list can't bind T, so the turbofish supplies it.
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(list(s).len())\nmain()\n",
+        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(List(s).len())\nmain()\n",
     );
 }
 
@@ -8156,7 +8156,7 @@ fn generic_newtype_ctor_infer_set_underlying_ok() {
     // A set-underlying generic newtype infers its param from the arg just like list/map —
     // `Bag({1, 2, 3})` ⇒ Bag[int] with NO turbofish (regression: `unify` lacked a `Ty::Set` arm).
     ok(
-        "newtype Bag[T: Hashable] = set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: set[int] = set(b)\n    print(s)\nmain()\n",
+        "newtype Bag[T: Hashable] = Set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: Set[int] = Set(b)\n    print(s)\nmain()\n",
     );
 }
 
@@ -8164,25 +8164,25 @@ fn generic_newtype_ctor_infer_set_underlying_ok() {
 fn generic_newtype_ctor_wrong_arg_rejected() {
     // `Stack[int](["a"])` — arg element str vs declared int.
     rejects(
-        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack[int]([\"a\"])\nmain()\n",
+        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack[int]([\"a\"])\nmain()\n",
         "expected",
     );
 }
 
 #[test]
 fn generic_newtype_cast_unwrap_propagates() {
-    // `list(s)` for s: Stack[int] yields list[int].
+    // `List(s)` for s: Stack[int] yields List[int].
     ok(
-        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[int] = list(s)\n    print(xs.len())\nmain()\n",
+        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack([1, 2])\n    xs: List[int] = List(s)\n    print(xs.len())\nmain()\n",
     );
 }
 
 #[test]
 fn generic_newtype_cast_unwrap_wrong_elem_rejected() {
-    // `list(s)` for s: Stack[int] is NOT list[str].
+    // `List(s)` for s: Stack[int] is NOT List[str].
     rejects(
-        "newtype Stack[T] = list[T]\nfn main():\n    s := Stack([1, 2])\n    xs: list[str] = list(s)\nmain()\n",
-        "list[str]",
+        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack([1, 2])\n    xs: List[str] = List(s)\nmain()\n",
+        "List[str]",
     );
 }
 
@@ -8229,7 +8229,7 @@ fn generic_newtype_own_method_dispatch_ok() {
 fn generic_newtype_bound_smoke_ok() {
     // Bounds on newtype params come along for free via enter_type_params/check_bounds/enforce_bounds.
     ok(
-        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(list(k).len())\nmain()\n",
+        "newtype Keyed[T: Hashable] = List[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(List(k).len())\nmain()\n",
     );
 }
 
@@ -8237,7 +8237,7 @@ fn generic_newtype_bound_smoke_ok() {
 fn generic_newtype_bound_violation_rejected() {
     // A type arg that violates the param bound is rejected at the annotation site.
     rejects(
-        "newtype Keyed[T: Hashable] = list[T]\nfn main():\n    k: Keyed[fn(int) -> int] = Keyed([])\nmain()\n",
+        "newtype Keyed[T: Hashable] = List[T]\nfn main():\n    k: Keyed[fn(int) -> int] = Keyed([])\nmain()\n",
         "Hashable",
     );
 }
@@ -8246,7 +8246,7 @@ fn generic_newtype_bound_violation_rejected() {
 fn generic_newtype_missing_targs_rejected() {
     // Bare `Stack` as an annotation (no args) on a generic newtype is rejected.
     rejects(
-        "newtype Stack[T] = list[T]\nfn main():\n    s: Stack = Stack([1])\nmain()\n",
+        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack = Stack([1])\nmain()\n",
         "type argument",
     );
 }
@@ -8265,7 +8265,7 @@ fn generic_newtype_missing_targs_rejected() {
 
 #[test]
 fn empty_list_push_pins_element_then_mixed_rejected() {
-    // x:=[]; x.push(1) pins list[int]; x.push("s") is then a normal mismatch.
+    // x:=[]; x.push(1) pins List[int]; x.push("s") is then a normal mismatch.
     rejects(
         "fn main():\n x := []\n x.push(1)\n x.push(\"s\")\nmain()",
         "pinned",
@@ -8300,7 +8300,7 @@ fn refine_erroring_index_key_reports_once() {
 
 #[test]
 fn empty_list_of_none_then_conflicting_some_rejected() {
-    // [None] is list[Option[Unknown]]; push(Some(5)) refines to list[Option[int]];
+    // [None] is List[Option[Unknown]]; push(Some(5)) refines to List[Option[int]];
     // push(Some("hi")) then conflicts (nested-typeparam + native None producer).
     rejects(
         "fn main():\n xs := [None]\n xs.push(Some(5))\n xs.push(Some(\"hi\"))\nmain()",
@@ -8310,7 +8310,7 @@ fn empty_list_of_none_then_conflicting_some_rejected() {
 
 #[test]
 fn empty_list_of_nullary_enum_then_conflicting_variant_rejected() {
-    // [Box.Empty] is list[Box[Unknown]]; push(Box.Full("hi")) refines to list[Box[str]];
+    // [Box.Empty] is List[Box[Unknown]]; push(Box.Full("hi")) refines to List[Box[str]];
     // push(Box.Full(5)) then conflicts (nullary-variant producer).
     rejects(
         "enum Box[T]:\n Full(T)\n Empty\nfn main():\n xs := [Box.Empty]\n xs.push(Box.Full(\"hi\"))\n xs.push(Box.Full(5))\nmain()",
@@ -8318,7 +8318,7 @@ fn empty_list_of_nullary_enum_then_conflicting_variant_rejected() {
     );
 }
 
-// ---- step 2: insertion-site Hashable / float-key ban on empty {}/set() ----
+// ---- step 2: insertion-site Hashable / float-key ban on empty {}/Set() ----
 
 #[test]
 fn empty_map_float_key_rejected() {
@@ -8328,10 +8328,10 @@ fn empty_map_float_key_rejected() {
 
 #[test]
 fn empty_set_float_and_nan_rejected() {
-    // s:=set(); s.add(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
-    rejects("fn main():\n s := set()\n s.add(1.5)\nmain()", "Hashable");
+    // s:=Set(); s.add(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
+    rejects("fn main():\n s := Set()\n s.add(1.5)\nmain()", "Hashable");
     rejects(
-        "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := set()\n s.add(nan)\nmain()",
+        "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := Set()\n s.add(nan)\nmain()",
         "Hashable",
     );
 }
@@ -8341,7 +8341,7 @@ fn empty_set_float_and_nan_rejected() {
 #[test]
 fn heterogeneous_struct_list_unannotated_rejected() {
     // shapes:=[]; push Sq; push Rect — the pin makes the 2nd push a mismatch; the
-    // diagnostic must hint at annotating list[<protocol>].
+    // diagnostic must hint at annotating List[<protocol>].
     let errs = check_src(
         "struct Sq:\n s: int\nstruct Rect:\n w: int\n h: int\nfn main():\n shapes := []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
     );
@@ -8358,7 +8358,7 @@ fn heterogeneous_struct_list_unannotated_rejected() {
 
 #[test]
 fn flow_sensitive_if_else_int_vs_str_rejects() {
-    // First-use pin PERSISTS: the then-arm pins xs to list[int]; the else-arm's str push is a
+    // First-use pin PERSISTS: the then-arm pins xs to List[int]; the else-arm's str push is a
     // cross-branch element-type conflict — rejected (a sound static over-approximation).
     rejects(
         "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n else:\n  xs.push(\"s\")\nmain()",
@@ -8368,7 +8368,7 @@ fn flow_sensitive_if_else_int_vs_str_rejects() {
 
 #[test]
 fn flow_sensitive_map_if_elif_rejects() {
-    // The first arm pins cfg to map[str,int]; the else-if writes a float value. float→int is the
+    // The first arm pins cfg to Map[str,int]; the else-if writes a float value. float→int is the
     // LOSSY direction (NOT widened — consistent with one-way int→float widening) → rejected.
     rejects(
         "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n else if c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
@@ -8378,9 +8378,9 @@ fn flow_sensitive_map_if_elif_rejects() {
 
 #[test]
 fn flow_sensitive_set_if_else_rejects() {
-    // First-use pin persists across sibling arms: set pinned to set[int], the str add is rejected.
+    // First-use pin persists across sibling arms: set pinned to Set[int], the str add is rejected.
     rejects(
-        "fn main():\n c := true\n s := set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()",
+        "fn main():\n c := true\n s := Set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()",
         "argument 1 of 'add': expected int, found str",
     );
 }
@@ -8389,7 +8389,7 @@ fn flow_sensitive_set_if_else_rejects() {
 
 #[test]
 fn refine_inside_block_persists_then_conflict_rejected() {
-    // The if-arm's push(1) pins xs to list[int] for the whole scope (the pin is written to the
+    // The if-arm's push(1) pins xs to List[int] for the whole scope (the pin is written to the
     // OWNING outer scope by `repin` and survives the block's `pop_scope`). The post-if push("s")
     // is therefore a real element-type conflict — rejected. (Persistent first-use pinning replaces
     // the old block-local "does not leak" design.)
@@ -8411,7 +8411,7 @@ fn refine_inside_block_on_outer_list_ok() {
 
 #[test]
 fn refine_single_arm_then_concrete_use_rejects() {
-    // One arm pins xs to list[int]; the annotated read `s: str = xs[0]` then mismatches.
+    // One arm pins xs to List[int]; the annotated read `s: str = xs[0]` then mismatches.
     rejects(
         "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n s: str = xs[0]\nmain()",
         "cannot assign int to variable of type str",
@@ -8420,7 +8420,7 @@ fn refine_single_arm_then_concrete_use_rejects() {
 
 #[test]
 fn refine_conflict_in_second_arm_rejects() {
-    // Homogeneous first arm pins list[int]; the conflict lands in the SECOND (else-if) arm.
+    // Homogeneous first arm pins List[int]; the conflict lands in the SECOND (else-if) arm.
     rejects(
         "fn main():\n c := 1\n xs := []\n if c == 1:\n  xs.push(1)\n else if c == 2:\n  xs.push(\"s\")\nmain()",
         "argument 1 of 'push': expected int, found str",
@@ -8429,7 +8429,7 @@ fn refine_conflict_in_second_arm_rejects() {
 
 #[test]
 fn refine_stmt_match_arm_conflict_rejects() {
-    // Statement-`match` arms mirror if/else statements (Option B): the `1:` arm pins list[int],
+    // Statement-`match` arms mirror if/else statements (Option B): the `1:` arm pins List[int],
     // the `_:` arm's str push is a hard cross-arm conflict.
     rejects(
         "fn main():\n c := 1\n xs := []\n match c:\n  1:\n   xs.push(1)\n  _:\n   xs.push(\"s\")\nmain()",
@@ -8439,7 +8439,7 @@ fn refine_stmt_match_arm_conflict_rejects() {
 
 #[test]
 fn refine_loop_body_pin_then_post_loop_conflict_rejects() {
-    // The for-loop body pins xs to list[int]; the post-loop str push conflicts. Accepts the
+    // The for-loop body pins xs to List[int]; the post-loop str push conflicts. Accepts the
     // zero-trip / always-runs over-approximation by design (sound static over-approximation).
     rejects(
         "fn main():\n xs := []\n for i in [1,2]:\n  xs.push(i)\n xs.push(\"s\")\nmain()",
@@ -8468,7 +8468,7 @@ fn expr_arm_pin_independence_ok() {
     // snapshot/restore barrier so a refinable empty produced/refined inside one value-arm refines
     // independently from its sibling — value-arm inference must not be disturbed by the persistent-
     // pin change. An if-EXPRESSION whose two arms each yield an empty list must unify to
-    // list[Unknown] and then refine cleanly on first use; a later conflicting use is rejected
+    // List[Unknown] and then refine cleanly on first use; a later conflicting use is rejected
     // because the RESULT binding's first-use pin persists (statement-position). This fails if an
     // expression-site restore is wrongly removed (sibling-arm pins would leak and corrupt inference).
     ok("fn main():\n c := true\n xs := (if c: [] else: [])\n xs.push(1)\n xs.push(2)\nmain()");
@@ -8490,7 +8490,7 @@ fn never_refined_empty_ok() {
 #[test]
 fn idiomatic_homogeneous_push_ok() {
     ok(
-        "fn main():\n out := []\n out.push(1)\n out.push(2)\n s := set()\n s.add(\"a\")\n s.add(\"b\")\n m := {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
+        "fn main():\n out := []\n out.push(1)\n out.push(2)\n s := Set()\n s.add(\"a\")\n s.add(\"b\")\n m := {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
     );
 }
 
@@ -8504,10 +8504,10 @@ fn single_nullary_enum_push_stays_ok() {
 
 #[test]
 fn annotated_heterogeneous_list_ok() {
-    // The intended escape hatch: an explicit list[Shape] annotation accepts mixed structs
+    // The intended escape hatch: an explicit List[Shape] annotation accepts mixed structs
     // sharing the protocol (refinement never engages on an already-concrete element type).
     ok(
-        "protocol Shape:\n fn area(self) -> int\nstruct Sq:\n s: int\n fn area(self) -> int:\n  return self.s * self.s\nstruct Rect:\n w: int\n h: int\n fn area(self) -> int:\n  return self.w * self.h\nfn main():\n shapes: list[Shape] = []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
+        "protocol Shape:\n fn area(self) -> int\nstruct Sq:\n s: int\n fn area(self) -> int:\n  return self.s * self.s\nstruct Rect:\n w: int\n h: int\n fn area(self) -> int:\n  return self.w * self.h\nfn main():\n shapes: List[Shape] = []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
     );
 }
 
@@ -8561,6 +8561,42 @@ fn all_shipped_examples_typecheck() {
     assert!(
         failures.is_empty(),
         "these shipped examples fail `chezzi check`:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn all_bench_corpus_typecheck() {
+    // The bench corpus `benches/chz/*.chz` is run by `benches/run.chz` via `chezzi run`, which does
+    // a pre-run type check (src/main.rs) and BLOCKS execution on any type error. `cargo test` does
+    // not otherwise exercise these files, so a stale lowercase `list[...]`/`map[...]`/`set[...]`
+    // type annotation (now rejected after the hard list->List/map->Map/set->Set rename) would ship
+    // FALSELY GREEN and break the documented perf-measurement entrypoint. Route every bench file
+    // through the real checked path so such regressions are caught.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches")
+        .join("chz");
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("benches/chz dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("chz"))
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "no bench corpus found in {dir:?}");
+    let mut failures = Vec::new();
+    for path in &entries {
+        match crate::resolver::build_graph(path) {
+            Ok(graph) => {
+                if let Err(errs) = crate::checker::check_graph(&graph) {
+                    failures.push(format!("{}: {:?}", path.display(), errs));
+                }
+            }
+            Err(e) => failures.push(format!("{}: resolve/parse error: {e}", path.display())),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these bench corpus files fail `chezzi check`:\n{}",
         failures.join("\n")
     );
 }
@@ -8830,12 +8866,12 @@ fn static_own_type_params_inferred_ok() {
 }
 
 /// PART 2 (no-leak): a static method param that cannot be bound by any argument or turbofish degrades
-/// to `Ty::Unknown`, never a free `Ty::Param`. `Box[int].make()` for `make[U]()->list[U]` (U unbound)
+/// to `Ty::Unknown`, never a free `Ty::Param`. `Box[int].make()` for `make[U]()->List[U]` (U unbound)
 /// must type-check and push refine cleanly (mirrors `generic_static_no_turbofish_degrades_param`).
 #[test]
 fn static_own_type_params_no_leak_unknown() {
     ok(
-        "struct Box[T]:\n    val: T\n    fn make[U]() -> list[U]:\n        return []\nfn main():\n    xs := Box[int].make()\n    xs.push(\"x\")\n    print(xs.len())\n",
+        "struct Box[T]:\n    val: T\n    fn make[U]() -> List[U]:\n        return []\nfn main():\n    xs := Box[int].make()\n    xs.push(\"x\")\n    print(xs.len())\n",
     );
 }
 
@@ -8875,7 +8911,7 @@ fn static_method_param_shadows_enclosing_rejected() {
 #[test]
 fn generic_static_no_turbofish_degrades_param_to_unknown() {
     ok(
-        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    b := Box.empty()\n    b.items.push(\"x\")\n    print(b.items.len())\n",
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    b := Box.empty()\n    b.items.push(\"x\")\n    print(b.items.len())\n",
     );
 }
 
@@ -8884,7 +8920,7 @@ fn generic_static_no_turbofish_degrades_param_to_unknown() {
 #[test]
 fn generic_static_infers_type_param_from_arg() {
     ok(
-        "struct Box[T]:\n    items: list[T]\n    fn wrap(x: T) -> Box[T]:\n        return Box([x])\nfn main():\n    b := Box.wrap(5)\n    n: int = b.items[0]\n    print(n)\n",
+        "struct Box[T]:\n    items: List[T]\n    fn wrap(x: T) -> Box[T]:\n        return Box([x])\nfn main():\n    b := Box.wrap(5)\n    n: int = b.items[0]\n    print(n)\n",
     );
 }
 
@@ -8892,7 +8928,7 @@ fn generic_static_infers_type_param_from_arg() {
 #[test]
 fn generic_static_turbofish_box_int_empty_typechecks() {
     ok(
-        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\n",
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\n",
     );
 }
 
@@ -8901,7 +8937,7 @@ fn generic_static_turbofish_box_int_empty_typechecks() {
 #[test]
 fn method_level_turbofish_on_non_generic_static_errors() {
     rejects(
-        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box.empty[int]()\n",
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    _ := Box.empty[int]()\n",
         "type argument",
     );
 }
@@ -8952,7 +8988,7 @@ fn iter_method_turbofish_errors() {
 #[test]
 fn index_then_call_on_indexed_receiver_stays() {
     ok(
-        "struct Cell:\n    handlers: list[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n    print(arr[0].handlers[0](20))\n",
+        "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n    print(arr[0].handlers[0](20))\n",
     );
 }
 
@@ -9024,6 +9060,41 @@ fn old_gliding_variant_turbofish_redirects() {
 #[test]
 fn turbofish_type_static_method_regression() {
     ok(
-        "struct Box[T]:\n    items: list[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\nmain()\n",
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn len(self) -> int:\n        return self.items.len()\nfn main():\n    b := Box[int].empty()\n    print(b.len())\nmain()\n",
+    );
+}
+
+/// Task 5 (HARD rename): the builtin container TYPE names are now PascalCase `List`/`Map`/`Set`.
+/// These resolve as types in annotations, nested forms, fn params/returns, and struct fields.
+#[test]
+fn pascal_containers_resolve() {
+    ok(
+        "fn main():\n    x: List[int] = [1]\n    m: Map[str, int] = {\"a\": 1}\n    s: Set[int] = {1}\n    nested: List[Map[str, Set[int]]] = []\n    print(x.len())\n    print(m.len())\n    print(s.len())\n    print(nested.len())\nmain()\n",
+    );
+}
+
+/// The lowercase `list`/`map`/`set` are GONE as type names (hard rename, no alias): they fall to the
+/// unknown-type branch.
+#[test]
+fn lowercase_containers_rejected() {
+    rejects(
+        "fn main():\n    x: list[int] = [1]\n    print(x.len())\nmain()\n",
+        "unknown",
+    );
+    rejects(
+        "fn main():\n    m: map[str, int] = {}\n    print(m.len())\nmain()\n",
+        "unknown",
+    );
+    rejects(
+        "fn main():\n    s: set[int] = {}\n    print(s.len())\nmain()\n",
+        "unknown",
+    );
+}
+
+/// The PascalCase constructors `List(it)`/`Set(it)`/`Map(it)` + empty `Set()` type-check.
+#[test]
+fn pascal_ctor_calls() {
+    ok(
+        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d := Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
     );
 }

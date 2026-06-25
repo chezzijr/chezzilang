@@ -18,23 +18,23 @@ fn main():
     io.print("{[1] * -1}")               # negative → empty
 
     # --- set union / intersection / difference / symmetric-difference ---
-    a: set[int] = {1, 2, 3}
-    b: set[int] = {3, 4, 5}
+    a: Set[int] = {1, 2, 3}
+    b: Set[int] = {3, 4, 5}
     io.print("{a | b}")                  # union     → {1, 2, 3, 4, 5}
     io.print("{a & b}")                  # intersect → {3}
     io.print("{a - b}")                  # diff      → {1, 2}
     io.print("{a ^ b}")                  # symdiff   → {1, 2, 4, 5}
 
     # set ops with an empty set
-    empty: set[int] = set()
+    empty: Set[int] = Set()
     io.print("{a | empty}")              # → {1, 2, 3}
     io.print("{a & empty}")              # → {}
     io.print("{a - empty}")              # → {1, 2, 3}
     io.print("{a ^ empty}")              # → {1, 2, 3}
 
     # set of strings (element type other than int)
-    s1: set[str] = {"x", "y"}
-    s2: set[str] = {"y", "z"}
+    s1: Set[str] = {"x", "y"}
+    s2: Set[str] = {"y", "z"}
     io.print("{s1 | s2}")                # → {x, y, z}
     io.print("{s1 & s2}")                # → {y}
 

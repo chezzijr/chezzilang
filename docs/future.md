@@ -87,8 +87,8 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 6. ~~**Optional chaining + null-coalescing**~~ — **DONE.** `x?.field`/`x?.method()` + right-assoc
    `a ?? b` on `Option`, lowered to a `match` by the desugar pass (zero checker/engine code).
    `examples/optchain.chz`.
-7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in list[(A,B)]`
-   (N-var over `list[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.
+7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in List[(A,B)]`
+   (N-var over `List[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.
    `enumerate`/`zip` shipped as pure-Chezzi `std/iter.chz`. `examples/for_tuple.chz`.
 8. ~~**Mutable closure capture**~~ — **RESOLVED by decision.** Capture stays **snapshot-by-value**
    *intentionally* (a bare scalar is copied when a closure closes over it); the idiomatic mutable box
@@ -144,7 +144,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     class — the **checker's "accept" boundary keeps drifting out of lockstep with the compiler's
     "can-lower" boundary**, so every run half-covers the lowering surface and a prosecutor finds the next
     axis (cross-module call, `spawn:`/`parallel:` body, first-class value / `defer` (`g := make; g()`),
-    inferred-T through a container `xs: list[T]`, non-leading bound param). Each shape either crashes the
+    inferred-T through a container `xs: List[T]`, non-leading bound param). Each shape either crashes the
     compiler or diverges VM↔interp. Making it sound needs a *complete* lowering contract enforced in one
     checker gate — a real design pass, not another blind run.
     **Current behavior on main (the sharp edge): a no-`self` protocol requirement is DECLARABLE but

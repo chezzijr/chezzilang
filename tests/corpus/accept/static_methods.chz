@@ -9,7 +9,7 @@ struct Rect:
         return Rect(s, s)
 
 struct Box[T]:
-    items: list[T]
+    items: List[T]
     fn empty() -> Box[T]:
         return Box([])
 

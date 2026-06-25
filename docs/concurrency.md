@@ -335,10 +335,10 @@ workloads (a shared config/registry/map read on every request) scale because rea
 each other; `Shared`'s `get`/`update` serialise *every* access.
 
 ```chezzi
-fn put(r: RwShared[map[str, int]], k: str, v: int):
+fn put(r: RwShared[Map[str, int]], k: str, v: int):
     r.write(fn(m): insert(m, k, v))      # exclusive write lock
 
-fn total(r: RwShared[map[str, int]]) -> int:
+fn total(r: RwShared[Map[str, int]]) -> int:
     return r.read(fn(m): sum_values(m))  # shared read lock (concurrent with other readers)
 ```
 
@@ -364,11 +364,11 @@ running the closure** (a `RwLock` guard is not reentrant), so a closure may free
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is
 simpler).
 
-**Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[map[...]]` is the right primitive
+**Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
 (insert-if-absent, increment a count) must be done inside a **single** `write` lock or they race. The
 pure-Chezzi `std.concurrency.collection` module bakes the correct single-lock idiom into two generic
-structs — **`ConcurrentMap[K, V]`** and **`ConcurrentCounter[K]`** — over `RwShared[map[...]]`. A struct
+structs — **`ConcurrentMap[K, V]`** and **`ConcurrentCounter[K]`** — over `RwShared[Map[...]]`. A struct
 of all-sendable fields crosses the airlock as a **shared handle** (same as `RwShared` itself), so the
 wrappers preserve the cross-task sharing; `get`/`len`/`count`/`snapshot` are concurrent reads and
 `set`/`increment`/`get_or_insert` are exclusive writes (the compound ones atomic in one lock). See
@@ -751,7 +751,7 @@ Ships the canonical worker/fan-out example.
   `Type::Generic("Channel", [T])` → `Ty::Channel`.
 - **Checker methods** `src/checker/mod.rs` (`infer_method_call`): `Ty::Channel` arm +
   `channel_method_sig` (`send(T)->nil`, `recv()->T`, `len()->int`); `Channel()` constructor (builtin
-  free fn, mirror `set()`).
+  free fn, mirror `Set()`).
 - **Sendability:** a `sendable(&Ty)` predicate gating `spawn` captures + `Channel.send`; read-only
   captured bindings (reassign of a captured name inside a task = error).
 - **Interp** `src/interp/value.rs`: `Value::Channel(Rc<RefCell<VecDeque<Value>>>)` + `type_name` /

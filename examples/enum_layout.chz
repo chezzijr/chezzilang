@@ -34,7 +34,7 @@ enum Shadow:
 # `return Some(v)` is the NATIVE Option (bare `Some` = builtin), matching `-> int?`. `?` on a genuine
 # native Option (xs.pop(), which stamps VID_SOME/VID_NONE_VARIANT directly) is recognised by `?`'s gate
 # regardless of the `Shadow.Some` name reuse — bare names never resolve to the user enum.
-fn first_native(xs: list[int]) -> int?:
+fn first_native(xs: List[int]) -> int?:
     v := xs.pop()?
     return Some(v)
 
@@ -77,7 +77,7 @@ fn chained(a: int, b: int, c: int) -> int!:
     y := safe_div(x, c)?
     return Ok(y)
 
-fn first_even(xs: list[int]) -> int?:
+fn first_even(xs: List[int]) -> int?:
     for x in xs:
         if x % 2 == 0:
             return Some(x)

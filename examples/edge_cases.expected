@@ -26,7 +26,7 @@ fdiv0: division by zero
 -- collections --
 []
 {}
-set()
+Set()
 0
 [[1, 2], [3]]
 {a: [1, 2], b: []}

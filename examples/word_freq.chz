@@ -1,6 +1,6 @@
 # examples/word_freq.chz — word-frequency counter + top-N (Domain C).
 #
-# Counts words into a `map[str,int]`, then prints the top-3 by frequency.
+# Counts words into a `Map[str,int]`, then prints the top-3 by frequency.
 #
 # Exercises two round-2 fixes: iterate the map's entries directly with `for w, c in counts`
 # (gap #14), then rank `(word, count)` pairs by count with a comparator (gap #11). Ties keep

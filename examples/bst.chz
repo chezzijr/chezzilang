@@ -26,7 +26,7 @@ fn insert(root: Node?, v: int) -> Node?:
             return Some(n)
 
 # In-order walk, appending values into `out` (shared by reference).
-fn inorder(root: Node?, out: list[int]):
+fn inorder(root: Node?, out: List[int]):
     match root:
         None:
             return
@@ -58,7 +58,7 @@ fn contains(root: Node?, v: int) -> bool:
                 return contains(n.left, v)
             return contains(n.right, v)
 
-fn join_ints(xs: list[int]) -> str:
+fn join_ints(xs: List[int]) -> str:
     out := ""
     i := 0
     for x in xs:

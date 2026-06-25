@@ -26,7 +26,7 @@ print(classify((7, 0)))     # on x-axis
 print(classify((2, 5)))     # point 2,5
 
 # Nested: an Option wrapping a tuple, destructured in the Some arm.
-fn first_pair(xs: list[(int, str)]) -> Option[(int, str)]:
+fn first_pair(xs: List[(int, str)]) -> Option[(int, str)]:
     for p in xs:
         return Some(p)
     return None

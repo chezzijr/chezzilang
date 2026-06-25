@@ -1,6 +1,6 @@
 # examples/ledger.chz — a small account-ledger / data-pipeline program.
 #
-# Exercises: enums with payloads (transactions), a `map[str, Account]` of mutable structs (mutating
+# Exercises: enums with payloads (transactions), a `Map[str, Account]` of mutable structs (mutating
 # a struct reached through `map.get(...)` persists, because structs are references), `Result`/`?`
 # for the overdraft / unknown-account error paths, `defer` for an end-of-run message, `sort_by` for
 # a ranked report, and list/`if` comprehensions for the summary. Fully deterministic.
@@ -18,7 +18,7 @@ struct Account:
     balance: int
 
 # Apply one transaction, mutating the account in place. Overdrafts and unknown accounts are Err.
-fn apply(accounts: map[str, Account], t: Txn) -> str!:
+fn apply(accounts: Map[str, Account], t: Txn) -> str!:
     match t:
         Txn.Deposit(who, amt):
             match accounts.get(who):
@@ -36,7 +36,7 @@ fn apply(accounts: map[str, Account], t: Txn) -> str!:
                     return Ok("{who} -{amt} -> {acc.balance}")
 
 # Run the batch. A `defer` guarantees the closing line prints however the loop exits.
-fn run(accounts: map[str, Account], txns: list[Txn]):
+fn run(accounts: Map[str, Account], txns: List[Txn]):
     defer note("-- books closed --")
     print("-- transactions --")
     for t in txns:
@@ -45,7 +45,7 @@ fn run(accounts: map[str, Account], txns: list[Txn]):
             Err(e):  print("REJECTED: {e.message()}")
 
 # Summary report: total, a balance-descending ranking, and a guarded comprehension.
-fn report(accounts: map[str, Account]):
+fn report(accounts: Map[str, Account]):
     print("-- report --")
     balances := [v.balance for k, v in accounts]
     print("total: {balances.sum()}")

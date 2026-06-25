@@ -3,7 +3,7 @@
 # scalars, collections, structs, and other aliases.
 
 type UserId = int
-type Score = map[str, int]
+type Score = Map[str, int]
 
 struct User:
     id: UserId          # alias in a field type

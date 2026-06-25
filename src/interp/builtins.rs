@@ -17,9 +17,9 @@ pub fn is_builtin(name: &str) -> bool {
             | "str"
             | "ord"
             | "chr"
-            | "set"
-            | "list"
-            | "map"
+            | "Set"
+            | "List"
+            | "Map"
             | "bytes"
             | "bytearray"
             // `panic(msg)` is intercepted in `eval_call` (raises an Err, not an Ok value), so the

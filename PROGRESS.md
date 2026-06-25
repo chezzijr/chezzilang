@@ -11,6 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ global-namespace cleanup — task 5/5 (FINAL): `list`/`map`/`set`→`List`/`Map`/`Set` HARD rename
+(2026-06-25).** The three builtin container TYPE **and** constructor names are now PascalCase
+`List`/`Map`/`Set` everywhere — type annotations (`List[int]`, `Map[str,int]`, `Set[int]`, nested),
+turbofish, struct fields, fn params/returns, and the free-fn ctors (`List(it)`/`Set(it)`/`Set()`/
+`Map(it)`). **HARD rename, no alias:** lowercase `list`/`map`/`set` as a type name now falls to the
+checker's unknown-type branch (REJECTED for free — the lowercase strings simply stop matching any
+`resolve_type`/`infer_named_call` arm), and as a bare name they are ordinary identifiers again.
+These names were never lexer keywords nor a `Type::Named` arm — they were plain string-literal matches
+in the checker (`resolve_type`/`resolve_ty_ro_d` Generic arms, `is_reserved_name`, `is_builtin_type`,
+`infer_named_call` ctor arms, `newtype_aggregate_cast`), compiler/interp/vm builtin dispatch +
+`is_builtin` + float-widening hints, and `json_decode` — every such literal flipped to PascalCase.
+**Runtime display** flips too: `type(x)` and error text now print `List`/`Map`/`Set`, the empty-set
+display is `Set()` (was `set()`), and `Ty`'s `Display`/`ref_display` render `List[…]`/`Map[…]`/`Set[…]`
+(so every type-mismatch message says PascalCase) — flipped in vm + interp + checker in lockstep so
+VM↔interp parity stays byte-identical. **Untouched (NOT the container type):** the `.map`/`.filter`/
+`.fold` list HOF methods, the `.set` method on `Shared`/`RwShared`/`Ref`, the std.iter `map(xs, f)`
+free function, `tuple` (left lowercase — possible later follow-up), internal `Ty::list/map/set`
+helpers, and list/map/set **literal** syntax (`[…]`/`{…}`). TDD: `pascal_containers_resolve` +
+`pascal_ctor_calls` (green) and `lowercase_containers_rejected` (lowercase now "unknown"). Migrated
+~52 examples + their `.expected` goldens (empty-set `set()`→`Set()`), all `std/*.chz`, the conformance
+corpus, `docs/grammar.bnf` prose, and all docs. `cargo test` (2711) + conformance + clippy clean;
+three-engine parity green. **Global-namespace cleanup batch COMPLETE (5/5).**
+
 **✅ global-namespace cleanup — task 4/5: `Shared`/`RwShared`/`Atomic`/`Executor`→`std.concurrency`
 (2026-06-25).** The four runtime concurrency ctor/TYPE names are no longer global builtins — they now
 require `import std.concurrency` (whole-module licenses all four) or `import Shared from std.concurrency`
@@ -36,7 +59,7 @@ attempt; plus reserved-still + per-name-licensing + len-3-does-not-license check
 used the four bare now `import std.concurrency` (atomic/executor/executor_pool/executor_autodrain/
 demo_executor/shared/rwshared/parallel_shared/parallel_cancel/ref_airlock/cancel_cpu + the two
 concurrent_collection*). Docs (stdlib/syntax/concurrency) updated. `cargo test` (2708) + conformance +
-clippy clean. (1 cleanup task remains: list/map/set→List/Map/Set.)
+clippy clean. (FINAL cleanup task — list/map/set→List/Map/Set — landed as task 5/5 above.)
 
 **✅ global-namespace cleanup — task 2/5: FFI `ptr` gated behind `import std.ffi` (2026-06-25).** The
 opaque C-ABI `ptr` type is no longer a global builtin — it now requires an import, **consistent with
@@ -103,7 +126,7 @@ byte-identical on VM/`--serial`/`--parallel`/interp). Docs: `docs/concurrency.md
 green, clippy clean.
 **✅ stdlib — `std.concurrency.collection`: thread-safe collections over `RwShared` (2026-06-24).**
 The capstone of the concurrency-collections work: pure-Chezzi ergonomic wrappers over the just-landed
-`RwShared[map[...]]` primitive, in the **first nested std module** (`std/concurrency/collection.chz` —
+`RwShared[Map[...]]` primitive, in the **first nested std module** (`std/concurrency/collection.chz` —
 the dotted path resolves generically, no resolver special-casing). Two generic structs:
 **`ConcurrentMap[K: Hashable, V]`** (`get`/`contains`/`len`/`snapshot` concurrent reads; `set`/`remove`/
 `get_or_insert` exclusive writes — `get_or_insert` is COMPOUND-ATOMIC, check-and-insert in one write
@@ -149,7 +172,7 @@ every native module fn (behavior-preserving — plain sigs have `min_params == p
 `native_module_sig` since the `func` closure borrows `sig`). The offload seam needs ZERO change (the
 optional int crosses the airlock via `extract_native_args` generically → 3-engine parity by construction).
 NO network golden for the timeout (non-deterministic); plumbing is asserted by a `do_get(.., Some(Duration))`
-unit smoke + checker arity tests. (B) **Query builder:** `std.encoding.query_encode(params: map[str,str]) -> str`
+unit smoke + checker arity tests. (B) **Query builder:** `std.encoding.query_encode(params: Map[str,str]) -> str`
 builds a `k=v&k2=v2` query string — both key and value percent-encoded (factored a shared `percent_encode`
 helper reused by `url_encode`, no duplicated escaper), **keys sorted by RAW value** for a deterministic
 golden, empty map → `""`. Lives in `std.encoding` (NOT `std.request`) because a native module name shadows
@@ -162,13 +185,13 @@ query_encode), `gaps.md` (std.request nit struck → ✅ resolved). 2602 tests +
 (heap/PQ, deque, counter, ordered map)") (2026-06-24).** New pure-Chezzi module `std/collections.chz`
 (no native Rust, no seam — like `std/datetime.chz`/`std/path.chz`): three generic structs over `T`
 built on the builtin `list`/`map`, so identical across all three engines. **`Heap[T]`** — binary
-heap over a backing `list[T]` with a comparator **closure field** `less: fn(T,T)->bool` (verified a
+heap over a backing `List[T]` with a comparator **closure field** `less: fn(T,T)->bool` (verified a
 generic struct can hold + call a fn-typed field); contract `less(a,b)==true ⇒ a pops first`, so
 `a<b`=min-heap, `a>b`=max-heap (any `T`, no `Comparable` needed); `min_heap()`/`max_heap()` int
 factories, `from_list(xs, less)` heapify (push-loop O(n log n)); push/pop O(log n), peek/len/is_empty
 O(1). **`Deque[T]`** — **two-stack** amortized-O(1) both ends (front/back lists, drain-far-on-empty);
 construct `Deque([], [])` (no `deque()` factory — a no-arg generic factory can't bind `T`).
-**`Counter[T: Hashable]`** — `map[T,int]` frequency table; `add`/`add_n`/`count` (0 if absent)/`total`/
+**`Counter[T: Hashable]`** — `Map[T,int]` frequency table; `add`/`add_n`/`count` (0 if absent)/`total`/
 `most_common(k)` (top-k by descending count, **stable insertion-order tie-break** via `map.keys()`
 order + stable `sort_by`); construct `Counter({})`. **Empty semantics:** every removal/peek returns
 `Option[T]` (`None`, never a fault — matches `list.pop()`). **Ordered map intentionally omitted** —
@@ -218,16 +241,16 @@ pure-Chezzi dogfood list). Full suite + conformance + `clippy --all-targets -D w
 **✅ stdlib — `std.process` polish (gaps.md "std.process polish") (2026-06-24).** `std.process` had
 only `cmd(line)` via `sh -c` (injection-prone, stdout discarded on a non-zero exit). Added two
 structured forms in `src/native/process.rs`: `run(line) -> Result[ProcResult]` (still `sh -c`, same
-shell semantics as `cmd`) and `run_args(prog, args: list[str]) -> Result[ProcResult]` (runs the
+shell semantics as `cmd`) and `run_args(prog, args: List[str]) -> Result[ProcResult]` (runs the
 program **directly, no shell** → arguments are passed literally, **injection-safe**). The new synthetic
 struct `ProcResult { stdout: str, stderr: str, code: int }` carries **both streams + the exit code**: a
 non-zero exit is a normal `Ok(ProcResult)` with `code != 0` (stdout NOT discarded), **only a spawn
 failure** (no such program / permission) is `Err`; a signal-killed process reports `code = -1`. `cmd`
-is unchanged (back-compat — `examples/sys.chz` still green). The `list[str]` argv crosses the off-heap
+is unchanged (back-compat — `examples/sys.chz` still green). The `List[str]` argv crosses the off-heap
 offload boundary via a NEW seam variant `NativeArg::List(Vec<String>)` + `Host::arg_str_list` (default-
 err), implemented on all three hosts (`VmHost` reads the live heap list, `extract_native_args`
 snapshots it to `NativeArg::List`, `OffloadHost` serves it back off-thread, `InterpHost` reads the live
-list) — a direct clone of the existing `map[str,str]` triad, so 3-engine parity (interp == cooperative
+list) — a direct clone of the existing `Map[str,str]` triad, so 3-engine parity (interp == cooperative
 VM == M:N) holds by construction at the NativeFn seam. `run`/`run_args` wired into `is_blocking()`
 (subprocess I/O → offloaded under the OS-thread engine). `ProcResult` is registered with the other
 synthetic stdlib structs in the compiler (`src/compiler/mod.rs`, declaration-order field names) and
@@ -297,7 +320,7 @@ fallback) on first use; `seed(n)` makes it deterministic. Draws are inline CPU �
 `is_blocking()`. **Generic helpers in `std.iter`** (pure Chezzi, call native `rand.int`): `shuffle[T]`
 (new Fisher–Yates permutation, non-mutating), `choice[T] -> Option[T]` (`None` on empty), `sample[T]`
 (`k` without replacement, `k` clamped to len). The split is **forced**: the native seam carries only
-engine-neutral scalars (cannot return a generic `list[T]`), and a native module name short-circuits a
+engine-neutral scalars (cannot return a generic `List[T]`), and a native module name short-circuits a
 same-named `std/<name>.chz` in the resolver — so scalars + helpers cannot co-inhabit a `rand`
 namespace. **Limit (documented, not a bug):** under `--parallel`, *concurrent* draws from multiple
 tasks interleave nondeterministically on the shared global RNG (engines may diverge) — the goldens draw
@@ -353,7 +376,7 @@ untouched); the down-count idiom is `range(start, end, -1)`. No grammar change (
 untouched; conformance clean). **Parity by construction** (shared helper). Tests (all RED-first): 3
 `slice::range_values` unit tests (up/down/by-N, empty + zero-step, overflow/INT_MIN edges) + interp +
 VM runtime tests (up/down/step-zero/empty/range-slice) + 2 checker tests (1/2/3-arg accept, 0/>3 reject,
-non-int reject; range-slice infers `list[int]`) + golden `examples/range_step.chz` (VM == interp ==
+non-int reject; range-slice infers `List[int]`) + golden `examples/range_step.chz` (VM == interp ==
 `.expected`). Docs: `docs/syntax.md` (range section + slicing note), `docs/stdlib.md` (range signature),
 `gaps.md` (gap #4 → RESOLVED log, open DX items renumbered 1..3). Full suite + conformance +
 `clippy --all-targets -D warnings` clean.
@@ -366,7 +389,7 @@ desugar — the compiler has no operand type info): new value-typed match arms i
 `vm::bitwise` (a shared `Vm::set_op` + `Vm::list_repeat`), mirrored byte-for-byte in
 `interp::eval_binary` (free-fn `set_op`/`list_repeat`), plus the type arms in checker `infer_binary`
 (list/set element types must match — a mismatch is the existing `cannot apply …`/`bitwise operator …
-requires int operands or two sets` error; `[] + [1]` infers `list[int]` via `merge_unknown`).
+requires int operands or two sets` error; `[] + [1]` infers `List[int]` via `merge_unknown`).
 `list * int` is **commutative** (`3 * [0]` too, Python-style); `n <= 0` → `[]`; a giant `n` raises a
 recoverable `list repeat capacity overflow` (byte-bounded by `isize::MAX`, like `str.repeat`), never a
 process abort. Set results preserve insertion order (union = mine-then-other; intersection/difference =
@@ -496,9 +519,9 @@ construction, and `float`-annotated / all-literal collection literals. **Interp*
 tree-walker — no bytecode): an equivalent `coerce_float`/`coerce_value_to_annotation` helper at the
 SAME AST boundaries → parity. **Semantic proof:** `x: float = 3` makes `x / 2 == 1.5` (real float
 division), not `1`. **Anti-lossy negatives stay type errors** (`y: int = 2.3`, `-> int: return 2.3`,
-`float` into `list[int]`, `int`→`float` across a **newtype**, reassign-int-to-float-local). **Scoped
+`float` into `List[int]`, `int`→`float` across a **newtype**, reassign-int-to-float-local). **Scoped
 carve-outs (documented, not holes):** an un-annotated NON-literal mixed collection (`xs := [a, b]`,
-a:int b:float) infers `list[float]` but its non-literal int element isn't widened at runtime; a plain
+a:int b:float) infers `List[float]` but its non-literal int element isn't widened at runtime; a plain
 reassign `x = 3` to a float local is a strict (rejected) target. Tests: 9 checker + 11 two/three-engine
 runtime (`widen_*`); native `sqrt(16)` / extern `cos(2)` widening confirmed hole-free (host promotes).
 Docs: `gaps.md` → RESOLVED log, `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`.
@@ -569,19 +592,19 @@ zero_trip_loop_over_approximation}_rejects`, `expr_arm_pin_independence_ok`; mus
 FULL refine-on-first-use + insertion-site Hashable check + (originally BLOCK-LOCAL, now PERSISTENT —
 see the entry above) flow-sensitivity (the
 empty-slot half of the `Ty::Unknown`-is-assignable family; sibling to the recursive-return fix below).**
-A bare empty literal (`[]`/`{}`/`set()`), a nullary user-enum variant (`Box.Empty`), or native `None`
+A bare empty literal (`[]`/`{}`/`Set()`), a nullary user-enum variant (`Box.Empty`), or native `None`
 typed its element/key/value/type-arg slot as the permissive `Ty::Unknown`, which nothing later refined —
 so `x:=[]; x.push(1); x.push("s")` passed `check` then faulted at runtime, and the deliberate
-float-key/Hashable ban was bypassed (`m:={}; m[1.5]=...`, `s:=set(); s.add(nan)`). Fix (checker-only,
+float-key/Hashable ban was bypassed (`m:={}; m[1.5]=...`, `s:=Set(); s.add(nan)`). Fix (checker-only,
 `checker/mod.rs`): `refine_receiver` (top of `infer_method_call`) and `refine_index_receiver`
 (`check_assign` Index branch) — when a **simple-variable** binding's type carries `Unknown` in a slot
 (detected by `contains_unknown_in_slot`, recursing through list/set/map/Option/Result/tuple/Channel/
 Shared/Atomic and user generic struct/enum), the FIRST mutating op (`.push`/`.add`/`.insert`/`.extend` /
 `x[k]=v`) that supplies a concrete type RE-PINS the binding at that slot via `merge_unknown` (which
-recurses into nested type params — `list[Option[Unknown]]` + `Some(5)` → `list[Option[int]]`, `[Box.Empty]`
-+ `Box.Full("hi")` → `list[Box[str]]`). A later INCOMPATIBLE concrete type is then a normal `check_args`
+recurses into nested type params — `List[Option[Unknown]]` + `Some(5)` → `List[Option[int]]`, `[Box.Empty]`
++ `Box.Full("hi")` → `List[Box[str]]`). A later INCOMPATIBLE concrete type is then a normal `check_args`
 mismatch, enriched to hint at annotating for a mixed/protocol collection. Heterogeneous/protocol
-collections now REQUIRE an explicit annotation (`shapes: list[Shape] = []`) — intended and clearer.
+collections now REQUIRE an explicit annotation (`shapes: List[Shape] = []`) — intended and clearer.
 Non-Hashable keys/elements are rejected by a DIRECT insertion-site `is_hashable_key` check at `m[k]=v`
 (fires even while the key type is still `Unknown`) and at set-element concrete-ification. **Flow-
 sensitivity** (now PERSISTENT scope-wide first-use pinning — see the entry above; originally block-local
@@ -595,7 +618,7 @@ closed). **Golden-test
 checker-bypass fixed:** the golden tests drive `run_capture`, which BYPASSES the Checker, so a checker
 regression on a shipped example shipped falsely green — added `checker::tests::all_shipped_examples_typecheck`
 (build_graph + check_graph over every `examples/*.chz`, two intentional run-only demos `panic.chz` /
-`explicit_type_args.chz` allow-listed) and annotated `examples/poly_method.chz` `list[Shape]` under the
+`explicit_type_args.chz` allow-listed) and annotated `examples/poly_method.chz` `List[Shape]` under the
 new rule. Checker-only ⇒ VM==interp parity automatic (newly-failing programs fail `check` before either
 engine runs; passing programs run byte-identical). All 2394 tests green; clippy + conformance clean.
 `gaps.md` updated (empty-collection + generic-nullary-variant producers RESOLVED; all three `Unknown`-in-slot
@@ -661,7 +684,7 @@ helpers. Scaffold now writes `entrypoint = "src.main:main"` and a `main.chz` wit
 method blocks after their variants, parsed via the same `parse_fn(true)` path structs use; the parser
 enforces variants-before-methods. (`test fn` is **rejected** in enum bodies — enum test *suites* are not
 wired in the compiler/test-runner, so a `test fn` would silently never run; rejected at parse time as a
-follow-up. A `Hashable` enum's `hash(self)` is dispatched at runtime in both engines, so `set[E]`/`map[E,V]`
+follow-up. A `Hashable` enum's `hash(self)` is dispatched at runtime in both engines, so `Set[E]`/`Map[E,V]`
 keys work — not just type-check.) The checker gained a name-keyed
 `enum_methods` map (+ `EnumSigInfo.methods` ferried across the module boundary on both the whole-module
 and `from`-import paths) and a `Ty::Enum` arm in `infer_method_call` (with generic-enum `T`-substitution),
@@ -682,7 +705,7 @@ listed here as deferred — **shipped in M21**; see its section below.)
 **✅ Module-scoped user types (struct / enum / `type` alias).** Types are now **private to their
 declaring module**, mirroring how top-level functions are namespaced — exported by default (no `pub`),
 visible elsewhere ONLY via import. `import core.geo` → `geo.Point(1,2)` / `x: geo.Point` /
-`list[geo.Point]` / `geo.Color.Red`; `import Point from core.geo` → bare `Point(1,2)` (rename allowed
+`List[geo.Point]` / `geo.Color.Red`; `import Point from core.geo` → bare `Point(1,2)` (rename allowed
 for user types). A bare use of a type whose module was imported whole but not named-imported is a
 **check-time error** with an import hint. Two modules MAY declare the same type name (no collision).
 Enforcement lives in the **checker** (per-module type tables: `structs`/`enums`/`variants`/`aliases`
@@ -794,7 +817,7 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
 - **`.iter()` dispatch** — on `list`/`set`/`map`(→keys)/`str`(→char)/`bytes`/`bytearray`(→int): a FRESH
   cursor SNAPSHOTTING current contents in EXACTLY `for x in X` order (reuses `drain_iterable` /
   `iter_rows_from_value`, the for-loop's single source of truth). On any `Iterator[T]` value (cursor,
-  generator, `next`-struct): returns SELF (idempotent). `list(xs.iter())`/`set(...)` drain for free.
+  generator, `next`-struct): returns SELF (idempotent). `List(xs.iter())`/`Set(...)` drain for free.
 - **For-loop additive case** — a struct with `iter()` but NO `next()` is for-iterable via a one-time
   `.iter()` then the cursor drains: checker for-bind arm AFTER the `next` arm (a struct with BOTH keeps
   the `next()` fast path — back-compat precedence); VM `Op::IterableToCursor` (one-time, before the
@@ -827,7 +850,7 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-
   `.iter()` inside adapters (v1 requires explicit `xs.iter()`); routing builtin for-loops through
-  `.iter()` (the fast path stays); cursor `.reset()`/`.peek()`/`.rev()`/`size_hint`.
+  `.iter()` (the fast path stays); cursor `.reSet()`/`.peek()`/`.rev()`/`size_hint`.
 - **grammar.bnf intentionally UNCHANGED** — `.iter()` is the existing method-call production, no new
   syntax (`cargo test conformance` green).
 - **Tests/golden:** checker `iter_method_on_collections_types_as_iterator` /
@@ -899,7 +922,7 @@ clean.
   against `-> nil` (a bare void call) stays legal. Tests: `inline_expr_error_reported_once`,
   `inline_nonnil_expr_against_nil_ret_rejected`.
 
-**✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `list()`/`set()`/`map()` constructors
+**✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `List()`/`Set()`/`Map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
 conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with
 **no new syntax** — every form is an existing call/method production, so **`docs/grammar.bnf` is
@@ -918,17 +941,17 @@ intentionally UNCHANGED** (`cargo test conformance` stays green, proving no new 
   `bytearray_method` + a new `bytes_method` + an `Obj::Bytes` route in `do_method_call`, both decode
   paths sharing `Vm::decode_utf8`; interp `str_method` + `eval_bytearray_method` + a new
   `eval_bytes_method`, both sharing the free `decode_utf8` (error string byte-identical between engines).
-- **`list(it)` / `set(it)` / `map(it)` constructors over ANY for-iterable** (NOT the narrow
+- **`List(it)` / `Set(it)` / `Map(it)` constructors over ANY for-iterable** (NOT the narrow
   `Iterator[T]` protocol). Element types resolve through the checker's **`iter_elem`** — the single
-  source of truth for "what `for x in X` accepts" — so `list([1,2])`, `list(myset)`, `list(b"hi")`,
-  `list("ab")`, `list(range(3))`, `list(bytearray(..))`, and `list(myUserIterator)` all typecheck with no
-  new protocol bound. `list(it) -> list[T]`; `set(it) -> set[T]` (the EXISTING `set` broadened from
-  list-only to any for-iterable, keeping the 0-arg empty-set form + the `Hashable` gate); `map(it) ->
-  map[K, V]` where the element is **exactly a 2-tuple** `(K, V)` (a non-2-tuple is a **static** checker
+  source of truth for "what `for x in X` accepts" — so `List([1,2])`, `List(myset)`, `List(b"hi")`,
+  `List("ab")`, `List(range(3))`, `List(bytearray(..))`, and `List(myUserIterator)` all typecheck with no
+  new protocol bound. `List(it) -> List[T]`; `Set(it) -> Set[T]` (the EXISTING `Set` broadened from
+  list-only to any for-iterable, keeping the 0-arg empty-set form + the `Hashable` gate); `Map(it) ->
+  Map[K, V]` where the element is **exactly a 2-tuple** `(K, V)` (a non-2-tuple is a **static** checker
   error), `K` `Hashable`, last-wins on dup keys (like the `{k: v}` literal). `list`/`map` are NEW reserved
   builtin names (added to `is_reserved_name` + both `is_builtin` sites + per-engine dispatch). The
-  argument is **required** — an empty `list`/`map` is the `[]`/`{}` literal, so `list()`/`map()` are
-  checker errors pointing there. `map(pairs)` (free call) and `xs.map(f)` (list HOF method) are separate
+  argument is **required** — an empty `list`/`map` is the `[]`/`{}` literal, so `List()`/`Map()` are
+  checker errors pointing there. `Map(pairs)` (free call) and `xs.map(f)` (list HOF method) are separate
   namespaces — verified the parser routes them distinctly; documented in `docs/syntax.md`.
 - **Runtime drain helper (the one genuinely new runtime piece).** Built-in collections copy elements
   directly (list/set elems, str→per-char `str`, bytes/bytearray→per-byte `int`, map→keys, range is
@@ -968,7 +991,7 @@ A heap byte buffer modeled on `list` (mutation flows through shared references),
 - **Type `bytearray`** (`Ty::ByteArray`): `ba[i]`→`int`, **`ba[i] = x`** (`IndexSet`, M15 — the new
   capability `bytes` lacks; value 0–255 + index in range, else a recoverable fault), `ba[a:b:c]`→a new
   `bytearray`, `for x in ba`→`int`, `len`, `.push(int)` / `.pop()->Option[int]` / `.extend(bytes|
-  bytearray|list[int])`, `==`/`!=` structural (incl. cross-type `bytes == bytearray` content-equal,
+  bytearray|List[int])`, `==`/`!=` structural (incl. cross-type `bytes == bytearray` content-equal,
   Python parity). **NOT `Hashable`** (mutable ⇒ not a `map`/`set` key, the deliberate divergence from
   `bytes`, consistent with `list`). Sendable across the `--parallel` airlock by **deep copy** (like
   `list` — `WireValue::ByteArray` rebuilds a fresh independent buffer; no shared mutable view).
@@ -1096,10 +1119,10 @@ and the wire/snap/airlock paths covered so a newtype is sendable iff its inner i
 parity** (VM/`--serial`/interp byte-identical) via `examples/newtype.chz` + `newtype.expected` golden;
 new grammar `<newtypeDecl>` + `tests/corpus/accept/newtype.chz` + `cargo test conformance` green; clippy
 clean; ~2347 tests pass. **v1 limits (documented):** an aggregate underlying (`newtype Names =
-list[str]`) gets identity+construct+unwrap+own-methods ONLY — no `.push`/index/iterate forwarding;
+List[str]`) gets identity+construct+unwrap+own-methods ONLY — no `.push`/index/iterate forwarding;
 no `derive`. Docs: `syntax.md §7`, `spec.md` (M21 row + enum-methods note de-staled), `grammar.bnf`.
 
-**✅ M21+ — Generic newtypes (`newtype Stack[T] = list[T]`).** Type parameters on a `newtype`, the Go
+**✅ M21+ — Generic newtypes (`newtype Stack[T] = List[T]`).** Type parameters on a `newtype`, the Go
 defined-type model extended to generics — reuses the struct/enum generic plumbing end-to-end:
 `type_params` on `StmtKind::NewType` (`parse_type_params`, the v1 hard-reject removed), a
 `newtype_type_params` map mirroring `enum_type_params`, and `Ty::NewType(key, Vec<Ty>)` carrying the
@@ -1111,7 +1134,7 @@ instantiated args like `Ty::Enum`. The underlying + method signatures resolve `T
 gets **no native operator auto-flow** — even `newtype Box[T] = T` over a numeric `T` — gated at every
 auto-flow site (`Div`/`Mod`, `op_overload_result`, `ordering_allowed`, the `satisfies` intrinsic arm)
 by a new `newtype_is_generic`; scalar `UserId=int`/`Meters=float` auto-flow is unchanged. **Cast-unwrap
-propagates the instantiation** (the one genuinely new bit): `list(s)` for `s: Stack[int]` ⇒ `list[int]`
+propagates the instantiation** (the one genuinely new bit): `List(s)` for `s: Stack[int]` ⇒ `List[int]`
 (via `newtype_unwrap_target` + a runtime peel in `builtin_list`/`set`/`map`, both engines — a
 map-over-map yields the inner map directly). Runtime is **type-erased** (`Obj::NewType`/`Value::NewType`
 carry no args), so generic instantiation / dispatch / hash / str are byte-identical across interp,
@@ -2386,7 +2409,7 @@ branch names) is in the git log.
   `.0`/`.1`; immutable, fixed-arity, GC-traced.
 - ✅ **M6a/b/c** — core-type str/list methods; pipe `|>` (parse-time desugar); stdlib via the Level-2
   native FFI seam (`std.math`/`std.io`/`std.os` native, `std.str` pure Chezzi).
-- ✅ **`map[K, V]` dictionary (gap #5)** — literals, keyed read/insert/update, six methods, GC-traced.
+- ✅ **`Map[K, V]` dictionary (gap #5)** — literals, keyed read/insert/update, six methods, GC-traced.
 - ✅ **Index & field assignment** — `xs[i] = v`, `p.x = v`, `+=`/`-=` in place (both engines).
 - ✅ **M5a/b/c** — bytecode compiler + stack VM; hand-built mark-sweep GC; cross-engine parity + perf;
   CLI default flip to the VM (`--interp` for the tree-walker). `read_file` capped at 64 MiB.
@@ -2423,7 +2446,7 @@ compile and fixed). All TDD'd; suite at **1630 green**.
 - **`std.iter`** (pure-Chezzi, `std/iter.chz`) — `take drop any all find flatten`, in the existing
   fiber-park-safe generic style. Golden: `examples/iter_more.chz`.
 - **`std.request`** — non-GET/POST verbs `put`/`patch`/`delete`/`head` + a general
-  `request(method, url, body, headers: map[str,str])` for custom headers (`src/native/request.rs`).
+  `request(method, url, body, headers: Map[str,str])` for custom headers (`src/native/request.rs`).
   Required a cross-engine `Host::arg_str_map` and a new **`NativeArg::Map`** variant so the
   headers-carrying form stays in `is_blocking()` and offloads to the `--parallel` dirty pool without
   pinning a core worker. Two-engine parity locked by `request_verbs_and_headers_parity_against_local_server`.

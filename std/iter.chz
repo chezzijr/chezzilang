@@ -2,19 +2,19 @@
 #
 # `shuffle`/`choice`/`sample` are the generic random-collection helpers: they live here (not under
 # `rand.*`) because the native FFI seam carries only engine-neutral scalars — it cannot return a
-# generic `list[T]` — so they are written in pure Chezzi and call the native `rand.int` for their
+# generic `List[T]` — so they are written in pure Chezzi and call the native `rand.int` for their
 # randomness. (Seed the stream via `rand.seed(n)` for deterministic output.)
 #
-# Written entirely in Chezzi: these return `list[(...)]`, so they compose with the
+# Written entirely in Chezzi: these return `List[(...)]`, so they compose with the
 # tuple-destructuring `for` (`for i, x in iter.enumerate(xs)`) and comprehensions
 # (`[a + b for a, b in iter.zip(xs, ys)]`). No builtin special-casing — ordinary library funcs.
 # The empty accumulator `out := []` recovers its element type from each function's return
-# annotation (`-> list[(int, T)]`), so the first `push` of a tuple type-checks.
+# annotation (`-> List[(int, T)]`), so the first `push` of a tuple type-checks.
 
 import std.rand
 
 # Pair each element with its 0-based index: `[a, b]` → `[(0, a), (1, b)]`.
-fn enumerate[T](xs: list[T]) -> list[(int, T)]:
+fn enumerate[T](xs: List[T]) -> List[(int, T)]:
     out := []
     i := 0
     for x in xs:
@@ -23,7 +23,7 @@ fn enumerate[T](xs: list[T]) -> list[(int, T)]:
     return out
 
 # Zip two lists into a list of pairs, truncating to the shorter length.
-fn zip[A, B](xs: list[A], ys: list[B]) -> list[(A, B)]:
+fn zip[A, B](xs: List[A], ys: List[B]) -> List[(A, B)]:
     out := []
     n := xs.len()
     if ys.len() < n:
@@ -41,14 +41,14 @@ fn zip[A, B](xs: list[A], ys: list[B]) -> list[(A, B)]:
 # stay the faster non-blocking path.
 
 # Apply `f` to each element, collecting the results into a new list (BEAM `Enum.map`).
-fn map[T, U](xs: list[T], f: fn(T) -> U) -> list[U]:
+fn map[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
     out := []
     for x in xs:
         out.push(f(x))
     return out
 
 # Keep the elements for which `pred` returns true, preserving order.
-fn filter[T](xs: list[T], pred: fn(T) -> bool) -> list[T]:
+fn filter[T](xs: List[T], pred: fn(T) -> bool) -> List[T]:
     out := []
     for x in xs:
         if pred(x):
@@ -56,7 +56,7 @@ fn filter[T](xs: list[T], pred: fn(T) -> bool) -> list[T]:
     return out
 
 # Left-fold: thread `acc` through `f(acc, x)` for each element, starting from `init`.
-fn fold[T, A](xs: list[T], init: A, f: fn(A, T) -> A) -> A:
+fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A) -> A:
     acc := init
     for x in xs:
         acc = f(acc, x)
@@ -68,14 +68,14 @@ fn fold[T, A](xs: list[T], init: A, f: fn(A, T) -> A) -> A:
 
 # Left-fold with no seed: the accumulator starts at the first element, `f` combines the rest.
 # `xs` must be non-empty (an empty list faults on the `xs[0]` index, matching no-seed reduce).
-fn reduce[T](xs: list[T], f: fn(T, T) -> T) -> T:
+fn reduce[T](xs: List[T], f: fn(T, T) -> T) -> T:
     acc := xs[0]
     for i in 1..xs.len():
         acc = f(acc, xs[i])
     return acc
 
 # The first `n` elements (clamped: `n <= 0` → `[]`, `n >= len` → the whole list).
-fn take[T](xs: list[T], n: int) -> list[T]:
+fn take[T](xs: List[T], n: int) -> List[T]:
     out := []
     i := 0
     while i < n and i < xs.len():
@@ -84,7 +84,7 @@ fn take[T](xs: list[T], n: int) -> list[T]:
     return out
 
 # All but the first `n` elements (clamped: `n <= 0` → the whole list, `n >= len` → `[]`).
-fn drop[T](xs: list[T], n: int) -> list[T]:
+fn drop[T](xs: List[T], n: int) -> List[T]:
     out := []
     i := n
     if i < 0:
@@ -95,28 +95,28 @@ fn drop[T](xs: list[T], n: int) -> list[T]:
     return out
 
 # Does `pred` hold for at least one element? (false for the empty list.)
-fn any[T](xs: list[T], pred: fn(T) -> bool) -> bool:
+fn any[T](xs: List[T], pred: fn(T) -> bool) -> bool:
     for x in xs:
         if pred(x):
             return true
     return false
 
 # Does `pred` hold for every element? (true for the empty list.)
-fn all[T](xs: list[T], pred: fn(T) -> bool) -> bool:
+fn all[T](xs: List[T], pred: fn(T) -> bool) -> bool:
     for x in xs:
         if not pred(x):
             return false
     return true
 
 # The first element for which `pred` holds, `Some(x)`, or `None` if there is none.
-fn find[T](xs: list[T], pred: fn(T) -> bool) -> Option[T]:
+fn find[T](xs: List[T], pred: fn(T) -> bool) -> Option[T]:
     for x in xs:
         if pred(x):
             return Some(x)
     return None
 
 # Concatenate a list of lists into one list (one level of nesting, order-preserving).
-fn flatten[T](xss: list[list[T]]) -> list[T]:
+fn flatten[T](xss: List[List[T]]) -> List[T]:
     out := []
     for xs in xss:
         out.extend(xs)
@@ -126,7 +126,7 @@ fn flatten[T](xss: list[list[T]]) -> list[T]:
 
 # Return a NEW list with the elements of `xs` randomly permuted (Fisher–Yates). Non-mutating:
 # `xs` is left untouched (matches std.iter's copy-and-return idiom).
-fn shuffle[T](xs: list[T]) -> list[T]:
+fn shuffle[T](xs: List[T]) -> List[T]:
     out := []
     for x in xs:
         out.push(x)
@@ -141,14 +141,14 @@ fn shuffle[T](xs: list[T]) -> list[T]:
     return out
 
 # A uniformly-random element of `xs`, `Some(x)`, or `None` if `xs` is empty.
-fn choice[T](xs: list[T]) -> Option[T]:
+fn choice[T](xs: List[T]) -> Option[T]:
     if xs.len() == 0:
         return None
     return Some(xs[rand.int(0, xs.len())])
 
 # `k` elements drawn WITHOUT replacement (a random subset, in random order). `k` is clamped to
 # `[0, len]`. Uses a partial Fisher–Yates on a copy, then takes the first `k`. Non-mutating.
-fn sample[T](xs: list[T], k: int) -> list[T]:
+fn sample[T](xs: List[T], k: int) -> List[T]:
     n := xs.len()
     take_n := k
     if take_n > n:

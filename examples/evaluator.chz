@@ -24,7 +24,7 @@ fn digit_val(c: str) -> int:
     return ord(c) - ord("0")
 
 # Scan a source string into a token list. Unknown characters fail with an Err.
-fn tokenize(src: str) -> list[Tok]!:
+fn tokenize(src: str) -> List[Tok]!:
     toks := []
     i := 0
     n := src.len()
@@ -74,7 +74,7 @@ enum Ast:
 #   factor := Num | '(' expr ')'
 
 struct Parser:
-    toks: list[Tok]
+    toks: List[Tok]
     pos: int
 
     fn peek(self) -> Tok?:

@@ -1,4 +1,4 @@
 # rule: postfix, type
 fn main():
     a := json.decode[int](s)
-    b := json.decode[map[str, int]](s)
+    b := json.decode[Map[str, int]](s)

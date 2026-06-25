@@ -4,19 +4,19 @@
 
 struct Tags:
     name: str
-    ids: set[int]
+    ids: Set[int]
 
 # Top-level: unordered.
 print({1, 2, 3} == {3, 2, 1})                 # true
-print(set([1, 2]) == set([2, 1, 2]))          # true (dedup + unordered)
+print(Set([1, 2]) == Set([2, 1, 2]))          # true (dedup + unordered)
 
 # Nested in a struct: the field set compares unordered.
-a := Tags("a", set([1, 2, 3]))
-b := Tags("a", set([3, 2, 1]))
-c := Tags("a", set([1, 2]))
+a := Tags("a", Set([1, 2, 3]))
+b := Tags("a", Set([3, 2, 1]))
+c := Tags("a", Set([1, 2]))
 print(a == b)                                 # true
 print(a == c)                                 # false (different members)
 
 # Nested in a list.
-print([set([1, 2])] == [set([2, 1])])         # true
+print([Set([1, 2])] == [Set([2, 1])])         # true
 print([{1, 2}, {3, 4}] == [{2, 1}, {4, 3}])   # true

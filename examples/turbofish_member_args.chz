@@ -23,7 +23,7 @@ struct Pair:
 # A fn-valued field on a struct, indexed on an INDEXED receiver: `arr[i].handlers[k](x)` must stay an
 # ordinary index-then-call (the head is a LOCAL), NOT a member-turbofish. This is the regression guard.
 struct Cell:
-    handlers: list[fn(int) -> int]
+    handlers: List[fn(int) -> int]
 
 fn main():
     # Generic static own `[U]` — `U` INFERRED from the argument (no turbofish).

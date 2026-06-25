@@ -128,7 +128,7 @@ fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
         // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
-        "range" | "int" | "float" | "str" | "ord" | "chr" | "set" | "list" | "map" | "bytes" | "bytearray"
+        "range" | "int" | "float" | "str" | "ord" | "chr" | "Set" | "List" | "Map" | "bytes" | "bytearray"
         // the special print op
         | "print"
         // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
@@ -2921,7 +2921,7 @@ impl Checker {
             },
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
-                ("list", [inner]) => Ty::list(self.resolve_type(inner, span)),
+                ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
                 ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
                 ("Result", [t, e]) => {
                     Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
@@ -2994,23 +2994,23 @@ impl Checker {
                         Ty::Unknown
                     }
                 }
-                ("map", [k, v]) => {
+                ("Map", [k, v]) => {
                     let key = self.resolve_type(k, span);
                     let value = self.resolve_type(v, span);
                     if !self.is_hashable_key(&key) {
                         self.error(
                             span,
-                            format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {key}"),
+                            format!("Map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {key}"),
                         );
                     }
                     Ty::map(key, value)
                 }
-                ("set", [t]) => {
+                ("Set", [t]) => {
                     let elem = self.resolve_type(t, span);
                     if !self.is_hashable_key(&elem) {
                         self.error(
                             span,
-                            format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
+                            format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
                         );
                     }
                     Ty::set(elem)
@@ -7185,16 +7185,16 @@ impl Checker {
         }
         let under = self.newtype_unwrap_target(it).unwrap_or(Ty::Unknown);
         let ok = match cast {
-            "list" => matches!(under, Ty::List(_) | Ty::Unknown),
-            "set" => matches!(under, Ty::Set(_) | Ty::Unknown),
-            "map" => matches!(under, Ty::Map(..) | Ty::Unknown),
+            "List" => matches!(under, Ty::List(_) | Ty::Unknown),
+            "Set" => matches!(under, Ty::Set(_) | Ty::Unknown),
+            "Map" => matches!(under, Ty::Map(..) | Ty::Unknown),
             _ => false,
         };
         if ok {
             Some(if under.is_unknown() {
                 match cast {
-                    "list" => Ty::list(Ty::Unknown),
-                    "set" => Ty::set(Ty::Unknown),
+                    "List" => Ty::list(Ty::Unknown),
+                    "Set" => Ty::set(Ty::Unknown),
                     _ => Ty::map(Ty::Unknown, Ty::Unknown),
                 }
             } else {
@@ -7206,8 +7206,8 @@ impl Checker {
                 format!("{cast}() cannot unwrap newtype {it} (its underlying type is {under})"),
             );
             Some(match cast {
-                "list" => Ty::list(Ty::Unknown),
-                "set" => Ty::set(Ty::Unknown),
+                "List" => Ty::list(Ty::Unknown),
+                "Set" => Ty::set(Ty::Unknown),
                 _ => Ty::map(Ty::Unknown, Ty::Unknown),
             })
         }
@@ -7323,16 +7323,16 @@ impl Checker {
             // Iterator). The element type flows through `iter_elem` — the single source of truth for
             // "what `for x in X` accepts". The argument is REQUIRED: an empty list is the `[]` literal
             // (zero args can't infer T).
-            "list" => {
+            "List" => {
                 if args.len() != 1 {
                     self.error(
                         span,
-                        "list() takes exactly one iterable argument — use [] for an empty list",
+                        "List() takes exactly one iterable argument — use [] for an empty list",
                     );
                     return Some(Ty::list(Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
-                if let Some(result) = self.newtype_aggregate_cast("list", &it, args[0].span) {
+                if let Some(result) = self.newtype_aggregate_cast("List", &it, args[0].span) {
                     return Some(result);
                 }
                 let elem = match self.iter_elem(&it) {
@@ -7341,14 +7341,14 @@ impl Checker {
                     None => {
                         self.error(
                             args[0].span,
-                            format!("list() expects an iterable, got {it}"),
+                            format!("List() expects an iterable, got {it}"),
                         );
                         Ty::Unknown
                     }
                 };
                 Some(Ty::list(elem))
             }
-            "set" => {
+            "Set" => {
                 // `set()` → empty set (element inferred from later use, like `{}` for maps);
                 // `set(it)` → a set from ANY for-iterable (broadened from list-only), deduped.
                 // The element type flows through `iter_elem`; it must be Hashable.
@@ -7356,7 +7356,7 @@ impl Checker {
                     0 => Some(Ty::set(Ty::Unknown)),
                     1 => {
                         let it = self.infer_value(&args[0]);
-                        if let Some(result) = self.newtype_aggregate_cast("set", &it, args[0].span)
+                        if let Some(result) = self.newtype_aggregate_cast("Set", &it, args[0].span)
                         {
                             return Some(result);
                         }
@@ -7366,7 +7366,7 @@ impl Checker {
                             None => {
                                 self.error(
                                     args[0].span,
-                                    format!("set() expects an iterable, got {it}"),
+                                    format!("Set() expects an iterable, got {it}"),
                                 );
                                 Ty::Unknown
                             }
@@ -7374,13 +7374,13 @@ impl Checker {
                         if !elem.is_unknown() && !self.is_hashable_key(&elem) {
                             self.error(
                                 span,
-                                format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
+                                format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
                             );
                         }
                         Some(Ty::set(elem))
                     }
                     _ => {
-                        self.error(span, "set() expects set() or set(iterable)");
+                        self.error(span, "Set() expects Set() or Set(iterable)");
                         Some(Ty::set(Ty::Unknown))
                     }
                 }
@@ -7389,23 +7389,23 @@ impl Checker {
             // a STATIC error here (not a runtime surprise). K must be Hashable. Last-wins on duplicate
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
-            "map" => {
+            "Map" => {
                 if args.len() != 1 {
                     self.error(
                         span,
-                        "map() takes exactly one iterable argument — use {} for an empty map",
+                        "Map() takes exactly one iterable argument — use {} for an empty map",
                     );
                     return Some(Ty::map(Ty::Unknown, Ty::Unknown));
                 }
                 let it = self.infer_value(&args[0]);
-                if let Some(result) = self.newtype_aggregate_cast("map", &it, args[0].span) {
+                if let Some(result) = self.newtype_aggregate_cast("Map", &it, args[0].span) {
                     return Some(result);
                 }
                 let elem = match self.iter_elem(&it) {
                     Some(e) => e,
                     None if it.is_unknown() => return Some(Ty::map(Ty::Unknown, Ty::Unknown)),
                     None => {
-                        self.error(args[0].span, format!("map() expects an iterable, got {it}"));
+                        self.error(args[0].span, format!("Map() expects an iterable, got {it}"));
                         return Some(Ty::map(Ty::Unknown, Ty::Unknown));
                     }
                 };
@@ -7417,7 +7417,7 @@ impl Checker {
                     other => {
                         self.error(
                             args[0].span,
-                            format!("map() expects an iterable of (key, value) 2-tuples, found element {other}"),
+                            format!("Map() expects an iterable of (key, value) 2-tuples, found element {other}"),
                         );
                         (Ty::Unknown, Ty::Unknown)
                     }
@@ -7425,7 +7425,7 @@ impl Checker {
                 if !k.is_unknown() && !self.is_hashable_key(&k) {
                     self.error(
                         span,
-                        format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {k}"),
+                        format!("Map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {k}"),
                     );
                 }
                 Some(Ty::map(k, v))
@@ -7442,10 +7442,10 @@ impl Checker {
                         Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                         other => self.error(
                             args[0].span,
-                            format!("bytearray() expects an int size, a bytes, a bytearray, or a list[int], got {other}"),
+                            format!("bytearray() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
                         ),
                     },
-                    _ => self.error(span, "bytearray() expects bytearray(), bytearray(int), bytearray(bytes|bytearray), or bytearray(list[int])"),
+                    _ => self.error(span, "bytearray() expects bytearray(), bytearray(int), bytearray(bytes|bytearray), or bytearray(List[int])"),
                 }
                 Some(Ty::ByteArray)
             }
@@ -7460,13 +7460,13 @@ impl Checker {
                         other => self.error(
                             args[0].span,
                             format!(
-                                "bytes() expects a bytes, a bytearray, or a list[int], got {other}"
+                                "bytes() expects a bytes, a bytearray, or a List[int], got {other}"
                             ),
                         ),
                     },
                     _ => self.error(
                         span,
-                        "bytes() expects bytes(bytes|bytearray) or bytes(list[int])",
+                        "bytes() expects bytes(bytes|bytearray) or bytes(List[int])",
                     ),
                 }
                 Some(Ty::Bytes)
@@ -8053,7 +8053,7 @@ impl Checker {
                     }
                     self.error(
                         span,
-                        format!("sort() requires a list of Comparable values (int, float, str, or a struct with a `compare` method), found list[{elem}]"),
+                        format!("sort() requires a list of Comparable values (int, float, str, or a struct with a `compare` method), found List[{elem}]"),
                     );
                     return Ty::Nil;
                 }
@@ -8065,7 +8065,7 @@ impl Checker {
                 if method == "sum" {
                     self.error(
                         span,
-                        format!("sum() requires a numeric list, found list[{elem}]"),
+                        format!("sum() requires a numeric list, found List[{elem}]"),
                     );
                 } else {
                     self.error(span, format!("type {obj_ty} has no method '{method}'"));
@@ -8094,7 +8094,7 @@ impl Checker {
                             Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
                             other => self.error(
                                 a.span,
-                                format!("extend() expects a bytes, a bytearray, or a list[int], got {other}"),
+                                format!("extend() expects a bytes, a bytearray, or a List[int], got {other}"),
                             ),
                         }
                     }
@@ -8610,7 +8610,7 @@ impl Checker {
                 // mixed/protocol collection legal.
                 let hint = if i == 0 && matches!(name, "push" | "add" | "insert") {
                     format!(
-                        " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `list[<protocol>] = []`, for a mixed/protocol collection)"
+                        " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
                     )
                 } else {
                     String::new()
@@ -9083,8 +9083,8 @@ impl Checker {
                 _ => Ty::Unknown,
             },
             Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
-                ("list", [x]) => Ty::list(self.resolve_ty_ro_d(x, depth + 1)),
-                ("set", [x]) => Ty::set(self.resolve_ty_ro_d(x, depth + 1)),
+                ("List", [x]) => Ty::list(self.resolve_ty_ro_d(x, depth + 1)),
+                ("Set", [x]) => Ty::set(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Channel", [x]) => Ty::channel(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Shared", [x]) => Ty::shared(self.resolve_ty_ro_d(x, depth + 1)),
@@ -9095,7 +9095,7 @@ impl Checker {
                     self.resolve_ty_ro_d(x, depth + 1),
                     self.resolve_ty_ro_d(e, depth + 1),
                 ),
-                ("map", [k, v]) => Ty::map(
+                ("Map", [k, v]) => Ty::map(
                     self.resolve_ty_ro_d(k, depth + 1),
                     self.resolve_ty_ro_d(v, depth + 1),
                 ),
@@ -11620,11 +11620,11 @@ mod graph_tests {
         let t = TmpDir::new();
         t.write(
             "types.chz",
-            "newtype Stack[T] = list[T]:\n    fn size(self) -> int:\n        return list(self).len()\n",
+            "newtype Stack[T] = List[T]:\n    fn size(self) -> int:\n        return List(self).len()\n",
         );
         let entry = t.write(
             "main.chz",
-            "import Stack from types\nfn main():\n    s: Stack[int] = Stack([1, 2, 3])\n    print(s.size())\n    xs: list[int] = list(s)\n    print(xs[0])\nmain()\n",
+            "import Stack from types\nfn main():\n    s: Stack[int] = Stack([1, 2, 3])\n    print(s.size())\n    xs: List[int] = List(s)\n    print(xs[0])\nmain()\n",
         );
         assert!(
             check_entry(&entry).is_ok(),
@@ -11637,7 +11637,7 @@ mod graph_tests {
     #[test]
     fn generic_newtype_cross_module_arity_rejected() {
         let t = TmpDir::new();
-        t.write("types.chz", "newtype Stack[T] = list[T]\n");
+        t.write("types.chz", "newtype Stack[T] = List[T]\n");
         let entry = t.write(
             "main.chz",
             "import types\nfn main():\n    s: types.Stack[int, str] = types.Stack([1])\n    print(1)\nmain()\n",

@@ -5,7 +5,7 @@
 #   - any user struct with `next(self) -> Option[T]`
 #
 # `T` is inferred by unifying the iterand's element type into the bound's arg — so it flows out into
-# return types (`-> T`, `-> list[T]`) and into the loop variable inside the body.
+# return types (`-> T`, `-> List[T]`) and into the loop variable inside the body.
 
 fn first_or[S: Iterator[T], T](xs: S, default: T) -> T:
     for x in xs:
@@ -19,7 +19,7 @@ fn count[S: Iterator[T], T](xs: S) -> int:
         n = n + 1
     return n
 
-fn to_list[S: Iterator[T], T](xs: S) -> list[T]:
+fn to_list[S: Iterator[T], T](xs: S) -> List[T]:
     out := []
     for x in xs:
         out.push(x)

@@ -32,9 +32,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 
 ## Language v1 — feature set
 
-**Core:** `int float bool str`, `list[T]`, `map[K,V]`, `set[T]`, `tuple`, `fn`, `struct`, `enum`,
+**Core:** `int float bool str`, `List[T]`, `Map[K,V]`, `Set[T]`, `tuple`, `fn`, `struct`, `enum`,
 `if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
-(`list`/`map`/`set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
+(`List`/`Map`/`Set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
 `Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol).
 
 **Included:**
@@ -241,7 +241,7 @@ reachable elsewhere **only via import**, accessed by the same bound last-segment
 import core.geo                      # binds `geo`
 p: geo.Point = geo.Point(1, 2)       # qualified construction + annotation
 c := geo.Color.Red                   # qualified enum variant
-xs: list[geo.Point] = []             # qualified type inside a generic
+xs: List[geo.Point] = []             # qualified type inside a generic
 
 import Point from core.geo           # named import → bare use
 q := Point(3, 4)                     # bare construction
@@ -282,7 +282,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 ## Standard library
 
 - **Builtins (no import):** `print`, `range`, casts (`int()`/`str()`/`float()`),
-  `ord`/`chr`, `set()`/`set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
+  `ord`/`chr`, `Set()`/`Set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
   (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
   `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
@@ -298,15 +298,15 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a `float`
   parameter DEFAULT value (`fn g(a: float = 3)`), a
   `-> float` return, a `float` struct field, native/`extern` `double` params, and a **mixed-numeric-literal**
-  collection (a list/map literal with ≥1 float literal infers `list[float]`/`map[_, float]`). The compiler
+  collection (a list/map literal with ≥1 float literal infers `List[float]`/`Map[_, float]`). The compiler
   emits a real conversion (`Op::CoerceFloat`; the interp applies an equivalent helper) so the checked path
   and the parity harness are byte-identical across both engines. Lossy conversions stay type errors
-  (`y: int = 2.3`, `-> int: return 2.3`, `float` into `list[int]`, `int`→`float` across a **newtype**
+  (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`, `int`→`float` across a **newtype**
   boundary). Widening is **scalar-at-the-sink**: a compound/nested float annotation is NOT widened —
-  `list[list[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int literal `list[float] =
-  [1, 2]`, and a non-literal RHS (`list[float] = f()`) all stay type errors (use explicit floats or a
+  `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int literal `List[float] =
+  [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors (use explicit floats or a
   mixed literal). Carve-outs: a plain reassignment `x = 3` to a `float` local is rejected (type-blind
-  target), and an un-annotated non-literal mixed collection is inferred `list[float]` but its non-literal
+  target), and an un-annotated non-literal mixed collection is inferred `List[float]` but its non-literal
   `int` element is not widened at runtime (annotate to convert).
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
@@ -315,10 +315,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `bytes` is `Hashable` (valid map/set key). `str(b)` / `print(b)` / interpolation use the Python
   `b'...'` repr. Immutable (no `b[i] = x`). **`bytearray`** is the **mutable sibling** (Python
   `bytearray` model), **shipped**: constructor-only (`bytearray()` empty, `bytearray(N)` N zero bytes,
-  `bytearray(b)`/`bytearray([ints])` from a bytes/list[int]) — no `ba"..."` literal. `ba[i]` -> `int`,
+  `bytearray(b)`/`bytearray([ints])` from a bytes/List[int]) — no `ba"..."` literal. `ba[i]` -> `int`,
   `ba[i] = x` mutates in place (`IndexSet`; value 0–255), `ba[a:b:c]` -> a new `bytearray`,
   `for x in ba` yields `int`, `len`, `.push(int)` / `.pop() -> Option[int]` / `.extend(bytes|bytearray|
-  list[int])`, `==` structural (incl. cross-type `bytes == bytearray` content-equal, Python parity).
+  List[int])`, `==` structural (incl. cross-type `bytes == bytearray` content-equal, Python parity).
   `bytearray` is **NOT** `Hashable` (mutable ⇒ not a map/set key, like `list`); its repr is
   `bytearray(b'...')`. The conversion bridge moves between the forms: `bytes(ba)` snapshots,
   `bytearray(b)` copies. Crosses the `--parallel` airlock by value (deep copy, like `list`).
@@ -335,7 +335,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 - **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
   `find_all`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
   are byte offsets); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
-  `post(url, body)` returning a `Response` struct `{status, body, headers: map[str,str]}`, where a
+  `post(url, body)` returning a `Response` struct `{status, body, headers: Map[str,str]}`, where a
   ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
   dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).
   `Match`/`Response` (and `ProcResult` from `std.process`) are **module-owned** struct types, not
@@ -366,10 +366,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   unwrap→op→rewrap); a `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 (define a method);
   equality (`==`/`!=`) works for any underlying. Methods
   + `Stringable`/`Hashable`/`Add`/`Comparable` work via the newtype's own methods (hash/str dispatched
-  at runtime in both engines). **Generic newtypes** (`newtype Stack[T] = list[T]`) are methods-only
+  at runtime in both engines). **Generic newtypes** (`newtype Stack[T] = List[T]`) are methods-only
   (no native operator auto-flow even for `Box[T] = T`): ctor infers type args (turbofish
   `Stack[int]([])` when an empty literal can't bind `T`), cast-unwrap propagates the instantiation
-  (`list(s)` for `s: Stack[int]` ⇒ `list[int]`). v1 limits: aggregate underlyings get
+  (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get
   identity+construct+unwrap+own-methods only (no `.push`/index/iterate forwarding); no `derive`;
   static / associated methods on a **newtype** are a follow-up (they **have** landed for struct +
   enum — see the "Static methods" milestone note below).
@@ -630,7 +630,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
-| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable`/`Add`/`Comparable` via the newtype's own methods (runtime hash/str dispatch, both engines). **Generic newtypes** (`newtype Stack[T] = list[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`list(s)` for `s: Stack[int]` ⇒ `list[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note). Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable`/`Add`/`Comparable` via the newtype's own methods (runtime hash/str dispatch, both engines). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note). Surface in [`docs/syntax.md §7b`](syntax.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 
 > Native FFI (Level-2 compiled-in bindings) **shipped in M6c**; **Level-3 dynamic C-ABI FFI v1

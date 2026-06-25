@@ -14,7 +14,7 @@ struct Pair[A, B]:
         return self.second
 
 struct Stack[T]:
-    items: list[T]
+    items: List[T]
 
     fn push(self, x: T):
         self.items.push(x)

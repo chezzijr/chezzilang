@@ -10,14 +10,14 @@ enum Json:
     Bool(bool)
     Num(float)
     Str(str)
-    Arr(list[Json])
-    Obj(map[str, Json])
+    Arr(List[Json])
+    Obj(Map[str, Json])
 
 # ----- parsing -------------------------------------------------------------------------------
 
 # A cursor over the input's codepoints. Fields mutate in place across method calls.
 struct Parser:
-    src: list[str]
+    src: List[str]
     pos: int
     len: int
 
@@ -325,14 +325,14 @@ fn as_str(j: Json) -> Option[str]:
         Json.Str(s): return Some(s)
         _: return None
 
-# The object's underlying `map[str, Json]` (None if `j` is not an object).
-fn as_object(j: Json) -> Option[map[str, Json]]:
+# The object's underlying `Map[str, Json]` (None if `j` is not an object).
+fn as_object(j: Json) -> Option[Map[str, Json]]:
     match j:
         Json.Obj(m): return Some(m)
         _: return None
 
-# The array's underlying `list[Json]` (None if `j` is not an array).
-fn as_array(j: Json) -> Option[list[Json]]:
+# The array's underlying `List[Json]` (None if `j` is not an array).
+fn as_array(j: Json) -> Option[List[Json]]:
     match j:
         Json.Arr(xs): return Some(xs)
         _: return None

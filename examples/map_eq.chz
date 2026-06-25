@@ -5,7 +5,7 @@
 
 struct Cfg:
     name: str
-    opts: map[str, int]
+    opts: Map[str, int]
 
 # Top-level: reordered keys are still ==.
 print({"a": 1, "b": 2} == {"b": 2, "a": 1})        # true

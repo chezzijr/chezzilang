@@ -5,8 +5,8 @@ methods on the built-in types, the runtime types, and the `std.*` modules. Langu
 in [`syntax.md`](syntax.md); this file is the **library** surface.
 
 Conventions used below:
-- Signatures use Chezzi types: `int`, `float`, `bool`, `str`, `nil`, `list[T]`, `map[K, V]`,
-  `set[T]`, `tuple` (`(A, B)`), `bytes`, `bytearray`, `Option[T]`, `Result[T]` / `Result[T, E]`,
+- Signatures use Chezzi types: `int`, `float`, `bool`, `str`, `nil`, `List[T]`, `Map[K, V]`,
+  `Set[T]`, `tuple` (`(A, B)`), `bytes`, `bytearray`, `Option[T]`, `Result[T]` / `Result[T, E]`,
   `fn(A) -> B` (function values).
 - "*mutates*" means the call changes the receiver in place and returns `nil`; otherwise a method
   returns a fresh value and leaves the receiver untouched.
@@ -19,7 +19,7 @@ Conventions used below:
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `print` | `print(...args, sep=" ", end="\n") -> nil` | Write each argument (any type) to stdout. Variadic. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. |
-| `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> list[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
+| `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). |
@@ -31,9 +31,9 @@ Conventions used below:
 
 | Form | Result | Notes |
 |------|--------|-------|
-| `list[T]()` / `list(xs)` | `list[T]` | Empty list / convert an iterable to a list. List literal: `[a, b, c]`. |
-| `map[K, V]()` / `{}` | `map[K, V]` | Empty map. Map literal: `{k: v, ...}`. |
-| `set(...elems)` | `set[T]` | Set from elements. Empty set is `set()` (`{}` is the empty **map**). |
+| `List[T]()` / `List(xs)` | `List[T]` | Empty list / convert an iterable to a list. List literal: `[a, b, c]`. |
+| `Map[K, V]()` / `{}` | `Map[K, V]` | Empty map. Map literal: `{k: v, ...}`. |
+| `Set(...elems)` | `Set[T]` | Set from elements. Empty set is `Set()` (`{}` is the empty **map**). |
 | `bytes(s)` | `bytes` | UTF-8 encode a `str` (same as `s.encode()`). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 
@@ -47,12 +47,12 @@ Conventions used below:
 | `len` | `() -> int` | Character (codepoint) count. |
 | `upper` / `lower` | `() -> str` | Case-mapped copy. |
 | `trim` | `() -> str` | Strip leading/trailing whitespace. |
-| `split` | `(sep: str) -> list[str]` | Split on `sep`. |
-| `chars` | `() -> list[str]` | One-character strings. |
+| `split` | `(sep: str) -> List[str]` | Split on `sep`. |
+| `chars` | `() -> List[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
 | `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
 | `contains` | `(sub: str) -> bool` | Substring test. |
-| `join` | `(xs: list[str]) -> str` | Join `xs` with the receiver as the separator. |
+| `join` | `(xs: List[str]) -> str` | Join `xs` with the receiver as the separator. |
 | `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` → unchanged. |
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
@@ -62,7 +62,7 @@ Conventions used below:
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
-| `split_lines` | `() -> list[str]` | Split on `"\n"`. |
+| `split_lines` | `() -> List[str]` | Split on `"\n"`. |
 | `to_int` | `() -> int?` | Safe parse (trims first): `Some(n)` or `None` on bad input. |
 | `to_float` | `() -> float?` | Safe parse (trims first): `Some(f)` or `None` on bad input. |
 | `encode` | `() -> bytes` | UTF-8 encode. |
@@ -74,7 +74,7 @@ methods are receiver-method aliases of the identically-named `std.str` free fns 
 keep working. (One safety divergence: `s.repeat(n)` raises a recoverable capacity-overflow fault for a
 huge `n` rather than allocating until it aborts.)
 
-### `list[T]`
+### `List[T]`
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
@@ -83,44 +83,44 @@ huge `n` rather than allocating until it aborts.)
 | `reverse` | `() -> nil` | *mutates* — reverse in place. |
 | `contains` | `(x: T) -> bool` | |
 | `index_of` | `(x: T) -> int` | First index, or `-1`. |
-| `concat` | `(other: list[T]) -> list[T]` | Returns a **new** list. Operator form: `a + b`. |
-| `extend` | `(other: list[T]) -> nil` | *mutates* — append all of `other`. |
+| `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
+| `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists only (`int`→`int`). |
 | `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). |
 | `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. |
-| `map` | `(f: fn(T) -> U) -> list[U]` | Returns a new list. |
-| `filter` | `(pred: fn(T) -> bool) -> list[T]` | Returns a new list. |
+| `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
+| `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
 
 `map`/`filter`/`fold` iterate over a **snapshot** of the receiver's elements taken at call time: a
 callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration
 sequence (and never faults). Same as comprehensions and Python `map`/`filter`.
 
-### `map[K, V]`
+### `Map[K, V]`
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
 | `has` | `(key: K) -> bool` | |
 | `get` | `(key: K) -> Option[V]` | |
-| `keys` | `() -> list[K]` | Insertion order. |
-| `values` | `() -> list[V]` | Insertion order. |
+| `keys` | `() -> List[K]` | Insertion order. |
+| `values` | `() -> List[V]` | Insertion order. |
 | `remove` | `(key: K) -> Option[V]` | *mutates* — returns the removed value, or `None`. |
-| `merge` | `(other: map[K, V]) -> map[K, V]` | Returns a **new** map (`other` wins on key clash). |
-| `update` | `(other: map[K, V]) -> nil` | *mutates* — merge `other` into self. |
+| `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
+| `update` | `(other: Map[K, V]) -> nil` | *mutates* — merge `other` into self. |
 
 Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
-### `set[T]`
+### `Set[T]`
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
 | `has` | `(x: T) -> bool` | |
 | `add` | `(x: T) -> nil` | *mutates* — idempotent insert. |
 | `remove` | `(x: T) -> bool` | *mutates* — returns whether it was present. |
-| `union` / `intersection` / `difference` | `(other: set[T]) -> set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
+| `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
 
-> **Set operators.** `\| & - ^` on two `set[T]` are union / intersection / difference /
+> **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
 > (concat) and `*` (repeat); see [`syntax.md` §4](syntax.md).
 
@@ -204,15 +204,15 @@ Constants: `math.pi`, `math.e`.
 ### `std.os`
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `args` | `() -> list[str]` | Program args (the positionals after the script path). |
+| `args` | `() -> List[str]` | Program args (the positionals after the script path). |
 | `env` | `(key: str) -> Option[str]` | Environment variable. |
 | `getcwd` | `() -> Result[str]` | |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt (status clamped `0..=255`), unwinding past any `recover:`. **Does NOT run `defer`s.** |
 
 ### `std.fs`
-**Queries:** `list_dir(path) -> Result[list[str]]` (sorted names) · `exists(path) -> bool` ·
+**Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·
 `is_file(path) -> bool` · `is_dir(path) -> bool` · `size(path) -> Result[int]` ·
-`glob(pattern) -> Result[list[str]]` (`*`/`?` in the final path component).
+`glob(pattern) -> Result[List[str]]` (`*`/`?` in the final path component).
 
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
@@ -241,7 +241,7 @@ if you need it.
 `struct ProcResult { stdout: str, stderr: str, code: int }`. A non-zero exit is a normal
 `Ok(ProcResult)` with `code != 0` (both streams kept); **only a spawn failure** (no such program,
 permission denied) is `Err`. A signal-killed process has no exit code and reports `code = -1`.
-`run_args(prog: str, args: list[str]) -> Result[ProcResult]` — run `prog` directly with `args` as the
+`run_args(prog: str, args: List[str]) -> Result[ProcResult]` — run `prog` directly with `args` as the
 argv vector, **NO shell** — so metacharacters in `args` (`$(...)`, `;`, `&&`, …) are passed literally
 and are **injection-safe**. Same `Ok`/`Err` contract as `run`. Prefer `run_args` over `run`/`cmd` when
 any argument comes from untrusted input.
@@ -261,22 +261,22 @@ Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed determini
 `[lo, hi)`; **faults** `rand.int(lo, hi): hi must be > lo` if `hi <= lo`) · `bool() -> bool`.
 The stream auto-seeds from OS entropy on first use; call `seed(n)` to make it reproducible. Draws are
 inline CPU (not I/O). Generic collection helpers (`shuffle`/`choice`/`sample`) live in `std.iter` —
-the native seam carries only scalars, so it cannot return a generic `list[T]`.
+the native seam carries only scalars, so it cannot return a generic `List[T]`.
 **Limit (not a bug):** the PRNG state is a single process-global, so under `--parallel` *concurrent*
 draws from multiple tasks interleave nondeterministically (engines may diverge). *Sequential* draws
 are deterministic and byte-identical across all engines once seeded — draw in one task, or guard with a
 `Shared`/lock, when you need reproducibility under concurrency.
 
 ### `std.regex`
-Returns use `struct Match { text: str, start: int, end: int, groups: list[str] }` (byte offsets;
+Returns use `struct Match { text: str, start: int, end: int, groups: List[str] }` (byte offsets;
 `groups` are capture groups 1..n; a non-participating optional group is `""`).
 `is_match(pattern, subject) -> Result[bool]` · `find(pattern, subject) -> Result[Option[Match]]` ·
-`find_all(pattern, subject) -> Result[list[Match]]` · `replace_all(pattern, subject, repl) -> Result[str]` ·
-`split(pattern, subject) -> Result[list[str]]`. A bad pattern is `Err`. Patterns are ordinary
+`find_all(pattern, subject) -> Result[List[Match]]` · `replace_all(pattern, subject, repl) -> Result[str]` ·
+`split(pattern, subject) -> Result[List[str]]`. A bad pattern is `Err`. Patterns are ordinary
 strings, so a literal backslash is doubled: `"\\d+"`, `"\\."`.
 
 ### `std.request`
-Returns use `struct Response { status: int, body: str, headers: map[str, str] }` (header names
+Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine).
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
@@ -287,7 +287,7 @@ and as `regex.Match(...)`; or `import Match from std.regex`). The names are ther
 types — a user `struct Response` without `import std.request` is their own type.
 `get(url, timeout_ms?: int) -> Result[Response]` · `post(url, body, timeout_ms?: int) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·
-`request(method, url, body, headers: map[str, str], timeout_ms?: int) -> Result[Response]` (method in UPPERCASE).
+`request(method, url, body, headers: Map[str, str], timeout_ms?: int) -> Result[Response]` (method in UPPERCASE).
 The optional trailing `timeout_ms` sets a **per-request total deadline** that overrides the agent's
 default caps (connect 10s / read 30s / write 30s) for that one call; `timeout_ms <= 0` or omitted falls
 back to the defaults. A timeout (like any transport failure) surfaces as a recoverable `Err`, never a
@@ -396,7 +396,7 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   `A-Za-z0-9-._~` literal and `%XX`-escapes everything else (uppercase hex) · `url_decode(s) ->
   Result[str]` reverses it. **Strict 3986** — `+` is *not* treated as a space (that's
   `application/x-www-form-urlencoded`, a different scheme).
-- query string builder: `query_encode(params: map[str, str]) -> str` assembles a `k=v&k2=v2` query
+- query string builder: `query_encode(params: Map[str, str]) -> str` assembles a `k=v&k2=v2` query
   string — both key and value are percent-encoded with the same `url_encode` escaper. Keys are
   **sorted by their RAW (pre-encoding) value** so the output is deterministic regardless of map
   iteration order (a stable golden + 3-engine parity). An empty map yields `""` (no leading `?`);
@@ -455,7 +455,7 @@ dirname/split/splitext) and Go `path.Clean` (`normalize`). `import std.path` (or
 | `stem` | `(p) -> str` | `basename` with its `ext` removed: `stem("a/b.tar.gz")` → `"b.tar"`, `stem(".bashrc")` → `".bashrc"`, `stem("a.txt")` → `"a"`. |
 | `with_ext` | `(p, e) -> str` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. |
 | `normalize` | `(p) -> str` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
-| `join` | `(parts: list[str]) -> str` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
+| `join` | `(parts: List[str]) -> str` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. |
 
 ### `std.datetime` — civil-calendar date/time (UTC-only)
 Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native
@@ -514,7 +514,7 @@ across all three engines** (interp / VM / `--parallel`). `import std.collections
 **EMPTY SEMANTICS (load-bearing, consistent):** every removal/peek returns `Option[T]` — an empty
 container yields `None`, never a fault, matching the builtin `list.pop() -> Option[T]`.
 
-**`Heap[T]`** — a binary heap over a backing `list[T]` with a comparator **closure**. The comparator
+**`Heap[T]`** — a binary heap over a backing `List[T]` with a comparator **closure**. The comparator
 contract (the footgun): `less(a, b) == true` means `a` is **more extreme** than `b`, so `a` pops
 **first**. Pass `fn(a,b): a < b` for a **min-heap** (smallest first) and `fn(a,b): a > b` for a
 **max-heap** — a "reverse" heap is just the flipped comparator. This generalises to any `T` (floats,
@@ -522,7 +522,7 @@ custom priorities, `(priority, item)` tuples) with **no `Comparable` impl** requ
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |
-| `Heap` | `Heap(data: list[T], less: fn(T,T)->bool)` | Raw constructor; `Heap([], cmp)` for an empty heap with comparator `cmp`. |
+| `Heap` | `Heap(data: List[T], less: fn(T,T)->bool)` | Raw constructor; `Heap([], cmp)` for an empty heap with comparator `cmp`. |
 | `min_heap` | `() -> Heap[int]` | Int min-heap factory (`a < b`). |
 | `max_heap` | `() -> Heap[int]` | Int max-heap factory (`a > b`). |
 | `from_list` | `(xs, less) -> Heap[T]` | Heapify (push-loop, **O(n log n)**, NOT bottom-up O(n)); `xs` untouched. |
@@ -544,7 +544,7 @@ peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is infe
 | `.peek_front()` / `.peek_back()` | `() -> Option[T]` | Head/tail without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
 
-**`Counter[T: Hashable]`** — a frequency table over `map[T, int]` (`T` must be `Hashable`, like any
+**`Counter[T: Hashable]`** — a frequency table over `Map[T, int]` (`T` must be `Hashable`, like any
 map key). Construct directly: **`Counter({})`** — `T` is inferred from the first `add`/`count`. (No
 `counter()` factory, same `T`-binding reason as `Deque`.)
 
@@ -554,7 +554,7 @@ map key). Construct directly: **`Counter({})`** — `T` is inferred from the fir
 | `.add_n(x, n)` | `(T, int) -> nil` | Increment by `n` (creates the entry if absent; `n` may be negative). **O(1)**. |
 | `.count(x)` | `(T) -> int` | Count of `x`, **0 if never added**. **O(1)**. |
 | `.total()` | `() -> int` | Sum of all counts. **O(n)**. |
-| `.most_common(k)` | `(int) -> list[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
+| `.most_common(k)` | `(int) -> List[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
 
 **Counter tie-break:** equal counts keep **insertion order** — guaranteed because `map.keys()` yields
 insertion order **and** the list `sort_by` is a **stable** merge sort (both engines). This is a
@@ -566,7 +566,7 @@ on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no
 `popitem` primitive; out of scope).
 
 ### `std.concurrency.collection` — thread-safe collections over `RwShared`
-Pure-Chezzi generic structs wrapping the `RwShared[map[...]]` runtime cell (many concurrent readers
+Pure-Chezzi generic structs wrapping the `RwShared[Map[...]]` runtime cell (many concurrent readers
 **or** one exclusive writer), so they are **identical across all three engines** (interp / VM /
 `--parallel`). `import std.concurrency.collection` (or `as col`). This is the **first nested std
 module** — the dotted path resolves to `std/concurrency/collection.chz` with no special-casing.
@@ -580,7 +580,7 @@ wrappers bake the correct single-lock idiom in.
 task makes is visible to the parent after the join. (`RwShared` is sendable and shares; a struct of
 all-sendable fields is too.)
 
-**Construction (no factory):** there is **no** `new_map()`/`new_counter()` — a no-argument generic
+**Construction (no factory):** there is **no** `new_Map()`/`new_counter()` — a no-argument generic
 factory cannot bind `K`/`V` (turbofish does not propagate into the inner `RwShared({})`). Construct
 **directly** at the use site: **`ConcurrentMap(RwShared({}))`** / **`ConcurrentCounter(RwShared({}))`**;
 `K`/`V` are deferred from the empty `{}` and inferred from the first method call (same idiom as
@@ -592,7 +592,7 @@ the bare `RwShared` ctor — only the whole-module `import std.concurrency` does
 wrapper method is flat (no nested locking), so user code is safe as long as it does not call a wrapper
 method from inside another wrapper's closure.
 
-**`ConcurrentMap[K: Hashable, V]`** — thread-safe map over `RwShared[map[K, V]]`. `get`/`contains`/
+**`ConcurrentMap[K: Hashable, V]`** — thread-safe map over `RwShared[Map[K, V]]`. `get`/`contains`/
 `len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` take the **exclusive write
 lock**.
 
@@ -604,9 +604,9 @@ lock**.
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check, the insert, AND capturing the value to return all happen inside ONE **exclusive write** lock (the value is stashed into a captured shared box by the write closure) — so there is no second lock, and no window in which a concurrent `remove` could delete the just-inserted key. Returns the existing value, or `default` if it was absent. |
-| `.snapshot()` | `() -> map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
+| `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 
-**`ConcurrentCounter[K: Hashable]`** — thread-safe frequency table over `RwShared[map[K, int]]`.
+**`ConcurrentCounter[K: Hashable]`** — thread-safe frequency table over `RwShared[Map[K, int]]`.
 `count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do
 their read-modify-write inside **one** closure, so N tasks each incrementing the same key produce an
 **exact** final count (no lost updates — the classic race-free concurrent counter).
@@ -626,15 +626,15 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 `clamp[T: Comparable](x, lo, hi) -> T`.
 
 ### `std.iter` — list/iterator helpers
-`enumerate(xs) -> list[(int, T)]` · `zip(xs, ys) -> list[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
+`enumerate(xs) -> List[(int, T)]` · `zip(xs, ys) -> List[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
 `fold(xs, init, f)` · `reduce(xs, f) -> T` (non-empty) · `take(xs, n)` · `drop(xs, n)` ·
 `any(xs, pred) -> bool` · `all(xs, pred) -> bool` · `find(xs, pred) -> Option[T]` ·
-`flatten(xss) -> list[T]`.
+`flatten(xss) -> List[T]`.
 Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi
-because the native seam can't return a generic `list[T]`):
-`shuffle(xs) -> list[T]` (new randomly-permuted list, Fisher–Yates, non-mutating) ·
+because the native seam can't return a generic `List[T]`):
+`shuffle(xs) -> List[T]` (new randomly-permuted list, Fisher–Yates, non-mutating) ·
 `choice(xs) -> Option[T]` (`None` on empty) ·
-`sample(xs, k) -> list[T]` (`k` elements without replacement; `k` clamped to `[0, len]`).
+`sample(xs, k) -> List[T]` (`k` elements without replacement; `k` clamped to `[0, len]`).
 
 ### `std.json` — JSON
 ```chezzi
@@ -643,16 +643,16 @@ enum Json:
     Bool(bool)
     Num(float)
     Str(str)
-    Arr(list[Json])
-    Obj(map[str, Json])
+    Arr(List[Json])
+    Obj(Map[str, Json])
 ```
 `parse(s) -> Result[Json]` · `stringify(j) -> str` · `is_null(j) -> bool` ·
 `as_bool(j) -> Option[bool]` · `as_float(j) -> Option[float]` · `as_int(j) -> Option[int]` ·
-`as_str(j) -> Option[str]` · `as_object(j) -> Option[map[str, Json]]` · `as_array(j) -> Option[list[Json]]` ·
+`as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
 
 For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
-struct / `map[str, V]` / `list[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
+struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
 ignored, and recursive/generic struct targets are rejected (use the `Json` enum for those).
 
 A JSON *literal in Chezzi source* clashes with string interpolation, so use a raw string

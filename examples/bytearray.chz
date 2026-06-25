@@ -9,7 +9,7 @@ fn main():
     print(bytearray())                 # bytearray(b'')
     print(bytearray(3))                # bytearray(b'\x00\x00\x00') — N zero bytes
     print(bytearray(b"\x01\x02"))      # bytearray(b'\x01\x02') — from a bytes
-    ba := bytearray([1, 2, 3, 255])    # from a list[int]
+    ba := bytearray([1, 2, 3, 255])    # from a List[int]
     print(ba)                          # bytearray(b'\x01\x02\x03\xff')
 
     # Display / str() / interpolation — the bytearray(b'...') repr (distinct from bytes' bare b'...').
@@ -42,7 +42,7 @@ fn main():
     # len.
     print(ba.len())
 
-    # Mutating methods: push (one byte), pop (-> Option[int]), extend (bytes / bytearray / list[int]).
+    # Mutating methods: push (one byte), pop (-> Option[int]), extend (bytes / bytearray / List[int]).
     ba.push(10)
     print(ba)
     print(ba.pop())                    # Some(10)

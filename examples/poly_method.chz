@@ -38,17 +38,17 @@ struct Line:
     fn area(self) -> int:
         return 0
 
-fn total(shapes: list[Shape]) -> int:
+fn total(shapes: List[Shape]) -> int:
     acc := 0
     for s in shapes:
         acc = acc + s.area()
     return acc
 
 fn main():
-    # Annotated `list[Shape]`: a heterogeneous/protocol collection needs the explicit element type.
+    # Annotated `List[Shape]`: a heterogeneous/protocol collection needs the explicit element type.
     # Without it, refine-on-first-use pins the element to the first push's concrete struct (`Sq`),
     # and a later `Rect`/`Tri`/… push is a type error. The annotation is also clearer to readers.
-    shapes: list[Shape] = []
+    shapes: List[Shape] = []
     shapes.push(Sq(3))      # 9
     shapes.push(Rect(2, 4)) # 8
     shapes.push(Tri(4, 5))  # 10

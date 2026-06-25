@@ -3,7 +3,7 @@
 
 import std.collections as col
 
-fn drain_heap(h: col.Heap[int]) -> list[int]:
+fn drain_heap(h: col.Heap[int]) -> List[int]:
     out := []
     while true:
         match h.pop():

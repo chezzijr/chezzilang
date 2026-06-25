@@ -594,7 +594,7 @@ conformance 7/7, clippy `--all-targets -D warnings` clean.
 ## M19 — N-way polymorphic method-call IC (CALLMETHOD ADAPTIVE) — 2026-06-13
 
 New **`poly_method`** bench (`benches/chz/poly_method.chz`: a protocol `Shape.area()` implemented by
-four distinct struct types, a heterogeneous `list[Shape]` walked at ONE `.area()` call site, ~4M
+four distinct struct types, a heterogeneous `List[Shape]` walked at ONE `.area()` call site, ~4M
 method calls) — a genuinely **megamorphic** `CallMethod` site. Measured baseline on the merged HEAD
 (`2a934a8`): **1.886 s ± 0.003 / 6.0× CPython** — *worse* than the monomorphic `struct` bench, because
 the existing single-cell `MethodIcCell` holds ONE `tid`. A rotating-4-type site misses on **every**

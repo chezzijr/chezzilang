@@ -18,7 +18,7 @@ import std.math
 # ---- sorting -------------------------------------------------------------------------------------
 
 # Merge two already-sorted lists into one sorted list.
-fn merge(a: list[int], b: list[int]) -> list[int]:
+fn merge(a: List[int], b: List[int]) -> List[int]:
     out := []
     i := 0
     j := 0
@@ -38,7 +38,7 @@ fn merge(a: list[int], b: list[int]) -> list[int]:
     return out
 
 # Recursive merge sort: splits in half, sorts each, merges. Returns a new list.
-fn sort(xs: list[int]) -> list[int]:
+fn sort(xs: List[int]) -> List[int]:
     n := xs.len()
     if n <= 1:
         return xs
@@ -57,7 +57,7 @@ fn sort(xs: list[int]) -> list[int]:
 # ---- search --------------------------------------------------------------------------------------
 
 # Binary search over a sorted list. Returns Some(index) if present, else None.
-fn bsearch(xs: list[int], target: int) -> int?:
+fn bsearch(xs: List[int], target: int) -> int?:
     lo := 0
     hi := xs.len() - 1
     while lo <= hi:
@@ -84,7 +84,7 @@ struct Stats:
     fn line(self) -> str:
         return "count={self.count} sum={self.sum} min={self.min} max={self.max}"
 
-fn analyze(xs: list[int]) -> Stats:
+fn analyze(xs: List[int]) -> Stats:
     n := xs.len()
     total := 0
     lo := xs[0]
@@ -105,7 +105,7 @@ fn analyze(xs: list[int]) -> Stats:
 
 # ---- helpers -------------------------------------------------------------------------------------
 
-fn join_ints(xs: list[int]) -> str:
+fn join_ints(xs: List[int]) -> str:
     out := ""
     i := 0
     for x in xs:

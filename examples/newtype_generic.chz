@@ -1,34 +1,34 @@
 # Generic newtype (M21) — type parameters on a `newtype`, the Go defined-type model with generics.
 # A type-parameterized newtype is METHODS-ONLY: it gets NO native operator auto-flow (even a
 # `newtype Box[T] = T` over a numeric T) — operators come only from its own methods. Its type args
-# ride on the value's type, so a cast-unwrap (`list(s)`) recovers the instantiated underlying.
+# ride on the value's type, so a cast-unwrap (`List(s)`) recovers the instantiated underlying.
 
-# A generic stack over `list[T]`, with methods that reference the type param `T`.
-newtype Stack[T] = list[T]:
+# A generic stack over `List[T]`, with methods that reference the type param `T`.
+newtype Stack[T] = List[T]:
     fn size(self) -> int:
-        return list(self).len()
+        return List(self).len()
     fn pushed(self, x: T) -> Stack[T]:
-        xs := list(self)
+        xs := List(self)
         xs.push(x)
         return Stack(xs)
     fn top(self) -> Option[T]:
-        xs := list(self)
+        xs := List(self)
         if xs.len() == 0:
             return None
         return Some(xs[xs.len() - 1])
 
 # A generic counter map keyed by T (Hashable, as a map key must be), methods-only. `bump` references
 # T; `total` sums the values. The Hashable bound on the param comes along like struct/enum bounds.
-newtype Tally[T: Hashable] = map[T, int]:
+newtype Tally[T: Hashable] = Map[T, int]:
     fn bump(self, k: T) -> Tally[T]:
-        m := map(self)
+        m := Map(self)
         cur := 0
         if k in m:
             cur = m[k]
         m[k] = cur + 1
         return Tally(m)
     fn total(self) -> int:
-        m := map(self)
+        m := Map(self)
         sum := 0
         for _, v in m:
             sum = sum + v
@@ -49,8 +49,8 @@ fn main():
         Some(x): print(x)           # 4
         None: print(-1)
 
-    # cast-unwrap propagates the instantiation: list(s2) is list[int]
-    xs: list[int] = list(s2)
+    # cast-unwrap propagates the instantiation: List(s2) is List[int]
+    xs: List[int] = List(s2)
     print(xs[0] + xs[3])            # 1 + 4 = 5
 
     # turbofish construction when args can't bind T (empty list)
