@@ -9835,7 +9835,12 @@ impl Checker {
         if name == "Channel" {
             return true;
         }
-        if let Some(i) = self.structs.get(name) {
+        // Look the struct up by its module-scoped runtime key (`bare_key`), NOT the bare name: under
+        // the real `check_graph` path `structs` is keyed `<module>::Name`, so a bare-name lookup
+        // always misses and wrongly reports user generic structs as non-generic — which made the
+        // `infer_named_call` gate reject explicit call-site type args (`Pair[int, str](…)`) that the
+        // struct-ctor branch fully supports. Mirrors the newtype arm below + the ctor branch itself.
+        if let Some(i) = self.structs.get(&self.bare_key(name)) {
             return !i.type_params.is_empty();
         }
         // A generic newtype constructor takes turbofish type args (`Stack[int]([])`) — report it so

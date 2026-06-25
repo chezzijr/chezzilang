@@ -447,6 +447,29 @@ p := Pair[str, str](1, \"a\")
 }
 
 #[test]
+fn explicit_type_args_struct_ok_via_graph() {
+    // REGRESSION: `name_is_generic` looked up `structs` by the BARE name, but under the real
+    // `check_graph` path (which `chezzi check`/`run` use) user structs are keyed by the
+    // module-prefixed `bare_key`. So a generic struct ctor with explicit call-site type args was
+    // wrongly reported non-generic and rejected with "takes no type arguments" — even though the
+    // struct-ctor branch fully supports them. `explicit_type_args_struct_ok` missed this because
+    // `ok()`/`check_src` use the single-module path where keys stay bare. Must use `entry_ok`.
+    entry_ok(
+        "\
+struct Pair[A, B]:
+    a: A
+    b: B
+struct Box[T]:
+    v: T
+p := Pair[int, str](1, \"one\")
+b := Box[int](3)
+print(p.a)
+print(b.v)
+",
+    );
+}
+
+#[test]
 fn ordering_on_comparable_struct_directly_ok() {
     ok(&format!("{POINT}b := Point(1, 2) < Point(3, 4)\n"));
 }
@@ -8653,13 +8676,13 @@ fn all_shipped_examples_typecheck() {
     // examples/*.chz through the real checked path (build_graph + check_graph, mirroring
     // `chezzi check`) so example type-errors are caught from now on.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    // Two shipped examples are INTENTIONAL `chezzi check` failures on base (they pre-date this
-    // change and are deliberately run-only demos that the golden VM tests exercise via `run`, which
-    // bypasses the checker): `panic.chz` (a top-level `panic(...)` demo whose result is used in
-    // value position) and `explicit_type_args.chz` (demos call-site type args the checker doesn't
-    // yet accept — a separate, pre-existing gap). They are allow-listed here so this test catches
-    // NEW checker regressions on the OTHER examples without being blocked by those two known holes.
-    let known_check_failures = ["panic.chz", "explicit_type_args.chz"];
+    // `panic.chz` is an INTENTIONAL `chezzi check` failure on base (a deliberately run-only demo the
+    // golden VM tests exercise via `run`, which bypasses the checker): a top-level `panic(...)` demo
+    // whose result is used in value position. Allow-listed so this test catches NEW checker
+    // regressions on the OTHER examples without being blocked by that known hole.
+    // (`explicit_type_args.chz` USED to be allow-listed too — its struct-ctor turbofish was wrongly
+    // rejected by a `name_is_generic` keying bug; fixed, so it now type-checks and is verified here.)
+    let known_check_failures = ["panic.chz"];
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("examples dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
