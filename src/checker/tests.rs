@@ -5676,14 +5676,60 @@ fn atomic_is_sendable() {
 #[test]
 fn timer_returns_channel_bool() {
     // `timer(ms)` yields a `Channel[bool]`; `recv()` on it composes where a `bool` is expected.
-    ok("fn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n");
+    // `timer` now requires `import std.time` (gated builtin) — see `timer_requires_import`.
+    entry_ok(
+        "import std.time\nfn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n",
+    );
 }
 
 #[test]
 fn timer_arg_must_be_int() {
-    rejects(
-        "fn main():\n    t := timer(\"x\")\n    print(t.recv())\nmain()\n",
+    entry_rejects(
+        "import std.time\nfn main():\n    t := timer(\"x\")\n    print(t.recv())\nmain()\n",
         "expected int",
+    );
+}
+
+#[test]
+fn timer_requires_import() {
+    // Bare `timer(ms)` with NO `import std.time` is an unknown-function error carrying the import hint.
+    let errs = check_entry("fn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown function 'timer'")
+                && e.message.contains("import std.time")),
+        "expected unknown-function + import hint, got: {errs:?}"
+    );
+}
+
+#[test]
+fn timer_whole_module_import_ok() {
+    // A whole-module `import std.time` licenses the bare `timer(ms)` builtin.
+    entry_ok("import std.time\nfn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n");
+}
+
+#[test]
+fn timer_from_import_licenses_and_rejects_rename() {
+    // A selective `import timer from std.time` licenses the bare `timer(ms)` call...
+    entry_ok("import timer from std.time\nfn main():\n    print(timer(50).recv())\nmain()\n");
+    // ...but the opcode-backed `timer` cannot be renamed on import (the runtime skip keys on the name).
+    entry_rejects(
+        "import timer as t2 from std.time\nfn main():\n    print(1)\nmain()\n",
+        "cannot be renamed",
+    );
+}
+
+#[test]
+fn timer_still_reserved() {
+    // The import gate (must-import-to-use) is SEPARATE from the reserved-name gate (can't-shadow):
+    // `timer` STAYS reserved, so a user `struct timer` / `fn timer` is rejected even with the import.
+    entry_rejects(
+        "struct timer:\n    n: int\nfn main():\n    print(1)\nmain()\n",
+        "reserved",
+    );
+    entry_rejects(
+        "fn timer():\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+        "reserved",
     );
 }
 

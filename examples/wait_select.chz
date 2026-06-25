@@ -6,6 +6,8 @@
 # (A `wait` that truly blocks until a sibling produces is a VM/cooperative capability; see the
 # `vm_wait_blocks_then_wakes_on_second_channel` test.)
 
+import std.time
+
 fn main():
     orders := Channel[str]()
     cancels := Channel[str]()
