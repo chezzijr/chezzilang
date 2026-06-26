@@ -4829,19 +4829,8 @@ impl Vm {
             }
             (a, b) if is_numeric(a) && is_numeric(b) => {
                 let (x, y) = (as_f64(a), as_f64(b));
-                if matches!(op, Op::Div | Op::Mod) && y == 0.0 {
-                    return Err(self.err(
-                        format!(
-                            "{} by zero",
-                            if matches!(op, Op::Div) {
-                                "division"
-                            } else {
-                                "modulo"
-                            }
-                        ),
-                        span,
-                    ));
-                }
+                // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
+                // never a fault. (The INT arm above still faults on /0 and overflow.)
                 Value::Float(match op {
                     Op::Add => x + y,
                     Op::Sub => x - y,
@@ -5116,14 +5105,8 @@ impl Vm {
             }
             (a, b) if is_numeric(a) && is_numeric(b) => {
                 let (x, y) = (as_f64(a), as_f64(b));
-                if matches!(op, Op::Div | Op::Mod) && y == 0.0 {
-                    let kind = if matches!(op, Op::Div) {
-                        "division"
-                    } else {
-                        "modulo"
-                    };
-                    return Err(self.err(format!("{kind} by zero"), span));
-                }
+                // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
+                // never a fault. (The INT arm above still faults on /0 and overflow.)
                 Ok(Value::Float(match op {
                     Op::Add => x + y,
                     Op::Sub => x - y,
@@ -21300,11 +21283,27 @@ main()
 
     #[test]
     fn division_and_modulo_by_zero_error() {
+        // INTEGER division/modulo by zero still faults (unchanged).
         assert_eq!(run_err("print(1 / 0)"), "division by zero");
         assert_eq!(run_err("print(1 % 0)"), "modulo by zero");
-        // Float by zero is an error too — not silent inf/nan.
-        assert_eq!(run_err("print(1.0 / 0.0)"), "division by zero");
-        assert_eq!(run_err("print(5.0 % 0.0)"), "modulo by zero");
+        // Float by zero is IEEE-754 — never faults; produces inf/-inf/NaN.
+        assert_eq!(run("print(1.0 / 0.0)"), "inf\n");
+        assert_eq!(run("print(5.0 % 0.0)"), "NaN\n");
+    }
+
+    #[test]
+    fn float_div_mod_by_zero_is_ieee() {
+        assert_eq!(run("print(1.0 / 0.0)"), "inf\n");
+        assert_eq!(run("print(-1.0 / 0.0)"), "-inf\n");
+        assert_eq!(run("print(0.0 / 0.0)"), "NaN\n");
+        assert_eq!(run("print(5.0 % 0.0)"), "NaN\n");
+    }
+
+    #[test]
+    fn int_div_mod_still_fault() {
+        // Regression tripwire: INTEGER arithmetic stays total-faulting.
+        assert_eq!(run_err("print(1 / 0)"), "division by zero");
+        assert_eq!(run_err("print(1 % 0)"), "modulo by zero");
     }
 
     #[test]
@@ -27966,17 +27965,31 @@ main()";
     }
 
     #[test]
-    fn parity_std_math_sqrt_negative_errors() {
-        // math.sqrt of a negative is a runtime error, identical on both engines.
+    fn parity_std_math_sqrt_negative_is_nan() {
+        // math.sqrt of a negative is IEEE NaN — never faults, identical on both engines.
         let src = "import std.math\nfn main():\n    print(math.sqrt(0.0 - 1.0))\nmain()";
-        let t = TmpDir::new();
-        let entry = t.write("main.chz", src);
-        let (_io, _ie, ir, _ic) = crate::interp::run_file(&entry);
-        let (_vo, _ve, vr, _vc) = run_file(&entry);
-        let ie = ir.unwrap_err().to_string();
-        let ve = vr.unwrap_err().to_string();
-        assert_eq!(ie, ve);
-        assert!(ie.contains("sqrt() of a negative number"), "{ie}");
+        assert_eq!(parity_entry(src), "NaN\n");
+    }
+
+    #[test]
+    fn parity_float_ieee_div_mod() {
+        // Float division/modulo by zero is total IEEE-754 on both engines: inf / NaN, never a fault.
+        let src = "fn main():\n    print(1.0 / 0.0)\n    print(-1.0 / 0.0)\n    print(0.0 / 0.0)\n    print(5.0 % 0.0)\nmain()";
+        assert_eq!(parity_entry(src), "inf\n-inf\nNaN\nNaN\n");
+    }
+
+    #[test]
+    fn parity_int_div_by_zero_still_faults() {
+        // INTEGER division by zero still faults — caught + printed identically on both engines.
+        let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        Ok(v): return Ok(v)\n        Err(e): print(e.message())\n    return Ok(0)\nfn main():\n    _ := run()\nmain()";
+        assert_eq!(parity_entry(src), "division by zero\n");
+    }
+
+    #[test]
+    fn parity_std_math_predicates() {
+        // is_nan / is_inf / is_finite — float predicates returning bool, identical on both engines.
+        let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";
+        assert_eq!(parity_entry(src), "true\ntrue\ntrue\nfalse\n");
     }
 
     #[test]

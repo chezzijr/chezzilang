@@ -7117,17 +7117,8 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
             (Int(_) | Float(_), Int(_) | Float(_)) => {
                 let a = as_f64(&l);
                 let b = as_f64(&r);
-                // Like the integer path (and Python), division/modulo by zero is an error rather
-                // than a silent `inf`/`nan`.
-                if matches!(op, Div | Mod) && b == 0.0 {
-                    return Err(RuntimeError {
-                        message: format!(
-                            "{} by zero",
-                            if op == Div { "division" } else { "modulo" }
-                        ),
-                        span,
-                    });
-                }
+                // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
+                // never a fault. (The INT arm above still faults on /0 and overflow.)
                 Ok(Float(match op {
                     Add => a + b,
                     Sub => a - b,
@@ -8962,9 +8953,23 @@ b := Buf([10, 20, 30])
     }
 
     #[test]
-    fn float_division_by_zero_errors() {
-        assert!(eval_str("1.0 / 0.0").is_err());
-        assert!(eval_str("1.0 % 0.0").is_err());
+    fn float_division_by_zero_is_ieee() {
+        // Float div/mod by zero is total IEEE-754 — never an error; yields inf/NaN.
+        match eval_str("1.0 / 0.0").unwrap() {
+            Value::Float(f) => assert!(f.is_infinite() && f > 0.0),
+            v => panic!("expected float, got {v:?}"),
+        }
+        match eval_str("0.0 / 0.0").unwrap() {
+            Value::Float(f) => assert!(f.is_nan()),
+            v => panic!("expected float, got {v:?}"),
+        }
+        match eval_str("5.0 % 0.0").unwrap() {
+            Value::Float(f) => assert!(f.is_nan()),
+            v => panic!("expected float, got {v:?}"),
+        }
+        // INTEGER div/mod by zero still faults.
+        assert!(eval_str("1 / 0").is_err());
+        assert!(eval_str("1 % 0").is_err());
     }
 
     #[test]

@@ -2587,7 +2587,12 @@ Surfaced by coverage passes; no `src/` changes pending, recorded for when they b
 - **`match` limits** — no multiple `Some(...)` arms (one arm per outer variant; refine with `_`).
   Nested nullary-variant patterns (`Some(None)`, `Ok(Err(e))`) and **or-patterns** (`p1 | p2`) now
   work — see below.
-- **Float division by zero is a runtime fault**, not an IEEE `Inf`/`NaN`.
+- **Float arithmetic is total IEEE-754** (landed): float ops never fault — `1.0/0.0`→`inf`,
+  `-1.0/0.0`→`-inf`, `0.0/0.0`/`5.0%0.0`→`NaN`, `math.sqrt(-1.0)`→`NaN`. `inf`/`NaN` are values;
+  inspect with `math.is_nan`/`math.is_inf`/`math.is_finite`. **Integer** arithmetic still faults
+  (overflow, `/0`, `%0`), and casting a non-finite float to `int` still faults. (Follow-up: `NaN`
+  ordered-comparison `nan < x` and `sort_by_key` semantics when a key is `NaN` are still as-was —
+  not yet addressed.)
 - **`std.os.getcwd`** not yet injectable via `HostConfig` (parity holds); **`read_file`** capped at 64 MiB.
 
 ## Notes

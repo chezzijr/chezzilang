@@ -6,7 +6,7 @@ underflow: integer overflow in Sub
 shift_hi: shift amount 99 out of range (0..64)
 shift_neg: shift amount -1 out of range (0..64)
 shift_ovf63: integer overflow in Shl
-fdiv0: division by zero
+fdiv0: ok inf
 -- numbers --
 9223372036854775807
 -9223372036854775808

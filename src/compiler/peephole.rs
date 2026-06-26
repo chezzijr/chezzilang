@@ -101,7 +101,10 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
                 }
                 (Op::ConstFloat(a), Op::ConstFloat(b)) => {
                     let (a, b) = (*a, *b);
-                    // VM raises "by zero" for float Div/Mod with a zero divisor — don't fold those.
+                    // Float Div/Mod by zero is total IEEE-754 (inf/-inf/NaN) at runtime — it no
+                    // longer faults. We still bail rather than const-fold a zero divisor: not folding
+                    // is always correct, and folding inf/NaN at compile time risks drifting from the
+                    // (identical, parity-checked) runtime arith path.
                     let r = match &out[m - 1] {
                         Op::Add => Some(a + b),
                         Op::Sub => Some(a - b),
