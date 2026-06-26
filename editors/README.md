@@ -16,41 +16,18 @@ The LSP is the primary, auto-extending path; the TextMate grammar is a static fa
 `chezzi-lsp` is a stdio language server providing **diagnostics** (type/parse errors as you type) and
 **semantic tokens** (highlighting straight from the lexer).
 
-### 1. Build / install the server
-
-Recommended — install onto your `PATH` so editor configs can just say `cmd = { "chezzi-lsp" }`
-(no fragile absolute path, survives `cargo clean`):
+### 1. Build the server
 
 ```sh
-cargo install --path . --features lsp --bin chezzi-lsp   # → ~/.cargo/bin/chezzi-lsp (release)
-```
-
-Or build in place:
-
-```sh
-cargo build --features lsp --bin chezzi-lsp              # → target/debug/chezzi-lsp
-cargo build --release --features lsp --bin chezzi-lsp    # → target/release/chezzi-lsp
+cargo build --features lsp --bin chezzi-lsp        # → target/debug/chezzi-lsp
+# or release:
+cargo build --release --features lsp --bin chezzi-lsp
 ```
 
 The `lsp` feature keeps the async deps (tower-lsp + tokio) out of the default `cargo build`, so the
-server is built on demand only. Re-run `cargo install …` after pulling lexer/checker changes to pick
-them up.
+server is built on demand only.
 
-### 2a. Register the filetype + server — Neovim 0.11+ (native API, no plugin)
-
-```lua
--- init.lua. Uses the built-in vim.lsp.config / vim.lsp.enable (Neovim 0.11+).
-vim.filetype.add({ extension = { chz = "chezzi" } })
-
-vim.lsp.config("chezzi", {
-  cmd = { "chezzi-lsp" },            -- absolute path if not on PATH
-  filetypes = { "chezzi" },
-  root_markers = { "chezzi.toml" }, -- project root (so imports resolve); falls back to the file's dir
-})
-vim.lsp.enable("chezzi")
-```
-
-### 2b. Register the filetype + server — lspconfig (Neovim 0.10)
+### 2. Register the filetype + server (lspconfig, Neovim 0.10+)
 
 ```lua
 -- ~/.config/nvim/after/ftdetect or your init.lua
@@ -63,7 +40,7 @@ local configs = require("lspconfig.configs")
 if not configs.chezzi then
   configs.chezzi = {
     default_config = {
-      cmd = { "chezzi-lsp" }, -- absolute path if not on PATH
+      cmd = { "/absolute/path/to/target/debug/chezzi-lsp" }, -- adjust to your checkout
       filetypes = { "chezzi" },
       -- root = the project dir containing chezzi.toml (so imports resolve), else the file's dir.
       root_dir = lspconfig.util.root_pattern("chezzi.toml") or vim.fn.getcwd,
@@ -72,30 +49,14 @@ if not configs.chezzi then
   }
 end
 
-lspconfig.chezzi.setup({})
-```
-
-### 2c. LunarVim
-
-```lua
--- ~/.config/lvim/config.lua
-vim.filetype.add({ extension = { chz = "chezzi" } })
-
-local lspconfig = require("lspconfig")
-local configs = require("lspconfig.configs")
-if not configs.chezzi then
-  configs.chezzi = {
-    default_config = {
-      cmd = { "chezzi-lsp" }, -- absolute path if not on PATH
-      filetypes = { "chezzi" },
-      root_dir = lspconfig.util.root_pattern("chezzi.toml") or vim.fn.getcwd,
-      single_file_support = true,
-    },
-  }
-end
-
--- LunarVim manages servers itself; register the custom one through its manager:
-require("lvim.lsp.manager").setup("chezzi", {})
+lspconfig.chezzi.setup({
+  on_attach = function(client, bufnr)
+    -- Enable LSP semantic-token highlighting (Neovim applies it automatically when the server
+    -- advertises the capability, which chezzi-lsp does). Nothing extra is required, but you can
+    -- force-refresh with:
+    vim.lsp.semantic_tokens.start(bufnr, client.id)
+  end,
+})
 ```
 
 Semantic tokens are on by default in Neovim 0.9+ whenever the server advertises
