@@ -2565,6 +2565,9 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,
   Cranelift AOT/JIT. Written up in [`docs/future.md`](docs/future.md).
+- **Bug-discovery track (pre-JIT)** — automated bug finding (cargo-fuzz parser, CPython output-differential,
+  Miri/sanitizers, proptest, metamorphic). Ranked plan + rationale in [`docs/bug-discovery.md`](docs/bug-discovery.md).
+  Recommended to stand up Tier 1 before the JIT, so the reference semantics are fuzzed + differentially validated first.
 - ~~**M-C — implicit nurseries**~~ — **shipped 2026-06-12** (see Concurrency above).
 
 ### Ideas — record-only (not scheduled)
