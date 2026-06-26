@@ -1348,6 +1348,7 @@ impl Walker<'_> {
                     kind: ExprKind::Field {
                         obj: Box::new(ident_expr(&c, span)),
                         name,
+                        name_span: span,
                     },
                     span,
                 };
@@ -1412,7 +1413,7 @@ impl Walker<'_> {
                 .resolve_bare(name)
                 .map(|s| s.iter().map(|p| p.is_ref).collect()),
             ExprKind::Ident(name) => self.local_fn_flags(name).cloned(),
-            ExprKind::Field { obj, name } => match &obj.kind {
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
                 // `module.f(...)` — a qualified free fn.
                 ExprKind::Ident(alias)
                     if !self.is_local(alias) && self.ctx.aliases.contains_key(alias) =>
@@ -1467,7 +1468,7 @@ impl Walker<'_> {
         // then mutate `expr`).
         let module_spec: Option<Vec<PSpec>> = match &callee.kind {
             ExprKind::Ident(name) if !self.is_local(name) => self.ctx.resolve_bare(name).cloned(),
-            ExprKind::Field { obj, name } => match &obj.kind {
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
                 ExprKind::Ident(alias) if !self.is_local(alias) => {
                     self.ctx.resolve_qualified(alias, name).cloned()
                 }
@@ -1670,6 +1671,7 @@ fn method_call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
         kind: ExprKind::Field {
             obj: Box::new(recv),
             name: method.to_string(),
+            name_span: span,
         },
         span,
     };

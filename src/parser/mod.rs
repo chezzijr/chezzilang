@@ -1711,6 +1711,8 @@ impl Parser {
                     self.advance();
                     // `obj.field` (struct/module) or `tuple.0` (element access). A numeric field name
                     // is the tuple-element index, stored as its decimal string (reusing `Field`).
+                    // Capture the field-name token's TRUE span before consuming it (editor hover keys on it).
+                    let name_span = self.cur_span();
                     let name = if let Token::Int(n) = self.peek() {
                         let n = *n;
                         self.advance();
@@ -1744,6 +1746,7 @@ impl Parser {
                             kind: ExprKind::Field {
                                 obj: Box::new(e),
                                 name,
+                                name_span,
                             },
                             span,
                         },
@@ -3722,7 +3725,7 @@ mod tests {
             panic!("expected Call, got {:?}", e.kind)
         };
         assert_eq!(args.len(), 1);
-        let ExprKind::Field { obj, name } = callee.kind else {
+        let ExprKind::Field { obj, name, .. } = callee.kind else {
             panic!("expected Field callee, got {:?}", callee.kind)
         };
         assert_eq!(name, "Ok");
@@ -3740,7 +3743,7 @@ mod tests {
         let ExprKind::Call { callee, .. } = e.kind else {
             panic!("expected Call, got {:?}", e.kind)
         };
-        let ExprKind::Field { obj, name } = callee.kind else {
+        let ExprKind::Field { obj, name, .. } = callee.kind else {
             panic!("expected Field callee, got {:?}", callee.kind)
         };
         assert_eq!(name, "Has");
@@ -3750,7 +3753,7 @@ mod tests {
         let StmtKind::Expr(e) = only("Pair[int, str].Empty\n") else {
             panic!()
         };
-        let ExprKind::Field { obj, name } = e.kind else {
+        let ExprKind::Field { obj, name, .. } = e.kind else {
             panic!("expected Field, got {:?}", e.kind)
         };
         assert_eq!(name, "Empty");
@@ -4815,6 +4818,25 @@ mod tests {
         };
         match e.kind {
             ExprKind::Field { name, .. } => assert_eq!(name, "1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_carries_name_span() {
+        // `p.x` — the Field node's `name_span` must point at the field name `x` (line 1, col 3),
+        // NOT the receiver `p`'s span; the LSP hover lookup keys on this true field-name position.
+        let StmtKind::Expr(e) = only("p.x\n") else {
+            panic!()
+        };
+        match e.kind {
+            ExprKind::Field {
+                name, name_span, ..
+            } => {
+                assert_eq!(name, "x");
+                assert_eq!(name_span.line, 1);
+                assert_eq!(name_span.col, 3);
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -514,6 +514,11 @@ pub enum ExprKind {
     Field {
         obj: Box<Expr>,
         name: String,
+        /// Source span of the field NAME token (`name`), distinct from the node's `span` which (like
+        /// every postfix expr) inherits the receiver's start. Purely diagnostic metadata for editor
+        /// tooling (LSP hover keys field-name hovers on this true position); runtime-inert — never
+        /// read by desugar/compiler/vm/interp, so it is behavior- and parity-neutral.
+        name_span: Span,
     },
     /// `obj[index]`
     Index {
