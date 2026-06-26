@@ -7547,12 +7547,19 @@ impl Vm {
         {
             return self.struct_compare(a, b, span);
         }
+        // Float keys order by `total_cmp` for the WHOLE comparison (not just the NaN case), exactly
+        // mirroring `sort()`'s `value_order` Float arm — so `sort_by_key` and `sort()` agree on every
+        // float pair, including `-0.0`/`+0.0` (which `partial_cmp` ranks Equal but `total_cmp` orders
+        // `-0.0 < +0.0`) and NaN (deterministic, to one end). Int keys deliberately stay on the int
+        // path below (`Int.cmp`): routing them through `as_f64` would lose precision past 2^53.
+        if let (Value::Float(x), Value::Float(y)) = (a, b) {
+            return Ok(x.total_cmp(&y));
+        }
         match self.compare(a, b) {
             Some(ord) => Ok(ord),
-            // Numeric keys with a NaN present: sort deterministically via `total_cmp` (NaN to one
-            // end), consistent with `sort()`'s `value_order` — never a fault. The checker enforces a
-            // single key type K, so a numeric `None` means a NaN float (Int.cmp / Int.partial_cmp
-            // never yield `None`); int/str keys never reach this branch (their `compare` is total).
+            // Numeric `None` means a NaN float — handled above for the Float/Float case; this arm
+            // only catches a mixed int/float key pair (not reachable for a single key type K), kept
+            // deterministic via `total_cmp` for safety.
             None if is_numeric(a) && is_numeric(b) => Ok(as_f64(a).total_cmp(&as_f64(b))),
             // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
             None => Err(self.err(
@@ -28008,11 +28015,26 @@ main()";
     #[test]
     fn parity_sort_by_key_nan_float_key_deterministic() {
         // `sort_by_key` with a float key that can be NaN sorts deterministically (total order, NaN to
-        // one end) instead of faulting — consistent with `sort()`. `0.0/0.0` is a negative NaN at
-        // runtime on x86, so total_cmp ranks both NaNs at the FRONT. assert_parity_out locks both the
-        // exact order AND VM↔interp agreement.
+        // one end) instead of faulting — consistent with `sort()`. The SIGN of `0.0/0.0` (hence
+        // whether NaN ranks at the front or back) is platform-dependent (negative on x86 SSE2,
+        // possibly positive elsewhere), so we do NOT bake an absolute position into a golden — that
+        // would be a non-portable test. `assert_parity` proves the real guarantees portably: the sort
+        // never faults and VM↔interp agree byte-identically on whatever order this machine produces.
         let src = "fn main():\n    xs := [1.0, 0.0 / 0.0, 2.0, 0.0 / 0.0, 0.5]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
-        assert_parity_out(src, "NaN\nNaN\n0.5\n1.0\n2.0\n");
+        assert_parity(src);
+    }
+
+    #[test]
+    fn parity_sort_by_key_signed_zero_matches_sort() {
+        // `sort_by_key` over a float key uses `total_cmp` for the WHOLE comparison, exactly like
+        // `sort()` — so they agree even on `-0.0`/`+0.0`, which `partial_cmp` ranks Equal but
+        // `total_cmp` orders `-0.0 < +0.0`. Signed-zero order is invisible to `==` (`-0.0 == +0.0`),
+        // so observe it via `1.0/x` → `-inf` for `-0.0`, `+inf` for `+0.0`. Both sort paths must put
+        // `-0.0` first ⇒ `-inf` then `inf`. Platform-independent (no NaN sign involved).
+        let by_sort = "fn main():\n    xs := [0.0, -1.0 * 0.0]\n    xs.sort()\n    for v in xs:\n        print(1.0 / v)\nmain()";
+        assert_parity_out(by_sort, "-inf\ninf\n");
+        let by_key = "fn main():\n    xs := [0.0, -1.0 * 0.0]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(1.0 / v)\nmain()";
+        assert_parity_out(by_key, "-inf\ninf\n");
     }
 
     #[test]

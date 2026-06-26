@@ -4414,11 +4414,19 @@ impl Interp {
         if matches!(a, Value::Struct { .. }) && matches!(b, Value::Struct { .. }) {
             return self.struct_compare(a.clone(), b.clone(), span);
         }
+        // Float keys order by `total_cmp` for the WHOLE comparison (not just the NaN case), exactly
+        // mirroring `sort()`'s float ordering — so `sort_by_key` and `sort()` agree on every float
+        // pair, including `-0.0`/`+0.0` (`partial_cmp` ranks Equal, `total_cmp` orders `-0.0 < +0.0`)
+        // and NaN (deterministic, to one end). Int keys stay on the int path below (`Int.cmp`):
+        // routing them through `as_f64` would lose precision past 2^53.
+        if let (Value::Float(x), Value::Float(y)) = (a, b) {
+            return Ok(x.total_cmp(y));
+        }
         match compare(a, b) {
             Some(ord) => Ok(ord),
-            // Numeric keys with a NaN present: sort deterministically via `total_cmp` (NaN to one
-            // end), consistent with `sort()` — never a fault. Mirrors `vm::Vm::order_key`. int/str
-            // keys never reach this branch (their `compare` is total).
+            // Numeric `None` means a NaN float — handled above for the Float/Float case; this arm
+            // only catches a mixed int/float key pair (not reachable for a single key type K), kept
+            // deterministic via `total_cmp` for safety.
             None if matches!(a, Value::Int(_) | Value::Float(_))
                 && matches!(b, Value::Int(_) | Value::Float(_)) =>
             {
