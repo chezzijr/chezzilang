@@ -11,6 +11,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Bug-discovery lever #2 — CPython differential oracle (2026-06-26).** `src/difftest/` generates
+random semantically-equivalent programs over a cross-language safe subset (literals, bounded-int
+arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive funcs, list/map/index/len), renders each
+as both Chezzi and Python from one typed IR (`ast.rs`; `emit_chezzi` + `emit_python`), runs both, and
+diffs stdout (`run.rs`). The Python backend prepends a **spec shim** (`_chz_str`/`_chz_div`/`_chz_mod`)
+that absorbs only the by-design surface/semantic diffs (`true`/`false`/`nil`, raw nested strings,
+truncate-toward-zero `/`,`%`) — so a divergence means the impl deviated from its own contract, not a
+formatting artifact. Correct-by-construction generator (`generate.rs`): well-typed, in-scope, non-zero
+divisors, in-range indices, and provable i64-bound tracking so generated programs never overflow (a
+Chezzi fault ⇒ real bug). Wired as `tests/difftest.rs` (P0 formatting probes + bench-pair smoke +
+non-tautology guard + fixed-seed fuzz) and `src/bin/difffuzz` (unattended; `--seed N` reproduces).
+3000-seed release sweep clean; manually confirmed it flags the i64-overflow class (the June-2026
+`sum()` blind spot). `cargo test --test difftest` green (10), clippy clean. Usage + design:
+[`docs/bug-discovery.md` "Differential oracle"]. Next: cargo-fuzz parser (lever #1), then P5 (IR
+shrinker + corpus dump + opt-in overflow-metamorphic mode).
+
 **✅ global-namespace cleanup — task 5/5 (FINAL): `list`/`map`/`set`→`List`/`Map`/`Set` HARD rename
 (2026-06-25).** The three builtin container TYPE **and** constructor names are now PascalCase
 `List`/`Map`/`Set` everywhere — type annotations (`List[int]`, `Map[str,int]`, `Set[int]`, nested),
@@ -2565,8 +2581,9 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,
   Cranelift AOT/JIT. Written up in [`docs/future.md`](docs/future.md).
-- **Bug-discovery track (pre-JIT)** — automated bug finding (cargo-fuzz parser, CPython output-differential,
-  Miri/sanitizers, proptest, metamorphic). Ranked plan + rationale in [`docs/bug-discovery.md`](docs/bug-discovery.md).
+- **Bug-discovery track (pre-JIT)** — automated bug finding. ✅ **CPython output-differential built**
+  (`src/difftest/`, see Current focus). Remaining: cargo-fuzz parser (lever #1), Miri/sanitizers,
+  proptest, metamorphic. Ranked plan + rationale in [`docs/bug-discovery.md`](docs/bug-discovery.md).
   Recommended to stand up Tier 1 before the JIT, so the reference semantics are fuzzed + differentially validated first.
 - ~~**M-C — implicit nurseries**~~ — **shipped 2026-06-12** (see Concurrency above).
 

@@ -34,7 +34,8 @@ The remedy is twofold and is the core of this strategy:
 
 - **VM↔interp parity oracle** — `assert_parity` / golden `examples/*.chz` + `.expected` (~2736 unit tests). Catches engine divergence.
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
-- **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs are an existing seed for an **output**-differential oracle (see #2 below) — the infrastructure is half-built already.
+- **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
+- **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
 - **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
 
 ## How real implementations find bugs
@@ -63,12 +64,12 @@ cases.
    never panics — malformed input yields a clean diagnostic, never a Rust panic / `unwrap` / index
    out-of-bounds / arithmetic overflow / OOM.* A day of setup; typically finds bugs in batches. The
    single highest-yield mechanical lever for a Rust-hosted language.
-2. **Differential vs CPython.** Build a corpus of programs valid in both languages; run both; diff
-   stdout. This is the external oracle that defeats the shared-bug blind spot — `sum()` overflow and
-   `nan <` would have surfaced immediately. Reuse `benches/chz` + `benches/py` and the `benches/run.chz`
-   harness; extend it from timing comparison to **output equality**. Mind the documented intentional
-   divergences (int overflow faults vs Python bignum; `/`,`%` truncation; float formatting) — encode
-   those as an allow-list so they don't produce false positives.
+2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
+   external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
+   immediately. The documented intentional divergences are handled *structurally* by a Python
+   **shim** (mirrors Chezzi's spec — `true`/`false`/`nil` spelling, raw nested strings, truncating
+   `/`,`%`) rather than by a big allow-list, so the allow-list stays near-empty and any hit is a
+   genuinely new category to triage.
 3. **Miri + ASan on the `unsafe` surface** (GC, FFI/libffi, raw pointers, any `transmute`).
    `cargo +nightly miri test` for UB; ASan on the C-ABI paths. Targeted at the most memory-fragile code.
 
@@ -101,3 +102,41 @@ Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the interpret
 correct (it must produce byte-identical results to the VM). Standing up Tier 1 first — so the
 reference semantics are fuzzed and differentially validated — de-risks the JIT before a line of it is
 written.
+
+## Differential oracle (`src/difftest/`)
+
+Lever #2, built. A seeded generator emits a *cross-language safe subset* (literals, bounded-int
+arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive functions, list/map/index/len). One
+abstract IR (`ast.rs`) is rendered by two backends — `emit_chezzi` (native ops/`print`) and
+`emit_python` — and the two are run and their stdout diffed (`run.rs`).
+
+**Why it isn't a tautology.** The Python backend prepends a fixed *shim* that implements Chezzi's
+**specification** (`_chz_str` for `true`/`false`/`nil` + raw nested strings + Chezzi float format;
+`_chz_div`/`_chz_mod` for truncate-toward-zero / sign-of-dividend). Chezzi source uses the real
+**implementation**. The shim absorbs only the by-design surface/semantic differences — never the
+actual arithmetic or control-flow *result* — so a stdout divergence means the implementation
+deviated from its own contract (a real bug). The `oracle_detects_real_divergence` test proves the
+harness catches a genuine divergence (raw Python `%` vs Chezzi `%` on negatives).
+
+**Correctness by construction.** Every generated program is well-typed and in-scope, every divisor
+is non-zero, every index is in range, and every integer value is provably within a safe window
+(`generate.rs` bound tracking) so it can never hit Chezzi's i64-overflow fault — that makes a Chezzi
+fault a real bug, not a generator artifact. (Deliberate overflow testing is the opt-in metamorphic
+mode, P5 — a Chezzi recoverable-panic vs Python bignum, handled as a distinct outcome, not stdout.)
+
+How to run:
+
+```sh
+cargo test --test difftest                 # CI gate: P0 probes + fixed seed range (reproducible)
+cargo test --test difftest -- --ignored    # heavier sweep (fuzz_full_heavy, seeds 0..3000)
+
+cargo build --release --bin chezzi --bin difffuzz
+./target/release/difffuzz --seeds 0..100000          # unattended fuzz (full features)
+./target/release/difffuzz --seed 12345               # reproduce one seed (prints both sources)
+./target/release/difffuzz --seeds 0..5000 --floats   # enable the float backend
+```
+
+A finding prints the seed plus both rendered sources and both captures — paste-ready for a bug
+report, reproduce with `--seed N`, then route through `auto-task` → `post-merge-gate`. To accept a
+newly-discovered, deliberately-unfixed divergence, add a narrow matcher to `allowlist.rs` with a
+cited reason.
