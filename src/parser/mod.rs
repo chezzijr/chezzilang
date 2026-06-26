@@ -506,6 +506,7 @@ impl Parser {
 
     fn parse_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
         self.expect(&Token::Fn)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.expect(&Token::LParen)?;
@@ -530,6 +531,7 @@ impl Parser {
             && matches!(body.as_slice(), [s] if matches!(s.kind, StmtKind::Expr(_)));
         Ok(FnDecl {
             name,
+            name_span,
             type_params,
             params,
             ret,
@@ -685,6 +687,7 @@ impl Parser {
         let mut seen_default = false;
         if !self.check(&Token::RParen) {
             loop {
+                let name_span = self.cur_span();
                 let name = self.expect_ident()?;
                 // A `ref` modifier is legal only directly after the `:` of a param annotation
                 // (`x: ref int`). `parse_type` never consumes `ref`, so it is a parse error in any
@@ -719,6 +722,7 @@ impl Parser {
                 }
                 params.push(Param {
                     name,
+                    name_span,
                     ty,
                     default,
                     is_ref,
@@ -753,6 +757,7 @@ impl Parser {
                 // `test fn name(self)` — a suite test method.
                 methods.push(self.parse_test_fn(true)?);
             } else {
+                let fname_span = self.cur_span();
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_type()?;
@@ -773,6 +778,7 @@ impl Parser {
                 }
                 fields.push(Field {
                     name: fname,
+                    name_span: fname_span,
                     ty,
                     default,
                 });
@@ -1513,6 +1519,7 @@ impl Parser {
             self.depth -= 1;
             return Ok(ty);
         }
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
         // first ident, a `.` introduces the type's name in the bound module. Any trailing `[args]`
@@ -1546,7 +1553,10 @@ impl Parser {
             self.expect(&Token::RBracket)?;
             Type::Generic(name, args)
         } else {
-            Type::Named(name)
+            Type::Named {
+                name,
+                span: name_span,
+            }
         };
         ty = self.parse_type_postfix(ty)?;
         self.depth -= 1;
@@ -2643,8 +2653,8 @@ mod tests {
                 assert_eq!(fns[0].name, "cos");
                 assert_eq!(fns[0].params.len(), 1);
                 assert_eq!(fns[0].params[0].name, "x");
-                assert_eq!(fns[0].params[0].ty, Some(Type::Named("float".to_string())));
-                assert_eq!(fns[0].ret, Some(Type::Named("float".to_string())));
+                assert_eq!(fns[0].params[0].ty, Some(Type::named("float")));
+                assert_eq!(fns[0].ret, Some(Type::named("float")));
                 assert_eq!(fns[1].name, "sqrt");
             }
             other => panic!("{other:?}"),
@@ -2919,7 +2929,7 @@ mod tests {
                     }]
                 );
                 assert_eq!(f.params.len(), 2);
-                assert_eq!(f.ret, Some(Type::Named("T".into())));
+                assert_eq!(f.ret, Some(Type::named("T")));
             }
             other => panic!("{other:?}"),
         }
@@ -2936,7 +2946,7 @@ mod tests {
                     f.type_params[0].bounds,
                     vec![Bound {
                         name: "Iterator".into(),
-                        args: vec![Type::Named("T".into())]
+                        args: vec![Type::named("T")]
                     }]
                 );
                 assert_eq!(f.type_params[1].name, "T");
@@ -2993,7 +3003,7 @@ mod tests {
                 assert_eq!(type_params.len(), 2);
                 assert_eq!(type_params[0].name, "A");
                 assert_eq!(fields.len(), 2);
-                assert_eq!(fields[0].ty, Type::Named("A".into()));
+                assert_eq!(fields[0].ty, Type::named("A"));
             }
             other => panic!("{other:?}"),
         }
@@ -3007,8 +3017,8 @@ mod tests {
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "compare");
                 assert_eq!(methods[0].params.len(), 2);
-                assert_eq!(methods[0].params[1].ty, Some(Type::Named("Self".into())));
-                assert_eq!(methods[0].ret, Some(Type::Named("int".into())));
+                assert_eq!(methods[0].params[1].ty, Some(Type::named("Self")));
+                assert_eq!(methods[0].ret, Some(Type::named("int")));
             }
             other => panic!("{other:?}"),
         }
@@ -3040,7 +3050,7 @@ mod tests {
                 assert_eq!(type_params.len(), 1);
                 assert_eq!(type_params[0].name, "T");
                 assert_eq!(methods.len(), 1);
-                assert_eq!(methods[0].ret, Some(Type::Named("T".into())));
+                assert_eq!(methods[0].ret, Some(Type::named("T")));
             }
             other => panic!("{other:?}"),
         }
@@ -3130,7 +3140,7 @@ mod tests {
                 names, ty, value, ..
             } => {
                 assert_eq!(names, vec!["name".to_string()]);
-                assert_eq!(ty, Some(Type::Named("str".into())));
+                assert_eq!(ty, Some(Type::named("str")));
                 assert_eq!(value.kind, ExprKind::Str("chezzi".into()));
             }
             other => panic!("{other:?}"),
@@ -3168,7 +3178,7 @@ mod tests {
             StmtKind::Fn(f) => {
                 assert_eq!(f.name, "add");
                 assert_eq!(f.params.len(), 2);
-                assert_eq!(f.ret, Some(Type::Named("int".into())));
+                assert_eq!(f.ret, Some(Type::named("int")));
                 assert_eq!(f.body.len(), 1);
             }
             other => panic!("{other:?}"),
@@ -3213,7 +3223,7 @@ mod tests {
                 assert_eq!(name, "Shape");
                 assert!(type_params.is_empty());
                 assert_eq!(variants[0].name, "Circle");
-                assert_eq!(variants[0].payload, vec![Type::Named("int".into())]);
+                assert_eq!(variants[0].payload, vec![Type::named("int")]);
                 assert_eq!(variants[1].name, "Point");
                 assert!(variants[1].payload.is_empty());
             }
@@ -3232,7 +3242,7 @@ mod tests {
             } => {
                 assert!(type_params.is_empty());
                 assert_eq!(name, "UserId");
-                assert_eq!(underlying, Type::Named("int".into()));
+                assert_eq!(underlying, Type::named("int"));
                 assert!(methods.is_empty());
             }
             other => panic!("{other:?}"),
@@ -3251,7 +3261,7 @@ mod tests {
             } => {
                 assert!(type_params.is_empty());
                 assert_eq!(name, "Meters");
-                assert_eq!(underlying, Type::Named("float".into()));
+                assert_eq!(underlying, Type::named("float"));
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "double");
             }
@@ -3284,7 +3294,7 @@ mod tests {
                 assert_eq!(type_params[0].name, "T");
                 assert_eq!(
                     underlying,
-                    Type::Generic("List".into(), vec![Type::Named("T".into())])
+                    Type::Generic("List".into(), vec![Type::named("T")])
                 );
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "peek");
@@ -3604,7 +3614,7 @@ mod tests {
         match value.kind {
             ExprKind::Closure { params, ret, body } => {
                 assert_eq!(params.len(), 1);
-                assert_eq!(ret, Some(Type::Named("int".into())));
+                assert_eq!(ret, Some(Type::named("int")));
                 assert!(matches!(
                     body.kind,
                     ExprKind::Binary {
@@ -4079,10 +4089,10 @@ mod tests {
             Some(Type::Generic(name, args)) => {
                 assert_eq!(name, "Map");
                 assert_eq!(args.len(), 2);
-                assert_eq!(args[0], Type::Named("str".into()));
+                assert_eq!(args[0], Type::named("str"));
                 assert_eq!(
                     args[1],
-                    Type::Generic("List".into(), vec![Type::Named("int".into())])
+                    Type::Generic("List".into(), vec![Type::named("int")])
                 );
             }
             other => panic!("{other:?}"),
@@ -4174,10 +4184,7 @@ mod tests {
         };
         assert_eq!(
             decl.params[0].ty,
-            Some(Type::Generic(
-                "Option".into(),
-                vec![Type::Named("int".into())]
-            ))
+            Some(Type::Generic("Option".into(), vec![Type::named("int")]))
         );
     }
 
@@ -4189,10 +4196,7 @@ mod tests {
         };
         assert_eq!(
             decl.ret,
-            Some(Type::Generic(
-                "Result".into(),
-                vec![Type::Named("int".into())]
-            ))
+            Some(Type::Generic("Result".into(), vec![Type::named("int")]))
         );
     }
 
@@ -4206,10 +4210,7 @@ mod tests {
             decl.params[0].ty,
             Some(Type::Generic(
                 "Option".into(),
-                vec![Type::Generic(
-                    "List".into(),
-                    vec![Type::Named("int".into())]
-                )]
+                vec![Type::Generic("List".into(), vec![Type::named("int")])]
             ))
         );
     }
@@ -4241,7 +4242,7 @@ mod tests {
             Some(Type::Qualified {
                 module: "g".into(),
                 name: "Box".into(),
-                args: vec![Type::Named("int".into())],
+                args: vec![Type::named("int")],
             })
         );
     }
@@ -4275,8 +4276,8 @@ mod tests {
         };
         match &f.params[0].ty {
             Some(Type::Func { params, ret }) => {
-                assert_eq!(params.as_slice(), &[Type::Named("int".into())]);
-                assert_eq!(**ret, Type::Named("int".into()));
+                assert_eq!(params.as_slice(), &[Type::named("int")]);
+                assert_eq!(**ret, Type::named("int"));
             }
             other => panic!("{other:?}"),
         }
@@ -4291,7 +4292,7 @@ mod tests {
         match &f.params[0].ty {
             Some(Type::Func { params, ret }) => {
                 assert!(params.is_empty());
-                assert_eq!(**ret, Type::Named("int".into()));
+                assert_eq!(**ret, Type::named("int"));
             }
             other => panic!("{other:?}"),
         }
@@ -4471,10 +4472,7 @@ mod tests {
         assert_eq!(safe_div.name, "safe_div");
         assert_eq!(
             safe_div.ret,
-            Some(Type::Generic(
-                "Result".into(),
-                vec![Type::Named("int".into())]
-            ))
+            Some(Type::Generic("Result".into(), vec![Type::named("int")]))
         );
         // body: `if b == 0:` then `return Ok(a / b)`
         assert!(matches!(safe_div.body[0].kind, StmtKind::If { .. }));
@@ -4524,17 +4522,14 @@ mod tests {
         };
         assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "max"));
         assert_eq!(args.len(), 2);
-        assert_eq!(type_args, vec![Type::Named("int".into())]);
+        assert_eq!(type_args, vec![Type::named("int")]);
 
         // Multi-arg, incl. a compound type — only expressible as type args (comma is not an index).
         let v = let_value("p := Pair[int, str](1, \"a\")\n");
         let ExprKind::Call { type_args, .. } = v.kind else {
             panic!("expected a Call, got {:?}", v.kind)
         };
-        assert_eq!(
-            type_args,
-            vec![Type::Named("int".into()), Type::Named("str".into())]
-        );
+        assert_eq!(type_args, vec![Type::named("int"), Type::named("str")]);
     }
 
     #[test]
@@ -4768,10 +4763,7 @@ mod tests {
         };
         assert_eq!(
             f.ret,
-            Some(Type::Tuple(vec![
-                Type::Named("int".into()),
-                Type::Named("int".into())
-            ]))
+            Some(Type::Tuple(vec![Type::named("int"), Type::named("int")]))
         );
     }
 
@@ -4781,7 +4773,7 @@ mod tests {
         let StmtKind::Fn(f) = only("fn f(x: (int)):\n    return x\n") else {
             panic!()
         };
-        assert_eq!(f.params[0].ty, Some(Type::Named("int".into())));
+        assert_eq!(f.params[0].ty, Some(Type::named("int")));
     }
 
     #[test]
@@ -4839,6 +4831,54 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn fn_decl_carries_name_span() {
+        // `fn foo(...)` — the FnDecl's `name_span` points at `foo` (line 1, col 4), for the LSP
+        // semantic-token overlay (mark the decl name `function`).
+        let StmtKind::Fn(decl) = only("fn foo(x: int):\n    x\n") else {
+            panic!()
+        };
+        assert_eq!(decl.name, "foo");
+        assert_eq!(decl.name_span.line, 1);
+        assert_eq!(decl.name_span.col, 4);
+    }
+
+    #[test]
+    fn param_carries_name_span() {
+        // `fn f(abc: int)` — param `abc` starts at col 6 (`fn f(` is 5 chars).
+        let StmtKind::Fn(decl) = only("fn f(abc: int):\n    abc\n") else {
+            panic!()
+        };
+        assert_eq!(decl.params[0].name, "abc");
+        assert_eq!(decl.params[0].name_span.line, 1);
+        assert_eq!(decl.params[0].name_span.col, 6);
+    }
+
+    #[test]
+    fn struct_field_carries_name_span() {
+        // `struct S:` then a 4-space-indented `fld: int` — the field name is at line 2, col 5.
+        let StmtKind::Struct { fields, .. } = only("struct S:\n    fld: int\n") else {
+            panic!()
+        };
+        assert_eq!(fields[0].name, "fld");
+        assert_eq!(fields[0].name_span.line, 2);
+        assert_eq!(fields[0].name_span.col, 5);
+    }
+
+    #[test]
+    fn type_named_carries_span() {
+        // `x: int = 5` — the `Type::Named` annotation's span points at `int` (line 1, col 4).
+        let StmtKind::Let { ty: Some(t), .. } = only("x: int = 5\n") else {
+            panic!()
+        };
+        let Type::Named { name, span } = t else {
+            panic!("expected Type::Named, got {t:?}")
+        };
+        assert_eq!(name, "int");
+        assert_eq!(span.line, 1);
+        assert_eq!(span.col, 4);
     }
 
     #[test]
@@ -5227,7 +5267,7 @@ mod tests {
             } => {
                 assert!(is_ref, "typed-let `ref` modifier should set is_ref");
                 assert_eq!(names, vec!["r".to_string()]);
-                assert_eq!(ty, Some(Type::Named("int".to_string())));
+                assert_eq!(ty, Some(Type::named("int")));
             }
             other => panic!("{other:?}"),
         }
@@ -5235,7 +5275,7 @@ mod tests {
             StmtKind::Fn(decl) => {
                 let p = &decl.params[0];
                 assert!(p.is_ref, "param `ref` modifier should set is_ref");
-                assert_eq!(p.ty, Some(Type::Named("int".to_string())));
+                assert_eq!(p.ty, Some(Type::named("int")));
             }
             other => panic!("{other:?}"),
         }
@@ -5288,7 +5328,7 @@ mod tests {
                     params[0].is_ref,
                     "closure param `ref` modifier should set is_ref"
                 );
-                assert_eq!(params[0].ty, Some(Type::Named("int".to_string())));
+                assert_eq!(params[0].ty, Some(Type::named("int")));
             }
             other => panic!("{other:?}"),
         }

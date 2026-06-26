@@ -28,6 +28,10 @@ fn legend_token_types() -> Vec<SemanticTokenType> {
         SemanticTokenType::NUMBER,
         SemanticTokenType::COMMENT,
         SemanticTokenType::VARIABLE,
+        SemanticTokenType::FUNCTION,
+        SemanticTokenType::TYPE,
+        SemanticTokenType::PROPERTY,
+        SemanticTokenType::PARAMETER,
     ]
 }
 
@@ -206,4 +210,23 @@ async fn main() {
         docs: tokio::sync::Mutex::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legend_token_types;
+
+    /// The server's advertised legend MUST agree, name-for-name and in index order, with
+    /// `chezzi::editor::SEMANTIC_TOKEN_TYPES` — the `u32` token types `semantic_tokens` emits index
+    /// THAT slice, so any drift mis-colors every token. Guards both lists together.
+    #[test]
+    fn legend_matches_editor() {
+        let types = legend_token_types();
+        let legend: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            legend.as_slice(),
+            chezzi::editor::SEMANTIC_TOKEN_TYPES,
+            "chezzi-lsp legend and editor::SEMANTIC_TOKEN_TYPES disagree"
+        );
+    }
 }

@@ -124,7 +124,12 @@ pub enum Token {
 
 /// Source location of a token: 1-based line and 1-based column (column counts characters
 /// from the start of the line). Added in M2 so the parser can point at exact positions.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `Default` (line 0, col 0) is the SENTINEL for a SYNTHESIZED span — a span filled in by a phase
+/// other than the parser (e.g. a `Type::Named` the checker builds from an inferred name). Because
+/// the lexer's lines/cols are 1-based, `(0, 0)` can never collide with a real source position, so a
+/// synthesized span never matches an editor hover/overlay key. Diagnostic-only; runtime-inert.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Span {
     pub line: usize,
     pub col: usize,
