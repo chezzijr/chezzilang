@@ -2590,9 +2590,11 @@ Surfaced by coverage passes; no `src/` changes pending, recorded for when they b
 - **Float arithmetic is total IEEE-754** (landed): float ops never fault — `1.0/0.0`→`inf`,
   `-1.0/0.0`→`-inf`, `0.0/0.0`/`5.0%0.0`→`NaN`, `math.sqrt(-1.0)`→`NaN`. `inf`/`NaN` are values;
   inspect with `math.is_nan`/`math.is_inf`/`math.is_finite`. **Integer** arithmetic still faults
-  (overflow, `/0`, `%0`), and casting a non-finite float to `int` still faults. (Follow-up: `NaN`
-  ordered-comparison `nan < x` and `sort_by_key` semantics when a key is `NaN` are still as-was —
-  not yet addressed.)
+  (overflow, `/0`, `%0`), and casting a non-finite float to `int` still faults. **Ordered
+  comparisons involving `NaN` are total too** (landed): `< <= > >=` against a `NaN` always return
+  `false` (never fault), matching IEEE-754 / Python / Rust; equality is unchanged (`nan == nan`→
+  `false`, `nan != nan`→`true`). `sort()` and `sort_by_key` are **deterministic** with `NaN` keys —
+  a total order (`f64::total_cmp`, `NaN` sorts to one end), never a fault.
 - **`std.os.getcwd`** not yet injectable via `HostConfig` (parity holds); **`read_file`** capped at 64 MiB.
 
 ## Notes

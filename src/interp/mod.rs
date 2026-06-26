@@ -4414,14 +4414,26 @@ impl Interp {
         if matches!(a, Value::Struct { .. }) && matches!(b, Value::Struct { .. }) {
             return self.struct_compare(a.clone(), b.clone(), span);
         }
-        compare(a, b).ok_or_else(|| RuntimeError {
-            message: format!(
-                "sort_by_key keys are not comparable: {} vs {}",
-                a.type_name(),
-                b.type_name()
-            ),
-            span,
-        })
+        match compare(a, b) {
+            Some(ord) => Ok(ord),
+            // Numeric keys with a NaN present: sort deterministically via `total_cmp` (NaN to one
+            // end), consistent with `sort()` — never a fault. Mirrors `vm::Vm::order_key`. int/str
+            // keys never reach this branch (their `compare` is total).
+            None if matches!(a, Value::Int(_) | Value::Float(_))
+                && matches!(b, Value::Int(_) | Value::Float(_)) =>
+            {
+                Ok(as_f64(a).total_cmp(&as_f64(b)))
+            }
+            // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
+            None => Err(RuntimeError {
+                message: format!(
+                    "sort_by_key keys are not comparable: {} vs {}",
+                    a.type_name(),
+                    b.type_name()
+                ),
+                span,
+            }),
+        }
     }
 
     /// Stable top-down merge sort driven by a Chezzi comparator value.
@@ -7147,14 +7159,25 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value, span: Span) -> Result<Value, Ru
             _ => Err(type_err(op, &l, &r)),
         },
         Lt | LtEq | Gt | GtEq => {
-            let ord = compare(&l, &r).ok_or_else(|| type_err(op, &l, &r))?;
-            Ok(Value::Bool(match op {
-                Lt => ord.is_lt(),
-                LtEq => ord.is_le(),
-                Gt => ord.is_gt(),
-                GtEq => ord.is_ge(),
-                _ => unreachable!(),
-            }))
+            // `compare` returns `None` for two reasons we MUST distinguish: both operands numeric ⇒ a
+            // NaN is involved — every ordered compare against NaN is `false` (IEEE-754 / Python / Rust
+            // parity), never a fault; genuinely-incomparable TYPES ⇒ keep faulting. Mirrors
+            // `vm::Vm::ordered_bool`.
+            let b = match compare(&l, &r) {
+                Some(ord) => match op {
+                    Lt => ord.is_lt(),
+                    LtEq => ord.is_le(),
+                    Gt => ord.is_gt(),
+                    GtEq => ord.is_ge(),
+                    _ => unreachable!(),
+                },
+                // Both numeric ⇒ NaN involved ⇒ false for all four ops.
+                None if matches!(l, Int(_) | Float(_)) && matches!(r, Int(_) | Float(_)) => false,
+                // Genuinely-incomparable types: unreachable from well-typed source (the checker
+                // rejects e.g. `str < int`); kept for internal-invariant safety.
+                None => return Err(type_err(op, &l, &r)),
+            };
+            Ok(Value::Bool(b))
         }
         // Bitwise/shift ops — int-only (gap #13). The checker rejects non-int operands; this is the
         // runtime fallback.
