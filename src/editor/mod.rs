@@ -17,7 +17,7 @@ use std::path::Path;
 pub struct Diag {
     /// 0-based start line.
     pub line: u32,
-    /// 0-based start character (UTF-16-agnostic char column; ASCII source in practice).
+    /// 0-based start character, in UTF-16 code units (the LSP default position encoding).
     pub col: u32,
     /// 0-based end line.
     pub end_line: u32,
@@ -52,13 +52,24 @@ pub fn diagnostics(path: &Path, source: &str) -> Vec<Diag> {
 /// position (so an undefined-name squiggle covers the whole name) or by one char otherwise.
 fn span_diag(source: &str, line1: usize, col1: usize, message: String) -> Diag {
     let line0 = line1.saturating_sub(1) as u32;
-    let col0 = col1.saturating_sub(1);
-    let end_col = word_end_col(source, line1, col1);
+    let col0_char = col1.saturating_sub(1);
+    let end_char = word_end_col(source, line1, col1) as usize;
+    // LSP positions default to UTF-16 code units; the lexer counts char columns. Convert both ends
+    // so a non-BMP character earlier on the line doesn't shift the squiggle off the real token.
+    let line = source.lines().nth(line1.saturating_sub(1)).unwrap_or("");
+    let line_chars: Vec<char> = line.chars().collect();
+    let to_utf16 = |upto: usize| -> u32 {
+        line_chars
+            .iter()
+            .take(upto)
+            .map(|c| c.len_utf16() as u32)
+            .sum()
+    };
     Diag {
         line: line0,
-        col: col0 as u32,
+        col: to_utf16(col0_char),
         end_line: line0,
-        end_col,
+        end_col: to_utf16(end_char),
         message,
     }
 }
@@ -101,7 +112,8 @@ pub const NUMBER: u32 = 3;
 pub const COMMENT: u32 = 4;
 pub const VARIABLE: u32 = 5;
 
-/// One classified token with an absolute **0-based** position. `len` is in source characters.
+/// One classified token with an absolute **0-based** position. `start` and `len` are in UTF-16 code
+/// units (the LSP default position encoding); every token stays within a single line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemTok {
     pub line: u32,
@@ -133,7 +145,7 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
         let col = tok.span.col;
         // Absolute char offset of the token's first char.
         let start_abs = line_starts.get(line - 1).copied().unwrap_or(0) + (col - 1);
-        let (ttype, len) = match &tok.kind {
+        let (ttype, char_len) = match &tok.kind {
             Token::Ident(name) => (VARIABLE, name.chars().count()),
             Token::Int(_) | Token::Float(_) => (NUMBER, measure_number(&chars, start_abs)),
             Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => {
@@ -155,15 +167,17 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
                 None => continue,
             },
         };
-        if len == 0 {
-            continue;
-        }
-        out.push(SemTok {
-            line: (line - 1) as u32,
-            start: (col - 1) as u32,
-            len: len as u32,
-            token_type: ttype,
-        });
+        // Split the token's char range across lines (LSP semantic tokens are single-line — a
+        // multi-line/triple-quoted string must NOT be one over-long token) and emit each segment's
+        // start/length in UTF-16 code units (the LSP default position encoding).
+        push_utf16_tokens(
+            &mut out,
+            &chars,
+            &line_starts,
+            start_abs,
+            start_abs + char_len,
+            ttype,
+        );
     }
 
     append_comments(&chars, &string_extents, &mut out);
@@ -201,6 +215,59 @@ fn line_start_offsets(chars: &[char]) -> Vec<usize> {
         }
     }
     v
+}
+
+/// Emit LSP semantic tokens for the absolute char range `[start_abs, end_abs)` of `chars`, all of
+/// type `ttype`. The range is split at newlines (LSP tokens may not cross a line boundary — so a
+/// triple-quoted multi-line string yields one token per line) and every column/length is measured
+/// in **UTF-16 code units**, the LSP default position encoding, so non-BMP characters (emoji, astral
+/// plane) keep highlights aligned with the editor's view of the line.
+fn push_utf16_tokens(
+    out: &mut Vec<SemTok>,
+    chars: &[char],
+    line_starts: &[usize],
+    start_abs: usize,
+    end_abs: usize,
+    ttype: u32,
+) {
+    if end_abs <= start_abs {
+        return;
+    }
+    // The line `start_abs` falls on, and its UTF-16 column within that line.
+    let mut line = match line_starts.binary_search(&start_abs) {
+        Ok(i) => i,
+        Err(i) => i - 1,
+    };
+    let mut seg_start: u32 = chars[line_starts[line]..start_abs]
+        .iter()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    let mut seg_len: u32 = 0;
+    for &c in &chars[start_abs..end_abs] {
+        if c == '\n' {
+            if seg_len > 0 {
+                out.push(SemTok {
+                    line: line as u32,
+                    start: seg_start,
+                    len: seg_len,
+                    token_type: ttype,
+                });
+            }
+            line += 1;
+            seg_start = 0;
+            seg_len = 0;
+        } else {
+            seg_len += c.len_utf16() as u32;
+        }
+    }
+    if seg_len > 0 {
+        out.push(SemTok {
+            line: line as u32,
+            start: seg_start,
+            len: seg_len,
+            token_type: ttype,
+        });
+    }
 }
 
 /// Char-length of the number literal starting at `start` — mirrors the lexer's `number()` extent
@@ -315,10 +382,11 @@ fn append_comments(chars: &[char], string_extents: &[(usize, usize)], out: &mut 
         if c == '#' && !in_str[i] {
             let start_col = col;
             let mut j = i;
+            let mut len = 0u32;
             while j < n && chars[j] != '\n' {
+                len += chars[j].len_utf16() as u32;
                 j += 1;
             }
-            let len = (j - i) as u32;
             out.push(SemTok {
                 line,
                 start: start_col,
@@ -329,7 +397,7 @@ fn append_comments(chars: &[char], string_extents: &[(usize, usize)], out: &mut 
             i = j;
             continue;
         }
-        col += 1;
+        col += c.len_utf16() as u32;
         i += 1;
     }
 }
@@ -577,5 +645,51 @@ mod tests {
             encode_semantic_tokens(&toks),
             vec![0, 0, 2, KEYWORD, 0, 1, 0, 1, VARIABLE, 0]
         );
+    }
+
+    #[test]
+    fn semtok_multiline_string_splits_per_line() {
+        // A triple-quoted string spanning lines must NOT emit one token whose length runs past
+        // end-of-line (LSP tokens are single-line). It splits into one STRING token per line.
+        let toks = semantic_tokens("\"\"\"\nab\n\"\"\"\n");
+        let strs: Vec<SemTok> = toks
+            .into_iter()
+            .filter(|t| t.token_type == STRING)
+            .collect();
+        assert_eq!(
+            strs,
+            vec![
+                st(0, 0, 3, STRING), // opening """
+                st(1, 0, 2, STRING), // ab
+                st(2, 0, 3, STRING), // closing """
+            ]
+        );
+    }
+
+    #[test]
+    fn semtok_utf16_astral_columns() {
+        // 🙂 is one Unicode scalar but TWO UTF-16 code units. LSP positions default to UTF-16, so
+        // the `+` and `x` after the string must land at UTF-16 columns 4 and 5, not char columns 3/4.
+        let toks = semantic_tokens("\"🙂\"+x");
+        assert_eq!(
+            toks,
+            vec![
+                st(0, 0, 4, STRING),   // "🙂" = 1 + 2 + 1 UTF-16 units
+                st(0, 4, 1, OPERATOR), // +
+                st(0, 5, 1, VARIABLE), // x
+            ]
+        );
+    }
+
+    #[test]
+    fn diag_utf16_astral_column() {
+        // An emoji before the error token shifts every later column by one UTF-16 unit.
+        let ds = diag("a := \"🙂\" + zzz\n");
+        assert!(!ds.is_empty(), "undefined name should produce a diagnostic");
+        let d = &ds[0];
+        assert!(d.message.contains("zzz"));
+        // `zzz` starts at char col 11 (0-based); UTF-16 col is 12 (🙂 adds one extra unit).
+        assert_eq!(d.col, 12);
+        assert_eq!(d.end_col, 15); // 12 + 3 chars of "zzz"
     }
 }
