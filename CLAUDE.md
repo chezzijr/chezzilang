@@ -60,6 +60,8 @@ cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED —
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 
 cargo install --path . --features lsp --bin chezzi-lsp        # editor LSP server → ~/.cargo/bin (neovim/lvim setup: editors/README.md)
+# ^ RE-RUN this after ANY lexer/checker/grammar change: the installed binary is a snapshot, so
+#   editors keep serving stale diagnostics/highlighting until you reinstall (it's the auto-extend seam).
 cargo build --features lsp --bin chezzi-lsp                    # …or build in place → target/debug/chezzi-lsp (off the default build)
 UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the VSCode TextMate grammar (single-sourced from the lexer)
 ```
