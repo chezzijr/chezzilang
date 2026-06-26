@@ -31,3 +31,15 @@ required-features = ["lsp"]
 [dev-dependencies]
 bnf = "0.6.0"
 cc = "1"
+
+# Build-time tuning for the dev/test cycle. Default cargo dev profile emits FULL debuginfo (`debug=2`),
+# which is slow to generate and link on a crate this size and is rebuilt on every `cargo test`. Keep
+# only line tables (panics still report file:line) and split debuginfo so the linker does less work.
+# Release is untouched — the VM is only fast when release-optimized (see CLAUDE.md / docs/benchmarks).
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.test]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
