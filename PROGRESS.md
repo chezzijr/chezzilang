@@ -42,8 +42,10 @@ target neovim) providing **diagnostics** (lexer+parser+checker over the live buf
 `chezzi::editor::diagnostics`, `CheckError`/`ResolveError` 1-based spans → 0-based LSP ranges, pushed on
 open/change/save), **semantic tokens** (lexer `Tok` stream → base
 `keyword/operator/string/number/comment/variable` legend, then an **AST-derived overlay** refines each
-ident to `function` (fn-decl names + call/ctor/method callees), `type` (type references in
-annotations/returns/fields/payloads/bounds), `property` (struct field decls + field accesses), or
+ident to `function` (fn-decl names + call/ctor/method callees), `type` (plain named-type references —
+struct/enum/scalar names — in annotations/returns/fields/payloads/bounds; generic-constructor heads
+and module-qualified names are span-less and stay `variable`, see limits), `property` (struct field
+decls + field accesses), or
 `parameter` (fn/closure params) — the legend is extended with those four names and a `chezzi-lsp`
 `#[cfg(test)]` test asserts the server legend and `editor::SEMANTIC_TOKEN_TYPES` agree index-for-index;
 a buffer that doesn't parse yields an empty overlay and degrades to lexer-only highlighting, never
@@ -74,8 +76,10 @@ a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: 
 No parity risk (front-end only; never runs VM/interp). v1 limits: unsaved edits to an *imported* module
 aren't reflected until saved; interpolated strings highlight as one literal (no nested `{expr}`); hover
 covers the entry module only, resolves leaf idents/literals/field-names + single-name let bindings +
-call callees incl. method names (desugared `?.`/`??` and non-first destructuring-bind names return no
-type; the semantic-token overlay's `type` role skips module-qualified type names, which carry no span).
+call callees incl. **user-struct** method names (generic/enum/newtype/builtin-collection methods,
+desugared `?.`/`??`, and non-first destructuring-bind names return no type; the semantic-token overlay's
+`type` role skips generic-constructor heads (`List[int]`'s `List`, `Map`/`Set`/`Box`, …) and
+module-qualified type names, both span-less).
 
 **✅ Bug-discovery lever #1 — front-end panic-fuzzer (2026-06-26).** `src/panicfuzz/` feeds
 adversarial / malformed inputs to `chezzi check` (the full front-end: lexer + parser + checker) and
