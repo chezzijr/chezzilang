@@ -137,7 +137,13 @@ fn utf16_to_char_col(line: &str, utf16_col: u32) -> usize {
         if acc >= utf16_col {
             return i;
         }
-        acc += c.len_utf16() as u32;
+        // If the target column falls strictly inside this char's surrogate pair, clamp to its
+        // start rather than overshooting to the next char.
+        let next = acc + c.len_utf16() as u32;
+        if next > utf16_col {
+            return i;
+        }
+        acc = next;
     }
     line.chars().count()
 }
@@ -732,6 +738,15 @@ mod tests {
         let src = "n := \"a\"\nout := \"\u{1f642}\" + n\n";
         let h = hov(src, 1, 14).expect("hover on n after emoji");
         assert_eq!(h.display, "str");
+    }
+
+    #[test]
+    fn utf16_to_char_col_clamps_mid_surrogate() {
+        // "a🙂": 'a' is 1 UTF-16 unit, 🙂 is 2 (cols 1 and 2 both fall within the emoji).
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 0), 0); // 'a'
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 1), 1); // boundary: start of 🙂
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 2), 1); // MID-surrogate → clamp to 🙂's start
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 3), 2); // past end → char count
     }
 
     fn st(line: u32, start: u32, len: u32, ty: u32) -> SemTok {
