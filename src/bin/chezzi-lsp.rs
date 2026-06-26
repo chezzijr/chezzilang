@@ -190,11 +190,14 @@ impl LanguageServer for Backend {
         let Some(info) = chezzi::editor::hover(&path, &text, pos.line, pos.character) else {
             return Ok(None);
         };
-        // Render the inferred type as a fenced `chezzi` code block so editors syntax-highlight it.
+        // Render the inferred type as a PLAIN fenced code block — deliberately NOT tagged `chezzi`.
+        // No `chezzi` treesitter parser exists, and a language-tagged fence makes some editors'
+        // markdown hover renderers (e.g. Neovim 0.12) attempt a missing-language injection and crash
+        // on the float instead of skipping it. An untagged fence still renders as monospace everywhere.
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```chezzi\n{}\n```", info.display),
+                value: format!("```\n{}\n```", info.display),
             }),
             range: None,
         }))

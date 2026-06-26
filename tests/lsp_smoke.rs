@@ -118,8 +118,15 @@ fn hover_round_trip() {
                         "hover response missing the inferred type: {msg}"
                     );
                     assert!(
-                        msg.contains("```chezzi"),
-                        "hover response missing the chezzi code block: {msg}"
+                        msg.contains("```"),
+                        "hover response missing the code block fence: {msg}"
+                    );
+                    // The fence must NOT be tagged `chezzi`: no chezzi treesitter parser exists, and a
+                    // language-tagged fence crashes some editors' markdown hover renderers (Neovim 0.12)
+                    // on a missing-language injection. Guard against regressing back to a tagged fence.
+                    assert!(
+                        !msg.contains("```chezzi"),
+                        "hover fence must stay untagged to avoid the treesitter injection crash: {msg}"
                     );
                     saw_hover = true;
                     break;
