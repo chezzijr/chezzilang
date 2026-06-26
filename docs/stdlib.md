@@ -86,9 +86,9 @@ huge `n` rather than allocating until it aborts.)
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists only (`int`→`int`). Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps; any-float lists accumulate to `float` (may reach `inf`). |
-| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. |
+| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic — never faults. |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). |
-| `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. |
+| `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()` — never faults. |
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
 | `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |

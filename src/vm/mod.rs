@@ -5364,30 +5364,7 @@ impl Vm {
                 Obj::NewType { inner, .. } => *inner,
                 _ => unreachable!(),
             };
-            let name = match op {
-                Op::Lt => "Lt",
-                Op::LtEq => "LtEq",
-                Op::Gt => "Gt",
-                Op::GtEq => "GtEq",
-                _ => unreachable!(),
-            };
-            let ord = self.compare(a, b).ok_or_else(|| {
-                self.err(
-                    format!(
-                        "cannot apply {name} to {} and {}",
-                        self.type_name(a),
-                        self.type_name(b)
-                    ),
-                    span,
-                )
-            })?;
-            let bres = match op {
-                Op::Lt => ord.is_lt(),
-                Op::LtEq => ord.is_le(),
-                Op::Gt => ord.is_gt(),
-                Op::GtEq => ord.is_ge(),
-                _ => unreachable!(),
-            };
+            let bres = self.ordered_bool(op, a, b, span)?;
             self.push(Value::Bool(bres));
             return Ok(());
         }
@@ -5400,32 +5377,49 @@ impl Vm {
         {
             return self.struct_ordering(op, l, r, span);
         }
-        let name = match op {
-            Op::Lt => "Lt",
-            Op::LtEq => "LtEq",
-            Op::Gt => "Gt",
-            Op::GtEq => "GtEq",
-            _ => unreachable!(),
-        };
-        let ord = self.compare(l, r).ok_or_else(|| {
-            self.err(
-                format!(
-                    "cannot apply {name} to {} and {}",
-                    self.type_name(l),
-                    self.type_name(r)
-                ),
-                span,
-            )
-        })?;
-        let b = match op {
-            Op::Lt => ord.is_lt(),
-            Op::LtEq => ord.is_le(),
-            Op::Gt => ord.is_gt(),
-            Op::GtEq => ord.is_ge(),
-            _ => unreachable!(),
-        };
+        let b = self.ordered_bool(op, l, r, span)?;
         self.push(Value::Bool(b));
         Ok(())
+    }
+
+    /// Map an ordering operator (`< <= > >=`) over two values to a bool. `compare` returns `None` for
+    /// two reasons we MUST distinguish: (1) both operands numeric ⇒ a NaN is involved — every ordered
+    /// compare against NaN is `false` (IEEE-754 / Python / Rust parity), never a fault; (2) genuinely
+    /// incomparable TYPES (the `_ => None` fallthrough, e.g. str vs int) ⇒ keep the existing fault.
+    /// `Ordering` has no "unordered" value, so the NaN case is special-cased here before the
+    /// is_lt/is_le/is_gt/is_ge match — encoding it as a fake `Ordering` would make exactly one of the
+    /// four ops true. Mirrors `interp::eval_binary`'s `Lt|LtEq|Gt|GtEq` arm.
+    fn ordered_bool(&self, op: &Op, a: Value, b: Value, span: Span) -> Result<bool, RuntimeError> {
+        match self.compare(a, b) {
+            Some(ord) => Ok(match op {
+                Op::Lt => ord.is_lt(),
+                Op::LtEq => ord.is_le(),
+                Op::Gt => ord.is_gt(),
+                Op::GtEq => ord.is_ge(),
+                _ => unreachable!(),
+            }),
+            // Both numeric ⇒ NaN is involved ⇒ false for all four ops.
+            None if is_numeric(a) && is_numeric(b) => Ok(false),
+            // Genuinely-incomparable types: unreachable from well-typed source (the checker rejects
+            // e.g. `str < int`); kept for internal-invariant safety.
+            None => {
+                let name = match op {
+                    Op::Lt => "Lt",
+                    Op::LtEq => "LtEq",
+                    Op::Gt => "Gt",
+                    Op::GtEq => "GtEq",
+                    _ => unreachable!(),
+                };
+                Err(self.err(
+                    format!(
+                        "cannot apply {name} to {} and {}",
+                        self.type_name(a),
+                        self.type_name(b)
+                    ),
+                    span,
+                ))
+            }
+        }
     }
 
     /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
@@ -7553,16 +7547,23 @@ impl Vm {
         {
             return self.struct_compare(a, b, span);
         }
-        self.compare(a, b).ok_or_else(|| {
-            self.err(
+        match self.compare(a, b) {
+            Some(ord) => Ok(ord),
+            // Numeric keys with a NaN present: sort deterministically via `total_cmp` (NaN to one
+            // end), consistent with `sort()`'s `value_order` — never a fault. The checker enforces a
+            // single key type K, so a numeric `None` means a NaN float (Int.cmp / Int.partial_cmp
+            // never yield `None`); int/str keys never reach this branch (their `compare` is total).
+            None if is_numeric(a) && is_numeric(b) => Ok(as_f64(a).total_cmp(&as_f64(b))),
+            // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
+            None => Err(self.err(
                 format!(
                     "sort_by_key keys are not comparable: {} vs {}",
                     self.type_name(a),
                     self.type_name(b)
                 ),
                 span,
-            )
-        })
+            )),
+        }
     }
 
     /// Built-in methods on `str` / `list` (M6). The result is returned (not pushed) so the caller
@@ -27990,6 +27991,38 @@ main()";
         // is_nan / is_inf / is_finite — float predicates returning bool, identical on both engines.
         let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";
         assert_eq!(parity_entry(src), "true\ntrue\ntrue\nfalse\n");
+    }
+
+    #[test]
+    fn parity_nan_ordered_compare_is_false() {
+        // Ordered comparisons (`< <= > >=`) involving NaN are ALWAYS false on both engines — never a
+        // fault — matching IEEE-754 / Python / Rust. Equality is untouched (`nan == nan` → false,
+        // `nan != nan` → true). Normal float compares still work (regression guard).
+        let src = "fn main():\n    nan := 0.0 / 0.0\n    print(nan < 1.0)\n    print(nan <= 1.0)\n    print(nan > 1.0)\n    print(nan >= 1.0)\n    print(1.0 < nan)\n    print(1.0 > nan)\n    print((1.0 / 0.0) < nan)\n    print(1.0 < 2.0)\n    print(2.0 > 1.0)\n    print(nan == nan)\n    print(nan != nan)\nmain()";
+        assert_parity_out(
+            src,
+            "false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\ntrue\ntrue\nfalse\ntrue\n",
+        );
+    }
+
+    #[test]
+    fn parity_sort_by_key_nan_float_key_deterministic() {
+        // `sort_by_key` with a float key that can be NaN sorts deterministically (total order, NaN to
+        // one end) instead of faulting — consistent with `sort()`. `0.0/0.0` is a negative NaN at
+        // runtime on x86, so total_cmp ranks both NaNs at the FRONT. assert_parity_out locks both the
+        // exact order AND VM↔interp agreement.
+        let src = "fn main():\n    xs := [1.0, 0.0 / 0.0, 2.0, 0.0 / 0.0, 0.5]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
+        assert_parity_out(src, "NaN\nNaN\n0.5\n1.0\n2.0\n");
+    }
+
+    #[test]
+    fn parity_sort_by_key_normal_key_unchanged() {
+        // Behavior-preserving guard: non-NaN float keys and int keys sort exactly as before — Part B
+        // touches only the NaN float-key path.
+        let fsrc = "fn main():\n    xs := [3.0, 1.0, 2.0]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
+        assert_parity_out(fsrc, "1.0\n2.0\n3.0\n");
+        let isrc = "fn main():\n    xs := [3, 1, 2]\n    xs.sort_by_key(fn(x: int) -> int: x)\n    for v in xs:\n        print(v)\nmain()";
+        assert_parity_out(isrc, "1\n2\n3\n");
     }
 
     #[test]
