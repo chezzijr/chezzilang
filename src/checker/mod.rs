@@ -151,9 +151,14 @@ fn is_reserved_protocol(name: &str) -> bool {
         "Comparable"
             | "Stringable"
             | "Hashable"
+            | "Error"
             | "Add"
             | "Sub"
             | "Mul"
+            | "Div"
+            | "Mod"
+            | "Neg"
+            | "Arithmetic"
             | "Iterator"
             | "Iterable"
             | "Index"
@@ -242,6 +247,12 @@ struct StructInfo {
 struct ProtocolInfo {
     type_params: Vec<String>,
     methods: Vec<(String, FnSig)>,
+    /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` carries `[Add, Sub]`. A type
+    /// satisfies this protocol iff it satisfies every embed (transitively) AND has every OWN method
+    /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical to
+    /// a type-param bound (name + optional `[args]`). The builtin `Arithmetic` bundle is built with
+    /// this same field (`embeds: [Add, Sub, Mul, Div]`, no own methods) — uniform machinery.
+    embeds: Vec<Bound>,
 }
 
 /// A user enum variant: which enum it belongs to and its payload field types.
@@ -2021,9 +2032,24 @@ impl Checker {
                 name,
                 type_params,
                 methods,
+                embeds,
             } = &s.kind
             {
-                self.hoist_protocol(name, type_params, methods, s.span);
+                self.hoist_protocol(name, type_params, methods, embeds, s.span);
+            }
+        }
+        // M22 — validate embeds in a SECOND pass, now that every protocol is registered, so a forward
+        // (or cyclic) embed reference resolves. Collision/cycle detection lives here (declare-time,
+        // authoritative — before any satisfaction check can recurse into a cycle).
+        for s in stmts {
+            if let StmtKind::Protocol {
+                name,
+                methods,
+                embeds,
+                ..
+            } = &s.kind
+            {
+                self.validate_protocol_embeds(name, methods, embeds, s.span);
             }
         }
         // extern fn (name, span) pairs, collected during the hoist loop and checked against the
@@ -5772,11 +5798,14 @@ impl Checker {
         let t = self.infer_value(inner);
         match op {
             UnaryOp::Neg => {
-                if !t.is_numeric() && !t.is_unknown() {
+                // int/float negate natively; a struct/newtype/type-param negates via the `Neg`
+                // protocol (method `neg(self) -> Self`) — the unary mirror of how `+` consults `Add`.
+                if t.is_numeric() || t.is_unknown() || self.satisfies(&t, "Neg").is_ok() {
+                    t
+                } else {
                     self.error(inner.span, format!("cannot negate {t}"));
-                    return Ty::Unknown;
+                    Ty::Unknown
                 }
-                t
             }
             UnaryOp::Not => {
                 if t != Ty::Bool && !t.is_unknown() {
@@ -5869,18 +5898,15 @@ impl Checker {
                     Ty::Unknown
                 }
             }
+            // `/`/`%` overload via the `Div`/`Mod` protocols on same-typed structs/enums/type-params,
+            // exactly like `-`/`*` use `Sub`/`Mul` (M22). `op_overload_result` also covers the same
+            // SCALAR numeric newtype auto-flow (`Meters / Meters`), so no hand-rolled newtype branch.
             Div | Mod => {
+                let proto = if op == Div { "Div" } else { "Mod" };
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
-                } else if let (Ty::NewType(a, _), Ty::NewType(b, _)) = (&l, &r)
-                    && a == b
-                    && !self.newtype_is_generic(a)
-                    && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
-                {
-                    // Same SCALAR numeric newtype: `/`/`%` auto-flow the underlying op like `+ - *`
-                    // (unwrap→op→rewrap), keeping the checker in step with the runtime. A generic
-                    // newtype is methods-only — no native operator auto-flow even over a numeric T.
-                    l.clone()
+                } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
+                    t
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -8864,6 +8890,7 @@ impl Checker {
         name: &str,
         type_params: &[TypeParam],
         methods: &[MethodSig],
+        embeds: &[Bound],
         span: Span,
     ) {
         if is_reserved_protocol(name) {
@@ -8932,8 +8959,114 @@ impl Checker {
             ProtocolInfo {
                 type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                 methods: sigs,
+                embeds: embeds.to_vec(),
             },
         );
+    }
+
+    /// M22 — validate a protocol's embeds AFTER every protocol is hoisted (so forward/cyclic refs
+    /// resolve). Three LOCKED rules: (1) an OWN `fn` whose name collides with any transitively-embedded
+    /// required method → error, regardless of order or sig; (2) two embeds pulling the same method name
+    /// with DIFFERING signatures → error (identical sigs dedup silently — the legal diamond); (3) a
+    /// cyclic embed (A embeds B, B embeds A) → error. Built-in protocols (registered via
+    /// [`prebuilt_protocols`], not here) are trusted and skipped.
+    fn validate_protocol_embeds(
+        &mut self,
+        name: &str,
+        methods: &[MethodSig],
+        embeds: &[Bound],
+        span: Span,
+    ) {
+        if is_reserved_protocol(name) {
+            return; // builtin (or already errored as a redeclaration / reserved name)
+        }
+        // Each embed must name a real protocol.
+        for emb in embeds {
+            if !self.protocols.contains_key(&emb.name) {
+                self.error(
+                    span,
+                    format!("unknown protocol '{}' embedded in '{name}'", emb.name),
+                );
+            }
+        }
+        // Flatten the transitive embed method set, detecting cycles + cross-embed signature conflicts.
+        let mut path = vec![name.to_string()];
+        let (required, cyclic, conflict) = self.flatten_embed_methods(embeds, &mut path);
+        if cyclic {
+            self.error(
+                span,
+                format!("cyclic protocol embedding involving '{name}'"),
+            );
+            return;
+        }
+        if let Some(m) = conflict {
+            self.error(
+                span,
+                format!("conflicting signature for method '{m}' from embedded protocols"),
+            );
+        }
+        // Rule 1: an own `fn` colliding with an embedded-required method name.
+        for m in methods {
+            if required.contains_key(&m.name) {
+                self.error(
+                    span,
+                    format!(
+                        "method '{}' conflicts with embedded protocol requirement",
+                        m.name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Recursively collect the method signatures required by a list of embeds. Returns
+    /// `(required, cyclic, conflict)`: `required` maps method name → signature (identical sigs deduped),
+    /// `cyclic` is set if any embed revisits a protocol on the current `path`, and `conflict` names a
+    /// method seen with two DIFFERING signatures (rule 2). Read-only over `self.protocols`.
+    fn flatten_embed_methods(
+        &self,
+        embeds: &[Bound],
+        path: &mut Vec<String>,
+    ) -> (HashMap<String, FnSig>, bool, Option<String>) {
+        let mut required: HashMap<String, FnSig> = HashMap::new();
+        let mut conflict: Option<String> = None;
+        let mut merge = |mn: &str, ms: &FnSig, conflict: &mut Option<String>| {
+            match required.get(mn) {
+                Some(existing) if !fn_sig_eq(existing, ms) => {
+                    if conflict.is_none() {
+                        *conflict = Some(mn.to_string());
+                    }
+                }
+                Some(_) => {} // identical sig — dedup silently (legal diamond)
+                None => {
+                    required.insert(mn.to_string(), ms.clone());
+                }
+            }
+        };
+        for emb in embeds {
+            if path.iter().any(|p| p == &emb.name) {
+                return (required, true, conflict);
+            }
+            let Some(pinfo) = self.protocols.get(&emb.name).cloned() else {
+                continue; // unknown embed already errored in validate_protocol_embeds
+            };
+            for (mn, ms) in &pinfo.methods {
+                merge(mn, ms, &mut conflict);
+            }
+            path.push(emb.name.clone());
+            let (sub, cyclic, sub_conf) = self.flatten_embed_methods(&pinfo.embeds, path);
+            path.pop();
+            if cyclic {
+                return (required, true, conflict);
+            }
+            for (mn, ms) in &sub {
+                merge(mn, ms, &mut conflict);
+            }
+            if conflict.is_none() {
+                conflict = sub_conf;
+            }
+        }
+        (required, false, conflict)
     }
 
     /// Does concrete `ty` structurally satisfy `protocol`? Read-only. Primitives intrinsically
@@ -9145,6 +9278,43 @@ impl Checker {
             let bt = self.resolve_ty_ro(ba);
             !ty_fully_concrete(&bt) || !ty_fully_concrete(want) || compatible(&bt, want)
         })
+    }
+
+    /// M22 — does a declared bound `bound_name[bound_args]` PROVIDE `protocol[required]`, directly or
+    /// transitively through embedded (super-)protocols? This is what makes `a + b` / `a / b` legal
+    /// inside a `[T: Arithmetic]` body (the bound `Arithmetic` flattens to Add/Sub/Mul/Div) and lets a
+    /// `[T: Arithmetic]` value forward into a `[U: Div]` call. Preserves the `Iterator`→`Iterable`
+    /// subsumption. Depth-capped against a (declare-time-rejected, but still-checked) cyclic embed.
+    fn bound_provides(
+        &self,
+        bound_name: &str,
+        bound_args: &[Type],
+        protocol: &str,
+        required: &[Ty],
+        depth: usize,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        // Direct: the bound names the required protocol with matching args.
+        if bound_name == protocol && self.bound_args_match(bound_args, required) {
+            return true;
+        }
+        // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self).
+        if protocol == "Iterable"
+            && bound_name == "Iterator"
+            && self.bound_args_match(bound_args, required)
+        {
+            return true;
+        }
+        // Transitive: any embed of the bound's protocol provides it.
+        if let Some(pinfo) = self.protocols.get(bound_name) {
+            return pinfo
+                .embeds
+                .iter()
+                .any(|e| self.bound_provides(&e.name, &e.args, protocol, required, depth + 1));
+        }
+        false
     }
 
     /// Read-only type resolution (no error emission), for contexts that only hold `&self`. Returns
@@ -9441,11 +9611,42 @@ impl Checker {
     /// protocol the structural check substitutes the protocol's type params with `args` before
     /// matching method signatures.
     fn satisfies_args(&self, ty: &Ty, protocol: &str, args: &[Ty]) -> Result<(), String> {
+        self.satisfies_args_d(ty, protocol, args, 0)
+    }
+
+    /// Depth-bounded core of [`satisfies_args`]. `depth` guards the embed-flattening recursion (M22):
+    /// cycles are rejected at declare time, but a malformed cyclic program still runs the rest of the
+    /// checker, so a hard cap (mirroring `resolve_ty_ro_d`) breaks the recursion with a plain failure
+    /// instead of overflowing the stack.
+    fn satisfies_args_d(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        args: &[Ty],
+        depth: usize,
+    ) -> Result<(), String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
             return Err(format!("unknown protocol '{protocol}'"));
         };
         if let Ty::Unknown = ty {
             return Ok(()); // don't cascade
+        }
+        // M22 — embedded (super-)protocols: a type satisfies `protocol` iff it satisfies every embed
+        // (transitively) AND has every OWN method below. A PURE bundle (`Arithmetic` = embeds only,
+        // no own methods) short-circuits once its embeds pass — this is what lets int/float/struct
+        // satisfy `Arithmetic` (each embed recurses into the intrinsic/structural arms). A `Ty::Param`
+        // is NOT flattened here — it forwards through its declared bounds in the `Ty::Param` arm below
+        // (which knows, via `bound_provides`, that an `Arithmetic`-bound param provides Add/Sub/…).
+        if !pinfo.embeds.is_empty() && !matches!(ty, Ty::Param(_)) {
+            if depth <= 64 {
+                for emb in &pinfo.embeds {
+                    let eargs: Vec<Ty> = emb.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                    self.satisfies_args_d(ty, &emb.name, &eargs, depth + 1)?;
+                }
+            }
+            if pinfo.methods.is_empty() {
+                return Ok(()); // pure bundle — all embeds satisfied, no own methods to check
+            }
         }
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return Ok(());
@@ -9531,9 +9732,12 @@ impl Checker {
                 Err(format!("type {ty} does not satisfy {protocol}"))
             };
         }
-        // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - *` are
-        // the primitive ops), so a `[T: Add + Mul]` generic works over numbers as well as structs.
-        if matches!(protocol, "Add" | "Sub" | "Mul") && matches!(ty, Ty::Int | Ty::Float) {
+        // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - * / %`
+        // and unary `-` are the primitive ops), so a `[T: Add + Mul]` / `[T: Div]` / `[T: Neg]`
+        // generic works over numbers as well as structs.
+        if matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg")
+            && matches!(ty, Ty::Int | Ty::Float)
+        {
             return Ok(());
         }
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
@@ -9542,13 +9746,8 @@ impl Checker {
         // `Container[str]` value is NOT accepted where `Container[int]` is required (forwarding hole).
         if let Ty::Param(name) = ty {
             let matched = self.type_params.get(name).is_some_and(|bs| {
-                bs.iter().any(|b| {
-                    // Direct: the bound names the required protocol with matching args.
-                    (b.name == protocol && self.bound_args_match(&b.args, args))
-                    // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self),
-                    // so an `Iterator`-bound param forwards into an `Iterable` bound (same element).
-                    || (protocol == "Iterable" && b.name == "Iterator" && self.bound_args_match(&b.args, args))
-                })
+                bs.iter()
+                    .any(|b| self.bound_provides(&b.name, &b.args, protocol, args, 0))
             });
             return if matched {
                 Ok(())
@@ -9574,7 +9773,7 @@ impl Checker {
             }
             // A newtype satisfies a protocol structurally via its OWN methods (like struct/enum).
             // PLUS, when its underlying is numeric, it intrinsically satisfies the operator protocols
-            // (`Add`/`Sub`/`Mul`/`Comparable`) — its same-type `+`/`<` use the underlying's native op
+            // (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`) — its same-type `+`/`<` use the native op
             // (unwrap→op→rewrap), so a `newtype Meters = float` flows into a `[T: Add]` generic with
             // no user `add` method. Hashable/Stringable stay strictly opt-in (the user's own method).
             Ty::NewType(ntkey, _) => {
@@ -9585,7 +9784,12 @@ impl Checker {
                     && self
                         .newtype_underlying(ntkey)
                         .is_some_and(|u| u.is_numeric());
-                if numeric && matches!(protocol, "Add" | "Sub" | "Mul" | "Comparable") {
+                if numeric
+                    && matches!(
+                        protocol,
+                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
+                    )
+                {
                     return Ok(());
                 }
                 let Some((_, methods)) = self.newtype_defs.get(ntkey) else {
@@ -10799,12 +11003,19 @@ fn first_duplicate_binder(p: &Pattern) -> Option<String> {
 
 /// The prebuilt protocols every program starts with. `Comparable` requires
 /// `compare(self, other: Self) -> int`; primitives (int/float/str) satisfy it intrinsically.
+/// M22 — structural equality of two protocol method signatures (params + return + arity), used to
+/// dedup identical embed-pulled methods (the legal diamond) vs. flag a conflicting-signature embed.
+fn fn_sig_eq(a: &FnSig, b: &FnSig) -> bool {
+    a.params == b.params && a.ret == b.ret && a.min_params == b.min_params
+}
+
 fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     let mut m = HashMap::new();
     m.insert(
         "Comparable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
+            embeds: Vec::new(),
             // receiver `self` (Unknown), `other: Self` (Param "Self"), returning int.
             methods: vec![(
                 "compare".to_string(),
@@ -10816,6 +11027,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Stringable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
+            embeds: Vec::new(),
             // receiver `self` (Unknown) only, returning str. A struct with `str(self) -> str`
             // satisfies it; `print`/`str()`/interpolation dispatch to that method at runtime.
             methods: vec![("str".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Str))],
@@ -10827,6 +11039,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Error".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
+            embeds: Vec::new(),
             methods: vec![(
                 "message".to_string(),
                 FnSig::plain(vec![Ty::Unknown], Ty::Str),
@@ -10837,6 +11050,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Hashable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
+            embeds: Vec::new(),
             // receiver `self` (Unknown) only, returning int. A struct with `hash(self) -> int`
             // satisfies it. WIRED TO MAP/SET KEYS: `map`/`set` are real hash tables (insertion-order
             // entries + a hash→position index), so any `Hashable` type can be a key/element — the
@@ -10847,14 +11061,22 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             methods: vec![("hash".to_string(), FnSig::plain(vec![Ty::Unknown], Ty::Int))],
         },
     );
-    // Per-operator numeric protocols (M10-G3): a struct satisfying `Add`/`Sub`/`Mul` (method
-    // `add`/`sub`/`mul`(self, other: Self) -> Self) overloads `+`/`-`/`*`. `Self` for `other` and the
-    // return makes them binary same-type operators (mirrors `Comparable`'s `compare`).
-    for (proto, method) in [("Add", "add"), ("Sub", "sub"), ("Mul", "mul")] {
+    // Per-operator numeric protocols (M10-G3, M22): a struct satisfying `Add`/`Sub`/`Mul`/`Div`/`Mod`
+    // (method `add`/`sub`/`mul`/`div`/`mod`(self, other: Self) -> Self) overloads `+`/`-`/`*`/`/`/`%`.
+    // `Self` for `other` and the return makes them binary same-type operators (mirrors `Comparable`'s
+    // `compare`).
+    for (proto, method) in [
+        ("Add", "add"),
+        ("Sub", "sub"),
+        ("Mul", "mul"),
+        ("Div", "div"),
+        ("Mod", "mod"),
+    ] {
         m.insert(
             proto.to_string(),
             ProtocolInfo {
                 type_params: Vec::new(),
+                embeds: Vec::new(),
                 methods: vec![(
                     method.to_string(),
                     FnSig::plain(
@@ -10865,6 +11087,48 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             },
         );
     }
+    // `Neg` (M22) — the UNARY `-` protocol: a struct/type-param satisfying `Neg` (method
+    // `neg(self) -> Self`, one param `self` only, no `other`) overloads unary `-`. int/float satisfy
+    // it intrinsically (their native negation). Mirrors `Stringable`'s single-`self`-param shape.
+    m.insert(
+        "Neg".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: Vec::new(),
+            methods: vec![(
+                "neg".to_string(),
+                FnSig::plain(vec![Ty::Unknown], Ty::Param("Self".into())),
+            )],
+        },
+    );
+    // `Arithmetic` (M22) — a builtin protocol BUNDLE: embeds `Add + Sub + Mul + Div` and adds no own
+    // methods. `[T: Arithmetic]` flattens to "has add/sub/mul/div", so int/float and any 4-op struct
+    // satisfy it. Built with the SAME `embeds` field user bundles use — no special-casing of builtins.
+    m.insert(
+        "Arithmetic".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: vec![
+                Bound {
+                    name: "Add".to_string(),
+                    args: Vec::new(),
+                },
+                Bound {
+                    name: "Sub".to_string(),
+                    args: Vec::new(),
+                },
+                Bound {
+                    name: "Mul".to_string(),
+                    args: Vec::new(),
+                },
+                Bound {
+                    name: "Div".to_string(),
+                    args: Vec::new(),
+                },
+            ],
+            methods: Vec::new(),
+        },
+    );
     // `Iterator[T]` — the language's one parameterized protocol. The method shape mirrors the
     // structural detection (`next(self) -> Option[T]`); conformance is decided in `satisfies` via
     // `iter_elem` (built-ins intrinsically, user structs via their `next`), NOT the generic structural
@@ -10875,6 +11139,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             // One type param (the element) so the generic arity check in `check_bounds` treats
             // `Iterator[T]` uniformly; its conformance + element recovery stay special-cased.
             type_params: vec!["Elem".to_string()],
+            embeds: Vec::new(),
             methods: vec![(
                 "next".to_string(),
                 FnSig::plain(
@@ -10894,6 +11159,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Iterable".to_string(),
         ProtocolInfo {
             type_params: vec!["Elem".to_string()],
+            embeds: Vec::new(),
             methods: vec![(
                 "iter".to_string(),
                 FnSig::plain(
@@ -10911,6 +11177,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Index".to_string(),
         ProtocolInfo {
             type_params: vec!["K".to_string(), "V".to_string()],
+            embeds: Vec::new(),
             methods: vec![(
                 "index".to_string(),
                 FnSig::plain(
@@ -10924,6 +11191,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "IndexSet".to_string(),
         ProtocolInfo {
             type_params: vec!["K".to_string(), "V".to_string()],
+            embeds: Vec::new(),
             methods: vec![
                 (
                     "index".to_string(),
@@ -10946,6 +11214,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Slice".to_string(),
         ProtocolInfo {
             type_params: vec!["R".to_string()],
+            embeds: Vec::new(),
             methods: vec![(
                 "slice".to_string(),
                 // Python-style: three `Option[int]` components (start/end/step), each `None` when

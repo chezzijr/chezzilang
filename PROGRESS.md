@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ M22 — operator protocols (Div/Mod/Neg) + protocol embedding + `Arithmetic` (2026-06-26).** Three
+new per-operator protocols wired exactly like `Add`/`Sub`/`Mul`: **`Div`** (`div(self, o: Self) ->
+Self`, powers `/`), **`Mod`** (`mod`, powers `%`), **`Neg`** (`neg(self) -> Self`, powers UNARY `-`).
+`int`/`float` satisfy all three intrinsically; structs/enums via the method; scalar newtypes get
+`Div`/`Mod` auto-flow (Neg out of scope). C-style `/` truncates / `%` int-remainder, so `Div`/`Mod`
+are `Self -> Self` (no float-return surprise). **Protocol embedding (super-protocols)** — a protocol
+body line is now EITHER an `fn` sig OR an embed line (`Add + Sub`, order-free, interleaved); reuses
+`Bound`. `ProtocolInfo`/`StmtKind::Protocol` gained `embeds: Vec<Bound>`. Satisfaction flattens
+transitively (memo-free recursion, depth-cap 64) — a type satisfies P iff it satisfies every embed AND
+has every OWN method; a pure bundle (embeds, no methods) short-circuits. Bound-site flattening via a
+new `bound_provides` helper makes `+ - * /` legal inside an `[T: Arithmetic]` body and lets an
+`Arithmetic`-bound value forward into `[U: Div]`. **Collision rules** validated declare-time (second
+hoist pass, after all protocols registered so forward/cyclic refs resolve): own-fn-vs-embed = error;
+same-method same-sig embed diamond dedups silently (`Arithmetic + Add` legal); differing-sig embed =
+error; cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`, built with the
+same `embeds` field (no special-casing). `Div`/`Mod`/`Neg`/`Arithmetic` + the previously-omitted
+`Error` are now reserved protocol names. Both-engine operator dispatch (vm `struct_arith` + `Op::Neg`;
+interp mirror); golden `examples/arithmetic_protocol.chz` runs byte-identical on vm/interp/parallel;
+grammar.bnf `protocolDecl` updated (+`tests/corpus/accept/protocol_embed.chz`, conformance green).
+Surface in [`docs/syntax.md`](docs/syntax.md), [`docs/spec.md`](docs/spec.md) (M22 row).
+
 **✅ Bug-discovery lever #1 — front-end panic-fuzzer (2026-06-26).** `src/panicfuzz/` feeds
 adversarial / malformed inputs to `chezzi check` (the full front-end: lexer + parser + checker) and
 flags any crash. A **stable, dependency-free SUBPROCESS harness** structurally mirroring

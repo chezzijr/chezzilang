@@ -174,12 +174,18 @@
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"
                   | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
 
-# A protocol is a Go-style structural interface: a block of body-less method signatures. A type
-# satisfies it by having matching methods (no explicit `implements`). It may carry type parameters
-# (`protocol Container[T]:`); a bound then supplies concrete args (`[X: Container[int]]`).
-<protocolDecl> ::= "PROTOCOL" "IDENT" "COLON" "NEWLINE" "INDENT" <fnSigs> "DEDENT"
-                 | "PROTOCOL" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <fnSigs> "DEDENT"
-<fnSigs>       ::= <fnSig> | <fnSig> <fnSigs>
+# A protocol is a Go-style structural interface: a block of body lines, each EITHER a body-less method
+# signature OR an embed line (M22). An embed line is one-or-more protocol refs joined by `+`
+# (`Add + Sub`, `Iterator[T]`) — it pulls in those (super-)protocols' requirements. Embeds and `fn`
+# sigs interleave in any order; a body of only embed lines is a bundle (`Arithmetic: Add + Sub + Mul +
+# Div`). A type satisfies the protocol by satisfying every embed (transitively) AND every own method.
+# It may carry type parameters (`protocol Container[T]:`); a bound supplies concrete args
+# (`[X: Container[int]]`). An embed ref reuses <boundList>/<bound>.
+<protocolDecl> ::= "PROTOCOL" "IDENT" "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
+                 | "PROTOCOL" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
+<protoBody>    ::= <protoLine> | <protoLine> <protoBody>
+<protoLine>    ::= <fnSig> | <embedLine>
+<embedLine>    ::= <boundList> "NEWLINE"
 <fnSig>        ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
                  | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                  | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"

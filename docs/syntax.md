@@ -778,10 +778,12 @@ print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
 ```
 
 Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type.
-Ordering is overloaded through `Comparable`; arithmetic `+`/`-`/`*` is overloaded through the
-per-operator protocols **`Add`/`Sub`/`Mul`** (methods `add`/`sub`/`mul(self, other: Self) -> Self`).
-A struct defining the matching method gets that operator on its values; `int`/`float` satisfy them
-intrinsically. `/` and `%` are never overloaded.
+Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
+protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
+other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,
+powering unary `-`). A struct/enum defining the matching method gets that operator on its values;
+`int`/`float` satisfy all six intrinsically. (C-style: `/` truncates and `%` is the int remainder, so
+`Div`/`Mod` are `Self -> Self` with no float-return surprise.)
 
 ```chezzi
 struct Vec2:
@@ -789,8 +791,36 @@ struct Vec2:
     y: int
     fn add(self, o: Vec2) -> Vec2:
         return Vec2(self.x + o.x, self.y + o.y)
+    fn div(self, o: Vec2) -> Vec2:
+        return Vec2(self.x / o.x, self.y / o.y)
+    fn neg(self) -> Vec2:
+        return Vec2(-self.x, -self.y)
 
-print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4   — `+` calls Vec2.add
+print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4    — `+` calls Vec2.add
+print((Vec2(6, 8) / Vec2(2, 4)).y)   # 2    — `/` calls Vec2.div
+print((-Vec2(1, 2)).x)               # -1   — unary `-` calls Vec2.neg
+```
+
+**Protocol embedding (super-protocols).** A protocol body may, in addition to `fn` signatures, list
+**embed lines** — one-or-more protocol refs joined by `+` — to pull in those protocols' requirements.
+Embeds and `fn` sigs interleave in any order; a body of only embed lines is a *bundle*. A type
+satisfies the protocol iff it satisfies every embed (transitively) **and** has every own method, so a
+bound flattens at use sites (`[T: Arithmetic]` requires add/sub/mul/div). The builtin **`Arithmetic`**
+bundle is `Add + Sub + Mul + Div`. Collision rules: an own `fn` whose name matches an embedded-required
+method is an error; two embeds requiring the same method with the *same* signature dedup silently (a
+legal diamond — so `Arithmetic + Add` is fine), with *differing* signatures it is an error; a cyclic
+embed is an error.
+
+```chezzi
+protocol Arithmetic:        # builtin — shown for reference
+    Add + Sub + Mul + Div
+
+protocol VectorSpace:       # embeds two protocols and adds its own requirement
+    Arithmetic + Neg
+    fn dot(self, o: Self) -> int
+
+fn combine[T: Arithmetic](a: T, b: T) -> T:   # +, -, *, / all available on T
+    return (a + b) * (a - b) / b
 ```
 
 Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
@@ -914,7 +944,7 @@ A newtype may carry its own **methods** (a trailing-colon block, like a struct/e
 the prebuilt protocols by defining the relevant method — `str(self)` (Stringable display override),
 `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the underlying),
 `compare`/`add`/… — so it passes into protocol-bound generics (`fn twice[T: Add](x: T)`). A numeric
-newtype satisfies `Add`/`Sub`/`Mul`/`Comparable` intrinsically (via the native same-type ops above).
+newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable` intrinsically (native same-type ops above).
 
 ```chezzi
 newtype Meters = float:
@@ -1085,9 +1115,10 @@ Enums may carry **methods** — `fn name(self, …)` blocks written **after all 
 struct methods. The receiver `self` is the whole enum value (a method body typically `match self`).
 A generic enum's methods may use its type parameters (`fn get(self) -> T`). Methods are name-resolved
 on the value (`shape.area()`), satisfy structural protocols (so an enum can define `str(self)` for
-`Stringable`, `hash(self)` for `Hashable`, `add`/`sub`/`mul`/`compare` for `Add`/`Sub`/`Mul`/
-`Comparable`, and pass into protocol-bound generics like `fn twice[T: Add](x: T)`), and overload the
-matching operators (`a + b`, `a < b`) just as struct methods do. (No `derive` — write the method.)
+`Stringable`, `hash(self)` for `Hashable`, `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` for
+`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`, and pass into protocol-bound generics like
+`fn twice[T: Add](x: T)`), and overload the matching operators (`a + b`, `a / b`, `-a`, `a < b`) just
+as struct methods do. (No `derive` — write the method.)
 A `test fn` is **not** allowed inside an enum body (enum test suites aren't wired — it would silently
 never run); test suites are a struct-only feature.
 

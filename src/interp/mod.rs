@@ -668,6 +668,11 @@ impl Interp {
                     }
                     (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
                     (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+                    // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
+                    // (the `Neg` protocol). Extracted to keep `eval`'s frame small (deep recursion).
+                    (UnaryOp::Neg, Value::Struct { .. } | Value::Enum { .. }) => {
+                        self.struct_neg(v, expr.span)
+                    }
                     _ => Err(RuntimeError {
                         message: format!("cannot apply {op:?} to {}", v.type_name()),
                         span: expr.span,
@@ -690,71 +695,9 @@ impl Interp {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.eval(lhs)?;
                 let r = self.eval(rhs)?;
-                // Operator overloading: ordering (`< <= > >=`) on two structs dispatches to the
-                // type's `compare(self, other) -> int` method (the `Comparable` protocol). The
-                // checker has already verified conformance. Equality stays structural (handled by
-                // `eval_binary`); only ordering is overloaded.
-                if matches!(
-                    op,
-                    BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
-                ) && matches!(
-                    (&l, &r),
-                    (Value::Struct { .. }, Value::Struct { .. })
-                        | (Value::Enum { .. }, Value::Enum { .. })
-                ) {
-                    return self.struct_ordering(*op, l, r, expr.span);
-                }
-                // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
-                // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
-                // conformance.
-                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
-                    && matches!(
-                        (&l, &r),
-                        (Value::Struct { .. }, Value::Struct { .. })
-                            | (Value::Enum { .. }, Value::Enum { .. })
-                    )
-                {
-                    return self.struct_arith(*op, l, r, expr.span);
-                }
-                // Same-newtype operators auto-flow to the UNDERLYING's NATIVE op (unwrap→op→rewrap for
-                // arithmetic; unwrap→compare for ordering), NOT a user method. The checker rejected
-                // `Meters + float` / `Meters + Seconds` / `Meters < Seconds`. Mirrors the VM.
-                if let (
-                    Value::NewType {
-                        type_key: ka,
-                        inner: ia,
-                    },
-                    Value::NewType {
-                        type_key: kb,
-                        inner: ib,
-                    },
-                ) = (&l, &r)
-                    && ka == kb
-                {
-                    if matches!(
-                        op,
-                        BinaryOp::Add
-                            | BinaryOp::Sub
-                            | BinaryOp::Mul
-                            | BinaryOp::Div
-                            | BinaryOp::Mod
-                    ) {
-                        let inner = eval_binary(*op, (**ia).clone(), (**ib).clone(), expr.span)?;
-                        return Ok(Value::NewType {
-                            type_key: ka.clone(),
-                            inner: Box::new(inner),
-                        });
-                    }
-                    if matches!(
-                        op,
-                        BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
-                    ) {
-                        // ordering on the inners (native compare), mapped to bool.
-                        return eval_binary(*op, (**ia).clone(), (**ib).clone(), expr.span);
-                    }
-                    // ==/!= fall through to `eval_binary`'s structural newtype equality.
-                }
-                eval_binary(*op, l, r, expr.span)
+                // The operator-overload + newtype dispatch is OUT-OF-LINE (see `eval_binop`) to keep
+                // `eval`'s own frame small — deep recursion is bounded by host-stack frame size.
+                self.eval_binop(*op, l, r, expr.span)
             }
             ExprKind::List(items) => {
                 // One-way int→float widening — the all-literal peephole (mirrors the VM): an
@@ -3078,6 +3021,84 @@ impl Interp {
         }))
     }
 
+    /// Binary-operator dispatch with operator overloading, kept OUT of `eval`'s match so `eval`'s
+    /// frame stays small (deep recursion is bounded by host-stack frame size — see the `eval_slice`
+    /// note). Handles: struct/enum ordering (`Comparable`), struct/enum arithmetic
+    /// (`Add`/`Sub`/`Mul`/`Div`/`Mod`), same-newtype native auto-flow, and the scalar fallback.
+    fn eval_binop(
+        &mut self,
+        op: BinaryOp,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        // Ordering (`< <= > >=`) on two structs/enums dispatches to `compare(self, other) -> int`
+        // (the `Comparable` protocol). Equality stays structural (in `eval_binary`).
+        if matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+        ) && matches!(
+            (&l, &r),
+            (Value::Struct { .. }, Value::Struct { .. }) | (Value::Enum { .. }, Value::Enum { .. })
+        ) {
+            return self.struct_ordering(op, l, r, span);
+        }
+        // Arithmetic overloading: `+`/`-`/`*`/`/`/`%` on two structs/enums dispatch to
+        // `add`/`sub`/`mul`/`div`/`mod` (the Add/Sub/Mul/Div/Mod protocols). Checker-verified.
+        if matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+        ) && matches!(
+            (&l, &r),
+            (Value::Struct { .. }, Value::Struct { .. }) | (Value::Enum { .. }, Value::Enum { .. })
+        ) {
+            return self.struct_arith(op, l, r, span);
+        }
+        // Same-newtype operators auto-flow to the UNDERLYING's NATIVE op (unwrap→op→rewrap for
+        // arithmetic; unwrap→compare for ordering), NOT a user method. The checker rejected
+        // `Meters + float` / `Meters + Seconds` / `Meters < Seconds`. Mirrors the VM.
+        if let (
+            Value::NewType {
+                type_key: ka,
+                inner: ia,
+            },
+            Value::NewType {
+                type_key: kb,
+                inner: ib,
+            },
+        ) = (&l, &r)
+            && ka == kb
+        {
+            if matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+            ) {
+                let inner = eval_binary(op, (**ia).clone(), (**ib).clone(), span)?;
+                return Ok(Value::NewType {
+                    type_key: ka.clone(),
+                    inner: Box::new(inner),
+                });
+            }
+            if matches!(
+                op,
+                BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+            ) {
+                // ordering on the inners (native compare), mapped to bool.
+                return eval_binary(op, (**ia).clone(), (**ib).clone(), span);
+            }
+            // ==/!= fall through to `eval_binary`'s structural newtype equality.
+        }
+        eval_binary(op, l, r, span)
+    }
+
+    /// M22 — unary `-` overloading: dispatch to the struct/enum's `neg(self) -> Self` method (the
+    /// `Neg` protocol). Self-only mirror of [`struct_arith`]; kept out of `eval`'s match to keep that
+    /// frame small for deep recursion. The checker has verified conformance.
+    fn struct_neg(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
+        let (decl, home) = self.resolve_overload_method(&v, "neg", span)?;
+        self.call(&decl, &home, vec![v], span)
+    }
+
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
     /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). The checker
     /// has verified conformance, so the method exists and returns the same struct type.
@@ -3092,7 +3113,9 @@ impl Interp {
             BinaryOp::Add => "add",
             BinaryOp::Sub => "sub",
             BinaryOp::Mul => "mul",
-            _ => unreachable!("struct_arith only handles + - *"),
+            BinaryOp::Div => "div",
+            BinaryOp::Mod => "mod",
+            _ => unreachable!("struct_arith only handles + - * / %"),
         };
         let (decl, home) = self.resolve_overload_method(&l, method, span)?;
         self.call(&decl, &home, vec![l, r], span)
@@ -9069,6 +9092,18 @@ b := Buf([10, 20, 30])
         let source = include_str!("../../examples/hello.chz");
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
+    }
+
+    /// M22 golden: operator protocols (`div`/`mod`/`neg`), protocol embedding, and the `Arithmetic`
+    /// bundle. The interp output must match the checked-in `.expected` (and the VM, via the twin test).
+    #[test]
+    fn golden_arithmetic_protocol_chz() {
+        let source = include_str!("../../examples/arithmetic_protocol.chz");
+        let expected = include_str!("../../examples/arithmetic_protocol.expected");
+        assert_eq!(
+            run_capture(source).expect("arithmetic_protocol.chz should run"),
+            expected
+        );
     }
 
     /// Slicing golden: list/str slicing (clamped) + a struct satisfying the `Index`/`IndexSet`/

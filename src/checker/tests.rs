@@ -9319,3 +9319,105 @@ fn pascal_ctor_calls() {
         "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d := Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
     );
 }
+
+// ===== M22: operator protocols Div/Mod/Neg + protocol embedding + Arithmetic =====
+
+/// A struct defining div/mod/neg overloads `/`, `%`, and unary `-`.
+#[test]
+fn div_mod_neg_struct_overload_typechecks() {
+    ok(
+        "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n",
+    );
+}
+
+/// Error must be a reserved protocol name (it's prebuilt) — previously omitted.
+#[test]
+fn error_is_reserved_protocol() {
+    rejects("protocol Error:\n    fn message(self) -> str\n", "reserved");
+}
+
+/// Div/Mod/Neg are reserved protocol names.
+#[test]
+fn div_mod_neg_are_reserved_protocols() {
+    rejects(
+        "protocol Div:\n    fn div(self, o: Self) -> Self\n",
+        "reserved",
+    );
+    rejects(
+        "protocol Mod:\n    fn mod(self, o: Self) -> Self\n",
+        "reserved",
+    );
+    rejects("protocol Neg:\n    fn neg(self) -> Self\n", "reserved");
+    rejects("protocol Arithmetic:\n    Add\n", "reserved");
+}
+
+/// `[T: Div]` / `[T: Mod]` / `[T: Neg]` generic bounds flow, with int instantiation.
+#[test]
+fn div_mod_neg_bound_flows() {
+    ok(
+        "fn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(d(7, 2))\nmain()\n",
+    );
+    ok(
+        "fn m[T: Mod](a: T, b: T) -> T:\n    return a % b\nfn main():\n    print(m(7, 2))\nmain()\n",
+    );
+    ok("fn n[T: Neg](a: T) -> T:\n    return -a\nfn main():\n    print(n(5))\nmain()\n");
+}
+
+/// `[T: Arithmetic]` accepts a struct with all four ops and uses them in the body; rejects a struct
+/// missing div (error mentions div).
+#[test]
+fn arithmetic_bundle_accepts_and_rejects() {
+    let prelude = "struct V:\n    n: int\n    fn add(self, o: V) -> V:\n        return V(self.n + o.n)\n    fn sub(self, o: V) -> V:\n        return V(self.n - o.n)\n    fn mul(self, o: V) -> V:\n        return V(self.n * o.n)\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n";
+    ok(&format!(
+        "{prelude}fn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b - a * b\nfn main():\n    print(calc(V(6), V(2)).n)\nmain()\n"
+    ));
+    // A struct lacking div fails an Arithmetic bound, mentioning div.
+    let no_div = "struct W:\n    n: int\n    fn add(self, o: W) -> W:\n        return W(self.n + o.n)\n    fn sub(self, o: W) -> W:\n        return W(self.n - o.n)\n    fn mul(self, o: W) -> W:\n        return W(self.n * o.n)\nfn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(calc(W(1), W(2)).n)\nmain()\n";
+    rejects(no_div, "div");
+}
+
+/// Inside a `[T: Arithmetic]` body, `+ - * /` all type-check (transitive bound flattening).
+#[test]
+fn arithmetic_body_uses_ops() {
+    ok(
+        "fn f[T: Arithmetic](a: T, b: T) -> T:\n    return ((a + b) - (a * b)) / a\nfn main():\n    print(f(8, 2))\nmain()\n",
+    );
+}
+
+/// A user protocol embedding Arithmetic plus its own methods (transitive embedding).
+#[test]
+fn user_protocol_embeds_arithmetic_and_own_methods() {
+    ok(
+        "protocol Field:\n    Arithmetic\n    fn zero(self) -> Self\nstruct V:\n    n: int\n    fn add(self, o: V) -> V:\n        return V(self.n + o.n)\n    fn sub(self, o: V) -> V:\n        return V(self.n - o.n)\n    fn mul(self, o: V) -> V:\n        return V(self.n * o.n)\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn zero(self) -> V:\n        return V(0)\nfn g[T: Field](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(g(V(9), V(3)).n)\nmain()\n",
+    );
+}
+
+/// Diamond dedup: embedding Arithmetic AND Add (both supply the same `add` sig) is legal.
+#[test]
+fn embed_diamond_dedup_ok() {
+    ok("protocol P:\n    Arithmetic + Add\n");
+}
+
+/// An own `fn` colliding with an embedded-required method name is a declare-time error.
+#[test]
+fn own_fn_vs_embed_collision_errors() {
+    rejects(
+        "protocol P:\n    Add\n    fn add(self, o: Self) -> Self\n",
+        "conflicts with embedded",
+    );
+}
+
+/// Two embeds pulling the same method name with differing signatures is an error.
+#[test]
+fn embed_sig_conflict_errors() {
+    rejects(
+        "protocol P1:\n    fn m(self) -> int\nprotocol P2:\n    fn m(self, o: Self) -> int\nprotocol Q:\n    P1 + P2\n",
+        "conflicting signature",
+    );
+}
+
+/// Cyclic embedding (A embeds B, B embeds A) is rejected at declare time.
+#[test]
+fn embed_cycle_errors() {
+    rejects("protocol A:\n    B\nprotocol B:\n    A\n", "cyclic");
+}

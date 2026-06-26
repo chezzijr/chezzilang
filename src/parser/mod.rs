@@ -607,9 +607,21 @@ impl Parser {
         let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut methods = Vec::new();
+        let mut embeds = Vec::new();
         self.skip_newlines();
+        // A protocol body line is EITHER an `fn` signature OR an embed line (M22). An embed line is
+        // one-or-more protocol refs joined by `+` (`Add + Sub`, `Iterator[T]`) — order-free, may
+        // interleave with `fn` sigs. The two are unambiguous: an `fn` line starts with `FN`, an embed
+        // line with an IDENT (a protocol name).
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
-            methods.push(self.parse_fn_sig()?);
+            if self.check(&Token::Fn) {
+                methods.push(self.parse_fn_sig()?);
+            } else {
+                embeds.push(self.parse_bound()?);
+                while self.eat(&Token::Plus) {
+                    embeds.push(self.parse_bound()?);
+                }
+            }
             self.expect_stmt_end()?;
             self.skip_newlines();
         }
@@ -618,6 +630,7 @@ impl Parser {
             name,
             type_params,
             methods,
+            embeds,
         })
     }
 
@@ -3018,6 +3031,7 @@ mod tests {
                 name,
                 type_params,
                 methods,
+                ..
             } => {
                 assert_eq!(name, "Container");
                 assert_eq!(type_params.len(), 1);
@@ -3034,6 +3048,43 @@ mod tests {
         let src = "protocol Shape:\n    fn area(self) -> float\n    fn name(self) -> str\n";
         match only(src) {
             StmtKind::Protocol { methods, .. } => assert_eq!(methods.len(), 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// M22: a protocol body may carry embed lines (`Add + Sub`, parameterized refs) interleaved with
+    /// `fn` sigs, order-free. The embeds collect into `embeds`, the methods into `methods`.
+    #[test]
+    fn protocol_with_embed_lines_parses() {
+        let src = "protocol Vector:\n    Add + Sub\n    fn dot(self, o: Self) -> float\n    Mul\n    fn norm(self) -> float\n";
+        match only(src) {
+            StmtKind::Protocol {
+                name,
+                methods,
+                embeds,
+                ..
+            } => {
+                assert_eq!(name, "Vector");
+                let enames: Vec<&str> = embeds.iter().map(|b| b.name.as_str()).collect();
+                assert_eq!(enames, vec!["Add", "Sub", "Mul"]);
+                let mnames: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+                assert_eq!(mnames, vec!["dot", "norm"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// M22: a bundle is a body of only embed lines (`Arithmetic: Add + Sub + Mul + Div`).
+    #[test]
+    fn protocol_pure_bundle_parses() {
+        match only("protocol Arithmetic:\n    Add + Sub + Mul + Div\n") {
+            StmtKind::Protocol {
+                methods, embeds, ..
+            } => {
+                assert!(methods.is_empty());
+                let enames: Vec<&str> = embeds.iter().map(|b| b.name.as_str()).collect();
+                assert_eq!(enames, vec!["Add", "Sub", "Mul", "Div"]);
+            }
             other => panic!("{other:?}"),
         }
     }

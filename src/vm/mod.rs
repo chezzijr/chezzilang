@@ -3963,6 +3963,16 @@ impl Vm {
                         self.err("integer overflow in negation".to_string(), span)
                     })?,
                     Value::Float(f) => Value::Float(-f),
+                    // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
+                    // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
+                    Value::Obj(h)
+                        if matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }) =>
+                    {
+                        let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
+                        self.guarded(|vm| {
+                            vm.run_proto(proto, home, None, vec![v], true, false, span)
+                        })?
+                    }
                     other => {
                         return Err(self.err(
                             format!("cannot apply Neg to {}", self.type_name(other)),
@@ -4857,7 +4867,7 @@ impl Vm {
             // conformance. Must precede the string-concat `Add` arm below (which would otherwise
             // reject struct+struct).
             (Value::Obj(ha), Value::Obj(hb))
-                if matches!(op, Op::Add | Op::Sub | Op::Mul)
+                if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
                     && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
                     && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
             {
@@ -5029,7 +5039,9 @@ impl Vm {
             Op::Add => "add",
             Op::Sub => "sub",
             Op::Mul => "mul",
-            _ => unreachable!("struct_arith only handles + - *"),
+            Op::Div => "div",
+            Op::Mod => "mod",
+            _ => unreachable!("struct_arith only handles + - * / %"),
         };
         let (proto, home) = self.resolve_overload_method(l, method, span)?;
         self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
@@ -22512,6 +22524,43 @@ main()";
         let interp_out = crate::interp::run_capture(src).expect("interp run");
         assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
+    }
+
+    /// M22 golden: operator protocols (`div`/`mod`/`neg`), protocol embedding (super-protocols), and
+    /// the builtin `Arithmetic` bundle — byte-identical on the VM, interp, the M:N parallel engine,
+    /// and the checked-in `.expected`.
+    #[test]
+    fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/arithmetic_protocol.chz");
+        let expected = include_str!("../../examples/arithmetic_protocol.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        let par_out = run_capture_parallel(src).expect("parallel run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from arithmetic_protocol.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on arithmetic_protocol"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "vm/parallel divergence on arithmetic_protocol"
+        );
+    }
+
+    /// M22: a struct defining `div`/`mod`/`neg` overloads `/`, `%`, and unary `-`. Runs byte-identical
+    /// on the VM, the cooperative interp (parity oracle), and the M:N parallel engine.
+    #[test]
+    fn struct_div_mod_neg_runs() {
+        let src = "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "3\n1\n-7\n");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on div/mod/neg");
+        let par_out = run_capture_parallel(src).expect("parallel run");
+        assert_eq!(vm_out, par_out, "vm/parallel divergence on div/mod/neg");
     }
 
     /// Static (associated) methods golden: `examples/static_methods.chz` — a named/alternative struct

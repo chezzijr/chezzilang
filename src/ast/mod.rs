@@ -63,6 +63,11 @@ pub enum StmtKind {
         name: String,
         type_params: Vec<TypeParam>,
         methods: Vec<MethodSig>,
+        /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` → `[Add, Sub]`. A type
+        /// satisfies this protocol iff it satisfies every embed (transitively) AND has every method
+        /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical
+        /// to a type-parameter bound (name + optional `[args]`).
+        embeds: Vec<Bound>,
     },
     /// `enum Name:` (or `enum Name[T]:`) with its variants. `type_params` is empty for a
     /// non-generic enum; for `enum Tree[T]` a variant payload may reference `T`. Type-erased like

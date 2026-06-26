@@ -1,0 +1,9 @@
+# rule: protocolDecl, embedLine, boundList, bound
+protocol Arithmetic:
+    Add + Sub + Mul + Div
+
+protocol Vector:
+    Add + Sub
+    fn dot(self, o: Self) -> float
+    Mul
+    fn norm(self) -> float

@@ -1,6 +1,7 @@
-# M10-G3 — operator overloading via the per-operator numeric protocols, plus multi-bound generics.
-# A struct that defines `add`/`sub`/`mul(self, other: Self) -> Self` satisfies the prebuilt `Add`/
-# `Sub`/`Mul` protocols, so `+`/`-`/`*` work on its values. `/` and `%` are never overloaded.
+# M10-G3 / M22 — operator overloading via the per-operator numeric protocols, plus multi-bound
+# generics. A struct that defines `add`/`sub`/`mul`/`div`/`mod(self, other: Self) -> Self` satisfies
+# the prebuilt `Add`/`Sub`/`Mul`/`Div`/`Mod` protocols (powering `+`/`-`/`*`/`/`/`%`); `neg(self) ->
+# Self` satisfies `Neg` (unary `-`). See examples/arithmetic_protocol.chz for div/mod/neg + embedding.
 
 struct Vec2:
     x: int
