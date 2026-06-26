@@ -192,6 +192,11 @@ Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `co
 `abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`. A `float`
 parameter accepts an `int` argument via one-way `int`→`float` widening — `sqrt(16)` / `floor(2)` are
 the same as `sqrt(16.0)` / `floor(2.0)` (the int is converted to a real `f64`; see `syntax.md §3`).
+Math is **total IEEE-754**: out-of-domain inputs return `NaN`/`inf` instead of faulting —
+`sqrt(-1.0)`, `ln(-1.0)`, `asin(2.0)` are all `NaN`; `ln(0.0)` is `-inf`. (`abs` on `int` `MIN`
+still overflow-faults — that's integer.)
+Predicates (`float -> bool`, IEEE-754 classification): `is_nan(x)`, `is_inf(x)` (±infinity),
+`is_finite(x)` (neither `NaN` nor infinite).
 Constants: `math.pi`, `math.e`.
 
 ### `std.io`

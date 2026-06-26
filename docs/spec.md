@@ -292,7 +292,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   overflow — arithmetic (`+ - * / %`), left shift (`<<`, when a significant bit is shifted out),
   negation, `MIN / -1`, `math.abs(MIN)`, and integer `List.sum()` (checked add) — is a *recoverable
   panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
-  crash. **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
+  crash. **Float arithmetic is total IEEE-754** (the policy diverges by type): a `float` op *never*
+  faults — `1.0/0.0` is `inf`, `-1.0/0.0` is `-inf`, `0.0/0.0` and `5.0%0.0` are `NaN`, and
+  `math.sqrt(-1.0)` is `NaN`. `inf`/`NaN` are ordinary values; inspect them with `math.is_nan` /
+  `math.is_inf` / `math.is_finite` (`import std.math`). Only **integer** arithmetic faults (overflow,
+  `/0`, `%0`). (Casting a non-finite float back to `int` — `int(1.0/0.0)` — still faults: `inf`/`NaN`
+  have no integer value.) **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
   converted to a real `f64` (the reverse is a lossy type error). It fires at every value-definition
   boundary: a typed `let` (`x: float = 3` so `x / 2 == 1.5`, real float division), a `float`
   function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a `float`

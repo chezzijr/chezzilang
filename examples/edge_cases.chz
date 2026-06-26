@@ -29,9 +29,6 @@ fn f_shift_neg() -> int:
     return 1 << (0 - 1)
 fn f_shift_ovf63() -> int:
     return 1 << 63
-fn f_fdiv0() -> int:
-    x := 1.0 / 0.0
-    return int(x)
 
 fn faults():
     print("-- faults --")
@@ -42,7 +39,8 @@ fn faults():
     probe("shift_hi", f_shift_hi)
     probe("shift_neg", f_shift_neg)
     probe("shift_ovf63", f_shift_ovf63)
-    probe("fdiv0", f_fdiv0)
+    # Float division by zero is IEEE-754 — NOT a fault. 1.0/0.0 is the value `inf`.
+    print("fdiv0: ok {1.0 / 0.0}")
 
 # ---- integer / float boundaries that DON'T fault -------------------------------------------------
 

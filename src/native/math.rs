@@ -48,13 +48,8 @@ fn pow(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 fn sqrt(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "sqrt", 1)?;
-    let x = h.arg_float(0)?;
-    if x < 0.0 {
-        return Err(HostError {
-            message: format!("sqrt() of a negative number ({x})"),
-        });
-    }
-    Ok(NativeRet::Float(x.sqrt()))
+    // Total IEEE-754: sqrt of a negative is NaN, never a fault (matches ln/asin's domain handling).
+    Ok(NativeRet::Float(h.arg_float(0)?.sqrt()))
 }
 
 // Trig / exp / log intrinsics (additive, M19-safe). Each is a plain `float -> float` (or
@@ -126,6 +121,25 @@ fn log(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Float(value.log(base)))
 }
 
+// Float predicates (IEEE-754 classification): `float -> bool`. Now that float arithmetic is total
+// (inf/NaN are values), these let user code inspect a result. Plain pass-throughs over f64's own
+// classifiers → free parity across engines (the `NativeRet::Bool` seam is already wired).
+
+fn is_nan(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "is_nan", 1)?;
+    Ok(NativeRet::Bool(h.arg_float(0)?.is_nan()))
+}
+
+fn is_inf(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "is_inf", 1)?;
+    Ok(NativeRet::Bool(h.arg_float(0)?.is_infinite()))
+}
+
+fn is_finite(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "is_finite", 1)?;
+    Ok(NativeRet::Bool(h.arg_float(0)?.is_finite()))
+}
+
 /// Callable members. `(name, fn)`.
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("abs", abs),
@@ -146,6 +160,9 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("log2", log2),
     ("log10", log10),
     ("log", log),
+    ("is_nan", is_nan),
+    ("is_inf", is_inf),
+    ("is_finite", is_finite),
 ];
 
 /// Constant members. `(name, value)`.

@@ -543,6 +543,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("log2", vec![Ty::Float], Ty::Float);
             func("log10", vec![Ty::Float], Ty::Float);
             func("log", vec![Ty::Float, Ty::Float], Ty::Float);
+            // Float predicates (IEEE-754 classification): `float -> bool`.
+            func("is_nan", vec![Ty::Float], Ty::Bool);
+            func("is_inf", vec![Ty::Float], Ty::Bool);
+            func("is_finite", vec![Ty::Float], Ty::Bool);
             sig.values.insert("pi".into(), Ty::Float);
             sig.values.insert("e".into(), Ty::Float);
         }
