@@ -44,6 +44,93 @@ impl Drop for ServerGuard {
     }
 }
 
+/// Spawn the server and run the initialize → initialized handshake, returning the piped stdin and a
+/// channel of framed response bodies. Shared by the diagnostics and hover round-trip tests.
+fn start_server() -> (
+    impl Write,
+    mpsc::Receiver<String>,
+    ServerGuard,
+    String, // the initialize response body
+) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn chezzi-lsp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let guard = ServerGuard(child);
+
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        while let Some(msg) = read_message(&mut reader) {
+            if tx.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#,
+    );
+    let init_resp = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("initialize response");
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+    );
+    (stdin, rx, guard, init_resp)
+}
+
+#[test]
+fn hover_round_trip() {
+    let (mut stdin, rx, _guard, init_resp) = start_server();
+    // The server must advertise hover support in its capabilities.
+    assert!(
+        init_resp.contains("hoverProvider"),
+        "initialize did not advertise hoverProvider: {init_resp}"
+    );
+
+    // didOpen a CLEAN document, then hover the binding `x` (line 0, char 0).
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover.chz","languageId":"chezzi","version":1,"text":"x := 41\n"}}}"#,
+    );
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover.chz"},"position":{"line":0,"character":0}}}"#,
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_hover = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                // The hover reply is the response to id 2 carrying MarkupContent.
+                if msg.contains("\"id\":2") {
+                    assert!(
+                        msg.contains("int"),
+                        "hover response missing the inferred type: {msg}"
+                    );
+                    assert!(
+                        msg.contains("```chezzi"),
+                        "hover response missing the chezzi code block: {msg}"
+                    );
+                    saw_hover = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(saw_hover, "never received a hover response for id 2");
+}
+
 #[test]
 fn diagnostics_round_trip() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi-lsp"))

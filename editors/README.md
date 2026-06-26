@@ -4,7 +4,7 @@ Two layers, both single-sourced from the compiler so language changes flow throu
 
 | Layer | What it does | Source of truth |
 | --- | --- | --- |
-| `chezzi-lsp` (LSP server) | Diagnostics + semantic-token highlighting in any LSP editor (neovim, VSCode, …) | The compiler front-end (lexer / parser / checker). A new keyword in the lexer highlights with **no** extra config. |
+| `chezzi-lsp` (LSP server) | Diagnostics + semantic-token highlighting + hover types (`K`) in any LSP editor (neovim, VSCode, …) | The compiler front-end (lexer / parser / checker). A new keyword in the lexer highlights with **no** extra config. |
 | `vscode/syntaxes/chezzi.tmLanguage.json` (TextMate grammar) | Static syntax highlighting in VSCode (works with no server) | Generated from the lexer's `KEYWORDS` / `PUNCTUATION` tables — **never hand-edit it.** |
 
 The LSP is the primary, auto-extending path; the TextMate grammar is a static fallback for VSCode.
@@ -13,8 +13,9 @@ The LSP is the primary, auto-extending path; the TextMate grammar is a static fa
 
 ## Neovim (primary target)
 
-`chezzi-lsp` is a stdio language server providing **diagnostics** (type/parse errors as you type) and
-**semantic tokens** (highlighting straight from the lexer).
+`chezzi-lsp` is a stdio language server providing **diagnostics** (type/parse errors as you type),
+**semantic tokens** (highlighting straight from the lexer), and **hover** (`K` shows the
+checker-inferred type of the symbol under the cursor).
 
 ### 1. Build the server
 

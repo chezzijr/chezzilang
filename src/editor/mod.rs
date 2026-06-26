@@ -96,6 +96,93 @@ fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Hover (the `K` / `textDocument/hover` path).
+// ---------------------------------------------------------------------------
+
+/// The result of a hover query: the checker-inferred type rendered for display, plus the symbol's
+/// classification (local/param/fn/field/struct/literal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverInfo {
+    /// The inferred type, ready to drop into a ```` ```chezzi ```` code block (e.g. `int`,
+    /// `fn(int) -> int`, `List[str]`).
+    pub display: String,
+    /// What kind of symbol the cursor landed on (secondary metadata; `display` is the payload).
+    pub kind: crate::checker::HoverKind,
+}
+
+/// Hover at a **0-based** LSP position (UTF-16 code units, the encoding the server emits — see
+/// `span_diag` / `push_utf16_tokens`). Reverses the UTF-16 → char-column conversion, finds the lexer
+/// token under the cursor, then runs the SAME resolve → desugar → check pipeline as [`diagnostics`]
+/// over the live `source` and returns the type the checker inferred for the smallest expression /
+/// binding / field-name at that token. `None` when the cursor is off any symbol, the program fails to
+/// resolve/check, or the position carries no type (operators, keywords, desugared `?.`/`??`).
+pub fn hover(path: &Path, source: &str, line: u32, character: u32) -> Option<HoverInfo> {
+    use crate::{checker, resolver};
+    // Reverse the UTF-16 column to a char column on the cursor's line.
+    let line_str = source.lines().nth(line as usize)?;
+    let char_col = utf16_to_char_col(line_str, character);
+    // The lexer token covering that char position → its 1-based (line, col) probe key.
+    let (l1, c1) = token_at(source, line as usize, char_col)?;
+    let graph = resolver::build_graph_with_entry_source(path, Some(source.to_string())).ok()?;
+    let (display, kind) = checker::hover_type(&graph, l1, c1)?;
+    Some(HoverInfo { display, kind })
+}
+
+/// Reverse of the `to_utf16` mapping in `span_diag`: given a line and a 0-based UTF-16 column, return
+/// the 0-based **char** column. Walks chars summing `len_utf16` until reaching the target; a column
+/// that lands mid-surrogate (between an astral char's two code units) clamps to that char's start.
+fn utf16_to_char_col(line: &str, utf16_col: u32) -> usize {
+    let mut acc: u32 = 0;
+    for (i, c) in line.chars().enumerate() {
+        if acc >= utf16_col {
+            return i;
+        }
+        // If the target column falls strictly inside this char's surrogate pair, clamp to its
+        // start rather than overshooting to the next char.
+        let next = acc + c.len_utf16() as u32;
+        if next > utf16_col {
+            return i;
+        }
+        acc = next;
+    }
+    line.chars().count()
+}
+
+/// Find the lexer token whose char-extent contains the 0-based `(line0, char_col)` cursor and return
+/// its **1-based** `(line, col)` start (the key the checker's hover probe matches). Each token's char
+/// length reuses the exact per-kind logic from [`semantic_tokens`] (Ident → `chars().count()`,
+/// numbers → [`measure_number`], strings → [`measure_string`], else the lexeme length); layout tokens
+/// (Newline/Indent/Dedent/Eof) and a lex error yield `None`.
+fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(usize, usize)> {
+    use crate::lexer::{self, Token};
+    let chars: Vec<char> = source.chars().collect();
+    let line_starts = line_start_offsets(&chars);
+    let toks = lexer::tokenize(source).ok()?;
+    let target_line = line0 + 1; // tokens use 1-based lines
+    for tok in &toks {
+        if tok.span.line != target_line {
+            continue;
+        }
+        let start_abs =
+            line_starts.get(tok.span.line - 1).copied().unwrap_or(0) + (tok.span.col - 1);
+        let char_len = match &tok.kind {
+            Token::Ident(name) => name.chars().count(),
+            Token::Int(_) | Token::Float(_) => measure_number(&chars, start_abs),
+            Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => measure_string(&chars, start_abs),
+            other => match other.lexeme() {
+                Some(lex) => lex.chars().count(),
+                None => continue, // layout token — no extent
+            },
+        };
+        let start_col0 = tok.span.col - 1;
+        if char_col >= start_col0 && char_col < start_col0 + char_len {
+            return Some((tok.span.line, tok.span.col));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Semantic tokens (the neovim highlight path).
 // ---------------------------------------------------------------------------
 
@@ -582,6 +669,84 @@ mod tests {
         // The squiggle covers the whole `zzz` identifier (col 5..8, 0-based).
         assert_eq!(d.col, 5);
         assert_eq!(d.end_col, 8);
+    }
+
+    fn hov(src: &str, line: u32, ch: u32) -> Option<HoverInfo> {
+        hover(
+            Path::new("/nonexistent/chezzi_editor/buf.chz"),
+            src,
+            line,
+            ch,
+        )
+    }
+
+    #[test]
+    fn hover_local_type() {
+        // `x := 1` — hovering the binding `x` reports its inferred type `int`.
+        let h = hov("x := 1\n", 0, 0).expect("hover on local");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_fn_param_type() {
+        // The use of param `a` inside the body reports the declared param type `str`.
+        let h = hov("fn f(a: str):\n    a\n", 1, 4).expect("hover on param use");
+        assert_eq!(h.display, "str");
+    }
+
+    #[test]
+    fn hover_fn_name() {
+        // A bare use of a function name reports its function type.
+        let h = hov("fn f(a: int) -> int:\n    return a\nf\n", 2, 0).expect("hover on fn name");
+        assert_eq!(h.display, "fn(int) -> int");
+    }
+
+    #[test]
+    fn hover_literal() {
+        // An integer literal reports `int`.
+        let h = hov("y := 123\n", 0, 5).expect("hover on literal");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_none_on_operator() {
+        // Hovering the `+` operator (a non-leaf, non-token position) yields no type.
+        assert_eq!(hov("a := 1 + 2\n", 0, 7), None);
+    }
+
+    #[test]
+    fn hover_no_check_returns_none() {
+        // The program does not type-check (`zzz` undefined) → hover returns None.
+        assert_eq!(hov("x := zzz\n", 0, 0), None);
+    }
+
+    #[test]
+    fn hover_field_access() {
+        // Hovering the field name `x` in `p.x` reports the field's type (`int`) and `Field` kind.
+        // The Field node anchors recording on the field-name span, not the receiver's start span.
+        let src = "struct P:\n    x: int\np := P(1)\np.x\n";
+        let h = hov(src, 3, 2).expect("hover on field name");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Field);
+    }
+
+    #[test]
+    fn hover_utf16_emoji() {
+        // 🙂 is one char but TWO UTF-16 units. The cursor on `n` arrives as a UTF-16 column; the
+        // reverse conversion must land on `n` (str), not slip a column because of the astral char.
+        // line 1: `out := "🙂" + n` — `n` is at char col 13, UTF-16 col 14 (🙂 adds one unit).
+        let src = "n := \"a\"\nout := \"\u{1f642}\" + n\n";
+        let h = hov(src, 1, 14).expect("hover on n after emoji");
+        assert_eq!(h.display, "str");
+    }
+
+    #[test]
+    fn utf16_to_char_col_clamps_mid_surrogate() {
+        // "a🙂": 'a' is 1 UTF-16 unit, 🙂 is 2 (cols 1 and 2 both fall within the emoji).
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 0), 0); // 'a'
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 1), 1); // boundary: start of 🙂
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 2), 1); // MID-surrogate → clamp to 🙂's start
+        assert_eq!(utf16_to_char_col("a\u{1f642}", 3), 2); // past end → char count
     }
 
     fn st(line: u32, start: u32, len: u32, ty: u32) -> SemTok {

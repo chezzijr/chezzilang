@@ -86,6 +86,8 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                // Hover (`K`): show the checker-inferred type of the symbol under the cursor.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
         })
@@ -166,6 +168,32 @@ impl LanguageServer for Backend {
             result_id: None,
             data,
         })))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = self
+            .docs
+            .lock()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+        let path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from(uri.path()));
+        let Some(info) = chezzi::editor::hover(&path, &text, pos.line, pos.character) else {
+            return Ok(None);
+        };
+        // Render the inferred type as a fenced `chezzi` code block so editors syntax-highlight it.
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```chezzi\n{}\n```", info.display),
+            }),
+            range: None,
+        }))
     }
 }
 

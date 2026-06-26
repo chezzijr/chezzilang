@@ -779,11 +779,12 @@ impl Interp {
                     home: self.env.globals_rc(),
                 })))
             }
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 // `module.Enum.Variant` (nullary, qualified value form) → the variant value.
                 if let ExprKind::Field {
                     obj: inner,
                     name: ename,
+                    ..
                 } = &obj.kind
                     && let ExprKind::Ident(mname) = &inner.kind
                     && self.env.get_local(mname).is_none()
@@ -1027,6 +1028,7 @@ impl Interp {
                             kind: ExprKind::Field {
                                 obj: obj.clone(),
                                 name: "parse".to_string(),
+                                name_span: expr.span,
                             },
                             span: expr.span,
                         }),
@@ -1315,7 +1317,7 @@ impl Interp {
     ) -> Result<Value, RuntimeError> {
         // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
         // qualified variant constructor, not a method: an unbound enum name dotted with its variant.
-        if let ExprKind::Field { obj, name } = &callee.kind {
+        if let ExprKind::Field { obj, name, .. } = &callee.kind {
             // `module.Struct(args)` → qualified struct constructor.
             if let ExprKind::Ident(mname) = &obj.kind
                 && self.env.get_local(mname).is_none()
@@ -1338,6 +1340,7 @@ impl Interp {
             if let ExprKind::Field {
                 obj: inner,
                 name: ename,
+                ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner.kind
                 && self.env.get_local(mname).is_none()
@@ -1397,7 +1400,9 @@ impl Interp {
         if let ExprKind::Index {
             obj: callee_obj, ..
         } = &callee.kind
-            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+            && let ExprKind::Field {
+                obj: head, name, ..
+            } = &callee_obj.kind
         {
             let tname = type_apply_head_name(&head.kind).or(match &head.kind {
                 ExprKind::Ident(n) => Some(n.as_str()),
@@ -1767,7 +1772,7 @@ impl Interp {
                     .iter()
                     .map(|a| self.eval(a))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let ExprKind::Field { obj, name } = &callee.kind {
+                if let ExprKind::Field { obj, name, .. } = &callee.kind {
                     let recv = self.eval(obj)?;
                     Deferred::Method {
                         recv,
@@ -2002,7 +2007,7 @@ impl Interp {
                 // Evaluate the receiver (method form) before the arguments, matching
                 // `eval_method_call`'s documented order so `spawn obj.m(a)` and a direct call agree
                 // (interp/VM parity).
-                if let ExprKind::Field { obj, name } = &callee.kind {
+                if let ExprKind::Field { obj, name, .. } = &callee.kind {
                     let recv = deep_clone(&self.eval(obj)?);
                     let arg_vals = args
                         .iter()
@@ -6023,7 +6028,7 @@ impl Interp {
                 Ok(())
             }
             // `p.x = v` — mutate a struct field in place (fields are `Rc<RefCell<…>>`).
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 let target_val = self.eval(obj)?;
                 let rhs = self.eval(value)?;
                 let Value::Struct { fields, .. } = &target_val else {
@@ -6155,7 +6160,7 @@ impl Interp {
                 items.borrow_mut()[i] = value;
                 Ok(())
             }
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 let target_val = self.eval(obj)?;
                 let Value::Struct { fields, .. } = &target_val else {
                     return Err(RuntimeError {

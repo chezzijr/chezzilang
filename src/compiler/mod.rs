@@ -1308,7 +1308,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::Ident(name) => self.emit_store(fc, name, span),
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 let tmp = fc.add_hidden();
                 fc.emit(Op::SetLocal(tmp), span);
                 self.compile_expr(fc, obj)?;
@@ -1392,7 +1392,7 @@ impl Compiler {
                         span,
                     });
                 };
-                if let ExprKind::Field { obj, name } = &callee.kind {
+                if let ExprKind::Field { obj, name, .. } = &callee.kind {
                     self.compile_expr(fc, obj)?;
                     for a in args {
                         self.compile_expr(fc, a)?;
@@ -1458,7 +1458,7 @@ impl Compiler {
                 }
             },
             // `obj.f = v` → [obj, v] SetField; compound dups `obj` to read-modify-write.
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 self.compile_expr(fc, obj)?;
                 if let Some(bin) = op.to_binop() {
                     let ic = self.next_field_ic(name);
@@ -1548,7 +1548,7 @@ impl Compiler {
                 );
                 self.emit_store(fc, name, span);
             }
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 self.compile_expr(fc, obj)?;
                 fc.emit(Op::GetLocal(tuple_slot), span);
                 fc.emit(
@@ -2725,11 +2725,12 @@ impl Compiler {
                 named,
                 ..
             } => self.compile_call(fc, callee, args, named, expr.span)?,
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 // `module.Enum.Variant` (nullary, qualified value form) → construct the variant.
                 if let ExprKind::Field {
                     obj: inner,
                     name: ename,
+                    ..
                 } = &obj.kind
                     && let ExprKind::Ident(mname) = &inner.kind
                     && fc.resolve_local(mname).is_none()
@@ -2875,6 +2876,7 @@ impl Compiler {
                             kind: ExprKind::Field {
                                 obj: obj.clone(),
                                 name: "parse".to_string(),
+                                name_span: expr.span,
                             },
                             span: expr.span,
                         }),
@@ -3072,7 +3074,7 @@ impl Compiler {
                 span,
             });
         };
-        if let ExprKind::Field { obj, name } = &callee.kind {
+        if let ExprKind::Field { obj, name, .. } = &callee.kind {
             self.compile_expr(fc, obj)?;
             for a in args {
                 self.compile_expr(fc, a)?;
@@ -3131,7 +3133,7 @@ impl Compiler {
         span: Span,
     ) -> Result<(), CompileError> {
         // Method / module-member call: `obj.name(args)`.
-        if let ExprKind::Field { obj, name } = &callee.kind {
+        if let ExprKind::Field { obj, name, .. } = &callee.kind {
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind
@@ -3164,6 +3166,7 @@ impl Compiler {
             if let ExprKind::Field {
                 obj: inner,
                 name: ename,
+                ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner.kind
                 && fc.resolve_local(mname).is_none()
@@ -3322,7 +3325,9 @@ impl Compiler {
         if let ExprKind::Index {
             obj: callee_obj, ..
         } = &callee.kind
-            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+            && let ExprKind::Field {
+                obj: head, name, ..
+            } = &callee_obj.kind
         {
             let tname = type_apply_head_name(&head.kind).or(match &head.kind {
                 ExprKind::Ident(n) => Some(n.as_str()),
@@ -3570,6 +3575,7 @@ fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stm
         kind: ExprKind::Field {
             obj: Box::new(obj),
             name: method.to_string(),
+            name_span: span,
         },
         span,
     };

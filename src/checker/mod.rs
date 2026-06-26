@@ -358,6 +358,49 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
     }
 }
 
+/// Classification of the symbol a hover landed on, returned alongside the inferred type display so
+/// editor tooling can label it (`local`/`param`/`fn`/`field`/`struct`/literal). Secondary metadata —
+/// the type string is the load-bearing payload; `Param` is folded into `Local` (the checker's scope
+/// table does not distinguish them cheaply). `Other` covers a leaf the classifier can't bucket.
+// `Param`/`Struct` are part of the public hover-kind contract but not yet produced (Param is folded
+// into Local; a struct-name hover currently resolves through other paths) — they are constructed by
+// editor consumers, not this crate's default `chezzi` bin (which compiles `checker` privately and
+// reaches hover only via the lib's `editor`), so allow the bin-only dead-code lint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum HoverKind {
+    Local,
+    Param,
+    Func,
+    Field,
+    Struct,
+    Literal,
+    Other,
+}
+
+/// Editor-tooling introspection (LSP hover): re-run the SAME deps-first checking pass as
+/// [`check_graph`] over `graph`, but with a single-position PROBE armed on the ENTRY module. Returns
+/// `Some((type_display, kind))` for the leaf expression / binding / field-name whose anchor position
+/// is the 1-based `(line, col)` token start — and ONLY when the whole program type-checks (mirrors
+/// the "no type when the program doesn't check" contract). `None` otherwise. Behavior-preserving:
+/// the probe only records a type already computed by the normal pass; it changes no checker decision.
+///
+/// Consumed by the lib's `editor::hover` (and through it the `chezzi-lsp` server); the default
+/// `chezzi` bin compiles `checker` privately without reaching it, so allow that target's dead-code lint.
+#[allow(dead_code)]
+pub fn hover_type(graph: &ModuleGraph, line: usize, col: usize) -> Option<(String, HoverKind)> {
+    let mut c = Checker::new();
+    c.hover_probe = Some((line, col));
+    c.hover_entry = Some(graph.entry.clone());
+    c.run_graph_pass(graph, false);
+    if !c.errors.is_empty() {
+        return None;
+    }
+    c.hover_result
+        .take()
+        .map(|(ty, kind)| (ty.to_string(), kind))
+}
+
 /// FFI ROOT FIX (fix4): resolve the fully-resolved, width-bearing C signature of every `extern` fn
 /// in the graph, each in its DEFINING module's import/alias scope — the SINGLE resolver both backends
 /// consume so every alias spelling (local chain, named-import hop, qualified hop, mixed) resolves
@@ -1041,6 +1084,15 @@ struct Checker {
     /// `from`-imported + std whole-module. Mirrors the compiler's `bare_types`; resolves a bare-written
     /// type name (annotation / constructor) to the module-scoped runtime key. Rebuilt per module.
     bare_types: HashMap<String, String>,
+    /// EDITOR HOVER (LSP): when `Some`, a single-position probe — the 1-based `(line, col)` of the
+    /// token under the cursor. `None` for an ordinary check (zero overhead). See [`hover_type`].
+    hover_probe: Option<(usize, usize)>,
+    /// The entry module the probe applies to; recording is gated on `current_module_id == hover_entry`
+    /// so a same-named symbol in an imported dependency can't shadow the entry-buffer hit.
+    hover_entry: Option<ModuleId>,
+    /// First probe hit: the inferred type + its classification. First-write-wins (children infer
+    /// before parents; only leaves/bindings record), so the smallest covering symbol's type is kept.
+    hover_result: Option<(Ty, HoverKind)>,
 }
 
 impl Checker {
@@ -1094,6 +1146,9 @@ impl Checker {
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),
+            hover_probe: None,
+            hover_entry: None,
+            hover_result: None,
         };
         c.seed_stdlib_structs();
         c
@@ -3373,6 +3428,12 @@ impl Checker {
                     }
                     None => val_ty,
                 };
+                // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
+                // probe visits during `infer`; record it here. The statement span starts at the first
+                // binding name, so it is that token's position (single-name let — the common case).
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(span, &declared, HoverKind::Local);
+                }
                 self.declare(name, declared);
                 if is_ref {
                     self.declare_ref(name);
@@ -3917,7 +3978,7 @@ impl Checker {
             }
             // `p.x = v` — only data fields of a struct are assignable (not methods, not module
             // members). `infer_field` would accept those, so check the field kind here.
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
@@ -5507,6 +5568,17 @@ impl Checker {
     }
 
     fn infer(&mut self, expr: &Expr) -> Ty {
+        let ty = self.infer_kind(expr);
+        // EDITOR HOVER probe: record this expr's type if its leaf/field anchor is the cursor token.
+        // No-op (one `Option` check) unless a probe is armed. Children infer before parents and only
+        // LEAF kinds record, so a parent expression never overwrites the smaller symbol's type.
+        if self.hover_probe.is_some() {
+            self.hover_record_expr(expr, &ty);
+        }
+        ty
+    }
+
+    fn infer_kind(&mut self, expr: &Expr) -> Ty {
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
@@ -5552,7 +5624,7 @@ impl Checker {
                 named,
                 type_args,
             } => self.infer_call(callee, args, named, type_args, expr.span),
-            ExprKind::Field { obj, name } => self.infer_field(obj, name),
+            ExprKind::Field { obj, name, .. } => self.infer_field(obj, name),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // Optional-chaining `?.` / null-coalescing `??` are carrier nodes lowered to `match` by
@@ -5582,6 +5654,50 @@ impl Checker {
                 );
                 Ty::Unknown
             }
+        }
+    }
+
+    /// Record `(ty, kind)` as the hover result if `span` is the armed probe position (entry module,
+    /// first hit wins). The single place a probe hit is committed; both the expr-leaf path and the
+    /// let-binding path funnel through here. A no-op when no probe is armed.
+    fn hover_record_at(&mut self, span: Span, ty: &Ty, kind: HoverKind) {
+        let Some((pl, pc)) = self.hover_probe else {
+            return;
+        };
+        if self.hover_result.is_some() || self.current_module_id != self.hover_entry {
+            return;
+        }
+        if span.line == pl && span.col == pc {
+            self.hover_result = Some((ty.clone(), kind));
+        }
+    }
+
+    /// Hover-record a LEAF expression (identifier / literal) or a field-name access. Non-leaf kinds
+    /// (Binary/Index/Call/…) are skipped so hovering `a` in `a[0]` reports `a`'s type, not the element
+    /// type — the parent never overwrites the child. The field-name access anchors on `name_span` (the
+    /// field-name token), not the receiver-start `expr.span`, so `a.b.c` resolves the hovered segment.
+    fn hover_record_expr(&mut self, expr: &Expr, ty: &Ty) {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal),
+            ExprKind::Ident(name) => {
+                let kind = if self.lookup(name).is_some() {
+                    HoverKind::Local
+                } else if self.functions.contains_key(name) {
+                    HoverKind::Func
+                } else {
+                    HoverKind::Other
+                };
+                self.hover_record_at(expr.span, ty, kind);
+            }
+            ExprKind::Field { name_span, .. } => {
+                self.hover_record_at(*name_span, ty, HoverKind::Field);
+            }
+            _ => {}
         }
     }
 
@@ -6158,6 +6274,7 @@ impl Checker {
         if let ExprKind::Field {
             obj: inner_obj,
             name: ename,
+            ..
         } = &obj.kind
             && let ExprKind::Ident(mname) = &inner_obj.kind
             && !self.is_local_binding(mname)
@@ -6681,7 +6798,7 @@ impl Checker {
             .map(|t| self.resolve_type(t, span))
             .collect();
         // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
-        if let ExprKind::Field { obj, name } = &callee.kind {
+        if let ExprKind::Field { obj, name, .. } = &callee.kind {
             // `module.Struct(args)` — qualified struct constructor. `module` is a bound module name
             // whose sig declares struct `name`. Inject nothing: resolve the constructor through the
             // sig's struct shape (mirrors `infer_named_call`'s struct path, with type args).
@@ -6712,6 +6829,7 @@ impl Checker {
             if let ExprKind::Field {
                 obj: inner_obj,
                 name: ename,
+                ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
                 && !self.is_local_binding(mname)
@@ -6833,7 +6951,9 @@ impl Checker {
             obj: callee_obj,
             index: mt,
         } = &callee.kind
-            && let ExprKind::Field { obj: head, name } = &callee_obj.kind
+            && let ExprKind::Field {
+                obj: head, name, ..
+            } = &callee_obj.kind
         {
             // Resolve the enclosing-type head + its type args. A bare `Ident(Box).member[U]` head has
             // NO enclosing type args; a `Box[int].member[U]` head carries them via `type_apply_head`.
@@ -6964,7 +7084,7 @@ impl Checker {
                     None
                 }
             }
-            ExprKind::Field { obj, name } => {
+            ExprKind::Field { obj, name, .. } => {
                 if let ExprKind::Ident(m) = &obj.kind {
                     Some(Type::Qualified {
                         module: m.clone(),
