@@ -374,8 +374,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (`int`/`float`) underlyings auto-flow same-type operators (the underlying's *native* op,
   unwrap→op→rewrap); a `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 (define a method);
   equality (`==`/`!=`) works for any underlying. Methods
-  + `Stringable`/`Hashable`/`Add`/`Comparable` work via the newtype's own methods (hash/str dispatched
-  at runtime in both engines). **Generic newtypes** (`newtype Stack[T] = List[T]`) are methods-only
+  + `Stringable`/`Hashable`/`Comparable` work via the newtype's own methods (`str`/`hash`/`compare`
+  dispatched at runtime in both engines); the **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`)
+  are NOT satisfiable by a newtype method (a newtype's own `add`/`div`/… is never dispatched as an
+  operator — the same-type arm auto-flows to the underlying's native op), so they come only from a
+  numeric underlying's intrinsic auto-flow. **Generic newtypes** (`newtype Stack[T] = List[T]`) are methods-only
   (no native operator auto-flow even for `Box[T] = T`): ctor infers type args (turbofish
   `Stack[int]([])` when an empty literal can't bind `T`), cast-unwrap propagates the instantiation
   (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get

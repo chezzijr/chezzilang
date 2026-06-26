@@ -941,10 +941,15 @@ Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* 
 (`Meters + Seconds`) is a type error — that rejection is the whole point.
 
 A newtype may carry its own **methods** (a trailing-colon block, like a struct/enum), and satisfies
-the prebuilt protocols by defining the relevant method — `str(self)` (Stringable display override),
-`hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the underlying),
-`compare`/`add`/… — so it passes into protocol-bound generics (`fn twice[T: Add](x: T)`). A numeric
-newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable` intrinsically (native same-type ops above).
+the **non-operator** prebuilt protocols by defining the relevant method — `str(self)` (Stringable
+display override), `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
+underlying), `compare(self, other)` (Comparable) — so it passes into those protocol-bound generics
+(`fn sorted[T: Comparable](xs: T)`). The **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`)
+are **not** satisfiable by a newtype method: a newtype's own `add`/`div`/… is never dispatched as an
+operator (the same-type arm always auto-flows to the underlying's native op), so only a **numeric**
+underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`
+intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` method does
+**not** pass `fn twice[T: Add](x: T)`.
 
 ```chezzi
 newtype Meters = float:
