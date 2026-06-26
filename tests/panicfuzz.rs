@@ -1,7 +1,8 @@
 //! Panic-fuzz harness — CI gate (bug-discovery lever #1).
 //!
-//! Shares the engine with `src/bin/panicfuzz.rs` via a `#[path]` include (the crate has no
-//! `[lib]`). `env!("CARGO_BIN_EXE_chezzi")` is provided by cargo for integration tests — it is the
+//! Shares the engine with `src/bin/panicfuzz.rs` via a `#[path]` include (the fuzz engine is not
+//! exposed by the `chezzi` library, so it is pulled in by path rather than `use`).
+//! `env!("CARGO_BIN_EXE_chezzi")` is provided by cargo for integration tests — it is the
 //! **debug** `chezzi`, so overflow-checks are ON and arithmetic-overflow panics ARE caught here.
 //!
 //! The invariant under test: feeding any malformed / adversarial input to `chezzi check` (the full
