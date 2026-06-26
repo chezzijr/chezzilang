@@ -1,20 +1,18 @@
-//! Chezzi as a library — the compiler **front-end** exposed for in-process tooling.
+//! Chezzi as a library — the compiler **front-end** and the engine, exposed as the crate of record.
 //!
-//! This is an *additive* crate root that lives alongside the `chezzi` binary (`src/main.rs`). The
-//! binary keeps its own private `mod` declarations untouched (including the delicate `#[cfg(test)]
-//! mod interp` two-engine parity wiring); this `lib.rs` re-declares the same front-end module set as
-//! `pub mod`s so the `chezzi-lsp` binary and the editor-tooling tests can reach the lexer / parser /
-//! checker / resolver in-process. The front-end therefore compiles twice (once for the bin, once for
-//! the lib); that is deliberate and safe — the crate exports no `#[no_mangle]`/`export_name` symbols,
-//! so there is nothing to clash.
+//! This is the real crate root: both binaries are thin shims that link this library. `src/main.rs`
+//! (the `chezzi` CLI) and `src/bin/chezzi-lsp.rs` (the LSP server) declare no front-end modules of
+//! their own — they `use chezzi::{…}`. The front-end therefore compiles **once**, and its module
+//! unit tests + the two-engine VM/interp parity tests + the grammar `conformance` suite run **once**,
+//! here in the lib's test target (a plain `cargo test` no longer double-compiles/double-runs them).
 //!
-//! Only `editor` (the new tooling layer) is meant to be consumed directly; the rest are re-exposed
-//! purely so `editor` can wrap them.
+//! NOTE for future CLI work: `src/main.rs` is the *bin* crate, so across the crate boundary it can
+//! only see `pub` items of this lib (not `pub(crate)`). If a new CLI subcommand references a lib item,
+//! that item must be `pub` here — mirror the existing `pub mod` front-end surface.
 
-// The front-end modules are re-declared `pub` (matching `main.rs`'s private set) so that every item
-// counts as reachable — keeping the modules' own dead-code analysis identical to the binary's, rather
-// than flagging the (intentionally) unused-by-`editor` compiler/VM API. The only consumer of this lib
-// is `editor`; the rest are exposed solely so it can wrap them.
+// The front-end modules are `pub` so every item the binaries reach across the crate boundary is
+// visible, and so the modules' own dead-code analysis stays whole-crate. `editor` is the tooling layer
+// consumed by `chezzi-lsp`; the rest are the compiler/VM pipeline driven by the `chezzi` CLI.
 pub mod ast;
 pub mod checker;
 pub mod compiler;
@@ -45,3 +43,9 @@ pub mod vm;
 /// The only intended public surface: the editor-tooling layer consumed by `chezzi-lsp` and the asset
 /// tests.
 pub mod editor;
+
+// The grammar-conformance suite (executes `docs/grammar.bnf`, differential-tests vs the parser). It is
+// `#[cfg(test)]`-only and its `crate::lexer`/`crate::parser` refs resolve against this lib, so it lives
+// here in the crate of record — running once via the lib test target (`cargo test conformance`).
+#[cfg(test)]
+mod conformance;

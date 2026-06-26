@@ -68,8 +68,11 @@ they never touch the default `cargo build`/`cargo test`; build on demand:
 (`editors/vscode/syntaxes/chezzi.tmLanguage.json`) **generated** from the lexer's new
 `KEYWORDS`/`PUNCTUATION` tables + `Token::lexeme()` — `tests/editor_tmlanguage.rs` is generator +
 CI drift-guard (`UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage` regenerates; a plain run
-fails if stale). Architecture: an **additive `src/lib.rs`** (`pub mod editor` + the front-end module set;
-`main.rs` left untouched, front-end compiles twice — safe, no exported symbols) plus a
+fails if stale). Architecture: **`src/lib.rs` is the crate of record** (`pub mod editor` + the front-end module set);
+both binaries are thin shims that link it — `src/main.rs` (the `chezzi` CLI) and
+`src/bin/chezzi-lsp.rs` declare no front-end modules, they `use chezzi::{…}`, so the front-end
+compiles **once** (its unit tests + two-engine parity + grammar `conformance` run once, in the lib
+test target — no more lib+bin double-compile/double-run) — plus a
 behavior-preserving `resolver::build_graph_with_entry_source` (entry from a live buffer, imports from
 disk). Editor logic (`src/editor/`) is dep-free and unit-tested in the default build; the LSP server has
 a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: [`editors/README.md`].

@@ -7,30 +7,11 @@
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
 
-mod ast;
-mod checker;
-mod compiler;
-mod desugar;
-mod fmtspec;
-// The tree-walk interpreter is the FROZEN two-engine parity oracle: golden tests run each program
-// through both the VM and `interp` and assert identical stdout. It has no CLI surface (the `--interp`
-// flag was removed), so it is only compiled for tests, where every reference to it lives.
-#[cfg(test)]
-mod interp;
-mod interpolation;
-mod json_decode;
-mod lexer;
-mod manifest;
-mod native;
-mod parser;
-mod resolver;
-mod runtime;
-mod slice;
-mod test_runner;
-mod vm;
-
-#[cfg(test)]
-mod conformance;
+// `src/main.rs` is a thin CLI shim over the `chezzi` **library** crate (`src/lib.rs`): the front-end
+// modules live there as `pub mod`s and compile once, so this binary declares no modules of its own —
+// it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the two-engine
+// VM/interp parity tests now live + run once in the lib's test target, not in this bin.)
+use chezzi::{checker, lexer, manifest, native, parser, resolver, test_runner, vm};
 
 use std::process::ExitCode;
 
@@ -848,7 +829,8 @@ mod init_tests {
         // The scaffolded main.chz no longer self-calls `main` — the manifest's `:main` entrypoint
         // does. Running the FILE directly is scripting-mode (top-level only): it defines `main` but
         // prints nothing.
-        let (stdout, stderr, result, _exit) = vm::run_file(&main);
+        let (stdout, stderr, result, _exit) =
+            vm::run_file_with_entry(&main, native::HostConfig::from_process(vec![]), false, None);
         assert!(
             result.is_ok(),
             "scaffolded main.chz must load; stderr:\n{stderr}"
@@ -859,7 +841,12 @@ mod init_tests {
         );
 
         // Invoking the entry function (what a bare `chezzi run` does) prints the greeting.
-        let (stdout, stderr, result, _exit) = vm::run_file_entry(&main, "main");
+        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
+            &main,
+            native::HostConfig::from_process(vec![]),
+            false,
+            Some("main"),
+        );
         assert!(
             result.is_ok(),
             "scaffolded entry `main` must run; stderr:\n{stderr}"
@@ -917,7 +904,12 @@ mod init_tests {
         );
 
         // Calling the named entry function prints the greeting.
-        let (stdout, stderr, result, _exit) = vm::run_file_entry(&entry, entry_fn.unwrap());
+        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
+            &entry,
+            native::HostConfig::from_process(vec![]),
+            false,
+            Some(entry_fn.unwrap()),
+        );
         assert!(result.is_ok(), "entrypoint must run; stderr:\n{stderr}");
         assert!(
             stdout.contains("Hello from Chezzi!"),
@@ -925,7 +917,12 @@ mod init_tests {
         );
 
         // A missing entry function is a clear error, not a silent no-op.
-        let (_o, _e, result, _exit) = vm::run_file_entry(&entry, "nope");
+        let (_o, _e, result, _exit) = vm::run_file_with_entry(
+            &entry,
+            native::HostConfig::from_process(vec![]),
+            false,
+            Some("nope"),
+        );
         let err = result.expect_err("missing entry function must error");
         let msg = vm::format_trace(&err.message, err.span, &err.trace);
         assert!(

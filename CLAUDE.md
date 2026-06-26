@@ -32,12 +32,12 @@ Claude implements directly. Ship working, tested code each session.
 
 ```sh
 cargo build --release    # compile (release; the VM is only fast optimized)
-# Tests: the crate builds a lib (src/lib.rs, editor tooling) AND the bin (src/main.rs), both
-# declaring the same modules, so a plain `cargo test` compiles + RUNS every unit test TWICE
-# (lib copy + bin copy) + integration → slow. Split the work:
-cargo test --lib                 # INNER LOOP: lib unit tests + two-engine parity, ONE copy (~half the time)
+# Tests: `src/main.rs` (the `chezzi` CLI) is a thin shim over the `chezzi` library crate (src/lib.rs,
+# the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + two-engine
+# parity + conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
+cargo test                       # FULL pre-commit suite: lib unit suite + parity + conformance + integration
+cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + two-engine parity + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
-cargo test                       # FULL pre-commit suite (adds the bin copy, conformance, integration)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
 # Local shortcut: `.cargo/config.toml` (git-excluded) aliases these as `cargo tfast` / `tfull` / `tlsp`.
 cargo test conformance   # execute docs/grammar.bnf, differential-test vs the parser

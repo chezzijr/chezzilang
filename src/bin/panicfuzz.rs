@@ -4,7 +4,7 @@
 //! SIGABRT / stack-overflow, exit code `None`). The crash-safety invariant is: malformed input
 //! yields a clean diagnostic, never a panic or a signal. The CI-gate variant lives in
 //! `tests/panicfuzz.rs`; both share the engine under `src/panicfuzz/` via a `#[path]` include (the
-//! crate has no `[lib]`).
+//! fuzz engine is not exposed by the `chezzi` library, so it is pulled in by path rather than `use`).
 //!
 //! Usage:
 //!   cargo run --release --bin panicfuzz -- [--seeds A..B] [--seed N] [--timeout-ms N] [--quiet]

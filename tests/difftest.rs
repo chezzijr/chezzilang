@@ -1,7 +1,8 @@
 //! CPython differential oracle — CI gate.
 //!
-//! Shares the engine with `src/bin/difffuzz.rs` via a `#[path]` include (the crate has no
-//! `[lib]`). `env!("CARGO_BIN_EXE_chezzi")` is provided by cargo for integration tests.
+//! Shares the engine with `src/bin/difffuzz.rs` via a `#[path]` include (the diff engine is not
+//! exposed by the `chezzi` library, so it is pulled in by path rather than `use`).
+//! `env!("CARGO_BIN_EXE_chezzi")` is provided by cargo for integration tests.
 
 #[path = "../src/difftest/mod.rs"]
 mod difftest;
