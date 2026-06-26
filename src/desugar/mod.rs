@@ -623,7 +623,7 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
     for stmt in stmts {
         if let StmtKind::Fn(decl) = &stmt.kind {
             let head = match &decl.ret {
-                Some(Type::Named(n)) | Some(Type::Generic(n, _)) => Some(n.clone()),
+                Some(Type::Named { name: n, .. }) | Some(Type::Generic(n, _)) => Some(n.clone()),
                 _ => None,
             };
             if let Some(h) = head
@@ -912,7 +912,7 @@ impl Walker<'_> {
                     let struct_ty = if self.lower_refs && names.len() == 1 {
                         // A `x: StructName = ...` annotation, or a `x := StructName(...)` ctor call.
                         match ty {
-                            Some(Type::Named(n)) => Some(n.clone()),
+                            Some(Type::Named { name: n, .. }) => Some(n.clone()),
                             _ => self.struct_value_ty(value),
                         }
                     } else {

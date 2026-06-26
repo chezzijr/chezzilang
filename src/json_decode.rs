@@ -63,7 +63,7 @@ pub fn from_type(
     visiting: &mut Vec<String>,
 ) -> Result<TypeDescriptor, String> {
     match ty {
-        Type::Named(n) => match n.as_str() {
+        Type::Named { name: n, .. } => match n.as_str() {
             "int" => Ok(TypeDescriptor::Int),
             "float" => Ok(TypeDescriptor::Float),
             "str" => Ok(TypeDescriptor::Str),
@@ -83,7 +83,7 @@ pub fn from_type(
                 visiting,
             )?))),
             ("Map", [k, v]) => {
-                if !matches!(k, Type::Named(s) if s == "str") {
+                if !matches!(k, Type::Named { name: s, .. } if s == "str") {
                     return Err("decode: Map keys must be str, found a non-str key".to_string());
                 }
                 Ok(TypeDescriptor::Map(Box::new(from_type(

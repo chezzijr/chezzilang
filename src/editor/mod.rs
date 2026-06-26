@@ -189,7 +189,18 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(usize, usize
 /// The semantic-token legend, in legend order. The `u32` token-type of a [`SemTok`] indexes this
 /// slice; the LSP server advertises exactly these names.
 pub const SEMANTIC_TOKEN_TYPES: &[&str] = &[
-    "keyword", "operator", "string", "number", "comment", "variable",
+    "keyword",
+    "operator",
+    "string",
+    "number",
+    "comment",
+    "variable",
+    // Role-based extras (Deliverable B): the AST overlay refines an Ident from `variable` to one of
+    // these. Appended (not inserted) so the existing indices 0..=5 never shift.
+    "function",
+    "type",
+    "property",
+    "parameter",
 ];
 
 pub const KEYWORD: u32 = 0;
@@ -198,6 +209,10 @@ pub const STRING: u32 = 2;
 pub const NUMBER: u32 = 3;
 pub const COMMENT: u32 = 4;
 pub const VARIABLE: u32 = 5;
+pub const FUNCTION: u32 = 6;
+pub const TYPE: u32 = 7;
+pub const PROPERTY: u32 = 8;
+pub const PARAMETER: u32 = 9;
 
 /// One classified token with an absolute **0-based** position. `start` and `len` are in UTF-16 code
 /// units (the LSP default position encoding); every token stays within a single line.
@@ -226,6 +241,10 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
     let mut out: Vec<SemTok> = Vec::new();
     // Absolute char ranges of string literals, so the comment scan can ignore `#` inside them.
     let mut string_extents: Vec<(usize, usize)> = Vec::new();
+    // AST-derived role overlay (Deliverable B): refines an Ident from the default `variable` to
+    // function / type / property / parameter. Built once; EMPTY (→ all idents stay `variable`) when
+    // the buffer doesn't parse, so a mid-edit document never errors or loses its base highlighting.
+    let overlay = semantic_overlay(source);
 
     for tok in &toks {
         let line = tok.span.line;
@@ -233,7 +252,12 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
         // Absolute char offset of the token's first char.
         let start_abs = line_starts.get(line - 1).copied().unwrap_or(0) + (col - 1);
         let (ttype, char_len) = match &tok.kind {
-            Token::Ident(name) => (VARIABLE, name.chars().count()),
+            // The token's 1-based source `(line, col)` keys the overlay (AST spans are 1-based char
+            // positions too); default to `variable` when no role applies.
+            Token::Ident(name) => (
+                overlay.get(&(line, col)).copied().unwrap_or(VARIABLE),
+                name.chars().count(),
+            ),
             Token::Int(_) | Token::Float(_) => (NUMBER, measure_number(&chars, start_abs)),
             Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => {
                 let l = measure_string(&chars, start_abs);
@@ -270,6 +294,380 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
     append_comments(&chars, &string_extents, &mut out);
     out.sort_by_key(|t| (t.line, t.start));
     out
+}
+
+// ---------------------------------------------------------------------------
+// AST-derived semantic-token overlay (Deliverable B).
+// ---------------------------------------------------------------------------
+
+/// Map from a token's **1-based** `(line, col)` source position to the semantic-token role that the
+/// AST assigns it (one of `FUNCTION` / `TYPE` / `PROPERTY` / `PARAMETER`). Built by lexing + parsing
+/// the SINGLE buffer (no resolver / no disk — robust to missing imports and fast) and walking the
+/// decls/exprs/types. Spans synthesized by other phases (`Span::default()`, line 0) are never
+/// inserted, and a buffer that fails to lex/parse yields an EMPTY map so `semantic_tokens` degrades
+/// gracefully to lexer-only highlighting (every ident `variable`) — it never errors on a mid-edit
+/// document. The keys match the 1-based `(span.line, span.col)` that `semantic_tokens` reads off the
+/// lexer stream, so an emitted Ident is refined by a direct lookup.
+fn semantic_overlay(source: &str) -> std::collections::HashMap<(usize, usize), u32> {
+    use crate::{lexer, parser};
+    let mut map = std::collections::HashMap::new();
+    let Ok(toks) = lexer::tokenize(source) else {
+        return map;
+    };
+    let Ok(module) = parser::parse(toks) else {
+        return map;
+    };
+    for stmt in &module.stmts {
+        overlay_stmt(stmt, &mut map);
+    }
+    map
+}
+
+/// Insert `role` at `span`'s 1-based `(line, col)`, skipping the synthesized-span sentinel (line 0)
+/// so a checker/desugar-built node never colors a real token. First write wins (the call-callee
+/// `function` mark is applied before the generic field-access `property` rule for the same name).
+fn overlay_mark(
+    map: &mut std::collections::HashMap<(usize, usize), u32>,
+    span: crate::ast::Span,
+    role: u32,
+) {
+    if span.line == 0 {
+        return;
+    }
+    map.entry((span.line, span.col)).or_insert(role);
+}
+
+/// Walk a type annotation, marking every `Type::Named` reference `TYPE` (covers struct/enum names in
+/// type position + generic bounds). A `Qualified` type has no span (Deliverable B scope) — only its
+/// args are walked.
+fn overlay_type(ty: &crate::ast::Type, map: &mut std::collections::HashMap<(usize, usize), u32>) {
+    use crate::ast::Type;
+    match ty {
+        Type::Named { span, .. } => overlay_mark(map, *span, TYPE),
+        Type::Qualified { args, .. } | Type::Generic(_, args) => {
+            for a in args {
+                overlay_type(a, map);
+            }
+        }
+        Type::Func { params, ret } => {
+            for p in params {
+                overlay_type(p, map);
+            }
+            overlay_type(ret, map);
+        }
+        Type::Tuple(elems) => {
+            for e in elems {
+                overlay_type(e, map);
+            }
+        }
+    }
+}
+
+/// Mark a function/method's signature: the name (`FUNCTION`), each param name (`PARAMETER`) and its
+/// type, the generic-bound args, the return type, and recurse the body.
+fn overlay_fndecl(
+    decl: &crate::ast::FnDecl,
+    map: &mut std::collections::HashMap<(usize, usize), u32>,
+) {
+    overlay_mark(map, decl.name_span, FUNCTION);
+    for tp in &decl.type_params {
+        for b in &tp.bounds {
+            for a in &b.args {
+                overlay_type(a, map);
+            }
+        }
+    }
+    overlay_params(&decl.params, map);
+    if let Some(ret) = &decl.ret {
+        overlay_type(ret, map);
+    }
+    overlay_block(&decl.body, map);
+}
+
+/// Mark each parameter's name (`PARAMETER`), its annotation, and its default expression.
+fn overlay_params(
+    params: &[crate::ast::Param],
+    map: &mut std::collections::HashMap<(usize, usize), u32>,
+) {
+    for p in params {
+        overlay_mark(map, p.name_span, PARAMETER);
+        if let Some(ty) = &p.ty {
+            overlay_type(ty, map);
+        }
+        if let Some(d) = &p.default {
+            overlay_expr(d, map);
+        }
+    }
+}
+
+fn overlay_block(
+    block: &crate::ast::Block,
+    map: &mut std::collections::HashMap<(usize, usize), u32>,
+) {
+    for s in block {
+        overlay_stmt(s, map);
+    }
+}
+
+fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(usize, usize), u32>) {
+    use crate::ast::{DeferTarget, SpawnTarget, StmtKind, WaitTarget};
+    match &stmt.kind {
+        StmtKind::Let { ty, value, .. } => {
+            if let Some(t) = ty {
+                overlay_type(t, map);
+            }
+            overlay_expr(value, map);
+        }
+        StmtKind::Assign { target, value, .. } => {
+            overlay_expr(target, map);
+            overlay_expr(value, map);
+        }
+        StmtKind::Fn(decl) => overlay_fndecl(decl, map),
+        StmtKind::Struct {
+            fields, methods, ..
+        } => {
+            for f in fields {
+                overlay_mark(map, f.name_span, PROPERTY);
+                overlay_type(&f.ty, map);
+                if let Some(d) = &f.default {
+                    overlay_expr(d, map);
+                }
+            }
+            for m in methods {
+                overlay_fndecl(m, map);
+            }
+        }
+        StmtKind::Protocol { methods, .. } => {
+            // A `MethodSig` carries no name span (Deliverable B scope), so only its params/return
+            // type are roled.
+            for sig in methods {
+                overlay_params(&sig.params, map);
+                if let Some(ret) = &sig.ret {
+                    overlay_type(ret, map);
+                }
+            }
+        }
+        StmtKind::Enum {
+            variants, methods, ..
+        } => {
+            for v in variants {
+                for t in &v.payload {
+                    overlay_type(t, map);
+                }
+            }
+            for m in methods {
+                overlay_fndecl(m, map);
+            }
+        }
+        StmtKind::TypeAlias { ty, .. } => overlay_type(ty, map),
+        StmtKind::NewType {
+            underlying,
+            methods,
+            ..
+        } => {
+            overlay_type(underlying, map);
+            for m in methods {
+                overlay_fndecl(m, map);
+            }
+        }
+        StmtKind::If {
+            branches,
+            else_block,
+        } => {
+            for (cond, body) in branches {
+                overlay_expr(cond, map);
+                overlay_block(body, map);
+            }
+            if let Some(b) = else_block {
+                overlay_block(b, map);
+            }
+        }
+        StmtKind::For { iter, body, .. } => {
+            overlay_expr(iter, map);
+            overlay_block(body, map);
+        }
+        StmtKind::While { cond, body } => {
+            overlay_expr(cond, map);
+            overlay_block(body, map);
+        }
+        StmtKind::Match { scrutinee, arms } => {
+            overlay_expr(scrutinee, map);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    overlay_expr(g, map);
+                }
+                overlay_block(&a.body, map);
+            }
+        }
+        StmtKind::Return(Some(e)) | StmtKind::Yield(e) | StmtKind::Expr(e) => overlay_expr(e, map),
+        StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::Import(_) => {}
+        StmtKind::Defer(DeferTarget::Call(e)) => overlay_expr(e, map),
+        StmtKind::Defer(DeferTarget::Block(b)) => overlay_block(b, map),
+        StmtKind::Parallel { body } => overlay_block(body, map),
+        StmtKind::Spawn(SpawnTarget::Call(e)) => overlay_expr(e, map),
+        StmtKind::Spawn(SpawnTarget::Block(b)) => overlay_block(b, map),
+        StmtKind::Wait { arms, else_block } => {
+            for a in arms {
+                if let WaitTarget::Assign(e) = &a.target {
+                    overlay_expr(e, map);
+                }
+                overlay_expr(&a.chan, map);
+                overlay_block(&a.body, map);
+            }
+            if let Some(b) = else_block {
+                overlay_block(b, map);
+            }
+        }
+        StmtKind::Extern { fns, .. } => {
+            for f in fns {
+                overlay_params(&f.params, map);
+                if let Some(ret) = &f.ret {
+                    overlay_type(ret, map);
+                }
+            }
+        }
+        StmtKind::Assert { cond, msg } => {
+            overlay_expr(cond, map);
+            if let Some(m) = msg {
+                overlay_expr(m, map);
+            }
+        }
+    }
+}
+
+fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(usize, usize), u32>) {
+    use crate::ast::ExprKind;
+    match &expr.kind {
+        // A CALL callee is a function reference, not a value/property: an `Ident` callee colors the
+        // name `function`; a `Field` callee (`obj.method(...)`) colors the METHOD name `function`
+        // (handled BEFORE the generic field-access `property` rule, so it never mis-colors). Other
+        // callee shapes (an index, a parenthesized expr) recurse normally.
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            type_args,
+        } => {
+            match &callee.kind {
+                ExprKind::Ident(_) => overlay_mark(map, callee.span, FUNCTION),
+                ExprKind::Field { obj, name_span, .. } => {
+                    overlay_mark(map, *name_span, FUNCTION);
+                    overlay_expr(obj, map);
+                }
+                _ => overlay_expr(callee, map),
+            }
+            for a in args {
+                overlay_expr(a, map);
+            }
+            for (_, v) in named {
+                overlay_expr(v, map);
+            }
+            for t in type_args {
+                overlay_type(t, map);
+            }
+        }
+        // A non-call field access colors the field NAME `property`.
+        ExprKind::Field { obj, name_span, .. } => {
+            overlay_mark(map, *name_span, PROPERTY);
+            overlay_expr(obj, map);
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_)
+        | ExprKind::TypeApply { .. } => {}
+        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            for e in es {
+                overlay_expr(e, map);
+            }
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                overlay_expr(k, map);
+                overlay_expr(v, map);
+            }
+        }
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            if let Some(k) = key {
+                overlay_expr(k, map);
+            }
+            overlay_expr(elem, map);
+            for c in clauses {
+                overlay_expr(&c.iter, map);
+                for g in &c.guards {
+                    overlay_expr(g, map);
+                }
+            }
+        }
+        ExprKind::Unary { expr, .. } => overlay_expr(expr, map),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            overlay_expr(lhs, map);
+            overlay_expr(rhs, map);
+        }
+        ExprKind::Range { start, end } => {
+            overlay_expr(start, map);
+            overlay_expr(end, map);
+        }
+        ExprKind::Index { obj, index } => {
+            overlay_expr(obj, map);
+            overlay_expr(index, map);
+        }
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            overlay_expr(obj, map);
+            for c in [start, end, step].into_iter().flatten() {
+                overlay_expr(c, map);
+            }
+        }
+        ExprKind::Try(e) => overlay_expr(e, map),
+        ExprKind::OptChain { obj, call, .. } => {
+            overlay_expr(obj, map);
+            if let Some(c) = call {
+                for a in &c.args {
+                    overlay_expr(a, map);
+                }
+                for (_, v) in &c.named {
+                    overlay_expr(v, map);
+                }
+            }
+        }
+        ExprKind::DecodeCall { obj, ty, arg } => {
+            overlay_expr(obj, map);
+            overlay_type(ty, map);
+            overlay_expr(arg, map);
+        }
+        ExprKind::Closure { params, ret, body } => {
+            overlay_params(params, map);
+            if let Some(r) = ret {
+                overlay_type(r, map);
+            }
+            overlay_expr(body, map);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            overlay_expr(scrutinee, map);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    overlay_expr(g, map);
+                }
+                overlay_expr(&a.body, map);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            overlay_expr(cond, map);
+            overlay_expr(then, map);
+            overlay_expr(els, map);
+        }
+        ExprKind::Recover(block) => overlay_block(block, map),
+    }
 }
 
 /// LSP delta-encoding: five `u32`s per token — `[deltaLine, deltaStart, length, tokenType,
@@ -789,6 +1187,58 @@ mod tests {
         let h = hov(src, 5, 2).expect("hover on method callee");
         assert_eq!(h.display, "fn(int) -> int");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    /// The `token_type` of the semantic token starting at 0-based `(line, start)`, or `None`.
+    fn role_at(toks: &[SemTok], line: u32, start: u32) -> Option<u32> {
+        toks.iter()
+            .find(|t| t.line == line && t.start == start)
+            .map(|t| t.token_type)
+    }
+
+    #[test]
+    fn overlay_roles() {
+        // One buffer exercising every AST-derived role. Columns are 0-based UTF-16 (all ASCII here).
+        let src = "fn f(p: int) -> int:\n    return p\nstruct S:\n    fld: int\nm := S(1)\na := m.fld\nb := f(2)\nc := 5\n";
+        let toks = semantic_tokens(src);
+        // fn-decl name → function; param decl → parameter; type annotations (param + return) → type.
+        assert_eq!(role_at(&toks, 0, 3), Some(FUNCTION), "fn-decl name");
+        assert_eq!(role_at(&toks, 0, 5), Some(PARAMETER), "param decl");
+        assert_eq!(role_at(&toks, 0, 8), Some(TYPE), "param type annotation");
+        assert_eq!(role_at(&toks, 0, 16), Some(TYPE), "return type annotation");
+        // struct field decl → property; its type annotation → type.
+        assert_eq!(role_at(&toks, 3, 4), Some(PROPERTY), "struct field decl");
+        assert_eq!(role_at(&toks, 3, 9), Some(TYPE), "field type annotation");
+        // ctor / fn-call callee → function; field access → property.
+        assert_eq!(role_at(&toks, 4, 5), Some(FUNCTION), "ctor callee");
+        assert_eq!(role_at(&toks, 5, 7), Some(PROPERTY), "field access");
+        assert_eq!(role_at(&toks, 6, 5), Some(FUNCTION), "fn-call callee");
+        // A plain local binding + a param USE stay variable (only DECL sites are roled).
+        assert_eq!(role_at(&toks, 7, 0), Some(VARIABLE), "plain local");
+        assert_eq!(role_at(&toks, 1, 11), Some(VARIABLE), "param use");
+    }
+
+    #[test]
+    fn overlay_graceful_on_parse_error() {
+        // A mid-edit unparseable buffer: the overlay is empty and semantic_tokens degrades to
+        // lexer-only (every ident VARIABLE) WITHOUT panicking and still emits tokens.
+        let toks = semantic_tokens("fn f( := = bad\n");
+        assert!(
+            !toks.is_empty(),
+            "tokens must still be emitted on a parse error"
+        );
+        for t in &toks {
+            assert_ne!(
+                t.token_type, FUNCTION,
+                "no overlay role should leak from an unparseable buffer"
+            );
+        }
+        // The identifiers `f` and `bad` are present and classified VARIABLE (no role override).
+        assert_eq!(
+            role_at(&toks, 0, 3),
+            Some(VARIABLE),
+            "ident f stays variable"
+        );
     }
 
     fn st(line: u32, start: u32, len: u32, ty: u32) -> SemTok {

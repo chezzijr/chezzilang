@@ -40,15 +40,25 @@ paths, both single-sourced from the lexer so language changes flow through with 
 maintain. (1) **`chezzi-lsp`** — a `tower-lsp` stdio language server (`src/bin/chezzi-lsp.rs`, primary
 target neovim) providing **diagnostics** (lexer+parser+checker over the live buffer via
 `chezzi::editor::diagnostics`, `CheckError`/`ResolveError` 1-based spans → 0-based LSP ranges, pushed on
-open/change/save), **semantic tokens** (classified straight off the lexer `Tok` stream →
-`keyword/operator/string/number/comment/variable` legend; a new keyword highlights automatically), and
+open/change/save), **semantic tokens** (lexer `Tok` stream → base
+`keyword/operator/string/number/comment/variable` legend, then an **AST-derived overlay** refines each
+ident to `function` (fn-decl names + call/ctor/method callees), `type` (type references in
+annotations/returns/fields/payloads/bounds), `property` (struct field decls + field accesses), or
+`parameter` (fn/closure params) — the legend is extended with those four names and a `chezzi-lsp`
+`#[cfg(test)]` test asserts the server legend and `editor::SEMANTIC_TOKEN_TYPES` agree index-for-index;
+a buffer that doesn't parse yields an empty overlay and degrades to lexer-only highlighting, never
+erroring), and
 **hover** (`K` / `textDocument/hover` → `chezzi::editor::hover`: reverses the UTF-16 cursor column to a
 char column, finds the lexer token under the cursor, re-runs the SAME resolve→desugar→check pipeline as
 diagnostics with a single-position checker PROBE on the entry module, and returns the inferred type of
-the smallest leaf/identifier/field-name as a ```` ```chezzi <type> ```` MarkupContent — `None` when the
-position has no type or the program doesn't check). The probe is a minimal, behavior-preserving checker
-introspection (`checker::hover_type` + a `HoverKind` classification); a new diagnostic-only
-`ExprKind::Field { name_span }` carries the field-name token position (runtime-inert, parity-neutral).
+the smallest leaf/identifier/field-name **or the signature of a call's callee** (free fn / struct ctor /
+generic fn / method — receiver stripped → `fn(int) -> int`) as a ```` ```chezzi <type> ```` MarkupContent
+— `None` when the position has no type, lands on a builtin/bare-enum-variant callee, or the program
+doesn't check). The probe is a minimal, behavior-preserving checker
+introspection (`checker::hover_type` + a `HoverKind` classification); diagnostic-only AST spans carry
+the token positions — `ExprKind::Field { name_span }` plus new `FnDecl`/`Param`/struct-`Field`
+`name_span`s and a `Type::Named { span }` (the latter with a hand-written equality-neutral `PartialEq`
+so position never flips type equality) — all runtime-inert and parity-neutral.
 **Reinstall (`cargo install --path . --features lsp --bin chezzi-lsp`) to pick up hover.** The
 async deps (tower-lsp + tokio) are OPTIONAL behind a `lsp` feature with `[[bin]] required-features`, so
 they never touch the default `cargo build`/`cargo test`; build on demand:
@@ -63,8 +73,9 @@ disk). Editor logic (`src/editor/`) is dep-free and unit-tested in the default b
 a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: [`editors/README.md`].
 No parity risk (front-end only; never runs VM/interp). v1 limits: unsaved edits to an *imported* module
 aren't reflected until saved; interpolated strings highlight as one literal (no nested `{expr}`); hover
-covers the entry module only, resolves leaf idents/literals/field-names + single-name let bindings
-(method-name, desugared `?.`/`??`, and non-first destructuring-bind names return no type).
+covers the entry module only, resolves leaf idents/literals/field-names + single-name let bindings +
+call callees incl. method names (desugared `?.`/`??` and non-first destructuring-bind names return no
+type; the semantic-token overlay's `type` role skips module-qualified type names, which carry no span).
 
 **✅ Bug-discovery lever #1 — front-end panic-fuzzer (2026-06-26).** `src/panicfuzz/` feeds
 adversarial / malformed inputs to `chezzi check` (the full front-end: lexer + parser + checker) and

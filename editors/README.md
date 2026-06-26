@@ -62,16 +62,20 @@ lspconfig.chezzi.setup({
 
 Semantic tokens are on by default in Neovim 0.9+ whenever the server advertises
 `semanticTokensProvider` — which `chezzi-lsp` does (legend:
-`keyword, operator, string, number, comment, variable`). If your colorscheme doesn't map them, link
-the `@lsp.type.*` groups, e.g.:
+`keyword, operator, string, number, comment, variable, function, type, property, parameter`). If your
+colorscheme doesn't map them, link the `@lsp.type.*` groups, e.g.:
 
 ```lua
-vim.api.nvim_set_hl(0, "@lsp.type.keyword.chezzi",  { link = "Keyword" })
-vim.api.nvim_set_hl(0, "@lsp.type.string.chezzi",   { link = "String" })
-vim.api.nvim_set_hl(0, "@lsp.type.number.chezzi",   { link = "Number" })
-vim.api.nvim_set_hl(0, "@lsp.type.comment.chezzi",  { link = "Comment" })
-vim.api.nvim_set_hl(0, "@lsp.type.operator.chezzi", { link = "Operator" })
-vim.api.nvim_set_hl(0, "@lsp.type.variable.chezzi", { link = "Identifier" })
+vim.api.nvim_set_hl(0, "@lsp.type.keyword.chezzi",   { link = "Keyword" })
+vim.api.nvim_set_hl(0, "@lsp.type.string.chezzi",    { link = "String" })
+vim.api.nvim_set_hl(0, "@lsp.type.number.chezzi",    { link = "Number" })
+vim.api.nvim_set_hl(0, "@lsp.type.comment.chezzi",   { link = "Comment" })
+vim.api.nvim_set_hl(0, "@lsp.type.operator.chezzi",  { link = "Operator" })
+vim.api.nvim_set_hl(0, "@lsp.type.variable.chezzi",  { link = "Identifier" })
+vim.api.nvim_set_hl(0, "@lsp.type.function.chezzi",  { link = "Function" })
+vim.api.nvim_set_hl(0, "@lsp.type.type.chezzi",      { link = "Type" })
+vim.api.nvim_set_hl(0, "@lsp.type.property.chezzi",  { link = "Identifier" })
+vim.api.nvim_set_hl(0, "@lsp.type.parameter.chezzi", { link = "Identifier" })
 ```
 
 Diagnostics appear automatically via `textDocument/publishDiagnostics` on open/change/save.

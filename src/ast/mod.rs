@@ -252,6 +252,10 @@ impl AssignOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    /// Source span of the function-NAME token. Purely diagnostic metadata for editor tooling (the
+    /// LSP semantic-token overlay marks the decl name `function`); runtime-inert — never read by
+    /// desugar/compiler/vm/interp, so it is behavior- and parity-neutral (mirrors `Field.name_span`).
+    pub name_span: Span,
     /// Generic type parameters: `fn max[T: Comparable](…)`. Empty for non-generic fns/methods.
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
@@ -307,6 +311,9 @@ pub struct MethodSig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
+    /// Source span of the parameter-NAME token. Diagnostic-only (LSP overlay marks params
+    /// `parameter`); runtime-inert, like `Field.name_span`. `Span::default()` for synthesized params.
+    pub name_span: Span,
     pub ty: Option<Type>,
     pub default: Option<Expr>,
     /// True for a `ref T` parameter (`fn f(x: ref int)`) — a transparent by-reference param that
@@ -321,6 +328,9 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
+    /// Source span of the field-NAME token. Diagnostic-only (LSP overlay marks struct field decls
+    /// `property`); runtime-inert, like `ExprKind::Field.name_span`.
+    pub name_span: Span,
     pub ty: Type,
     pub default: Option<Expr>,
 }
@@ -410,9 +420,24 @@ pub enum Import {
 // ===== types =====
 
 /// A type annotation: `int`, `str`, `Point`, or a generic `list[int]`, `map[K, V]`, `Result[int]`.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `PartialEq` is hand-written (NOT derived) so the `Named` span is EQUALITY-NEUTRAL: two
+/// `Type::Named` with the same name compare equal regardless of their source spans. The span is pure
+/// editor-tooling metadata (the LSP overlay marks type references `type`); making position flip
+/// equality would break the parser tests that compare whole `Type`s and is semantically meaningless
+/// (no non-test code compares `Type`s — all uses are `matches!`/`if let`). Runtime-inert.
+#[derive(Debug, Clone)]
 pub enum Type {
-    Named(String),
+    /// A bare type name (`int`, `Point`, `T`). `span` points at the name token (diagnostic-only,
+    /// equality-neutral — see the type-level doc; `Span::default()` for a synthesized annotation).
+    /// The span's ONLY reader is the lib-only `editor` semantic-token overlay; the default `chezzi`
+    /// bin doesn't compile `editor`, so allow the bin's dead-code lint (same reason `HoverKind`'s
+    /// editor-only variants do).
+    Named {
+        name: String,
+        #[allow(dead_code)]
+        span: Span,
+    },
     /// A module-qualified user type: `geo.Point` / `geo.Box[int]`. `module` is the bound
     /// last-segment/alias name (the SAME name a function call `geo.ping()` uses); `name` is the type
     /// in that module; `args` carries any generic type arguments (`geo.Box[int]` ⇒ args `[int]`,
@@ -432,13 +457,60 @@ pub enum Type {
     Tuple(Vec<Type>),
 }
 
+impl Type {
+    /// A bare `Type::Named` with a SYNTHESIZED (default) span — for callers that have only a name
+    /// (the checker building an annotation from an inferred name, test literals, desugar). The span
+    /// is equality-neutral, so this compares equal to a parser-built `Named` of the same name.
+    pub fn named(name: impl Into<String>) -> Type {
+        Type::Named {
+            name: name.into(),
+            span: Span::default(),
+        }
+    }
+}
+
+/// Hand-written so the `Named` span is EQUALITY-NEUTRAL (see the `Type` doc): everything else is a
+/// structural field-by-field comparison, exactly as a derive would produce.
+impl PartialEq for Type {
+    fn eq(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Named { name: a, .. }, Type::Named { name: b, .. }) => a == b,
+            (
+                Type::Qualified {
+                    module: m1,
+                    name: n1,
+                    args: a1,
+                },
+                Type::Qualified {
+                    module: m2,
+                    name: n2,
+                    args: a2,
+                },
+            ) => m1 == m2 && n1 == n2 && a1 == a2,
+            (Type::Generic(n1, a1), Type::Generic(n2, a2)) => n1 == n2 && a1 == a2,
+            (
+                Type::Func {
+                    params: p1,
+                    ret: r1,
+                },
+                Type::Func {
+                    params: p2,
+                    ret: r2,
+                },
+            ) => p1 == p2 && r1 == r2,
+            (Type::Tuple(t1), Type::Tuple(t2)) => t1 == t2,
+            _ => false,
+        }
+    }
+}
+
 /// True iff `ty` is the primitive `float` (bare `Type::Named("float")`). Used by the compiler and the
 /// interpreter to drive one-way int→float coercion at value-definition boundaries (`let x: float = 3`,
 /// float params, float returns, float struct fields). A generic param typed `T`, a `Qualified`/`Generic`
 /// type, or any non-`float` `Named` is NOT float — so no coercion fires there (matching the
 /// no-generic-widening carve-out). Shared so both engines coerce from the IDENTICAL annotation.
 pub fn is_float_ty(ty: &Type) -> bool {
-    matches!(ty, Type::Named(n) if n == "float")
+    matches!(ty, Type::Named { name, .. } if name == "float")
 }
 
 // ===== expressions =====

@@ -113,9 +113,9 @@ fn numeric_mix(a: &Ty, b: &Ty) -> bool {
 /// already matched, so non-matching shapes fall back to a generic label.
 fn describe_extern_type(t: &Type) -> String {
     match t {
-        Type::Named(n) => n.clone(),
+        Type::Named { name: n, .. } => n.clone(),
         Type::Generic(n, args) if n == "Option" => match args.first() {
-            Some(Type::Named(inner)) => format!("{inner}?"),
+            Some(Type::Named { name: inner, .. }) => format!("{inner}?"),
             _ => "str?".to_string(),
         },
         _ => "owned_str".to_string(),
@@ -2046,7 +2046,7 @@ impl Checker {
     /// to license a width-alias only when its defining module imported all the widths it embeds.
     fn collect_width_names(ty: &Type, out: &mut Vec<String>) {
         match ty {
-            Type::Named(n) => {
+            Type::Named { name: n, .. } => {
                 if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) {
                     out.push(n.clone());
                 }
@@ -2480,7 +2480,7 @@ impl Checker {
     /// just terminate cleanly and report "not return-only".
     fn is_return_only_extern_type_seen(&self, t: &Type, seen: &mut Vec<String>) -> bool {
         match t {
-            Type::Named(n) => {
+            Type::Named { name: n, .. } => {
                 if n == "owned_str" {
                     return true;
                 }
@@ -2495,7 +2495,7 @@ impl Checker {
             }
             // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
             Type::Generic(n, args) if n == "Option" => args.first().is_some_and(|inner| {
-                matches!(inner, Type::Named(s) if s == "str" || s == "owned_str")
+                matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
                     || self.is_return_only_extern_type_seen(inner, seen)
             }),
             _ => false,
@@ -2858,7 +2858,7 @@ impl Checker {
     /// (use a first-class `Ref[T]` field/param for a generic box). Other unboxable shapes do not arise
     /// — the parser already bars `ref` from collection-element / return / field positions.
     fn check_ref_ty(&mut self, t: &Type, span: Span) {
-        if let Type::Named(n) = t
+        if let Type::Named { name: n, .. } = t
             && self.type_params.contains_key(n)
         {
             self.error(
@@ -2904,7 +2904,7 @@ impl Checker {
 
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
-            Type::Named(n) => match n.as_str() {
+            Type::Named { name: n, .. } => match n.as_str() {
                 "int" => Ty::Int,
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
@@ -7122,7 +7122,7 @@ impl Checker {
     /// caller falls back to the ordinary index-then-method path so a real index error still surfaces.
     fn index_as_type(&self, index: &Expr) -> Option<Type> {
         match &index.kind {
-            ExprKind::Ident(n) => Some(Type::Named(n.clone())),
+            ExprKind::Ident(n) => Some(Type::named(n.clone())),
             ExprKind::Index { obj, index } => {
                 if let ExprKind::Ident(n) = &obj.kind {
                     Some(Type::Generic(n.clone(), vec![self.index_as_type(index)?]))
@@ -9511,7 +9511,7 @@ impl Checker {
             return Ty::Unknown;
         }
         match t {
-            Type::Named(n) => match n.as_str() {
+            Type::Named { name: n, .. } => match n.as_str() {
                 "int" => Ty::Int,
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
@@ -9644,7 +9644,7 @@ impl Checker {
             return None; // cyclic alias — defended (the marshal gate rejects it cleanly).
         }
         match t {
-            Type::Named(n) => match n.as_str() {
+            Type::Named { name: n, .. } => match n.as_str() {
                 "int" => Some(CType::Int),
                 "float" => Some(CType::Float),
                 "bool" => Some(CType::Bool),

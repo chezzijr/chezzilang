@@ -6930,7 +6930,7 @@ fn decode_utf8(bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
 /// never-panic backstop in the extern marshal loop.
 fn ffi_type_display(ty: Option<&crate::ast::Type>) -> String {
     match ty {
-        Some(crate::ast::Type::Named(n)) => n.clone(),
+        Some(crate::ast::Type::Named { name: n, .. }) => n.clone(),
         Some(crate::ast::Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
         Some(crate::ast::Type::Generic(n, _)) => n.clone(),
         Some(_) => "<unsupported>".to_string(),

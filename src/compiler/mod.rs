@@ -3792,7 +3792,7 @@ pub(crate) fn bare_display(key: &str) -> String {
 /// the spellings that reach an extern boundary; anything else falls back to a plain placeholder.
 fn ffi_type_display(ty: Option<&Type>) -> String {
     match ty {
-        Some(Type::Named(n)) => n.clone(),
+        Some(Type::Named { name: n, .. }) => n.clone(),
         Some(Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
         Some(Type::Generic(n, _)) => n.clone(),
         Some(_) => "<unsupported>".to_string(),
