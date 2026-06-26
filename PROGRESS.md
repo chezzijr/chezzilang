@@ -15,7 +15,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 new per-operator protocols wired exactly like `Add`/`Sub`/`Mul`: **`Div`** (`div(self, o: Self) ->
 Self`, powers `/`), **`Mod`** (`mod`, powers `%`), **`Neg`** (`neg(self) -> Self`, powers UNARY `-`).
 `int`/`float` satisfy all three intrinsically; structs/enums via the method; scalar newtypes get
-`Div`/`Mod` auto-flow (Neg out of scope). C-style `/` truncates / `%` int-remainder, so `Div`/`Mod`
+`Div`/`Mod` auto-flow (Neg out of scope). Soundness: a newtype operator overload defined as a *method*
+is never dispatched at runtime (the same-newtype arm always auto-flows to the underlying's native op),
+so the checker does NOT satisfy `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` on a newtype structurally — only
+via the numeric auto-flow — closing a `check`-ok / `run`-faults hole. C-style `/` truncates / `%` int-remainder, so `Div`/`Mod`
 are `Self -> Self` (no float-return surprise). **Protocol embedding (super-protocols)** — a protocol
 body line is now EITHER an `fn` sig OR an embed line (`Add + Sub`, order-free, interleaved); reuses
 `Bound`. `ProtocolInfo`/`StmtKind::Protocol` gained `embeds: Vec<Bound>`. Satisfaction flattens

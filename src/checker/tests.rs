@@ -9421,3 +9421,60 @@ fn embed_sig_conflict_errors() {
 fn embed_cycle_errors() {
     rejects("protocol A:\n    B\nprotocol B:\n    A\n", "cyclic");
 }
+
+// ===== M22 soundness: a newtype operator METHOD is never dispatched at runtime (the same-newtype
+// arm always auto-flows to the underlying's native op), so the checker must NOT type-check an
+// operator overload defined on a newtype — doing so would accept a program that crashes at runtime
+// on every engine (`check` ok / `run` faults). The ONLY newtype operator support is the numeric
+// underlying's auto-flow. =====
+
+/// A newtype defining a `neg` method must NOT make unary `-` type-check (no newtype Neg dispatch on
+/// any engine; Neg is out of scope for newtypes). Regression: M22 added a `satisfies(Neg)` path that
+/// wrongly admitted newtypes (`check` ok, `run`/`run --serial` → "cannot apply Neg to newtype").
+#[test]
+fn newtype_neg_method_rejected() {
+    rejects(
+        "newtype Foo = int:\n    fn neg(self) -> Foo:\n        return Foo(-int(self))\nfn main():\n    print(int(-Foo(5)))\nmain()\n",
+        "cannot negate",
+    );
+}
+
+/// A NON-numeric newtype (`= str`) defining a `div` method must NOT make `/` type-check (the runtime
+/// same-newtype arm auto-flows to `str / str`, which faults; the user `div` is never dispatched).
+/// Regression: M22's `op_overload_result` admitted it (`check` ok, `run` → "cannot apply Div to str
+/// and str").
+#[test]
+fn newtype_nonnumeric_div_method_rejected() {
+    rejects(
+        "newtype Name = str:\n    fn div(self, o: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a / a\n",
+        "cannot apply /",
+    );
+}
+
+/// Same as above for `mod` (`%`).
+#[test]
+fn newtype_nonnumeric_mod_method_rejected() {
+    rejects(
+        "newtype Name = str:\n    fn mod(self, o: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a % a\n",
+        "cannot apply %",
+    );
+}
+
+/// A numeric scalar newtype STILL gets `/` and `%` via the underlying's native auto-flow (no method
+/// needed) — the fix must not regress the legitimate numeric-newtype operator path.
+#[test]
+fn numeric_newtype_div_mod_still_ok() {
+    ok(
+        "newtype Meters = float\nfn main():\n    a := Meters(7.0)\n    b := Meters(2.0)\n    print(float(a / b))\n    print(float(a % b))\nmain()\n",
+    );
+}
+
+/// A newtype must not satisfy a `[T: Div]` / `[T: Neg]` generic bound via a structural operator
+/// method (bound-site soundness: forwarding such a newtype into the generic would crash at runtime).
+#[test]
+fn newtype_operator_method_fails_generic_bound() {
+    rejects(
+        "newtype Name = str:\n    fn div(self, o: Name) -> Name:\n        return self\nfn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn use(x: Name) -> Name:\n    return d(x, x)\n",
+        "Div",
+    );
+}

@@ -9792,6 +9792,18 @@ impl Checker {
                 {
                     return Ok(());
                 }
+                // SOUNDNESS: a newtype operator overload defined as a METHOD is NEVER dispatched at
+                // runtime — the same-newtype operator arm (vm `newtype_arith` / interp `eval_binop`)
+                // always auto-flows to the UNDERLYING's native op, and unary `-` has no newtype path
+                // at all. So an operator protocol on a newtype is satisfiable ONLY via the numeric
+                // auto-flow above; admitting it structurally here would type-check a call that faults
+                // on every engine (`check` ok / `run` "cannot apply <Op> to <underlying>"). A
+                // non-numeric (or generic) newtype therefore does NOT satisfy these — its own
+                // `add`/`sub`/`mul`/`div`/`mod`/`neg` method is intentionally unreachable as an
+                // operator. (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
+                if matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg") {
+                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                }
                 let Some((_, methods)) = self.newtype_defs.get(ntkey) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
