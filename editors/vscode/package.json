@@ -1,0 +1,34 @@
+{
+  "name": "chezzi",
+  "displayName": "Chezzi",
+  "description": "Chezzi language support: TextMate syntax highlighting, plus diagnostics and semantic tokens when paired with chezzi-lsp.",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "chezzi",
+        "aliases": [
+          "Chezzi",
+          "chezzi"
+        ],
+        "extensions": [
+          ".chz"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "chezzi",
+        "scopeName": "source.chezzi",
+        "path": "./syntaxes/chezzi.tmLanguage.json"
+      }
+    ]
+  }
+}
