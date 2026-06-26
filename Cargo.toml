@@ -11,6 +11,22 @@ polling = "3"
 regex = "1"
 socket2 = "0.5"
 ureq = { version = "2", features = ["tls"] }
+# Editor LSP server deps — OPTIONAL, gated behind the `lsp` feature so neither the dependency tree nor
+# the `chezzi-lsp` bin is part of the default `cargo build`/`cargo test`. tower-lsp pulls in tokio (an
+# async runtime is unavoidable for an stdio JSON-RPC server), so both are gated together.
+tower-lsp = { version = "0.20", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"], optional = true }
+
+[features]
+# Build the LSP server: `cargo build --features lsp --bin chezzi-lsp`.
+lsp = ["dep:tower-lsp", "dep:tokio"]
+
+# The LSP server binary is excluded from the default build — it needs the `lsp` feature's heavy async
+# deps. The editor *logic* lives in `src/editor` (dep-free) and is always built + tested.
+[[bin]]
+name = "chezzi-lsp"
+path = "src/bin/chezzi-lsp.rs"
+required-features = ["lsp"]
 
 [dev-dependencies]
 bnf = "0.6.0"

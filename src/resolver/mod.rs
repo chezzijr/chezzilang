@@ -179,17 +179,32 @@ pub fn module_file(path: &[String], project_root: &Path, std_root: &Path) -> Pat
 /// transitively imported module; detect cycles; return modules in a stable load order
 /// (dependencies before dependents — reverse-postorder DFS, entry last).
 pub fn build_graph(entry: &Path) -> Result<ModuleGraph, ResolveError> {
+    build_graph_with_entry_source(entry, None)
+}
+
+/// Like [`build_graph`], but the **entry** module's source may be supplied directly (`Some`) instead
+/// of being read from disk — every *imported* module still resolves from disk as usual. This lets the
+/// LSP type-check the live, possibly-unsaved editor buffer while cross-module imports resolve against
+/// the on-disk project, faithfully mirroring `chezzi check` (resolve → desugar → check_graph) and so
+/// avoiding the single-module-check bare-key-vs-module-key pitfall. `None` reads the entry from disk
+/// and is byte-for-byte equivalent to the old `build_graph`.
+pub fn build_graph_with_entry_source(
+    entry: &Path,
+    entry_source: Option<String>,
+) -> Result<ModuleGraph, ResolveError> {
     let entry_abs = abs(entry);
     let project_root = find_root(&entry_abs);
     let std_root = std_root();
+    let entry_id = ModuleId(canonical_or_abs(&entry_abs));
+    let entry_override = entry_source.map(|s| (entry_id.clone(), s));
     let mut b = Builder {
         project_root,
         std_root,
         visited: HashMap::new(),
         on_stack: Vec::new(),
         order: Vec::new(),
+        entry_override,
     };
-    let entry_id = ModuleId(canonical_or_abs(&entry_abs));
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
     let mut graph = ModuleGraph {
         entry: entry_id,
@@ -209,6 +224,8 @@ struct Builder {
     /// Modules currently being processed (cycle detection), with their dotted labels.
     on_stack: Vec<(ModuleId, Vec<String>)>,
     order: Vec<LoadedModule>,
+    /// If set, `(entry_id, source)` — the entry module reads from this string instead of disk.
+    entry_override: Option<(ModuleId, String)>,
 }
 
 impl Builder {
@@ -236,15 +253,19 @@ impl Builder {
             return Ok(());
         }
 
-        let source = std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
-            message: format!(
-                "cannot find module '{}' (looked for {})",
-                dotted_label(dotted),
-                id.0.display()
-            ),
-            span: import_span,
-            module: Some(dotted_label(dotted)),
-        })?;
+        let source = match &self.entry_override {
+            // The entry buffer is supplied in-memory (live LSP doc); imports still hit disk.
+            Some((oid, osrc)) if oid == id => osrc.clone(),
+            _ => std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
+                message: format!(
+                    "cannot find module '{}' (looked for {})",
+                    dotted_label(dotted),
+                    id.0.display()
+                ),
+                span: import_span,
+                module: Some(dotted_label(dotted)),
+            })?,
+        };
         let ast = self.parse(&source, dotted)?;
         let imports = self.scan_imports(&ast);
 
@@ -433,6 +454,36 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // 0a. The entry-source override is used verbatim instead of reading the entry from disk.
+    #[test]
+    fn entry_source_override_used() {
+        // A path that does not exist on disk: only the override lets this resolve.
+        let graph = build_graph_with_entry_source(
+            Path::new("/nonexistent/chezzi_editor/x.chz"),
+            Some("x = 1\n".into()),
+        )
+        .expect("override source should resolve without a disk read");
+        // The entry module's AST came from the override (one assignment statement).
+        let entry = graph.modules.last().unwrap();
+        assert_eq!(entry.id, graph.entry);
+        assert_eq!(entry.ast.stmts.len(), 1);
+    }
+
+    // 0b. With `None`, behavior is identical to build_graph (reads the entry from disk).
+    #[test]
+    fn override_none_equals_disk() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "y = 2\nz = y + 1\n");
+        let a = build_graph(&entry).expect("disk build");
+        let b = build_graph_with_entry_source(&entry, None).expect("delegated build");
+        assert_eq!(a.entry, b.entry);
+        assert_eq!(a.modules.len(), b.modules.len());
+        assert_eq!(
+            a.modules.last().unwrap().ast.stmts.len(),
+            b.modules.last().unwrap().ast.stmts.len()
+        );
     }
 
     // 1. find_root walks up to the chezzi.toml marker.

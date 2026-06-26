@@ -51,6 +51,9 @@ cargo run -- docs                        # print docs: no topic = full LLM refer
 cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED — stub errors; see src/main.rs:81)
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
+
+cargo build --features lsp --bin chezzi-lsp                    # editor LSP server (off the default build; see editors/README.md)
+UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the VSCode TextMate grammar (single-sourced from the lexer)
 ```
 
 > Flags go **before** the file path; anything after the file is passed to the program.

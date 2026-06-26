@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Chezzi",
+  "scopeName": "source.chezzi",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.number-sign.chezzi", "match": "#.*$" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]?\"\"\"", "end": "\"\"\"" },
+        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]?'''", "end": "'''" },
+        { "name": "string.quoted.double.chezzi", "begin": "[bBrR]?\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] },
+        { "name": "string.quoted.single.chezzi", "begin": "[bBrR]?'", "end": "'", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.chezzi", "match": "\\b(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?)\\b" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.chezzi", "match": "\\b(fn|return|if|else|for|while|in|break|continue|struct|enum|protocol|type|newtype|match|recover|defer|assert|test|spawn|parallel|wait|yield|import|extern|from|as|ref|and|or|not|true|false)\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.chezzi", "match": "(<<=|>>=|!=|%=|&=|\\*=|\\+=|-=|->|\\.\\.|/=|:=|<<|<=|==|>=|>>|\\?\\.|\\?\\?|\\^=|\\|=|\\|>|!|%|&|\\(|\\)|\\*|\\+|,|-|\\.|/|:|<|=|>|\\?|\\[|\\]|\\^|\\{|\\||\\})" }
+      ]
+    }
+  }
+}

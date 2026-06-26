@@ -35,6 +35,27 @@ interp mirror); golden `examples/arithmetic_protocol.chz` runs byte-identical on
 grammar.bnf `protocolDecl` updated (+`tests/corpus/accept/protocol_embed.chz`, conformance green).
 Surface in [`docs/syntax.md`](docs/syntax.md), [`docs/spec.md`](docs/spec.md) (M22 row).
 
+**✅ Editor tooling — LSP server + VSCode TextMate grammar (2026-06-26).** Two highlight/diagnostic
+paths, both single-sourced from the lexer so language changes flow through with no separate grammar to
+maintain. (1) **`chezzi-lsp`** — a `tower-lsp` stdio language server (`src/bin/chezzi-lsp.rs`, primary
+target neovim) providing **diagnostics** (lexer+parser+checker over the live buffer via
+`chezzi::editor::diagnostics`, `CheckError`/`ResolveError` 1-based spans → 0-based LSP ranges, pushed on
+open/change/save) and **semantic tokens** (classified straight off the lexer `Tok` stream →
+`keyword/operator/string/number/comment/variable` legend; a new keyword highlights automatically). The
+async deps (tower-lsp + tokio) are OPTIONAL behind a `lsp` feature with `[[bin]] required-features`, so
+they never touch the default `cargo build`/`cargo test`; build on demand:
+`cargo build --features lsp --bin chezzi-lsp`. (2) **VSCode TextMate grammar**
+(`editors/vscode/syntaxes/chezzi.tmLanguage.json`) **generated** from the lexer's new
+`KEYWORDS`/`PUNCTUATION` tables + `Token::lexeme()` — `tests/editor_tmlanguage.rs` is generator +
+CI drift-guard (`UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage` regenerates; a plain run
+fails if stale). Architecture: an **additive `src/lib.rs`** (`pub mod editor` + the front-end module set;
+`main.rs` left untouched, front-end compiles twice — safe, no exported symbols) plus a
+behavior-preserving `resolver::build_graph_with_entry_source` (entry from a live buffer, imports from
+disk). Editor logic (`src/editor/`) is dep-free and unit-tested in the default build; the LSP server has
+a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: [`editors/README.md`].
+No parity risk (front-end only; never runs VM/interp). v1 limits: unsaved edits to an *imported* module
+aren't reflected until saved; interpolated strings highlight as one literal (no nested `{expr}`).
+
 **✅ Bug-discovery lever #1 — front-end panic-fuzzer (2026-06-26).** `src/panicfuzz/` feeds
 adversarial / malformed inputs to `chezzi check` (the full front-end: lexer + parser + checker) and
 flags any crash. A **stable, dependency-free SUBPROCESS harness** structurally mirroring

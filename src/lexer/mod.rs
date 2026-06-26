@@ -157,46 +157,178 @@ impl fmt::Display for LexError {
     }
 }
 
+/// The single source of truth for the language's keyword surface: every reserved word paired with
+/// the [`Token`] it lexes to. `keyword()` looks itself up here, and the editor tooling (the VSCode
+/// TextMate grammar generator and the LSP semantic-token lengths) derives the keyword set from this
+/// same table — so adding a keyword here flows through to highlighting with no second edit.
+pub const KEYWORDS: &[(&str, Token)] = &[
+    ("fn", Token::Fn),
+    ("return", Token::Return),
+    ("if", Token::If),
+    ("else", Token::Else),
+    ("for", Token::For),
+    ("while", Token::While),
+    ("in", Token::In),
+    ("break", Token::Break),
+    ("continue", Token::Continue),
+    ("struct", Token::Struct),
+    ("enum", Token::Enum),
+    ("protocol", Token::Protocol),
+    ("type", Token::Type),
+    ("newtype", Token::NewType),
+    ("match", Token::Match),
+    ("recover", Token::Recover),
+    ("defer", Token::Defer),
+    ("assert", Token::Assert),
+    ("test", Token::Test),
+    ("spawn", Token::Spawn),
+    ("parallel", Token::Parallel),
+    ("wait", Token::Wait),
+    ("yield", Token::Yield),
+    ("import", Token::Import),
+    ("extern", Token::Extern),
+    ("from", Token::From),
+    ("as", Token::As),
+    ("ref", Token::Ref),
+    ("and", Token::And),
+    ("or", Token::Or),
+    ("not", Token::Not),
+    ("true", Token::True),
+    ("false", Token::False),
+];
+
+/// Every operator + delimiter token variant, paired (implicitly, via [`Token::lexeme`]) with its
+/// one fixed spelling. Single-sources the operator set for the TextMate generator and the
+/// semantic-token operator class. Ordering is longest-first within each char family is NOT required
+/// here (callers that build regex alternations sort by length); this list only needs to be complete.
+///
+/// Consumed only by the editor-tooling layer (`src/editor`, reachable via `src/lib.rs`), so the
+/// `chezzi` binary's copy of the lexer never reads it — `allow(dead_code)` for that build.
+#[allow(dead_code)]
+pub const PUNCTUATION: &[Token] = &[
+    // operators
+    Token::Plus,
+    Token::Minus,
+    Token::Star,
+    Token::Slash,
+    Token::Percent,
+    Token::Assign,
+    Token::Walrus,
+    Token::EqEq,
+    Token::NotEq,
+    Token::Lt,
+    Token::LtEq,
+    Token::Gt,
+    Token::GtEq,
+    Token::PlusEq,
+    Token::MinusEq,
+    Token::StarEq,
+    Token::SlashEq,
+    Token::PercentEq,
+    Token::AmpEq,
+    Token::PipeEq,
+    Token::CaretEq,
+    Token::ShlEq,
+    Token::ShrEq,
+    Token::Arrow,
+    Token::Pipe,
+    Token::Question,
+    Token::QuestionDot,
+    Token::QuestionQuestion,
+    Token::Bang,
+    Token::Amp,
+    Token::Caret,
+    Token::BitOr,
+    Token::Shl,
+    Token::Shr,
+    // delimiters
+    Token::LParen,
+    Token::RParen,
+    Token::LBracket,
+    Token::RBracket,
+    Token::LBrace,
+    Token::RBrace,
+    Token::Comma,
+    Token::Colon,
+    Token::Dot,
+    Token::DotDot,
+];
+
+impl Token {
+    /// The fixed source spelling of a keyword / operator / delimiter token (e.g. `Token::Fn` →
+    /// `"fn"`, `Token::Walrus` → `":="`). `None` for tokens whose text varies (literals, idents) or
+    /// that have no spelling at all (layout: `Newline`/`Indent`/`Dedent`/`Eof`).
+    ///
+    /// This is the single source for both the TextMate operator alternation and the fixed-token
+    /// length used by the LSP semantic-token encoder.
+    ///
+    /// Used only by the editor-tooling layer (via `src/lib.rs`); the `chezzi` binary's lexer copy
+    /// never calls it, hence `allow(dead_code)` for that build.
+    #[allow(dead_code)]
+    pub fn lexeme(&self) -> Option<&'static str> {
+        if let Some((w, _)) = KEYWORDS.iter().find(|(_, t)| t == self) {
+            return Some(w);
+        }
+        use Token::*;
+        Some(match self {
+            // operators
+            Plus => "+",
+            Minus => "-",
+            Star => "*",
+            Slash => "/",
+            Percent => "%",
+            Assign => "=",
+            Walrus => ":=",
+            EqEq => "==",
+            NotEq => "!=",
+            Lt => "<",
+            LtEq => "<=",
+            Gt => ">",
+            GtEq => ">=",
+            PlusEq => "+=",
+            MinusEq => "-=",
+            StarEq => "*=",
+            SlashEq => "/=",
+            PercentEq => "%=",
+            AmpEq => "&=",
+            PipeEq => "|=",
+            CaretEq => "^=",
+            ShlEq => "<<=",
+            ShrEq => ">>=",
+            Arrow => "->",
+            Pipe => "|>",
+            Question => "?",
+            QuestionDot => "?.",
+            QuestionQuestion => "??",
+            Bang => "!",
+            Amp => "&",
+            Caret => "^",
+            BitOr => "|",
+            Shl => "<<",
+            Shr => ">>",
+            // delimiters
+            LParen => "(",
+            RParen => ")",
+            LBracket => "[",
+            RBracket => "]",
+            LBrace => "{",
+            RBrace => "}",
+            Comma => ",",
+            Colon => ":",
+            Dot => ".",
+            DotDot => "..",
+            _ => return None,
+        })
+    }
+}
+
 /// Look up whether an identifier is actually a keyword.
 /// HINT (sub-step 1e): call this after you've scanned a whole word.
 fn keyword(word: &str) -> Option<Token> {
-    let tok = match word {
-        "fn" => Token::Fn,
-        "return" => Token::Return,
-        "if" => Token::If,
-        "else" => Token::Else,
-        "for" => Token::For,
-        "while" => Token::While,
-        "in" => Token::In,
-        "break" => Token::Break,
-        "continue" => Token::Continue,
-        "struct" => Token::Struct,
-        "enum" => Token::Enum,
-        "protocol" => Token::Protocol,
-        "type" => Token::Type,
-        "newtype" => Token::NewType,
-        "match" => Token::Match,
-        "recover" => Token::Recover,
-        "defer" => Token::Defer,
-        "assert" => Token::Assert,
-        "test" => Token::Test,
-        "spawn" => Token::Spawn,
-        "parallel" => Token::Parallel,
-        "wait" => Token::Wait,
-        "yield" => Token::Yield,
-        "import" => Token::Import,
-        "extern" => Token::Extern,
-        "from" => Token::From,
-        "as" => Token::As,
-        "ref" => Token::Ref,
-        "and" => Token::And,
-        "or" => Token::Or,
-        "not" => Token::Not,
-        "true" => Token::True,
-        "false" => Token::False,
-        _ => return None,
-    };
-    Some(tok)
+    KEYWORDS
+        .iter()
+        .find(|(w, _)| *w == word)
+        .map(|(_, t)| t.clone())
 }
 
 /// The lexer. Holds the source as a list of chars plus a cursor.
@@ -2193,5 +2325,49 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn kw_table_is_single_source() {
+        // Every entry in the table must round-trip through keyword(); a non-keyword is None.
+        for (w, t) in KEYWORDS {
+            assert_eq!(keyword(w), Some(t.clone()), "keyword({w:?}) mismatch");
+        }
+        assert_eq!(keyword("notakw"), None);
+        // The table must cover the full keyword surface the lexer recognizes.
+        for w in [
+            "fn", "return", "if", "else", "for", "while", "in", "break", "continue", "struct",
+            "enum", "protocol", "type", "newtype", "match", "recover", "defer", "assert", "test",
+            "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "ref", "and",
+            "or", "not", "true", "false",
+        ] {
+            assert!(
+                KEYWORDS.iter().any(|(k, _)| *k == w),
+                "KEYWORDS missing {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_lexeme_covers_punctuation_and_keywords() {
+        assert_eq!(Token::Plus.lexeme(), Some("+"));
+        assert_eq!(Token::Walrus.lexeme(), Some(":="));
+        assert_eq!(Token::ShlEq.lexeme(), Some("<<="));
+        assert_eq!(Token::Fn.lexeme(), Some("fn"));
+        assert_eq!(Token::NewType.lexeme(), Some("newtype"));
+        // literals / idents / layout have no fixed spelling
+        assert_eq!(Token::Ident("x".into()).lexeme(), None);
+        assert_eq!(Token::Int(1).lexeme(), None);
+        assert_eq!(Token::Str("s".into()).lexeme(), None);
+        assert_eq!(Token::Newline.lexeme(), None);
+        assert_eq!(Token::Eof.lexeme(), None);
+        // every punctuation variant has a lexeme
+        for t in PUNCTUATION {
+            assert!(t.lexeme().is_some(), "{t:?} should have a lexeme");
+        }
+        // every keyword variant has a lexeme too
+        for (w, t) in KEYWORDS {
+            assert_eq!(t.lexeme(), Some(*w), "{t:?} lexeme mismatch");
+        }
     }
 }
