@@ -171,16 +171,21 @@ fn find_examples_dir() -> Option<std::path::PathBuf> {
 }
 
 fn read_chz(dir: &std::path::Path) -> Vec<Vec<u8>> {
-    let mut corpus = Vec::new();
+    // Sort paths by filename: `read_dir` order is filesystem-defined, so without this the
+    // seed->base-example mapping (and thus strategy-3 reproducibility + the gate's input set)
+    // would be machine-dependent.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("chz")
-                && let Ok(bytes) = std::fs::read(&p)
-            {
-                corpus.push(bytes);
+            if p.extension().and_then(|s| s.to_str()) == Some("chz") {
+                paths.push(p);
             }
         }
     }
-    corpus
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::read(&p).ok())
+        .collect()
 }

@@ -25,19 +25,23 @@ fn config() -> Config {
 
 /// Load the `examples/*.chz` corpus as raw bytes (for the structure-aware mutation generator).
 fn load_corpus() -> Vec<Vec<u8>> {
+    // Sort by filename so the seed->base-example mapping (and thus the gate's input set) is
+    // stable across machines — `read_dir` order is filesystem-defined.
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let mut corpus = Vec::new();
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("chz")
-                && let Ok(bytes) = std::fs::read(&p)
-            {
-                corpus.push(bytes);
+            if p.extension().and_then(|s| s.to_str()) == Some("chz") {
+                paths.push(p);
             }
         }
     }
-    corpus
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::read(&p).ok())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
