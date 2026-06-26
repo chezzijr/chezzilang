@@ -32,7 +32,14 @@ Claude implements directly. Ship working, tested code each session.
 
 ```sh
 cargo build --release    # compile (release; the VM is only fast optimized)
-cargo test               # run unit + parity (both engines) + guiding tests
+# Tests: the crate builds a lib (src/lib.rs, editor tooling) AND the bin (src/main.rs), both
+# declaring the same modules, so a plain `cargo test` compiles + RUNS every unit test TWICE
+# (lib copy + bin copy) + integration → slow. Split the work:
+cargo test --lib                 # INNER LOOP: lib unit tests + two-engine parity, ONE copy (~half the time)
+cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
+cargo test                       # FULL pre-commit suite (adds the bin copy, conformance, integration)
+cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
+# Local shortcut: `.cargo/config.toml` (git-excluded) aliases these as `cargo tfast` / `tfull` / `tlsp`.
 cargo test conformance   # execute docs/grammar.bnf, differential-test vs the parser
 cargo clippy -- -D warnings   # lint (must be clean before commit)
 cargo run -- help        # CLI usage
@@ -52,7 +59,8 @@ cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED —
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 
-cargo build --features lsp --bin chezzi-lsp                    # editor LSP server (off the default build; see editors/README.md)
+cargo install --path . --features lsp --bin chezzi-lsp        # editor LSP server → ~/.cargo/bin (neovim/lvim setup: editors/README.md)
+cargo build --features lsp --bin chezzi-lsp                    # …or build in place → target/debug/chezzi-lsp (off the default build)
 UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the VSCode TextMate grammar (single-sourced from the lexer)
 ```
 
