@@ -749,6 +749,48 @@ mod tests {
         assert_eq!(utf16_to_char_col("a\u{1f642}", 3), 2); // past end → char count
     }
 
+    #[test]
+    fn hover_free_fn_callee() {
+        // Hovering the CALLEE `inc` of a call `inc(3)` reports the function's signature.
+        let src = "fn inc(x: int) -> int:\n    return x + 1\ninc(3)\n";
+        let h = hov(src, 2, 0).expect("hover on free-fn callee");
+        assert_eq!(h.display, "fn(int) -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_struct_ctor_callee() {
+        // Hovering the ctor callee `Vec2` of `Vec2(1, 2)` reports a fn from fields to the struct.
+        let src = "struct Vec2:\n    x: int\n    y: int\nVec2(1, 2)\n";
+        let h = hov(src, 3, 0).expect("hover on struct-ctor callee");
+        assert_eq!(h.display, "fn(int, int) -> Vec2");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_generic_fn_callee() {
+        // A generic fn callee reports its DECLARED signature with the type parameters intact.
+        let src = "fn combine[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\ncombine(1, 2)\n";
+        let h = hov(src, 2, 0).expect("hover on generic-fn callee");
+        assert_eq!(h.display, "fn(T, T) -> T");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_builtin_callee_none() {
+        // A builtin callee (`print`) carries no recordable signature → hover stays None.
+        assert_eq!(hov("print(\"hi\")\n", 0, 0), None);
+    }
+
+    #[test]
+    fn hover_method_callee() {
+        // Hovering a method name in `c.foo(2)` reports the method's CALL signature (receiver stripped).
+        let src = "struct C:\n    n: int\n    fn foo(self, n: int) -> int:\n        return n\nc := C(1)\nc.foo(2)\n";
+        let h = hov(src, 5, 2).expect("hover on method callee");
+        assert_eq!(h.display, "fn(int) -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
     fn st(line: u32, start: u32, len: u32, ty: u32) -> SemTok {
         SemTok {
             line,

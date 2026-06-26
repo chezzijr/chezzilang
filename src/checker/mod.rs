@@ -5701,6 +5701,35 @@ impl Checker {
         }
     }
 
+    /// Build a DISPLAY-only `Ty::Func` for a by-name call callee (free fn or struct constructor), for
+    /// editor hover. `None` for builtins (`print`/`range`/`List`) and bare enum variants — they carry
+    /// no recordable signature, so hover stays `None`. Pure read of the fn/struct tables: emits no
+    /// error and changes no checking decision (it is only ever called under the hover probe). The
+    /// free-fn branch displays a generic fn's declared signature verbatim (`FnSig` params/ret stay
+    /// `Ty::Param(T)` → "fn(T, T) -> T"); the struct branch mirrors `name_is_generic`'s module-keyed
+    /// `bare_key` lookup and renders fields → `Struct` ("fn(int, int) -> Vec2").
+    fn callee_display_ty(&self, name: &str) -> Option<Ty> {
+        if let Some(sig) = self.functions.get(name) {
+            return Some(Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+            });
+        }
+        if let Some(info) = self.structs.get(&self.bare_key(name)) {
+            let params: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
+            let targs: Vec<Ty> = info
+                .type_params
+                .iter()
+                .map(|tp| Ty::Param(tp.name.clone()))
+                .collect();
+            return Some(Ty::Func {
+                params,
+                ret: Box::new(Ty::Struct(name.to_string(), targs)),
+            });
+        }
+        None
+    }
+
     /// `recover: <block>` yields `Result[T, Error]` where `T` is the type of the block's trailing
     /// expression (or `nil`). Non-final statements are checked for their effects.
     fn infer_recover(&mut self, block: &Block) -> Ty {
@@ -6798,7 +6827,12 @@ impl Checker {
             .map(|t| self.resolve_type(t, span))
             .collect();
         // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
-        if let ExprKind::Field { obj, name, .. } = &callee.kind {
+        if let ExprKind::Field {
+            obj,
+            name,
+            name_span,
+        } = &callee.kind
+        {
             // `module.Struct(args)` — qualified struct constructor. `module` is a bound module name
             // whose sig declares struct `name`. Inject nothing: resolve the constructor through the
             // sig's struct shape (mirrors `infer_named_call`'s struct path, with type args).
@@ -6939,7 +6973,7 @@ impl Checker {
                 }
                 return self.infer_static_call(&key, &tname, name, args, &resolved, &[], span);
             }
-            return self.infer_method_call(obj, name, args, &targs, span);
+            return self.infer_method_call(obj, name, *name_span, args, &targs, span);
         }
         // Combined member-side turbofish: `Type[T].member[U](args)` (and the bare `Type.member[U]`).
         // The trailing method `[U]` makes the callee an `Index` over the `Field`, so it does NOT hit
@@ -6996,10 +7030,22 @@ impl Checker {
         }
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
-            if self.lookup(name).is_none()
-                && let Some(ty) = self.infer_named_call(name, args, &targs, span, None)
-            {
-                return ty;
+            if self.lookup(name).is_none() {
+                // Editor hover (probe-gated no-op): record a DISPLAY function type at the callee
+                // token so hovering a CALL's callee yields its signature — the callee never reaches
+                // `infer()`/`hover_record_expr`, so without this it returns None. We build the display
+                // `Ty::Func` WITHOUT emitting any error and never touch normal checking results.
+                // A free fn → its declared `FnSig` (a generic fn's params/ret stay `Ty::Param(T)`, so
+                // it Displays "fn(T, T) -> T"); a struct ctor → fields-to-`Struct` ; builtins
+                // (print/range/List) + bare enum variants record nothing → hover stays None.
+                if self.hover_probe.is_some()
+                    && let Some(fty) = self.callee_display_ty(name)
+                {
+                    self.hover_record_at(callee.span, &fty, HoverKind::Func);
+                }
+                if let Some(ty) = self.infer_named_call(name, args, &targs, span, None) {
+                    return ty;
+                }
             }
         }
         // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
@@ -7963,6 +8009,9 @@ impl Checker {
         &mut self,
         obj: &Expr,
         method: &str,
+        // Source span of the method-NAME token (the `Field` callee's `name_span`), used ONLY to
+        // anchor the editor hover record at the method name; never affects checking.
+        name_span: Span,
         args: &[Expr],
         type_args: &[Ty],
         span: Span,
@@ -8118,6 +8167,16 @@ impl Checker {
                     // static flag, e.g. a protocol-derived sig.)
                     match params.split_first() {
                         Some((_receiver, expected)) => {
+                            // Editor hover (probe-gated no-op): record the method's CALL signature
+                            // (receiver stripped → "fn(int) -> int") at the method-name token, so
+                            // hovering `c.foo(2)`'s `foo` yields the signature. Pure side effect.
+                            if self.hover_probe.is_some() {
+                                let fty = Ty::Func {
+                                    params: expected.to_vec(),
+                                    ret: Box::new(ret.clone()),
+                                };
+                                self.hover_record_at(name_span, &fty, HoverKind::Func);
+                            }
                             self.check_args_w(method, expected, args, span)
                         }
                         None => {
