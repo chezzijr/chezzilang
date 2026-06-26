@@ -76,6 +76,17 @@ impl Emitter {
                 self.expr(value);
                 self.out.push('\n');
             }
+            Stmt::Unpack { names, init } => {
+                for (i, n) in names.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.out.push_str(n);
+                }
+                self.out.push_str(" := ");
+                self.expr(init);
+                self.out.push('\n');
+            }
             Stmt::If { cond, then, els } => {
                 self.out.push_str("if ");
                 self.expr(cond);
@@ -207,12 +218,91 @@ impl Emitter {
                 self.expr(idx);
                 self.out.push_str("])");
             }
+            Expr::Slice {
+                base,
+                start,
+                end,
+                step,
+                ..
+            } => self.slice(base, start, end, step),
+            Expr::Method {
+                recv, method, args, ..
+            } => {
+                self.out.push('(');
+                self.expr(recv);
+                self.out.push(')');
+                self.out.push('.');
+                self.out.push_str(chezzi_method_name(*method));
+                self.out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.expr(a);
+                }
+                self.out.push(')');
+            }
+            Expr::TupleLit(items) => {
+                self.out.push('(');
+                for (i, it) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.expr(it);
+                }
+                self.out.push(')');
+            }
+            Expr::TupleField { base, idx, .. } => {
+                self.out.push('(');
+                self.expr(base);
+                self.out.push_str(").");
+                self.out.push_str(&idx.to_string());
+            }
             Expr::Len(base) => {
                 self.out.push('(');
                 self.expr(base);
                 self.out.push_str(").len()");
             }
         }
+    }
+
+    /// `(base)[start:end:step]` — each bound emitted only if present; the step `:` is emitted
+    /// only when a step is present. Identical text to the Python emitter.
+    fn slice(
+        &mut self,
+        base: &Expr,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        step: &Option<Box<Expr>>,
+    ) {
+        self.out.push('(');
+        self.expr(base);
+        self.out.push('[');
+        if let Some(s) = start {
+            self.expr(s);
+        }
+        self.out.push(':');
+        if let Some(e) = end {
+            self.expr(e);
+        }
+        if let Some(st) = step {
+            self.out.push(':');
+            self.expr(st);
+        }
+        self.out.push_str("])");
+    }
+}
+
+fn chezzi_method_name(m: Method) -> &'static str {
+    match m {
+        Method::Upper => "upper",
+        Method::Lower => "lower",
+        Method::Replace => "replace",
+        Method::Split => "split",
+        Method::Join => "join",
+        Method::StartsWith => "starts_with",
+        Method::EndsWith => "ends_with",
+        Method::Contains => "contains",
     }
 }
 
@@ -224,6 +314,10 @@ fn ty_str(t: &Ty) -> String {
         Ty::Float => "float".into(),
         Ty::List(e) => format!("List[{}]", ty_str(e)),
         Ty::Map(k, v) => format!("Map[{}, {}]", ty_str(k), ty_str(v)),
+        Ty::Tuple(elems) => {
+            let inner: Vec<String> = elems.iter().map(ty_str).collect();
+            format!("({})", inner.join(", "))
+        }
     }
 }
 
@@ -242,6 +336,7 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::Ne => "!=",
         BinOp::And => "and",
         BinOp::Or => "or",
+        BinOp::In => "in",
     }
 }
 

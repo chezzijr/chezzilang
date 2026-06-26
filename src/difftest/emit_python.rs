@@ -27,6 +27,7 @@ def _chz_str(v):
         if v == float("-inf"): return "-inf"
         return ("%.1f" % v) if v.is_integer() else repr(v)
     if isinstance(v, str): return v
+    if isinstance(v, tuple): return "(" + ", ".join(_chz_repr(x) for x in v) + ")"
     if isinstance(v, list): return "[" + ", ".join(_chz_repr(x) for x in v) + "]"
     if isinstance(v, dict): return "{" + ", ".join(_chz_repr(k) + ": " + _chz_repr(x) for k, x in v.items()) + "}"
     return str(v)
@@ -89,6 +90,17 @@ impl Emitter {
         match s {
             Stmt::Let { name, init, .. } => {
                 self.out.push_str(name);
+                self.out.push_str(" = ");
+                self.expr(init);
+                self.out.push('\n');
+            }
+            Stmt::Unpack { names, init } => {
+                for (i, n) in names.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.out.push_str(n);
+                }
                 self.out.push_str(" = ");
                 self.expr(init);
                 self.out.push('\n');
@@ -222,12 +234,101 @@ impl Emitter {
                 self.expr(idx);
                 self.out.push_str("])");
             }
+            Expr::Slice {
+                base,
+                start,
+                end,
+                step,
+                ..
+            } => self.slice(base, start, end, step),
+            Expr::Method {
+                recv, method, args, ..
+            } => self.method(recv, *method, args),
+            Expr::TupleLit(items) => {
+                self.out.push('(');
+                for (i, it) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.expr(it);
+                }
+                self.out.push(')');
+            }
+            Expr::TupleField { base, idx, .. } => {
+                self.out.push('(');
+                self.expr(base);
+                self.out.push('[');
+                self.out.push_str(&idx.to_string());
+                self.out.push_str("])");
+            }
             Expr::Len(base) => {
                 self.out.push_str("len(");
                 self.expr(base);
                 self.out.push(')');
             }
         }
+    }
+
+    /// `(base)[start:end:step]` — byte-identical text to the Chezzi emitter.
+    fn slice(
+        &mut self,
+        base: &Expr,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        step: &Option<Box<Expr>>,
+    ) {
+        self.out.push('(');
+        self.expr(base);
+        self.out.push('[');
+        if let Some(s) = start {
+            self.expr(s);
+        }
+        self.out.push(':');
+        if let Some(e) = end {
+            self.expr(e);
+        }
+        if let Some(st) = step {
+            self.out.push(':');
+            self.expr(st);
+        }
+        self.out.push_str("])");
+    }
+
+    /// String methods. Names map to the Python spelling (`startswith`/`endswith`); `Contains`
+    /// has no Python `str` method, so it renders as `(sub in recv)` — semantically identical.
+    fn method(&mut self, recv: &Expr, method: Method, args: &[Expr]) {
+        if method == Method::Contains {
+            // Chezzi `(recv).contains(sub)` == Python `(sub in recv)`.
+            self.out.push('(');
+            self.expr(&args[0]);
+            self.out.push_str(" in ");
+            self.expr(recv);
+            self.out.push(')');
+            return;
+        }
+        let name = match method {
+            Method::Upper => "upper",
+            Method::Lower => "lower",
+            Method::Replace => "replace",
+            Method::Split => "split",
+            Method::Join => "join",
+            Method::StartsWith => "startswith",
+            Method::EndsWith => "endswith",
+            Method::Contains => unreachable!(),
+        };
+        self.out.push('(');
+        self.expr(recv);
+        self.out.push(')');
+        self.out.push('.');
+        self.out.push_str(name);
+        self.out.push('(');
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            self.expr(a);
+        }
+        self.out.push(')');
     }
 
     /// Integer `/` and `%` route through the shim (Chezzi semantics); everything else is the
@@ -262,6 +363,7 @@ impl Emitter {
             BinOp::Ne => "!=",
             BinOp::And => "and",
             BinOp::Or => "or",
+            BinOp::In => "in",
         });
         self.out.push(' ');
         self.expr(r);

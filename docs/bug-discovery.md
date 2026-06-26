@@ -106,9 +106,33 @@ written.
 ## Differential oracle (`src/difftest/`)
 
 Lever #2, built. A seeded generator emits a *cross-language safe subset* (literals, bounded-int
-arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive functions, list/map/index/len). One
-abstract IR (`ast.rs`) is rendered by two backends — `emit_chezzi` (native ops/`print`) and
-`emit_python` — and the two are run and their stdout diffed (`run.rs`).
+arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive functions, list/map/index/len, plus the
+widened families below). One abstract IR (`ast.rs`) is rendered by two backends — `emit_chezzi`
+(native ops/`print`) and `emit_python` — and the two are run and their stdout diffed (`run.rs`).
+
+**Widened construct coverage** (granular `Features` flags, all on in `full()`):
+- **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
+  `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language
+  (`starts_with`→`startswith`, `ends_with`→`endswith`); `contains` has no Python `str` method so it
+  renders as `sub in recv`. Two by-design diffs are dodged by generator restriction (no shim): a
+  `replace` `old` and a `split` `sep` are always **non-empty** literals (empty `old` is unchanged in
+  Chezzi but insert-everywhere in Python; empty `sep` per-char-splits in Chezzi but `ValueError`s in
+  Python).
+- **Slicing + negative indexing** (`slicing`): Python-style `xs[a:b:c]` on lists/strings and negative
+  scalar index `xs[-k]`. Both engines clamp out-of-range bounds identically and step `0` errors on
+  both, so no shim — the generator just never emits step `0` and keeps negative scalar indices in
+  `[-len, -1]`. Slice results carry `len: None`, so they are never scalar-indexed (no OOB seam).
+- **Membership** (`membership`): `x in xs` (list element), `k in m` (map key), `sub in s` (substring) —
+  native `in` on both sides, always `bool`.
+- **Tuples** (`tuples`): literals `(a, b)`, positional fields (`(t).N` Chezzi / `(t)[N]` Python), and
+  destructuring (`a, b := t` / `a, b = t`). The **single** new shim arm is the tuple stringify in
+  `_chz_str` (`(1, two, true)` spelling, raw nested strings); single-element `(1,)` and empty `()`
+  diverge from Chezzi's spelling, so the generator only emits arity ≥ 2.
+
+The i64-no-overflow guarantee is preserved across these: the only new path where an int value crosses a
+seam is a tuple-field read, which inherits the element's tracked `tuple_bounds` and is never emitted
+inside an in-loop accumulator RHS; method (`str`/`bool`/`List[str]`), `in` (`bool`), and slice
+(collection/`str`) results carry no int value, so they add no seam.
 
 **Why it isn't a tautology.** The Python backend prepends a fixed *shim* that implements Chezzi's
 **specification** (`_chz_str` for `true`/`false`/`nil` + raw nested strings + Chezzi float format;

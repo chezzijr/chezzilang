@@ -32,6 +32,10 @@ pub struct Features {
     pub collections: bool,
     pub functions: bool,
     pub floats: bool,
+    pub string_methods: bool, // upper/lower/replace/split/join/starts_with/ends_with/contains
+    pub slicing: bool,        // xs[a:b:c] on lists/strings + negative scalar indexing
+    pub membership: bool,     // `in` (list elem / map key / substring)
+    pub tuples: bool,         // tuple literals, fields, destructuring
 }
 
 impl Features {
@@ -44,6 +48,10 @@ impl Features {
             collections: true,
             functions: true,
             floats: false,
+            string_methods: true,
+            slicing: true,
+            membership: true,
+            tuples: true,
         }
     }
     pub fn straight_line() -> Self {
@@ -54,6 +62,10 @@ impl Features {
             collections: false,
             functions: false,
             floats: false,
+            string_methods: false,
+            slicing: false,
+            membership: false,
+            tuples: false,
         }
     }
 }
@@ -61,10 +73,11 @@ impl Features {
 struct VarInfo {
     name: String,
     ty: Ty,
-    bound: i128,        // conservative |value| bound (Int only)
-    len: Option<usize>, // known length (List/Map literals)
-    keys: Vec<Expr>,    // known keys for Map indexing
-    reserved: bool,     // loop counter — body must not reassign
+    bound: i128,             // conservative |value| bound (Int only)
+    len: Option<usize>,      // known length (List/Map literals)
+    keys: Vec<Expr>,         // known keys for Map indexing
+    reserved: bool,          // loop counter — body must not reassign
+    tuple_bounds: Vec<i128>, // per-element |value| bound for Tuple vars (Int elems; 0 otherwise)
 }
 
 struct FuncSig {
@@ -180,6 +193,7 @@ impl Gen {
                 len: None,
                 keys: Vec::new(),
                 reserved: false,
+                tuple_bounds: Vec::new(),
             });
         }
         // small body of straight-line lets (functions stay simple & non-recursive)
@@ -219,6 +233,7 @@ impl Gen {
             len: None,
             keys: Vec::new(),
             reserved: false,
+            tuple_bounds: Vec::new(),
         });
         Some(Stmt::Let { name, ty, init })
     }
@@ -249,8 +264,15 @@ impl Gen {
     }
 
     fn gen_let(&mut self) -> Option<Stmt> {
+        // Occasionally destructure an in-scope tuple instead of a fresh binding.
+        if self.feat.tuples
+            && self.rng.chance(0.3)
+            && let Some(s) = self.gen_unpack()
+        {
+            return Some(s);
+        }
         let ty = self.rand_ty();
-        let (init, bound, len, keys) = self.gen_init(&ty);
+        let (init, bound, len, keys, tuple_bounds) = self.gen_init(&ty);
         let name = self.fresh_var();
         self.scope.push(VarInfo {
             name: name.clone(),
@@ -259,8 +281,58 @@ impl Gen {
             len,
             keys,
             reserved: false,
+            tuple_bounds,
         });
         Some(Stmt::Let { name, ty, init })
+    }
+
+    /// `a, b := t` — destructure an in-scope tuple var into fresh per-element vars, inheriting
+    /// each element's static type and (for Int) its `tuple_bounds[i]`.
+    fn gen_unpack(&mut self) -> Option<Stmt> {
+        let cands: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(&v.ty, Ty::Tuple(_)))
+            .map(|(i, _)| i)
+            .collect();
+        if cands.is_empty() {
+            return None;
+        }
+        let i = *self.rng.choice(&cands);
+        let elems = match &self.scope[i].ty {
+            Ty::Tuple(es) => es.clone(),
+            _ => unreachable!(),
+        };
+        let bounds = self.scope[i].tuple_bounds.clone();
+        let tname = self.scope[i].name.clone();
+        let mut names = Vec::new();
+        let mut pushes = Vec::new();
+        for (j, ety) in elems.iter().enumerate() {
+            let n = self.fresh_var();
+            names.push(n.clone());
+            let bound = if *ety == Ty::Int {
+                bounds.get(j).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            pushes.push(VarInfo {
+                name: n,
+                ty: ety.clone(),
+                bound,
+                len: None,
+                keys: Vec::new(),
+                reserved: false,
+                tuple_bounds: Vec::new(),
+            });
+        }
+        for p in pushes {
+            self.scope.push(p);
+        }
+        Some(Stmt::Unpack {
+            names,
+            init: Expr::Var(tname),
+        })
     }
 
     fn gen_print_or_assign(&mut self) -> Option<Stmt> {
@@ -364,6 +436,7 @@ impl Gen {
             len: None,
             keys: Vec::new(),
             reserved: true, // loop var: don't reassign
+            tuple_bounds: Vec::new(),
         });
         let prev_mult = self.loop_mult;
         self.loop_mult = self.loop_mult.saturating_mul((span.max(1)) as i128);
@@ -392,6 +465,7 @@ impl Gen {
             len: None,
             keys: Vec::new(),
             reserved: true,
+            tuple_bounds: Vec::new(),
         });
         let cond = Expr::Bin {
             op: BinOp::Lt,
@@ -448,9 +522,27 @@ impl Gen {
 
     // ---- initializers & expressions ------------------------------------------
 
-    fn gen_init(&mut self, ty: &Ty) -> (Expr, i128, Option<usize>, Vec<Expr>) {
+    /// Returns (init, int-bound, known-len, map-keys, tuple-element-bounds). The last is only
+    /// non-empty for `Ty::Tuple`.
+    fn gen_init(&mut self, ty: &Ty) -> (Expr, i128, Option<usize>, Vec<Expr>, Vec<i128>) {
         match ty {
             Ty::List(elem) => {
+                // Sometimes derive the list from a slice or a `split` (len then unknown). Both
+                // engines clamp slices, and a `split` result length is data-dependent, so the
+                // result carries `len: None` — try_index never scalar-indexes it (no OOB seam).
+                if self.feat.slicing
+                    && self.rng.chance(0.3)
+                    && let Some(e) = self.try_slice(ty)
+                {
+                    return (e, 0, None, Vec::new(), Vec::new());
+                }
+                if self.feat.string_methods
+                    && **elem == Ty::Str
+                    && self.rng.chance(0.3)
+                    && let Some(e) = self.try_split()
+                {
+                    return (e, 0, None, Vec::new(), Vec::new());
+                }
                 let n = 1 + self.rng.below(3) as usize; // 1..3 (empty `[]` defeats `:=` inference)
                 let mut items = Vec::new();
                 for _ in 0..n {
@@ -464,6 +556,7 @@ impl Gen {
                     },
                     0,
                     Some(n),
+                    Vec::new(),
                     Vec::new(),
                 )
             }
@@ -491,11 +584,22 @@ impl Gen {
                     0,
                     Some(n),
                     keys,
+                    Vec::new(),
                 )
+            }
+            Ty::Tuple(elems) => {
+                let mut items = Vec::new();
+                let mut bounds = Vec::new();
+                for ety in elems {
+                    let (e, b) = self.gen_expr(ety, MAX_EXPR_DEPTH); // scalar leaves only
+                    bounds.push(if *ety == Ty::Int { b } else { 0 });
+                    items.push(e);
+                }
+                (Expr::TupleLit(items), 0, None, Vec::new(), bounds)
             }
             _ => {
                 let (e, b) = self.gen_expr(ty, 1);
-                (e, b, None, Vec::new())
+                (e, b, None, Vec::new(), Vec::new())
             }
         }
     }
@@ -508,11 +612,11 @@ impl Gen {
             Ty::Bool => (self.gen_bool(depth), 0),
             Ty::Str => (self.gen_str(depth), 0),
             Ty::Float => (self.gen_float(depth), 0),
-            Ty::List(_) | Ty::Map(_, _) => {
+            Ty::List(_) | Ty::Map(_, _) | Ty::Tuple(_) => {
                 // only reference an existing collection var of this exact type
                 let vs = self.vars_of(ty);
                 if vs.is_empty() {
-                    let (e, _, _, _) = self.gen_init(ty);
+                    let (e, _, _, _, _) = self.gen_init(ty);
                     (e, 0)
                 } else {
                     let i = *self.rng.choice(&vs);
@@ -567,6 +671,15 @@ impl Gen {
         if self.feat.collections
             && self.rng.chance(0.15)
             && let Some((e, b)) = self.try_index(&Ty::Int)
+        {
+            return (e, b);
+        }
+        // Tuple-field int read — never inside an in-loop accumulator RHS (a tuple var is not a
+        // loop-stable reserved counter; reading it there could compound across iterations).
+        if self.feat.tuples
+            && !self.in_loop_rhs
+            && self.rng.chance(0.15)
+            && let Some((e, b)) = self.try_tuple_field()
         {
             return (e, b);
         }
@@ -660,6 +773,18 @@ impl Gen {
             return Expr::BoolLit(self.rng.chance(0.5));
         }
         // composite bool
+        if self.feat.membership
+            && self.rng.chance(0.3)
+            && let Some(e) = self.try_membership()
+        {
+            return e;
+        }
+        if self.feat.string_methods
+            && self.rng.chance(0.3)
+            && let Some(e) = self.try_bool_method()
+        {
+            return e;
+        }
         if self.rng.chance(0.3) {
             let e = self.gen_bool(depth + 1);
             return Expr::Unary {
@@ -692,6 +817,19 @@ impl Gen {
                 return Expr::Var(self.scope[i].name.clone());
             }
             return Expr::StrLit(self.rand_str());
+        }
+        // string method (upper/lower/replace/join) or slice of a str
+        if self.feat.string_methods
+            && self.rng.chance(0.35)
+            && let Some(e) = self.try_str_method()
+        {
+            return e;
+        }
+        if self.feat.slicing
+            && self.rng.chance(0.35)
+            && let Some(e) = self.try_slice(&Ty::Str)
+        {
+            return e;
         }
         // concat
         let l = self.gen_str(depth + 1);
@@ -770,12 +908,256 @@ impl Gen {
         }
         let i = *self.rng.choice(&list_cands);
         let len = self.scope[i].len.unwrap();
-        let idx = self.rng.below(len as u64) as i64;
+        let pos = self.rng.below(len as u64) as i64; // in [0, len-1]
+        // With slicing on, also exercise negative indexing xs[-k], k in [1, len] — both engines
+        // are Python-style; staying in [-len, -1] keeps it in range (no OOB fault on either).
+        let idx = if self.feat.slicing && self.rng.chance(0.4) {
+            pos - len as i64 // maps [0, len-1] -> [-len, -1]
+        } else {
+            pos
+        };
         Some((
             Expr::Index {
                 ret: want.clone(),
                 base: Box::new(Expr::Var(self.scope[i].name.clone())),
                 idx: Box::new(Expr::IntLit(idx)),
+            },
+            bound,
+        ))
+    }
+
+    /// A guaranteed-non-empty single-char string literal. Used for `replace`'s `old` and
+    /// `split`'s `sep`, where an empty argument diverges (Chezzi unchanged / per-char split vs
+    /// Python insert-everywhere / `ValueError`).
+    fn non_empty_str_lit(&mut self) -> Expr {
+        const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789 .,-_";
+        let c = SAFE[self.rng.pick(SAFE.len())] as char;
+        Expr::StrLit(c.to_string())
+    }
+
+    /// A leaf string expression — an in-scope str var if any, else a literal.
+    fn leaf_str(&mut self) -> Expr {
+        let str_vars = self.vars_of(&Ty::Str);
+        if !str_vars.is_empty() && self.rng.chance(0.5) {
+            let i = *self.rng.choice(&str_vars);
+            Expr::Var(self.scope[i].name.clone())
+        } else {
+            Expr::StrLit(self.rand_str())
+        }
+    }
+
+    /// One optional slice bound: `None` (open) or a small literal incl. negatives. Slices clamp
+    /// on both engines, so the literal need not be in range.
+    fn slice_bound(&mut self) -> Option<Box<Expr>> {
+        if self.rng.chance(0.4) {
+            None
+        } else {
+            Some(Box::new(Expr::IntLit(self.rng.range_i64(-6, 6))))
+        }
+    }
+
+    /// `(base)[start:end:step]` over a List[want] / Str var. Result carries no tracked length.
+    fn try_slice(&mut self, want: &Ty) -> Option<Expr> {
+        let vs = self.vars_of(want);
+        if vs.is_empty() {
+            return None;
+        }
+        let i = *self.rng.choice(&vs);
+        let base = Box::new(Expr::Var(self.scope[i].name.clone()));
+        let start = self.slice_bound();
+        let end = self.slice_bound();
+        // step never 0 (errors on both); None | ±1 | ±2.
+        let step = match self.rng.below(5) {
+            0 => None,
+            1 => Some(Box::new(Expr::IntLit(1))),
+            2 => Some(Box::new(Expr::IntLit(2))),
+            3 => Some(Box::new(Expr::IntLit(-1))),
+            _ => Some(Box::new(Expr::IntLit(-2))),
+        };
+        Some(Expr::Slice {
+            ret: want.clone(),
+            base,
+            start,
+            end,
+            step,
+        })
+    }
+
+    /// `(s).split(sep)` with a guaranteed-non-empty `sep` → List[str].
+    fn try_split(&mut self) -> Option<Expr> {
+        let recv = self.leaf_str();
+        let sep = self.non_empty_str_lit();
+        Some(Expr::Method {
+            recv: Box::new(recv),
+            method: Method::Split,
+            args: vec![sep],
+            ret: Ty::List(Box::new(Ty::Str)),
+        })
+    }
+
+    /// A str-returning string method: upper/lower/replace/join.
+    fn try_str_method(&mut self) -> Option<Expr> {
+        let method =
+            *self
+                .rng
+                .choice(&[Method::Upper, Method::Lower, Method::Replace, Method::Join]);
+        let (recv, args) = match method {
+            Method::Upper | Method::Lower => (self.leaf_str(), vec![]),
+            Method::Replace => {
+                // `old` must be non-empty; `new` is unrestricted.
+                let old = self.non_empty_str_lit();
+                let new = Expr::StrLit(self.rand_str());
+                (self.leaf_str(), vec![old, new])
+            }
+            Method::Join => {
+                // receiver is the separator; arg is a List[str].
+                let list_ty = Ty::List(Box::new(Ty::Str));
+                let lvs = self.vars_of(&list_ty);
+                let arg = if !lvs.is_empty() && self.rng.chance(0.7) {
+                    let i = *self.rng.choice(&lvs);
+                    Expr::Var(self.scope[i].name.clone())
+                } else {
+                    let n = 1 + self.rng.below(3) as usize;
+                    let items = (0..n).map(|_| Expr::StrLit(self.rand_str())).collect();
+                    Expr::ListLit {
+                        elem: Ty::Str,
+                        items,
+                    }
+                };
+                (self.leaf_str(), vec![arg])
+            }
+            _ => unreachable!(),
+        };
+        Some(Expr::Method {
+            recv: Box::new(recv),
+            method,
+            args,
+            ret: Ty::Str,
+        })
+    }
+
+    /// A bool-returning string method: starts_with/ends_with/contains (empty arg aligns).
+    fn try_bool_method(&mut self) -> Option<Expr> {
+        let method = *self
+            .rng
+            .choice(&[Method::StartsWith, Method::EndsWith, Method::Contains]);
+        let recv = self.leaf_str();
+        let arg = Expr::StrLit(self.rand_str());
+        Some(Expr::Method {
+            recv: Box::new(recv),
+            method,
+            args: vec![arg],
+            ret: Ty::Bool,
+        })
+    }
+
+    /// `x in container`: list element, map key, or substring. Always returns bool — no int seam.
+    fn try_membership(&mut self) -> Option<Expr> {
+        // kinds: 0 = list, 1 = map, 2 = substring
+        let mut kinds: Vec<u8> = Vec::new();
+        let list_cands: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(&v.ty, Ty::List(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let map_cands: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(&v.ty, Ty::Map(_, _)))
+            .map(|(i, _)| i)
+            .collect();
+        let str_cands = self.vars_of(&Ty::Str);
+        if !list_cands.is_empty() {
+            kinds.push(0);
+        }
+        if !map_cands.is_empty() {
+            kinds.push(1);
+        }
+        if !str_cands.is_empty() {
+            kinds.push(2);
+        }
+        if kinds.is_empty() {
+            return None;
+        }
+        match *self.rng.choice(&kinds) {
+            0 => {
+                let i = *self.rng.choice(&list_cands);
+                let elem = match &self.scope[i].ty {
+                    Ty::List(e) => (**e).clone(),
+                    _ => unreachable!(),
+                };
+                let name = self.scope[i].name.clone();
+                let (lhs, _) = self.gen_expr(&elem, MAX_EXPR_DEPTH); // leaf elem value
+                Some(Expr::Bin {
+                    op: BinOp::In,
+                    ty: Ty::Bool,
+                    l: Box::new(lhs),
+                    r: Box::new(Expr::Var(name)),
+                })
+            }
+            1 => {
+                let i = *self.rng.choice(&map_cands);
+                let kty = match &self.scope[i].ty {
+                    Ty::Map(k, _) => (**k).clone(),
+                    _ => unreachable!(),
+                };
+                let name = self.scope[i].name.clone();
+                let (lhs, _) = self.gen_expr(&kty, MAX_EXPR_DEPTH); // leaf key value
+                Some(Expr::Bin {
+                    op: BinOp::In,
+                    ty: Ty::Bool,
+                    l: Box::new(lhs),
+                    r: Box::new(Expr::Var(name)),
+                })
+            }
+            _ => {
+                let i = *self.rng.choice(&str_cands);
+                let name = self.scope[i].name.clone();
+                let sub = Expr::StrLit(self.rand_str()); // may be empty — aligns (true)
+                Some(Expr::Bin {
+                    op: BinOp::In,
+                    ty: Ty::Bool,
+                    l: Box::new(sub),
+                    r: Box::new(Expr::Var(name)),
+                })
+            }
+        }
+    }
+
+    /// `(t).N` reading an Int element of an in-scope tuple var. Returns the element's tracked
+    /// bound. NEVER emitted inside an in-loop accumulator RHS (would be a non-loop-stable read).
+    fn try_tuple_field(&mut self) -> Option<(Expr, i128)> {
+        let cands: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(&v.ty, Ty::Tuple(es) if es.contains(&Ty::Int)))
+            .map(|(i, _)| i)
+            .collect();
+        if cands.is_empty() {
+            return None;
+        }
+        let i = *self.rng.choice(&cands);
+        let int_positions: Vec<usize> = match &self.scope[i].ty {
+            Ty::Tuple(es) => es
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| **e == Ty::Int)
+                .map(|(j, _)| j)
+                .collect(),
+            _ => unreachable!(),
+        };
+        let pos = *self.rng.choice(&int_positions);
+        let bound = self.scope[i].tuple_bounds.get(pos).copied().unwrap_or(0);
+        let name = self.scope[i].name.clone();
+        Some((
+            Expr::TupleField {
+                ret: Ty::Int,
+                base: Box::new(Expr::Var(name)),
+                idx: pos,
             },
             bound,
         ))
@@ -831,6 +1213,12 @@ impl Gen {
     }
 
     fn rand_ty(&mut self) -> Ty {
+        // Tuple arity >= 2 (single-element `(1,)` and empty `()` diverge from Chezzi spelling).
+        if self.feat.tuples && self.rng.chance(0.18) {
+            let arity = 2 + self.rng.below(2) as usize; // 2..3
+            let elems = (0..arity).map(|_| self.rand_scalar_ty()).collect();
+            return Ty::Tuple(elems);
+        }
         if self.feat.collections && self.rng.chance(0.25) {
             let elem = self.rand_scalar_ty();
             if self.rng.chance(0.5) {

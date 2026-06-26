@@ -23,9 +23,24 @@ divisors, in-range indices, and provable i64-bound tracking so generated program
 Chezzi fault ⇒ real bug). Wired as `tests/difftest.rs` (P0 formatting probes + bench-pair smoke +
 non-tautology guard + fixed-seed fuzz) and `src/bin/difffuzz` (unattended; `--seed N` reproduces).
 3000-seed release sweep clean; manually confirmed it flags the i64-overflow class (the June-2026
-`sum()` blind spot). `cargo test --test difftest` green (10), clippy clean. Usage + design:
+`sum()` blind spot). `cargo test --test difftest` green, clippy clean. Usage + design:
 [`docs/bug-discovery.md` "Differential oracle"]. Next: cargo-fuzz parser (lever #1), then P5 (IR
 shrinker + corpus dump + opt-in overflow-metamorphic mode).
+
+**✅ Oracle coverage widened (2026-06-26).** The differential oracle's IR + both emitters + generator
+now cover four more construct families (granular `Features` flags `string_methods`/`slicing`/
+`membership`/`tuples`, all on in `full()`): (a) the eight ASCII-identical string methods
+`upper`/`lower`/`replace`/`split`/`join`/`starts_with`/`ends_with`/`contains` (`contains` renders as
+Python `sub in recv`); (b) Python-style slicing `xs[a:b:c]` and negative scalar indexing on lists/
+strings (both engines clamp identically — no shim); (c) `in` membership (list elem / map key /
+substring); (d) tuples — literals, `.N` fields, and `a, b := t` destructuring. Only one new shim arm
+(tuple stringify in `_chz_str`, kept honest by `oracle_detects_tuple_render_divergence`); every other
+by-design diff is absorbed by a generator restriction, **no new allowlist entry**: `replace` `old` /
+`split` `sep` forced non-empty, slice step never 0, negative index kept in `[-len,-1]`, tuple arity ≥ 2.
+i64-no-overflow invariant preserved — the one new int seam (tuple-field read) inherits per-element
+`tuple_bounds` and is skipped inside in-loop accumulators; method/`in`/slice results carry no int value
+and `split`/slice results carry `len: None` so they're never scalar-indexed. New P0 probes + per-construct
+coverage + fuzz sweeps; `./target/release/difffuzz --seeds 0..5000` clean (0 findings).
 
 **✅ global-namespace cleanup — task 5/5 (FINAL): `list`/`map`/`set`→`List`/`Map`/`Set` HARD rename
 (2026-06-25).** The three builtin container TYPE **and** constructor names are now PascalCase
