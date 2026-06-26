@@ -11,6 +11,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Bug-discovery lever #1 — front-end panic-fuzzer (2026-06-26).** `src/panicfuzz/` feeds
+adversarial / malformed inputs to `chezzi check` (the full front-end: lexer + parser + checker) and
+flags any crash. A **stable, dependency-free SUBPROCESS harness** structurally mirroring
+`src/difftest/` (own `xoshiro256**` RNG copy; same reader-thread + `try_wait` + kill-on-timeout
+machinery) — *not* `cargo-fuzz` (no nightly / rustup / cargo-fuzz here) and *not* in-process
+`catch_unwind` (the crate is binary-only — no `[lib]` — and shelling out catches more crash classes
+incl. **stack overflow**, the most likely deep-parser crash). Invariant: malformed input ⇒ a clean
+diagnostic, never a Rust panic (`panicked at` on stderr) or a signal kill (exit code `None` =
+SIGSEGV/SIGABRT/stack-overflow); a wall-clock timeout is **not** a finding. Three bounded (≤2 KB),
+deterministic generators (`generate.rs`): random UTF-8-ish bytes; a token-alphabet sampler (Chezzi
+keyword/punct/op spellings + idents/numbers/indent); raw-byte mutation of the `examples/*.chz` corpus.
+A finding reports the seed + raw triggering input, reproducible via `panicfuzz --seed N` (the input is
+the artifact — no shrink pass in v1). Wired as `tests/panicfuzz.rs` (classify/clean/determinism unit
+guards + fuzz seeds `0..2000`) and `src/bin/panicfuzz` (`--seeds A..B`/`--seed N`/`--quiet`,
+unattended). Parity is N/A (front-end crash-safety only — never runs VM/interp). `cargo test --test
+panicfuzz` green (8); release sweep `0..100000` (overflow-checks OFF) and debug sweep `0..20000`
+(overflow-checks ON) both **0 findings** — front-end crash-safe so far. NOTE: a *release* `chezzi` has
+overflow-checks OFF so arithmetic-overflow wraps invisibly there; the debug CI gate catches overflow
+panics, and a full overflow sweep needs `RUSTFLAGS="-C overflow-checks=on"`. Usage + design:
+[`docs/bug-discovery.md` "Panic-fuzz harness"]. Next: Tier-1 done (#1 + #2); Tier-2/3 (proptest,
+grammar-accept fuzzer, TSan/loom, coverage) remain.
+
 **✅ Bug-discovery lever #2 — CPython differential oracle (2026-06-26).** `src/difftest/` generates
 random semantically-equivalent programs over a cross-language safe subset (literals, bounded-int
 arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive funcs, list/map/index/len), renders each
@@ -24,8 +46,8 @@ Chezzi fault ⇒ real bug). Wired as `tests/difftest.rs` (P0 formatting probes +
 non-tautology guard + fixed-seed fuzz) and `src/bin/difffuzz` (unattended; `--seed N` reproduces).
 3000-seed release sweep clean; manually confirmed it flags the i64-overflow class (the June-2026
 `sum()` blind spot). `cargo test --test difftest` green, clippy clean. Usage + design:
-[`docs/bug-discovery.md` "Differential oracle"]. Next: cargo-fuzz parser (lever #1), then P5 (IR
-shrinker + corpus dump + opt-in overflow-metamorphic mode).
+[`docs/bug-discovery.md` "Differential oracle"]. Lever #1 (panic-fuzzer) now also built — see above.
+Remaining: P5 (IR shrinker + corpus dump + opt-in overflow-metamorphic mode).
 
 **✅ Oracle coverage widened (2026-06-26).** The differential oracle's IR + both emitters + generator
 now cover four more construct families (granular `Features` flags `string_methods`/`slicing`/

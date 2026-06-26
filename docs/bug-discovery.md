@@ -1,8 +1,9 @@
 # Chezzi — Bug Discovery Strategy
 
 > **Status:** strategy doc. Captures *how* we systematically find correctness bugs in the
-> implementation before committing to large work (e.g. the Cranelift JIT). Most of the automated
-> techniques below are **not yet built** — this is the ranked plan. Live status in
+> implementation before committing to large work (e.g. the Cranelift JIT). The Tier-1 mechanical
+> levers are now built — **#1 panic-fuzz (`src/panicfuzz/`)** and **#2 CPython differential
+> (`src/difftest/`)**; the rest below is the ranked plan. Live status in
 > [`PROGRESS.md`](../PROGRESS.md); design rationale for the language in [`spec.md`](spec.md).
 
 ## Why this exists
@@ -36,13 +37,14 @@ The remedy is twofold and is the core of this strategy:
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
+- **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly + no `[lib]`). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
 - **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
 
 ## How real implementations find bugs
 
 | Technique | Who uses it | What it catches | Fit for Chezzi |
 |---|---|---|---|
-| **Coverage-guided fuzzing** (libFuzzer/AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser/checker **panics** on malformed input (should be clean errors, not Rust crashes) | ⭐ highest mechanical ROI — Rust-native |
+| **Coverage-guided fuzzing** (libFuzzer/AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser/checker **panics** on malformed input (should be clean errors, not Rust crashes) | ✅ **built** as a subprocess panic-fuzzer (`src/panicfuzz/`) — `cargo-fuzz` unavailable here (no nightly + no `[lib]`) |
 | **Differential vs reference impl** | GCC/LLVM (CSmith vs `-O0`/`-O3`); JS engines cross-tested | **shared** semantic bugs — wrong output both engines agree on | ⭐ Python-feel + CPython harness already exists |
 | **Metamorphic / EMI** | GCC/LLVM (Equivalence-Modulo-Inputs, 400+ bugs) | optimizer bugs: behavior-preserving transforms that change output | peephole/const-fold on==off, `x`→`(x)`, dead-code inject |
 | **Property-based** (proptest / Hypothesis) | CPython, Rust | invariant violations: `parse∘print==id`, idempotence, roundtrips | compiler pipeline |
@@ -60,10 +62,15 @@ cases.
 
 **Tier 1 — would have auto-caught the June 2026 bugs; closes the blind spot:**
 
-1. **`cargo-fuzz` on lexer → parser → checker.** Feed random bytes/strings. Invariant: *the pipeline
-   never panics — malformed input yields a clean diagnostic, never a Rust panic / `unwrap` / index
-   out-of-bounds / arithmetic overflow / OOM.* A day of setup; typically finds bugs in batches. The
-   single highest-yield mechanical lever for a Rust-hosted language.
+1. **Panic-fuzz the front-end (lexer → parser → checker).** ✅ **Built** — `src/panicfuzz/` (see
+   "Panic-fuzz harness" below). Feed adversarial / malformed inputs to `chezzi check`. Invariant:
+   *the pipeline never crashes — malformed input yields a clean diagnostic, never a Rust panic /
+   `unwrap` / index out-of-bounds / arithmetic overflow / stack overflow / signal kill.* Implemented
+   as a **stable, dependency-free subprocess harness** (a hand-rolled stand-in for `cargo-fuzz`),
+   not `cargo-fuzz` itself, because this environment has **no nightly / rustup / cargo-fuzz** and the
+   crate is **binary-only (no `[lib]`)** to link a fuzz target against — and shelling out catches
+   **more** crash classes than in-process `catch_unwind` (notably stack overflow, the most likely
+   deep-parser crash). The single highest-yield mechanical lever for a Rust-hosted language.
 2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
    external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
    immediately. The documented intentional divergences are handled *structurally* by a Python
@@ -93,8 +100,8 @@ cases.
 
 ## Recommended starting point
 
-Begin with **#1 (cargo-fuzz parser) + #2 (CPython differential)** — together they cover both *crashes*
-(fuzz) and *wrong answers* (differential), and they are the two techniques that directly close the
+**#1 (panic-fuzz front-end) + #2 (CPython differential)** are both ✅ **built** — together they cover
+both *crashes* (fuzz) and *wrong answers* (differential), the two techniques that directly close the
 parity blind spot. Run them unattended; triage findings through the existing
 `auto-task` → `post-merge-gate` pipeline.
 
@@ -102,6 +109,61 @@ Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the interpret
 correct (it must produce byte-identical results to the VM). Standing up Tier 1 first — so the
 reference semantics are fuzzed and differentially validated — de-risks the JIT before a line of it is
 written.
+
+## Panic-fuzz harness (`src/panicfuzz/`)
+
+Lever #1, built. A seeded, dependency-free generator emits adversarial / malformed inputs and feeds
+each to the already-built `chezzi check <tmpfile>` (the full front-end: `resolver::build_graph` →
+`checker::check_graph` = lexer + parser + checker). The single invariant it enforces: **malformed
+input must yield a clean diagnostic, never a Rust panic or a signal crash.** It structurally mirrors
+`src/difftest/` (its own copy of the `xoshiro256**` RNG; the same reader-thread + `try_wait` +
+kill-on-timeout subprocess machinery) and is wired via a `#[path]` include into both the
+`tests/panicfuzz.rs` CI gate (fixed seeds `0..2000`) and the `src/bin/panicfuzz` long-runner.
+
+**Why a hand-rolled subprocess harness instead of `cargo-fuzz`.** Three constraints decided the
+architecture:
+- **No nightly / rustup / cargo-fuzz** in this environment — `cargo-fuzz` is unavailable.
+- **The crate is binary-only (no `[lib]`)** by design, so there is nothing to link an in-process
+  fuzz target / `libFuzzer` harness against.
+- **Shelling out catches more crash classes** than in-process `catch_unwind`: a subprocess detects a
+  **signal kill** (SIGSEGV / SIGABRT / **stack overflow** — the most likely deep-parser crash, which
+  `catch_unwind` cannot intercept) as an exit code of `None`, *and* a Rust panic via the `panicked
+  at` marker on stderr.
+
+**Classification** (`run.rs`): `Clean` = exit 0, or non-zero with a clean diagnostic and no panic
+marker (non-finding); `HostPanic` = stderr contains `panicked at` (a BUG); `Crash` = exit code is
+`None`, killed by a signal (a BUG); `Timeout` = killed at the wall-clock budget (**not** a finding —
+a slow input, not a crash). Only `HostPanic`/`Crash` are findings (`is_finding()`).
+
+**Three combined generators** (`generate.rs`), all bounded to ≤ 2 KB and deterministic in `(seed,
+corpus)`: (1) random UTF-8-ish byte strings; (2) a token-alphabet sampler over Chezzi keyword /
+punctuation / operator spellings + random identifiers / numbers / newlines + indentation (reaches
+deep parser states); (3) structure-aware **raw-byte** mutation of the `examples/*.chz` corpus (byte
+flips, truncation, duplicated / removed lines, inserted braces / colons / indentation). A finding
+reports the **seed + the raw triggering input** (the input *is* the artifact — no shrink pass in v1),
+reproducible with `panicfuzz --seed N`.
+
+**Parity is N/A for this lever** — it exercises only the front-end's crash-safety; it never runs the
+VM/interp, so the two-engine parity bar does not apply.
+
+How to run:
+
+```sh
+cargo test --test panicfuzz                # CI gate: classify/clean/determinism unit guards + fuzz seeds 0..2000
+cargo build --release --bin chezzi --bin panicfuzz
+./target/release/panicfuzz --seeds 0..200000   # unattended sweep (~30-50 min of subprocess spawns)
+./target/release/panicfuzz --seed 12345        # reproduce one seed (prints the triggering input)
+```
+
+**Overflow blind spot in release.** The `tests/panicfuzz.rs` gate runs the **debug** `chezzi`
+(overflow-checks ON), so arithmetic-overflow panics ARE caught there. A **release** sibling `chezzi`
+has overflow-checks OFF, so arithmetic-overflow wraps *silently* and is invisible in a release sweep
+(the bin prints this NOTE). For a full overflow sweep, rebuild with `RUSTFLAGS="-C
+overflow-checks=on"`. Signal / segfault / explicit-panic crashes are caught regardless of profile.
+
+Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
+OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
+front-end is crash-safe over the inputs explored so far.
 
 ## Differential oracle (`src/difftest/`)
 
