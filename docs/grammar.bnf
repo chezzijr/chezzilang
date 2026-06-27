@@ -47,7 +47,7 @@
 <simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
 
 # ===== simple statements =====
-# The third form is a destructuring let: `a, b, … := expr` binds a tuple's elements positionally.
+# The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
 # Only `:=` introduces destructuring binds (`a, b = …` is multi-target *re*assignment — see below).
 # An optional `REF` before the typed-let's <type> is the `ref T` by-reference binding modifier
 # (`r: ref int = 0`) — sugar that lowers to a `Ref[T]` box. Legal ONLY here and on a <param> type;

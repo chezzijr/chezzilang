@@ -57,16 +57,21 @@ the decl line is never a doc. **Lexer side-channel** (NOT new tokens): `tokenize
 output stay byte-identical (only `resolver::parse` opts in via `parse_with_docs`; every other
 `tokenize`/`parse` caller gets `doc = None`). **Coverage:** `doc: Option<String>` on `FnDecl` (covers
 free fns + every method/static/associated fn since they all reuse `FnDecl`) and `StmtKind::{Let, Struct,
-Enum, Protocol, NewType, TypeAlias}` (top-level lets surface; local lets carry the field but are inert).
+Enum, Protocol, NewType, TypeAlias}` (the doc is *parsed + attached* for all of these; top-level bindings
+carry it and surface on hover, local bindings carry the field but are inert).
 **Inert/parity:** the doc is purely informational — never read by desugar/compiler/vm/interp, so two-engine
 VM==interp parity is untouched (front-end-only). **Hover wiring:** `FnSig.doc` (free fns + methods) +
-`Checker.name_docs` (type decls + top-level lets, simple-name keyed, entry-module-scoped like
+`Checker.name_docs` (struct constructors + top-level bindings, simple-name keyed, entry-module-scoped like
 `self.functions`) feed a 3rd element into `hover_result`/`HoverInfo.doc`; `chezzi-lsp` renders the doc as
 plain markdown lines above the untagged fence. **Shadow-safe:** a `name_docs` doc surfaces only when the
 hovered name actually resolves to the module top-level (scope 0) — a param/local that shadows a documented
 global's name shows no doc, not the global's. **Fence-safe:** user doc text is run through `untag_fences`
 before rendering, so a fenced block (```` ```lang ```` or `~~~lang`) inside a doc-comment can't reintroduce
-the language-tagged fence the type fence avoids (Neovim injection crash, commit `0f36a59`). **Known v1 limit:** protocol METHOD signatures
+the language-tagged fence the type fence avoids (Neovim injection crash, commit `0f36a59`). **Known v1 limit:** only `fn`/method, struct-constructor, and top-level-binding docs actually surface on
+hover. The doc is parsed + attached for `enum`, `protocol`, `newtype`, and `type` aliases too, but does
+NOT yet reach the popup — enum-variant constructors (`Field`-access form) and newtype constructors record
+no callee hover signature (`callee_display_ty` has no enum/newtype branch), and protocol/type-alias names
+have no value/expression form to hover. Separately, protocol METHOD signatures
 (`MethodSig`, not `FnDecl`) get no per-method doc — only the protocol container does. Builds on the
 builtin-hover plumbing below. **Reinstall the LSP snapshot to serve it: `cargo install --path . --features
 lsp --bin chezzi-lsp`.**
@@ -160,7 +165,7 @@ disk). Editor logic (`src/editor/`) is dep-free and unit-tested in the default b
 a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: [`editors/README.md`].
 No parity risk (front-end only; never runs VM/interp). v1 limits: unsaved edits to an *imported* module
 aren't reflected until saved; interpolated strings highlight as one literal (no nested `{expr}`); hover
-covers the entry module only, resolves leaf idents/literals/field-names + single-name let bindings +
+covers the entry module only, resolves leaf idents/literals/field-names + single-name bindings +
 call callees incl. **user-struct** method names, **reserved free/ctor builtins**, **builtin-collection/
 concurrency methods**, and **stdlib-module fns** (generic/enum/newtype user methods,
 desugared `?.`/`??`, and non-first destructuring-bind names return no type; the semantic-token overlay's
@@ -659,7 +664,7 @@ panic (`i64::MIN.abs()` would); the 10M result cap is unchanged. The materializa
 `(0..5)[::-1]` → `[4, 3, 2, 1, 0]` — by materializing the (ascending, step-1) range via the `range`
 builtin then reusing the **existing** `Op::GetSlice` / `slice::slice_indices` `::step` machinery (compiler
 Slice arm emits `CallBuiltin("range", 2)` when the obj is a `Range`; interp `eval_slice` mirrors it). A
-bare range still has no value anywhere else (`let x = 0..10` keeps its compile error). **Decision: `a..b`
+bare range still has no value anywhere else (`x := 0..10` keeps its compile error). **Decision: `a..b`
 stays ascending — no auto-reverse** (`for i in 10..0` yields nothing, the lazy for-loop path is
 untouched); the down-count idiom is `range(start, end, -1)`. No grammar change (the `..` syntax is
 untouched; conformance clean). **Parity by construction** (shared helper). Tests (all RED-first): 3
@@ -798,11 +803,11 @@ driven by the static annotation already in the AST — so it is byte-identical o
 AND the checker-bypassing parity harness (two-engine VM↔interp parity by construction; the M:N
 `--parallel` engine shares the compiler so it is covered too). **Checker** (read-only): a scoped
 `assignable_w(expected, actual, widen)` adds `(Float, Int) => true` only at compiler-coercible sinks
-(typed `let`, fn/method/closure args via `check_args_w`, returns, struct-field defaults, native/extern
+(typed binding, fn/method/closure args via `check_args_w`, returns, struct-field defaults, native/extern
 float params) — the type-blind assign targets (`p.x = 3`, `xs[0] = 3`, `m[k] = 3`, tuple-target,
 reassign-to-float-local) stay STRICT (no runtime hole); `infer_list`/`infer_map`-value unify an
 int/float mix to `float` (one-way). **Compiler**: new cheap inline `Op::CoerceFloat` (mirrors `AsInt`,
-reuses `n as f64`), emitted at typed `let`, the float-param callee prologue (so an int *variable* widens
+reuses `n as f64`), emitted at typed binding, the float-param callee prologue (so an int *variable* widens
 at the boundary, any caller), `-> float` returns (incl. inline-expr bodies), per-`float`-field struct
 construction, and `float`-annotated / all-literal collection literals. **Interp** (frozen oracle, a
 tree-walker — no bytecode): an equivalent `coerce_float`/`coerce_value_to_annotation` helper at the
@@ -2538,7 +2543,7 @@ branch names) is in the git log.
   ALIASES the same box when the RHS is already a `ref` binding. Coercion table enforced: `ref→ref` param
   aliases the box, `ref→T` param auto-derefs to a copy, a by-value local or a literal into a `ref` param
   is an error. `ref` is barred (parse error) from return types, generic args, collection elements, tuple
-  elements, struct fields, and destructuring lets; a `ref`-over-generic-param is a type error. Concurrency:
+  elements, struct fields, and destructuring bindings; a `ref`-over-generic-param is a type error. Concurrency:
   a `ref T` is a `Ref[T]` → non-sendable, so crossing the airlock is rejected (matches `Ref[T]`; use
   `Shared[T]`). `ref` is now a keyword (corpus-safe; `import std.ref` paths still parse via a path-segment
   exception). Goldens `examples/ref_binding.chz` + `examples/ref_airlock.chz` (byte-identical on
@@ -2833,7 +2838,7 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
   fields, and `a, b = f()` for a tuple-returning `f`). Parser collects a comma lvalue list before
   `=` (op `=` only — compound with multiple targets is a clean parse error); the full RHS is
   evaluated into a hidden temp FIRST (Python semantics — correct even when an index appears on both
-  sides), mirroring the destructuring-`let` lowering. Example: `examples/tuple_swap.chz`.
+  sides), mirroring the destructuring-binding lowering. Example: `examples/tuple_swap.chz`.
 
 > One sharp edge found + fixed: adding the `Op::Contains` arm to the VM's `step` grew its frame just
 > enough to trip `self_referential_stringable_hits_depth_limit` (infinite `str(self)` recursion must

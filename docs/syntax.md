@@ -29,8 +29,11 @@ struct Point:
 - **Logical lines** end at a newline. Blank / comment-only lines are ignored.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
 - **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,
-  `enum`, `protocol`, `newtype`, `type` alias, top-level `let`) become its doc, surfaced on LSP hover
-  above the `chezzi` type fence. The doc is the *contiguous* run of comment lines with NO blank line
+  `enum`, `protocol`, `newtype`, `type` alias, top-level binding) become its doc. The doc surfaces on
+  LSP hover above the `chezzi` type fence **today for free functions, methods, struct constructors, and
+  top-level bindings**; for `enum`, `protocol`, `newtype`, and `type` aliases the doc is parsed and
+  attached to the declaration but does **not** yet surface on hover (their names/constructors record no
+  hover info). The doc is the *contiguous* run of comment lines with NO blank line
   between the last one and the declaration — a blank line detaches earlier comments. Stacked lines join
   with newlines (one leading `# ` stripped per line). An inline trailing comment on the decl line is
   not a doc. Purely informational: doc-comments never affect type-checking or execution.
@@ -240,7 +243,7 @@ print(r + 100)     # 106 — usable anywhere its value is
   `Ref[T]` would. Write `"{r + 0}"` or bind a copy (`v := r`) first if you need the value in a string.
   Everywhere else (`print(r)`, arithmetic, args, indexing) `r` reads as its value.
 - **Where it's allowed.** Locals + params **only**. `ref` is a **parse error** as a return type, a
-  generic argument, a collection element, a tuple element, a struct field, or on a destructuring let
+  generic argument, a collection element, a tuple element, a struct field, or on a destructuring binding
   — use a first-class `Ref[T]` there.
 - **Concurrency (important).** `ref`/`Ref` are **same-task** aliasing only. A `ref T` is a `Ref[T]`
   box, which is **non-sendable**: capturing or passing the box across the `spawn` / `parallel:` /
