@@ -7324,18 +7324,34 @@ impl Checker {
                     .map(|t| self.resolve_type(t, span))
                     .collect();
                 if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
+                    // A variant ctor takes NO method-level type args. Under the broadened parser steal
+                    // the combined `Box[int].Has[str](5)` now arrives here as a Field callee carrying
+                    // `targs=[str]` (it used to ride the Index-over-Field block below, which errored);
+                    // preserve that error rather than silently dropping the targs.
+                    if !targs.is_empty() {
+                        self.error(
+                            span,
+                            format!("variant '{name}' of '{tname}' takes no method type arguments"),
+                        );
+                    }
                     return self.infer_variant_call(&v, name, args, &resolved, span);
                 }
-                return self.infer_static_call(&key, &tname, name, args, &resolved, &[], span);
+                // `targs` is the member-level (method) turbofish — `Box[int].make[str](x)` arrives here
+                // as a Field callee under the broadened steal, with the enclosing `[int]` in `resolved`
+                // and the method `[str]` in `targs`. Thread `targs` as the static method's `mtargs` so
+                // the combined form composes (was `&[]`, which dropped the method turbofish).
+                return self.infer_static_call(&key, &tname, name, args, &resolved, &targs, span);
             }
             return self.infer_method_call(obj, name, *name_span, args, &targs, span);
         }
-        // Combined member-side turbofish: `Type[T].member[U](args)` (and the bare `Type.member[U]`).
-        // The trailing method `[U]` makes the callee an `Index` over the `Field`, so it does NOT hit
-        // the `Field`-callee dispatch above — it lands here. Reinterpret: the inner `Field`'s `obj` is
-        // the enclosing-type head (a type-applied `Box[int]` or a bare `Ident(Box)`), the trailing
-        // index is the single method type argument. Gate on the head being a KNOWN, NON-local
-        // struct/enum so `arr[i].field[k](x)` (head a value) stays ordinary index-then-call.
+        // Combined member-side turbofish — DEFENSIVE FALLBACK. Since the parser steal was broadened to
+        // ANY `Field` receiver, the combined `Type[T].member[U](args)` now parses as a `Call{callee:
+        // Field, type_args:[U]}` and is handled by the `Field`-callee dispatch above (the `type_apply_head`
+        // branch). This `Index`-over-`Field`-callee block stays in place for the residual shapes that do
+        // NOT get stolen — e.g. a head that is a value (`arr[i].field[k](x)`, where `resolved_head` is
+        // `None` and we fall through to ordinary index-then-call). Reinterpret: the inner `Field`'s `obj`
+        // is the enclosing-type head (a type-applied `Box[int]` or a bare `Ident(Box)`), the trailing
+        // index is the single method type argument. Gate on the head being a KNOWN, NON-local struct/enum.
         if let ExprKind::Index {
             obj: callee_obj,
             index: mt,

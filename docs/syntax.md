@@ -758,6 +758,23 @@ turbofish, multi-arg: `pair.first[int, str](1, "x")`. Static methods do **not** 
 **protocol** satisfaction — protocols stay instance-only. Static methods on `newtype` are not
 supported yet (struct + enum only).
 
+**Uniform parse rule (any receiver).** `recv.name[X](args)` parses as a method turbofish on **any**
+receiver — not just a bare ident, but a call result, a field, or an index:
+
+```chezzi
+W(1).cast[str]("a")          # call-result receiver
+mk().cast[str]("a")          # factory-result receiver
+h.w.cast[str]("a")           # field receiver
+xs[0].cast[str]("a")         # index receiver
+W(1).cast[Map[str, int]](m)  # nested-generic type arg, non-bare receiver
+```
+
+The trade-off: index-then-call of a **fn-valued** field needs **parens** on any receiver —
+`(recv.name[k])(args)` — because `recv.name[k](args)` reads `k` as a type and parses as a turbofish.
+This is uniform with the bare-ident receiver, which already required parens. A **numeric** index
+(`arr[0].handlers[0](20)`) still parses as index-then-call (an int is not a type), and a plain
+subscript with no following call (`obj.items[0]`, `m.data[k]`) is always an ordinary index.
+
 ## 7b. Generics & protocols  (M7)
 
 **Generic functions** take type parameters in `[…]` after the name. A parameter may carry a

@@ -415,15 +415,17 @@
             | <typeApply> "DOT" "IDENT" "LPAREN" "RPAREN"
             | <typeApply> "DOT" "IDENT" "LPAREN" <argList> "RPAREN"
             # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
-            # `s.first[int, str](1, "x")`). The receiver is a VALUE head (`Field{obj: Ident}`); the
-            # parser steals the type list + arg list here. The COMBINED form `Box[int].make[str](x)`
-            # (enclosing-type args from PART 1 + this method `[str]`) is NOT a distinct production: it
-            # parses as `<postfix> LBRACKET <subscript> RBRACKET LPAREN <argList> RPAREN` — an index
-            # over the `Box[int].make` member access — because the parser cannot tell it from
-            # `value[i].field[k](x)`. The CHECKER reinterprets it (head a known type ⇒ member-turbofish;
-            # head a value ⇒ ordinary index-then-call). The combined form carries a SINGLE method type
-            # arg (the subscript rejects commas; the steal is deliberately not widened to the
-            # index/type-applied receiver, which would misparse `arr[i].field[k](x)`).
+            # `s.first[int, str](1, "x")`). The receiver is ANY postfix expression: a bare ident, a call
+            # result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index (`xs[0].cast[U](x)`).
+            # The parser steals the type list + arg list whenever the receiver is a member access and the
+            # `[ <typeList> ] (` shape is present (SPECULATIVE: a non-type-then-call subscript such as
+            # `obj.items[0]` or the numeric `arr[0].h[0](x)` backtracks and keeps its plain index meaning).
+            # UNIFORM RULE: `recv.name[X](args)` always parses as a method turbofish on ANY receiver, so
+            # index-then-call of a fn-VALUED field needs parens — `(recv.name[k])(args)` — on any receiver
+            # (this matches the bare-ident receiver, which already required parens). The COMBINED form
+            # `Box[int].make[str](x)` (enclosing-type args from PART 1 + this method `[str]`) likewise
+            # parses through these productions (the receiver `Box[int]` is itself a postfix) and the
+            # CHECKER threads both arg sets; a method turbofish on a generic VARIANT ctor is an error.
             | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
             | <postfix> "QUESTION"

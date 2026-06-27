@@ -421,10 +421,16 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > (`Box[int].make(5)` infers `U = int`); an un-inferred member/enclosing param degrades to `Unknown`,
 > never a leaked `Ty::Param`. A method param may not shadow an enclosing type param; a member-level
 > turbofish on a non-generic member or a builtin (`xs.iter[int]()`, `xs.len[int]()`) is an arity error.
-> The combined form parses as an index over the member access (indistinguishable from
-> `value[i].field[k](x)`) and is resolved by **checker reinterpretation** (head a known type ⇒
-> member-turbofish; head a value ⇒ ordinary index-then-call) — the parser steal is **not** widened. The
-> combined form carries a single method type arg; multiple method args are reachable by inference.
+> **UNIFORM PARSE RULE:** `recv.name[X](args)` parses as a method turbofish on **ANY** receiver — a
+> bare ident, a call result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index
+> (`xs[0].cast[U](x)`). The parser steal is **widened to any member-access receiver**; the combined
+> form `Box[int].make[str](x)` rides the same path (the receiver `Box[int]` is itself a postfix) and
+> the checker threads both the enclosing type args and the method args. The combined form supports a
+> multi-arg method turbofish (`mk().pair[int, str](..)`) and nested-generic type args
+> (`W(1).cast[Map[str, int]](m)`). **Authorized trade-off:** index-then-call of a fn-**valued** field
+> now needs parens on any receiver — `(recv.name[k])(args)` (the bare-ident receiver already required
+> this); the numeric form `arr[0].handlers[0](20)` still parses as index-then-call (an int is not a
+> type). A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
 > Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so VM, interp, and
 > `--parallel` are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
 > methods on `newtype` and associated protocol requirements (`T.zero()`) — the latter **SHELVED**

@@ -1492,11 +1492,20 @@ default (`Box[int].make(5)` ⇒ `U = int`). **Checker:** `infer_static_call` gai
 builds ONE by-name substitution map over BOTH the enclosing type params (seeded from the type turbofish)
 and the method's own `[U]` (seeded from `mtargs`), inferring the rest from the args and degrading EVERY
 un-inferred param — enclosing or method — to `Ty::Unknown` (no leaked `Ty::Param`; mirrors the static
-fix at 7c75ab2). The combined `Box[int].make[str](x)` parses as an **index over the member access**
-(token-identical to `value[i].field[k](x)`), so it is resolved by **checker REINTERPRETATION** (gated on
-the head being a known, non-local struct/enum — a value head stays ordinary index-then-call) — the parser
-steal is deliberately **NOT** widened (that widening was the rejected prior run; it misparsed
-`arr[i].handlers[k](x)`). `infer_method_call` gained a `type_args` arg threaded into `infer_generic_method`
+fix at 7c75ab2). **UPDATE — parser steal BROADENED (uniform-receiver rule).** The member-turbofish steal
+now fires on **ANY** `Field` receiver, not just a `Field` over a bare ident: `recv.name[X](args)` parses
+as a method turbofish on a bare ident, a call result (`W(1).cast[str]("a")`), a field (`h.w.cast[U](x)`),
+or an index (`xs[0].cast[U](x)`). `try_parse_type_arg_call` stays speculative (commits only on the
+`[ <typeList> ] (` shape, else restores pos+depth), so `obj.items[0]`/`m.data[k]` (no call) and the
+numeric `arr[0].handlers[0](20)` still backtrack to index-then-call. The combined `Box[int].make[str](x)`
+now also rides the Field-callee path (the receiver `Box[int]` is itself a postfix) and is dispatched by
+the `type_apply_head` branch — threading **both** the enclosing type args (`[int]`) and the method targ
+(`[str]`, was dropped as `&[]`, now `&targs`); a method turbofish on a generic **variant** ctor
+(`Box[int].Has[str](5)`) is now explicitly an error (the old Index-over-Field block that caught it is
+bypassed). **AUTHORIZED REGRESSION (accepted, documented):** index-then-call of a fn-**valued** field on
+a non-bare receiver — `arr[i].handlers[k](10)` — now parses as a turbofish and errors; workaround is
+parens `(arr[i].handlers[k])(10)`. This makes non-bare receivers UNIFORM with the bare-ident case
+`w.handlers[k](10)`, which already required parens. `infer_method_call` gained a `type_args` arg threaded into `infer_generic_method`
 (instance multi-turbofish `s.m[A, B](x, y)` now seeds + arity-checks + catches an explicit-targ/arg
 conflict, previously silently dropped) plus a top-of-fn guard — BEFORE the `.iter` fast-path — rejecting a
 member-level turbofish on a builtin/non-generic member (fixes the `.iter[int]()` swallow; `len[int]()`
