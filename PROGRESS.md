@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Checker — import+same-name-struct collision soundness hole closed (2026-06-28).** Checker-only,
+three-engine-parity-safe by construction (rejected programs never run; accepted programs byte-identical).
+The four native **struct-modeled** types (`Ref`/`std.ref`, `Match`/`std.regex`, `Response`/`std.request`,
+`ProcResult`/`std.process`) slipped through the decl guard: a program that BOTH imported one AND declared a
+same-named `struct` passed `check` clean then **trapped at runtime on both engines** (e.g. `no field 'v' on
+Ref(value=5)`) — the user layout overwrote the Builtin seed in the hoist while the runtime kept constructing/
+returning the native shape. Root cause: the struct-hoist `already_defined` test (`mod.rs`) only treats a
+*User*-origin prior as defined, so a name IMPORTED as a Builtin-origin layout was silently overwritten; the
+enum/newtype/typealias decl paths were already closed via their `struct_names` collect-name guards. Fix
+(approach (b), minimum-correct — NOT full reservation, which would break the module-owned bare-decl intent +
+the origin-keyed sendability check): a new per-module `imported_builtin_types` set, populated at the two
+struct-import insert sites (whole-module `import std.regex` + selective `import Match from std.regex`) keyed on
+`info.origin == StructOrigin::Builtin`, consulted in the struct-hoist reserved-name gate → a same-named user
+`struct` is now rejected `type 'X' is reserved (builtin)` (Socket/Shared precedent). Generalized: the gate also
+closes the identical latent hole for every other import-gated std struct (Token/Parser/Heap/Deque/…). A bare
+unimported `struct Ref` (no import) and a merely-similar name (`struct RefBox` with `import Ref`) both stay
+legal. Tests: `import_plus_same_name_struct_decl_rejected` (all four + whole-module form),
+`import_does_not_over_reject_distinct_struct_name`, `bare_struct_procresult_without_import_ok`; existing
+`user_struct_response_without_import_ok` / `user_struct_match_without_import_ok` / `user_struct_named_ref_is_sendable`
+/ `from_import_licenses_bare_response` stay green. Docs: `docs/syntax.md` module-owned note.
+
 **✅ Manual feature-audit sweep — 3 correctness bugs found + fixed, playbook documented (2026-06-27).**
 A structured adversarial hand-audit of the feature domains the *automated* oracles can't reach
 (generics, `match`/enums, closures, protocols, namespace/import gating — `src/difftest/generate.rs`

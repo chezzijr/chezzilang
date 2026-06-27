@@ -4059,6 +4059,64 @@ fn user_struct_match_without_import_ok() {
     );
 }
 
+// SOUNDNESS HOLE: `import X from M` + a same-named user `struct X` (for the four native
+// struct-modeled types Ref/Match/Response/ProcResult, and every other import-gated std struct)
+// must be a CLEAN check-time `reserved (builtin)` error — NEVER accept-then-trap at runtime. The
+// import licenses the bare name as a Builtin-origin layout; a user `struct X` would overwrite the
+// seed and carry the user layout while the runtime returns/constructs the native shape → field trap.
+#[test]
+fn import_plus_same_name_struct_decl_rejected() {
+    // from-import form, all four struct-modeled natives
+    for (src, name) in [
+        (
+            "import Ref from std.ref\nstruct Ref:\n    v: int\nfn main():\n    print(1)\nmain()\n",
+            "Ref",
+        ),
+        (
+            "import Match from std.regex\nstruct Match:\n    v: int\nfn main():\n    print(1)\nmain()\n",
+            "Match",
+        ),
+        (
+            "import Response from std.request\nstruct Response:\n    v: int\nfn main():\n    print(1)\nmain()\n",
+            "Response",
+        ),
+        (
+            "import ProcResult from std.process\nstruct ProcResult:\n    v: int\nfn main():\n    print(1)\nmain()\n",
+            "ProcResult",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("reserved (builtin)") && e.message.contains(name)),
+            "expected `{name}` reserved-builtin error, got: {errs:?}"
+        );
+    }
+    // whole-module form
+    entry_rejects(
+        "import std.regex\nstruct Match:\n    x: int\nfn main():\n    print(1)\nmain()\n",
+        "reserved (builtin)",
+    );
+}
+
+// BOUNDARY: a similar-but-distinct user struct name stays legal even with the import present —
+// the gate keys on the exact imported name, not a prefix/substring.
+#[test]
+fn import_does_not_over_reject_distinct_struct_name() {
+    entry_ok(
+        "import Ref from std.ref\nstruct RefBox:\n    v: int\nfn main():\n    b := RefBox(5)\n    print(str(b.v))\nmain()\n",
+    );
+}
+
+// BOUNDARY: module-owned intent preserved — the bare name is FREE for a user struct when the owning
+// module is NOT imported (ProcResult lacked a bare-ok test; Ref/Match/Response covered elsewhere).
+#[test]
+fn bare_struct_procresult_without_import_ok() {
+    entry_ok(
+        "struct ProcResult:\n    x: int\nfn main():\n    r := ProcResult(5)\n    print(str(r.x))\nmain()\n",
+    );
+}
+
 #[test]
 fn native_time_now_is_int_monotonic_is_float() {
     entry_ok(
