@@ -2882,14 +2882,15 @@ impl Checker {
         }
     }
 
-    /// Count the un-annotated free fns + struct methods that `infer_returns` infers — the fixpoint
-    /// iteration bound. (Annotated decls are skipped by the pass, so they cannot extend the chain.)
+    /// Count the un-annotated free fns + struct/enum methods that `infer_returns` infers — the
+    /// fixpoint iteration bound. (Annotated decls are skipped by the pass, so they cannot extend the
+    /// chain.)
     fn count_uninferred(&self, stmts: &[Stmt]) -> usize {
         let mut n = 0;
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) if decl.ret.is_none() => n += 1,
-                StmtKind::Struct { methods, .. } => {
+                StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => {
                     n += methods.iter().filter(|m| m.ret.is_none()).count();
                 }
                 _ => {}
@@ -2925,6 +2926,10 @@ impl Checker {
                     ..
                 } => {
                     let self_ty = self.struct_self_ty(name);
+                    // The layout is stored under the runtime key (bare unless disambiguated); a bare
+                    // `name` lookup misses in the multi-module path, so the inferred ret would be written
+                    // to a non-existent slot and never reach call sites / protocol satisfaction.
+                    let key = self.bare_key(name);
                     let saved = self.enter_type_params(type_params);
                     for m in methods {
                         if m.ret.is_some() {
@@ -2932,7 +2937,7 @@ impl Checker {
                         }
                         let Some(sig) = self
                             .structs
-                            .get(name)
+                            .get(&key)
                             .and_then(|s| s.methods.get(&m.name))
                             .cloned()
                         else {
@@ -2941,8 +2946,44 @@ impl Checker {
                         let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
                         if let Some(ms) = self
                             .structs
-                            .get_mut(name)
+                            .get_mut(&key)
                             .and_then(|s| s.methods.get_mut(&m.name))
+                            && ms.ret != ret
+                        {
+                            ms.ret = ret;
+                            changed = true;
+                        }
+                    }
+                    self.exit_type_params(saved);
+                }
+                StmtKind::Enum {
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => {
+                    // Mirror the struct arm for enum methods (same un-annotated-return inference): read
+                    // and write the inferred ret into `enum_methods` under the enum's runtime key.
+                    let self_ty = self.enum_self_ty(name);
+                    let key = self.bare_key(name);
+                    let saved = self.enter_type_params(type_params);
+                    for m in methods {
+                        if m.ret.is_some() {
+                            continue;
+                        }
+                        let Some(sig) = self
+                            .enum_methods
+                            .get(&key)
+                            .and_then(|ms| ms.get(&m.name))
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
+                        if let Some(ms) = self
+                            .enum_methods
+                            .get_mut(&key)
+                            .and_then(|ms| ms.get_mut(&m.name))
                             && ms.ret != ret
                         {
                             ms.ret = ret;
@@ -3702,11 +3743,13 @@ impl Checker {
                     } else if is_suite && is_lifecycle_hook(&m.name) {
                         self.validate_lifecycle_hook(m);
                     }
-                    // Panic-safe: a redeclared struct name means `structs[name]` is a *different*
-                    // struct whose method table may not contain `m.name`.
+                    // Panic-safe: a redeclared struct name means `structs[key]` is a *different*
+                    // struct whose method table may not contain `m.name`. Keyed by the runtime key
+                    // (mirror the enum arm below) so the layout resolves in the multi-module path —
+                    // otherwise a bare-`name` miss silently SKIPS body checking entirely.
                     if let Some(sig) = self
                         .structs
-                        .get(name)
+                        .get(&self.bare_key(name))
                         .and_then(|s| s.methods.get(&m.name))
                         .cloned()
                     {
@@ -5350,7 +5393,14 @@ impl Checker {
         // or `E.V(a, a)` — Rust's rule. Emitted (not early-returned) so the arm body still checks on
         // the last binding, avoiding cascade errors. Or-alternatives are checked when this fn recurses
         // on each alt above, so a duplicate inside one alt is still caught.
-        if let Some(dup) = first_duplicate_binder(pattern) {
+        // A bare ident is a real binder UNLESS it names a (refutable) nullary variant — the built-in
+        // `Ok`/`Err`/`Some`/`None` or a user enum variant — which binds nothing (see `bind_subpattern`).
+        // Mirror that registry here so `(None, None, None)` isn't falsely flagged as a duplicate binding.
+        let is_binder = |name: &str| {
+            !(self.variant_owners.contains_key(name)
+                || matches!(name, "Ok" | "Err" | "Some" | "None"))
+        };
+        if let Some(dup) = first_duplicate_binder(pattern, &is_binder) {
             self.error(
                 span,
                 format!("identifier '{dup}' is bound more than once in this pattern"),
@@ -9341,9 +9391,14 @@ impl Checker {
     /// The `Self` type for a struct's own methods: `Struct(name, [Param(p) for each type param])`,
     /// so inside `struct Stack[T]` the receiver is `Stack[T]` and `self.items` is `list[T]`.
     fn struct_self_ty(&self, name: &str) -> Ty {
+        // Key by the struct's runtime key (bare unless a cross-module clash disambiguated it), exactly
+        // like `enum_self_ty`/`newtype_self_ty`. In the multi-module (`build_graph`) path the layout is
+        // stored under `<module-key>::Name`, so a bare-`name` lookup here would miss — leaving `self`'s
+        // type wrong during both return inference and pass-2 body checking.
+        let key = self.bare_key(name);
         let args = self
             .structs
-            .get(name)
+            .get(&key)
             .map(|i| {
                 i.type_params
                     .iter()
@@ -9351,7 +9406,7 @@ impl Checker {
                     .collect()
             })
             .unwrap_or_default();
-        Ty::Struct(name.to_string(), args)
+        Ty::Struct(key, args)
     }
 
     /// The `Ty::Enum` of an enum's own `self`: keyed by its runtime key, parameterized by its own
@@ -11517,10 +11572,22 @@ fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
 /// skipped; literals/ranges bind nothing. Or-alternatives are NOT descended — each `A(x) | B(x)`
 /// alternative is its own binding context (consistency across alts is governed elsewhere); a
 /// duplicate inside one alternative is caught when `bind_match_arm` recurses on that alternative.
-fn first_duplicate_binder(p: &Pattern) -> Option<String> {
-    fn go(p: &Pattern, seen: &mut std::collections::HashSet<String>) -> Option<String> {
+/// `is_binder(name)` returns `true` iff a bare `Pattern::Ident(name)` actually BINDS a fresh variable
+/// here, rather than naming a (refutable) nullary variant. A bare `None`/`Ok`/`Err`/`Some` or a user
+/// variant name binds nothing (it's a variant test — see `bind_subpattern`), so two of them in one
+/// pattern (e.g. `(None, None, None)`) is NOT a duplicate binding. Mirrors `bind_subpattern`'s
+/// Ident-as-variant recognition so this pre-pass doesn't falsely reject correct code.
+fn first_duplicate_binder(p: &Pattern, is_binder: &impl Fn(&str) -> bool) -> Option<String> {
+    fn go(
+        p: &Pattern,
+        seen: &mut std::collections::HashSet<String>,
+        is_binder: &impl Fn(&str) -> bool,
+    ) -> Option<String> {
         match p {
             Pattern::Ident(n) => {
+                if !is_binder(n) {
+                    return None;
+                }
                 if !seen.insert(n.clone()) {
                     return Some(n.clone());
                 }
@@ -11528,7 +11595,7 @@ fn first_duplicate_binder(p: &Pattern) -> Option<String> {
             }
             Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) => {
                 for b in bindings {
-                    if let Some(dup) = go(b, seen) {
+                    if let Some(dup) = go(b, seen, is_binder) {
                         return Some(dup);
                     }
                 }
@@ -11543,7 +11610,7 @@ fn first_duplicate_binder(p: &Pattern) -> Option<String> {
                 let mut or_binds = std::collections::BTreeSet::new();
                 for alt in alts {
                     let mut alt_seen = std::collections::HashSet::new();
-                    if let Some(dup) = go(alt, &mut alt_seen) {
+                    if let Some(dup) = go(alt, &mut alt_seen, is_binder) {
                         return Some(dup);
                     }
                     or_binds.extend(alt_seen);
@@ -11559,7 +11626,7 @@ fn first_duplicate_binder(p: &Pattern) -> Option<String> {
         }
     }
     let mut seen = std::collections::HashSet::new();
-    go(p, &mut seen)
+    go(p, &mut seen, is_binder)
 }
 
 /// The prebuilt protocols every program starts with. `Comparable` requires

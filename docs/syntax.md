@@ -397,7 +397,10 @@ recursive call contributes no type (it is skipped, the non-recursive returns dec
 references / mutual recursion resolve via a fixpoint — so a callee defined *after* the caller still
 yields the caller's precise inferred type. A function that is genuinely un-inferable (pure self- or
 mutual recursion with **no concrete base case anywhere**) keeps a permissive inferred type; annotate
-it with an explicit `-> T` for a precise type.
+it with an explicit `-> T` for a precise type. This applies uniformly to **struct/enum methods** as
+well as free functions: an inferred method return flows to call sites (`P(3).val()` is typed by the
+inferred return, not `Unknown`) and to **protocol satisfaction** (an inferred `compare(self, o)`
+yielding `bool` fails `Comparable`, which requires `-> int`, exactly as an explicit `-> bool` would).
 
 **Returns on every path (enforced).** A **multiline** function with a **declared non-void return
 type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a
