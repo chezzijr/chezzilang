@@ -9521,6 +9521,18 @@ fn combined_method_turbofish_mismatch_errors() {
     );
 }
 
+/// PART 2 (combined variant guard): a method-level turbofish on a generic VARIANT ctor is an error —
+/// `Box[int].Has[str](5)` (a variant takes no method type args). Under the broadened parser steal this
+/// arrives as a Field callee at the `type_apply_head` branch; without the explicit guard the `targs`
+/// would be silently dropped (the old Index-over-Field block that errored is now bypassed).
+#[test]
+fn combined_variant_method_turbofish_errors() {
+    rejects(
+        "enum Box[T]:\n    Has(T)\n    Empty\nfn main():\n    _ := Box[int].Has[str](5)\nmain()\n",
+        "takes no method type arguments",
+    );
+}
+
 /// PART 2: a static method param that SHADOWS the enclosing struct's type param name is rejected
 /// (the existing `fn_sig` guard fires for static methods now that they're allowed).
 #[test]
@@ -9609,13 +9621,112 @@ fn iter_method_turbofish_errors() {
     );
 }
 
-/// PART 2 regression GUARD: indexing a fn-valued field on an INDEXED receiver and calling it
-/// (`arr[i].handlers[k](x)`, `arr[0].handlers[0](y)`) must stay ordinary index-then-call — NOT a
-/// member-turbofish (head `arr` is a LOCAL). Must type-check (this is the exact prior-run regression).
+/// AUTHORIZED REGRESSION (broadened parser steal): the new UNIFORM rule is `recv.name[X](args)`
+/// parses as a method turbofish on ANY receiver. So a VARIABLE-index fn-field index-then-call on a
+/// non-bare receiver — `arr[i].handlers[k](10)` — now parses as a method turbofish (`k` reads as a
+/// type name) and errors. This is intentionally uniform with the bare-ident case `w.handlers[k](10)`,
+/// which ALREADY required parens. Workaround: parens, `(arr[i].handlers[k])(10)` (see the `_ok` test).
 #[test]
-fn index_then_call_on_indexed_receiver_stays() {
+fn var_index_then_call_on_indexed_receiver_now_turbofish_errors() {
+    rejects(
+        "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n",
+        "type argument",
+    );
+}
+
+/// The documented workaround for the authorized regression: parenthesize the index-then-call —
+/// `(arr[i].handlers[k])(10)` — so the `(` no longer immediately follows the `]` and the steal does
+/// not fire. Must type-check (the fn-valued field is indexed then the value is called).
+#[test]
+fn parenthesized_var_index_then_call_ok() {
     ok(
-        "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n    print(arr[0].handlers[0](20))\n",
+        "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print((arr[i].handlers[k])(10))\n",
+    );
+}
+
+/// A NUMERIC index-then-call on an indexed receiver stays ordinary index-then-call: `0` is not a
+/// type, so `try_parse_type_arg_call` backtracks and `arr[0].handlers[0](20)` keeps its meaning.
+#[test]
+fn numeric_index_then_call_on_indexed_receiver_stays() {
+    ok(
+        "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    print(arr[0].handlers[0](20))\n",
+    );
+}
+
+/// BOUNDARY: a plain subscript with NO following call stays an Index on a non-bare receiver — neither
+/// `obj.items[0]` (numeric) nor `m.data[k]` (variable) is followed by `(`, so the steal never fires.
+#[test]
+fn subscript_without_call_on_non_bare_receiver_stays_index() {
+    ok(
+        "struct S:\n    items: List[int]\nfn main():\n    s := S([1, 2, 3])\n    print(s.items[0])\n",
+    );
+    ok(
+        "struct M:\n    data: Map[str, int]\nfn main():\n    m := M({\"a\": 1})\n    k := \"a\"\n    print(m.data[k])\n",
+    );
+}
+
+// ===== member-level turbofish on a NON-BARE receiver (broadened parser steal) =====
+// `recv.name[X](args)` now parses as a method turbofish on ANY receiver (not just a bare ident),
+// so a call-result / factory-result / field / index receiver can all take a member turbofish.
+
+/// Call-result receiver: `W(1).cast[str]("a")` — the receiver is a struct ctor CALL, not a bare
+/// ident. Previously mis-parsed as `Index{Field, str}` then a value-call ⇒ "unknown name 'str'".
+#[test]
+fn member_turbofish_on_call_result_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nfn main():\n    a := W(1).cast[str](\"a\")\n    s: str = a.v\n    print(s)\nmain()\n",
+    );
+}
+
+/// Factory-result receiver: `mk().cast[str]("a")` — receiver is a free-fn call.
+#[test]
+fn member_turbofish_on_factory_result_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nfn mk() -> W[int]:\n    return W(1)\nfn main():\n    a := mk().cast[str](\"a\")\n    s: str = a.v\n    print(s)\nmain()\n",
+    );
+}
+
+/// Field receiver: `h.w.cast[str]("a")` — receiver is a (deeper) field access, NOT a bare ident.
+#[test]
+fn member_turbofish_on_field_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nstruct H:\n    w: W[int]\nfn main():\n    h := H(W(1))\n    a := h.w.cast[str](\"a\")\n    s: str = a.v\n    print(s)\nmain()\n",
+    );
+}
+
+/// Index receiver: `xs[0].cast[str]("a")` — receiver is an index expression.
+#[test]
+fn member_turbofish_on_index_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nfn main():\n    xs := [W(1)]\n    a := xs[0].cast[str](\"a\")\n    s: str = a.v\n    print(s)\nmain()\n",
+    );
+}
+
+/// Chained: `W(1).cast("a").cast[bool](true)` — a member turbofish on the result of a prior method
+/// call (the receiver is itself a method-call expression).
+#[test]
+fn member_turbofish_chained_on_method_result_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nfn main():\n    a := W(1).cast(\"a\").cast[bool](true)\n    b: bool = a.v\n    print(b)\nmain()\n",
+    );
+}
+
+/// Multi-type-arg member turbofish on a NON-BARE receiver: `mk().pair[int, str](1, "x")`. The comma
+/// in the type list means this can NEVER ride the old single-arg Index-reinterpret path — it REQUIRES
+/// the broadened parser steal.
+#[test]
+fn member_multi_turbofish_on_non_bare_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn pair[A, B](self, x: A, y: B) -> A:\n        return x\nfn mk() -> W[int]:\n    return W(1)\nfn main():\n    r: int = mk().pair[int, str](1, \"x\")\n    print(r)\nmain()\n",
+    );
+}
+
+/// Nested-generic member turbofish on a NON-BARE receiver: `W(1).cast[Map[str, int]](m)`. The inner
+/// `[..]` of the type arg likewise cannot ride the Index-reinterpret path — REQUIRES the broaden.
+#[test]
+fn member_nested_generic_turbofish_on_non_bare_receiver_ok() {
+    ok(
+        "struct W[T]:\n    v: T\n    fn cast[U](self, x: U) -> W[U]:\n        return W(x)\nfn main():\n    m: Map[str, int] = {\"a\": 1}\n    a := W(1).cast[Map[str, int]](m)\n    n: int = a.v[\"a\"]\n    print(n)\nmain()\n",
     );
 }
 

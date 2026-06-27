@@ -1847,13 +1847,19 @@ impl Parser {
                         continue;
                     }
                     // `name[Type, …](args)` — explicit call-site type arguments. A bare name can be a
-                    // generic fn / struct / variant; a qualified `Enum.Variant` (a `Field` over a bare
-                    // ident) can be a generic variant constructor (`Tree.Node[int](…)`). Only try the
-                    // steal there; anything else (`arr[i]`, `obj.f[i]`) is a plain index. SPECULATIVE:
-                    // if the `[types](` shape isn't present we backtrack and parse an index instead, so
-                    // a numeric or non-type subscript (`fns[0](x)`) keeps its index+call meaning.
+                    // generic fn / struct / variant; ANY member access (`recv.name`, a `Field` over an
+                    // arbitrary receiver) can be a method turbofish (`recv.name[U](args)`) — the receiver
+                    // need NOT be a bare ident (`W(1).cast[str]("a")`, `xs[0].cast[U](x)`, `h.w.cast[U](x)`
+                    // all qualify). SPECULATIVE: `try_parse_type_arg_call` only commits when it sees the
+                    // exact `[types](` shape, restoring pos+depth otherwise, so a genuine subscript that
+                    // is NOT a type-then-call (`obj.items[0]`, `m.data[k]`, the numeric `arr[0].h[0](x)`)
+                    // backtracks and keeps its plain index (then-call) meaning. The trade-off the broaden
+                    // makes UNIFORM across all receivers: `recv.name[X](args)` where `X` parses as a type
+                    // ALWAYS parses as a method turbofish; index-then-call of a fn-VALUED field therefore
+                    // needs parens — `(recv.name[k])(args)` — on ANY receiver (the bare-ident receiver
+                    // already required this; non-bare receivers now match it).
                     let steal = matches!(e.kind, ExprKind::Ident(_))
-                        || matches!(&e.kind, ExprKind::Field { obj, .. } if matches!(obj.kind, ExprKind::Ident(_)));
+                        || matches!(&e.kind, ExprKind::Field { .. });
                     let type_call = if steal {
                         self.try_parse_type_arg_call(&e, span)?
                     } else {

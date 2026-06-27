@@ -1,8 +1,11 @@
 # turbofish at the DECLARATION site (PART 2, member-side). A member declares its OWN type args
 # (`fn make[U]`); they compose with the type-side args from PART 1 (`Box[int].`). Inference is the
 # default — turbofish only when the args can't bind a param. The combined form `Box[int].make[U](x)`
-# is resolved by CHECKER reinterpretation (the parser can't tell it from `value[i].field[k](x)`),
-# then dispatches type-erased to the same static/method path. Three engines must agree byte-for-byte.
+# dispatches type-erased to the same static/method path. Three engines must agree byte-for-byte.
+#
+# UNIFORM PARSE RULE: `recv.name[X](args)` parses as a method turbofish on ANY receiver — a bare
+# ident, a call result (`W(1).cast[str](..)`), a field (`h.w.cast[..]`), or an index (`xs[0].cast[..]`).
+# Index-then-call of a fn-VALUED field therefore needs parens on ANY receiver — `(recv.name[k])(args)`.
 
 struct Box[T]:
     val: T
@@ -20,10 +23,24 @@ struct Pair:
     fn first[A, B](self, x: A, y: B) -> A:
         return x
 
-# A fn-valued field on a struct, indexed on an INDEXED receiver: `arr[i].handlers[k](x)` must stay an
-# ordinary index-then-call (the head is a LOCAL), NOT a member-turbofish. This is the regression guard.
+# A generic struct with an instance method that declares its OWN `[U]`. The receiver of `.cast[U]`
+# can be ANY expression (call result, field, index) — all parse as a member turbofish.
+struct W[T]:
+    v: T
+    fn cast[U](self, x: U) -> W[U]:
+        return W(x)
+
+# Holds a W so a FIELD can be the receiver of a member turbofish (`h.w.cast[..]`).
+struct H:
+    w: W[int]
+
+# A fn-valued field on a struct. Index-then-call on an indexed receiver `arr[i].handlers[k](x)` now
+# parses as a member turbofish (the uniform rule), so the value-call form needs parens.
 struct Cell:
     handlers: List[fn(int) -> int]
+
+fn mk() -> W[int]:
+    return W(1)
 
 fn main():
     # Generic static own `[U]` — `U` INFERRED from the argument (no turbofish).
@@ -42,11 +59,33 @@ fn main():
     p := Pair(0)
     print(p.first[int, str](7, "ignored"))   # 7
 
-    # REGRESSION GUARD: index-then-call on an indexed receiver stays index-then-call.
+    # Member turbofish on a CALL-RESULT receiver (not a bare ident): `W(1).cast[str](..)`.
+    cr := W(1).cast[str]("call")
+    print(cr.v)                         # call
+
+    # Member turbofish on a FACTORY-RESULT receiver: `mk().cast[str](..)`.
+    fr := mk().cast[str]("factory")
+    print(fr.v)                         # factory
+
+    # Member turbofish on a FIELD receiver: `h.w.cast[str](..)`.
+    h := H(W(1))
+    fd := h.w.cast[str]("field")
+    print(fd.v)                         # field
+
+    # Member turbofish on an INDEX receiver: `xs[0].cast[str](..)`.
+    xs := [W(1)]
+    ix := xs[0].cast[str]("index")
+    print(ix.v)                         # index
+
+    # CHAINED member turbofish on a prior method result: `W(1).cast("a").cast[bool](true)`.
+    ch := W(1).cast("a").cast[bool](true)
+    print(ch.v)                         # true
+
+    # AUTHORIZED REGRESSION + workaround: index-then-call of a fn-valued field needs parens.
     arr := [Cell([fn(x: int) -> int: x + 1])]
     i := 0
     k := 0
-    print(arr[i].handlers[k](10))       # 11
+    print((arr[i].handlers[k])(10))     # 11
     print(arr[0].handlers[0](20))       # 21
 
 main()
