@@ -215,20 +215,25 @@ impl LanguageServer for Backend {
 }
 
 /// Strip the language tag from every fenced-code-block delimiter in `s` (a line whose first
-/// non-whitespace is a run of 3+ backticks), leaving the bare backtick run. A language-tagged fence
-/// reaching a markdown hover renderer triggers a missing-language treesitter injection that crashes
-/// some clients (Neovim 0.12) — see commit 0f36a59. An untagged fence renders as plain monospace.
+/// non-whitespace is a run of 3+ backticks OR tildes), leaving the bare delimiter run. A
+/// language-tagged fence reaching a markdown hover renderer triggers a missing-language treesitter
+/// injection that crashes some clients (Neovim 0.12) — see commit 0f36a59. CommonMark §4.5 treats
+/// ```` ``` ```` and `~~~` as fenced code blocks alike, and treesitter-markdown injects on the
+/// info-string of BOTH regardless of delimiter, so both must be untagged. An untagged fence still
+/// renders as plain monospace.
 fn untag_fences(s: &str) -> String {
     s.lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
-                let indent = &line[..line.len() - trimmed.len()];
-                let ticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
-                format!("{indent}{ticks}")
-            } else {
-                line.to_string()
+            // A fence delimiter is a leading run of 3+ of the same fence char (backtick or tilde).
+            if let Some(delim @ ('`' | '~')) = trimmed.chars().next() {
+                let run: String = trimmed.chars().take_while(|&c| c == delim).collect();
+                if run.len() >= 3 {
+                    let indent = &line[..line.len() - trimmed.len()];
+                    return format!("{indent}{run}");
+                }
             }
+            line.to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -260,6 +265,21 @@ mod tests {
             "language tag must be stripped: {out:?}"
         );
         assert_eq!(out, "Example:\n```\nfoo()\n```");
+    }
+
+    #[test]
+    fn untag_fences_strips_tilde_fence_tag() {
+        // CommonMark tilde fences inject identically to backtick fences (treesitter-markdown matches
+        // the info-string of both), so `~~~lang` must also be untagged — else it re-arms 0f36a59.
+        let doc = "Example:\n~~~chezzi\nfoo()\n~~~";
+        let out = untag_fences(doc);
+        assert!(
+            !out.contains("~~~chezzi"),
+            "tilde language tag must be stripped: {out:?}"
+        );
+        assert_eq!(out, "Example:\n~~~\nfoo()\n~~~");
+        // A short tilde run (< 3, e.g. a strikethrough or stray tilde) is not a fence — leave it.
+        assert_eq!(untag_fences("~~not a fence~~"), "~~not a fence~~");
     }
 
     #[test]
