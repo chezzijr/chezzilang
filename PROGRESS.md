@@ -1523,6 +1523,12 @@ attempts, see `docs/future.md` §3.13; protocols stay instance-only.
 substitution; removed the "cannot declare its own `[U]`" / "method-level turbofish reserved" notes),
 `spec.md` (PART 2 milestone note; lifted the static-own-`[U]` limit), `grammar.bnf` (generalized
 production + combined-form checker-reinterpreted comment).
+**KNOWN FOLLOW-UP (deferred, doc-only — revisit later):** the authorized-regression error for
+`recv.name[k](args)` where `name` is a fn-valued field / not a generic method is currently the bare
+`method '…' takes no type argument(s)`. Upgrade it to a *guiding* diagnostic that detects the
+fn-field/non-generic-member case and suggests the parens workaround `(recv.name[k])(args)` so users
+hit by the uniform-steal rule are pointed at the fix without reading the spec caveat. Checker-side,
+low risk, no parser change; pairs with a regression test on the parenthesized form.
 
 **✅ Static (associated) methods on struct + enum — the "no self ⇒ static" rule.** A struct/enum
 method whose first parameter is **not** `self` (or which has no parameters) is a **static** method,
