@@ -11,6 +11,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Manual feature-audit sweep — 3 correctness bugs found + fixed, playbook documented (2026-06-27).**
+A structured adversarial hand-audit of the feature domains the *automated* oracles can't reach
+(generics, `match`/enums, closures, protocols, namespace/import gating — `src/difftest/generate.rs`
+emits none of these). Fanned out parallel agents per domain, each probing edge cases on BOTH engines +
+`check`, evidence-gated. Found and fixed: **(1)** a `match` **exhaustiveness soundness hole** — guarded
+arms (`A if c`) and refutable payloads (`Some(0)`, `Pair(0,y)`) wrongly closed a variant, so a
+non-exhaustive `match` passed `check` then **faulted at runtime** (commits in
+[`src/checker`](src/checker/mod.rs) `bind_match_arm`/`bind_subpattern`; a nested **single-variant**
+payload stays irrefutable, verified); **(2)** the namespace name-leak (entry above); **(3)** polish —
+NaN `-NaN` via the format-spec path, and a misleading "earlier push" diagnostic for an un-inferred
+type param. All TDD, two-engine-parity-green, merged via `auto-task` → `post-merge-gate` (2821 tests).
+The repeatable method — domains, per-agent protocol, bug taxonomy, and the procedure gotchas (verify the
+CLI via `cargo run --bin chezzi` not a hardcoded `target/` path; an `ok()` unit test passing ≠ the CLI
+is correct; adversarially verify every fix) — is now the **"Manual feature-audit playbook"** in
+[`docs/bug-discovery.md`](docs/bug-discovery.md) (lever #9). Run it every pre-freeze session.
+
 **✅ Checker — builtin-type namespace name-leak, two holes closed (2026-06-27).** Checker-only,
 parity-safe by construction (mirrors the landed std.concurrency/std.time/std.ffi gates; NO runtime/opcode
 change beyond two byte-identical `bind_import` skips). **HOLE A — decl-guard incomplete:** `is_reserved_type`

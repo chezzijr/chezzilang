@@ -98,6 +98,11 @@ cases.
    coverage makes those gaps visible.)
 8. **Dogfooding** — write real programs (a JSON CLI, a mini-interpreter, a log analyzer). Finds
    semantic/ergonomic/integration bugs and missing-feature friction that fuzzing structurally cannot.
+9. **Manual feature-audit (agent-driven).** ✅ **Playbook below.** A structured adversarial sweep of the
+   feature domains the generators *cannot reach* — generics, `match`/enums, closures, protocols,
+   modules, namespace/import gating. The June 2026 *automated* hunt found numeric/parity bugs; the
+   June 27 *manual* audit found a **`match` exhaustiveness soundness hole** + namespace leaks the
+   differential generator can never surface (it emits no generics/enums/match). See the playbook.
 
 ## Recommended starting point
 
@@ -110,6 +115,95 @@ Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the interpret
 correct (it must produce byte-identical results to the VM). Standing up Tier 1 first — so the
 reference semantics are fuzzed and differentially validated — de-risks the JIT before a line of it is
 written.
+
+## Manual feature-audit playbook (agent-driven — finds what the generators can't reach)
+
+> **Run this when** the automated oracles (panic-fuzz, CPython-differential, DSA) have gone quiet but
+> the language is still pre-freeze (pre-JIT). "No bugs found by the fuzzers" ≠ "the language is
+> correct" — it means *that bug class* is exhausted. The fuzzers only exercise a narrow surface; this
+> playbook attacks the rest by hand. **It is the highest-yield way to find correctness bugs in the
+> typed feature surface**, and it is repeatable every session.
+
+### Why the generators miss these (the structural gap)
+
+`src/difftest/generate.rs` is **correct-by-construction over a deliberately small surface**: straight-line
+code + simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative
+bounds (it *avoids* overflow, deep nesting, aliasing). It emits **no** generics, structs, enums, `match`,
+closures/HOF, protocols, `Result`/`Option`/`?`, recursion, or modules. So every bug in those features is
+invisible to it. The VM↔interp **parity** oracle is also blind here: the two engines were co-developed,
+so they share bugs — parity catches *divergence*, never *shared wrongness*. A bug that both engines agree
+on **and** lives in an un-generated feature is undiscoverable by automation. That is exactly where the
+real bugs have been.
+
+### Bug taxonomy this audit targets
+
+Every finding so far falls into one of these (use as a "what am I hunting" checklist):
+
+- **Feature doesn't work as documented** — the spec says X, the impl does Y (e.g. `match` accepts a
+  non-exhaustive set then faults at runtime — a *soundness* hole: `check` passes, the program traps).
+- **Namespace pollution / name leak** — a builtin name resolves without its `import` (e.g. `Socket`
+  usable with no `import std.net`), or a builtin type name can be *redeclared* (`struct int`) and is
+  then silently shadowed → self-contradictory diagnostics (`expected return type Socket, found Socket`).
+- **Import / path resolution** — a module resolves to the wrong file, fails for a file that exists, or
+  is cwd-sensitive; double-eval of a module's top level; bad error attribution across a transitive chain.
+- **Numeric / scalar edge cases** — overflow at a seam the fuzzer skips (`*`, `pow`, shifts, `abs(MIN)`),
+  float formatting (`-NaN`), div/mod sign rules, slice steps, unicode indexing, aliasing/copy semantics.
+- **Unintended feature from a bug** — an "abnormal feature" that only exists because of an
+  implementation accident (an accepted form the spec never sanctioned); it WILL be relied on, then break.
+- **Diagnostic-quality bugs** — wrong/misleading error text (`"earlier push"` when there was none),
+  even when the accept/reject decision is correct. Low severity, high user-confusion.
+- **Hidden / latent** — passes every existing test because the tests never exercise the angle. The
+  audit's whole point: surface these before a JIT freezes them into native code.
+
+### The procedure (repeatable)
+
+1. **Measure the blind spot first.** Re-read `src/difftest/generate.rs`'s `Features`/`gen_*` to confirm
+   what's *still* un-generated — that list IS your target domains. (Don't re-hunt a domain the generator
+   now covers.)
+2. **Build, then fan out.** `cargo build --release`. Dispatch one agent **per feature domain** in
+   parallel (`superpowers:dispatching-parallel-agents`) — domains are independent, no shared state.
+   The five domains below + import-resolution were the June 27 split; reuse or refine.
+3. **Per-agent protocol** (bake into every prompt):
+   - **Read the spec FIRST** (`docs/syntax.md`, `docs/spec.md`, `docs/stdlib.md`) — distinguish a *bug*
+     from *intended design*. Chezzi's intended Python-divergences (i64 not bignum, truncating `/`,`%`,
+     static typing) are **not** bugs; silent wrapping / UB / a runtime fault on an accepted program is.
+   - **Write tiny focused `.chz` probes**, one angle each.
+   - **Run on BOTH engines** (`run` and `run --serial`) **and** `check`. Divergence = bug. Where the
+     semantics should match Python, diff against `python3`.
+   - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite
+     spec) + ACTUAL (quoted) + VM/interp divergence? + severity. No speculation; "clean" if an angle
+     yields nothing, with the angles covered listed.
+4. **Triage each confirmed bug** through `auto-task` (research → plan → TDD → prosecute/defend) →
+   merge → `post-merge-gate`. Batch by file seam (most checker bugs touch `src/checker/mod.rs` in
+   *disjoint functions* — safe to parallelize as separate auto-tasks, merge serially).
+
+### Domain checklist (the reusable target list)
+
+| Domain | High-value angles (start here) |
+|---|---|
+| **Generics** | turbofish at decl vs use site; nested (`Map[str,List[int]]`); return-only param inference (`empty[T]()`); generic methods/static methods; protocol bounds + calling a bound method on a type param; recursive generic enums; arity/mismatch → clean error not panic |
+| **`match`/enums** | exhaustiveness with **guards** (`A if c` must NOT close A) and **refutable payloads** (`Some(0)`, `Pair(0,y)` must NOT close); nested single-variant *is* irrefutable; or-patterns binding consistency; redundant/duplicate arms; range patterns; match-as-expression divergent arms |
+| **Closures/defer/recover** | loop-variable capture (late-binding?); by-value vs by-ref capture (local vs **global** differ!); escaping closures; `defer` LIFO + arg-eval timing + early-return/break; `recover` catching overflow/index/div0; re-panic in `recover` |
+| **Namespace/import gating** | redeclare a builtin type (`struct int`/`List`/`Socket`/`range`) → must be `reserved (builtin)`, never silently shadowed; bare std type without `import` → import hint; `import X from M` for a pure type runs on BOTH engines (the `bind_import` skip); reserved-name shadowing by var/param/type-param/field |
+| **Import/path resolution** | cwd-sensitivity; nested `chezzi.toml` (entry-root vs import-root must agree); dotted paths; dir/file name collision; diamond re-import (top-level runs once?); a local module shadowing a `std.*` name; entrypoint `:fn` suffix forms; transitive-error attribution |
+| **Numeric/string/collection** | overflow at `*`/`pow`/shifts/`abs(MIN)`/fold; float `-NaN` via format-spec; div/mod sign + by-zero; slice neg-step/OOB/step-0; unicode index/len; **aliasing** (list-of-list shared ref, `b:=a`, captured-list mutation); NaN/inf in sort/keys/compare |
+
+### Procedure gotchas (these cost real time — internalize them)
+
+- **Verify the CLI via `cargo run --release --bin chezzi -- …`, never a hardcoded `target/` path.**
+  auto-task worktrees redirect `target-dir` to `~/.cache/chezzi-target` (a git-excluded `.cargo/config.toml`);
+  main builds to `./target`. A hardcoded cache path serves a *stale worktree binary* → a fake "bug".
+  `cargo build` can even report "Finished" while the on-disk artifact is missing/stale. Trust
+  `cargo run`/`cargo test`, not a path + mtime. (4 bins exist → `cargo run` needs `--bin chezzi`.)
+- **An `ok()`/`check_src` unit test passing ≠ the CLI is correct.** `check_src` (test helper) runs
+  *no desugar, single-module*; the real CLI runs `build_graph` (desugars) → `check_graph` (module-scoped
+  keys). Use the `check_entry`/`entry_ok` helpers (which go through `build_graph` + `check_graph`) to
+  regression-guard a finding on the **real** path, and confirm via the CLI binary itself.
+- **Adversarially verify every fix — an over-broad fix over-rejects.** Twice this session a fix that
+  closed the reported hole *also* rejected a legitimate neighbor (a nested single-variant match; a
+  bound-param push). Always add a failing-then-green test for the *boundary* case the fix must NOT break.
+- **Parity-green is necessary, not sufficient.** Both engines agreeing only rules out divergence bugs;
+  it says nothing about shared wrongness. The external check (spec + CPython) is what catches those.
 
 ## Panic-fuzz harness (`src/panicfuzz/`)
 
