@@ -1,0 +1,35 @@
+# Generic struct/enum operator overloading + protocol satisfaction.
+# A generic type's `add`/`neg`/`compare` methods overload `+`/`-`/`<` and satisfy
+# `Add`/`Comparable`, so it flows into protocol-bounded generics like `twice[T: Add]` —
+# the receiving type's own param (`T -> int` from `Box[int]`) is threaded into the
+# protocol-method signature comparison, not just `Self`.
+
+struct Box[T]:
+    v: T
+    fn add(self, o: Box[T]) -> Box[T]:
+        return Box(self.v)
+    fn neg(self) -> Box[T]:
+        return Box(self.v)
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+
+enum Num[T]:
+    Val(T)
+    fn add(self, o: Num[T]) -> Num[T]:
+        return self
+    fn get(self) -> T:
+        match self:
+            Num.Val(x): return x
+
+fn twice[T: Add](x: T) -> T:
+    return x + x
+
+fn main():
+    print((Box(5) + Box(10)).v)
+    print((-Box(7)).v)
+    print(Box(3) < Box(4))
+    print(twice(Box(8)).v)
+    print((Num.Val(1) + Num.Val(2)).get())
+    print(twice(Num.Val(9)).get())
+
+main()

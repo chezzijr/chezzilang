@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Checker — operator overloading + protocol satisfaction on GENERIC structs/enums (2026-06-28).**
+A generic type that defined an operator method (`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) could
+**call it directly** but could NOT use the matching operator (`a + b`, `-a`, `a < b`), satisfy the
+protocol (`Add`/.../`Comparable`), or flow into a protocol-bounded generic (`twice[T: Add]`) — `check`
+*and* both engines rejected with `cannot apply + to Box[int] and Box[int]` / `does not satisfy Add
+(method 'add' has the wrong signature)`. Non-generic types worked, and `Stringable`/`Hashable` worked
+on generics (their sigs never mention the type param) — the exact asymmetry that proved it was a
+generic-substitution bug, not a missing feature. **Root cause:** `satisfies_methods` (checker, shared
+front-end) substituted only the protocol's own params (`pmap`) + `Self` into the comparison; the
+RECEIVING type's own param→arg map (e.g. `T→int` from `Box[int]`) was never threaded, so the user's
+stored method `add(self, o: Box[T]) -> Box[T]` (params kept UNsubstituted) failed
+`compatible(Box[int], Box[T])`. **Fix:** build `tymap` from `ty` itself (struct via `struct_param_map`,
+enum via `enum_param_map`, newtype via `newtype_type_params`) and pre-substitute it into the ACTUAL
+(user) method signature before `method_matches`. Only the actual side is bound, so a genuinely wrong
+sig (`add(self, o: int) -> int`) STILL fails — no laundering. The newtype operator-soundness gate
+(generic newtype operators stay intentionally method-only/unreachable) is untouched (the fix lives
+after that early-return). Parity-safe by construction (one shared checker; no per-engine logic). TDD:
+new checker tests (generic struct/enum add/neg/compare, multi-param, wrong-sig boundary) + twin golden
+`examples/generic_operator_overload.chz` (run byte-identical on VM, interp, parallel). `docs/syntax.md`
+already documented this as working — the bug was the gap between spec and checker; now closed.
+
 **✅ Manual feature-audit sweep — 3 correctness bugs found + fixed, playbook documented (2026-06-27).**
 A structured adversarial hand-audit of the feature domains the *automated* oracles can't reach
 (generics, `match`/enums, closures, protocols, namespace/import gating — `src/difftest/generate.rs`

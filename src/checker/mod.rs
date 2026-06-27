@@ -10547,6 +10547,33 @@ impl Checker {
             .cloned()
             .zip(args.iter().cloned())
             .collect();
+        // The RECEIVING type's own param→arg substitution (e.g. `T→int` from `Box[int]`). The user's
+        // stored methods carry the struct/enum/newtype's type params UNsubstituted (a method on
+        // `Box[T]` is stored as `add(self, o: Box[T]) -> Box[T]`), so for a generic instantiation we
+        // must bind those params to the instantiation's args before comparing against the (Self-bound)
+        // protocol signature — otherwise `compatible(Box[int], Box[T])` fails and a perfectly good
+        // operator method is rejected as "wrong signature". Non-generic types yield an empty map (no
+        // params), and checking inside the generic's own def (`ty = Box[T]`) yields an identity map
+        // `{T→T}` — both are no-op substitutions, so this only ever binds concrete args.
+        let tymap: HashMap<String, Ty> = match ty {
+            Ty::Struct(name, targs) => self
+                .structs
+                .get(name)
+                .map(|info| struct_param_map(info, targs))
+                .unwrap_or_default(),
+            Ty::Enum(name, targs) => self.enum_param_map(name, targs),
+            Ty::NewType(key, targs) => self
+                .newtype_type_params
+                .get(key)
+                .map(|tps| {
+                    tps.iter()
+                        .map(|tp| tp.name.clone())
+                        .zip(targs.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => HashMap::new(),
+        };
         for (mname, msig) in &pinfo.methods {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
             let min_params = subst_params.len();
@@ -10559,7 +10586,21 @@ impl Checker {
                 doc: None,
             };
             let msig = &want;
-            match methods.get(mname) {
+            // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
+            // its `Box[T]` becomes `Box[int]` before the comparison. Only the actual side is bound —
+            // a genuinely wrong sig (`add(self, o: int) -> int`) stays a mismatch, no laundering.
+            let actual_owned = methods.get(mname).map(|actual| {
+                if tymap.is_empty() {
+                    actual.clone()
+                } else {
+                    FnSig {
+                        params: actual.params.iter().map(|t| subst(t, &tymap)).collect(),
+                        ret: subst(&actual.ret, &tymap),
+                        ..actual.clone()
+                    }
+                }
+            });
+            match actual_owned.as_ref() {
                 Some(actual) if method_matches(msig, actual, ty) => {}
                 Some(_) => {
                     return Err(format!(

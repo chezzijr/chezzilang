@@ -9120,6 +9120,20 @@ b := Buf([10, 20, 30])
         );
     }
 
+    /// Generic operator-overload golden: a generic struct `Box[T]` and generic enum `Num[T]` whose
+    /// `add`/`neg`/`compare` methods overload `+`/`-`/`<` and satisfy `Add`/`Comparable`, flowing into
+    /// a `twice[T: Add]` bound. Proves the receiving type's own param substitution is threaded into the
+    /// protocol-method comparison. Output must match the checked-in `.expected` (and the VM twin).
+    #[test]
+    fn golden_generic_operator_overload_chz() {
+        let source = include_str!("../../examples/generic_operator_overload.chz");
+        let expected = include_str!("../../examples/generic_operator_overload.expected");
+        assert_eq!(
+            run_capture(source).expect("generic_operator_overload.chz should run"),
+            expected
+        );
+    }
+
     /// Slicing golden: list/str slicing (clamped) + a struct satisfying the `Index`/`IndexSet`/
     /// `Slice` protocols + a generic bounded by `Index[int, V]` over both.
     #[test]

@@ -715,6 +715,95 @@ v := fma(PointA(1), PointA(2), PointA(3))
     rejects(src, "does not satisfy Mul");
 }
 
+// ----- generic struct/enum operator overloading + protocol satisfaction (the receiving type's
+// own type params, e.g. `T->int` from `Box[int]`, must be threaded into the protocol-method
+// signature comparison, in addition to `Self` and the protocol's own params) -----
+
+#[test]
+fn generic_struct_add_satisfies_and_overloads() {
+    // `Box[T]` defines `add(self, o: Box[T]) -> Box[T]`; the `+` operator AND a `T: Add`-bounded
+    // generic must both accept `Box[int]`. Previously rejected ("cannot apply + ..." / "does not
+    // satisfy Add (method 'add' has the wrong signature)") because `T` was never bound to `int`.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: Box[T]) -> Box[T]:
+        return Box(self.v)
+fn twice[T: Add](x: T) -> T:
+    return x + x
+a := (Box(5) + Box(10)).v
+b := twice(Box(7)).v
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_struct_neg_and_compare() {
+    // Unary `neg`/`-` and `compare`/`<`/Comparable over a generic struct.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn neg(self) -> Box[T]:
+        return Box(self.v)
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+a := (-Box(5)).v
+b := Box(5) < Box(10)
+fn smallest[T: Comparable](x: T, y: T) -> T:
+    if x < y:
+        return x
+    return y
+c := smallest(Box(1), Box(2)).v
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_enum_add_satisfies() {
+    // Generic-enum analogue: `enum Num[T]` with `add` overloads `+` and satisfies `Add`.
+    let src = "\
+enum Num[T]:
+    Val(T)
+    fn add(self, o: Num[T]) -> Num[T]:
+        return self
+fn twice[T: Add](x: T) -> T:
+    return x + x
+a := Num.Val(1) + Num.Val(2)
+b := twice(Num.Val(3))
+";
+    entry_ok(src);
+}
+
+#[test]
+fn multi_param_generic_operator() {
+    // A 2-param generic exercises a multi-entry receiving-type substitution {A->int, B->str}.
+    let src = "\
+struct Pair[A, B]:
+    a: A
+    b: B
+    fn add(self, o: Pair[A, B]) -> Pair[A, B]:
+        return self
+p := Pair(1, \"x\") + Pair(2, \"y\")
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_struct_wrong_add_sig_rejected() {
+    // BOUNDARY / soundness: a generic struct whose `add` has a genuinely WRONG signature
+    // (`o: int -> int`, not `Box[T] -> Box[T]`) must STILL be rejected — no type laundering.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: int) -> int:
+        return 0
+fn twice[T: Add](x: T) -> T:
+    return x + x
+v := twice(Box(5))
+";
+    entry_rejects(src, "does not satisfy Add");
+}
+
 #[test]
 fn redeclaring_add_rejected() {
     rejects(
