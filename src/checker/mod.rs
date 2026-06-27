@@ -82,10 +82,45 @@ fn module_label(import: &Import) -> String {
 /// experimental generator existential (`Ty::Struct("Iterator", [T])`) that `iter_elem` / `.next()`
 /// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
 /// on a phantom `.next()`).
+///
+/// The same hazard applies to EVERY bare name `resolve_type` maps to a builtin: a user `struct int`
+/// / `enum List` / `struct Socket` would type-check clean (the decl guards only consulted this set)
+/// and then the use-site (`x: int` / `l: List[int]` / `s: Socket`) would silently resolve to the
+/// builtin, yielding an unreachable user type + self-contradictory diagnostics (`expected Socket,
+/// found Socket`). So the builtin SCALAR (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`nil`),
+/// CONTAINER (`List`/`Set`/`Map`/`Channel`/`range`), and HANDLE (`Socket`/`Listener`/`ptr`/
+/// `owned_str`) type names are all reserved at declaration too — `struct X` is rejected with the same
+/// `type 'X' is reserved (builtin)` error `struct Result` already gives. (The fixed-width FFI integer
+/// names like `int32` are reserved via `native::ffi::TYPE_NAMES` at the decl guards, not listed here.)
 fn is_reserved_type(name: &str) -> bool {
     name == "Result"
         || name == "Option"
         || name == "Iterator"
+        // Builtin scalar primitives — a user `struct int` / `enum str` would shadow the scalar arm in
+        // `resolve_type`.
+        || name == "int"
+        || name == "float"
+        || name == "bool"
+        || name == "str"
+        || name == "bytes"
+        || name == "bytearray"
+        || name == "nil"
+        // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
+        // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`) and `range` (a reserved callable whose ctor a
+        // `struct range` would silently shadow).
+        || name == "List"
+        || name == "Set"
+        || name == "Map"
+        || name == "Channel"
+        || name == "range"
+        // Runtime handle TYPE names: the std.net TCP handles (`Socket`/`Listener`) and the FFI
+        // marshalling primitives (`ptr` and the return-only `owned_str`). Reserved at declaration even
+        // though their USE is import-gated (std.net / std.ffi) — the two gates are independent, exactly
+        // as for the concurrency ctors below.
+        || name == "Socket"
+        || name == "Listener"
+        || name == "ptr"
+        || name == "owned_str"
         // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
         // `struct Executor` is rejected at declaration (a clean `reserved` error), NOT silently
         // shadowed by the builtin ctor. This is SEPARATE from the `import std.concurrency` gate (which
@@ -678,6 +713,15 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `Socket`/`Listener` handle + register poller interest), not run as off-heap natives.
             func("connect", vec![Ty::Str], Ty::result(Ty::Socket));
             func("listen", vec![Ty::Str], Ty::result(Ty::Listener));
+            // The two TCP handle TYPE names live in `sig.types` so `import Socket from std.net`
+            // validates membership; the checker's `bind_import` records them into the per-module
+            // `imported_net` set, and `resolve_type` then accepts the bare `Socket`/`Listener`
+            // annotation only in a module that imported it (whole-module or per-name). They carry no
+            // runtime module-member value — a `Socket` value comes from `connect`/`listen` and the
+            // type resolves directly to `Ty::Socket` — so there are no extra `sig.functions`/`values`.
+            for tn in ["Socket", "Listener"] {
+                sig.types.insert(tn.to_string());
+            }
         }
         "std.fs" => {
             func("list_dir", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
@@ -1083,6 +1127,14 @@ struct Checker {
     /// `import std.time` hint). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
     /// may call `timer` bare) via `current_module_is_stdlib`.
     imported_time: std::collections::HashSet<String>,
+    /// The std.net TCP handle TYPE names (`Socket`/`Listener`) licensed into the *current* module from
+    /// `std.net` (whole-module `import std.net` licenses both; selective `import Socket from std.net`
+    /// licenses just the named ones). Like `imported_concurrency`, these are NOT callable values — they
+    /// only gate `resolve_type`, which accepts the bare `Socket`/`Listener` annotation iff it's in this
+    /// set (else an unknown-type error with the `import std.net` hint; the ctors are `connect`/`listen`,
+    /// already real native fns). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
+    /// may use the two bare) via `current_module_is_stdlib`.
+    imported_net: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -1179,6 +1231,7 @@ impl Checker {
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
+            imported_net: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -1296,6 +1349,7 @@ impl Checker {
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
         self.imported_time.clear();
+        self.imported_net.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -1488,6 +1542,14 @@ impl Checker {
                 if path.as_slice() == ["std".to_string(), "time".to_string()] {
                     self.imported_time.insert("timer".to_string());
                 }
+                // A whole-module `import std.net` licenses BOTH bare TCP handle TYPE names. Keyed on
+                // the EXACT len-2 path. std.net is a REAL native module, so `Import::Plain` already
+                // binds the module object (connect/listen members); we only ADD the type licensing.
+                if path.as_slice() == ["std".to_string(), "net".to_string()] {
+                    for tn in ["Socket", "Listener"] {
+                        self.imported_net.insert(tn.to_string());
+                    }
+                }
             }
             Import::From { path: _, names } => {
                 let sig = self
@@ -1580,6 +1642,25 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_ffi_types.insert(member.clone());
+                            }
+                        } else if matches!(member.as_str(), "Socket" | "Listener") {
+                            // A selective `import Socket from std.net` licenses just the named TCP
+                            // handle TYPE in THIS module (mirrors the per-name concurrency imports).
+                            // Like those, a net handle carries no runtime value (the type resolves
+                            // directly to `Ty::Socket`; a value comes from `connect`/`listen`) AND the
+                            // runtime `bind_import` skip keys on the original member name — so an alias
+                            // would bind nothing usable: reject the rename. Only `std.net`'s `sig.types`
+                            // carries these names (they're reserved, so no user module can export them).
+                            if alias.as_ref().is_some_and(|a| a != member) {
+                                self.error(
+                                    imp.span,
+                                    format!(
+                                        "net type '{member}' cannot be renamed on import — \
+                                         write `import {member} from std.net`"
+                                    ),
+                                );
+                            } else {
+                                self.imported_net.insert(member.clone());
                             }
                         } else if let Some(info) = sig.struct_defs.get(member) {
                             // A user struct imported by name: inject its resolved shape under the
@@ -2233,7 +2314,9 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    if is_reserved_type(name) {
+                    if is_reserved_type(name)
+                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                    {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
                     // A pre-seeded synthetic stdlib struct (`Match`/`Response`/`ProcResult`, always
@@ -2287,7 +2370,9 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    if is_reserved_type(name) {
+                    if is_reserved_type(name)
+                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                    {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
                     // The LAYOUT tables (`enums`/`variants`/`enum_type_params`) are keyed by this
@@ -2990,6 +3075,14 @@ impl Checker {
         self.imported_time.contains(n) || self.current_module_is_stdlib
     }
 
+    /// True iff the std.net TCP handle TYPE name `n` (`Socket`/`Listener`) is usable in the current
+    /// module: either this module imported it from `std.net` (whole-module or per-name), or we're
+    /// inside a privileged stdlib module (std/* may use the two bare). The two ALSO stay reserved names
+    /// (can't be shadowed by a user `struct`); this gate is the SEPARATE "must import to USE" requirement.
+    fn net_licensed(&self, n: &str) -> bool {
+        self.imported_net.contains(n) || self.current_module_is_stdlib
+    }
+
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named { name: n, .. } => match n.as_str() {
@@ -3079,8 +3172,28 @@ impl Checker {
                     Ty::Unknown
                 }
                 // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
-                "Socket" => Ty::Socket,
-                "Listener" => Ty::Listener,
+                // Like `Executor`/`Shared`/`ptr` above, these are NOT global builtins: they resolve
+                // only in a module that imported `std.net` (whole-module or per-name). The names STAY
+                // reserved (no user `struct Socket`); this is the separate import requirement. (An
+                // in-scope type param of the same name was already resolved by the hoisted `type_params`
+                // arm above this match.)
+                n @ ("Socket" | "Listener") => {
+                    if self.net_licensed(n) {
+                        if n == "Socket" {
+                            Ty::Socket
+                        } else {
+                            Ty::Listener
+                        }
+                    } else {
+                        self.error(
+                            span,
+                            format!(
+                                "unknown type '{n}' (import it from std.net: `import std.net`)"
+                            ),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // A transparent type alias resolves to its underlying type (recursively). The
                 // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
                 _ if self.aliases.contains_key(n) => {

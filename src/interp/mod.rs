@@ -4927,6 +4927,13 @@ impl Interp {
                     if &*ns.name == "std.time" && member == "timer" {
                         continue;
                     }
+                    // `std.net`'s `Socket`/`Listener` are TYPE-only imports with NO runtime module-member
+                    // value: a `Socket` value comes from `connect`/`listen` and the type resolves directly
+                    // to `Ty::Socket`. Skip them — the native namespace has no such member. Mirrors the VM
+                    // `bind_import` skip (parity); without it `import Socket from std.net` faults.
+                    if &*ns.name == "std.net" && matches!(member.as_str(), "Socket" | "Listener") {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no

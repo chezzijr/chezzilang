@@ -11,6 +11,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Checker — builtin-type namespace name-leak, two holes closed (2026-06-27).** Checker-only,
+parity-safe by construction (mirrors the landed std.concurrency/std.time/std.ffi gates; NO runtime/opcode
+change beyond two byte-identical `bind_import` skips). **HOLE A — decl-guard incomplete:** `is_reserved_type`
+blocked only 8 names while `resolve_type` maps ~16 bare names to builtins, so `struct int` / `enum List` /
+`struct Socket` type-checked clean then silently shadowed the builtin at the use-site. Extended
+`is_reserved_type` to the full builtin scalar (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`nil`),
+container (`List`/`Set`/`Map`/`Channel`/`range`), and handle (`Socket`/`Listener`/`ptr`/`owned_str`) set,
+and added the `native::ffi::TYPE_NAMES` (FFI width names like `int32`) check to the struct+enum decl guards
+(mirroring NewType/TypeAlias) — all four decl forms now reject with `type 'X' is reserved (builtin)`.
+**HOLE B — std.net types ungated:** `Socket`/`Listener` resolved to `Ty::Socket`/`Ty::Listener`
+UNCONDITIONALLY (no `import std.net`), unlike `Executor`/`Shared`/`ptr`. Added an `imported_net` per-module
+licensing set wired from the whole-module `import std.net` arm + a per-name `import Socket from std.net`
+branch (rename rejected), with a `net_licensed` helper gating the `resolve_type` arm; unlicensed bare use now
+errors `unknown type 'Socket' (import it from std.net: ...)`. Runtime `bind_import` skip added to BOTH vm +
+interp so `from std.net import Socket` doesn't fault (the type carries no module-member value). Production
+blast radius zero (all std.net examples already import it). Tests: `reserved_builtin_type_names_rejected_at_decl`,
+`bare_net_type_without_import_hints_import`, `net_type_with_import_ok`,
+`net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
+`vm::tests::net_from_import_runs_both_engines` (both engines).
+
 **✅ Editor tooling — doc-comments on LSP hover (2026-06-27).** A plain `#` comment block *immediately
 above* a declaration is now its DOC-COMMENT, rendered on LSP hover ABOVE the existing `chezzi` type
 fence. No new marker (`#`, not `##`/`///`); multiline via stacked `#` lines (join with `\n`, one leading
