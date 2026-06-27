@@ -373,9 +373,11 @@
 
 # postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
 # arguments `name[Type, …](args)`, and the scoped `.decode[Type](arg)` form (JSON decode). The
-# `[types](` form is parsed speculatively — only when the callee is a bare IDENT or a qualified
-# `Enum.Variant` (a `DOT IDENT` over a bare ident, for a generic FN / struct / newtype ctor) and the
-# `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain indexing.
+# `[types](` form is parsed speculatively — when the callee is a bare IDENT, OR a `DOT IDENT` field
+# over ANY receiver (`recv.method[Type](args)` on any postfix receiver, not just a bare ident — the
+# broadened steal), and the `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain
+# indexing. Uniform rule: `recv.name[X](args)` always parses as a method turbofish on any receiver;
+# index-then-call of a fn-valued field therefore requires parens — `(recv.field[k])(args)`.
 #
 # DECLARATION-SITE TURBOFISH (the whole rule: explicit type args go at the site the generic is
 # DECLARED). For a generic TYPE (enum variant ctor or static method) they go ON THE TYPE, uniformly:
