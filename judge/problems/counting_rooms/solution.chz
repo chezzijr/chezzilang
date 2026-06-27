@@ -1,0 +1,60 @@
+# CSES 1192 — Counting Rooms. Count 4-connected floor ('.') regions in an n×m grid of '.'/'#'.
+# Stresses: nested List[List[...]] grids, an explicit stack flood-fill (iterative, so deep regions
+# can't overflow the call stack), tuple elements, and string char indexing.
+import std.io
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    m := int(toks[1])
+
+    cells := []
+    for r in 0..n:
+        cells.push(toks[2 + r].chars())
+
+    visited := []
+    for r in 0..n:
+        row := []
+        for c in 0..m:
+            row.push(false)
+        visited.push(row)
+
+    dirs := [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    rooms := 0
+    for sr in 0..n:
+        for sc in 0..m:
+            if cells[sr][sc] == "." and not visited[sr][sc]:
+                rooms += 1
+                stack := []
+                stack.push((sr, sc))
+                visited[sr][sc] = true
+                while stack.len() > 0:
+                    match stack.pop():
+                        Some(cell):
+                            r := cell.0
+                            c := cell.1
+                            for d in dirs:
+                                nr := r + d.0
+                                nc := c + d.1
+                                if nr >= 0 and nr < n and nc >= 0 and nc < m:
+                                    if cells[nr][nc] == "." and not visited[nr][nc]:
+                                        visited[nr][nc] = true
+                                        stack.push((nr, nc))
+                        None: break
+
+    io.print(str(rooms))
+
+main()

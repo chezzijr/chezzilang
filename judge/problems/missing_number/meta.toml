@@ -1,0 +1,5 @@
+name = "Missing Number"
+source = "CSES Problem Set"
+cses_id = 1083
+url = "https://cses.fi/problemset/task/1083"
+note = "Sum-difference; sum(1..n) ~ 2e10 for n=2e5 exercises the int boundary."

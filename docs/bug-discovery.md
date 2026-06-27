@@ -38,6 +38,7 @@ The remedy is twofold and is the core of this strategy:
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
 - **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly + no `[lib]`). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
+- **DSA known-answer harness** — ✅ **built**. `judge/` runs hand-written competitive-programming solutions (`judge/problems/<slug>/solution.chz`) against known-correct CSES answers — a third oracle that catches *shared wrongness* both engines agree on, independent of CPython. The harness itself is written in Chezzi (`judge/run.chz`). See "DSA known-answer harness" below.
 - **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
 
 ## How real implementations find bugs
@@ -226,3 +227,43 @@ A finding prints the seed plus both rendered sources and both captures — paste
 report, reproduce with `--seed N`, then route through `auto-task` → `post-merge-gate`. To accept a
 newly-discovered, deliberately-unfixed divergence, add a narrow matcher to `allowlist.rs` with a
 cited reason.
+
+## DSA known-answer harness (`judge/`)
+
+A third oracle, complementary to the two above. The differential generator (`src/difftest/`) is
+correct **by construction** — it deliberately keeps every int in a safe window so it never trips
+overflow, never recurses, and only emits a cross-language-safe subset. That safety is exactly its
+blind spot: real algorithms live at the edges it avoids. The DSA harness runs **hand-written
+competitive-programming solutions** (deep recursion, big-int boundaries, heavy `List`/`Map`/`Set`
+churn, grids, slicing) against **known-correct answers** — so it catches *shared wrongness* the
+co-developed engines agree on, with an oracle that depends on neither engine nor CPython.
+
+- **Source of truth:** the CSES Problem Set. Each `judge/problems/<slug>/solution.chz` is a
+  hand-written Chezzi solution reading stdin competitive-style (`std.io.read_line`). It is **vetted
+  once** against the published answer; after that, any divergence on re-run is a candidate Chezzi
+  regression.
+- **Test cases:** committed **public samples** (from the statement) under
+  `judge/problems/<slug>/samples/*.in`/`.out`, plus the **full hidden suite** under
+  `judge/data/<slug>/` — the latter is the authors' IP, so it is **gitignored** and fetched locally
+  with `judge/fetch_data.py` (point it at a test ZIP downloaded from the CSES task page).
+- **The harness is itself written in Chezzi** (`judge/run.chz`) — dogfooding: the judge is one more
+  real program exercising the language, and it mirrors the `benches/run.chz` driver pattern. It shells
+  out per case via `sh -c "timeout N chezzi run solution.chz < case.in"` (`std.process` has no stdin
+  piping yet, so the case input is fed by shell redirection), so a solution that hangs (`TIME`),
+  hard-crashes, or panics the host (`PANIC`) is isolated and reported instead of taking down the run.
+  Output is compared whitespace-normalized (CSES checkers are whitespace-insensitive).
+
+How to run:
+
+```sh
+cargo build --release
+./target/release/chezzi run judge/run.chz                 # all problems (samples + any fetched data)
+./target/release/chezzi run judge/run.chz weird_algorithm # one problem
+python3 judge/fetch_data.py <slug> path/to/tests.zip      # install the full hidden suite locally
+```
+
+A non-`PASS` verdict on a vetted solution is a candidate bug: minimize the failing `.in`, then land a
+failing-then-green unit test per the repo's TDD flow before fixing. Verdicts: `PASS` / `WRONG` (prints
+the first differing line) / `FAULT` (Chezzi runtime error + exit code) / `PANIC` (Rust host panic — a
+Chezzi bug for certain) / `TIME` (timeout). A problem with no cases is **skipped**, never failed, so
+the harness is inert until samples are committed or data is fetched.

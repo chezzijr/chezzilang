@@ -167,6 +167,22 @@ non-tautology guard + fixed-seed fuzz) and `src/bin/difffuzz` (unattended; `--se
 3000-seed release sweep clean; manually confirmed it flags the i64-overflow class (the June-2026
 `sum()` blind spot). `cargo test --test difftest` green, clippy clean. Usage + design:
 [`docs/bug-discovery.md` "Differential oracle"]. Lever #1 (panic-fuzzer) now also built — see above.
+
+**✅ DSA known-answer harness — `judge/` (2026-06-27).** A third bug-discovery oracle, complementary
+to panic-fuzz (#1) and the CPython differential (#2). Where the differential generator is correct
+*by construction* (safe int window, no recursion, cross-language subset) — and so is blind to exactly
+those edges — this runs **hand-written competitive-programming solutions** (`judge/problems/<slug>/
+solution.chz`, reading stdin) against **known-correct CSES answers**, catching *shared wrongness* both
+co-developed engines agree on, with an oracle independent of both engines and of CPython. Seeded with
+6 problems across distinct stress paths: `weird_algorithm` (loop/bigint Collatz), `distinct_numbers`
+(Set), `missing_number` (sum bigint), `playlist` (Map sliding window), `coin_combinations_i` (DP+mod),
+`counting_rooms` (grid flood-fill). Cases: committed public **samples** (`samples/*.in`/`.out`) + the
+gitignored full hidden suite (`judge/data/`, fetched via `judge/fetch_data.py` from a CSES test ZIP —
+authors' IP, never committed). **The harness is written in Chezzi** (`judge/run.chz`, dogfood; mirrors
+`benches/run.chz`): shells out per case under `timeout`, classifies `PASS`/`WRONG`/`FAULT`/`PANIC`/
+`TIME`, whitespace-normalized compare. Not part of `cargo test` (a `.chz` driver); inert until samples
+exist / data is fetched. All 6 seed solutions PASS on samples; negative checks confirm `WRONG`+diff and
+`FAULT`+exit-code detection. Usage + design: [`docs/bug-discovery.md` "DSA known-answer harness"].
 Remaining: P5 (IR shrinker + corpus dump + opt-in overflow-metamorphic mode).
 
 **✅ Oracle coverage widened (2026-06-26).** The differential oracle's IR + both emitters + generator

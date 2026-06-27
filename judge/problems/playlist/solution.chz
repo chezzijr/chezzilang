@@ -1,0 +1,34 @@
+# CSES 1141 — Playlist. Longest contiguous run of distinct values (sliding window).
+# Stresses: Map[int,int] last-seen lookups + updates over up to 2e5 elements.
+import std.io
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    last := {}
+    best := 0
+    start := 0
+    for i in 0..n:
+        v := int(toks[1 + i])
+        if last.has(v) and last[v] >= start:
+            start = last[v] + 1
+        last[v] = i
+        cur := i - start + 1
+        if cur > best:
+            best = cur
+    io.print(str(best))
+
+main()

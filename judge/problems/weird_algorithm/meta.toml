@@ -1,0 +1,5 @@
+name = "Weird Algorithm"
+source = "CSES Problem Set"
+cses_id = 1068
+url = "https://cses.fi/problemset/task/1068"
+note = "Collatz sequence; intermediate values up to ~1.5e10 fit i64."

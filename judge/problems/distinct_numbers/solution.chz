@@ -1,0 +1,26 @@
+# CSES 1621 — Distinct Numbers. Read n then n values; print how many distinct values.
+# Stresses: Set insert/dedup over up to 2e5 ints.
+import std.io
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    seen := Set()
+    for i in 0..n:
+        seen.add(int(toks[1 + i]))
+    io.print(str(seen.len()))
+
+main()

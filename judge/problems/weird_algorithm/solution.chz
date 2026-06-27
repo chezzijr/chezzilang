@@ -1,0 +1,20 @@
+# CSES 1068 — Weird Algorithm (Collatz). Read n, print the sequence until it reaches 1.
+# Stresses: tight loop, integer `/` and `%`, intermediate values up to ~1.5e10 (i64 range).
+import std.io
+
+fn main():
+    n := 0
+    match io.read_line():
+        Some(l): n = int(l)
+        None:    return
+    out := []
+    while n != 1:
+        out.push(str(n))
+        if n % 2 == 0:
+            n = n / 2
+        else:
+            n = 3 * n + 1
+    out.push("1")
+    io.print(" ".join(out))
+
+main()

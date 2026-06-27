@@ -1,0 +1,27 @@
+# CSES 1083 — Missing Number. Given n and n-1 distinct values from 1..n, print the missing one.
+# Stresses: big-int accumulation — sum(1..n) ~ 2e10 for n=2e5 (i64 range, checked add).
+import std.io
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    total := n * (n + 1) / 2
+    s := 0
+    for i in 0..(n - 1):
+        s += int(toks[1 + i])
+    io.print(str(total - s))
+
+main()

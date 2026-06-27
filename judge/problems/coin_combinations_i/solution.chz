@@ -1,0 +1,39 @@
+# CSES 1635 — Coin Combinations I. Count ordered ways to form sum x from given coins, mod 1e9+7.
+# Stresses: bottom-up DP over a List[int] table + modular arithmetic in the inner loop.
+import std.io
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    x := int(toks[1])
+    coins := []
+    for i in 0..n:
+        coins.push(int(toks[2 + i]))
+
+    MOD := 1000000007
+    ways := []
+    for s in 0..(x + 1):
+        ways.push(0)
+    ways[0] = 1
+    for s in 1..(x + 1):
+        acc := 0
+        for c in coins:
+            if c <= s:
+                acc = (acc + ways[s - c]) % MOD
+        ways[s] = acc
+    io.print(str(ways[x]))
+
+main()

@@ -1,0 +1,172 @@
+# judge/run.chz — DSA known-answer bug-finding harness (CSES-backed), written in Chezzi itself.
+#
+# Runs each hand-written solution under judge/problems/<slug>/solution.chz against its test cases —
+# the committed public samples (judge/problems/<slug>/samples/*.in/.out) AND the gitignored full
+# downloaded suite (judge/data/<slug>/*.in/.out) — diffing the solution's stdout (whitespace-
+# normalized) against the expected output. A mismatch on a *vetted* solution is a candidate Chezzi
+# bug → triage. Writing the harness in Chezzi dogfoods the language: the judge is itself bug-bait, and
+# it mirrors the benches/run.chz pattern (a .chz driver shelling out via std.process).
+#
+# Each solution runs in a SUBPROCESS via `sh -c "timeout N chezzi run solution.chz < case.in"`, so a
+# solution that infinite-loops (TIME), hard-crashes, or panics the host (PANIC) is isolated and caught
+# instead of taking down the harness — exactly the failure modes we hunt. (std.process has no stdin
+# piping yet, so the `< case.in` shell redirection feeds the case input.)
+#
+# Usage (from the repo root, after `cargo build --release`):
+#   ./target/release/chezzi run judge/run.chz            # all problems
+#   ./target/release/chezzi run judge/run.chz <slug>     # one problem
+# Exits non-zero if any case fails.
+
+import std.io
+import std.fs
+import std.process
+import std.os
+
+struct Verdict:
+    tag: str       # PASS | WRONG | FAULT | PANIC | TIME | NOEXP | SPAWN
+    detail: str    # human hint for a failure (empty for PASS)
+
+# CSES's default checker compares the *token sequence*, ignoring ALL whitespace (spaces, tabs, and
+# newlines alike): a token-identical answer with different line breaks is still ACCEPTED. So the
+# pass/fail decision is made on tokens (see `tokens` + judge_case), not line structure — otherwise a
+# correct solution that lays tokens out differently than the .out would be a false-positive WRONG,
+# which would defeat the harness (a non-PASS is meant to flag a candidate Chezzi bug).
+fn tokens(s: str) -> List[str]:
+    out := []
+    for l in s.replace("\t", " ").split_lines():
+        for t in l.split(" "):
+            tt := t.trim()
+            if tt != "":
+                out.push(tt)
+    return out
+
+# Per-line normalization used ONLY for the human-readable diff hint (not the verdict): trim each line,
+# drop trailing blank lines.
+fn norm_lines(s: str) -> List[str]:
+    out := []
+    for l in s.split_lines():
+        out.push(l.trim())
+    while out.len() > 0 and out[out.len() - 1] == "":
+        out.pop()
+    return out
+
+fn first_diff(got: List[str], want: List[str]) -> str:
+    n := got.len()
+    if want.len() > n:
+        n = want.len()
+    for i in 0..n:
+        g := "<missing>"
+        if i < got.len():
+            g = got[i]
+        w := "<missing>"
+        if i < want.len():
+            w = want[i]
+        if g != w:
+            lineno := i + 1
+            return "line {lineno}: expected `{w}` got `{g}`"
+    return "(differs only in length)"
+
+fn first_line(s: str) -> str:
+    ls := s.split_lines()
+    if ls.len() > 0:
+        return ls[0]
+    return ""
+
+# All `.in` case paths for a slug: committed samples first, then downloaded full suite.
+fn case_inputs(slug: str) -> List[str]:
+    ins := []
+    for pat in ["judge/problems/{slug}/samples/*.in", "judge/data/{slug}/*.in"]:
+        match fs.glob(pat):
+            Ok(paths): ins.extend(paths)
+            Err(e):    ins.extend([])
+    return ins
+
+# Run one case; return its verdict.
+fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
+    expfile := infile.strip_suffix(".in") + ".out"
+    expected := ""
+    match io.read_file(expfile):
+        Ok(t):  expected = t
+        Err(e): return Verdict("NOEXP", "no .out for {infile}")
+    cmd := "timeout {timeout_s} {chezzi} run {sol} < {infile}"
+    match process.run(cmd):
+        Ok(r):
+            if r.code == 124:
+                return Verdict("TIME", "killed after {timeout_s}s")
+            if r.stderr.contains("panicked at"):
+                return Verdict("PANIC", first_line(r.stderr))
+            if r.code != 0:
+                return Verdict("FAULT", "exit {r.code}: {first_line(r.stderr)}")
+            if " ".join(tokens(r.stdout)) == " ".join(tokens(expected)):
+                return Verdict("PASS", "")
+            return Verdict("WRONG", first_diff(norm_lines(r.stdout), norm_lines(expected)))
+        Err(e):
+            return Verdict("SPAWN", e.message())
+
+fn find_problems(only: str) -> List[str]:
+    out := []
+    match fs.list_dir("judge/problems"):
+        Ok(names):
+            for name in names:
+                if only != "" and name != only:
+                    continue
+                if fs.is_file("judge/problems/{name}/solution.chz"):
+                    out.push(name)
+        Err(e):
+            print("cannot read judge/problems/ ({e}) — run from the repo root")
+    return out
+
+fn main():
+    chezzi := "./target/release/chezzi"
+    timeout_s := 10
+    only := ""
+    args := os.args()
+    if args.len() > 0:
+        only = args[0]
+
+    problems := find_problems(only)
+    if problems.len() == 0:
+        print("no problems found under judge/problems/")
+        os.exit(2)
+
+    total_cases := 0
+    total_fail := 0
+    skipped := 0
+
+    for slug in problems:
+        sol := "judge/problems/{slug}/solution.chz"
+        inputs := case_inputs(slug)
+        if inputs.len() == 0:
+            skipped += 1
+            print("SKIP  {slug}  (no cases — commit samples/ or run: python3 judge/fetch_data.py {slug})")
+            continue
+
+        prob_fail := 0
+        for infile in inputs:
+            v := judge_case(chezzi, timeout_s, sol, infile)
+            # A missing/unpaired .out is a data-fetch gap, not a solution failure → warn and skip,
+            # never count it toward the failure tally / exit code.
+            if v.tag == "NOEXP":
+                print(" WARN  {slug}  {infile}  ({v.detail} — skipped)")
+                continue
+            total_cases += 1
+            if v.tag != "PASS":
+                prob_fail += 1
+                total_fail += 1
+                tag := v.tag.pad_left(5, " ")
+                print("{tag}  {slug}  {infile}")
+                print("      {v.detail}")
+
+        if prob_fail == 0:
+            n := inputs.len()
+            print("PASS  {slug}  ({n} case(s))")
+        else:
+            n := inputs.len()
+            print("FAIL  {slug}  ({prob_fail}/{n} case(s) failed)")
+
+    print("")
+    print("done: {total_cases} case(s), {total_fail} failure(s), {skipped} problem(s) skipped")
+    if total_fail > 0:
+        os.exit(1)
+
+main()

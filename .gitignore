@@ -6,3 +6,7 @@
 
 # scratch dir written by examples/fs_mutations.chz (self-cleaning; this guards a crashed run)
 /examples/.fs_scratch
+
+# Downloaded CSES test data for the DSA judge harness (authors' IP — never committed). Only the
+# hand-written solutions + committed public samples under judge/problems/ are tracked.
+/judge/data/
