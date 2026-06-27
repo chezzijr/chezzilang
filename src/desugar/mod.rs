@@ -1026,7 +1026,9 @@ impl Walker<'_> {
                     self.walk_block(b)?;
                 }
             }
-            StmtKind::For { vars, iter, body } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
                 self.walk_expr(iter)?;
                 self.push_scope();
                 for v in vars.iter() {

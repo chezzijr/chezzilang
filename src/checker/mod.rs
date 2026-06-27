@@ -3834,7 +3834,12 @@ impl Checker {
                     self.check_block(body);
                 }
             }
-            StmtKind::For { vars, iter, body } => {
+            StmtKind::For {
+                vars,
+                var_spans,
+                iter,
+                body,
+            } => {
                 let bindings = self.for_bindings(vars, iter);
                 // PERSISTENT refine-on-first-use (see `check_block`): a refine-on-first-use pin of an
                 // OUTER empty collection inside the loop body PERSISTS past the loop. We accept the
@@ -3844,7 +3849,12 @@ impl Checker {
                 // type records it". (No snapshot/restore here, so the pin written to the binding's
                 // OWNING scope by `repin` survives `pop_scope`, which only removes the loop vars.)
                 self.push_scope();
-                for (name, ty) in bindings {
+                // `bindings` is parallel to `vars` (and thus `var_spans`); zip truncates safely if the
+                // lengths ever diverge (a binding's hover is dropped, never a panic).
+                for ((name, ty), span) in bindings.into_iter().zip(var_spans.iter()) {
+                    // EDITOR HOVER: the loop binding (`i` in `for i in …`) is a NAME, not an `Expr` the
+                    // probe visits during `infer`; record its decl-site hover here (no-op unless armed).
+                    self.hover_record_at(*span, &ty, HoverKind::Local, None);
                     self.declare(&name, ty);
                     // Loop vars are rebound each iteration → immutable; reassigning one diverges
                     // across engines, so the checker forbids it (see `check_assign`).
@@ -11235,7 +11245,9 @@ fn collect_free_calls_block(
                     collect_free_calls_block(b, fns, scopes, out);
                 }
             }
-            StmtKind::For { vars, iter, body } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
                 collect_free_calls_expr(iter, fns, scopes, out);
                 scopes.push(vars.iter().cloned().collect());
                 collect_free_calls_block(body, fns, scopes, out);
@@ -11472,7 +11484,9 @@ fn find_global_mutations(
                     find_global_mutations(b, globals, scopes, out);
                 }
             }
-            StmtKind::For { vars, iter, body } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
                 find_mutations_in_expr(iter, globals, scopes, out);
                 scopes.push(vars.iter().cloned().collect());
                 find_global_mutations(body, globals, scopes, out);

@@ -121,6 +121,11 @@ pub enum StmtKind {
     /// one binding for the common form, or two (`for k, v in m:`) to destructure a map's entries.
     For {
         vars: Vec<String>,
+        /// Source span of each binding-NAME token, parallel to `vars` (same order/length).
+        /// Diagnostic-only (the LSP records a decl-site hover at each binding); runtime-inert,
+        /// like `Param.name_span`. `Span::default()` for synthesized bindings (e.g. comprehension
+        /// desugaring), which never collide with a real hover position.
+        var_spans: Vec<Span>,
         iter: Expr,
         body: Block,
     },

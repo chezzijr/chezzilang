@@ -5367,7 +5367,9 @@ impl Interp {
                     None => Ok(Flow::Normal),
                 }
             }
-            StmtKind::For { vars, iter, body } => self.exec_for(vars, iter, body),
+            StmtKind::For {
+                vars, iter, body, ..
+            } => self.exec_for(vars, iter, body),
             StmtKind::While { cond, body } => {
                 while as_bool(self.eval(cond)?, cond.span)? {
                     match self.exec_scoped_block(body)? {
