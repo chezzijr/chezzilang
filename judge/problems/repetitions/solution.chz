@@ -1,0 +1,23 @@
+# CSES 1069 — Repetitions. Longest run of one repeated character, single forward pass.
+# Stresses: per-codepoint string iteration over up to 1e6 chars.
+import std.io
+
+fn main():
+    s := ""
+    match io.read_line():
+        Some(l): s = l.trim()
+        None:    return
+    best := 0
+    cur := 0
+    prev := ""
+    for c in s:
+        if c == prev:
+            cur = cur + 1
+        else:
+            cur = 1
+            prev = c
+        if cur > best:
+            best = cur
+    io.print(str(best))
+
+main()

@@ -243,9 +243,10 @@ co-developed engines agree on, with an oracle that depends on neither engine nor
   once** against the published answer; after that, any divergence on re-run is a candidate Chezzi
   regression.
 - **Test cases:** committed **public samples** (from the statement) under
-  `judge/problems/<slug>/samples/*.in`/`.out`, plus the **full hidden suite** under
-  `judge/data/<slug>/` — the latter is the authors' IP, so it is **gitignored** and fetched locally
-  with `judge/fetch_data.py` (point it at a test ZIP downloaded from the CSES task page).
+  `judge/problems/<slug>/samples/*.in`/`.out`, plus generated/official cases under
+  `judge/data/<slug>/` (gitignored). The main path generates them (see below); official CSES hidden
+  data is the authors' IP (gated/solve-first, no API) — drop it into `judge/data/` by hand if you have
+  it. `judge/fetch_problem.py <url>` scaffolds a new problem from its public statement + samples.
 - **The harness is itself written in Chezzi** (`judge/run.chz`) — dogfooding: the judge is one more
   real program exercising the language, and it mirrors the `benches/run.chz` driver pattern. It shells
   out per case via `sh -c "timeout N chezzi run solution.chz < case.in"` (`std.process` has no stdin
@@ -260,17 +261,18 @@ plus a fast path for large stress inputs). `judge/generate.py` feeds the same in
 `judge/data/<slug>/` (gitignored); `run.chz` diffs the Chezzi solution against the Python oracle — a
 self-contained Chezzi-vs-Python differential. The oracle uses a *different algorithm* than the solution
 (e.g. union-find vs flood-fill, sequence-enumeration vs DP) so an agreeing pair can't be hiding a shared
-bug. Seeded with 6 CSES problems + 1 Codeforces (Theatre Square, near-i64 multiply); 700+ generated
-cases run clean.
+bug. Seeded with 12 problems (11 CSES + 1 Codeforces) spanning loop/bigint, Set, Map, DP+mod, grid
+flood-fill, string iteration, modular loops, sort+i64, and 2^n recursion; 300+ generated + edge cases
+run clean.
 
 How to run:
 
 ```sh
 cargo build --release
 python3 judge/generate.py [--count N]                      # synthesize in-domain cases (no download)
-./target/release/chezzi run judge/run.chz                  # all problems (samples + generated/fetched)
+./target/release/chezzi run judge/run.chz                  # all problems (samples + generated cases)
 ./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
-python3 judge/fetch_data.py <slug> path/to/tests.zip       # optional: install the real hidden suite
+python3 judge/fetch_problem.py <url> [slug]                # scaffold a new problem from its statement
 ```
 
 A non-`PASS` verdict on a vetted solution is a candidate bug: minimize the failing `.in`, then land a

@@ -1,0 +1,40 @@
+# CSES 1623 — Apple Division. Min |sum(A) - sum(B)| over all 2-partitions, by recursion.
+# Stresses: 2^n recursive include/exclude branching (n up to 20, ~2e6 calls) + i64 sums.
+import std.io
+import std.math
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+# Walk the include/exclude tree; at a leaf the difference is |total - 2*chosen|.
+fn best_diff(w: List[int], n: int, total: int, i: int, chosen: int) -> int:
+    if i == n:
+        return math.abs(total - 2 * chosen)
+    take := best_diff(w, n, total, i + 1, chosen + w[i])
+    skip := best_diff(w, n, total, i + 1, chosen)
+    if take < skip:
+        return take
+    return skip
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    w := []
+    total := 0
+    for i in 0..n:
+        v := int(toks[1 + i])
+        w.push(v)
+        total = total + v
+    io.print(str(best_diff(w, n, total, 0, 0)))
+
+main()

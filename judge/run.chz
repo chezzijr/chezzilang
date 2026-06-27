@@ -138,7 +138,7 @@ fn main():
         inputs := case_inputs(slug)
         if inputs.len() == 0:
             skipped += 1
-            print("SKIP  {slug}  (no cases — commit samples/ or run: python3 judge/fetch_data.py {slug})")
+            print("SKIP  {slug}  (no cases — commit samples/ or run: python3 judge/generate.py {slug})")
             continue
 
         prob_fail := 0

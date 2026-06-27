@@ -1,0 +1,16 @@
+# CSES 1617 — Bit Strings. 2^n mod 1e9+7 by iterative doubling.
+# Stresses: a up-to-1e6-iteration modular-multiply loop (i64 mod arithmetic).
+import std.io
+
+fn main():
+    n := 0
+    match io.read_line():
+        Some(l): n = int(l.trim())
+        None:    return
+    MOD := 1000000007
+    r := 1
+    for i in 0..n:
+        r = (r * 2) % MOD
+    io.print(str(r))
+
+main()

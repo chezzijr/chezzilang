@@ -7,6 +7,10 @@
 # scratch dir written by examples/fs_mutations.chz (self-cleaning; this guards a crashed run)
 /examples/.fs_scratch
 
-# Downloaded CSES test data for the DSA judge harness (authors' IP — never committed). Only the
+# Generated + official test data for the DSA judge harness. Generated cases (judge/generate.py) are
+# reproducible; official CSES data is the authors' IP. Either way — never committed. Only the
 # hand-written solutions + committed public samples under judge/problems/ are tracked.
 /judge/data/
+# Scraped problem statements (fetch_problem.py): the prose is the authors' content — a local
+# reference for writing solutions, not ours to redistribute. Samples/meta stay tracked.
+/judge/problems/*/statement.md

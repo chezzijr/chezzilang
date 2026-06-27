@@ -174,18 +174,27 @@ to panic-fuzz (#1) and the CPython differential (#2). Where the differential gen
 those edges — this runs **hand-written competitive-programming solutions** (`judge/problems/<slug>/
 solution.chz`, reading stdin) against **known-correct CSES answers**, catching *shared wrongness* both
 co-developed engines agree on, with an oracle independent of both engines and of CPython. Seeded with
-6 problems across distinct stress paths: `weird_algorithm` (loop/bigint Collatz), `distinct_numbers`
-(Set), `missing_number` (sum bigint), `playlist` (Map sliding window), `coin_combinations_i` (DP+mod),
-`counting_rooms` (grid flood-fill). Cases: committed public **samples** (`samples/*.in`/`.out`) + the
-gitignored full hidden suite (`judge/data/`, fetched via `judge/fetch_data.py` from a CSES test ZIP —
-authors' IP, never committed). **The harness is written in Chezzi** (`judge/run.chz`, dogfood; mirrors
+12 problems (11 CSES + 1 Codeforces) across distinct stress paths: `weird_algorithm` (loop/bigint
+Collatz), `distinct_numbers` (Set), `missing_number` (sum bigint), `playlist` (Map sliding window),
+`coin_combinations_i` (DP+mod), `counting_rooms` (grid flood-fill), `repetitions` (string iteration),
+`bit_strings` (modular loop), `trailing_zeros` (true-factorial differential), `stick_lengths`
+(sort+i64), `apple_division` (recursion, 2^20 calls), `cf_theatre_square` (near-i64 multiply). Cases:
+committed public **samples** (`samples/*.in`/`.out`) + the
+gitignored full hidden suite (`judge/data/`, the authors' IP — gated/solve-first, never committed;
+drop official cases there by hand if you have them). **The harness is written in Chezzi** (`judge/run.chz`, dogfood; mirrors
 `benches/run.chz`): shells out per case under `timeout`, classifies `PASS`/`WRONG`/`FAULT`/`PANIC`/
 `TIME`, whitespace-normalized compare (token-sequence, CSES-accurate). Not part of `cargo test` (a
 `.chz` driver). **Self-contained generated-oracle mode** (`judge/generate.py` + per-problem `gen.py` +
 **independent** `reference.py` — union-find vs flood-fill, enumeration vs DP, etc. — brute force on
-small inputs, fast path on large): a Chezzi-vs-Python differential needing **no download**. +1
-Codeforces problem (Theatre Square, near-i64 multiply). 700+ generated in-domain cases run clean;
-negative checks confirm `WRONG`+diff / `FAULT`+exit-code detection. Adversarial-reviewed (4 findings
+small inputs, fast path on large): a Chezzi-vs-Python differential needing **no download**. New
+problems scaffold from their public statement via `judge/fetch_problem.py <url>` (statement + samples
++ meta; CSES/Codeforces). Generated in-domain cases run clean; negative checks confirm
+`WRONG`+diff / `FAULT`+exit-code detection. **Edge-case coverage
+(2026-06-27):** each problem also ships an optional `edges.py` (index protocol: no arg → count,
+`argv[1]=k` → k-th input) emitting the deterministic corners random `gen.py` misses — min/max sizes,
+all-equal, value extremes, exact multiples, empty/full grids (incl. `counting_rooms` 1000×1000 deep
+flood-fill and `cf_theatre_square` 1e18 i64-product boundary). `generate.py` writes them as
+`e{k}.in/.out` through the same oracle; 318 cases (random + edges) across 12 problems run clean. Adversarial-reviewed (4 findings
 fixed: token-insensitive compare, NOEXP-as-skip, fetch stale-clear, stem-collision warn). Usage +
 design: [`docs/bug-discovery.md` "DSA known-answer harness"].
 Remaining: P5 (IR shrinker + corpus dump + opt-in overflow-metamorphic mode).

@@ -1,0 +1,32 @@
+# CSES 1074 — Stick Lengths. Min total |p_i - t| is minimized at the median; sort then sum.
+# Stresses: List[int] sort over up to 2e5 ints + i64 cost accumulation (up to ~2e14).
+import std.io
+import std.math
+
+fn read_tokens() -> List[str]:
+    text := ""
+    while true:
+        match io.read_line():
+            Some(l): text = text + l + " "
+            None:    break
+    toks := []
+    for t in text.split(" "):
+        s := t.trim()
+        if s != "":
+            toks.push(s)
+    return toks
+
+fn main():
+    toks := read_tokens()
+    n := int(toks[0])
+    p := []
+    for i in 0..n:
+        p.push(int(toks[1 + i]))
+    p.sort()
+    med := p[n / 2]
+    cost := 0
+    for v in p:
+        cost = cost + math.abs(v - med)
+    io.print(str(cost))
+
+main()

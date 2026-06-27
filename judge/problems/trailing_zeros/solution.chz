@@ -1,0 +1,17 @@
+# CSES 1618 — Trailing Zeros in n!. Count factors of 5 (Legendre): n/5 + n/25 + n/125 + ...
+# Stresses: integer-division loop with i64 (n up to 1e9, p grows past 1e9 before the loop ends).
+import std.io
+
+fn main():
+    n := 0
+    match io.read_line():
+        Some(l): n = int(l.trim())
+        None:    return
+    zeros := 0
+    p := 5
+    while p <= n:
+        zeros = zeros + n / p
+        p = p * 5
+    io.print(str(zeros))
+
+main()
