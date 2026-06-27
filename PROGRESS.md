@@ -180,9 +180,14 @@ co-developed engines agree on, with an oracle independent of both engines and of
 gitignored full hidden suite (`judge/data/`, fetched via `judge/fetch_data.py` from a CSES test ZIP —
 authors' IP, never committed). **The harness is written in Chezzi** (`judge/run.chz`, dogfood; mirrors
 `benches/run.chz`): shells out per case under `timeout`, classifies `PASS`/`WRONG`/`FAULT`/`PANIC`/
-`TIME`, whitespace-normalized compare. Not part of `cargo test` (a `.chz` driver); inert until samples
-exist / data is fetched. All 6 seed solutions PASS on samples; negative checks confirm `WRONG`+diff and
-`FAULT`+exit-code detection. Usage + design: [`docs/bug-discovery.md` "DSA known-answer harness"].
+`TIME`, whitespace-normalized compare (token-sequence, CSES-accurate). Not part of `cargo test` (a
+`.chz` driver). **Self-contained generated-oracle mode** (`judge/generate.py` + per-problem `gen.py` +
+**independent** `reference.py` — union-find vs flood-fill, enumeration vs DP, etc. — brute force on
+small inputs, fast path on large): a Chezzi-vs-Python differential needing **no download**. +1
+Codeforces problem (Theatre Square, near-i64 multiply). 700+ generated in-domain cases run clean;
+negative checks confirm `WRONG`+diff / `FAULT`+exit-code detection. Adversarial-reviewed (4 findings
+fixed: token-insensitive compare, NOEXP-as-skip, fetch stale-clear, stem-collision warn). Usage +
+design: [`docs/bug-discovery.md` "DSA known-answer harness"].
 Remaining: P5 (IR shrinker + corpus dump + opt-in overflow-metamorphic mode).
 
 **✅ Oracle coverage widened (2026-06-26).** The differential oracle's IR + both emitters + generator

@@ -1,0 +1,22 @@
+# Codeforces 1A — Theatre Square. Cover an n×m square with a×a flagstones (no breaking, may
+# overhang). Answer = ceil(n/a)*ceil(m/a). Stresses near-i64 multiplication: up to ~1e18.
+import std.io
+
+fn main():
+    line := ""
+    match io.read_line():
+        Some(l): line = l
+        None:    return
+    parts := []
+    for t in line.split(" "):
+        s := t.trim()
+        if s != "":
+            parts.push(s)
+    n := int(parts[0])
+    m := int(parts[1])
+    a := int(parts[2])
+    rows := (n + a - 1) / a
+    cols := (m + a - 1) / a
+    io.print(str(rows * cols))
+
+main()

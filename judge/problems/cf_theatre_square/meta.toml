@@ -1,0 +1,5 @@
+name = "Theatre Square"
+source = "Codeforces"
+cf_id = "1A"
+url = "https://codeforces.com/problemset/problem/1/A"
+note = "ceil(n/a)*ceil(m/a); answer up to ~1e18 exercises near-i64 multiply."

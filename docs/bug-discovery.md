@@ -253,13 +253,24 @@ co-developed engines agree on, with an oracle that depends on neither engine nor
   hard-crashes, or panics the host (`PANIC`) is isolated and reported instead of taking down the run.
   Output is compared whitespace-normalized (CSES checkers are whitespace-insensitive).
 
+**Self-contained generated oracle (no download).** The primary path needs no CSES data at all: each
+problem ships `gen.py` (random input within the problem's stated range/domain) and `reference.py` (an
+**independent** Python implementation — ideally a brute force that's obviously correct on small inputs,
+plus a fast path for large stress inputs). `judge/generate.py` feeds the same input to both and writes
+`judge/data/<slug>/` (gitignored); `run.chz` diffs the Chezzi solution against the Python oracle — a
+self-contained Chezzi-vs-Python differential. The oracle uses a *different algorithm* than the solution
+(e.g. union-find vs flood-fill, sequence-enumeration vs DP) so an agreeing pair can't be hiding a shared
+bug. Seeded with 6 CSES problems + 1 Codeforces (Theatre Square, near-i64 multiply); 700+ generated
+cases run clean.
+
 How to run:
 
 ```sh
 cargo build --release
-./target/release/chezzi run judge/run.chz                 # all problems (samples + any fetched data)
-./target/release/chezzi run judge/run.chz weird_algorithm # one problem
-python3 judge/fetch_data.py <slug> path/to/tests.zip      # install the full hidden suite locally
+python3 judge/generate.py [--count N]                      # synthesize in-domain cases (no download)
+./target/release/chezzi run judge/run.chz                  # all problems (samples + generated/fetched)
+./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
+python3 judge/fetch_data.py <slug> path/to/tests.zip       # optional: install the real hidden suite
 ```
 
 A non-`PASS` verdict on a vetted solution is a candidate bug: minimize the failing `.in`, then land a
