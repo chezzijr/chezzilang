@@ -5060,33 +5060,45 @@ impl Checker {
                     span,
                 );
                 match self.variants_of(ty) {
-                    Some(vmap) => match vmap.get(name) {
-                        Some(payload) => {
-                            if payload.len() != bindings.len() {
-                                self.error(
-                                    span,
-                                    format!(
-                                        "variant '{name}' binds {} value(s), but {} given",
-                                        payload.len(),
-                                        bindings.len()
-                                    ),
-                                );
+                    Some(vmap) => {
+                        // A nested variant sub-pattern is irrefutable ONLY when its enum has exactly
+                        // one variant (so naming it covers the whole domain) AND every payload
+                        // sub-pattern is itself irrefutable. `Some(Some(v))` (2-variant Option) or
+                        // `Some(0)` (literal payload) stays refutable; `Outer.Wrap(Inner.Only(x))`
+                        // over single-variant enums is irrefutable and may close its parent variant.
+                        let single_variant = vmap.len() == 1;
+                        match vmap.get(name) {
+                            Some(payload) => {
+                                if payload.len() != bindings.len() {
+                                    self.error(
+                                        span,
+                                        format!(
+                                            "variant '{name}' binds {} value(s), but {} given",
+                                            payload.len(),
+                                            bindings.len()
+                                        ),
+                                    );
+                                }
+                                let mut sub_irref = true;
+                                for (b, t) in bindings.iter().zip(payload.iter()) {
+                                    sub_irref &= self.bind_subpattern(b, t, span);
+                                }
+                                single_variant && sub_irref
                             }
-                            for (b, t) in bindings.iter().zip(payload.iter()) {
-                                self.bind_subpattern(b, t, span);
+                            None => {
+                                self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                for b in bindings {
+                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                }
+                                false
                             }
                         }
-                        None => {
-                            self.error(span, format!("'{name}' is not a variant of {ty}"));
-                            for b in bindings {
-                                self.bind_subpattern(b, &Ty::Unknown, span);
-                            }
-                        }
-                    },
+                    }
                     None if ty.is_unknown() => {
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
+                        false
                     }
                     None => {
                         self.error(
@@ -5096,9 +5108,9 @@ impl Checker {
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
+                        false
                     }
                 }
-                false
             }
         }
     }

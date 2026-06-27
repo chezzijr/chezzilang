@@ -4308,6 +4308,26 @@ fn unguarded_variant_duplicate_still_rejected() {
 }
 
 #[test]
+fn nested_single_variant_payload_is_exhaustive() {
+    // A nested single-variant enum pattern covers its whole domain, so `Outer.Wrap(Inner.Only(x))`
+    // is irrefutable and closes Wrap — a single-variant Outer match is exhaustive (no `_` needed).
+    // Regression guard: the exhaustiveness fix must not over-reject genuinely-total nested matches.
+    ok(
+        "enum Inner:\n    Only(int)\nenum Outer:\n    Wrap(Inner)\nfn f(o: Outer) -> int:\n    match o:\n        Outer.Wrap(Inner.Only(x)): return x\nf(Outer.Wrap(Inner.Only(5)))\n",
+    );
+}
+
+#[test]
+fn nested_multivariant_payload_stays_refutable() {
+    // `Some(Some(v))` does not cover `Some(None)` — the inner Option has 2 variants, so the nested
+    // pattern is refutable and Some stays open.
+    rejects(
+        "fn f(x: Option[Option[int]]) -> int:\n    match x:\n        None: return -1\n        Some(Some(v)): return v\nf(Some(None))\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
 fn match_guard_ok() {
     // A guard sees the pattern's bindings; with a trailing `_` the match is exhaustive.
     ok(
