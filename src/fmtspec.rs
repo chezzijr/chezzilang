@@ -308,7 +308,9 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
 }
 
 fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), String> {
-    let neg = x.is_sign_negative() && (x != 0.0 || x.is_sign_negative());
+    // NaN: mask the sign so the spec path renders `NaN` (not `-NaN`), matching the bare
+    // stringify path (`format_float`) which drops the NaN sign. `-inf`/`-0.0` keep their sign.
+    let neg = !x.is_nan() && x.is_sign_negative() && (x != 0.0 || x.is_sign_negative());
     let mag = x.abs();
     let body = match spec.ty {
         Some('f') | None => match spec.precision {
@@ -468,6 +470,22 @@ mod tests {
         assert_eq!(ok_apply(".2f", FmtArg::Float(5.0)), "5.00");
         // int promoted by float type char
         assert_eq!(ok_apply(".2f", FmtArg::Int(3)), "3.00");
+    }
+
+    #[test]
+    fn nan_sign_masked_in_format_spec() {
+        // A negative-signed quiet NaN (e.g. from 0.0/0.0) must render `NaN`, not `-NaN`,
+        // to match the bare stringify path which masks the NaN sign.
+        let nn = f64::from_bits(0xFFF8000000000000); // negative qNaN
+        assert!(nn.is_sign_negative() && nn.is_nan());
+        assert_eq!(ok_apply(".2f", FmtArg::Float(nn)), "NaN");
+        assert_eq!(ok_apply("f", FmtArg::Float(nn)), "NaN");
+        assert_eq!(ok_apply("e", FmtArg::Float(nn)), "NaN");
+        // Positive NaN unchanged.
+        assert_eq!(ok_apply(".2f", FmtArg::Float(f64::NAN)), "NaN");
+        // Infinities keep their sign.
+        assert_eq!(ok_apply(".2f", FmtArg::Float(f64::NEG_INFINITY)), "-inf");
+        assert_eq!(ok_apply(".2f", FmtArg::Float(f64::INFINITY)), "inf");
     }
 
     #[test]
