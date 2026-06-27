@@ -1,0 +1,8 @@
+# rule: matchStmt, pattern, patternPrimary
+fn classify(x: int) -> str:
+    match x:
+        -3: return "neg3"
+        -10..-5: return "lo"
+        0..-5: return "empty"
+        -1 | -2: return "or"
+        _: return "other"
