@@ -211,6 +211,17 @@ impl Parser {
         }
     }
 
+    /// Expect an integer literal in pattern position, accepting an optional leading `-` for a
+    /// negative int literal/range bound (int-only — a leading `-` before a float still routes to
+    /// `expect_int`, which rejects with "expected integer, found float"; no float pattern is added).
+    fn expect_pattern_int(&mut self) -> PResult<i64> {
+        if self.eat(&Token::Minus) {
+            Ok(-self.expect_int()?)
+        } else {
+            self.expect_int()
+        }
+    }
+
     /// Expect a string literal (used for the library name in an `extern "lib":` header). A raw
     /// string (`r"lib"`) is an ordinary `str` literal and is accepted here too.
     fn expect_str(&mut self) -> PResult<String> {
@@ -1184,17 +1195,18 @@ impl Parser {
     }
 
     fn parse_pattern_primary(&mut self, top: bool) -> PResult<Pattern> {
-        // Literal patterns: int / str / bool. Float is intentionally not a pattern.
+        // Literal patterns: int / str / bool. Float is intentionally not a pattern. A leading `-`
+        // begins a negative int literal/range pattern (int-only; `-3.0` routes through
+        // `expect_pattern_int` → `expect_int` and is rejected as "expected integer, found float").
         match self.peek() {
-            Token::Int(n) => {
-                let n = *n;
-                self.advance();
+            Token::Int(_) | Token::Minus => {
+                let start = self.expect_pattern_int()?;
                 // `start..end` — a half-open integer range pattern (matches `start <= v < end`).
                 if self.eat(&Token::DotDot) {
-                    let end = self.expect_int()?;
-                    return Ok(Pattern::Range { start: n, end });
+                    let end = self.expect_pattern_int()?;
+                    return Ok(Pattern::Range { start, end });
                 }
-                return Ok(Pattern::Literal(LitPattern::Int(n)));
+                return Ok(Pattern::Literal(LitPattern::Int(start)));
             }
             // A raw string is an ordinary `str` literal in pattern position too.
             Token::Str(s) | Token::RawStr(s) => {
@@ -5203,6 +5215,52 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn neg_int_literal_and_range_patterns_parse() {
+        // Negative int literal pattern.
+        assert_eq!(
+            first_arm_pattern("match x:\n    -3: print(1)\n    _: print(0)\n"),
+            Pattern::Literal(LitPattern::Int(-3))
+        );
+        // Negative-bounded range (both bounds negative).
+        assert_eq!(
+            first_arm_pattern("match x:\n    -10..-5: print(1)\n    _: print(0)\n"),
+            Pattern::Range {
+                start: -10,
+                end: -5
+            }
+        );
+        // Mixed range bounds: negative start, positive end.
+        assert_eq!(
+            first_arm_pattern("match x:\n    -10..5: print(1)\n    _: print(0)\n"),
+            Pattern::Range { start: -10, end: 5 }
+        );
+        // Positive start, negative end (still parses; semantics: empty range).
+        assert_eq!(
+            first_arm_pattern("match x:\n    0..-5: print(1)\n    _: print(0)\n"),
+            Pattern::Range { start: 0, end: -5 }
+        );
+        // Negatives compose with or-patterns.
+        match first_arm_pattern("match x:\n    -1 | -2: print(1)\n    _: print(0)\n") {
+            Pattern::Or(alts) => {
+                assert_eq!(alts.len(), 2);
+                assert_eq!(alts[0], Pattern::Literal(LitPattern::Int(-1)));
+                assert_eq!(alts[1], Pattern::Literal(LitPattern::Int(-2)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn neg_float_pattern_still_rejected() {
+        // A negative float pattern stays a parse error (float patterns are not supported).
+        let e = parse_err("match x:\n    -3.0: print(1)\n    _: print(0)\n");
+        assert!(
+            e.to_string().contains("float"),
+            "expected a 'float' error, got: {e}"
+        );
     }
 
     #[test]

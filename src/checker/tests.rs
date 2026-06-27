@@ -2175,6 +2175,21 @@ fn match_int_expr_with_wildcard_ok() {
 }
 
 #[test]
+fn neg_literal_arm_ok_with_wildcard() {
+    // Negative int literal arms are refutable like positive ones; a `_` arm makes it exhaustive.
+    ok("n := -3\nmatch n:\n    -3: print(\"a\")\n    -5: print(\"b\")\n    _: print(\"c\")\n");
+}
+
+#[test]
+fn neg_literal_arm_non_exhaustive_without_wildcard() {
+    // A negative literal arm does NOT close the int domain — `_` is still required.
+    rejects(
+        "n := -3\nmatch n:\n    -3: print(\"a\")\n    -5: print(\"b\")\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
 fn match_int_without_wildcard_rejected() {
     rejects(
         "n := 2\nmatch n:\n    0: print(\"zero\")\n    1: print(\"one\")\n",

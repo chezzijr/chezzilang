@@ -1133,9 +1133,9 @@ enum Shape:
 
 fn area(s: Shape) -> float:
     match s:                          # match is exhaustive — compiler checks all variants
-        Circle(r): return 3.14 * float(r * r)
-        Square(n): return float(n * n)
-        Point:     return 0.0
+        Shape.Circle(r): return 3.14 * float(r * r)
+        Shape.Square(n): return float(n * n)
+        Shape.Point:     return 0.0
 ```
 
 Enums may be **generic**, carrying type parameters after the name exactly like generic structs; a
@@ -1151,8 +1151,8 @@ enum Tree[T]:
 
 fn sum(t: Tree[int]) -> int:
     match t:
-        Leaf:          return 0
-        Node(v, l, r): return sum(l) + v + sum(r)   # v is int — T substituted in the match
+        Tree.Leaf:          return 0
+        Tree.Node(v, l, r): return sum(l) + v + sum(r)   # v is int — T substituted in the match
 ```
 
 A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
@@ -1271,9 +1271,9 @@ bind the **same** variables with unifiable types, so the body sees them regardle
 
 ```chezzi
 match c:
-    Red | Green | Blue: "primary"   # a full enum or-pattern is exhaustive WITHOUT a `_`
+    Color.Red | Color.Green | Color.Blue: "primary"   # a full enum or-pattern is exhaustive WITHOUT a `_`
 match shape:
-    Circle(a) | Square(a): a        # both alternatives bind `a` (same type)
+    Shape.Circle(a) | Shape.Square(a): a        # both alternatives bind `a` (same type)
 ```
 
 A `bool` or-pattern `true | false` still does **not** close the bool domain — keep a `_` (one rule:
@@ -1305,6 +1305,17 @@ match score:
     _:      "A"
 ```
 
+Int literal and range patterns may be **negative** (`-3:`, `-10..-5:`; either bound independently,
+`-10..5`, `0..-5`). This is int-only — there is **no float pattern**, so a negative (or positive)
+float like `-3.0:` / `3.0:` is a parse error, the same as today.
+
+```chezzi
+match temp:
+    -3:       "exactly minus three"
+    -10..-5:  "cold"
+    _:        "warm"
+```
+
 ### `match` and `if` as expressions
 
 Both branch forms can also be used as **expressions** that produce a value — handy for
@@ -1313,9 +1324,9 @@ initializing a variable without a pre-declared mutable:
 ```chezzi
 # match-expression: multiline, exhaustive, each arm body is a single value-expression
 label := match shape:
-    Circle(r): "round"
-    Square(n): "boxy"
-    Point:     "dot"
+    Shape.Circle(r): "round"
+    Shape.Square(n): "boxy"
+    Shape.Point:     "dot"
 
 # if-expression: inline, ternary-style — `else` is REQUIRED
 sign := if n > 0: "pos" else: "neg"

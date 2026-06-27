@@ -1,0 +1,6 @@
+# rule: pattern
+# expect: float
+fn classify(x: float) -> str:
+    match x:
+        -3.0: return "neg"
+        _: return "other"
