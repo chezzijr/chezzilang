@@ -36,10 +36,15 @@ struct PSpec {
 }
 
 /// Built-in / core methods on `str`/`list`/`map`/`set` (kept in sync with the checker's
-/// `*_method_sig` tables + the HOF/`sort` handling in `infer_method_call`). A method call whose name
-/// is one of these is never rewritten by the method path — its receiver may be a builtin type whose
-/// shape we cannot see here. A user struct that happens to reuse one of these names therefore does
-/// not get default/named support on that method (a documented, narrow limitation).
+/// `*_method_sig` tables + the HOF/`sort` handling in `infer_method_call`). The receiver of a call
+/// whose name is one of these MIGHT be a builtin type whose shape we cannot see here, so the
+/// name-keyed method path skips it. A user struct/enum that reuses one of these names DOES still get
+/// default/named support — but only when the receiver's struct type is statically knowable pre-type
+/// (a typed local, an inline ctor call, or a struct-returning fn call: see `receiver_struct_ty`),
+/// resolved through `methods_by_struct`. A genuine builtin receiver (List/Set/Map/str) — or a
+/// receiver whose type is not statically knowable (e.g. an unannotated param, an inferred enum
+/// value) — is left untouched; a named-arg call there is an accurate error, not the misleading
+/// "only supported on … struct methods".
 const BUILTIN_METHODS: &[&str] = &[
     "len",
     "upper",
@@ -1423,18 +1428,25 @@ impl Walker<'_> {
                         .resolve_qualified(alias, name)
                         .map(|s| s.iter().map(|p| p.is_ref).collect())
                 }
-                _ if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) => {
+                _ if !self.ctx.fn_fields.contains(name) => {
                     // A method call `recv.m(...)`. If the receiver's struct type is knowable pre-type
                     // (a named local, an inline ctor call, or a struct-returning fn call — see
                     // `receiver_struct_ty`), resolve `m` against THAT struct (charge 2 — sibling
-                    // structs may disagree on a param's ref-ness). Otherwise fall back to the
-                    // name-keyed table, using it only
-                    // when every defining struct agrees (an unambiguous pre-type shape).
+                    // structs may disagree on a param's ref-ness). This receiver-aware lookup binds
+                    // the exact user method even when its name collides with a builtin.
                     if let Some(sname) = self.receiver_struct_ty(obj)
                         && let Some(spec) = self.ctx.methods_by_struct.get(&(sname, name.clone()))
                     {
                         return Some(spec.iter().map(|p| p.is_ref).collect());
                     }
+                    // A builtin-named call with an unknowable/builtin receiver: no `ref` info (the
+                    // receiver may be a list/str/map/set). Don't consult the name-keyed user-method
+                    // table — it could mis-bind a genuine builtin call's args.
+                    if is_builtin_method(name) {
+                        return None;
+                    }
+                    // Otherwise fall back to the name-keyed table, using it only when every defining
+                    // struct agrees (an unambiguous pre-type shape).
                     match self.ctx.methods.get(name.as_str()) {
                         Some(cands)
                             if !cands.is_empty() && cands.iter().all(|c| *c == cands[0]) =>
@@ -1488,25 +1500,39 @@ impl Walker<'_> {
         // method. Skip method-default normalization for such names so a same-named method's default
         // can't be injected into a fn-field call.
         let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
-            (None, ExprKind::Field { name, .. })
-                if !is_builtin_method(name) && !self.ctx.fn_fields.contains(name) =>
-            {
-                match self.ctx.methods.get(name.as_str()) {
-                    Some(cands) if !cands.is_empty() => {
-                        if cands.iter().all(|c| *c == cands[0]) {
-                            Some(cands[0].clone())
-                        } else if !named.is_empty() {
-                            return Err(err(
-                                span,
-                                format!(
-                                    "cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"
-                                ),
-                            ));
-                        } else {
-                            None
+            (None, ExprKind::Field { obj, name, .. }) if !self.ctx.fn_fields.contains(name) => {
+                if is_builtin_method(name) {
+                    // The method name collides with a builtin (`add`, `map`, `push`, …). The receiver
+                    // might be a genuine builtin value (List/Set/Map/str) whose shape we cannot see in
+                    // this pre-type pass, so we resolve ONLY when the receiver's struct type is
+                    // statically knowable AND that exact struct defines the method (then it's a user
+                    // method — full named/default support). Anything else (builtin receiver, or an
+                    // unknowable receiver) stays None: NO name-keyed fallback that could mis-bind a
+                    // builtin call.
+                    self.receiver_struct_ty(obj).and_then(|sname| {
+                        self.ctx
+                            .methods_by_struct
+                            .get(&(sname, name.clone()))
+                            .cloned()
+                    })
+                } else {
+                    match self.ctx.methods.get(name.as_str()) {
+                        Some(cands) if !cands.is_empty() => {
+                            if cands.iter().all(|c| *c == cands[0]) {
+                                Some(cands[0].clone())
+                            } else if !named.is_empty() {
+                                return Err(err(
+                                    span,
+                                    format!(
+                                        "cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"
+                                    ),
+                                ));
+                            } else {
+                                None
+                            }
                         }
+                        _ => None,
                     }
-                    _ => None,
                 }
             }
             _ => None,
@@ -1546,6 +1572,20 @@ impl Walker<'_> {
                     }
                     // Keys are valid (subset of {sep,end}, no dups): keep `named` intact.
                     return Ok(());
+                }
+                // A method call whose name collides with a builtin, where the receiver's struct type
+                // is NOT statically knowable (an unannotated param, an inferred enum value, or a
+                // genuine builtin receiver). Named/default support needs a known receiver — say so,
+                // instead of the misleading "only supported on … struct methods" (it IS a method).
+                if let ExprKind::Field { name, .. } = &callee.kind
+                    && is_builtin_method(name)
+                {
+                    return Err(err(
+                        span,
+                        format!(
+                            "method '{name}' reuses a built-in method name; named/default arguments need a receiver whose struct type is statically known — bind it to a typed local or pass positionally"
+                        ),
+                    ));
                 }
                 return Err(err(
                     span,
@@ -2005,6 +2045,93 @@ mod tests {
         );
         // xs.push(3) stays one positional arg (the builtin), not rewritten to the struct spec.
         assert_eq!(method_call_arg_ints(&s), vec![3]);
+    }
+
+    #[test]
+    fn builtin_named_method_known_receiver_normalized() {
+        // A user struct method whose name collides with a builtin (`add`) DOES get named/default
+        // support when the receiver's struct type is statically known (a named local).
+        let s = desugar_ok(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nc := Counter(0)\nr := c.add(amount=5)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![5]);
+    }
+
+    #[test]
+    fn builtin_named_method_inline_ctor() {
+        // Inline ctor receiver `Counter(0).add(amount=5)` — struct type knowable syntactically.
+        let s = desugar_ok(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nr := Counter(0).add(amount=5)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![5]);
+    }
+
+    #[test]
+    fn builtin_default_filled_positional() {
+        // A 0-arg builtin-named user-method call on a known receiver fills the default.
+        let s = desugar_ok(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nr := Counter(0).add()\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![1]);
+    }
+
+    #[test]
+    fn builtin_named_method_struct_returning_fn() {
+        // Struct-returning free fn receiver `mk().add(amount=5)` — return type names a struct.
+        let s = desugar_ok(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nfn mk() -> Counter:\n    return Counter(0)\nr := mk().add(amount=5)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![5]);
+    }
+
+    #[test]
+    fn enum_builtin_named_method_annotated_receiver() {
+        // An enum method reusing a builtin name (`map`) resolves on a type-annotated local receiver.
+        let s = desugar_ok(
+            "enum E:\n    A\n    B\n    fn map(self, n: int = 2) -> int:\n        return n\nm: E = E.A\nr := m.map(n=5)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![5]);
+    }
+
+    #[test]
+    fn real_builtin_set_add_untouched() {
+        // A genuine builtin-type receiver: `s.add(3)` on a Set must NOT be rewritten, even though a
+        // struct also defines `add` with a default. receiver_struct_ty is None for a Set local.
+        let s = desugar_ok(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(3)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![3]);
+    }
+
+    #[test]
+    fn builtin_named_unknowable_receiver_accurate_error() {
+        // Named args on a builtin-colliding name whose receiver type is NOT statically known: the
+        // diagnostic must be accurate (mentions the builtin-name clash), not the misleading
+        // "only supported on functions, struct constructors, and struct methods".
+        let e = desugar_err(
+            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(x=3)\n",
+        );
+        assert!(
+            e.message.contains("reuses a built-in method name"),
+            "got: {}",
+            e.message
+        );
+        assert!(
+            !e.message.contains("only supported on"),
+            "must not use the misleading message; got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn builtin_named_no_struct_defines_no_panic() {
+        // A builtin-named named-arg call where NO user struct defines it: clean error, no panic.
+        let e = desugar_err("s := Set([1, 2])\ns.add(x=3)\n");
+        assert!(
+            e.message.contains("reuses a built-in method name"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[test]

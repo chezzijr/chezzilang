@@ -1,0 +1,49 @@
+# examples/builtin_named_method.chz — a user struct/enum method whose name collides with a built-in
+# method name (`add`, `map`) STILL gets named- and default-argument support, as long as the receiver's
+# struct type is statically known pre-type (a typed local, an inline ctor call, or a struct-returning
+# fn call). A genuine built-in receiver (List/Map) is untouched — the same names route to the builtin.
+# Two engines (VM + interp) and the .expected must all agree.
+
+struct Counter:
+    n: int
+    fn add(self, amount: int = 1) -> int:
+        return self.n + amount
+
+fn mk(start: int) -> Counter:
+    return Counter(start)
+
+enum Tag:
+    A
+    B
+    # `map` reuses the built-in list/iterator method name.
+    fn map(self, n: int = 2) -> int:
+        return match self:
+            Tag.A: n
+            Tag.B: n * 10
+
+fn main():
+    # Named local receiver: named arg + default fill on a builtin-colliding method.
+    c := Counter(10)
+    print(c.add(amount=5))   # 15
+    print(c.add())           # 11 (default amount=1)
+
+    # Inline ctor receiver.
+    print(Counter(100).add(amount=3))   # 103
+
+    # Struct-returning fn receiver.
+    print(mk(20).add(amount=2))         # 22
+
+    # Enum method reusing a builtin name, on a type-annotated local.
+    t: Tag = Tag.A
+    print(t.map(n=7))        # 7
+    u: Tag = Tag.B
+    print(u.map())           # 20 (default n=2 -> 2*10)
+
+    # Genuine built-in receivers: `add`/`map` here are the List/builtin methods, untouched.
+    xs := [1, 2]
+    xs.push(3)
+    print(xs)                # [1, 2, 3]
+    doubled := [1, 2, 3].map(fn(x: int) -> int: x * 2)
+    print(doubled)           # [2, 4, 6]
+
+main()
