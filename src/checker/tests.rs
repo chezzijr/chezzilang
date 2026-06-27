@@ -2149,6 +2149,41 @@ fn try_in_main_ok() {
     ok(src);
 }
 
+// SOUNDNESS: `?` must match the enclosing function's sum-type KIND (Result vs Option). A Result-`?`
+// inside an Option-returning fn (or vice versa) would make the fn return the wrong sum-type and fault
+// a downstream exhaustive `match`/`??` at runtime even though `check` passed.
+#[test]
+fn try_result_in_option_fn_rejected() {
+    let src = "fn pr() -> int!:\n    return Err(\"bad\")\n\
+               fn f() -> int?:\n    x := pr()?\n    return Some(x)\n\
+               fn main():\n    match f():\n        Some(v): print(\"some {v}\")\n        None: print(\"none\")\n\
+               main()\n";
+    entry_rejects(src, "returns Option, not Result");
+}
+
+#[test]
+fn try_option_in_result_fn_rejected() {
+    let src = "fn find() -> int?:\n    return None\n\
+               fn f() -> int!:\n    x := find()?\n    return Ok(x)\n\
+               fn main():\n    match f():\n        Ok(v): print(v)\n        Err(e): print(e.message())\n\
+               main()\n";
+    entry_rejects(src, "returns Result, not Option");
+}
+
+#[test]
+fn try_result_in_result_compatible_ok() {
+    let src = "fn g() -> int!:\n    return Ok(1)\n\
+               fn f() -> int!:\n    x := g()?\n    return Ok(x + 1)\n";
+    entry_ok(src);
+}
+
+#[test]
+fn try_option_in_option_ok() {
+    let src = "fn h() -> int?:\n    return Some(1)\n\
+               fn f() -> int?:\n    x := h()?\n    return Some(x)\n";
+    entry_ok(src);
+}
+
 // ===== inference / generics =====
 
 #[test]

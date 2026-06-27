@@ -6906,35 +6906,64 @@ impl Checker {
                 }
             };
         }
-        // The enclosing function must be able to early-return the Err/None. We allow Result/Option
-        // (propagate) and Nil (top-level / `fn main()` — the interpreter unwinds it at the boundary).
-        let ret_err = match &self.current_ret {
-            Ty::Result(_, e) => Some((**e).clone()),
-            Ty::Option(_) | Ty::Nil => None,
-            other => {
-                self.error(
-                    span,
-                    format!("'?' used in a function that returns {other}, not Result or Option"),
-                );
-                None
-            }
-        };
+        // The enclosing function must be able to early-return the Err/None. The operand's sum-type
+        // KIND must match the enclosing return's KIND — a Result-`?` early-returns an `Err`, so the
+        // function must itself return `Result`; an Option-`?` early-returns a `None`, so it must
+        // return `Option`. `Nil` (top-level / `fn main()` — the interpreter unwinds at the boundary)
+        // accepts either. Mixing kinds would make the function return the wrong sum-type and fault a
+        // downstream exhaustive `match`/`??` at runtime even though `check` passed.
         match t {
             Ty::Result(ok, err) => {
-                // Propagating an `Err` early-returns it as the enclosing function's error, so the
-                // inner error type must fit the enclosing one (Rust-like). Skip when the enclosing
-                // returns Option/Nil (no error slot to check against).
-                if let Some(re) = ret_err
-                    && !self.assignable(&re, &err)
-                {
-                    self.error(
-                        span,
-                        format!("'?' propagates error {err}, but the enclosing function's error type is {re}"),
-                    );
+                match self.current_ret.clone() {
+                    // Propagating an `Err` early-returns it as the enclosing function's error, so the
+                    // inner error type must fit the enclosing one (Rust-like).
+                    Ty::Result(_, re) => {
+                        if !self.assignable(&re, &err) {
+                            self.error(
+                                span,
+                                format!("'?' propagates error {err}, but the enclosing function's error type is {re}"),
+                            );
+                        }
+                    }
+                    // Top-level / `fn main()` — the interpreter unwinds the Err at the boundary.
+                    Ty::Nil => {}
+                    Ty::Option(_) => {
+                        self.error(
+                            span,
+                            "'?' propagates a Result error, but the enclosing function returns Option, not Result".to_string(),
+                        );
+                    }
+                    other => {
+                        self.error(
+                            span,
+                            format!(
+                                "'?' used in a function that returns {other}, not Result or Option"
+                            ),
+                        );
+                    }
                 }
                 *ok
             }
-            Ty::Option(inner) => *inner,
+            Ty::Option(inner) => {
+                match self.current_ret.clone() {
+                    Ty::Option(_) | Ty::Nil => {}
+                    Ty::Result(..) => {
+                        self.error(
+                            span,
+                            "'?' propagates a None, but the enclosing function returns Result, not Option".to_string(),
+                        );
+                    }
+                    other => {
+                        self.error(
+                            span,
+                            format!(
+                                "'?' used in a function that returns {other}, not Result or Option"
+                            ),
+                        );
+                    }
+                }
+                *inner
+            }
             Ty::Unknown => Ty::Unknown,
             other => {
                 self.error(span, format!("'?' expects Result or Option, found {other}"));
