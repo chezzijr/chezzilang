@@ -3281,6 +3281,15 @@ impl Vm {
                     if self.module_name(target_obj) == "std.time" && member == "timer" {
                         continue;
                     }
+                    // `std.net`'s `Socket`/`Listener` are TYPE-only imports with NO runtime module-member
+                    // value: a `Socket` value comes from `connect`/`listen` and the type resolves directly
+                    // to `Ty::Socket`. Skip them — the native module has no such global by design. Mirrors
+                    // the interp `bind_import` skip (parity); without it `import Socket from std.net` faults.
+                    if self.module_name(target_obj) == "std.net"
+                        && matches!(member.as_str(), "Socket" | "Listener")
+                    {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no
@@ -19904,6 +19913,35 @@ main()
         );
         assert_eq!(vo, "0\n", "cooperative VM output");
         assert_eq!(vo, io, "VM vs interp divergence");
+    }
+
+    /// Gate `Socket`/`Listener` behind `import std.net` — a `Socket` carries no runtime module-member
+    /// value (the runtime resolves `Ty::Socket` directly; the ctor is `connect`/`listen`), so a
+    /// from-import (`import Socket from std.net`) would fault `module 'std.net' has no member 'Socket'`
+    /// WITHOUT the `bind_import` skip. This pins the skip on BOTH engines (single-engine fault = red)
+    /// plus a whole-module twin. The `use_sock` fn is checked though never called.
+    #[test]
+    fn net_from_import_runs_both_engines() {
+        for src in [
+            "import Socket from std.net\nfn use_sock(s: Socket) -> int:\n    return 1\nfn main():\n    print(1)\nmain()\n",
+            "import std.net\nfn use_sock(s: Socket) -> int:\n    return 1\nfn main():\n    print(1)\nmain()\n",
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_vm_net_from_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let entry = dir.join("main.chz");
+            std::fs::write(&entry, src).unwrap();
+            let (vo, _ve, vr, _vc) = run_file(&entry);
+            let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
+            assert!(
+                ir.is_ok(),
+                "interp faulted (bind_import skip missing?): {ir:?}"
+            );
+            assert_eq!(vo, "1\n", "cooperative VM output");
+            assert_eq!(vo, io, "VM vs interp divergence");
+        }
     }
 
     /// Gate `timer` behind `import std.time` — a whole-module `import std.time` then `timer(50).recv()`

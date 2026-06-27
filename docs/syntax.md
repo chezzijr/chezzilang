@@ -1806,6 +1806,12 @@ fn fetch_all(urls: List[str]):
   `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` requires `import std.time`
   (whole-module, or `import timer from std.time`) — it is NOT a global builtin, but it stays a **reserved
   name** (no user `struct timer`/`fn timer`).
+- **`Socket` / `Listener`** (`import std.net`) — the TCP handle TYPE names (from `connect`/`listen`).
+  Like `Shared`/`Executor`/`timer`, a bare annotation requires `import std.net` (whole-module, or
+  `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
+  `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
+  (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`).
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on

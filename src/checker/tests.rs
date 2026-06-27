@@ -6000,15 +6000,21 @@ fn bare_reserved_type_without_typeparam_still_errors() {
                 && e.message.contains("import std.ffi")),
         "bare ptr (no type param) must still emit the std.ffi import hint, got: {errs:?}"
     );
-    // Declaration-site reservedness is untouched: `struct Executor` still rejected (reserved
-    // builtin); `struct Socket` is deliberately NOT reserved and still type-checks.
+    // Declaration-site reservedness: `struct Executor` rejected (reserved builtin); `struct Socket` is
+    // ALSO reserved now (Hole A — the std.net handle name can't be shadowed by a user struct, same as
+    // every other builtin TYPE name).
     let errs = check_entry("struct Executor:\n    x: int\nfn main():\n    print(1)\nmain()\n");
     assert!(
         errs.iter()
             .any(|e| e.message.contains("Executor") && e.message.contains("reserved")),
         "struct Executor must stay reserved, got: {errs:?}"
     );
-    entry_ok("struct Socket:\n    x: int\nfn main():\n    print(Socket(1).x)\nmain()\n");
+    let errs = check_entry("struct Socket:\n    x: int\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("Socket") && e.message.contains("reserved")),
+        "struct Socket must be reserved, got: {errs:?}"
+    );
 }
 
 #[test]
@@ -6062,6 +6068,124 @@ fn concurrency_names_still_reserved() {
             "reserved",
         );
     }
+}
+
+// ----- namespace name-leak: builtin TYPE names reserved at declaration -----
+
+#[test]
+fn reserved_builtin_type_names_rejected_at_decl() {
+    // HOLE A — every bare name `resolve_type` maps to a builtin (scalar / container / handle) must be
+    // rejected at the DECLARATION site (`struct X` / `enum X`), not silently shadow the builtin at the
+    // use-site. Previously only `is_reserved_type`'s 8 names were blocked, so `struct int` / `enum List`
+    // / `struct Socket` type-checked clean then mis-resolved the use-site to the builtin.
+    for name in [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "bytes",
+        "bytearray",
+        "nil",
+        "List",
+        "Set",
+        "Map",
+        "Channel",
+        "range",
+        "Socket",
+        "Listener",
+        "ptr",
+        "owned_str",
+    ] {
+        let struct_src = format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n");
+        let errs = check_entry(&struct_src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
+            "struct {name} must be rejected as reserved, got: {errs:?}"
+        );
+        let enum_src = format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n");
+        let errs = check_entry(&enum_src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
+            "enum {name} must be rejected as reserved, got: {errs:?}"
+        );
+    }
+    // An FFI fixed-width type name (`int32`) is reserved too (via TYPE_NAMES) — `struct int32` / `enum
+    // int32` must be rejected, matching the NewType/TypeAlias guards.
+    for src in [
+        "struct int32:\n    x: int\nfn main():\n    print(1)\nmain()\n",
+        "enum int32:\n    A\nfn main():\n    print(1)\nmain()\n",
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("int32") && e.message.contains("reserved (builtin)")),
+            "int32 decl must be rejected as reserved, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn bare_net_type_without_import_hints_import() {
+    // HOLE B — bare `Socket` / `Listener` annotations require `import std.net` (mirrors the
+    // Executor/Shared/ptr gates). Without the import, the use must emit the import hint, not resolve
+    // unconditionally to Ty::Socket/Ty::Listener.
+    for (src, name) in [
+        (
+            "fn f(s: Socket):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "Socket",
+        ),
+        (
+            "fn f(l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "Listener",
+        ),
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
+                    && e.message.contains("import std.net")),
+            "bare {name} without import must hint import std.net, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn net_type_with_import_ok() {
+    // A whole-module `import std.net` licenses both bare net handles in annotation position.
+    entry_ok(
+        "import std.net\nfn f(s: Socket, l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+    );
+    // A selective per-name import licenses each named handle.
+    entry_ok(
+        "import Socket from std.net\nimport Listener from std.net\nfn f(s: Socket, l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+    );
+}
+
+#[test]
+fn net_type_from_import_partial_does_not_license_other() {
+    // `import Socket from std.net` licenses Socket but NOT Listener.
+    let errs = check_entry(
+        "import Socket from std.net\nfn f(l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'Listener'")),
+        "from-importing Socket must not license Listener, got: {errs:?}"
+    );
+}
+
+#[test]
+fn net_type_rename_rejected() {
+    // A net type carries no runtime value (the runtime resolves Ty::Socket directly), so renaming it
+    // on import would bind nothing usable — reject the rename (mirrors the concurrency/timer gate).
+    let errs = check_entry("import Socket as S from std.net\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("Socket") && e.message.contains("cannot be renamed")),
+        "renaming a net type on import must be rejected, got: {errs:?}"
+    );
 }
 
 // ----- C5 refinement #1: a non-sendable value merely *read* inside a `spawn:` block -----
@@ -6303,35 +6427,54 @@ fn user_struct_named_ref_is_sendable() {
 }
 
 // ----- D6c: optional `timeout_ms` on net socket read/accept/write -----
+// NOTE: bare `Socket`/`Listener` now require `import std.net` (Hole B), so these moved off the
+// single-module `ok`/`rejects` helpers (which don't resolve native imports) onto the graph helpers
+// `entry_ok`/`check_entry` with an `import std.net` prefix + a trivial `main` tail (the `use_*` fn is
+// type-checked though never called). `check_entry` also desugars, so `?` lowers correctly.
 
 #[test]
 fn socket_read_with_timeout_type_checks() {
     // `read(n)` and `read(n, timeout_ms)` both type-check (the trailing int is optional).
-    ok(
-        "fn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return Ok(a + b)\n",
+    entry_ok(
+        "import std.net\nfn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return Ok(a + b)\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
 #[test]
 fn socket_write_with_timeout_type_checks() {
-    ok(
-        "fn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return Ok(a + b)\n",
+    entry_ok(
+        "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return Ok(a + b)\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
 #[test]
 fn listener_accept_with_timeout_type_checks() {
     // `accept()` and `accept(timeout_ms)` both type-check.
-    ok(
-        "fn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return Ok(0)\n",
+    entry_ok(
+        "import std.net\nfn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return Ok(0)\nfn main():\n    print(1)\nmain()\n",
+    );
+}
+
+/// Assert `check_entry(src)` reports `needle` AND did not leak an `unknown type` (i.e. the `import
+/// std.net` licensed the handle, so the real method-arity/type error surfaces — not a swallowed
+/// `Socket → Ty::Unknown` cascade).
+fn check_entry_rejects_net(src: &str, needle: &str) {
+    let errs = check_entry(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("unknown type")),
+        "a leaked 'unknown type' means the net handle was not licensed, got: {errs:?}"
     );
 }
 
 #[test]
 fn socket_read_with_non_int_timeout_rejected() {
     // A non-int `timeout_ms` is a type error.
-    rejects(
-        "fn use_sock(s: Socket):\n    s.read(64, \"x\")\n",
+    check_entry_rejects_net(
+        "import std.net\nfn use_sock(s: Socket):\n    s.read(64, \"x\")\nfn main():\n    print(1)\nmain()\n",
         "expected int",
     );
 }
@@ -6339,22 +6482,25 @@ fn socket_read_with_non_int_timeout_rejected() {
 #[test]
 fn socket_read_with_too_few_args_rejected() {
     // `read()` (zero args) is below the 1–2 arg range.
-    rejects("fn use_sock(s: Socket):\n    s.read()\n", "argument");
+    check_entry_rejects_net(
+        "import std.net\nfn use_sock(s: Socket):\n    s.read()\nfn main():\n    print(1)\nmain()\n",
+        "argument",
+    );
 }
 
 #[test]
 fn socket_read_with_too_many_args_rejected() {
     // `read(n, t, extra)` exceeds the 1–2 arg range.
-    rejects(
-        "fn use_sock(s: Socket):\n    s.read(64, 100, 1)\n",
+    check_entry_rejects_net(
+        "import std.net\nfn use_sock(s: Socket):\n    s.read(64, 100, 1)\nfn main():\n    print(1)\nmain()\n",
         "argument",
     );
 }
 
 #[test]
 fn listener_accept_with_too_many_args_rejected() {
-    rejects(
-        "fn use_listener(l: Listener):\n    l.accept(100, 1)\n",
+    check_entry_rejects_net(
+        "import std.net\nfn use_listener(l: Listener):\n    l.accept(100, 1)\nfn main():\n    print(1)\nmain()\n",
         "argument",
     );
 }

@@ -174,6 +174,9 @@ value-first: `RwShared(v)`.
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` · `close() -> nil`.
 - `Listener`: `accept(timeout_ms?: int) -> Result[Socket]` · `addr() -> Result[str]` · `close() -> nil`.
+- `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
+  requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
+  builtins, matching the `Shared`/`Executor` (std.concurrency) and `ptr` (std.ffi) gates.
 
 ### Iterator cursors & generators
 A `.iter()` cursor and a generator value both expose `next() -> Option[T]` and `iter() -> Iterator[T]`
@@ -306,6 +309,8 @@ panic. Build a query string with `std.encoding.query_encode` and compose `url + 
 ### `std.net`
 Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
 `listen(addr: "host:port") -> Listener`. Socket/Listener methods are in §3. See `concurrency.md`.
+The `Socket`/`Listener` TYPE names require `import std.net` to use bare in an annotation (whole-module,
+or `import Socket from std.net`) — they are reserved names, not global builtins.
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).
