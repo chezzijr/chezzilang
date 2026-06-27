@@ -8609,6 +8609,26 @@ fn pinned_hint_preserved_for_concrete_collection() {
     );
 }
 
+#[test]
+fn pinned_hint_preserved_for_bound_generic_param() {
+    // Inside a generic fn, the first push pins the element type to the IN-SCOPE, legitimately-bound
+    // type param T; a later wrong-typed push is a genuine "earlier push" pin. The expected type is
+    // a `Ty::Param`, but because T is bound, the diagnostic must KEEP the original earlier-push
+    // narrative and NOT the un-inferred-param message (which only fits an un-bound/leaked param).
+    let errs = check_src("fn f[T](x: T):\n xs := []\n xs.push(x)\n xs.push(\"s\")\nf(1)\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("pinned") && e.message.contains("earlier")),
+        "bound-param pin must keep the original earlier-push hint, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("un-inferred type parameter")),
+        "bound-param pin must not use the un-inferred-param message, got: {errs:?}"
+    );
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----
