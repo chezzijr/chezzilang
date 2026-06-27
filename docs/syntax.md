@@ -1252,6 +1252,11 @@ the int/str/bool literal domains are always open).
 **Guards** (`pattern if cond:`) add a boolean test to an arm — it matches only when the pattern
 binds *and* the guard (which sees the pattern's bindings) is true; otherwise the next arm is tried.
 A guarded arm is never irrefutable, so it can't satisfy exhaustiveness on its own — keep a `_`.
+Likewise a variant arm whose payload contains a *refutable* sub-pattern (a literal, range, or nested
+variant — e.g. `Some(0)`, `Pair(0, y)`) covers only part of that variant's domain, so it does **not**
+close the variant; only an unguarded arm whose payload is all wildcards/plain bindings does. (A guarded
+variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
+then `E.A(n)` — without a "duplicate arm" error.)
 
 ```chezzi
 match n:

@@ -5173,33 +5173,45 @@ impl Checker {
                     span,
                 );
                 match self.variants_of(ty) {
-                    Some(vmap) => match vmap.get(name) {
-                        Some(payload) => {
-                            if payload.len() != bindings.len() {
-                                self.error(
-                                    span,
-                                    format!(
-                                        "variant '{name}' binds {} value(s), but {} given",
-                                        payload.len(),
-                                        bindings.len()
-                                    ),
-                                );
+                    Some(vmap) => {
+                        // A nested variant sub-pattern is irrefutable ONLY when its enum has exactly
+                        // one variant (so naming it covers the whole domain) AND every payload
+                        // sub-pattern is itself irrefutable. `Some(Some(v))` (2-variant Option) or
+                        // `Some(0)` (literal payload) stays refutable; `Outer.Wrap(Inner.Only(x))`
+                        // over single-variant enums is irrefutable and may close its parent variant.
+                        let single_variant = vmap.len() == 1;
+                        match vmap.get(name) {
+                            Some(payload) => {
+                                if payload.len() != bindings.len() {
+                                    self.error(
+                                        span,
+                                        format!(
+                                            "variant '{name}' binds {} value(s), but {} given",
+                                            payload.len(),
+                                            bindings.len()
+                                        ),
+                                    );
+                                }
+                                let mut sub_irref = true;
+                                for (b, t) in bindings.iter().zip(payload.iter()) {
+                                    sub_irref &= self.bind_subpattern(b, t, span);
+                                }
+                                single_variant && sub_irref
                             }
-                            for (b, t) in bindings.iter().zip(payload.iter()) {
-                                self.bind_subpattern(b, t, span);
+                            None => {
+                                self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                for b in bindings {
+                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                }
+                                false
                             }
                         }
-                        None => {
-                            self.error(span, format!("'{name}' is not a variant of {ty}"));
-                            for b in bindings {
-                                self.bind_subpattern(b, &Ty::Unknown, span);
-                            }
-                        }
-                    },
+                    }
                     None if ty.is_unknown() => {
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
+                        false
                     }
                     None => {
                         self.error(
@@ -5209,9 +5221,9 @@ impl Checker {
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
+                        false
                     }
                 }
-                false
             }
         }
     }
@@ -5299,6 +5311,7 @@ impl Checker {
         kind: &MatchKind,
         span: Span,
         covered: &mut std::collections::HashSet<String>,
+        guarded: bool,
     ) -> bool {
         // A wildcard binds nothing and is valid in every mode.
         if let Pattern::Wildcard = pattern {
@@ -5315,7 +5328,10 @@ impl Checker {
             let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
             for (i, alt) in alts.iter().enumerate() {
                 // Recurse: this pushes a scratch scope, threads `covered`, binds the alternative.
-                let alt_irref = self.bind_match_arm(alt, kind, span, covered);
+                // Thread `guarded` unchanged: a top-level guard makes EVERY alternative refutable,
+                // so a guarded `E.A(0) | E.B` closes nothing; an unguarded one lets each alternative
+                // decide its own payload-irrefutability independently.
+                let alt_irref = self.bind_match_arm(alt, kind, span, covered, guarded);
                 let snap: std::collections::BTreeMap<String, Ty> = self
                     .scopes
                     .last()
@@ -5393,9 +5409,11 @@ impl Checker {
                                 ),
                             );
                         }
-                        if !covered.insert(name.clone()) {
-                            self.error(span, format!("duplicate match arm '{name}'"));
-                        }
+                        // Bind the payload FIRST, accumulating whether every sub-pattern is
+                        // irrefutable (a wildcard or plain binding). A literal/range/nested-variant
+                        // sub-pattern (e.g. `Some(0)`, `P.Pair(0, y)`) makes the payload refutable,
+                        // so the arm covers only part of the variant's domain — it must NOT close it.
+                        let mut payload_irref = true;
                         match &payload {
                             Some(payload) => {
                                 if payload.len() != bindings.len() {
@@ -5409,14 +5427,23 @@ impl Checker {
                                     );
                                 }
                                 for (b, t) in bindings.iter().zip(payload.iter()) {
-                                    self.bind_subpattern(b, t, span);
+                                    payload_irref &= self.bind_subpattern(b, t, span);
                                 }
                             }
                             None => {
                                 for b in bindings {
-                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                    payload_irref &= self.bind_subpattern(b, &Ty::Unknown, span);
                                 }
                             }
+                        }
+                        // A variant is `covered` ONLY when an arm for it is BOTH unguarded AND has an
+                        // all-irrefutable payload (docs/syntax.md §8: a guarded arm is never
+                        // irrefutable). Duplicate-arm detection fires only against a PRIOR fully
+                        // closing arm, so a guard-then-fallback on the same variant is legal.
+                        if covered.contains(name) {
+                            self.error(span, format!("duplicate match arm '{name}'"));
+                        } else if !guarded && payload_irref {
+                            covered.insert(name.clone());
                         }
                     }
                     Pattern::Literal(_) => self.error(
@@ -5654,7 +5681,13 @@ impl Checker {
             // the binding's OWNING scope survives `pop_scope` (which only removes the arm's binders).
             // The EXPRESSION-position matcher `infer_match` keeps its barrier — value-arms stay
             // independent.
-            let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            let irref = self.bind_match_arm(
+                &arm.pattern,
+                &kind,
+                scrutinee.span,
+                &mut covered,
+                arm.guard.is_some(),
+            );
             // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
             // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
             if let Some(guard) = &arm.guard {
@@ -5680,7 +5713,13 @@ impl Checker {
             // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
             // conditionally too — refinement inside one arm must not leak across arms or past it.
             let snap = self.snapshot_refinable();
-            let irref = self.bind_match_arm(&arm.pattern, &kind, scrutinee.span, &mut covered);
+            let irref = self.bind_match_arm(
+                &arm.pattern,
+                &kind,
+                scrutinee.span,
+                &mut covered,
+                arm.guard.is_some(),
+            );
             if let Some(guard) = &arm.guard {
                 self.expect_bool(guard, "match guard");
             }
