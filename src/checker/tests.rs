@@ -8573,6 +8573,42 @@ fn heterogeneous_struct_list_unannotated_rejected() {
     );
 }
 
+#[test]
+fn leaked_param_push_emits_uninferred_param_msg() {
+    // `empty[T]()` has a return-only type param T with nothing to infer it from, so `xs` is
+    // `List[<unbound Param T>]`. The FIRST push then mismatches. The diagnostic must NOT use the
+    // wrong "earlier push" narrative (this is the first push) and must accurately point at the
+    // un-inferred type parameter / construction-site fix.
+    let errs = check_src("fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(5)\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("un-inferred type parameter")),
+        "expected the un-inferred-param message, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("earlier")),
+        "must not use the 'earlier push' narrative, got: {errs:?}"
+    );
+}
+
+#[test]
+fn pinned_hint_preserved_for_concrete_collection() {
+    // The genuine first-push-pins case (concrete element type Int) must KEEP the original
+    // "pinned by an earlier push" narrative and NOT use the un-inferred-param message.
+    let errs = check_src("fn main():\n xs := []\n xs.push(1)\n xs.push(\"s\")\nmain()");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("pinned") && e.message.contains("earlier")),
+        "expected the original pinned/earlier hint, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("un-inferred type parameter")),
+        "concrete pin must not use the un-inferred-param message, got: {errs:?}"
+    );
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----
