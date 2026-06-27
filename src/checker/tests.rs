@@ -1749,6 +1749,110 @@ fn inferred_method_return() {
     );
 }
 
+// SOUNDNESS: an inferred (un-annotated) struct method return must FLOW to call sites through the
+// build_graph/check_graph path (module-prefixed keys), not just the single-module bare-key path.
+// Pre-fix the single-module `inferred_method_return` above passes while the CLI/entry path silently
+// accepts `int` assigned to `str` (the bare-key vs module-key divergence).
+#[test]
+fn inferred_struct_method_return_flows_to_callsite() {
+    entry_rejects(
+        "struct P:\n    x: int\n    fn val(self):\n        return 5\nfn main():\n    s: str = P(3).val()\n    print(s)\nmain()\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn inferred_struct_method_return_correct_site_ok() {
+    // BOUNDARY: an inferred method return used at a correctly-typed site must still compile.
+    entry_ok(
+        "struct P:\n    x: int\n    fn val(self):\n        return 5\nfn main():\n    n: int = P(3).val()\n    print(n)\nmain()\n",
+    );
+}
+
+#[test]
+fn explicit_struct_method_return_flows_to_callsite() {
+    // BOUNDARY: an EXPLICIT annotation must still flow (already worked) on the entry path.
+    entry_rejects(
+        "struct P:\n    x: int\n    fn val(self) -> int:\n        return 5\nfn main():\n    s: str = P(3).val()\n    print(s)\nmain()\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn struct_method_body_is_typechecked() {
+    // DISCOVERED HOLE: in the build_graph path struct method bodies were entirely UNCHECKED
+    // (the pass-2 guard read the bare key, missing the module-keyed slot), so a body type error
+    // like `y: str = self.x` was silently accepted.
+    entry_rejects(
+        "struct P:\n    x: int\n    fn val(self) -> int:\n        y: str = self.x\n        return 5\nfn main():\n    print(\"hi\")\nmain()\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn struct_method_body_correct_ok() {
+    // BOUNDARY control for the body-check fix: a correct struct method body still compiles.
+    entry_ok(
+        "struct P:\n    x: int\n    fn val(self) -> int:\n        y: int = self.x\n        return y\nfn main():\n    print(\"hi\")\nmain()\n",
+    );
+}
+
+#[test]
+fn inferred_struct_compare_rejected_for_comparable() {
+    // An inferred `compare(self,o)` body yielding bool must be REJECTED where Comparable (needs
+    // `-> int`) is required (the `<` operator), exactly like an explicit `-> bool`.
+    entry_rejects(
+        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
+        "compare",
+    );
+}
+
+#[test]
+fn inferred_compare_generic_bound_rejected() {
+    // A generic bound `[T: Comparable]` over a struct whose `compare` infers bool must reject at
+    // check, not fault later.
+    entry_rejects(
+        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
+        "Comparable",
+    );
+}
+
+#[test]
+fn inferred_enum_method_return_flows_to_callsite() {
+    // Enum methods have the same hole: an un-annotated `fn val(self): return 5` returns int, which
+    // must not be silently assignable to a str slot.
+    entry_rejects(
+        "enum Color:\n    Red\n    Blue\n    fn val(self):\n        return 5\nfn main():\n    s: str = Color.Red.val()\n    print(s)\nmain()\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+#[test]
+fn inferred_enum_method_return_correct_site_ok() {
+    entry_ok(
+        "enum Color:\n    Red\n    Blue\n    fn val(self):\n        return 5\nfn main():\n    n: int = Color.Red.val()\n    print(n)\nmain()\n",
+    );
+}
+
+#[test]
+fn recursive_inferred_struct_method_no_spurious_error() {
+    // BOUNDARY: a recursive un-annotated method must still infer `int` via the fixpoint and not
+    // start spuriously erroring.
+    entry_ok(
+        "struct P:\n    x: int\n    fn f(self, c: bool):\n        if c:\n            return self.f(false)\n        return 0\nfn main():\n    n: int = P(1).f(true)\n    print(n)\nmain()\n",
+    );
+}
+
+#[test]
+fn repeated_none_in_tuple_pattern_not_duplicate_binder() {
+    // A nullary variant (`None`) binds nothing, so `(None, None, None)` is NOT a duplicate binding.
+    // Pre-fix the duplicate-binder pre-pass naively counted each `None` ident as a binder. (This
+    // pattern only got exercised in struct method bodies, which were unchecked in the entry path.)
+    entry_ok(
+        "fn slice(a: int? = None, b: int? = None, c: int? = None) -> int:\n    match (a, b, c):\n        (None, None, None): return 0\n        _: return 1\nfn main():\n    print(slice())\nmain()\n",
+    );
+}
+
 // ===== 9b'. struct method calls — the receiver `self` is implicit, not an explicit argument =====
 
 const BOX: &str = "struct Box:\n    v: int\n    fn get(self) -> int:\n        return self.v\n    fn add(self, k: int) -> int:\n        return self.v + k\n";
