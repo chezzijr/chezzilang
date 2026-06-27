@@ -2221,7 +2221,12 @@ A few cross-cutting notes (full detail in `stdlib.md`):
   (`regex.find(…).text`, `request.get(…).status`, `process.run(…).code`) needs **no import**; naming or
   constructing the type (`m: Match` / `Match(…)`) requires importing the owning module (`import std.regex`
   exposes `Match` bare and as `regex.Match(…)`; or `import Match from std.regex`). The names are free for
-  user types — a user `struct Response` without `import std.request` is their own type.
+  user types **only when the owning module is not imported** — a user `struct Response` without `import
+  std.request` is their own type. But importing the type **and** declaring a same-named `struct` in the
+  same module is a collision, rejected at check (`type 'Response' is reserved (builtin)`) — never accept-
+  then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (Same
+  for `Ref` from `std.ref` and every other import-gated std struct.) A merely-similar name (`struct
+  RefBox` alongside `import Ref from std.ref`) stays legal.
 
 ---
 
