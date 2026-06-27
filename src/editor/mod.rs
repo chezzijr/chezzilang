@@ -1090,6 +1090,21 @@ mod tests {
     }
 
     #[test]
+    fn hover_for_binding_decl() {
+        // `for i in [1,2,3]:` — hovering the binding `i` at the decl site (right after `for `)
+        // reports its inferred element type `int`.
+        let h = hov("for i in [1,2,3]:\n    print(i)\n", 0, 4).expect("hover on for binding");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_for_binding_body() {
+        // The body use-site of the loop var still resolves (additive decl-site span must not regress).
+        let h = hov("for i in [1,2,3]:\n    print(i)\n", 1, 10).expect("hover on for body use");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
     fn hover_fn_param_type() {
         // The use of param `a` inside the body reports the declared param type `str`.
         let h = hov("fn f(a: str):\n    a\n", 1, 4).expect("hover on param use");

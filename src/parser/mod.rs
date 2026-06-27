@@ -1004,14 +1004,22 @@ impl Parser {
         self.expect(&Token::For)?;
         // One binding (`for x in …`), or a comma-separated list (`for k, v in m:`) to destructure a
         // map's entries. The checker enforces which iterands accept which arities.
+        // Capture each binding-name token's span (parallel to `vars`) for decl-site hover.
+        let mut var_spans = vec![self.cur_span()];
         let mut vars = vec![self.expect_ident()?];
         while self.eat(&Token::Comma) {
+            var_spans.push(self.cur_span());
             vars.push(self.expect_ident()?);
         }
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(StmtKind::For { vars, iter, body })
+        Ok(StmtKind::For {
+            vars,
+            var_spans,
+            iter,
+            body,
+        })
     }
 
     /// Parse one comprehension `for` clause: `for <ident>[, <ident>] in <iter> [if <guard>]…`.

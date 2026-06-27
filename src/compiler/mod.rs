@@ -1220,7 +1220,9 @@ impl Compiler {
             StmtKind::Defer(target) => self.compile_defer(fc, target, stmt.span),
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
-            StmtKind::For { vars, iter, body } => self.compile_for(fc, vars, iter, body, stmt.span),
+            StmtKind::For {
+                vars, iter, body, ..
+            } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
             // Concurrency C4 — sequential, run-to-completion executor (mirrors the interpreter).
             StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
@@ -2054,6 +2056,9 @@ impl Compiler {
             body = vec![Stmt {
                 kind: StmtKind::For {
                     vars: clause.vars.clone(),
+                    // Synthesized: comprehension clauses carry no binding spans, so default
+                    // (sentinel) spans — they never collide with a real decl-site hover.
+                    var_spans: vec![Span::default(); clause.vars.len()],
                     iter: (*clause.iter).clone(),
                     body,
                 },
@@ -2068,6 +2073,7 @@ impl Compiler {
                     vars,
                     iter,
                     body: inner,
+                    ..
                 },
             ..
         } = &body[0]

@@ -47,6 +47,18 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover on the for-loop binding decl-site (2026-06-27).** Hovering the loop
+variable at its declaration (`for i in …` — the `i` right after `for`) now reports its inferred element
+type (e.g. `int`), matching the body use-site that already worked. Root cause: `StmtKind::For` stored
+`vars: Vec<String>` with no source span, so the checker had no token position to record a hover at. Fix
+is purely additive metadata: a parallel `var_spans: Vec<Span>` field on `StmtKind::For` (one span per
+name, mirroring `Param.name_span`/`Field.name_span`), captured by the parser via `cur_span()` before each
+binding ident; the checker zips it with the declare loop and calls `hover_record_at` (a no-op unless a
+probe is armed → zero overhead on normal checks). `var_spans` is never read at runtime by either engine,
+so VM↔interp parity and every golden are byte-identical; comprehension-synthesized `for`s use
+`Span::default()` (no decl-site hover — out of scope, intended). Tests: `editor::hover_for_binding_decl`
+(decl-site) + `editor::hover_for_binding_body` (use-site regression guard).
+
 **✅ Editor tooling — doc-comments on LSP hover (2026-06-27).** A plain `#` comment block *immediately
 above* a declaration is now its DOC-COMMENT, rendered on LSP hover ABOVE the existing `chezzi` type
 fence. No new marker (`#`, not `##`/`///`); multiline via stacked `#` lines (join with `\n`, one leading
