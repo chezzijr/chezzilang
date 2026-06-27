@@ -1579,11 +1579,12 @@ impl Walker<'_> {
                 // instead of the misleading "only supported on … struct methods" (it IS a method).
                 if let ExprKind::Field { name, .. } = &callee.kind
                     && is_builtin_method(name)
+                    && !self.ctx.fn_fields.contains(name)
                 {
                     return Err(err(
                         span,
                         format!(
-                            "method '{name}' reuses a built-in method name; named/default arguments need a receiver whose struct type is statically known — bind it to a typed local or pass positionally"
+                            "method '{name}' reuses a built-in method name, so named/default arguments can't be bound here unless the receiver's struct type is statically known — if it's a user-struct method, bind the receiver to a typed local or inline constructor; a built-in method takes no named arguments"
                         ),
                     ));
                 }
@@ -2130,6 +2131,22 @@ mod tests {
         assert!(
             e.message.contains("reuses a built-in method name"),
             "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn builtin_named_fn_field_not_mislabeled_as_method() {
+        // A function-typed struct FIELD whose name collides with a builtin (`map`), called with a
+        // named arg, is field-access-then-call — NOT a method. It must fall through to the generic
+        // unsupported-named-args error, never the "reuses a built-in method name" method diagnostic
+        // (which would wrongly imply a typed-local would help). Guards the fn_fields omission.
+        let e = desugar_err(
+            "struct S:\n    map: fn(int) -> int\ns := S(fn(x: int) -> int: x)\ns.map(arg=1)\n",
+        );
+        assert!(
+            !e.message.contains("reuses a built-in method name"),
+            "fn-field call must not get the builtin-method-name diagnostic; got: {}",
             e.message
         );
     }
