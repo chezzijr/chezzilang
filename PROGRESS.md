@@ -833,6 +833,30 @@ parallel is structural (no `src/interp` edit). Tests: `lowers_ref_arg_through_ct
 `examples/ref_indirect.chz` golden (stdout `42`, two-engine parity). Negative guards intact (single-struct
 mismatch + by-value-into-ref still error). Docs: `gaps.md` entry → RESOLVED.
 
+**✅ Bug fix — a struct/enum method whose name collides with a built-in method (`add`, `map`, `push`,
+`len`, … the `BUILTIN_METHODS` list) now gets named- and default-argument support (2026-06-27).**
+Previously the desugar `is_builtin_method(name)` guard (two sites in `src/desugar/mod.rs`) skipped ALL
+method resolution for any builtin-colliding name — because the receiver MIGHT be a List/Set/Map/str the
+pre-type pass can't see — so `c.add(amount=5)` on a user `Counter` was rejected with the misleading
+"named arguments are only supported on functions, struct constructors, and struct methods" (it IS a
+method). Fix: on the builtin branch, resolve via the already-existing receiver-type-aware lookup
+(`receiver_struct_ty(obj)` → `methods_by_struct[(sname,name)]`) BEFORE bailing — when the receiver's
+struct/enum type is statically knowable pre-type (a typed local, an inline ctor call, or a
+struct-returning fn call) and that struct defines the method, the user method's spec drives full
+named/default rewriting; a genuine builtin receiver (or an unknowable one) still returns None and is
+left untouched (no name-keyed fallback that could mis-bind a builtin). `normalize_call`'s `method_spec`
+arm + `callee_param_is_ref` both updated; the diagnostic for the unknowable-receiver case is now accurate
+("method '…' reuses a built-in method name; named/default arguments need a receiver whose struct type is
+statically known — bind it to a typed local or pass positionally"). Desugar runs once before both engines
+⇒ two-engine parity is structural (no `src/interp` edit). Tests: 7 new desugar unit tests
+(`builtin_named_method_*`, `enum_builtin_named_method_annotated_receiver`, accurate-error +
+no-struct-defines guards) + the `real_builtin_set_add_untouched` / `builtin_method_name_not_normalized` /
+`ambiguous_method_named_errors` boundary guards stay green; new `examples/builtin_named_method.chz` golden
++ `golden_builtin_named_method_chz_matches_expected_and_interp` (VM == interp). Docs: `docs/syntax.md`
+limitation sentence rewritten; the `BUILTIN_METHODS` doc-comment updated. Known boundary (pre-existing,
+not introduced here): an inferred enum receiver `m := E.Variant` is Field-shaped so its type isn't
+statically known → falls to the accurate diagnostic (annotate the local or pass positionally).
+
 **✅ Soundness fix — two missing duplicate/collision checks in the checker are now rejected (both
 checker-only; two-engine parity preserved by construction — rejected programs never reach an engine,
 accepted programs are byte-identical).** (1) **Import name collisions.** `bind_import` recorded a value

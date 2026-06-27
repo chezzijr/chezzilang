@@ -22575,6 +22575,26 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on newtype");
     }
 
+    /// Golden: a user struct/enum method whose name collides with a built-in method name (`add`,
+    /// `map`) still gets named/default-arg support when the receiver's struct type is statically
+    /// known (typed local / inline ctor / struct-returning fn), while a genuine builtin receiver
+    /// (List) routes to the builtin untouched. Byte-identical on the VM, interp, and `.expected`.
+    #[test]
+    fn golden_builtin_named_method_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/builtin_named_method.chz");
+        let expected = include_str!("../../examples/builtin_named_method.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from builtin_named_method.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on builtin_named_method"
+        );
+    }
+
     /// M22 golden: operator protocols (`div`/`mod`/`neg`), protocol embedding (super-protocols), and
     /// the builtin `Arithmetic` bundle — byte-identical on the VM, interp, the M:N parallel engine,
     /// and the checked-in `.expected`.

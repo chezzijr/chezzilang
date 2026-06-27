@@ -462,8 +462,15 @@ methods** (`p.greet(punct="?")`, `p.scale()` filling a default). Because a metho
 unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
 with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
 can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
-so give same-named methods the same parameter shape or unique names. A method that reuses a built-in
-method name (`map`, `push`, `len`, …) does not get default/named support. Defaults are **not**
+so give same-named methods the same parameter shape or unique names. A method that **reuses a built-in
+method name** (`map`, `push`, `len`, `add`, …) does still get default/named support, but **only when
+the receiver's struct/enum type is statically known** at this pre-type pass — a typed local
+(`c := Counter(0)` or `t: Tag = …`), an inline constructor call (`Counter(0).add(amount=5)`), or a
+struct-returning function call (`mk().add(...)`). A genuine builtin receiver (a `List`/`Set`/`Map`/`str`
+value) keeps routing to the builtin method untouched; a named call to a builtin-colliding method whose
+receiver type is *not* statically known (e.g. an unannotated parameter, or an inferred `m := E.Variant`)
+is rejected with an accurate "reuses a built-in method name — bind it to a typed local or pass
+positionally" error. Defaults are **not**
 supported on **closures** or on **enum variant constructors** — note this is the variant
 *constructor*; an enum's *methods* take defaults just like struct methods. (Per §above, a default may
 be any expression that doesn't
