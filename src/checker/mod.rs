@@ -1135,6 +1135,19 @@ struct Checker {
     /// already real native fns). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
     /// may use the two bare) via `current_module_is_stdlib`.
     imported_net: std::collections::HashSet<String>,
+    /// The bare type names that an `import` licensed into the *current* module as a
+    /// `StructOrigin::Builtin` struct layout (the std struct-modeled natives — `Ref`/`Match`/
+    /// `Response`/`ProcResult` and every other import-gated std struct like `Token`/`Heap`/`Deque`).
+    /// Populated at the two struct-import insert sites (whole-module `import std.regex` and selective
+    /// `import Match from std.regex`), keyed on `info.origin == StructOrigin::Builtin`. A same-named
+    /// user `struct X` decl IN A MODULE THAT IMPORTED `X` is then rejected as `reserved (builtin)` —
+    /// closing the soundness hole where the user layout overwrote the Builtin seed yet the runtime
+    /// still returned/constructed the native shape (a check-clean program that trapped at runtime).
+    /// NOT reusable from `self.structs` membership: `Match`/`Response`/`ProcResult` are seeded with
+    /// Builtin origin GLOBALLY even without any import, and THAT seeded-but-not-imported state is the
+    /// legal bare-decl case — only the import EVENT licenses the name, so it's tracked separately.
+    /// Per-module: cleared in `begin_module`.
+    imported_builtin_types: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.
@@ -1232,6 +1245,7 @@ impl Checker {
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
             imported_net: std::collections::HashSet::new(),
+            imported_builtin_types: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -1350,6 +1364,7 @@ impl Checker {
         self.imported_concurrency.clear();
         self.imported_time.clear();
         self.imported_net.clear();
+        self.imported_builtin_types.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -1479,6 +1494,13 @@ impl Checker {
                         if is_std {
                             self.struct_names.insert(sname.clone());
                             self.bare_types.entry(sname.clone()).or_insert(key);
+                            // A Builtin-origin std struct (Ref/Match/Response/ProcResult, Token/Heap/
+                            // …) licensed bare by THIS import: record the name so a same-named user
+                            // `struct` decl below is a clean `reserved (builtin)` error, not an
+                            // accept-then-trap (the user layout would shadow the native shape).
+                            if info.origin == StructOrigin::Builtin {
+                                self.imported_builtin_types.insert(sname.clone());
+                            }
                         }
                     }
                     for (ename, edef) in &sig.enum_defs {
@@ -1671,6 +1693,12 @@ impl Checker {
                             self.structs.insert(key.clone(), info.clone());
                             self.struct_names.insert(bind.clone());
                             self.bare_types.insert(bind.clone(), key);
+                            // Same soundness gate as the whole-module path: a Builtin-origin std
+                            // struct imported by name reserves its BIND name against a same-named user
+                            // `struct` decl (else accept-then-trap on the native shape mismatch).
+                            if info.origin == StructOrigin::Builtin {
+                                self.imported_builtin_types.insert(bind.clone());
+                            }
                         } else if let Some(edef) = sig.enum_defs.get(member) {
                             // A user enum imported by name: inject its variant names, type params, and
                             // each variant's payload under the declaring module's runtime key; expose
@@ -2314,8 +2342,15 @@ impl Checker {
                     methods,
                     ..
                 } => {
+                    // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
+                    // struct (Ref/Match/Response/ProcResult, …) is reserved against a same-named user
+                    // `struct` decl — declaring it would overwrite the native seed yet the runtime
+                    // still constructs/returns the native shape, so the check-clean program would trap
+                    // at runtime on a field mismatch. (A bare unimported `struct Match` stays legal —
+                    // the name isn't in the set without the import event.)
                     if is_reserved_type(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                        || self.imported_builtin_types.contains(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }

@@ -16384,6 +16384,39 @@ mod tests {
     }
 
     #[test]
+    fn neg_int_pattern_runtime_parity() {
+        // A negative int literal pattern matches the negative value and nothing else; a
+        // negative-bounded range pattern is half-open (`-10 <= v < -5`). VM == interp.
+        let src = "fn classify(x: int) -> str:\n\
+                   \x20   match x:\n\
+                   \x20       -3: return \"neg3\"\n\
+                   \x20       -10..-5: return \"lo\"\n\
+                   \x20       _: return \"other\"\n\
+                   print(classify(-3))\n\
+                   print(classify(-7))\n\
+                   print(classify(-5))\n\
+                   print(classify(-10))\n\
+                   print(classify(3))\n";
+        assert_eq!(run_parity(src), "neg3\nlo\nother\nlo\nother\n");
+    }
+
+    #[test]
+    fn neg_pattern_with_guard_and_or_parity() {
+        // Negatives compose with guards and or-patterns; both engines agree.
+        let src = "fn f(x: int, flag: bool) -> str:\n\
+                   \x20   match x:\n\
+                   \x20       -3 if flag: return \"g\"\n\
+                   \x20       -1 | -2: return \"or\"\n\
+                   \x20       _: return \"_\"\n\
+                   print(f(-3, true))\n\
+                   print(f(-3, false))\n\
+                   print(f(-1, false))\n\
+                   print(f(-2, true))\n\
+                   print(f(0, true))\n";
+        assert_eq!(run_parity(src), "g\n_\nor\nor\n_\n");
+    }
+
+    #[test]
     fn ic_deep_field_read() {
         // Read the LAST field of a 6-field struct in a loop: exercises the IC hit path past five
         // would-be name-probes. Cached idx must point at `f` every iteration.

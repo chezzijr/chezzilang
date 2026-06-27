@@ -297,6 +297,13 @@
                 | <tuplePattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
+# A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
+# pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
+# bound may independently be negative (`-10..-5`, `-10..5`, `0..-5`).
+                | "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOT" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOT" "INT"
+                | "INT" "DOTDOT" "MINUS" "INT"
 # A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
 # binding name OR — when it names a nullary variant of the matched type — a refutable variant match
 # (checker-promoted; e.g. the `None` in `Some(None)`). Same surface grammar either way.
