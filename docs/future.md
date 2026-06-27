@@ -123,7 +123,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     site is inferred from the param/binding ref-ness (the earlier "explicit `ref` at the call site" /
     `r^` notes are superseded); (b) **`ref` restricted to locals + params only** — the parser bars it
     from return types, generic args, collection elements, struct fields, tuple elements, and
-    destructuring lets (those keep first-class `Ref[T]`); (c) coercion table + the non-sendable airlock
+    destructuring bindings (those keep first-class `Ref[T]`); (c) coercion table + the non-sendable airlock
     boundary (a `ref`/`Ref` box can't cross a task — use `Shared[T]`). See `docs/syntax.md` (`ref T`),
     `gaps.md`, and examples `ref_binding.chz` / `ref_airlock.chz`.
 
