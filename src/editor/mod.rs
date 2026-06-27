@@ -1302,6 +1302,60 @@ mod tests {
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 
+    #[test]
+    fn hover_newtype_ctor_callee() {
+        // Hovering the ctor callee `UserId` of `UserId(10)` reports a fn from the underlying to the
+        // newtype (mirrors the struct-ctor path).
+        let src = "newtype UserId = int\nUserId(10)\n";
+        let h = hov(src, 1, 0).expect("hover on newtype-ctor callee");
+        assert_eq!(h.display, "fn(int) -> UserId");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_enum_variant_callee() {
+        // Hovering the variant-name `Val` of `Col.Val(3)` reports the variant's ctor signature.
+        let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
+        let h = hov(src, 3, 4).expect("hover on enum-variant callee");
+        assert_eq!(h.display, "fn(int) -> Col");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_enum_variant_receiver() {
+        // Hovering the receiver `Col` of `Col.Val(3)` reports the enum type.
+        let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
+        let h = hov(src, 3, 0).expect("hover on enum-variant receiver");
+        assert_eq!(h.display, "Col");
+    }
+
+    #[test]
+    fn hover_static_method_callee() {
+        // Hovering the static-method name `default` of `Foo.default()` reports its call signature.
+        let src = "struct Foo:\n    x: int\n    fn default() -> Foo:\n        return Foo(0)\nFoo.default()\n";
+        let h = hov(src, 4, 4).expect("hover on static-method callee");
+        assert_eq!(h.display, "fn() -> Foo");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_static_method_receiver() {
+        // Hovering the receiver `Foo` of `Foo.default()` reports the struct type.
+        let src = "struct Foo:\n    x: int\n    fn default() -> Foo:\n        return Foo(0)\nFoo.default()\n";
+        let h = hov(src, 4, 0).expect("hover on static-method receiver");
+        assert_eq!(h.display, "Foo");
+    }
+
+    #[test]
+    fn hover_builtin_callee_chr() {
+        // CONFIRMING (already green): a bare-name builtin callee (`chr`) records its display sig via
+        // callee_display_ty -> builtin_sig. `len(...)` is method-only (not a free fn / not reserved-
+        // callable), so `len(x)` is an undefined-name error and is out of scope here.
+        let h = hov("chr(65)\n", 0, 0).expect("hover on builtin chr callee");
+        assert_eq!(h.display, "fn(int) -> str");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
     /// The `token_type` of the semantic token starting at 0-based `(line, start)`, or `None`.
     fn role_at(toks: &[SemTok], line: u32, start: u32) -> Option<u32> {
         toks.iter()

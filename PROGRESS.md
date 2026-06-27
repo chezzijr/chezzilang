@@ -47,6 +47,23 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for value-producing call/ctor/static/receiver sites (2026-06-27).**
+Hover on four call categories previously returned `None`; now they report a signature, checker-only and
+probe-gated (every addition is inside `if self.hover_probe.is_some()` or routes through `hover_record_at`,
+a no-op when no probe is armed → NO type-check/codegen/VM/interp change, two-engine parity untouched):
+(1) **newtype constructor** (`UserId(10)` → `fn(int) -> UserId`) — a newtype branch in `callee_display_ty`
+(the existing bare-Ident callee record site fires it, symmetric with the struct-ctor branch);
+(2) **enum-variant constructor** (`Col.Val(3)`: variant name `Val` → `fn(int) -> Col`) — `infer_variant_call`
+records the variant's ctor sig at the variant-name span (threaded a `name_span` through it + `infer_named_call`);
+(3) **static method** (`Foo.default()`: `default` → `fn() -> Foo`) — `infer_static_call` records the declared
+sig at the method-name span (threaded `name_span` through all four call sites);
+(4) **receivers** of `Col.Val(..)` / `Foo.default()` → the enum/struct type name (`Col` / `Foo`). The
+bare-builtin callee case (`print`/`range`/`chr`/…) was ALREADY covered via `callee_display_ty`→`builtin_sig`;
+`len(...)` is method-only (not a free fn) so it stays an undefined-name error (out of scope). Tests:
+`editor::tests::hover_newtype_ctor_callee`, `hover_enum_variant_callee`, `hover_enum_variant_receiver`,
+`hover_static_method_callee`, `hover_static_method_receiver`, `hover_builtin_callee_chr`. **Reinstall the LSP
+snapshot to serve it: `cargo install --path . --features lsp --bin chezzi-lsp`.**
+
 **✅ Editor tooling — doc-comments on LSP hover (2026-06-27).** A plain `#` comment block *immediately
 above* a declaration is now its DOC-COMMENT, rendered on LSP hover ABOVE the existing `chezzi` type
 fence. No new marker (`#`, not `##`/`///`); multiline via stacked `#` lines (join with `\n`, one leading

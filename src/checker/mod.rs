@@ -6044,6 +6044,23 @@ impl Checker {
                 ret: Box::new(Ty::Struct(name.to_string(), targs)),
             });
         }
+        // A newtype constructor (`UserId(10)`): one arg of the underlying type → the newtype. Mirrors
+        // the struct branch (module-keyed `bare_key` lookup); a generic newtype keeps its declared
+        // `Ty::Param`s so it Displays "fn(list[T]) -> Stack[T]".
+        if self.newtype_names.contains(name) {
+            let key = self.bare_key(name);
+            if let Some((under, _)) = self.newtype_defs.get(&key) {
+                let targs: Vec<Ty> = self
+                    .newtype_type_params
+                    .get(&key)
+                    .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+                    .unwrap_or_default();
+                return Some(Ty::Func {
+                    params: vec![under.clone()],
+                    ret: Box::new(Ty::NewType(name.to_string(), targs)),
+                });
+            }
+        }
         // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
         // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
         // be user-shadowed, so this never collides with the fn/struct tables above.
@@ -7250,7 +7267,7 @@ impl Checker {
                     // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
                     // genuine clash), matching the layout tables + the declaring module's signatures.
                     vi.enum_name = self.type_key(&mid, ename);
-                    return self.infer_variant_call(&vi, name, args, &targs, span);
+                    return self.infer_variant_call(&vi, name, args, &targs, *name_span, span);
                 }
                 self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
                 for a in args {
@@ -7267,6 +7284,16 @@ impl Checker {
                 && self.enum_names.contains(ename)
             {
                 let ekey = self.bare_key(ename);
+                // Editor hover (probe-gated no-op): record the receiver `Col` of `Col.Val(3)` /
+                // `Col.method()` as its enum type. Covers both the variant-ctor and enum-static paths.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(
+                        obj.span,
+                        &Ty::Enum(ekey.clone(), Vec::new()),
+                        HoverKind::Other,
+                        None,
+                    );
+                }
                 if self
                     .variants
                     .contains_key(&(ekey.clone(), name.to_string()))
@@ -7284,7 +7311,9 @@ impl Checker {
                         );
                         return Ty::Unknown;
                     }
-                    if let Some(ty) = self.infer_named_call(name, args, &targs, span, Some(&ekey)) {
+                    if let Some(ty) =
+                        self.infer_named_call(name, args, &targs, *name_span, span, Some(&ekey))
+                    {
                         return ty;
                     }
                 } else {
@@ -7292,7 +7321,16 @@ impl Checker {
                     // first, so a variant always wins; disjointness is enforced at decl time). The
                     // member-level turbofish (`Enum.method[U](...)`) is the bare carrier of the
                     // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
-                    return self.infer_static_call(&ekey, ename, name, args, &[], &targs, span);
+                    return self.infer_static_call(
+                        &ekey,
+                        ename,
+                        name,
+                        args,
+                        &[],
+                        &targs,
+                        *name_span,
+                        span,
+                    );
                 }
             }
             // `Type.method(args)` — STATIC (associated) method on a bare struct/enum type name. The
@@ -7303,9 +7341,28 @@ impl Checker {
                 && self.struct_names.contains(tname)
             {
                 let key = self.bare_key(tname);
+                // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
+                // its struct type.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(
+                        obj.span,
+                        &Ty::Struct(key.clone(), Vec::new()),
+                        HoverKind::Other,
+                        None,
+                    );
+                }
                 // The member-level turbofish (`Type.method[U](...)`) is the bare carrier of the
                 // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
-                return self.infer_static_call(&key, tname, name, args, &[], &targs, span);
+                return self.infer_static_call(
+                    &key,
+                    tname,
+                    name,
+                    args,
+                    &[],
+                    &targs,
+                    *name_span,
+                    span,
+                );
             }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
@@ -7334,13 +7391,15 @@ impl Checker {
                             format!("variant '{name}' of '{tname}' takes no method type arguments"),
                         );
                     }
-                    return self.infer_variant_call(&v, name, args, &resolved, span);
+                    return self.infer_variant_call(&v, name, args, &resolved, *name_span, span);
                 }
                 // `targs` is the member-level (method) turbofish — `Box[int].make[str](x)` arrives here
                 // as a Field callee under the broadened steal, with the enclosing `[int]` in `resolved`
                 // and the method `[str]` in `targs`. Thread `targs` as the static method's `mtargs` so
                 // the combined form composes (was `&[]`, which dropped the method turbofish).
-                return self.infer_static_call(&key, &tname, name, args, &resolved, &targs, span);
+                return self.infer_static_call(
+                    &key, &tname, name, args, &resolved, &targs, *name_span, span,
+                );
             }
             return self.infer_method_call(obj, name, *name_span, args, &targs, span);
         }
@@ -7357,7 +7416,9 @@ impl Checker {
             index: mt,
         } = &callee.kind
             && let ExprKind::Field {
-                obj: head, name, ..
+                obj: head,
+                name,
+                name_span,
             } = &callee_obj.kind
         {
             // Resolve the enclosing-type head + its type args. A bare `Ident(Box).member[U]` head has
@@ -7386,7 +7447,7 @@ impl Checker {
                         span,
                         format!("variant '{name}' of '{tname}' takes no method type arguments"),
                     );
-                    return self.infer_variant_call(&v, name, args, &enclosing, span);
+                    return self.infer_variant_call(&v, name, args, &enclosing, *name_span, span);
                 }
                 return self.infer_static_call(
                     &key,
@@ -7395,6 +7456,7 @@ impl Checker {
                     args,
                     &enclosing,
                     &[mt_ty],
+                    *name_span,
                     span,
                 );
             }
@@ -7421,7 +7483,8 @@ impl Checker {
                         .or_else(|| self.name_docs.get(name).cloned());
                     self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
-                if let Some(ty) = self.infer_named_call(name, args, &targs, span, None) {
+                if let Some(ty) = self.infer_named_call(name, args, &targs, callee.span, span, None)
+                {
                     return ty;
                 }
             }
@@ -7541,6 +7604,7 @@ impl Checker {
         args: &[Expr],
         targs: &[Ty],
         mtargs: &[Ty],
+        name_span: Span,
         span: Span,
     ) -> Ty {
         // Resolve the method sig + the enclosing type's params, from either map.
@@ -7580,6 +7644,16 @@ impl Checker {
                 ),
             );
             return Ty::Unknown;
+        }
+        // Editor hover (probe-gated no-op): record the static method's declared call signature at the
+        // method-name token (`Foo.default()` → "fn() -> Foo"), mirroring the free-fn convention
+        // (declared `FnSig` params/ret verbatim). Emits no error, changes no checking result.
+        if self.hover_probe.is_some() {
+            let fty = Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+            };
+            self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
         // A method-level turbofish (`Box.empty[int]()`) on a static method that declares NO own
         // `[U]` is an arity error: it takes no method type arguments.
@@ -7651,6 +7725,7 @@ impl Checker {
         name: &str,
         args: &[Expr],
         targs: &[Ty],
+        name_span: Span,
         span: Span,
     ) -> Ty {
         let tps = self
@@ -7658,6 +7733,17 @@ impl Checker {
             .get(&v.enum_name)
             .cloned()
             .unwrap_or_default();
+        // Editor hover (probe-gated no-op): record the variant's ctor signature at the variant-name
+        // token (`Col.Val(3)` → "fn(int) -> Col"). The enum's declared `Ty::Param`s are preserved in
+        // the return type, so a generic variant Displays "fn(T) -> Box[T]". Emits no error.
+        if self.hover_probe.is_some() {
+            let targs_disp: Vec<Ty> = tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect();
+            let fty = Ty::Func {
+                params: v.payload.clone(),
+                ret: Box::new(Ty::Enum(v.enum_name.clone(), targs_disp)),
+            };
+            self.hover_record_at(name_span, &fty, HoverKind::Func, None);
+        }
         if tps.is_empty() {
             if !targs.is_empty() {
                 self.error(span, format!("'{name}' takes no type arguments"));
@@ -7885,6 +7971,7 @@ impl Checker {
         name: &str,
         args: &[Expr],
         targs: &[Ty],
+        name_span: Span,
         span: Span,
         enum_qual: Option<&str>,
     ) -> Option<Ty> {
@@ -7896,7 +7983,7 @@ impl Checker {
                 .variants
                 .get(&(en.to_string(), name.to_string()))
                 .cloned()?;
-            return Some(self.infer_variant_call(&v, name, args, targs, span));
+            return Some(self.infer_variant_call(&v, name, args, targs, name_span, span));
         }
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
