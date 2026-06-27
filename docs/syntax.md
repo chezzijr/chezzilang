@@ -991,14 +991,15 @@ Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* 
 
 A newtype may carry its own **methods** (a trailing-colon block, like a struct/enum), and satisfies
 the **non-operator** prebuilt protocols by defining the relevant method — `str(self)` (Stringable
-display override), `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
-underlying), `compare(self, other)` (Comparable) — so it passes into those protocol-bound generics
-(`fn sorted[T: Comparable](xs: T)`). The **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`)
-are **not** satisfiable by a newtype method: a newtype's own `add`/`div`/… is never dispatched as an
-operator (the same-type arm always auto-flows to the underlying's native op), so only a **numeric**
+display override) and `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
+underlying) — so it passes into those protocol-bound generics (`fn show[T: Stringable](x: T)`). The
+**operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`) are **not** satisfiable by a
+newtype method: a newtype's own `add`/`div`/`compare`/… is never dispatched as an operator (the
+same-type arm always auto-flows to the underlying's native op/ordering), so only a **numeric**
 underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`
-intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` method does
-**not** pass `fn twice[T: Add](x: T)`.
+intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
+method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
+would silently use the underlying's native ordering, never the method, so the checker rejects it.
 
 ```chezzi
 newtype Meters = float:

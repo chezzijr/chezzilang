@@ -10544,15 +10544,23 @@ impl Checker {
                     return Ok(());
                 }
                 // SOUNDNESS: a newtype operator overload defined as a METHOD is NEVER dispatched at
-                // runtime — the same-newtype operator arm (vm `newtype_arith` / interp `eval_binop`)
-                // always auto-flows to the UNDERLYING's native op, and unary `-` has no newtype path
-                // at all. So an operator protocol on a newtype is satisfiable ONLY via the numeric
-                // auto-flow above; admitting it structurally here would type-check a call that faults
-                // on every engine (`check` ok / `run` "cannot apply <Op> to <underlying>"). A
-                // non-numeric (or generic) newtype therefore does NOT satisfy these — its own
-                // `add`/`sub`/`mul`/`div`/`mod`/`neg` method is intentionally unreachable as an
-                // operator. (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
-                if matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg") {
+                // runtime — the same-newtype operator arm (vm `newtype_arith` / `compare_op`, interp
+                // `eval_binop`) always auto-flows to the UNDERLYING's native op, and unary `-` has no
+                // newtype path at all. So an operator protocol on a newtype is satisfiable ONLY via the
+                // numeric auto-flow above; admitting it structurally here would type-check a call that
+                // diverges on every engine (`check` ok / `run` silently using the native op, or
+                // "cannot apply <Op> to <underlying>"). A non-numeric (or generic) newtype therefore
+                // does NOT satisfy these — its own `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` method
+                // is intentionally unreachable as an operator. `Comparable` is in this list for the
+                // same reason: same-newtype `<`/`<=`/`>`/`>=` always uses the underlying's NATIVE
+                // ordering (`compare_op`'s `same_newtype_keys` fast path), never the user `compare`, so
+                // a generic newtype (the only non-numeric case that reaches here after the numeric
+                // short-circuit) must NOT claim `Comparable` via a method — that would be check-ok /
+                // run-divergent. (Hashable/Stringable/Iterable/etc. still resolve structurally below.)
+                if matches!(
+                    protocol,
+                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
+                ) {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
                 let Some((_, methods)) = self.newtype_defs.get(ntkey) else {
@@ -10668,10 +10676,16 @@ impl Checker {
         {
             return Some(l.clone());
         }
+        // SAME generic type REQUIRES matching type ARGS, not just the same name. The user's operator
+        // method `add(self, o: Box[T]) -> Box[T]` on a `Box[int]` receiver needs `o: Box[int]`, so a
+        // heterogeneous pair like `Box[int] + Box[str]` must NOT overload — admitting it would infer
+        // the result `Box[int]` for a value carrying a `Box[str]` (the returned type the checker can't
+        // honor → runtime type confusion). `compatible` checks name + pairwise-compatible targs; an
+        // `Unknown` targ on a partially-inferred side still unifies (no false rejection there).
         let same = match (l, r) {
-            (Ty::Struct(a, _), Ty::Struct(b, _)) => a == b,
-            (Ty::Enum(a, _), Ty::Enum(b, _)) => a == b,
-            (Ty::NewType(a, _), Ty::NewType(b, _)) => a == b,
+            (Ty::Struct(..), Ty::Struct(..))
+            | (Ty::Enum(..), Ty::Enum(..))
+            | (Ty::NewType(..), Ty::NewType(..)) => compatible(l, r),
             (Ty::Param(a), Ty::Param(b)) => a == b,
             _ => false,
         };
@@ -10704,10 +10718,15 @@ impl Checker {
                 bs.iter()
                     .any(|proto| self.protocol_has_method(&proto.name, "compare"))
             }),
-            (Ty::Struct(a, _), Ty::Struct(b, _)) if a == b => {
+            // Same generic struct/enum REQUIRES matching type ARGS (`compatible` = name + targs), not
+            // just the same name — `Box[int] < Box[str]` must not overload `compare` (same
+            // heterogeneous laundering as `+`; see `op_overload_result`).
+            (Ty::Struct(..), Ty::Struct(..)) if compatible(l, r) => {
                 self.satisfies(l, "Comparable").is_ok()
             }
-            (Ty::Enum(a, _), Ty::Enum(b, _)) if a == b => self.satisfies(l, "Comparable").is_ok(),
+            (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
+                self.satisfies(l, "Comparable").is_ok()
+            }
             // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
             // native ordering (returns bool). A user `compare` method also enables it via satisfies()
             // (the only path for a generic newtype — methods-only, no native ordering auto-flow).

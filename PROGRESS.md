@@ -31,6 +31,15 @@ after that early-return). Parity-safe by construction (one shared checker; no pe
 new checker tests (generic struct/enum add/neg/compare, multi-param, wrong-sig boundary) + twin golden
 `examples/generic_operator_overload.chz` (run byte-identical on VM, interp, parallel). `docs/syntax.md`
 already documented this as working — the bug was the gap between spec and checker; now closed.
+**Two soundness boundaries hardened in the same change** (adversarial-review findings): (1) the operator
+now requires **matching type ARGS**, not just the same type name — `op_overload_result`/`ordering_allowed`
+test `compatible(l, r)` (name + pairwise targs, `Unknown` still unifies) instead of `name == name`, so a
+heterogeneous `Box[int] + Box[str]` / `Box[int] < Box[str]` is REJECTED (admitting it would infer result
+`Box[int]` for a value built from a `Box[str]` → runtime type confusion). (2) `Comparable` is added to the
+newtype operator-soundness gate: a same-newtype `<` ALWAYS auto-flows to the underlying's NATIVE ordering
+(`compare_op`'s `same_newtype_keys` fast path), never a user `compare`, so a **generic newtype**'s `compare`
+stays unreachable as an operator and must NOT claim `Comparable` (else check-ok / run-divergent). Both
+boundaries covered by new failing-first rejection tests.
 
 **✅ Checker — import+same-name-struct collision soundness hole closed (2026-06-28).** Checker-only,
 three-engine-parity-safe by construction (rejected programs never run; accepted programs byte-identical).

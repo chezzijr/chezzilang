@@ -805,6 +805,85 @@ v := twice(Box(5))
 }
 
 #[test]
+fn generic_struct_heterogeneous_add_rejected() {
+    // BOUNDARY / soundness (no type laundering across type args): `Box[int] + Box[str]` must NOT
+    // overload `add`. The user's `add(self, o: Box[T]) -> Box[T]` on a `Box[int]` receiver requires
+    // `o: Box[int]`; admitting `Box[str]` would infer the result `Box[int]` for a value built from a
+    // `Box[str]` → static type the checker cannot honor → runtime type confusion. The operator must
+    // only fire when the operands' type args match (an exact-`Box[int]` pair).
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: Box[T]) -> Box[T]:
+        return o
+x := Box(5) + Box(\"hello\")
+";
+    entry_rejects(src, "cannot apply + to Box[int] and Box[str]");
+}
+
+#[test]
+fn generic_struct_heterogeneous_compare_rejected() {
+    // BOUNDARY (Bug 1, ordering variant): `Box[int] < Box[str]` must NOT overload `compare` — the
+    // same heterogeneous-type-args laundering as `+`, via `ordering_allowed`.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+b := Box(5) < Box(\"hello\")
+";
+    entry_rejects(src, "cannot compare Box[int] and Box[str]");
+}
+
+#[test]
+fn generic_enum_heterogeneous_add_rejected() {
+    // BOUNDARY (Bug 1, enum analogue): a heterogeneous generic-enum pair must not overload `add`.
+    let src = "\
+enum Num[T]:
+    Val(T)
+    fn add(self, o: Num[T]) -> Num[T]:
+        return o
+x := Num.Val(1) + Num.Val(\"hello\")
+";
+    entry_rejects(src, "cannot apply + to Num[int] and Num[str]");
+}
+
+#[test]
+fn generic_newtype_compare_via_method_rejected() {
+    // BOUNDARY / soundness (Bug 2): a GENERIC newtype's `compare` method is NEVER dispatched at
+    // runtime — same-newtype `<` ALWAYS auto-flows to the underlying's NATIVE ordering (vm
+    // `compare_op` / interp `eval_binop`), ignoring the user `compare`. So the checker must NOT
+    // accept `Comparable`/`<` for a generic newtype via its method (it would be check-ok / run-
+    // divergent: a numeric underlying silently uses the native order; a non-orderable underlying
+    // faults at runtime). The newtype operator-soundness gate must reject `Comparable` too, not
+    // just Add/Sub/Mul/Div/Mod/Neg.
+    let src = "\
+newtype Wrap[T] = T:
+    fn compare(self, o: Wrap[T]) -> int:
+        return 0
+b := Wrap(3) < Wrap(5)
+";
+    entry_rejects(src, "cannot compare");
+}
+
+#[test]
+fn generic_newtype_compare_satisfies_comparable_rejected() {
+    // Bug 2, the protocol-bound form: a generic newtype must NOT satisfy `Comparable` via its
+    // `compare` method (no runtime dispatch path), so it cannot flow into a `[T: Comparable]` bound.
+    let src = "\
+newtype Wrap[T] = T:
+    fn compare(self, o: Wrap[T]) -> int:
+        return 0
+fn pick[T: Comparable](x: T, y: T) -> T:
+    if x < y:
+        return x
+    return y
+v := pick(Wrap(1), Wrap(2))
+";
+    entry_rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
 fn redeclaring_add_rejected() {
     rejects(
         "protocol Add:\n    fn add(self, other: Self) -> Self\n",
