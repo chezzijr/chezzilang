@@ -16373,6 +16373,17 @@ mod tests {
     }
 
     #[test]
+    fn nan_format_spec_sign_parity() {
+        // A negative-signed NaN (0.0/0.0) must render `NaN` (not `-NaN`) through the format-spec
+        // path on BOTH engines, matching the bare stringify path. Infinities keep their sign.
+        let src = "n := 0.0 / 0.0\n\
+                   print(\"{n:.2f}\")\nprint(\"{n:f}\")\nprint(\"{n:e}\")\n\
+                   ninf := -1.0 / 0.0\nprint(\"{ninf:.2f}\")\n\
+                   pinf := 1.0 / 0.0\nprint(\"{pinf:.2f}\")\n";
+        assert_eq!(run_parity(src), "NaN\nNaN\nNaN\n-inf\ninf\n");
+    }
+
+    #[test]
     fn ic_deep_field_read() {
         // Read the LAST field of a 6-field struct in a loop: exercises the IC hit path past five
         // would-be name-probes. Cached idx must point at `f` every iteration.

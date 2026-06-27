@@ -9247,9 +9247,25 @@ impl Checker {
                 // is a real mismatch — point the user at the explicit annotation that makes a
                 // mixed/protocol collection legal.
                 let hint = if i == 0 && matches!(name, "push" | "add" | "insert") {
-                    format!(
-                        " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
-                    )
+                    // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a
+                    // return-only `T` from `empty[T]()` called with nothing to bind it from. A
+                    // `Ty::Param` that IS in scope (`self.type_params`) is a legitimately-bound
+                    // generic param genuinely pinned by an earlier push — keep the original
+                    // narrative for it (and for every concrete element type).
+                    if matches!(pt, Ty::Param(p) if !self.type_params.contains_key(p)) {
+                        // The expected element type is an un-inferred type parameter (e.g. a
+                        // return-only `T` from `empty[T]()` with nothing to bind it from), NOT a
+                        // type pinned by an earlier push. The "earlier push" narrative is wrong
+                        // here (this may be the FIRST push) and `List[<protocol>] = []` would not
+                        // help — the fix is to bind the parameter at the construction site.
+                        format!(
+                            " (the collection's element type is the un-inferred type parameter {expected}; bind it at the construction site with a turbofish or annotation, e.g. `empty[int]()` or `xs: List[int] = ...`)"
+                        )
+                    } else {
+                        format!(
+                            " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
+                        )
+                    }
                 } else {
                     String::new()
                 };
