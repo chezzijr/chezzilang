@@ -715,6 +715,174 @@ v := fma(PointA(1), PointA(2), PointA(3))
     rejects(src, "does not satisfy Mul");
 }
 
+// ----- generic struct/enum operator overloading + protocol satisfaction (the receiving type's
+// own type params, e.g. `T->int` from `Box[int]`, must be threaded into the protocol-method
+// signature comparison, in addition to `Self` and the protocol's own params) -----
+
+#[test]
+fn generic_struct_add_satisfies_and_overloads() {
+    // `Box[T]` defines `add(self, o: Box[T]) -> Box[T]`; the `+` operator AND a `T: Add`-bounded
+    // generic must both accept `Box[int]`. Previously rejected ("cannot apply + ..." / "does not
+    // satisfy Add (method 'add' has the wrong signature)") because `T` was never bound to `int`.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: Box[T]) -> Box[T]:
+        return Box(self.v)
+fn twice[T: Add](x: T) -> T:
+    return x + x
+a := (Box(5) + Box(10)).v
+b := twice(Box(7)).v
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_struct_neg_and_compare() {
+    // Unary `neg`/`-` and `compare`/`<`/Comparable over a generic struct.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn neg(self) -> Box[T]:
+        return Box(self.v)
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+a := (-Box(5)).v
+b := Box(5) < Box(10)
+fn smallest[T: Comparable](x: T, y: T) -> T:
+    if x < y:
+        return x
+    return y
+c := smallest(Box(1), Box(2)).v
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_enum_add_satisfies() {
+    // Generic-enum analogue: `enum Num[T]` with `add` overloads `+` and satisfies `Add`.
+    let src = "\
+enum Num[T]:
+    Val(T)
+    fn add(self, o: Num[T]) -> Num[T]:
+        return self
+fn twice[T: Add](x: T) -> T:
+    return x + x
+a := Num.Val(1) + Num.Val(2)
+b := twice(Num.Val(3))
+";
+    entry_ok(src);
+}
+
+#[test]
+fn multi_param_generic_operator() {
+    // A 2-param generic exercises a multi-entry receiving-type substitution {A->int, B->str}.
+    let src = "\
+struct Pair[A, B]:
+    a: A
+    b: B
+    fn add(self, o: Pair[A, B]) -> Pair[A, B]:
+        return self
+p := Pair(1, \"x\") + Pair(2, \"y\")
+";
+    entry_ok(src);
+}
+
+#[test]
+fn generic_struct_wrong_add_sig_rejected() {
+    // BOUNDARY / soundness: a generic struct whose `add` has a genuinely WRONG signature
+    // (`o: int -> int`, not `Box[T] -> Box[T]`) must STILL be rejected — no type laundering.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: int) -> int:
+        return 0
+fn twice[T: Add](x: T) -> T:
+    return x + x
+v := twice(Box(5))
+";
+    entry_rejects(src, "does not satisfy Add");
+}
+
+#[test]
+fn generic_struct_heterogeneous_add_rejected() {
+    // BOUNDARY / soundness (no type laundering across type args): `Box[int] + Box[str]` must NOT
+    // overload `add`. The user's `add(self, o: Box[T]) -> Box[T]` on a `Box[int]` receiver requires
+    // `o: Box[int]`; admitting `Box[str]` would infer the result `Box[int]` for a value built from a
+    // `Box[str]` → static type the checker cannot honor → runtime type confusion. The operator must
+    // only fire when the operands' type args match (an exact-`Box[int]` pair).
+    let src = "\
+struct Box[T]:
+    v: T
+    fn add(self, o: Box[T]) -> Box[T]:
+        return o
+x := Box(5) + Box(\"hello\")
+";
+    entry_rejects(src, "cannot apply + to Box[int] and Box[str]");
+}
+
+#[test]
+fn generic_struct_heterogeneous_compare_rejected() {
+    // BOUNDARY (Bug 1, ordering variant): `Box[int] < Box[str]` must NOT overload `compare` — the
+    // same heterogeneous-type-args laundering as `+`, via `ordering_allowed`.
+    let src = "\
+struct Box[T]:
+    v: T
+    fn compare(self, o: Box[T]) -> int:
+        return 0
+b := Box(5) < Box(\"hello\")
+";
+    entry_rejects(src, "cannot compare Box[int] and Box[str]");
+}
+
+#[test]
+fn generic_enum_heterogeneous_add_rejected() {
+    // BOUNDARY (Bug 1, enum analogue): a heterogeneous generic-enum pair must not overload `add`.
+    let src = "\
+enum Num[T]:
+    Val(T)
+    fn add(self, o: Num[T]) -> Num[T]:
+        return o
+x := Num.Val(1) + Num.Val(\"hello\")
+";
+    entry_rejects(src, "cannot apply + to Num[int] and Num[str]");
+}
+
+#[test]
+fn generic_newtype_compare_via_method_rejected() {
+    // BOUNDARY / soundness (Bug 2): a GENERIC newtype's `compare` method is NEVER dispatched at
+    // runtime — same-newtype `<` ALWAYS auto-flows to the underlying's NATIVE ordering (vm
+    // `compare_op` / interp `eval_binop`), ignoring the user `compare`. So the checker must NOT
+    // accept `Comparable`/`<` for a generic newtype via its method (it would be check-ok / run-
+    // divergent: a numeric underlying silently uses the native order; a non-orderable underlying
+    // faults at runtime). The newtype operator-soundness gate must reject `Comparable` too, not
+    // just Add/Sub/Mul/Div/Mod/Neg.
+    let src = "\
+newtype Wrap[T] = T:
+    fn compare(self, o: Wrap[T]) -> int:
+        return 0
+b := Wrap(3) < Wrap(5)
+";
+    entry_rejects(src, "cannot compare");
+}
+
+#[test]
+fn generic_newtype_compare_satisfies_comparable_rejected() {
+    // Bug 2, the protocol-bound form: a generic newtype must NOT satisfy `Comparable` via its
+    // `compare` method (no runtime dispatch path), so it cannot flow into a `[T: Comparable]` bound.
+    let src = "\
+newtype Wrap[T] = T:
+    fn compare(self, o: Wrap[T]) -> int:
+        return 0
+fn pick[T: Comparable](x: T, y: T) -> T:
+    if x < y:
+        return x
+    return y
+v := pick(Wrap(1), Wrap(2))
+";
+    entry_rejects(src, "does not satisfy Comparable");
+}
+
 #[test]
 fn redeclaring_add_rejected() {
     rejects(

@@ -22652,6 +22652,31 @@ main()";
         );
     }
 
+    /// Generic operator-overload golden: `examples/generic_operator_overload.chz` — a generic struct
+    /// `Box[T]` and generic enum `Num[T]` whose `add`/`neg`/`compare` methods overload `+`/`-`/`<`,
+    /// satisfy `Add`/`Comparable`, and flow into `twice[T: Add]`. Byte-identical on the VM, the interp
+    /// (parity oracle), and the M:N parallel engine, plus the checked-in `.expected`.
+    #[test]
+    fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/generic_operator_overload.chz");
+        let expected = include_str!("../../examples/generic_operator_overload.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        let par_out = run_capture_parallel(src).expect("parallel run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from generic_operator_overload.expected"
+        );
+        assert_eq!(
+            vm_out, interp_out,
+            "vm/interp divergence on generic_operator_overload"
+        );
+        assert_eq!(
+            vm_out, par_out,
+            "vm/parallel divergence on generic_operator_overload"
+        );
+    }
+
     /// M22: a struct defining `div`/`mod`/`neg` overloads `/`, `%`, and unary `-`. Runs byte-identical
     /// on the VM, the cooperative interp (parity oracle), and the M:N parallel engine.
     #[test]
