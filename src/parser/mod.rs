@@ -44,6 +44,22 @@ pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
     Parser::new(tokens).parse_module()
 }
 
+/// Parse a token stream into a `Module`, attaching doc-comments from the lexer side-channel.
+///
+/// `comments` is the `(line, stripped_text)` table from [`crate::lexer::tokenize_with_comments`]:
+/// each comment-only source line. A declaration's doc is the contiguous run of comment lines
+/// IMMEDIATELY above its keyword line (a blank/non-comment line breaks the run — only the adjacent
+/// block attaches). All existing `parse` callers get `doc = None` (zero behavior change); only the
+/// resolver routes docs in. The docs are purely informational (LSP hover) and runtime-inert.
+pub fn parse_with_docs(
+    tokens: Vec<Tok>,
+    comments: Vec<crate::lexer::DocComment>,
+) -> PResult<Module> {
+    let mut p = Parser::new(tokens);
+    p.docs = comments.into_iter().collect();
+    p.parse_module()
+}
+
 /// Parse a token stream containing exactly one expression into an `Expr`.
 ///
 /// Used by the M3 interpreter to evaluate the inner `{…}` fragments of an interpolated string
@@ -67,6 +83,10 @@ struct Parser {
     toks: Vec<Tok>,
     pos: usize,
     depth: usize,
+    /// Doc-comment side table: source-line → stripped comment text, for every comment-only line.
+    /// Empty for `parse` (so every existing caller gets `doc = None`); populated by `parse_with_docs`
+    /// from the lexer side-channel. Consulted by `doc_above` at each declaration's keyword line.
+    docs: std::collections::HashMap<usize, String>,
 }
 
 impl Parser {
@@ -75,7 +95,33 @@ impl Parser {
             toks,
             pos: 0,
             depth: 0,
+            docs: std::collections::HashMap::new(),
         }
+    }
+
+    /// The doc-comment attached to a declaration whose keyword sits on `decl_line`: the contiguous
+    /// run of comment-only lines immediately above it (`decl_line - 1`, `decl_line - 2`, …) while
+    /// each is present in the side table. A blank/non-comment line is absent → the run stops there
+    /// (so a blank line detaches earlier comments, and stacked `#` lines join). Lines join top-down
+    /// with `\n`. Returns `None` when there is no adjacent comment (incl. the empty-map `parse` path).
+    fn doc_above(&self, decl_line: usize) -> Option<String> {
+        if self.docs.is_empty() {
+            return None;
+        }
+        let mut lines: Vec<&str> = Vec::new();
+        let mut line = decl_line;
+        while line > 1 {
+            line -= 1;
+            match self.docs.get(&line) {
+                Some(text) => lines.push(text.as_str()),
+                None => break,
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        lines.reverse(); // collected bottom-up; restore source order
+        Some(lines.join("\n"))
     }
 
     // ----- cursor helpers -----
@@ -321,6 +367,9 @@ impl Parser {
 
     /// `let` (`:=` or typed `name: T = …`), assignment (`= += -=`), or a bare expression statement.
     fn parse_simple_stmt(&mut self) -> PResult<StmtKind> {
+        // Doc-comment for a `let`: the contiguous comment run above this statement's first line.
+        // (Computed for every simple-stmt; only consumed by the `Let` arms below.)
+        let stmt_doc = self.doc_above(self.cur_span().line);
         // typed let: `name: Type = value`
         if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Colon {
             let name = self.expect_ident()?;
@@ -337,6 +386,7 @@ impl Parser {
                 ty: Some(ty),
                 value,
                 is_ref,
+                doc: stmt_doc,
             });
         }
 
@@ -374,6 +424,7 @@ impl Parser {
                     ty: None,
                     value,
                     is_ref: false,
+                    doc: stmt_doc,
                 });
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
@@ -458,6 +509,7 @@ impl Parser {
                     ty: None,
                     value,
                     is_ref: false,
+                    doc: stmt_doc,
                 });
             }
             Token::Assign => AssignOp::Eq,
@@ -505,6 +557,9 @@ impl Parser {
     }
 
     fn parse_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
+        // doc = comment run immediately above the `fn` keyword line (covers methods too — they all
+        // route through here). For `test fn` the modifier is on the same line, so the `fn` line works.
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Fn)?;
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
@@ -539,6 +594,7 @@ impl Parser {
             is_generator,
             is_test: false,
             inline_expr_body,
+            doc,
         })
     }
 
@@ -603,6 +659,7 @@ impl Parser {
     }
 
     fn parse_protocol(&mut self) -> PResult<StmtKind> {
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Protocol)?;
         let name = self.expect_ident()?;
         // `protocol Container[T]:` — optional type parameters, reusing the generic fn/struct parser.
@@ -633,6 +690,7 @@ impl Parser {
             type_params,
             methods,
             embeds,
+            doc,
         })
     }
 
@@ -740,6 +798,7 @@ impl Parser {
     }
 
     fn parse_struct(&mut self) -> PResult<StmtKind> {
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Struct)?;
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
@@ -791,19 +850,22 @@ impl Parser {
             type_params,
             fields,
             methods,
+            doc,
         })
     }
 
     /// `type Name = <type>` — a transparent type alias (one line, terminated by the caller).
     fn parse_type_alias(&mut self) -> PResult<StmtKind> {
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Type)?;
         let name = self.expect_ident()?;
         self.expect(&Token::Assign)?;
         let ty = self.parse_type()?;
-        Ok(StmtKind::TypeAlias { name, ty })
+        Ok(StmtKind::TypeAlias { name, ty, doc })
     }
 
     fn parse_enum(&mut self) -> PResult<StmtKind> {
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Enum)?;
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
@@ -855,6 +917,7 @@ impl Parser {
             type_params,
             variants,
             methods,
+            doc,
         })
     }
 
@@ -865,6 +928,7 @@ impl Parser {
     /// and method signatures may then reference them. `test fn` in the body is rejected (suites
     /// aren't wired — enum precedent).
     fn parse_newtype(&mut self) -> PResult<StmtKind> {
+        let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::NewType)?;
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
@@ -901,6 +965,7 @@ impl Parser {
             type_params,
             underlying,
             methods,
+            doc,
         })
     }
 
@@ -2411,6 +2476,65 @@ mod tests {
         m.stmts.remove(0).kind
     }
 
+    /// Parse with the lexer's doc-comment side-channel attached, returning the FIRST statement's kind.
+    fn first_with_docs(src: &str) -> StmtKind {
+        let (toks, comments) = lexer::tokenize_with_comments(src).unwrap();
+        let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
+        m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn fn_carries_adjacent_doc() {
+        // A contiguous comment block immediately above a `fn` joins (top-down, `\n`) into its doc.
+        let StmtKind::Fn(decl) = first_with_docs("# line A\n# line B\nfn foo():\n    1\n") else {
+            panic!("expected fn");
+        };
+        assert_eq!(decl.doc.as_deref(), Some("line A\nline B"));
+    }
+
+    #[test]
+    fn blank_line_detaches_doc() {
+        // A blank line between two comment blocks detaches the earlier one — only the adjacent block
+        // (here "attached") attaches to the decl.
+        let StmtKind::Fn(decl) = first_with_docs("# detached\n\n# attached\nfn foo():\n    1\n")
+        else {
+            panic!("expected fn");
+        };
+        assert_eq!(decl.doc.as_deref(), Some("attached"));
+    }
+
+    #[test]
+    fn inline_trailing_comment_is_not_doc() {
+        // A trailing comment on the decl line itself is not a doc (it never reaches the side channel).
+        let StmtKind::Fn(decl) = first_with_docs("fn foo(): 1  # not a doc\n") else {
+            panic!("expected fn");
+        };
+        assert_eq!(decl.doc, None);
+    }
+
+    #[test]
+    fn doc_attaches_to_struct_and_let() {
+        let StmtKind::Struct { doc, .. } = first_with_docs("# a point\nstruct P:\n    x: int\n")
+        else {
+            panic!("expected struct");
+        };
+        assert_eq!(doc.as_deref(), Some("a point"));
+
+        let StmtKind::Let { doc, .. } = first_with_docs("# the answer\nanswer := 42\n") else {
+            panic!("expected let");
+        };
+        assert_eq!(doc.as_deref(), Some("the answer"));
+    }
+
+    #[test]
+    fn plain_parse_has_no_docs() {
+        // The default `parse` path (empty doc map) never attaches a doc — zero behavior change.
+        let StmtKind::Fn(decl) = only("# nope\nfn foo():\n    1\n") else {
+            panic!("expected fn");
+        };
+        assert_eq!(decl.doc, None);
+    }
+
     #[test]
     fn raw_str_parses_to_rawstr_expr() {
         // A raw string parses to a distinct `ExprKind::RawStr` carrying verbatim text.
@@ -3239,6 +3363,7 @@ mod tests {
                 type_params,
                 underlying,
                 methods,
+                ..
             } => {
                 assert!(type_params.is_empty());
                 assert_eq!(name, "UserId");
@@ -3258,6 +3383,7 @@ mod tests {
                 type_params,
                 underlying,
                 methods,
+                ..
             } => {
                 assert!(type_params.is_empty());
                 assert_eq!(name, "Meters");
@@ -3288,6 +3414,7 @@ mod tests {
                 type_params,
                 underlying,
                 methods,
+                ..
             } => {
                 assert_eq!(name, "Stack");
                 assert_eq!(type_params.len(), 1);

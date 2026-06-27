@@ -139,6 +139,47 @@ fn hover_round_trip() {
 }
 
 #[test]
+fn hover_doc_comment_round_trip() {
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+    // didOpen a document with a `#` doc-comment above the binding `x`, then hover `x` (line 1, char 0).
+    send(
+        &mut stdin,
+        r##"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover_doc.chz","languageId":"chezzi","version":1,"text":"# the meaning of life\nx := 41\n"}}}"##,
+    );
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover_doc.chz"},"position":{"line":1,"character":0}}}"#,
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_hover = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("\"id\":2") {
+                    // The doc text appears in the rendered hover…
+                    assert!(
+                        msg.contains("the meaning of life"),
+                        "hover response missing the doc-comment text: {msg}"
+                    );
+                    // …ABOVE the type code fence: the doc substring must precede the first fence.
+                    let doc_at = msg.find("the meaning of life").unwrap();
+                    let fence_at = msg.find("```").expect("hover response missing the fence");
+                    assert!(
+                        doc_at < fence_at,
+                        "doc-comment must render ABOVE the type fence: {msg}"
+                    );
+                    saw_hover = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(saw_hover, "never received a hover response for id 2");
+}
+
+#[test]
 fn diagnostics_round_trip() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi-lsp"))
         .stdin(Stdio::piped())

@@ -12,11 +12,30 @@ For the *why* behind each choice see [`spec.md`](spec.md); for token names see [
 
 ```chezzi
 # comments start with '#' and run to end of line
+
+# A '#' comment block touching a declaration (no blank line between) is its DOC-COMMENT,
+# shown on editor hover (LSP) above the type. Stacked '#' lines join into one doc.
+fn greet(name: str):           # ^ this two-line block documents `greet`
+    print("hi {name}")
+
+# detached — a BLANK line below breaks the run, so this line is NOT part of the doc
+
+# this line IS the doc for Point (adjacent, no gap)
+struct Point:
+    x: int
 ```
 
 - **Blocks = indentation** (spaces only; tabs are a lex error). A block opens after a `:` line.
 - **Logical lines** end at a newline. Blank / comment-only lines are ignored.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
+- **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,
+  `enum`, `protocol`, `newtype`, `type` alias, top-level `let`) become its doc, surfaced on LSP hover
+  above the `chezzi` type fence. The doc is the *contiguous* run of comment lines with NO blank line
+  between the last one and the declaration — a blank line detaches earlier comments. Stacked lines join
+  with newlines (one leading `# ` stripped per line). An inline trailing comment on the decl line is
+  not a doc. Purely informational: doc-comments never affect type-checking or execution.
+  *(Reinstall the LSP after upgrading — `cargo install --path . --features lsp --bin chezzi-lsp` — the
+  installed binary is a snapshot.)*
 
 ## 2. Literals
 

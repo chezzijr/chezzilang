@@ -353,6 +353,9 @@ fn parser_rules_match_fns() {
         "parse_recover_expr",
         "parse_ok",
         "parse_err",
+        // `parse_with_docs` is the doc-comment-carrying entry point (same grammar as `parse`, plus the
+        // lexer's doc-comment side-channel); it maps to no distinct grammar rule.
+        "parse_with_docs",
     ]
     .into_iter()
     .collect();

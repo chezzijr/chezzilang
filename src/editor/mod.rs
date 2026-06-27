@@ -108,6 +108,10 @@ pub struct HoverInfo {
     pub display: String,
     /// What kind of symbol the cursor landed on (secondary metadata; `display` is the payload).
     pub kind: crate::checker::HoverKind,
+    /// The symbol's doc-comment: the contiguous run of `#` comment lines immediately above its
+    /// declaration (blank line detaches; stacked lines join with `\n`, one leading `# ` stripped).
+    /// `None` when the declaration has no adjacent comment. Rendered ABOVE the type code-fence.
+    pub doc: Option<String>,
 }
 
 /// Hover at a **0-based** LSP position (UTF-16 code units, the encoding the server emits — see
@@ -124,8 +128,8 @@ pub fn hover(path: &Path, source: &str, line: u32, character: u32) -> Option<Hov
     // The lexer token covering that char position → its 1-based (line, col) probe key.
     let (l1, c1) = token_at(source, line as usize, char_col)?;
     let graph = resolver::build_graph_with_entry_source(path, Some(source.to_string())).ok()?;
-    let (display, kind) = checker::hover_type(&graph, l1, c1)?;
-    Some(HoverInfo { display, kind })
+    let (display, kind, doc) = checker::hover_type(&graph, l1, c1)?;
+    Some(HoverInfo { display, kind, doc })
 }
 
 /// Reverse of the `to_utf16` mapping in `span_diag`: given a line and a 0-based UTF-16 column, return
@@ -1104,6 +1108,60 @@ mod tests {
         // An integer literal reports `int`.
         let h = hov("y := 123\n", 0, 5).expect("hover on literal");
         assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_fn_shows_doc() {
+        // A `#` comment immediately above a `fn` becomes its doc, surfaced on hover of the fn's use.
+        let h = hov("# greet the world\nfn f():\n    1\nf\n", 3, 0).expect("hover on fn use");
+        assert_eq!(h.display, "fn() -> nil");
+        assert_eq!(h.doc.as_deref(), Some("greet the world"));
+    }
+
+    #[test]
+    fn hover_doc_multiline_joins() {
+        // Stacked `#` lines (no gap) join with a newline.
+        let h = hov("# line one\n# line two\nfn f():\n    1\nf\n", 4, 0).expect("hover on fn use");
+        assert_eq!(h.doc.as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn hover_doc_blank_line_detaches() {
+        // A blank line between two comment blocks detaches the earlier one.
+        let h =
+            hov("# detached\n\n# attached\nfn f():\n    1\nf\n", 5, 0).expect("hover on fn use");
+        assert_eq!(h.doc.as_deref(), Some("attached"));
+    }
+
+    #[test]
+    fn hover_doc_on_struct() {
+        // Doc on a struct surfaces when hovering the struct constructor.
+        let h =
+            hov("# a 2D point\nstruct P:\n    x: int\nP(1)\n", 3, 0).expect("hover on struct ctor");
+        assert_eq!(h.doc.as_deref(), Some("a 2D point"));
+    }
+
+    #[test]
+    fn hover_doc_on_method() {
+        // Doc on a method surfaces when hovering the method call.
+        let src = "struct C:\n    # double it\n    fn dbl(self) -> int:\n        return 2\nc := C()\nc.dbl()\n";
+        let h = hov(src, 5, 2).expect("hover on method call");
+        assert_eq!(h.doc.as_deref(), Some("double it"));
+    }
+
+    #[test]
+    fn hover_doc_on_top_level_let() {
+        // Doc on a top-level let surfaces on the binding.
+        let h = hov("# the answer\nanswer := 42\n", 1, 0).expect("hover on let binding");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.doc.as_deref(), Some("the answer"));
+    }
+
+    #[test]
+    fn hover_inline_trailing_comment_not_doc() {
+        // An inline trailing comment on the decl line is not picked up as a doc.
+        let h = hov("fn f(): 1  # not a doc\nf\n", 1, 0).expect("hover on fn use");
+        assert_eq!(h.doc, None);
     }
 
     #[test]

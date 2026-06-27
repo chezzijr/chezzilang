@@ -194,10 +194,15 @@ impl LanguageServer for Backend {
         // No `chezzi` treesitter parser exists, and a language-tagged fence makes some editors'
         // markdown hover renderers (e.g. Neovim 0.12) attempt a missing-language injection and crash
         // on the float instead of skipping it. An untagged fence still renders as monospace everywhere.
+        // When the symbol has a doc-comment, render it as plain markdown lines ABOVE the type fence.
+        let value = match &info.doc {
+            Some(doc) => format!("{doc}\n\n```\n{}\n```", info.display),
+            None => format!("```\n{}\n```", info.display),
+        };
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```\n{}\n```", info.display),
+                value,
             }),
             range: None,
         }))

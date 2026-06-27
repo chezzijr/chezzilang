@@ -39,6 +39,10 @@ pub enum StmtKind {
         /// rejection) and consumed by desugar (read/write/init lowering); both engines see only the
         /// already-lowered `Ref`/`.get()`/`.set()` forms, so they ignore this flag.
         is_ref: bool,
+        /// Doc-comment: the contiguous run of `#` comment lines immediately above this `let`
+        /// (blank line detaches). Purely informational (surfaced on LSP hover for top-level lets);
+        /// runtime-inert — never read by desugar/compiler/checker codegen or either engine.
+        doc: Option<String>,
     },
     /// `target op value`, e.g. `count += 1`, `x = 3`.
     Assign {
@@ -54,6 +58,8 @@ pub enum StmtKind {
         type_params: Vec<TypeParam>,
         fields: Vec<Field>,
         methods: Vec<FnDecl>,
+        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the struct name.
+        doc: Option<String>,
     },
     /// `protocol Name:` (or `protocol Name[T]:`) — a structural interface: a list of method
     /// signatures (no bodies). A type satisfies it by having matching methods (Go-style; no explicit
@@ -68,6 +74,8 @@ pub enum StmtKind {
         /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical
         /// to a type-parameter bound (name + optional `[args]`).
         embeds: Vec<Bound>,
+        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the protocol name.
+        doc: Option<String>,
     },
     /// `enum Name:` (or `enum Name[T]:`) with its variants. `type_params` is empty for a
     /// non-generic enum; for `enum Tree[T]` a variant payload may reference `T`. Type-erased like
@@ -77,10 +85,17 @@ pub enum StmtKind {
         type_params: Vec<TypeParam>,
         variants: Vec<Variant>,
         methods: Vec<FnDecl>,
+        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the enum name.
+        doc: Option<String>,
     },
     /// `type Name = <type>` — a transparent type alias (`Name` is interchangeable with the aliased
     /// type everywhere; structural, not a distinct nominal type).
-    TypeAlias { name: String, ty: Type },
+    TypeAlias {
+        name: String,
+        ty: Type,
+        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the alias name.
+        doc: Option<String>,
+    },
     /// `newtype Name = <type>` (optionally with a trailing-colon method block) — a DISTINCT nominal
     /// type that wraps `underlying`. Unlike `TypeAlias` it is NOT interchangeable with the
     /// underlying: only an explicit construct (`Name(x)`) or cast-unwrap (`int(n)`) crosses the
@@ -93,6 +108,8 @@ pub enum StmtKind {
         type_params: Vec<TypeParam>,
         underlying: Type,
         methods: Vec<FnDecl>,
+        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the newtype name.
+        doc: Option<String>,
     },
     /// `if` / `else if` / `else`. Each `(cond, body)` is one branch; `else if` adds another
     /// branch; a final bare `else` is `else_block`.
@@ -275,6 +292,12 @@ pub struct FnDecl {
     /// `Block = Vec<Stmt>` shape otherwise erases). `false` for multiline bodies, non-expr inline
     /// bodies (`: x = 5`, `: return e`), and generators.
     pub inline_expr_body: bool,
+    /// Doc-comment: the contiguous run of `#` comment lines immediately above this `fn` (blank line
+    /// detaches; one leading `# ` stripped per line, lines joined with `\n`). Covers free fns AND
+    /// every method / static / associated fn (they all reuse `FnDecl`). Purely informational
+    /// (surfaced on LSP hover); runtime-inert — never read by desugar/compiler/vm/interp, so it is
+    /// behavior- and parity-neutral (mirrors `name_span`).
+    pub doc: Option<String>,
 }
 
 /// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized

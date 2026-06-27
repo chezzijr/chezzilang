@@ -11,6 +11,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Editor tooling — doc-comments on LSP hover (2026-06-27).** A plain `#` comment block *immediately
+above* a declaration is now its DOC-COMMENT, rendered on LSP hover ABOVE the existing `chezzi` type
+fence. No new marker (`#`, not `##`/`///`); multiline via stacked `#` lines (join with `\n`, one leading
+`# ` stripped); **attachment rule**: the doc is the *contiguous* run of comment lines with NO blank line
+between the last one and the decl — a blank line detaches earlier comments; an inline trailing comment on
+the decl line is never a doc. **Lexer side-channel** (NOT new tokens): `tokenize_with_comments` captures
+`(line, stripped_text)` for each comment-only line on the side, so the token stream + `chezzi tokens`
+output stay byte-identical (only `resolver::parse` opts in via `parse_with_docs`; every other
+`tokenize`/`parse` caller gets `doc = None`). **Coverage:** `doc: Option<String>` on `FnDecl` (covers
+free fns + every method/static/associated fn since they all reuse `FnDecl`) and `StmtKind::{Let, Struct,
+Enum, Protocol, NewType, TypeAlias}` (top-level lets surface; local lets carry the field but are inert).
+**Inert/parity:** the doc is purely informational — never read by desugar/compiler/vm/interp, so two-engine
+VM==interp parity is untouched (front-end-only). **Hover wiring:** `FnSig.doc` (free fns + methods) +
+`Checker.name_docs` (type decls + top-level lets, simple-name keyed, entry-module-scoped like
+`self.functions`) feed a 3rd element into `hover_result`/`HoverInfo.doc`; `chezzi-lsp` renders the doc as
+plain markdown lines above the untagged fence. **Known v1 limit:** protocol METHOD signatures
+(`MethodSig`, not `FnDecl`) get no per-method doc — only the protocol container does. Builds on the
+builtin-hover plumbing below. **Reinstall the LSP snapshot to serve it: `cargo install --path . --features
+lsp --bin chezzi-lsp`.**
+
 **✅ Editor tooling — LSP hover for builtins (2026-06-27).** Hover on a builtin callee/method/stdlib-fn
 previously returned `None`; it now reports a signature, via three reuse-driven cases (no flat
 hand-table), checker+editor only (NO VM/interp/runtime touch → no two-engine parity risk):

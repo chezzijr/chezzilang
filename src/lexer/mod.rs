@@ -149,6 +149,11 @@ pub struct Tok {
     pub span: Span,
 }
 
+/// A captured doc-comment line: its 1-based source `line` and the stripped comment text (the chars
+/// after `#`, with one optional leading space removed). Collected on the lexer side-channel so the
+/// parser can attach the contiguous run above a declaration as its doc; never enters the token stream.
+pub type DocComment = (usize, String);
+
 /// Error returned when the source can't be tokenized.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexError {
@@ -350,6 +355,11 @@ pub struct Lexer {
     at_line_start: bool,    // true when the next char begins a fresh logical line
     pending: VecDeque<Tok>, // layout tokens computed together but emitted one-per-call (Dedents)
     bracket_depth: usize, // nesting depth of (), [], {}; >0 suppresses layout (multi-line literals)
+    /// Side-channel for doc-comments: `(line, stripped_text)` for every comment-ONLY line
+    /// (a `#` line with no preceding tokens). Inline trailing comments (STEP B) are NOT recorded,
+    /// so they can never become docs. The token stream is unaffected — this is a pure side table the
+    /// parser consults for the contiguous comment run immediately above a declaration.
+    doc_comments: Vec<DocComment>,
 }
 
 impl Lexer {
@@ -363,6 +373,7 @@ impl Lexer {
             at_line_start: true,
             pending: VecDeque::new(),
             bracket_depth: 0,
+            doc_comments: Vec::new(),
         }
     }
 
@@ -429,6 +440,24 @@ impl Lexer {
             }
         }
         Ok(tokens)
+    }
+
+    /// Like [`tokenize`](Self::tokenize), but also returns the captured doc-comment side table
+    /// (`(line, stripped_text)` for each comment-only line). The token stream is byte-identical to
+    /// `tokenize` — the comments live purely on the side channel — so the only callers that need
+    /// this are the ones threading docs into the AST (the resolver). `tokenize` keeps its exact
+    /// signature so every existing caller and the `tokens` CLI snapshot stay unchanged.
+    pub fn tokenize_with_comments(mut self) -> Result<(Vec<Tok>, Vec<DocComment>), LexError> {
+        let mut tokens = Vec::new();
+        loop {
+            let tok = self.next_token()?;
+            let done = tok.kind == Token::Eof;
+            tokens.push(tok);
+            if done {
+                break;
+            }
+        }
+        Ok((tokens, self.doc_comments))
     }
 
     /// Produce the next single token (it's fine for ONE call to also emit layout tokens —
@@ -804,11 +833,23 @@ impl Lexer {
                 self.line_start = self.pos;
                 continue;
             }
-            // 3. comment-only line → does not count, skip to its newline
+            // 3. comment-only line → does not count, skip to its newline. We DO capture its text
+            //    in the doc-comment side-channel (line + stripped body) so the parser can attach a
+            //    contiguous run of comment lines above a declaration as its doc. `self.line` here is
+            //    this comment's line: a comment line never bumps `self.line` (only the blank-line
+            //    branch above, when it later consumes the trailing `\n`, does), so it's still correct.
             if self.peek() == '#' {
+                let hash = self.pos; // index of '#'
                 while !self.is_at_end() && self.peek() != '\n' {
                     self.advance();
                 }
+                // body = chars after '#', with at most one leading space stripped (so `# foo` → `foo`).
+                let mut body_start = hash + 1;
+                if self.chars.get(body_start) == Some(&' ') {
+                    body_start += 1;
+                }
+                let body: String = self.chars[body_start..self.pos].iter().collect();
+                self.doc_comments.push((self.line, body));
                 continue;
             }
             // 4. end of input → no content line; let the caller close out
@@ -1313,6 +1354,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
+/// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment
+/// side table. The token stream is identical to [`tokenize`].
+pub fn tokenize_with_comments(source: &str) -> Result<(Vec<Tok>, Vec<DocComment>), LexError> {
+    Lexer::new(source).tokenize_with_comments()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1550,6 +1597,24 @@ mod tests {
             kinds("1 # this is ignored"),
             vec![Token::Int(1), Token::Newline, Token::Eof]
         );
+    }
+
+    #[test]
+    fn doc_comments_captured_with_line_numbers() {
+        // Comment-only lines are captured on the side channel with their line numbers + stripped body
+        // (one leading space removed). The token stream is unchanged.
+        let (toks, comments) = tokenize_with_comments("# a\n# b\nfn f():\n    1\n").unwrap();
+        assert_eq!(comments, vec![(1, "a".to_string()), (2, "b".to_string())]);
+        // token stream byte-identical to plain tokenize (no Comment tokens leaked in)
+        let plain = tokenize("# a\n# b\nfn f():\n    1\n").unwrap();
+        assert_eq!(toks, plain);
+    }
+
+    #[test]
+    fn inline_trailing_comment_not_captured() {
+        // A trailing comment on a content line goes through STEP B, never the side channel.
+        let (_toks, comments) = tokenize_with_comments("fn f(): 1  # not a doc\n").unwrap();
+        assert!(comments.is_empty());
     }
 
     #[test]

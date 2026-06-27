@@ -212,6 +212,10 @@ struct FnSig {
     /// instance method, free function, closure, and native sig (the default via `plain`/`optional_tail`);
     /// set only by [`Checker::fn_sig`] from the declaration's first param name.
     is_static: bool,
+    /// Doc-comment from the declaration (set by [`Checker::fn_sig`] from `FnDecl::doc`; `None` for
+    /// native/synthetic sigs). Purely informational — surfaced on LSP hover, never affects checking
+    /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
+    doc: Option<String>,
 }
 
 impl FnSig {
@@ -224,6 +228,7 @@ impl FnSig {
             type_params: Vec::new(),
             min_params,
             is_static: false,
+            doc: None,
         }
     }
 
@@ -237,6 +242,7 @@ impl FnSig {
             type_params: Vec::new(),
             min_params,
             is_static: false,
+            doc: None,
         }
     }
 }
@@ -411,7 +417,11 @@ pub enum HoverKind {
 /// Consumed by the lib's `editor::hover` (and through it the `chezzi-lsp` server); the default
 /// `chezzi` bin compiles `checker` privately without reaching it, so allow that target's dead-code lint.
 #[allow(dead_code)]
-pub fn hover_type(graph: &ModuleGraph, line: usize, col: usize) -> Option<(String, HoverKind)> {
+pub fn hover_type(
+    graph: &ModuleGraph,
+    line: usize,
+    col: usize,
+) -> Option<(String, HoverKind, Option<String>)> {
     let mut c = Checker::new();
     c.hover_probe = Some((line, col));
     c.hover_entry = Some(graph.entry.clone());
@@ -421,7 +431,7 @@ pub fn hover_type(graph: &ModuleGraph, line: usize, col: usize) -> Option<(Strin
     }
     c.hover_result
         .take()
-        .map(|(ty, kind)| (ty.to_string(), kind))
+        .map(|(ty, kind, doc)| (ty.to_string(), kind, doc))
 }
 
 /// FFI ROOT FIX (fix4): resolve the fully-resolved, width-bearing C signature of every `extern` fn
@@ -1113,9 +1123,17 @@ struct Checker {
     /// The entry module the probe applies to; recording is gated on `current_module_id == hover_entry`
     /// so a same-named symbol in an imported dependency can't shadow the entry-buffer hit.
     hover_entry: Option<ModuleId>,
-    /// First probe hit: the inferred type + its classification. First-write-wins (children infer
-    /// before parents; only leaves/bindings record), so the smallest covering symbol's type is kept.
-    hover_result: Option<(Ty, HoverKind)>,
+    /// First probe hit: the inferred type + its classification + the symbol's doc-comment (if any).
+    /// First-write-wins (children infer before parents; only leaves/bindings record), so the smallest
+    /// covering symbol's type is kept.
+    hover_result: Option<(Ty, HoverKind, Option<String>)>,
+    /// EDITOR HOVER: doc-comment for the entry module's non-fn type decls (struct/enum/protocol/
+    /// newtype/alias) + top-level lets, keyed by simple name. Populated per module from the AST in
+    /// `collect_docs`; consulted by the hover Ident/type-name sites. Keyed by simple name is safe
+    /// because hover only fires in the entry module (gated by `current_module_id == hover_entry`),
+    /// where this table holds exactly that module's decls (mirrors how `functions` is entry-scoped).
+    /// Free fns / methods carry their doc on `FnSig::doc` instead. Runtime-inert (LSP only).
+    name_docs: HashMap<String, String>,
 }
 
 impl Checker {
@@ -1172,6 +1190,7 @@ impl Checker {
             hover_probe: None,
             hover_entry: None,
             hover_result: None,
+            name_docs: HashMap::new(),
         };
         c.seed_stdlib_structs();
         c
@@ -1267,6 +1286,7 @@ impl Checker {
         self.scopes.clear();
         self.loop_vars.clear();
         self.functions.clear();
+        self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
         self.import_binds.clear();
@@ -1331,6 +1351,7 @@ impl Checker {
             self.bind_import(imp);
         }
         self.collect_names(stmts);
+        self.collect_docs(stmts);
         self.hoist(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
         // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
@@ -2023,7 +2044,7 @@ impl Checker {
                     }
                     self.newtype_names.insert(name.clone());
                 }
-                StmtKind::TypeAlias { name, ty } => {
+                StmtKind::TypeAlias { name, ty, .. } => {
                     if matches!(
                         name.as_str(),
                         "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
@@ -2057,6 +2078,45 @@ impl Checker {
                         {
                             self.ffi_alias_ok.insert(name.clone());
                         }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect doc-comments for the module's top-level NON-fn declarations (struct/enum/protocol/
+    /// newtype/type-alias names + top-level `let` bindings) into `name_docs`, keyed by simple name.
+    /// Free fns and methods carry their doc on `FnSig::doc` instead (handled in `fn_sig`). Purely for
+    /// LSP hover — never consulted by checking/codegen, so it is behavior- and parity-neutral.
+    fn collect_docs(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Struct {
+                    name, doc: Some(d), ..
+                }
+                | StmtKind::Enum {
+                    name, doc: Some(d), ..
+                }
+                | StmtKind::Protocol {
+                    name, doc: Some(d), ..
+                }
+                | StmtKind::NewType {
+                    name, doc: Some(d), ..
+                }
+                | StmtKind::TypeAlias {
+                    name, doc: Some(d), ..
+                } => {
+                    self.name_docs.insert(name.clone(), d.clone());
+                }
+                // A top-level `let` binds (possibly multiple) names; surface the doc on each.
+                StmtKind::Let {
+                    names,
+                    doc: Some(d),
+                    ..
+                } => {
+                    for n in names {
+                        self.name_docs.insert(n.clone(), d.clone());
                     }
                 }
                 _ => {}
@@ -2111,6 +2171,7 @@ impl Checker {
                 type_params,
                 methods,
                 embeds,
+                ..
             } = &s.kind
             {
                 self.hoist_protocol(name, type_params, methods, embeds, s.span);
@@ -2170,6 +2231,7 @@ impl Checker {
                     type_params,
                     fields,
                     methods,
+                    ..
                 } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2223,6 +2285,7 @@ impl Checker {
                     type_params,
                     variants,
                     methods,
+                    ..
                 } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2297,6 +2360,7 @@ impl Checker {
                     type_params,
                     underlying,
                     methods,
+                    ..
                 } => {
                     if is_reserved_type(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2698,6 +2762,7 @@ impl Checker {
             ret,
             type_params: decl.type_params.clone(),
             is_static,
+            doc: decl.doc.clone(),
         }
     }
 
@@ -3411,6 +3476,7 @@ impl Checker {
                 ty,
                 value,
                 is_ref,
+                ..
             } => {
                 let is_ref = *is_ref;
                 let val_ty = self.infer_value(value);
@@ -3455,7 +3521,10 @@ impl Checker {
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
                 if self.hover_probe.is_some() {
-                    self.hover_record_at(span, &declared, HoverKind::Local);
+                    // doc surfaces at the binding site too (only top-level lets are in `name_docs`;
+                    // a local let resolves to None — its doc is inert).
+                    let doc = self.name_docs.get(name).cloned();
+                    self.hover_record_at(span, &declared, HoverKind::Local, doc);
                 }
                 self.declare(name, declared);
                 if is_ref {
@@ -3480,6 +3549,7 @@ impl Checker {
                 type_params,
                 fields,
                 methods,
+                ..
             } => {
                 let self_ty = self.struct_self_ty(name);
                 // The struct's type parameters are in scope across its method bodies.
@@ -5683,7 +5753,7 @@ impl Checker {
     /// Record `(ty, kind)` as the hover result if `span` is the armed probe position (entry module,
     /// first hit wins). The single place a probe hit is committed; both the expr-leaf path and the
     /// let-binding path funnel through here. A no-op when no probe is armed.
-    fn hover_record_at(&mut self, span: Span, ty: &Ty, kind: HoverKind) {
+    fn hover_record_at(&mut self, span: Span, ty: &Ty, kind: HoverKind, doc: Option<String>) {
         let Some((pl, pc)) = self.hover_probe else {
             return;
         };
@@ -5691,7 +5761,7 @@ impl Checker {
             return;
         }
         if span.line == pl && span.col == pc {
-            self.hover_result = Some((ty.clone(), kind));
+            self.hover_result = Some((ty.clone(), kind, doc));
         }
     }
 
@@ -5706,19 +5776,22 @@ impl Checker {
             | ExprKind::Str(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bytes(_)
-            | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal),
+            | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal, None),
             ExprKind::Ident(name) => {
-                let kind = if self.lookup(name).is_some() {
-                    HoverKind::Local
-                } else if self.functions.contains_key(name) {
-                    HoverKind::Func
+                // doc source mirrors the resolution: a `let`-bound local/global → `name_docs`; a free
+                // fn → its `FnSig::doc`; a bare type/ctor name used as a value → `name_docs`. All keyed
+                // by simple name, entry-module-scoped (safe — hover only fires in the entry module).
+                let (kind, doc) = if self.lookup(name).is_some() {
+                    (HoverKind::Local, self.name_docs.get(name).cloned())
+                } else if let Some(sig) = self.functions.get(name) {
+                    (HoverKind::Func, sig.doc.clone())
                 } else {
-                    HoverKind::Other
+                    (HoverKind::Other, self.name_docs.get(name).cloned())
                 };
-                self.hover_record_at(expr.span, ty, kind);
+                self.hover_record_at(expr.span, ty, kind, doc);
             }
             ExprKind::Field { name_span, .. } => {
-                self.hover_record_at(*name_span, ty, HoverKind::Field);
+                self.hover_record_at(*name_span, ty, HoverKind::Field, None);
             }
             _ => {}
         }
@@ -7075,7 +7148,13 @@ impl Checker {
                 if self.hover_probe.is_some()
                     && let Some(fty) = self.callee_display_ty(name)
                 {
-                    self.hover_record_at(callee.span, &fty, HoverKind::Func);
+                    // doc: a free fn → its `FnSig::doc`; a struct ctor → the struct's `name_docs` entry.
+                    let doc = self
+                        .functions
+                        .get(name)
+                        .and_then(|s| s.doc.clone())
+                        .or_else(|| self.name_docs.get(name).cloned());
+                    self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
                 if let Some(ty) = self.infer_named_call(name, args, &targs, span, None) {
                     return ty;
@@ -8045,7 +8124,7 @@ impl Checker {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
             };
-            self.hover_record_at(name_span, &fty, HoverKind::Func);
+            self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
     }
 
@@ -8190,10 +8269,11 @@ impl Checker {
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
+                            sig.doc.clone(),
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static)) = resolved {
+                if let Some((params, ret, mtps, is_static, mdoc)) = resolved {
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
@@ -8229,7 +8309,12 @@ impl Checker {
                                     params: expected.to_vec(),
                                     ret: Box::new(ret.clone()),
                                 };
-                                self.hover_record_at(name_span, &fty, HoverKind::Func);
+                                self.hover_record_at(
+                                    name_span,
+                                    &fty,
+                                    HoverKind::Func,
+                                    mdoc.clone(),
+                                );
                             }
                             self.check_args_w(method, expected, args, span)
                         }
@@ -10088,6 +10173,7 @@ impl Checker {
                 type_params: Vec::new(),
                 min_params,
                 is_static: false,
+                doc: None,
             };
             let msig = &want;
             match methods.get(mname) {

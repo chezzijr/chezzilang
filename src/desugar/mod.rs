@@ -881,6 +881,7 @@ impl Walker<'_> {
                 ty,
                 value,
                 is_ref,
+                doc: _,
             } => {
                 if *is_ref && self.lower_refs {
                     // `r: ref T = RHS`. The parser guarantees a single name here. CREATE-vs-ALIAS is

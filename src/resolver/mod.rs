@@ -326,15 +326,20 @@ impl Builder {
     /// Lex + parse a module's source, wrapping failures with the module label (since `Span`
     /// carries no filename).
     fn parse(&self, source: &str, dotted: &[String]) -> Result<Module, ResolveError> {
-        let tokens = lexer::tokenize(source).map_err(|e| ResolveError {
-            message: prefix(dotted, e.to_string()),
-            span: Span {
-                line: e.line,
-                col: 1,
-            },
-            module: opt_label(dotted),
-        })?;
-        parser::parse(tokens).map_err(|e| ResolveError {
+        // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
+        // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
+        // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
+        // unchanged. This is the single graph seam that threads docs in.
+        let (tokens, comments) =
+            lexer::tokenize_with_comments(source).map_err(|e| ResolveError {
+                message: prefix(dotted, e.to_string()),
+                span: Span {
+                    line: e.line,
+                    col: 1,
+                },
+                module: opt_label(dotted),
+            })?;
+        parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
             message: prefix(dotted, e.to_string()),
             span: e.span,
             module: opt_label(dotted),
