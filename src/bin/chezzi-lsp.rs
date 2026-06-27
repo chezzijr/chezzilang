@@ -195,8 +195,13 @@ impl LanguageServer for Backend {
         // markdown hover renderers (e.g. Neovim 0.12) attempt a missing-language injection and crash
         // on the float instead of skipping it. An untagged fence still renders as monospace everywhere.
         // When the symbol has a doc-comment, render it as plain markdown lines ABOVE the type fence.
+        // The doc is user-authored free text and may itself contain a language-tagged ```` ```lang ````
+        // fence; strip the language tag from any fence in it first, for the SAME reason the type fence
+        // above is untagged — a missing-language injection crashes some markdown hover renderers
+        // (Neovim 0.12, commit 0f36a59). `untag_fences` keeps the (untagged) fence, so code blocks in
+        // docs still render as monospace; it just removes the injection trigger.
         let value = match &info.doc {
-            Some(doc) => format!("{doc}\n\n```\n{}\n```", info.display),
+            Some(doc) => format!("{}\n\n```\n{}\n```", untag_fences(doc), info.display),
             None => format!("```\n{}\n```", info.display),
         };
         Ok(Some(Hover {
@@ -207,6 +212,26 @@ impl LanguageServer for Backend {
             range: None,
         }))
     }
+}
+
+/// Strip the language tag from every fenced-code-block delimiter in `s` (a line whose first
+/// non-whitespace is a run of 3+ backticks), leaving the bare backtick run. A language-tagged fence
+/// reaching a markdown hover renderer triggers a missing-language treesitter injection that crashes
+/// some clients (Neovim 0.12) — see commit 0f36a59. An untagged fence renders as plain monospace.
+fn untag_fences(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                let indent = &line[..line.len() - trimmed.len()];
+                let ticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
+                format!("{indent}{ticks}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::main]
@@ -222,7 +247,30 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::legend_token_types;
+    use super::{legend_token_types, untag_fences};
+
+    #[test]
+    fn untag_fences_strips_language_tag() {
+        // A doc-comment containing a language-tagged fence must NOT yield a tagged fence in the
+        // rendered hover markup (regression guard for the Neovim injection crash, commit 0f36a59).
+        let doc = "Example:\n```python\nfoo()\n```";
+        let out = untag_fences(doc);
+        assert!(
+            !out.contains("```python"),
+            "language tag must be stripped: {out:?}"
+        );
+        assert_eq!(out, "Example:\n```\nfoo()\n```");
+    }
+
+    #[test]
+    fn untag_fences_preserves_plain_text_and_indented_fences() {
+        assert_eq!(untag_fences("just text\nno fence"), "just text\nno fence");
+        // Indented / longer fences keep their indent and tick-count, lose only the tag.
+        assert_eq!(
+            untag_fences("    ````rust\n    x\n    ````"),
+            "    ````\n    x\n    ````"
+        );
+    }
 
     /// The server's advertised legend MUST agree, name-for-name and in index order, with
     /// `chezzi::editor::SEMANTIC_TOKEN_TYPES` — the `u32` token types `semantic_tokens` emits index

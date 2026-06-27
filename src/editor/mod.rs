@@ -1165,6 +1165,20 @@ mod tests {
     }
 
     #[test]
+    fn hover_local_shadowing_documented_global_has_no_doc() {
+        // A param/local that shadows a documented top-level name must NOT borrow the global's doc
+        // (`name_docs` is keyed by bare name). Repro from the adversarial review.
+        let src = "# the seed value\nseed := 42\nfn f(seed: int) -> int:\n    return seed\n";
+        // The param USE inside the body resolves to the local `seed` (scope 1) → no doc.
+        let use_h = hov(src, 3, 11).expect("hover on param use");
+        assert_eq!(use_h.kind, crate::checker::HoverKind::Local);
+        assert_eq!(use_h.doc, None, "local use must not show the global's doc");
+        // Guard: the genuine top-level `seed` binding still shows its doc.
+        let global_h = hov(src, 1, 0).expect("hover on top-level let");
+        assert_eq!(global_h.doc.as_deref(), Some("the seed value"));
+    }
+
+    #[test]
     fn hover_none_on_operator() {
         // Hovering the `+` operator (a non-leaf, non-token position) yields no type.
         assert_eq!(hov("a := 1 + 2\n", 0, 7), None);

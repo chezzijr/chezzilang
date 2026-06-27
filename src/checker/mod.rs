@@ -3521,9 +3521,15 @@ impl Checker {
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
                 if self.hover_probe.is_some() {
-                    // doc surfaces at the binding site too (only top-level lets are in `name_docs`;
-                    // a local let resolves to None — its doc is inert).
-                    let doc = self.name_docs.get(name).cloned();
+                    // doc surfaces at the binding site too, but ONLY for a top-level `let` (the module
+                    // scope is then the lone open scope). A function-local/block let that shadows a
+                    // documented global's name must NOT borrow that global's doc (`name_docs` is keyed
+                    // by bare name); such a local has no doc of its own.
+                    let doc = if self.scopes.len() == 1 {
+                        self.name_docs.get(name).cloned()
+                    } else {
+                        None
+                    };
                     self.hover_record_at(span, &declared, HoverKind::Local, doc);
                 }
                 self.declare(name, declared);
@@ -5782,7 +5788,19 @@ impl Checker {
                 // fn → its `FnSig::doc`; a bare type/ctor name used as a value → `name_docs`. All keyed
                 // by simple name, entry-module-scoped (safe — hover only fires in the entry module).
                 let (kind, doc) = if self.lookup(name).is_some() {
-                    (HoverKind::Local, self.name_docs.get(name).cloned())
+                    // Only a TRUE module-top-level binding (resolves at scope 0) owns its `name_docs`
+                    // entry; a shadowing param/local of the same name has no doc of its own and must
+                    // NOT borrow the global's (`name_docs` is keyed by bare name).
+                    let at_top_level = (0..self.scopes.len())
+                        .rev()
+                        .find(|&i| self.scopes[i].contains_key(name))
+                        == Some(0);
+                    let doc = if at_top_level {
+                        self.name_docs.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    (HoverKind::Local, doc)
                 } else if let Some(sig) = self.functions.get(name) {
                     (HoverKind::Func, sig.doc.clone())
                 } else {

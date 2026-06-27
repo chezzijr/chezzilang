@@ -26,7 +26,11 @@ Enum, Protocol, NewType, TypeAlias}` (top-level lets surface; local lets carry t
 VM==interp parity is untouched (front-end-only). **Hover wiring:** `FnSig.doc` (free fns + methods) +
 `Checker.name_docs` (type decls + top-level lets, simple-name keyed, entry-module-scoped like
 `self.functions`) feed a 3rd element into `hover_result`/`HoverInfo.doc`; `chezzi-lsp` renders the doc as
-plain markdown lines above the untagged fence. **Known v1 limit:** protocol METHOD signatures
+plain markdown lines above the untagged fence. **Shadow-safe:** a `name_docs` doc surfaces only when the
+hovered name actually resolves to the module top-level (scope 0) — a param/local that shadows a documented
+global's name shows no doc, not the global's. **Fence-safe:** user doc text is run through `untag_fences`
+before rendering, so a ```` ```lang ```` fence inside a doc-comment can't reintroduce the language-tagged
+fence the type fence avoids (Neovim injection crash, commit `0f36a59`). **Known v1 limit:** protocol METHOD signatures
 (`MethodSig`, not `FnDecl`) get no per-method doc — only the protocol container does. Builds on the
 builtin-hover plumbing below. **Reinstall the LSP snapshot to serve it: `cargo install --path . --features
 lsp --bin chezzi-lsp`.**
