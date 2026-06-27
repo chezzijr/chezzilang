@@ -129,18 +129,41 @@ fn describe_extern_type(t: &Type) -> String {
 /// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
 /// Mirrors `compiler::is_builtin` + the constructor/`print` special cases. (Struct- and variant-name
 /// collisions are caught separately against the built registries, since those are user-declared.)
+/// Every reserved CALLABLE builtin name: the free functions (`print`/`panic`/`range`/`int`/`float`/
+/// `str`/`ord`/`chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/
+/// `Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). Every name here is CALLED (none is a
+/// pure type marker), so each must have a [`builtin_sig`] entry for editor hover — enforced by the
+/// `reserved_callables_all_have_builtin_sig` drift-guard test. (The generic ctors `Ok`/`Err`/`Some`
+/// are NOT reserved — a user may shadow them — so they are intentionally out of this set and keep
+/// hovering `None` for v1.) Mirrors `compiler::is_builtin` + the constructor/`print` special cases.
+const RESERVED_CALLABLE: &[&str] = &[
+    // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
+    "range",
+    "int",
+    "float",
+    "str",
+    "ord",
+    "chr",
+    "Set",
+    "List",
+    "Map",
+    "bytes",
+    "bytearray",
+    // the special print op
+    "print",
+    // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
+    "panic",
+    // runtime constructors the backends special-case before a plain call
+    "Channel",
+    "Shared",
+    "RwShared",
+    "Atomic",
+    "timer",
+    "Executor",
+];
+
 fn is_reserved_name(name: &str) -> bool {
-    matches!(
-        name,
-        // builtins (mirrors compiler::is_builtin / interp::builtins::is_builtin)
-        "range" | "int" | "float" | "str" | "ord" | "chr" | "Set" | "List" | "Map" | "bytes" | "bytearray"
-        // the special print op
-        | "print"
-        // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
-        | "panic"
-        // runtime constructors the backends special-case before a plain call
-        | "Channel" | "Shared" | "RwShared" | "Atomic" | "timer" | "Executor"
-    )
+    RESERVED_CALLABLE.contains(&name)
 }
 
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
@@ -5701,13 +5724,14 @@ impl Checker {
         }
     }
 
-    /// Build a DISPLAY-only `Ty::Func` for a by-name call callee (free fn or struct constructor), for
-    /// editor hover. `None` for builtins (`print`/`range`/`List`) and bare enum variants — they carry
-    /// no recordable signature, so hover stays `None`. Pure read of the fn/struct tables: emits no
-    /// error and changes no checking decision (it is only ever called under the hover probe). The
-    /// free-fn branch displays a generic fn's declared signature verbatim (`FnSig` params/ret stay
-    /// `Ty::Param(T)` → "fn(T, T) -> T"); the struct branch mirrors `name_is_generic`'s module-keyed
-    /// `bare_key` lookup and renders fields → `Struct` ("fn(int, int) -> Vec2").
+    /// Build a DISPLAY-only `Ty::Func` for a by-name call callee (free fn, struct constructor, or a
+    /// reserved builtin via [`builtin_sig`]), for editor hover. `None` only for bare enum variants —
+    /// they carry no recordable signature, so hover stays `None`. Pure read of the fn/struct/builtin
+    /// tables: emits no error and changes no checking decision (it is only ever called under the hover
+    /// probe). The free-fn branch displays a generic fn's declared signature verbatim (`FnSig`
+    /// params/ret stay `Ty::Param(T)` → "fn(T, T) -> T"); the struct branch mirrors `name_is_generic`'s
+    /// module-keyed `bare_key` lookup and renders fields → `Struct` ("fn(int, int) -> Vec2"); the
+    /// builtin branch returns a canonical display sig ("fn(int) -> List[int]" for `range`).
     fn callee_display_ty(&self, name: &str) -> Option<Ty> {
         if let Some(sig) = self.functions.get(name) {
             return Some(Ty::Func {
@@ -5725,6 +5749,15 @@ impl Checker {
             return Some(Ty::Func {
                 params,
                 ret: Box::new(Ty::Struct(name.to_string(), targs)),
+            });
+        }
+        // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
+        // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
+        // be user-shadowed, so this never collides with the fn/struct tables above.
+        if let Some(sig) = builtin_sig(name) {
+            return Some(Ty::Func {
+                params: sig.params,
+                ret: Box::new(sig.ret),
             });
         }
         None
@@ -7036,8 +7069,9 @@ impl Checker {
                 // `infer()`/`hover_record_expr`, so without this it returns None. We build the display
                 // `Ty::Func` WITHOUT emitting any error and never touch normal checking results.
                 // A free fn → its declared `FnSig` (a generic fn's params/ret stay `Ty::Param(T)`, so
-                // it Displays "fn(T, T) -> T"); a struct ctor → fields-to-`Struct` ; builtins
-                // (print/range/List) + bare enum variants record nothing → hover stays None.
+                // it Displays "fn(T, T) -> T"); a struct ctor → fields-to-`Struct`; a reserved builtin
+                // (print/range/List) → its `builtin_sig` display sig. Only bare enum variants record
+                // nothing → hover stays None.
                 if self.hover_probe.is_some()
                     && let Some(fty) = self.callee_display_ty(name)
                 {
@@ -8000,6 +8034,21 @@ impl Checker {
         }
     }
 
+    /// Editor hover (probe-gated no-op): record a builtin method's CALL signature at the method-name
+    /// token. The builtin `*_method_sig` helpers carry NO receiver param (unlike user methods), so the
+    /// sig is recorded as-is — `str.upper()`'s `[]→str` renders "fn() -> str". Pure side effect: only
+    /// runs under the hover probe and emits no error / changes no checking. Mirrors the user-struct
+    /// method-arm probe block (which strips the receiver first).
+    fn record_method_hover(&mut self, name_span: Span, sig: &FnSig) {
+        if self.hover_probe.is_some() {
+            let fty = Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+            };
+            self.hover_record_at(name_span, &fty, HoverKind::Func);
+        }
+    }
+
     /// Type-check an instance method call `obj.method(args)`. `type_args` are the explicit
     /// member-level turbofish (`obj.method[A, B](x, y)`) — non-empty only when the parser stole a
     /// type list after the `.method`; they seed a generic method's own `[U]` params. A method-level
@@ -8062,6 +8111,11 @@ impl Checker {
                     .and_then(|id| self.module_sigs.get(id));
                 let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
                 let fsig = sig.and_then(|s| s.functions.get(method).cloned());
+                // Editor hover (CASE 2): record `module.fn`'s native signature at the method name —
+                // covers plain, numeric-poly (`abs` has an arity fsig), and generic module fns.
+                if let Some(f) = &fsig {
+                    self.record_method_hover(name_span, f);
+                }
                 // Numeric-polymorphic native fns (gap #12): result type follows the argument type.
                 if is_poly {
                     let arity = fsig.as_ref().map_or(2, |f| f.params.len());
@@ -8334,6 +8388,7 @@ impl Checker {
             // Core-type methods (M6): built-in methods on `str` and `list[T]`.
             Ty::Str => {
                 if let Some(sig) = str_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8372,6 +8427,7 @@ impl Checker {
                     return Ty::Nil;
                 }
                 if let Some(sig) = list_method_sig(method, elem) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8389,6 +8445,7 @@ impl Checker {
             // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
             Ty::Bytes => {
                 if let Some(sig) = bytes_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8415,6 +8472,7 @@ impl Checker {
                     return Ty::Nil;
                 }
                 if let Some(sig) = bytearray_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8424,6 +8482,7 @@ impl Checker {
             }
             Ty::Map(k, v) => {
                 if let Some(sig) = map_method_sig(method, k, v) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8433,6 +8492,7 @@ impl Checker {
             }
             Ty::Set(elem) => {
                 if let Some(sig) = set_method_sig(method, elem) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8445,6 +8505,7 @@ impl Checker {
                 // element type `T`, which is itself sendable-checked at the channel's construction
                 // — so a well-typed `send` is always sendable.
                 if let Some(sig) = channel_method_sig(method, elem) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8456,6 +8517,7 @@ impl Checker {
                 // `get()->T`, `set(T)->nil`, `update(fn(T)->T)->nil` — the same box API as `Ref[T]`,
                 // but reachable across tasks.
                 if let Some(sig) = shared_method_sig(method, elem) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8470,6 +8532,9 @@ impl Checker {
                 // is accepted) and ret `Unknown`; here we recover R from the supplied closure so the
                 // call site sees the real return type (not `Unknown`).
                 if let Some(sig) = rwshared_method_sig(method, elem) {
+                    // `read`'s sig ret is the placeholder `Unknown` (the real R is recovered below) —
+                    // hover shows the declared `fn(fn(T) -> ?) -> ?` shape, which is the sig of record.
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     if method == "read" {
                         // R = the closure argument's actual return type (else `Unknown` on arity
@@ -8494,6 +8559,7 @@ impl Checker {
                 // `load()->T`, `store(T)`, `exchange(T)->T`, `cas(T,T)->bool`; `add(T)->T`/`sub(T)->T`
                 // only when `T` is numeric (gated inside `atomic_method_sig`).
                 if let Some(sig) = atomic_method_sig(method, elem) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
@@ -8504,6 +8570,7 @@ impl Checker {
             Ty::Executor => {
                 // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
                 if let Some(sig) = executor_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so its
                     // captures cross the airlock exactly like a `spawn` task's. Push a capture floor at
                     // the current scope depth around the argument check; the submitted closure opens
@@ -8527,6 +8594,7 @@ impl Checker {
             // their `Result`.
             Ty::Socket => {
                 if let Some(sig) = socket_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
@@ -8536,6 +8604,7 @@ impl Checker {
             }
             Ty::Listener => {
                 if let Some(sig) = listener_method_sig(method) {
+                    self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
@@ -11992,6 +12061,52 @@ fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         "add" => (vec![elem.clone()], Ty::Nil),
         "remove" => (vec![elem.clone()], Ty::Bool), // true if the element was present
         "union" | "intersection" | "difference" => (vec![set.clone()], set),
+        _ => return None,
+    };
+    Some(FnSig::plain(params, ret))
+}
+
+/// A DISPLAY-only signature for a free / constructor builtin (editor hover, v1). Unlike the
+/// `infer_named_call` arms — whose result is arg-dependent (overloads, variadics, named params,
+/// type-arg-driven element types) — this returns ONE canonical positional shape per name, mirrored
+/// by hand from `docs/stdlib.md §1`. Polymorphic-input slots use `Ty::Unknown` (renders `?`); the
+/// precise concrete RETURN is the hover payload. NOT used for checking — only `callee_display_ty`
+/// reads it under the hover probe. Covers exactly [`RESERVED_CALLABLE`] (drift-guarded by a test);
+/// a future reserved builtin that forgets an entry here fails that test rather than silently losing
+/// hover. (`Ok`/`Err`/`Some` are not reserved and stay hover-`None`.)
+fn builtin_sig(name: &str) -> Option<FnSig> {
+    let (params, ret) = match name {
+        // Free functions ----------------------------------------------------------------------
+        // Variadic + named args (`sep`/`end`) collapse to one `?` slot; always returns `nil`.
+        "print" => (vec![Ty::Unknown], Ty::Nil),
+        // Diverging (bottom-typed): renders `fn(str) -> ?`.
+        "panic" => (vec![Ty::Str], Ty::Unknown),
+        // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the
+        // canonical `range(end)`.
+        "range" => (vec![Ty::Int], Ty::list(Ty::Int)),
+        // `int`/`float`/`str` accept ~anything → `?` arg, concrete scalar return.
+        "int" => (vec![Ty::Unknown], Ty::Int),
+        "float" => (vec![Ty::Unknown], Ty::Float),
+        "str" => (vec![Ty::Unknown], Ty::Str),
+        "ord" => (vec![Ty::Str], Ty::Int),
+        "chr" => (vec![Ty::Int], Ty::Str),
+        // Container constructors --------------------------------------------------------------
+        // Element/key/value types are inferred from the argument → `?` slots.
+        "List" => (vec![Ty::Unknown], Ty::list(Ty::Unknown)),
+        "Set" => (vec![Ty::Unknown], Ty::set(Ty::Unknown)),
+        "Map" => (vec![Ty::Unknown], Ty::map(Ty::Unknown, Ty::Unknown)),
+        "bytes" => (vec![Ty::Unknown], Ty::Bytes),
+        "bytearray" => (vec![Ty::Unknown], Ty::ByteArray),
+        // Runtime constructors ----------------------------------------------------------------
+        // `Channel[T]()` is type-arg-driven, no value arg → no params.
+        "Channel" => (vec![], Ty::channel(Ty::Unknown)),
+        "Shared" => (vec![Ty::Unknown], Ty::shared(Ty::Unknown)),
+        "RwShared" => (vec![Ty::Unknown], Ty::rwshared(Ty::Unknown)),
+        "Atomic" => (vec![Ty::Unknown], Ty::atomic(Ty::Unknown)),
+        // `timer(ms) -> Channel[bool]` (one-shot timeout channel).
+        "timer" => (vec![Ty::Int], Ty::channel(Ty::Bool)),
+        // `Executor()` — zero-arg work queue.
+        "Executor" => (vec![], Ty::Executor),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

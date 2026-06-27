@@ -9478,3 +9478,26 @@ fn newtype_operator_method_fails_generic_bound() {
         "Div",
     );
 }
+
+/// Drift guard (editor hover): EVERY reserved callable builtin must have a `builtin_sig` entry, so a
+/// future builtin added to `RESERVED_CALLABLE` can't silently lose hover. The set is exactly the
+/// CALLABLE reserved names — the free functions (`print`/`panic`/`range`/`int`/`float`/`str`/`ord`/
+/// `chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/`Channel`/
+/// `Shared`/`RwShared`/`Atomic`/`timer`/`Executor`); none is a pure type marker, so each one is
+/// callable and must have a display signature. (`Ok`/`Err`/`Some` are deliberately NOT reserved — a
+/// user may shadow them — so they're out of scope and keep hovering `None` for v1.) `is_reserved_name`
+/// is the single source: `builtin_sig` is keyed off the same names.
+#[test]
+fn reserved_callables_all_have_builtin_sig() {
+    for name in RESERVED_CALLABLE {
+        assert!(
+            builtin_sig(name).is_some(),
+            "reserved callable builtin '{name}' has no builtin_sig entry → it would lose editor hover"
+        );
+        // And the const slice IS the reserved-name set (refactor stayed behavior-identical).
+        assert!(is_reserved_name(name), "'{name}' must be a reserved name");
+    }
+    // Sanity: a non-reserved name has no builtin sig (no accidental over-coverage).
+    assert!(builtin_sig("Ok").is_none());
+    assert!(builtin_sig("totally_not_a_builtin").is_none());
+}

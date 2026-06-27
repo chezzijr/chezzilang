@@ -11,6 +11,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Editor tooling — LSP hover for builtins (2026-06-27).** Hover on a builtin callee/method/stdlib-fn
+previously returned `None`; it now reports a signature, via three reuse-driven cases (no flat
+hand-table), checker+editor only (NO VM/interp/runtime touch → no two-engine parity risk):
+(1) **builtin methods** (`str`/`list`/`map`/`set`/`Channel`/`Shared`/`RwShared`/`Atomic`/`bytes`/
+`bytearray`/`Executor`/`Socket`/`Listener`) record their CALL signature off the SAME `*_method_sig`
+helpers that drive inference (zero drift) via a new `record_method_hover` probe helper in each
+`infer_method_call` builtin arm; (2) **stdlib-module fns** (`math.sqrt`, …) record off
+`native_module_sig(module).functions` in the `Ty::Module` arm; (3) **free/ctor builtins** (`print`,
+`range`, `int`/`float`/`str`, `ord`/`chr`, `panic`, `List`/`Set`/`Map`/`bytes`/`bytearray`,
+`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`) get a NEW DISPLAY-only `builtin_sig(name)`
+(mirrored by hand from `docs/stdlib.md §1`; polymorphic-input slots render `?`, the concrete return is
+the payload, e.g. `print`→`fn(?) -> nil`, `range`→`fn(int) -> List[int]`) consulted by
+`callee_display_ty` before its `None`. **Drift guard:** `is_reserved_name` is refactored onto a
+`const RESERVED_CALLABLE` slice (behavior-identical) and a test asserts every name in it has a
+`builtin_sig` entry, so a future reserved builtin can't silently lose hover. `Ok`/`Err`/`Some` are NOT
+reserved (user-shadowable) → still hover `None` for v1. Signature-only (no docstrings — a separate
+follow-up). **Reinstall the LSP snapshot to serve it: `cargo install --path . --features lsp --bin
+chezzi-lsp`.**
+
 **✅ M22 — operator protocols (Div/Mod/Neg) + protocol embedding + `Arithmetic` (2026-06-26).** Three
 new per-operator protocols wired exactly like `Add`/`Sub`/`Mul`: **`Div`** (`div(self, o: Self) ->
 Self`, powers `/`), **`Mod`** (`mod`, powers `%`), **`Neg`** (`neg(self) -> Self`, powers UNARY `-`).
@@ -54,8 +73,11 @@ erroring), and
 char column, finds the lexer token under the cursor, re-runs the SAME resolve→desugar→check pipeline as
 diagnostics with a single-position checker PROBE on the entry module, and returns the inferred type of
 the smallest leaf/identifier/field-name **or the signature of a call's callee** (free fn / struct ctor /
-generic fn / method — receiver stripped → `fn(int) -> int`) as a ```` ```chezzi <type> ```` MarkupContent
-— `None` when the position has no type, lands on a builtin/bare-enum-variant callee, or the program
+generic fn / user method — receiver stripped → `fn(int) -> int` — **and builtins**: free/ctor builtins
+(`print`→`fn(?) -> nil`, `range`→`fn(int) -> List[int]`, …) + builtin-collection/concurrency methods
+(`"x".upper()`→`fn() -> str`) + stdlib-module fns (`math.sqrt`→`fn(float) -> float`)) as a
+```` ```chezzi <type> ```` MarkupContent — `None` only when the position has no type, lands on a bare
+enum-variant callee (or `Ok`/`Err`/`Some`, which are non-reserved), or the program
 doesn't check). The probe is a minimal, behavior-preserving checker
 introspection (`checker::hover_type` + a `HoverKind` classification); diagnostic-only AST spans carry
 the token positions — `ExprKind::Field { name_span }` plus new `FnDecl`/`Param`/struct-`Field`
@@ -79,7 +101,8 @@ a `cargo test --features lsp --test lsp_smoke` JSON-RPC round-trip. Setup docs: 
 No parity risk (front-end only; never runs VM/interp). v1 limits: unsaved edits to an *imported* module
 aren't reflected until saved; interpolated strings highlight as one literal (no nested `{expr}`); hover
 covers the entry module only, resolves leaf idents/literals/field-names + single-name let bindings +
-call callees incl. **user-struct** method names (generic/enum/newtype/builtin-collection methods,
+call callees incl. **user-struct** method names, **reserved free/ctor builtins**, **builtin-collection/
+concurrency methods**, and **stdlib-module fns** (generic/enum/newtype user methods,
 desugared `?.`/`??`, and non-first destructuring-bind names return no type; the semantic-token overlay's
 `type` role skips generic-constructor heads (`List[int]`'s `List`, `Map`/`Set`/`Box`, …) and
 module-qualified type names, both span-less).

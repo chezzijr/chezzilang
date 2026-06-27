@@ -1175,9 +1175,50 @@ mod tests {
     }
 
     #[test]
-    fn hover_builtin_callee_none() {
-        // A builtin callee (`print`) carries no recordable signature → hover stays None.
-        assert_eq!(hov("print(\"hi\")\n", 0, 0), None);
+    fn hover_builtin_callee_print() {
+        // A free builtin callee (`print`) now reports a DISPLAY signature (v1: signature-only).
+        // Polymorphic/variadic args collapse to `?`; the precise return (`nil`) is the payload.
+        let h = hov("print(\"hi\")\n", 0, 0).expect("hover on builtin print callee");
+        assert_eq!(h.display, "fn(?) -> nil");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_builtin_callee_range() {
+        // `range` is overload-collapsed to the canonical `range(end) -> List[int]` display.
+        let h = hov("range(10)\n", 0, 0).expect("hover on builtin range callee");
+        assert_eq!(h.display, "fn(int) -> List[int]");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_builtin_method_str() {
+        // CASE 1: a builtin `str` method reports the inference-source signature (receiver stripped).
+        let src = "s := \"abc\".upper()\n";
+        // `upper` starts at char col 11 (`s := "abc".` is 11 chars).
+        let h = hov(src, 0, 11).expect("hover on str builtin method");
+        assert_eq!(h.display, "fn() -> str");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_builtin_method_list_len() {
+        // `len` is a METHOD (not a free fn): `xs.len()` reports `fn() -> int` via list_method_sig.
+        let src = "xs := [1, 2]\nn := xs.len()\n";
+        // line 1 `n := xs.` → `len` at char col 8.
+        let h = hov(src, 1, 8).expect("hover on list len method");
+        assert_eq!(h.display, "fn() -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_stdlib_module_fn() {
+        // CASE 2: a stdlib module fn (`math.sqrt`) reports its native FnSig.
+        let src = "import std.math\nx := math.sqrt(2.0)\n";
+        // line 1 `x := math.` → `sqrt` at char col 10.
+        let h = hov(src, 1, 10).expect("hover on std.math.sqrt");
+        assert_eq!(h.display, "fn(float) -> float");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 
     #[test]
