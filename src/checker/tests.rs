@@ -4263,6 +4263,51 @@ fn guarded_binding_does_not_make_exhaustive() {
 }
 
 #[test]
+fn guarded_variant_arm_does_not_close_variant() {
+    // A guarded variant arm (`E.A if false`) is refutable — it can't close variant A.
+    rejects(
+        "enum E:\n    A\n    B\nfn f(e: E) -> int:\n    match e:\n        E.A if false: return 1\n        E.B: return 2\nf(E.A)\n",
+        "non-exhaustive match on E: missing A",
+    );
+}
+
+#[test]
+fn refutable_literal_payload_does_not_close_variant() {
+    // `Some(0)` only covers the value 0, not every `Some(n)` — Some stays open.
+    rejects(
+        "fn f(x: Option[int]) -> str:\n    match x:\n        None: return \"none\"\n        Some(0): return \"zero\"\nf(Some(5))\n",
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn refutable_literal_in_multifield_variant_does_not_close() {
+    // A literal sub-pattern in a multi-field variant payload keeps the variant open.
+    rejects(
+        "enum P:\n    Pair(int, int)\nfn f(p: P) -> str:\n    match p:\n        P.Pair(0, y): return \"zero-x\"\nf(P.Pair(1, 2))\n",
+        "non-exhaustive match on P: missing Pair",
+    );
+}
+
+#[test]
+fn guarded_variant_then_fallback_accepted() {
+    // A guarded variant arm followed by an unguarded fallback on the same variant is the
+    // standard idiom and must be accepted (the guarded arm doesn't close the variant).
+    ok(
+        "enum E:\n    A(int)\n    B\nfn f(e: E) -> str:\n    match e:\n        E.A(n) if n > 0: return \"pos\"\n        E.A(n): return \"nonpos\"\n        E.B: return \"b\"\nf(E.A(1))\n",
+    );
+}
+
+#[test]
+fn unguarded_variant_duplicate_still_rejected() {
+    // A genuine duplicate (a prior unguarded+irrefutable arm already closed A) still fires.
+    rejects(
+        "enum E:\n    A(int)\n    B\nfn f(e: E) -> str:\n    match e:\n        E.A(n): return \"a\"\n        E.A(m): return \"a2\"\n        E.B: return \"b\"\nf(E.A(1))\n",
+        "duplicate match arm",
+    );
+}
+
+#[test]
 fn match_guard_ok() {
     // A guard sees the pattern's bindings; with a trailing `_` the match is exhaustive.
     ok(
