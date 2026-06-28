@@ -51,14 +51,12 @@ enum MatchKind {
     Literal(Ty),
     /// Tuple scrutinee — arms are tuple patterns (gap #15). Carries the element types.
     Tuple(Vec<Ty>),
-    /// Un-inferable (`Ty::Unknown`) scrutinee — skip exhaustiveness, accept any pattern shape.
+    /// Un-inferable (`Ty::Unknown`) scrutinee with only binding/`_` arms — skip exhaustiveness, bind
+    /// permissively. A STRUCTURAL arm over an un-inferable scrutinee is rejected upstream (§4.1, in
+    /// `reconstruct_unknown_kind` for the top-level arm and `bind_subpattern` for nested positions);
+    /// a literal/range arm pins `MatchKind::Literal`. So `Skip` only carries the genuinely-permissive
+    /// residue.
     Skip,
-    /// Un-inferable (`Ty::Unknown`) scrutinee whose arms are literals/ranges (an open domain): bind
-    /// permissively like `Skip`, but exhaustiveness REQUIRES a `_` wildcard — a genuinely untyped
-    /// scrutinee over an open literal domain can't be proven complete any other way. Heterogeneous
-    /// literal arms (`1` + `"b"`) are fine: type agreement is irrelevant when the value has no
-    /// static type, and the `_` makes the match total regardless.
-    OpenScrutinee,
 }
 
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
@@ -1166,6 +1164,13 @@ struct Checker {
     /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
     /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
     loop_depth: usize,
+    /// True while inferring a generic ctor/call/method's args in the unification PREPASS
+    /// ([`Checker::infer_generic_arg_tys`]). In that pass an unannotated closure param must stay
+    /// `Ty::Unknown` (so unification is driven by the other args / substituted slot type, then the
+    /// per-arg [`Checker::check_generic_arg`] re-infers it in checking-mode) — the free-body scan
+    /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
+    /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
+    generic_arg_prepass: bool,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
@@ -1240,6 +1245,7 @@ impl Checker {
             current_ret: Ty::Nil,
             yield_ty: None,
             recover_depth: 0,
+            generic_arg_prepass: false,
             inferring_ret: false,
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
@@ -3706,7 +3712,25 @@ impl Checker {
                 ..
             } => {
                 let is_ref = *is_ref;
-                let val_ty = self.infer_value(value);
+                // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
+                // resolve the annotation first so its unannotated params bind to the slot's param
+                // types. Only the single-name, non-`ref`, `fn`-typed case (a `ref` pointee is never a
+                // closure; destructuring never binds one). Otherwise ordinary bottom-up inference.
+                let val_ty = match ty {
+                    Some(t)
+                        if !is_ref
+                            && names.len() == 1
+                            && matches!(value.kind, ExprKind::Closure { .. }) =>
+                    {
+                        let expected = self.resolve_type(t, span);
+                        if matches!(expected, Ty::Func { .. }) {
+                            self.infer_arg(value, Some(&expected))
+                        } else {
+                            self.infer_value(value)
+                        }
+                    }
+                    _ => self.infer_value(value),
+                };
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     self.check_destructure(names, &val_ty, value.span);
@@ -3765,7 +3789,25 @@ impl Checker {
                 }
             }
             StmtKind::Assign { target, op, value } => {
-                let val_ty = self.infer_value(value);
+                // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
+                // fn-typed variable) binds its unannotated params from the target's type (source #1).
+                let val_ty = if matches!(value.kind, ExprKind::Closure { .. }) {
+                    // Discover the target's type for checking-mode WITHOUT diagnosing it: inferring
+                    // an lvalue as an rvalue would run read-side gates (non-sendable-captured-binding
+                    // read) and double-infer a Field/Index receiver. `check_assign` below is the sole
+                    // validator of the target, so snapshot+truncate any errors this probe produces
+                    // (mirrors the generic-arg recovery idiom).
+                    let mark = self.errors.len();
+                    let target_ty = self.infer(target);
+                    self.errors.truncate(mark);
+                    if matches!(target_ty, Ty::Func { .. }) {
+                        self.infer_arg(value, Some(&target_ty))
+                    } else {
+                        self.infer_value(value)
+                    }
+                } else {
+                    self.infer_value(value)
+                };
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
@@ -4480,7 +4522,16 @@ impl Checker {
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
-                let ty = self.infer(e);
+                // Checking-mode: a closure returned into a `fn`-typed return slot binds its
+                // unannotated params from the declared return type (source #1). A NON-closure return
+                // keeps plain `infer` (NOT `infer_value`): returning `nil` just makes a void fn — it
+                // is not "using nil as a value", so it must not get `infer_value`'s nil-rejection on
+                // top of check_return's own `function returns nothing` diagnostic.
+                let ty = if matches!(e.kind, ExprKind::Closure { .. }) {
+                    self.infer_arg(e, Some(&ret))
+                } else {
+                    self.infer(e)
+                };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, true) {
@@ -5135,7 +5186,7 @@ impl Checker {
             // reconstruct a concrete kind from the arm patterns when they unambiguously name a single
             // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
             // cases still fall back to `Skip`.
-            Ty::Unknown => self.reconstruct_unknown_kind(patterns),
+            Ty::Unknown => self.reconstruct_unknown_kind(patterns, scrutinee.span),
             other => {
                 self.error(
                     scrutinee.span,
@@ -5146,28 +5197,23 @@ impl Checker {
         }
     }
 
-    /// Recover a concrete `MatchKind` for an un-inferable (`Ty::Unknown`) scrutinee by inspecting the
-    /// arms' top-level patterns, so exhaustiveness is still enforced (closing the Skip-path soundness
-    /// hole). The reconstructed kind feeds the SAME downstream coverage/guard/refutable logic as a
-    /// concrete scrutinee, so no new exhaustiveness rules are introduced here.
+    /// Classify a match over a residual un-inferable (`Ty::Unknown`) scrutinee — one that §3 closure
+    /// inference did NOT pin (e.g. a tuple-element binding `a` from `(a, b)`, or an `Unknown`-typed
+    /// expression). The top-level scrutinee arm goes through this path (not `bind_subpattern`), so it
+    /// is the OTHER half of the §4.1 structural-over-`Unknown` reject (the nested half is in
+    /// `bind_subpattern`):
+    /// - **Any STRUCTURAL arm** (a tuple, or a real variant — qualified, builtin `Ok`/`Err`/`Some`/
+    ///   `None`, an owned bare variant, or a `Name(..)` with a payload) tests a shape/tag against a
+    ///   value whose type we can't prove → it traps at runtime on a wrong shape (a trailing `_` cannot
+    ///   rescue it). Reject; annotate the enclosing param. Returns `Skip` afterwards so the arm bodies
+    ///   still bind permissively (no cascade).
+    /// - **Only literal/range arms** → `Literal(first-arm scalar)`: the existing literal-domain rule
+    ///   then makes a non-`_` match non-exhaustive AND a heterogeneous arm (`1` + `"b"`) a literal
+    ///   mismatch — restoring the pre-`OpenScrutinee` behaviour.
+    /// - **Only bindings / `_`** → `Skip` (a bare-ident catch-all closes it; nothing to enforce).
     ///
-    /// Classification (top-level `Or` alternatives are flattened first):
-    /// - `Enum.Variant` qualified by a known enum, or a bare variant uniquely owned by one enum, or
-    ///   the builtin `Ok`/`Err` (Result) / `Some`/`None` (Option) — collect that enum.
-    /// - a bare name that is NOT a known variant is a catch-all binding → ignored for detection.
-    /// - `Literal`/`Range` → mark `saw_literal`.
-    /// - tuple/ident/wildcard → no signal (stay permissive).
-    ///
-    /// Decision: exactly ONE distinct enum → `Variants` (built from the real decl via `variants_of`);
-    /// ZERO enums + a literal → `Literal` (forces a `_` arm); anything else (no signal, an ambiguous
-    /// bare variant, an unknown qualifier, or multiple enums) → `Skip` (stay permissive — never
-    /// over-reject an un-inferable match).
-    fn reconstruct_unknown_kind(&self, patterns: &[&Pattern]) -> MatchKind {
-        use std::collections::BTreeSet;
-        // Each entry is an enum *identity*: a user enum's resolved runtime key (e.g. `main::E`), or
-        // the builtin marker `"Result"`/`"Option"` (reserved names — never a user enum key).
-        let mut enums: BTreeSet<String> = BTreeSet::new();
-        let mut lit_ty: Option<Ty> = None;
+    /// Top-level `Or` alternatives are flattened first. `&mut self` (it may emit the §4.1 reject).
+    fn reconstruct_unknown_kind(&mut self, patterns: &[&Pattern], span: Span) -> MatchKind {
         // Flatten top-level or-alternatives into a flat head list.
         let mut heads: Vec<&Pattern> = Vec::new();
         for p in patterns {
@@ -5176,45 +5222,31 @@ impl Checker {
                 other => heads.push(other),
             }
         }
-        for h in heads {
+        let mut lit_ty: Option<Ty> = None;
+        // The kind word of the FIRST structural arm seen (`"tuple"` / `"variant"`), if any.
+        let mut structural: Option<&'static str> = None;
+        for h in &heads {
             match h {
+                Pattern::Tuple(_) => {
+                    structural.get_or_insert("tuple");
+                }
                 Pattern::Variant {
                     name,
                     enum_name,
                     module_name,
-                    ..
+                    bindings,
                 } => {
-                    if let Some(en) = enum_name {
-                        // A *module*-qualified enum (`mod.Enum.Variant`) doesn't resolve through the
-                        // bare-name table — can't classify safely; stay permissive.
-                        if module_name.is_some() {
-                            return MatchKind::Skip;
-                        }
-                        let key = self.bare_key(en);
-                        if self.enums.contains_key(&key) {
-                            enums.insert(key);
-                        } else {
-                            // Qualifier names an enum we can't resolve to a known key — bail.
-                            return MatchKind::Skip;
-                        }
-                    } else if matches!(name.as_str(), "Ok" | "Err") {
-                        enums.insert("Result".into());
-                    } else if matches!(name.as_str(), "Some" | "None") {
-                        enums.insert("Option".into());
-                    } else if let Some(owners) = self.variant_owners.get(name) {
-                        if owners.len() == 1 {
-                            let key = self.bare_key(&owners[0]);
-                            if self.enums.contains_key(&key) {
-                                enums.insert(key);
-                            } else {
-                                return MatchKind::Skip;
-                            }
-                        } else {
-                            // A bare variant name owned by multiple enums is ambiguous — bail.
-                            return MatchKind::Skip;
-                        }
+                    // A real variant pattern (qualified, builtin, owned, or carrying a payload) is
+                    // structural; a bare name that is NOT a known variant and binds nothing is a
+                    // catch-all binding → not structural.
+                    let is_variant = module_name.is_some()
+                        || enum_name.is_some()
+                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                        || self.variant_owners.contains_key(name)
+                        || !bindings.is_empty();
+                    if is_variant {
+                        structural.get_or_insert("variant");
                     }
-                    // else: a bare name that is not a known variant is a catch-all binding → ignore.
                 }
                 Pattern::Literal(lit) => {
                     if lit_ty.is_none() {
@@ -5226,28 +5258,21 @@ impl Checker {
                         lit_ty = Some(Ty::Int);
                     }
                 }
-                // Tuple/Ident/Wildcard/(nested Or) — no enum or literal signal; stay permissive.
+                // Ident/Wildcard/(nested Or) — no structural or literal signal.
                 _ => {}
             }
         }
-        if enums.len() == 1 {
-            let label = enums.into_iter().next().unwrap();
-            let ty = match label.as_str() {
-                "Result" => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
-                "Option" => Ty::Option(Box::new(Ty::Unknown)),
-                key => Ty::Enum(key.to_string(), vec![]),
-            };
-            if let Some(variants) = self.variants_of(&ty) {
-                return MatchKind::Variants { label, variants };
-            }
+        if let Some(kind) = structural {
+            self.error(
+                span,
+                format!(
+                    "cannot match a {kind} pattern on a value of un-inferable type; annotate it"
+                ),
+            );
             return MatchKind::Skip;
         }
-        if enums.is_empty() && lit_ty.is_some() {
-            // Literal/range arms over an un-inferable scrutinee: open domain — require a `_` for
-            // totality, but bind permissively (do NOT type-check arms against a single literal
-            // type, which would wrongly reject heterogeneous arms like `1` + `"b"` even when a
-            // `_` makes the match total).
-            return MatchKind::OpenScrutinee;
+        if let Some(t) = lit_ty {
+            return MatchKind::Literal(t);
         }
         MatchKind::Skip
     }
@@ -5383,11 +5408,20 @@ impl Checker {
                     irref
                 }
                 Ty::Unknown => {
-                    let mut irref = true;
+                    // §4.1 — a STRUCTURAL sub-pattern (here a tuple) over an un-inferable element/
+                    // payload would destructure a value whose shape we can't prove → it traps at
+                    // runtime on a wrong shape (a trailing `_` cannot rescue it). Reject; annotate the
+                    // enclosing param. Still bind the sub-patterns (as Unknown) so the arm body does
+                    // not cascade into spurious "unknown name" errors.
+                    self.error(
+                        span,
+                        "cannot match a tuple pattern on a value of un-inferable type; annotate it"
+                            .to_string(),
+                    );
                     for sub in subs {
-                        irref &= self.bind_subpattern(sub, &Ty::Unknown, span);
+                        self.bind_subpattern(sub, &Ty::Unknown, span);
                     }
-                    irref
+                    false
                 }
                 other => {
                     self.error(
@@ -5449,6 +5483,16 @@ impl Checker {
                         }
                     }
                     None if ty.is_unknown() => {
+                        // §4.1 — a STRUCTURAL sub-pattern (here an enum/variant) over an un-inferable
+                        // element/payload tests a variant tag against a value whose type we can't
+                        // prove → it traps at runtime on a wrong shape (a trailing `_` cannot rescue
+                        // it). Reject; annotate the enclosing param. Still bind the payload (as
+                        // Unknown) so the arm body does not cascade into "unknown name" errors.
+                        self.error(
+                            span,
+                            "cannot match a variant pattern on a value of un-inferable type; annotate it"
+                                .to_string(),
+                        );
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
@@ -5605,10 +5649,10 @@ impl Checker {
             );
         }
         match kind {
-            MatchKind::Skip | MatchKind::OpenScrutinee => {
-                // Un-inferable scrutinee: accept the pattern shape permissively, binding everything
-                // as `Unknown`. Still scope so the caller can `pop_scope` uniformly. (`OpenScrutinee`
-                // differs from `Skip` only in `check_exhaustive`, where it requires a `_` wildcard.)
+            MatchKind::Skip => {
+                // Un-inferable scrutinee with only binding/`_` arms: accept the pattern shape
+                // permissively, binding everything as `Unknown`. Still scope so the caller can
+                // `pop_scope` uniformly. (A structural arm here was already rejected upstream by §4.1.)
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
@@ -5870,11 +5914,6 @@ impl Checker {
         }
         match kind {
             MatchKind::Skip => {}
-            // Literal/range arms over an un-inferable scrutinee are total only via a `_` wildcard
-            // (already short-circuited above when present) — reaching here means none was given.
-            MatchKind::OpenScrutinee => {
-                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
-            }
             MatchKind::Variants { label, variants } => {
                 let mut missing: Vec<String> = variants
                     .keys()
@@ -6161,7 +6200,9 @@ impl Checker {
             }
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => {
-                self.infer_closure(params, ret.as_ref(), body)
+                // No expected type at the generic `infer` seam — free-closure inference (sources
+                // #2/#3) and the ambiguity check happen inside `infer_closure`.
+                self.infer_closure(params, ret.as_ref(), body, None)
             }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
@@ -7318,16 +7359,323 @@ impl Checker {
         }
     }
 
-    fn infer_closure(&mut self, params: &[Param], ret: Option<&Type>, body: &Expr) -> Ty {
+    /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only
+    /// when there is no expected/slot type). **Shallow + precise** (closes the bare-param structural
+    /// trap without over-pinning): source #2 — a `match` whose scrutinee is the BARE param identifier
+    /// (`match x:`, not `match x.f:` / `match g(x):`), pinned from its first concrete arm; source #3 —
+    /// a member access on the bare param (`x.f` / `x.m()`) whose name is declared by exactly one struct.
+    /// Source #2 wins. Does NOT descend into nested closures (an inner param shadowing the name is
+    /// unrelated). Read-only; returns `None` when nothing pins the param.
+    fn scan_free_closure_param(&self, name: &str, body: &Expr) -> Option<Ty> {
+        let mut match_pin = None;
+        let mut member_pin = None;
+        self.scan_expr_for_pin(name, body, &mut match_pin, &mut member_pin);
+        match_pin.or(member_pin)
+    }
+
+    /// Walk `e` (skipping nested closures) accumulating the source-#2 (`match_pin`) and source-#3
+    /// (`member_pin`) candidates for a free closure's param `name`. Stops descending once a source-#2
+    /// pin is found (highest priority). See [`Checker::scan_free_closure_param`].
+    fn scan_expr_for_pin(
+        &self,
+        name: &str,
+        e: &Expr,
+        match_pin: &mut Option<Ty>,
+        member_pin: &mut Option<Ty>,
+    ) {
+        if match_pin.is_some() {
+            return;
+        }
+        match &e.kind {
+            // Source #2: a match whose scrutinee is the BARE param — pin from the first concrete arm.
+            ExprKind::Match { scrutinee, arms } => {
+                if let ExprKind::Ident(s) = &scrutinee.kind
+                    && s == name
+                {
+                    for arm in arms {
+                        if let Some(t) = self.pin_ty_of_pattern(&arm.pattern) {
+                            *match_pin = Some(t);
+                            return;
+                        }
+                    }
+                }
+                self.scan_expr_for_pin(name, scrutinee, match_pin, member_pin);
+                for arm in arms {
+                    // Scope-awareness: an arm whose pattern BINDS `name` (a tuple/variant sub-position
+                    // or a bare catch-all of the same spelling) shadows the closure param inside the
+                    // guard + body — a `match <name>:` there reads that binding, not the param, so it
+                    // must NOT pin. Skip the shadowed arm's guard/body.
+                    if pattern_binds(&arm.pattern, name) {
+                        continue;
+                    }
+                    if let Some(g) = &arm.guard {
+                        self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, &arm.body, match_pin, member_pin);
+                }
+            }
+            // Source #3: a member access (field or method receiver) on the bare param.
+            ExprKind::Field {
+                obj, name: member, ..
+            } => {
+                if member_pin.is_none()
+                    && let ExprKind::Ident(r) = &obj.kind
+                    && r == name
+                    && let Some(t) = self.unique_member_owner(member)
+                {
+                    *member_pin = Some(t);
+                }
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+            }
+            // A nested closure is its own scope — never descend (it may shadow `name`).
+            ExprKind::Closure { .. } => {}
+            // Every other expression: recurse into its child expressions.
+            ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+                for c in es {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    self.scan_expr_for_pin(name, v, match_pin, member_pin);
+                }
+            }
+            ExprKind::Comprehension {
+                key, elem, clauses, ..
+            } => {
+                // Scope-awareness: a clause's `vars` shadow `name` for every LATER clause's
+                // iter/guards and for the key/elem. Scan each clause's iter (evaluated before this
+                // clause binds), then stop once a clause binds `name` — its own guards and everything
+                // downstream read the shadowing binding, not the param.
+                let mut shadowed = false;
+                for c in clauses {
+                    if !shadowed {
+                        self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
+                    }
+                    if c.vars.iter().any(|v| v == name) {
+                        shadowed = true;
+                    }
+                    if !shadowed {
+                        for g in &c.guards {
+                            self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                        }
+                    }
+                }
+                if !shadowed {
+                    if let Some(k) = key {
+                        self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, elem, match_pin, member_pin);
+                }
+            }
+            ExprKind::Unary { expr, .. } => {
+                self.scan_expr_for_pin(name, expr, match_pin, member_pin)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.scan_expr_for_pin(name, lhs, match_pin, member_pin);
+                self.scan_expr_for_pin(name, rhs, match_pin, member_pin);
+            }
+            ExprKind::Range { start, end } => {
+                self.scan_expr_for_pin(name, start, match_pin, member_pin);
+                self.scan_expr_for_pin(name, end, match_pin, member_pin);
+            }
+            ExprKind::Call { callee, args, .. } => {
+                self.scan_expr_for_pin(name, callee, match_pin, member_pin);
+                for a in args {
+                    self.scan_expr_for_pin(name, a, match_pin, member_pin);
+                }
+            }
+            ExprKind::Index { obj, index } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, index, match_pin, member_pin);
+            }
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                for c in [start, end, step].into_iter().flatten() {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Try(inner) => self.scan_expr_for_pin(name, inner, match_pin, member_pin),
+            ExprKind::DecodeCall { obj, arg, .. } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, arg, match_pin, member_pin);
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.scan_expr_for_pin(name, cond, match_pin, member_pin);
+                self.scan_expr_for_pin(name, then, match_pin, member_pin);
+                self.scan_expr_for_pin(name, els, match_pin, member_pin);
+            }
+            // String interpolation: the `{…}` fragment expressions are not stored as child `Expr`s —
+            // they live inside the raw text and are produced on demand by the shared interpolation
+            // parser (the same one `check_interpolation` uses). Parse + scan them so a param pinned
+            // ONLY by a member access inside an interpolation (`"{x.f}"`) resolves via source #3. A
+            // malformed interpolation is ignored here (it is diagnosed by `check_interpolation`).
+            ExprKind::Str(raw) => {
+                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
+                    for chunk in &chunks {
+                        if let crate::interpolation::Chunk::Expr(frag, _) = chunk {
+                            self.scan_expr_for_pin(name, frag, match_pin, member_pin);
+                        }
+                    }
+                }
+            }
+            // `?.`/`??` carriers are lowered before checking. `recover:` carries a statement block
+            // (which can introduce its own bindings); it is NOT scanned — a param pinnable only from
+            // inside a `recover:` body stays un-inferable and requires an annotation (sound: this is
+            // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`TypeApply`/
+            // `RawStr`) have no child to scan.
+            _ => {}
+        }
+    }
+
+    /// The scrutinee type a top-level match arm pattern implies (source #2 classification). Mirrors
+    /// [`Checker::reconstruct_unknown_kind`]'s arm classification: a qualified/unique enum variant or
+    /// builtin `Ok`/`Err`/`Some`/`None` → that enum/Result/Option (type args `Unknown`); a tuple → an
+    /// all-`Unknown` tuple of that arity; a literal/range → its scalar; a binding/wildcard/ambiguous →
+    /// `None` (no pin).
+    fn pin_ty_of_pattern(&self, p: &Pattern) -> Option<Ty> {
+        match p {
+            Pattern::Or(alts) => alts.first().and_then(|a| self.pin_ty_of_pattern(a)),
+            Pattern::Tuple(subs) => Some(Ty::Tuple(vec![Ty::Unknown; subs.len()])),
+            Pattern::Literal(lit) => Some(lit_pattern_ty(lit)),
+            Pattern::Range { .. } => Some(Ty::Int),
+            Pattern::Variant {
+                name,
+                enum_name,
+                module_name,
+                ..
+            } => {
+                // A module-qualified variant can't be resolved through the bare-name table — no pin.
+                if module_name.is_some() {
+                    return None;
+                }
+                if let Some(en) = enum_name {
+                    let key = self.bare_key(en);
+                    return self
+                        .enums
+                        .contains_key(&key)
+                        .then(|| self.enum_ty_unknown_args(&key));
+                }
+                match name.as_str() {
+                    "Ok" | "Err" => Some(Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown))),
+                    "Some" | "None" => Some(Ty::Option(Box::new(Ty::Unknown))),
+                    other => {
+                        // A bare variant uniquely owned by one enum pins it; an ambiguous one, or a
+                        // bare binding name (not a known variant), does not.
+                        let owners = self.variant_owners.get(other)?;
+                        if owners.len() != 1 {
+                            return None;
+                        }
+                        let key = self.bare_key(&owners[0]);
+                        self.enums
+                            .contains_key(&key)
+                            .then(|| self.enum_ty_unknown_args(&key))
+                    }
+                }
+            }
+            Pattern::Ident(_) | Pattern::Wildcard => None,
+        }
+    }
+
+    /// A user enum's `Ty::Enum` with its type arguments filled as `Unknown` (the scrutinee shape an
+    /// arm pattern pins — element types are unknown, the enum identity is what matters for call-site
+    /// checking).
+    fn enum_ty_unknown_args(&self, key: &str) -> Ty {
+        let n = self
+            .enum_type_params
+            .get(key)
+            .map(|tps| tps.len())
+            .unwrap_or(0);
+        Ty::Enum(key.to_string(), vec![Ty::Unknown; n])
+    }
+
+    /// If exactly one struct declares a field OR method `member`, return that struct's type (type args
+    /// `Unknown`); else `None` (source #3 only fires for a UNIQUELY-owned member — a name shared by
+    /// >1 type, or none, never pins). Read-only.
+    fn unique_member_owner(&self, member: &str) -> Option<Ty> {
+        // A member shared by any PARAMETERIZED collection (`len`/`map`/`get`/`push`/… on
+        // `list`/`map`/`set`) is never a unique pin: it is shared across types AND would only pin a
+        // weak `list[Unknown]`-style type (design §3 — "methods/fields shared by >1 type … never
+        // pin"). Bail before collecting owners so such members fall through to the annotation rule.
+        if list_method_sig(member, &Ty::Unknown).is_some()
+            || map_method_sig(member, &Ty::Unknown, &Ty::Unknown).is_some()
+            || set_method_sig(member, &Ty::Unknown).is_some()
+        {
+            return None;
+        }
+        // Collect every PINNABLE owner of `member`: user structs (by field or method) plus the
+        // concrete scalar builtins `str`/`bytes` (the design's `x.upper()` → `str` case). The pin
+        // fires only when exactly one type owns it.
+        let mut owners: Vec<Ty> = Vec::new();
+        for (key, info) in &self.structs {
+            // Source #3 pins only from a USER type. The `Builtin`-origin native structs
+            // (Match/Response/ProcResult/…) are seeded into `self.structs` unconditionally at init
+            // regardless of imports, so scanning them would mis-pin a param to an unimported,
+            // unreferenced builtin (their fields like `end`/`code`/`status`). Skip them.
+            if info.origin == StructOrigin::Builtin {
+                continue;
+            }
+            let has =
+                info.fields.iter().any(|(n, _)| n == member) || info.methods.contains_key(member);
+            if has {
+                let n = info.type_params.len();
+                owners.push(Ty::Struct(key.clone(), vec![Ty::Unknown; n]));
+            }
+        }
+        if str_method_sig(member).is_some() {
+            owners.push(Ty::Str);
+        }
+        if bytes_method_sig(member).is_some() {
+            owners.push(Ty::Bytes);
+        }
+        if owners.len() == 1 {
+            owners.pop()
+        } else {
+            None
+        }
+    }
+
+    fn infer_closure(
+        &mut self,
+        params: &[Param],
+        ret: Option<&Type>,
+        body: &Expr,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a
+        // `fn(..)` whose arity matches, an UNANNOTATED param binds to the expected param type
+        // (checking-mode), and a non-`Unknown` expected return becomes the body's return context.
+        // On an arity mismatch the params stay `Unknown` here and the call site's `assignable` check
+        // reports the mismatch (single diagnostic).
+        let (exp_params, exp_ret): (Option<Vec<Ty>>, Option<Ty>) = match expected {
+            Some(Ty::Func { params: p, ret: r }) if p.len() == params.len() => {
+                (Some(p.clone()), Some((**r).clone()))
+            }
+            _ => (None, None),
+        };
+        // A `fn`-typed slot whose arity does NOT match: keep unannotated params silently `Unknown`
+        // here and let the call site's `assignable` check report the single arity diagnostic — do
+        // NOT route them through the free-closure scan (which would emit a spurious, misdirecting
+        // "cannot infer type of parameter").
+        let expected_arity_mismatch =
+            matches!(expected, Some(Ty::Func { params: p, .. }) if p.len() != params.len());
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
-        // errors). Mirrors `check_fn_body`'s `current_ret` handling.
+        // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
+        // supplies that context when the closure is unannotated.
         let declared_ret = ret
             .map(|t| self.resolve_type(t, body.span))
+            .or_else(|| exp_ret.clone().filter(|r| !r.is_unknown()))
             .unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
@@ -7337,11 +7685,13 @@ impl Checker {
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 // A closure `ref T` param is a `Ref[T]` box, exactly like a named-fn `ref` param
                 // (charge 3): the body's reads/writes were lowered to `.get()`/`.set()` by desugar,
                 // and a `ref` arg aliases at the call site. `check_ref_ty` rejects a non-boxable
-                // pointee. Without a `ref`, the param keeps its by-value type (or `Unknown`).
+                // pointee. Without a `ref`, the param keeps its by-value type, or — for an
+                // unannotated param — the expected (slot) param type (source #1), else `Unknown`.
                 let ty = match &p.ty {
                     Some(t) if p.is_ref => {
                         self.check_ref_ty(t, body.span);
@@ -7351,7 +7701,50 @@ impl Checker {
                         )
                     }
                     Some(t) => self.resolve_type(t, body.span),
-                    None => Ty::Unknown,
+                    None => {
+                        // An unannotated param: prefer the expected (slot) param type (source #1);
+                        // else infer it from the body — source #2 (a match whose scrutinee is the
+                        // bare param) / source #3 (a uniquely-owned member access).
+                        //
+                        // An `Unknown` expected param type is NOT a pin: it arises when a generic
+                        // slot's type param was unified ONLY from this closure (`store(fn(a): …)` →
+                        // `T = fn(Unknown) -> Unknown`), so binding the param to it silently would
+                        // leave the call site unchecked → check-passes-then-traps. Filter it out and
+                        // fall through to the body scan / annotation requirement (soundness).
+                        if let Some(t) = exp_params
+                            .as_ref()
+                            .and_then(|ps| ps.get(i))
+                            .filter(|t| !t.is_unknown())
+                            .cloned()
+                        {
+                            t
+                        } else if expected_arity_mismatch {
+                            // Arity mismatch against a `fn`-typed slot — stay `Unknown`; the call
+                            // site reports the mismatch (single diagnostic).
+                            Ty::Unknown
+                        } else if self.generic_arg_prepass {
+                            // Generic unification prepass: keep the param `Unknown` so the other
+                            // args / substituted slot type drive unification; `check_generic_arg`
+                            // re-infers it in checking-mode afterwards. Running the free scan here
+                            // would corrupt unification (see `generic_arg_prepass` doc).
+                            Ty::Unknown
+                        } else if let Some(t) = self.scan_free_closure_param(&p.name, body) {
+                            t
+                        } else {
+                            // Genuinely unresolved: no expected/slot type and nothing in the body
+                            // pins it. Require an annotation rather than degrade the param to a
+                            // runtime `Unknown` value (the one place `Unknown` could reach a value).
+                            // Bind `Unknown` after erroring so the body still checks (no cascade).
+                            self.error(
+                                p.name_span,
+                                format!(
+                                    "cannot infer type of parameter '{}'; add a type annotation",
+                                    p.name
+                                ),
+                            );
+                            Ty::Unknown
+                        }
+                    }
                 };
                 self.declare(&p.name, ty.clone());
                 if p.is_ref {
@@ -7903,7 +8296,7 @@ impl Checker {
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct/newtype ctor + a generic free fn.
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
@@ -7918,12 +8311,7 @@ impl Checker {
         self.recover_index_args(&sig.type_params, &mut sub, span);
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{method}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(method, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &sub, span);
@@ -7979,7 +8367,7 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -7990,12 +8378,7 @@ impl Checker {
         self.recover_iter_elems(&tps, &mut sub, span);
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -8030,7 +8413,7 @@ impl Checker {
             self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != field_tys.len() {
             self.check_arity(name, field_tys.len(), args, span);
         }
@@ -8041,12 +8424,7 @@ impl Checker {
         self.recover_iter_elems(&tps, &mut sub, span);
         for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -8081,7 +8459,7 @@ impl Checker {
             self.check_args(name, std::slice::from_ref(underlying), args, span);
             return Ty::NewType(key.to_string(), Vec::new());
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != 1 {
             self.check_arity(name, 1, args, span);
         }
@@ -8092,12 +8470,7 @@ impl Checker {
         self.recover_iter_elems(tps, &mut sub, span);
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(tps, &sub, span);
         let targs_out = tps
@@ -8604,7 +8977,7 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+                    let arg_tys = self.infer_generic_arg_tys(args);
                     if arg_tys.len() != field_tys.len() {
                         self.check_arity(name, field_tys.len(), args, span);
                     }
@@ -8615,14 +8988,7 @@ impl Checker {
                     self.recover_iter_elems(&tps, &mut sub, span);
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        if !self.assignable(&expected, actual) {
-                            self.error(
-                                arg.span,
-                                format!(
-                                    "argument to '{name}' has type {actual}, expected {expected}"
-                                ),
-                            );
-                        }
+                        self.check_generic_arg(name, &expected, actual, arg);
                     }
                     self.enforce_bounds(&tps, &sub, span);
                     let targs = tps
@@ -9363,7 +9729,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Unknown),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Unknown,
                     Ty::Func { params, ret }
@@ -9390,7 +9760,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let pt = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Bool),
+                };
+                let pt = self.infer_arg(&args[0], Some(&expected));
                 match pt {
                     Ty::Unknown => Ty::list(elem.clone()),
                     Ty::Func { params, ret }
@@ -9419,8 +9793,12 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let init = self.infer(&args[0]);
-                let ft = self.infer(&args[1]);
+                let init = self.infer_value(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![init.clone(), elem.clone()],
+                    ret: Box::new(init.clone()),
+                };
+                let ft = self.infer_arg(&args[1], Some(&expected));
                 match ft {
                     Ty::Unknown => {
                         // Closure type unknown: fall back to the init type as the result.
@@ -9455,7 +9833,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Nil;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone(), elem.clone()],
+                    ret: Box::new(Ty::Int),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
                     Ty::Func { params, ret }
@@ -9489,7 +9871,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Nil;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Unknown),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
                     Ty::Func { params, ret }
@@ -9613,6 +9999,71 @@ impl Checker {
         self.check_args_range_w(name, params, min_params, args, span, false);
     }
 
+    /// Infer a single call argument in *checking mode*: if the argument is a closure literal and the
+    /// expected slot type is a `fn(..)`, infer the closure WITH that expected type (source #1 — so its
+    /// unannotated params bind to the expected param types and call sites are checked); otherwise it is
+    /// the ordinary bottom-up [`Checker::infer_value`]. The single seam every `fn`-typed slot routes
+    /// through, so closure-detection lives in one place.
+    fn infer_arg(&mut self, arg: &Expr, expected: Option<&Ty>) -> Ty {
+        if let ExprKind::Closure { params, ret, body } = &arg.kind
+            && matches!(expected, Some(Ty::Func { .. }))
+        {
+            return self.infer_closure(params, ret.as_ref(), body, expected);
+        }
+        self.infer_value(arg)
+    }
+
+    /// First-pass bottom-up inference of a generic ctor/call's args (the pass that drives unification).
+    /// A closure arg is inferred WITHOUT an expected type here (its params would be `Unknown`); its body
+    /// errors — and the phase-5 "cannot infer parameter" error — are SUPPRESSED, because the per-arg
+    /// check ([`Checker::check_generic_arg`]) re-infers each closure against its SUBSTITUTED expected
+    /// type and reports cleanly there (mirrors the `RwShared.read` recovery-reinfer idiom). Every
+    /// generic ctor/variant/fn/method path uses this pair so closure params are pinned by the field/
+    /// param type, not left `Unknown`.
+    fn infer_generic_arg_tys(&mut self, args: &[Expr]) -> Vec<Ty> {
+        args.iter()
+            .map(|a| {
+                if matches!(a.kind, ExprKind::Closure { .. }) {
+                    let mark = self.errors.len();
+                    // Keep the closure's unannotated params `Unknown` in the unification prepass —
+                    // the free-body scan (sources #2/#3) must not pin them here (see the field doc).
+                    let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
+                    let t = self.infer_value(a);
+                    self.generic_arg_prepass = saved;
+                    self.errors.truncate(mark);
+                    t
+                } else {
+                    self.infer_value(a)
+                }
+            })
+            .collect()
+    }
+
+    /// Per-argument check for a generic ctor/call/method. `expected` is the arg's SUBSTITUTED declared
+    /// type; `fallback` is its first-pass inferred type. A closure arg is re-inferred in checking-mode
+    /// against `expected` (binding its unannotated params + reporting body errors here, since
+    /// [`Checker::infer_generic_arg_tys`] suppressed them); other args keep `fallback`. Then assert
+    /// assignability with the uniform "argument to '<name>'" diagnostic.
+    fn check_generic_arg(&mut self, name: &str, expected: &Ty, fallback: &Ty, arg: &Expr) {
+        if matches!(arg.kind, ExprKind::Closure { .. }) {
+            // Re-infer the closure in checking-mode against the substituted expected type: this binds
+            // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
+            // suppressed). The assignability check below still uses the first-pass `fallback`
+            // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
+            // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
+            // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
+            // re-check is the real enforcement; the `fallback` check still catches an arity or
+            // annotated-return mismatch.
+            self.infer_arg(arg, Some(expected));
+        }
+        if !self.assignable(expected, fallback) {
+            self.error(
+                arg.span,
+                format!("argument to '{name}' has type {fallback}, expected {expected}"),
+            );
+        }
+    }
+
     /// [`Checker::check_args_range`] with an explicit `widen` flag — see [`Checker::assignable_w`].
     fn check_args_range_w(
         &mut self,
@@ -9635,7 +10086,7 @@ impl Checker {
             );
         }
         for (i, arg) in args.iter().enumerate() {
-            let at = self.infer_value(arg);
+            let at = self.infer_arg(arg, params.get(i));
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)
             {
@@ -11255,7 +11706,7 @@ impl Checker {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
@@ -11274,12 +11725,7 @@ impl Checker {
         // two positions with conflicting types, e.g. `max(1, "x")`).
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &subst_map);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         subst(&sig.ret, &subst_map)
     }
@@ -11321,7 +11767,7 @@ impl Checker {
                 ),
             );
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
@@ -11349,12 +11795,7 @@ impl Checker {
         }
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
-            if !self.assignable(&want, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{method}' has type {actual}, expected {want}"),
-                );
-            }
+            self.check_generic_arg(method, &want, actual, arg);
         }
         subst(ret, &mmap)
     }
@@ -12461,6 +12902,24 @@ fn lit_pattern_ty(lit: &LitPattern) -> Ty {
         LitPattern::Int(_) => Ty::Int,
         LitPattern::Str(_) => Ty::Str,
         LitPattern::Bool(_) => Ty::Bool,
+    }
+}
+
+/// Whether a match-arm pattern introduces a binding of `name` (so a free-closure body scan must treat
+/// `name` as shadowed inside that arm — see [`Checker::scan_expr_for_pin`]). Covers a tuple/variant
+/// sub-position `Ident` binding, an or-pattern alternative (all alternatives bind the same set), and a
+/// top-level bare catch-all of the same spelling (parsed as a nullary `Variant`).
+fn pattern_binds(p: &Pattern, name: &str) -> bool {
+    match p {
+        Pattern::Ident(s) => s == name,
+        // A nullary bare-name pattern (`Variant{ bindings: [] }`) is a catch-all binding when it
+        // names neither a qualified variant nor a payload — scope-conservatively, a same-spelling one
+        // shadows. A payload variant's bindings are sub-positions; recurse.
+        Pattern::Variant {
+            name: vn, bindings, ..
+        } => (bindings.is_empty() && vn == name) || bindings.iter().any(|b| pattern_binds(b, name)),
+        Pattern::Tuple(subs) | Pattern::Or(subs) => subs.iter().any(|s| pattern_binds(s, name)),
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => false,
     }
 }
 
@@ -13685,25 +14144,28 @@ mod graph_tests {
         );
     }
 
-    // Boundary (must STAY accepted): an un-inferable scrutinee with HETEROGENEOUS literal arms
-    // (int + str) is total via `_` and never traps — type agreement is irrelevant when the value
-    // has no static type. Forcing a single literal type here would wrongly reject the str arm.
+    // MIGRATED (closure-param inference, phase 3): the first literal arm (`1`) now PINS the bare
+    // param `x` to `int` (source #2 — a bare-param match scrutinee). The `"b"` arm is then a str
+    // literal against an `int` scrutinee → rejected. The pre-inference `OpenScrutinee` behaviour
+    // (accept heterogeneous literals when a `_` closes the match) no longer applies: the scrutinee is
+    // no longer un-inferable.
     #[test]
-    fn match_unknown_param_hetero_literals_plus_wildcard_accepts() {
+    fn match_unknown_param_hetero_literals_plus_wildcard_rejects() {
         let t = TmpDir::new();
         let entry = t.write(
             "main.chz",
             "g := fn(x) -> str: match x:\n    1: \"a\"\n    \"b\": \"c\"\n    _: \"d\"\nfn main(): print(g(1))\n",
         );
+        let errs = errors(&entry);
         assert!(
-            check_entry(&entry).is_ok(),
-            "expected clean (wildcard closes heterogeneous literals): {:?}",
-            errors(&entry)
+            errs.iter()
+                .any(|e| e.contains("literal of type str cannot match scrutinee of type int")),
+            "expected str-literal-vs-int-scrutinee mismatch, got: {errs:?}"
         );
     }
 
-    // Soundness: heterogeneous literal arms with NO `_` cannot be proven complete — the unmatched
-    // scrutinee would otherwise leak (`g(true) -> true`). Must reject, like the homogeneous case.
+    // MIGRATED (phase 3): the first arm (`1`) pins `x` to `int`; the `"b"` arm is then a literal
+    // mismatch (and the match is also non-exhaustive). Either way it rejects.
     #[test]
     fn match_unknown_param_hetero_literals_no_wildcard_rejects() {
         let t = TmpDir::new();
@@ -13714,8 +14176,8 @@ mod graph_tests {
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|e| e.contains("non-exhaustive") && e.contains("`_`")),
-            "expected non-exhaustive add a `_` arm, got: {errs:?}"
+                .any(|e| e.contains("literal of type str cannot match scrutinee of type int")),
+            "expected str-literal-vs-int-scrutinee mismatch, got: {errs:?}"
         );
     }
 

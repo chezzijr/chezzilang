@@ -10347,3 +10347,433 @@ fn reserved_callables_all_have_builtin_sig() {
     assert!(builtin_sig("Ok").is_none());
     assert!(builtin_sig("totally_not_a_builtin").is_none());
 }
+
+// ============================================================================
+// Closure-parameter type inference (v1) — see docs/plan 2026-06-28.
+// ============================================================================
+
+// Phase 1a — expected type from a native HOF that routes through `check_args`
+// (`Shared.update`): an unannotated closure param binds to the element type, so
+// a body use incompatible with it is rejected (was accepted: param = Unknown).
+#[test]
+fn closure_param_inferred_from_shared_update_conflict_rejected() {
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_param_inferred_from_shared_update_ok() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
+    );
+}
+
+// Phase 1b — native list HOFs (`infer_list_hof`): the closure param binds to the
+// element type, so a body use incompatible with it is rejected.
+#[test]
+fn map_closure_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): x.upper())\n    print(ys)\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_param_inferred_from_map_ok() {
+    entry_ok("fn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): x + 1)\n    print(ys)\n");
+}
+
+#[test]
+fn closure_param_inferred_from_filter_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    ys := xs.filter(fn(x): x.upper() == \"A\")\n    print(ys)\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn rwshared_read_len_ok() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",
+    );
+}
+
+// Phase 1c — generic struct constructor: a `fn`-typed field's closure arg is
+// re-inferred against the SUBSTITUTED field type, so its param binds concretely.
+const MAPPED_DEFS: &str = "struct Mapped[I: Iterator[T], T, U]:\n    inner: I\n    f: fn(T) -> U\n    fn next(self) -> Option[U]:\n        match self.inner.next():\n            Some(x):\n                return Some(self.f(x))\n            None:\n                return None\n";
+
+#[test]
+fn closure_param_inferred_in_generic_struct_ctor_ok() {
+    entry_ok(&format!(
+        "{MAPPED_DEFS}fn main():\n    m := Mapped([1, 2, 3].iter(), fn(x): x * 2)\n    print(m.next())\n"
+    ));
+}
+
+#[test]
+fn closure_param_inferred_in_generic_struct_ctor_conflict_rejected() {
+    entry_rejects(
+        &format!(
+            "{MAPPED_DEFS}fn main():\n    m := Mapped([1, 2, 3].iter(), fn(x): x.upper())\n    print(m.next())\n"
+        ),
+        "has no method 'upper'",
+    );
+}
+
+// Phase 2a — a closure bound to a `fn`-typed `let`/`:=` annotation is inferred
+// in checking-mode (source #1).
+#[test]
+fn closure_inferred_from_fn_typed_let_binding_ok() {
+    entry_ok("fn main():\n    cb: fn(int) -> int = fn(x): x + 1\n    print(cb(2))\n");
+}
+
+#[test]
+fn closure_inferred_from_fn_typed_let_binding_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    cb: fn(int) -> int = fn(x): x.upper()\n    print(cb(2))\n",
+        "has no method 'upper'",
+    );
+}
+
+// Phase 2b — struct fn-field assignment + fn-typed return position (source #1).
+#[test]
+fn closure_inferred_in_struct_fn_field_assignment_ok() {
+    entry_ok(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.cb = fn(x): x + 1\n    print(b.cb(2))\n",
+    );
+}
+
+#[test]
+fn closure_inferred_in_struct_fn_field_assignment_conflict_rejected() {
+    entry_rejects(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.cb = fn(x): x.upper()\n    print(b.cb(2))\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_inferred_in_fn_typed_return_ok() {
+    entry_ok(
+        "fn make() -> fn(int) -> int:\n    return fn(x): x + 1\nfn main():\n    f := make()\n    print(f(2))\n",
+    );
+}
+
+#[test]
+fn closure_inferred_in_fn_typed_return_conflict_rejected() {
+    entry_rejects(
+        "fn make() -> fn(int) -> int:\n    return fn(x): x.upper()\nfn main():\n    f := make()\n    print(f(2))\n",
+        "has no method 'upper'",
+    );
+}
+
+// Phase 3a — free-closure body inference (source #2: a match whose scrutinee is
+// the BARE param). Pins the param, so the call site is checked.
+#[test]
+fn free_closure_match_variant_pins_param_call_site_rejects() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(5))\n",
+        "found int",
+    );
+}
+
+#[test]
+fn free_closure_all_variants_match_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
+    );
+}
+
+#[test]
+fn free_closure_concrete_nested_tuple_not_swept() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn main():\n    g := fn(x: (E, int)): match x:\n        (E.A, b): \"a\"\n        _: \"o\"\n    print(g((E.A, 1)))\n",
+    );
+}
+
+// Phase 4a — a STRUCTURAL sub-pattern over an un-inferable (Unknown) element/payload
+// is rejected at `bind_subpattern` (the trap class: matching a tuple/variant shape on
+// a value whose type we can't pin). The bare-param match pins x to a tuple/Result/Option
+// with Unknown elements, so the nested E.A is structural-over-Unknown → reject.
+#[test]
+fn nested_tuple_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_ok_payload_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    Ok(E.A): \"a\"\n    _: \"o\"\nfn main(): print(g(Ok(5)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_some_payload_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    Some(E.A): \"a\"\n    _: \"o\"\nfn main(): print(g(Some(5)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_guarded_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x, c: bool): match x:\n    (E.A, b) if c: \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9), true))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_or_alt_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b) | (E.B, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
+        "un-inferable type",
+    );
+}
+
+// Phase 4a — boundary: a concrete-element structural sub-pattern must NOT be swept up.
+#[test]
+fn concrete_nested_ok_subpattern_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn main():\n    g := fn(x: Result[E, str]): match x:\n        Ok(E.A): \"a\"\n        _: \"o\"\n    print(g(Ok(E.A)))\n",
+    );
+}
+
+// Phase 4b — a residual-Unknown scrutinee (a tuple-element binding) with STRUCTURAL arms
+// rejects (the top-level scrutinee arm goes through match_kind/reconstruct, not bind_subpattern).
+#[test]
+fn residual_unknown_top_level_structural_rejected() {
+    // Unannotated `x`: source #2 pins it to `(Unknown, Unknown)` from the `(a, b)` arm, so the
+    // tuple-element binding `a` is Unknown; the inner `match a:` is a top-level structural match on a
+    // residual-Unknown scrutinee → reject (caught by match_kind/reconstruct, not bind_subpattern).
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (a, b): match a:\n        E.A: \"a\"\n        E.B: \"b\"\nfn main(): print(g((E.A, 1)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn residual_unknown_top_level_structural_annotated_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn classify(p: (E, int)) -> str:\n    a, b := p\n    return match a:\n        E.A: \"a\"\n        E.B: \"b\"\nfn main(): print(classify((E.A, 1)))\n",
+    );
+}
+
+// Phase 4b — heterogeneous literal arms over a residual-Unknown scrutinee now reject (the first
+// arm pins the literal kind; the `OpenScrutinee` accept-with-`_` path is gone).
+#[test]
+fn residual_unknown_hetero_literal_rejects() {
+    entry_rejects(
+        "g := fn(x): match x:\n    (a, b): match a:\n        1: \"x\"\n        \"b\": \"y\"\n        _: \"z\"\n    _: \"o\"\nfn main(): print(g((1, 2)))\n",
+        "literal of type str cannot match scrutinee of type int",
+    );
+}
+
+// Phase 5 — a free closure whose param NOTHING pins (no expected/slot type, no body match-
+// scrutinee or unique member) must be annotated; it must not degrade to a runtime `Unknown`.
+#[test]
+fn free_closure_unresolved_param_arith_requires_annotation() {
+    entry_rejects(
+        "g := fn(x): x + 1\nfn main(): print(g(2))\n",
+        "cannot infer type of parameter 'x'; add a type annotation",
+    );
+}
+
+#[test]
+fn free_closure_unresolved_param_print_requires_annotation() {
+    entry_rejects(
+        "g := fn(x): print(x)\nfn main(): g(2)\n",
+        "cannot infer type of parameter 'x'; add a type annotation",
+    );
+}
+
+#[test]
+fn annotated_free_closure_arith_ok() {
+    entry_ok("g := fn(x: int): x + 1\nfn main(): print(g(2))\n");
+}
+
+#[test]
+fn annotated_free_closure_match_ok() {
+    entry_ok(
+        "enum E:\n    A\n    B\ng := fn(x: E): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
+    );
+}
+
+// ===== Adversarial-review fixes (closure-param inference) =====
+
+// BUG 1 — the free-closure match-scrutinee scan (source #2) must be scope-aware: a `match x:` whose
+// scrutinee `x` is a SHADOWING binding introduced by an enclosing tuple/variant sub-pattern is NOT
+// the closure param, so it must not pin the param. Here the param `x` is never used (the inner
+// `match x:` reads the `(x, _)` tuple binding), so the param is genuinely un-inferable → annotate.
+// Pre-fix: param wrongly pinned to `E` → spurious call-site reject "expected E, found str".
+#[test]
+fn free_closure_shadowing_match_does_not_pin_param() {
+    let errs = check_entry(
+        "enum E:\n    A\n    B\nfn foo() -> (E, int):\n    return (E.A, 1)\ng := fn(x): match foo():\n    (x, _): match x:\n        E.A: 1\n        E.B: 2\nfn main(): print(g(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'x'")),
+        "expected the annotate-param error (param is un-inferable), got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("expected E")),
+        "param must NOT be pinned to E from the shadowing inner match, got: {errs:?}"
+    );
+}
+
+// BUG 2 — a closure literal passed to a `fn`-typed slot with MISMATCHED arity must keep its params
+// silently `Unknown` (the call site's assignability check reports the single arity diagnostic); it
+// must NOT also route through the free-closure scan and emit "cannot infer type of parameter".
+#[test]
+fn closure_arity_mismatch_single_diagnostic() {
+    let errs = check_entry(
+        "fn g(f: fn(int) -> int) -> int:\n    return f(0)\nfn main(): print(g(fn(a, b): a + b))\n",
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("cannot infer type of parameter")),
+        "arity mismatch must not emit the annotate-param error, got: {errs:?}"
+    );
+    assert!(
+        !errs.is_empty(),
+        "the call-site arity/assignability mismatch must still be reported, got: {errs:?}"
+    );
+}
+
+// BUG 3 — source #3 (unique member access) must fire even when the only pinning use of the param is
+// inside a string-interpolation fragment (`"{x.name}"`). Pre-fix the scan was opaque to `Str` so the
+// param was reported un-inferable.
+#[test]
+fn free_closure_pinned_by_member_in_interpolation() {
+    entry_ok(
+        "struct P:\n    name: str\nf := fn(x): \"hello {x.name}\"\nfn main(): print(f(P(\"bob\")))\n",
+    );
+}
+
+// BUG 4/6 — a non-closure return expression must keep using plain `infer` (not `infer_value`): a
+// `return <void-call>` must report ONLY "function returns nothing", not ALSO the value-position
+// nil-rejection.
+#[test]
+fn return_void_call_single_diagnostic() {
+    let errs = check_entry("fn f():\n    return print(\"x\")\nfn main(): f()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("function returns nothing")),
+        "expected the 'function returns nothing' error, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("returns no value (nil)")),
+        "a return expr must not get the value-position nil rejection, got: {errs:?}"
+    );
+}
+
+// BUG 5 — source #3 must scan only USER structs; the always-seeded `Builtin`-origin native structs
+// (Match/Response/ProcResult) must never pin a param. `end` is a field of Match (Builtin) and of no
+// user struct, so the param is un-inferable → annotate, NOT pinned to the unimported `Match`.
+#[test]
+fn free_closure_member_does_not_pin_builtin_struct() {
+    let errs = check_entry("f := fn(s): s.end\nfn main(): print(f(5))\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 's'")),
+        "expected the annotate-param error, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("Match")),
+        "param must NOT be pinned to the seeded Builtin struct Match, got: {errs:?}"
+    );
+}
+
+// BUG 7 — an assignment lvalue target must not be inferred as an rvalue (read-side gates / receiver
+// double-inference). A closure assigned to a bad field must report the field error ONCE.
+#[test]
+fn closure_assign_bad_field_single_error() {
+    let errs = check_entry(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.nope = fn(x): x + 1\n",
+    );
+    let field_errs = errs
+        .iter()
+        .filter(|e| e.message.contains("no field 'nope'"))
+        .count();
+    assert_eq!(
+        field_errs, 1,
+        "the bad-field error must be reported exactly once, got: {errs:?}"
+    );
+}
+
+// SOUNDNESS — a closure passed to a GENERIC `T` slot whose type param is bound ONLY by the closure
+// itself unifies `T` to `fn(Unknown) -> Unknown`; the substituted expected param type is therefore
+// `Unknown`. Binding the unannotated closure param to that `Unknown` silently (source #1) leaves the
+// call site unchecked → check-passes-then-traps at runtime on both engines. An `Unknown` expected
+// param type must NOT count as a pin: fall through to the body scan / annotation requirement.
+#[test]
+fn closure_param_under_generic_unknown_slot_requires_annotation() {
+    let errs = check_entry(
+        "fn store[T](x: T) -> T:\n    return x\nfn main():\n    f := store(fn(a): a + 1)\n    print(f(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'a'")),
+        "an unannotated closure param under a generic Unknown slot must require annotation, got: {errs:?}"
+    );
+}
+
+// The same generic slot WITH an annotated closure param is fine, and the resolved `fn(int) -> int`
+// signature is propagated so a later mismatched call is rejected at the call site (no runtime trap).
+#[test]
+fn closure_param_under_generic_slot_annotated_propagates_to_call_site() {
+    let errs = check_entry(
+        "fn store[T](x: T) -> T:\n    return x\nfn main():\n    f := store(fn(a: int): a + 1)\n    print(f(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected int") || e.message.contains("found str")),
+        "annotated closure param must propagate fn(int)->int so the str call is rejected, got: {errs:?}"
+    );
+}
+
+// Source #3 (unique member) — the design's flagship builtin example: `x.upper()` is owned only by
+// `str`, so a free closure `fn(x): x.upper()` pins `x: str` and runs. (Previously the scan saw only
+// user structs, so this was wrongly reported un-inferable.)
+#[test]
+fn free_closure_pinned_by_unique_str_method() {
+    entry_ok("f := fn(x): x.upper()\nfn main(): print(f(\"hi\"))\n");
+}
+
+// …and the resolved `fn(str) -> str` signature propagates: a non-str call is rejected at the call
+// site (no permissive Unknown laundering).
+#[test]
+fn free_closure_str_pin_propagates_to_call_site() {
+    entry_rejects(
+        "f := fn(x): x.upper()\nfn main(): print(f(5))\n",
+        "expected str",
+    );
+}
+
+// Source #3 negative — a member shared by >1 type (`len` is on str/list/map/set/bytes) must NOT pin,
+// EVEN when exactly one USER struct also has it: it is ambiguous → require an annotation. (Pre-fix
+// the struct-only scan mis-pinned the param to the lone struct, wrongly rejecting a list call with
+// "expected <Struct>".)
+#[test]
+fn free_closure_shared_member_does_not_pin() {
+    let errs = check_entry(
+        "struct Counter:\n    n: int\n    fn len(self) -> int:\n        return self.n\nf := fn(x): x.len()\nfn main(): print(f([1, 2, 3]))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'x'")),
+        "a member shared with builtins must be un-inferable, not pinned, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("expected Counter")),
+        "param must NOT be mis-pinned to the lone struct, got: {errs:?}"
+    );
+}

@@ -368,6 +368,24 @@ twice := fn(x: int) -> int: x * 2
 nums.map(fn(x): x * 2)             # param/return types inferred in closures
 ```
 
+**Closure-parameter inference.** An unannotated closure parameter is resolved to a concrete type from
+the context the closure appears in (it is never left dynamic). In priority order: **(1)** the
+*expected type* of the slot the closure sits in — a call argument matching a `fn(...)` parameter
+(`s.update(fn(x): x + 1)` → `x: T` of `Shared[T]`; `[1,2,3].map(fn(x): x + 1)` → `x: int`;
+`Mapped(it, fn(x): x * 2)` → `x` from the field type), an assignment/`:=` to a `fn`-typed target, a
+struct `fn`-field, or a `fn`-typed return position; **(2)** a `match` whose scrutinee is the bare
+param (`fn(x): match x: E.A: …; E.B: …` → `x: E`); **(3)** a member access **uniquely owned by one
+type** — a method only `str`/`bytes` has (`fn(x): x.upper()` → `x: str`) or a field/method exactly
+one struct declares (`fn(x): x.f`). Arithmetic/comparison/indexing and any member shared by >1 type
+(`x.len()` — on `str`/`list`/`map`/`set`, so it never pins) do **not** pin — they are *checked*
+against a type a higher source resolved. Once resolved, the closure's `fn` signature is filled in and
+**call sites are type-checked** like a named function. A parameter that *nothing* resolves
+(`g := fn(x): x + 1` with no slot or match) is an error:
+`cannot infer type of parameter 'x'; add a type annotation` — annotate it (`fn(x: int): …`). A
+closure passed to a **generic** slot whose type parameter only *it* would pin (`store(fn(a): a + 1)`
+for `fn store[T](x: T) -> T`) is likewise un-inferable → annotate (`fn(a: int): …`): the param is
+never silently left dynamic, so a later call can never trap.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure
@@ -1289,14 +1307,19 @@ close the variant; only an unguarded arm whose payload is all wildcards/plain bi
 variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
 then `E.A(n)` — without a "duplicate arm" error.)
 
-Exhaustiveness still applies when the scrutinee's type is **un-inferable** (e.g. an unannotated
-closure param, `fn(x): match x: …`). The arms are inspected to recover the domain: if they name the
-variants of a single known enum, the match must cover them all (or add a `_`); if they are literals,
-a `_` is required (the literal domain is open). Because the scrutinee has no static type, literal arms
-of *different* types (`1` then `"b"`) are accepted as long as a `_` makes the match total — type
-agreement across arms is only enforced when the scrutinee type is actually known. Only a genuinely
-unknowable match (no enum/literal signal, an ambiguous bare variant, or a module-qualified enum) is
-left unchecked.
+**Matching on an unannotated closure parameter.** An unannotated closure param is now *inferred* to a
+concrete type from its context (see "Closure-parameter inference" above), so `fn(x): match x: E.A: …;
+E.B: …` resolves `x: E` and is checked like any typed scrutinee — the call site is enforced
+(`g(5)` → error) and exhaustiveness is the ordinary enum/literal rule (cover all variants, or `_`; a
+literal match needs a `_`). A **structural** pattern (an enum variant, a tuple, or a variant/`Ok`/
+`Err`/`Some`/`None` payload) over a value whose type genuinely *can't* be inferred — a residual
+`Unknown`, e.g. a tuple-element binding `a` in `match x: (a, b): match a: E.A: …` where `x` itself was
+only shape-pinned — is **rejected** (`cannot match a <tuple|variant> pattern on a value of un-inferable
+type; annotate it`): matching a shape/tag on an un-typed value would trap at runtime, and a trailing
+`_` cannot rescue it (the destructure runs first). Literal/range/`_`/binding patterns over an
+un-inferable value stay allowed (a value-compare or bind never traps); a heterogeneous literal match
+(`1` then `"b"`) is rejected once the first arm pins the scalar type. Annotate the parameter
+(`fn(x: (E, int)): …`) to make a structural match legal.
 
 ```chezzi
 match n:
