@@ -10466,3 +10466,27 @@ fn closure_inferred_in_fn_typed_return_conflict_rejected() {
         "has no method 'upper'",
     );
 }
+
+// Phase 3a — free-closure body inference (source #2: a match whose scrutinee is
+// the BARE param). Pins the param, so the call site is checked.
+#[test]
+fn free_closure_match_variant_pins_param_call_site_rejects() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(5))\n",
+        "found int",
+    );
+}
+
+#[test]
+fn free_closure_all_variants_match_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
+    );
+}
+
+#[test]
+fn free_closure_concrete_nested_tuple_not_swept() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn main():\n    g := fn(x: (E, int)): match x:\n        (E.A, b): \"a\"\n        _: \"o\"\n    print(g((E.A, 1)))\n",
+    );
+}

@@ -7351,6 +7351,229 @@ impl Checker {
         }
     }
 
+    /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only
+    /// when there is no expected/slot type). **Shallow + precise** (closes the bare-param structural
+    /// trap without over-pinning): source #2 — a `match` whose scrutinee is the BARE param identifier
+    /// (`match x:`, not `match x.f:` / `match g(x):`), pinned from its first concrete arm; source #3 —
+    /// a member access on the bare param (`x.f` / `x.m()`) whose name is declared by exactly one struct.
+    /// Source #2 wins. Does NOT descend into nested closures (an inner param shadowing the name is
+    /// unrelated). Read-only; returns `None` when nothing pins the param.
+    fn scan_free_closure_param(&self, name: &str, body: &Expr) -> Option<Ty> {
+        let mut match_pin = None;
+        let mut member_pin = None;
+        self.scan_expr_for_pin(name, body, &mut match_pin, &mut member_pin);
+        match_pin.or(member_pin)
+    }
+
+    /// Walk `e` (skipping nested closures) accumulating the source-#2 (`match_pin`) and source-#3
+    /// (`member_pin`) candidates for a free closure's param `name`. Stops descending once a source-#2
+    /// pin is found (highest priority). See [`Checker::scan_free_closure_param`].
+    fn scan_expr_for_pin(
+        &self,
+        name: &str,
+        e: &Expr,
+        match_pin: &mut Option<Ty>,
+        member_pin: &mut Option<Ty>,
+    ) {
+        if match_pin.is_some() {
+            return;
+        }
+        match &e.kind {
+            // Source #2: a match whose scrutinee is the BARE param — pin from the first concrete arm.
+            ExprKind::Match { scrutinee, arms } => {
+                if let ExprKind::Ident(s) = &scrutinee.kind
+                    && s == name
+                {
+                    for arm in arms {
+                        if let Some(t) = self.pin_ty_of_pattern(&arm.pattern) {
+                            *match_pin = Some(t);
+                            return;
+                        }
+                    }
+                }
+                self.scan_expr_for_pin(name, scrutinee, match_pin, member_pin);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, &arm.body, match_pin, member_pin);
+                }
+            }
+            // Source #3: a member access (field or method receiver) on the bare param.
+            ExprKind::Field {
+                obj, name: member, ..
+            } => {
+                if member_pin.is_none()
+                    && let ExprKind::Ident(r) = &obj.kind
+                    && r == name
+                    && let Some(t) = self.unique_member_owner(member)
+                {
+                    *member_pin = Some(t);
+                }
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+            }
+            // A nested closure is its own scope — never descend (it may shadow `name`).
+            ExprKind::Closure { .. } => {}
+            // Every other expression: recurse into its child expressions.
+            ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+                for c in es {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    self.scan_expr_for_pin(name, v, match_pin, member_pin);
+                }
+            }
+            ExprKind::Comprehension {
+                key, elem, clauses, ..
+            } => {
+                if let Some(k) = key {
+                    self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                }
+                self.scan_expr_for_pin(name, elem, match_pin, member_pin);
+                for c in clauses {
+                    self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
+                    for g in &c.guards {
+                        self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                    }
+                }
+            }
+            ExprKind::Unary { expr, .. } => {
+                self.scan_expr_for_pin(name, expr, match_pin, member_pin)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.scan_expr_for_pin(name, lhs, match_pin, member_pin);
+                self.scan_expr_for_pin(name, rhs, match_pin, member_pin);
+            }
+            ExprKind::Range { start, end } => {
+                self.scan_expr_for_pin(name, start, match_pin, member_pin);
+                self.scan_expr_for_pin(name, end, match_pin, member_pin);
+            }
+            ExprKind::Call { callee, args, .. } => {
+                self.scan_expr_for_pin(name, callee, match_pin, member_pin);
+                for a in args {
+                    self.scan_expr_for_pin(name, a, match_pin, member_pin);
+                }
+            }
+            ExprKind::Index { obj, index } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, index, match_pin, member_pin);
+            }
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                for c in [start, end, step].into_iter().flatten() {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Try(inner) => self.scan_expr_for_pin(name, inner, match_pin, member_pin),
+            ExprKind::DecodeCall { obj, arg, .. } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, arg, match_pin, member_pin);
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.scan_expr_for_pin(name, cond, match_pin, member_pin);
+                self.scan_expr_for_pin(name, then, match_pin, member_pin);
+                self.scan_expr_for_pin(name, els, match_pin, member_pin);
+            }
+            // `?.`/`??` carriers are lowered before checking; `recover:` carries a block (statements,
+            // not in the closure-body single-expression grammar). Leaves (`Ident`/literals/`TypeApply`)
+            // have no child to scan.
+            _ => {}
+        }
+    }
+
+    /// The scrutinee type a top-level match arm pattern implies (source #2 classification). Mirrors
+    /// [`Checker::reconstruct_unknown_kind`]'s arm classification: a qualified/unique enum variant or
+    /// builtin `Ok`/`Err`/`Some`/`None` → that enum/Result/Option (type args `Unknown`); a tuple → an
+    /// all-`Unknown` tuple of that arity; a literal/range → its scalar; a binding/wildcard/ambiguous →
+    /// `None` (no pin).
+    fn pin_ty_of_pattern(&self, p: &Pattern) -> Option<Ty> {
+        match p {
+            Pattern::Or(alts) => alts.first().and_then(|a| self.pin_ty_of_pattern(a)),
+            Pattern::Tuple(subs) => Some(Ty::Tuple(vec![Ty::Unknown; subs.len()])),
+            Pattern::Literal(lit) => Some(lit_pattern_ty(lit)),
+            Pattern::Range { .. } => Some(Ty::Int),
+            Pattern::Variant {
+                name,
+                enum_name,
+                module_name,
+                ..
+            } => {
+                // A module-qualified variant can't be resolved through the bare-name table — no pin.
+                if module_name.is_some() {
+                    return None;
+                }
+                if let Some(en) = enum_name {
+                    let key = self.bare_key(en);
+                    return self
+                        .enums
+                        .contains_key(&key)
+                        .then(|| self.enum_ty_unknown_args(&key));
+                }
+                match name.as_str() {
+                    "Ok" | "Err" => Some(Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown))),
+                    "Some" | "None" => Some(Ty::Option(Box::new(Ty::Unknown))),
+                    other => {
+                        // A bare variant uniquely owned by one enum pins it; an ambiguous one, or a
+                        // bare binding name (not a known variant), does not.
+                        let owners = self.variant_owners.get(other)?;
+                        if owners.len() != 1 {
+                            return None;
+                        }
+                        let key = self.bare_key(&owners[0]);
+                        self.enums
+                            .contains_key(&key)
+                            .then(|| self.enum_ty_unknown_args(&key))
+                    }
+                }
+            }
+            Pattern::Ident(_) | Pattern::Wildcard => None,
+        }
+    }
+
+    /// A user enum's `Ty::Enum` with its type arguments filled as `Unknown` (the scrutinee shape an
+    /// arm pattern pins — element types are unknown, the enum identity is what matters for call-site
+    /// checking).
+    fn enum_ty_unknown_args(&self, key: &str) -> Ty {
+        let n = self
+            .enum_type_params
+            .get(key)
+            .map(|tps| tps.len())
+            .unwrap_or(0);
+        Ty::Enum(key.to_string(), vec![Ty::Unknown; n])
+    }
+
+    /// If exactly one struct declares a field OR method `member`, return that struct's type (type args
+    /// `Unknown`); else `None` (source #3 only fires for a UNIQUELY-owned member — a name shared by
+    /// >1 type, or none, never pins). Read-only.
+    fn unique_member_owner(&self, member: &str) -> Option<Ty> {
+        let mut found: Option<&String> = None;
+        for (key, info) in &self.structs {
+            let has =
+                info.fields.iter().any(|(n, _)| n == member) || info.methods.contains_key(member);
+            if has {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(key);
+            }
+        }
+        let key = found?;
+        let n = self
+            .structs
+            .get(key)
+            .map(|i| i.type_params.len())
+            .unwrap_or(0);
+        Some(Ty::Struct(key.clone(), vec![Ty::Unknown; n]))
+    }
+
     fn infer_closure(
         &mut self,
         params: &[Param],
@@ -7408,6 +7631,11 @@ impl Checker {
                     None => exp_params
                         .as_ref()
                         .and_then(|ps| ps.get(i).cloned())
+                        // Free closure (no expected type): infer the param from its body —
+                        // source #2 (a match whose scrutinee is the bare param) / source #3 (a
+                        // uniquely-owned member access). Leaves `Unknown` if nothing pins it
+                        // (phase-5 then requires an annotation).
+                        .or_else(|| self.scan_free_closure_param(&p.name, body))
                         .unwrap_or(Ty::Unknown),
                 };
                 self.declare(&p.name, ty.clone());
@@ -13786,25 +14014,28 @@ mod graph_tests {
         );
     }
 
-    // Boundary (must STAY accepted): an un-inferable scrutinee with HETEROGENEOUS literal arms
-    // (int + str) is total via `_` and never traps — type agreement is irrelevant when the value
-    // has no static type. Forcing a single literal type here would wrongly reject the str arm.
+    // MIGRATED (closure-param inference, phase 3): the first literal arm (`1`) now PINS the bare
+    // param `x` to `int` (source #2 — a bare-param match scrutinee). The `"b"` arm is then a str
+    // literal against an `int` scrutinee → rejected. The pre-inference `OpenScrutinee` behaviour
+    // (accept heterogeneous literals when a `_` closes the match) no longer applies: the scrutinee is
+    // no longer un-inferable.
     #[test]
-    fn match_unknown_param_hetero_literals_plus_wildcard_accepts() {
+    fn match_unknown_param_hetero_literals_plus_wildcard_rejects() {
         let t = TmpDir::new();
         let entry = t.write(
             "main.chz",
             "g := fn(x) -> str: match x:\n    1: \"a\"\n    \"b\": \"c\"\n    _: \"d\"\nfn main(): print(g(1))\n",
         );
+        let errs = errors(&entry);
         assert!(
-            check_entry(&entry).is_ok(),
-            "expected clean (wildcard closes heterogeneous literals): {:?}",
-            errors(&entry)
+            errs.iter()
+                .any(|e| e.contains("literal of type str cannot match scrutinee of type int")),
+            "expected str-literal-vs-int-scrutinee mismatch, got: {errs:?}"
         );
     }
 
-    // Soundness: heterogeneous literal arms with NO `_` cannot be proven complete — the unmatched
-    // scrutinee would otherwise leak (`g(true) -> true`). Must reject, like the homogeneous case.
+    // MIGRATED (phase 3): the first arm (`1`) pins `x` to `int`; the `"b"` arm is then a literal
+    // mismatch (and the match is also non-exhaustive). Either way it rejects.
     #[test]
     fn match_unknown_param_hetero_literals_no_wildcard_rejects() {
         let t = TmpDir::new();
@@ -13815,8 +14046,8 @@ mod graph_tests {
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|e| e.contains("non-exhaustive") && e.contains("`_`")),
-            "expected non-exhaustive add a `_` arm, got: {errs:?}"
+                .any(|e| e.contains("literal of type str cannot match scrutinee of type int")),
+            "expected str-literal-vs-int-scrutinee mismatch, got: {errs:?}"
         );
     }
 
