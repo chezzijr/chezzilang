@@ -53,6 +53,12 @@ enum MatchKind {
     Tuple(Vec<Ty>),
     /// Un-inferable (`Ty::Unknown`) scrutinee — skip exhaustiveness, accept any pattern shape.
     Skip,
+    /// Un-inferable (`Ty::Unknown`) scrutinee whose arms are literals/ranges (an open domain): bind
+    /// permissively like `Skip`, but exhaustiveness REQUIRES a `_` wildcard — a genuinely untyped
+    /// scrutinee over an open literal domain can't be proven complete any other way. Heterogeneous
+    /// literal arms (`1` + `"b"`) are fine: type agreement is irrelevant when the value has no
+    /// static type, and the `_` makes the match total regardless.
+    OpenScrutinee,
 }
 
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
@@ -5204,10 +5210,12 @@ impl Checker {
             }
             return MatchKind::Skip;
         }
-        if enums.is_empty()
-            && let Some(ty) = lit_ty
-        {
-            return MatchKind::Literal(ty);
+        if enums.is_empty() && lit_ty.is_some() {
+            // Literal/range arms over an un-inferable scrutinee: open domain — require a `_` for
+            // totality, but bind permissively (do NOT type-check arms against a single literal
+            // type, which would wrongly reject heterogeneous arms like `1` + `"b"` even when a
+            // `_` makes the match total).
+            return MatchKind::OpenScrutinee;
         }
         MatchKind::Skip
     }
@@ -5565,9 +5573,10 @@ impl Checker {
             );
         }
         match kind {
-            MatchKind::Skip => {
+            MatchKind::Skip | MatchKind::OpenScrutinee => {
                 // Un-inferable scrutinee: accept the pattern shape permissively, binding everything
-                // as `Unknown`. Still scope so the caller can `pop_scope` uniformly.
+                // as `Unknown`. Still scope so the caller can `pop_scope` uniformly. (`OpenScrutinee`
+                // differs from `Skip` only in `check_exhaustive`, where it requires a `_` wildcard.)
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
@@ -5811,6 +5820,11 @@ impl Checker {
         }
         match kind {
             MatchKind::Skip => {}
+            // Literal/range arms over an un-inferable scrutinee are total only via a `_` wildcard
+            // (already short-circuited above when present) — reaching here means none was given.
+            MatchKind::OpenScrutinee => {
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
             MatchKind::Variants { label, variants } => {
                 let mut missing: Vec<String> = variants
                     .keys()
@@ -13618,6 +13632,40 @@ mod graph_tests {
             check_entry(&entry).is_ok(),
             "expected clean (wildcard closes literals): {:?}",
             errors(&entry)
+        );
+    }
+
+    // Boundary (must STAY accepted): an un-inferable scrutinee with HETEROGENEOUS literal arms
+    // (int + str) is total via `_` and never traps — type agreement is irrelevant when the value
+    // has no static type. Forcing a single literal type here would wrongly reject the str arm.
+    #[test]
+    fn match_unknown_param_hetero_literals_plus_wildcard_accepts() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "g := fn(x) -> str: match x:\n    1: \"a\"\n    \"b\": \"c\"\n    _: \"d\"\nfn main(): print(g(1))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean (wildcard closes heterogeneous literals): {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Soundness: heterogeneous literal arms with NO `_` cannot be proven complete — the unmatched
+    // scrutinee would otherwise leak (`g(true) -> true`). Must reject, like the homogeneous case.
+    #[test]
+    fn match_unknown_param_hetero_literals_no_wildcard_rejects() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "g := fn(x): match x:\n    1: \"a\"\n    \"b\": \"c\"\nfn main(): print(g(true))\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("non-exhaustive") && e.contains("`_`")),
+            "expected non-exhaustive add a `_` arm, got: {errs:?}"
         );
     }
 }
