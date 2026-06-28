@@ -5587,6 +5587,24 @@ impl Checker {
                     } => {
                         // Un-inferable scrutinee (Skip): no enum to validate the qualifier against.
                         self.check_pattern_qualifier(module_name, enum_name, name, None, span);
+                        // A bare name (no qualifier, no payload) that is NOT a known variant is an
+                        // irrefutable binding catch-all — `n:` binds the scrutinee like `_` and
+                        // closes the match, exactly as a concretely-typed scrutinee does (the parser
+                        // models every bare pattern name as a nullary `Variant`). Declaring it +
+                        // returning irrefutable keeps the un-inferable path consistent with the
+                        // typed-`Literal` path; treating it as a refutable variant instead would both
+                        // leave the binding undeclared (`unknown name`) and wrongly report the match
+                        // non-exhaustive.
+                        let is_known_variant = self.variant_owners.contains_key(name)
+                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                        if enum_name.is_none()
+                            && module_name.is_none()
+                            && bindings.is_empty()
+                            && !is_known_variant
+                        {
+                            self.declare(name, Ty::Unknown);
+                            return true;
+                        }
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -13666,6 +13684,24 @@ mod graph_tests {
             errs.iter()
                 .any(|e| e.contains("non-exhaustive") && e.contains("`_`")),
             "expected non-exhaustive add a `_` arm, got: {errs:?}"
+        );
+    }
+
+    // Boundary (must STAY accepted): a bare-ident catch-all (`n:`) over an un-inferable scrutinee is
+    // an irrefutable binding that closes the match — exactly like a concretely-typed int scrutinee.
+    // Regression guard: routing the literal case through the permissive `Skip` bind branch wrongly
+    // treated `n` as a refutable nullary variant → spurious non-exhaustive + undeclared binding.
+    #[test]
+    fn match_unknown_param_bare_ident_catchall_accepts() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "g := fn(x) -> str: match x:\n    0: \"zero\"\n    n: \"got {n}\"\nfn main(): print(g(7))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean (bare-ident catch-all closes + binds): {:?}",
+            errors(&entry)
         );
     }
 }

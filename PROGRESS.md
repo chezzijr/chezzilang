@@ -37,9 +37,17 @@ missing-variant, unguarded-literal, and heterogeneous-literal-no-`_` matches now
 Tests (graph_tests, real `build_graph`+`check_graph` CLI path):
 `match_unknown_param_missing_variant_rejects`, `…_literals_no_wildcard_rejects`,
 `…_all_variants_accepts`, `…_variants_plus_wildcard_accepts`, `…_literals_plus_wildcard_accepts`,
-`…_hetero_literals_plus_wildcard_accepts`, `…_hetero_literals_no_wildcard_rejects`. Residual
-known-limit: a **module-qualified** enum (`mod.Enum.Variant`) over an un-inferable scrutinee stays
-unchecked. Docs: `docs/syntax.md` §match.
+`…_hetero_literals_plus_wildcard_accepts`, `…_hetero_literals_no_wildcard_rejects`,
+`…_bare_ident_catchall_accepts`. A **bare-ident catch-all** (`n:`) over an un-inferable scrutinee is an
+irrefutable binding that closes the match + binds the name (consistent with a typed-`int` scrutinee);
+the un-inferable bind path now declares it rather than treating it as a refutable nullary variant
+(which had both over-rejected the match as non-exhaustive and left the binding undeclared). Residual
+known-limits (pre-existing, **not** introduced here — main behaves identically): a **module-qualified**
+enum (`mod.Enum.Variant`) over an un-inferable scrutinee stays unchecked; and a match mixing a literal
+with a **shape-incompatible** pattern (a tuple/variant-payload) over an un-inferable scrutinee is
+accepted then traps at runtime if the off-shape arm is reached (a pattern-shape-consistency hole
+orthogonal to exhaustiveness — would need scrutinee annotation to close; tracked for follow-up). Docs:
+`docs/syntax.md` §match.
 
 **✅ Checker — operator overloading + protocol satisfaction on GENERIC structs/enums (2026-06-28).**
 A generic type that defined an operator method (`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) could
