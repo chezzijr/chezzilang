@@ -1037,7 +1037,7 @@ newtype Stack[T] = List[T]:
         return List(self).len()
     fn top(self) -> Option[T]:
         xs := List(self)
-        return None if xs.len() == 0 else Some(xs[xs.len() - 1])
+        return if xs.len() == 0: None else: Some(xs[xs.len() - 1])
 
 s := Stack([1, 2, 3])      # inferred Stack[int]
 print(s.size())            # 3

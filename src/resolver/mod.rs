@@ -285,6 +285,18 @@ impl Builder {
                 });
                 continue;
             }
+            // A bare `import std` is not a real module: routing it through `module_file` yields the
+            // std *directory* with a `.chz` extension (`<install>/std.chz`), so it both ignores any
+            // project-local `std.chz` and leaks the internal install path. Reject it up front with a
+            // filesystem-agnostic diagnostic. (Submodules like `std.math` / `std.x.y` are unaffected.)
+            if path.len() == 1 && path.first().map(String::as_str) == Some("std") {
+                return Err(ResolveError {
+                    message: "'std' is a reserved namespace (import a submodule, e.g. 'std.math')"
+                        .into(),
+                    span,
+                    module: Some(dotted_label(&path)),
+                });
+            }
             let file = module_file(&path, &self.project_root, &self.std_root);
             let target = ModuleId(canonical_or_abs(&file));
             self.visit(&target, &path, span)?;
@@ -555,6 +567,24 @@ mod tests {
             err.message
         );
         assert!(err.message.contains("nope.thing"), "got: {}", err.message);
+    }
+
+    // 7. A bare `import std` is a clear reserved-namespace diagnostic, NOT a confusing internal
+    // install-path leak. A project-local `std.chz` next to main is intentionally ignored.
+    #[test]
+    fn bare_std_import_is_reserved_namespace() {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "");
+        t.write("std.chz", "x = 1\n");
+        let entry = t.write("main.chz", "import std\nfn main(): print(1)\n");
+        let err = build_graph(&entry).unwrap_err();
+        assert!(
+            err.message.contains("reserved namespace"),
+            "got: {}",
+            err.message
+        );
+        // Must not leak the internal install path (`<crate>/std.chz`).
+        assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
     // 8. A native std module (std.math) is virtual: resolved without any .chz file, flagged native.

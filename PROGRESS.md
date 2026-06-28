@@ -11,6 +11,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Docs + resolver polish (2026-06-28).** Two low-severity fixes: (1) `docs/syntax.md` "Generic
+newtypes" `Stack[T].top` example used a Python-style **postfix** ternary
+(`return None if … else Some(…)`) that does not parse in Chezzi (only the **prefix** `if c: a else: b`
+conditional-expression form exists) — rewritten to `return if xs.len() == 0: None else: Some(…)`,
+verified `Some(3)`/`None` on both engines (syntax.md code blocks are not conformance-executed, hence
+the slip). (2) `src/resolver/mod.rs` — a bare `import std` routed through `module_file` to
+`<install>/std.chz`, ignoring any project-local `std.chz` and leaking the internal install path; now
+emits `'std' is a reserved namespace (import a submodule, e.g. 'std.math')` (narrow guard, submodules
+like `std.math`/`std.x.y` unaffected). TDD: new `bare_std_import_is_reserved_namespace` resolver unit
+test (RED → GREEN). No checker changes; parity-safe by construction.
+
 **✅ Checker — operator overloading + protocol satisfaction on GENERIC structs/enums (2026-06-28).**
 A generic type that defined an operator method (`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) could
 **call it directly** but could NOT use the matching operator (`a + b`, `-a`, `a < b`), satisfy the
