@@ -11,6 +11,44 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Checker — match-exhaustiveness soundness hole on the `MatchKind::Skip` path closed (2026-06-28).**
+Checker-only, three-engine-parity-safe by construction (rejected programs never run; accepted programs
+byte-identical). An **un-inferable scrutinee** (`Ty::Unknown`, e.g. an unannotated closure param
+`fn(x): match x: …`) mapped to `MatchKind::Skip`, which **no-op'd exhaustiveness entirely** — so
+`g := fn(x) -> str: match x: E.A: "a"` over `enum E{A,B}` passed `check` clean then **trapped at
+runtime** on BOTH the VM and `--serial` (`no match arm for variant 'B'`); a literal arm was worse —
+`fn(x): match x: 1: "one"` then `g(99)` checked ok and the int scrutinee **leaked out** of the match.
+This predates the recent concrete-scrutinee exhaustiveness fixes (guarded-arms / refutable-payloads /
+nested-single-variant), which only run on the `Variants`/`Literal` path. **Root cause:** `match_kind`
+returned `Skip` for `Ty::Unknown`, and both `bind_match_arm` (inserts every named variant into
+`covered` unconditionally) + `check_exhaustive` (returns) skip coverage. **Fix:** a new
+`reconstruct_unknown_kind` recovers a concrete `MatchKind` from the arms' patterns — if they name the
+variants of a **single known enum** (resolved to its runtime key via `bare_key`) it rebuilds
+`MatchKind::Variants` and the normal coverage/guard/refutable logic applies for free; if they are
+**literals** it rebuilds a new `MatchKind::OpenScrutinee` (binds permissively like `Skip`, but
+exhaustiveness **requires a `_`** — the literal domain is open); genuinely unknowable matches
+(no signal, ambiguous bare variant, module-qualified enum) stay `Skip` (never over-reject). No closure-
+param type inference added. Because the scrutinee has no static type, **heterogeneous** literal arms
+(`1` then `"b"`) are accepted when a `_` makes the match total — arm type-agreement is only enforced
+on a concretely-typed scrutinee (the original implementation rebuilt `MatchKind::Literal(int)` and
+wrongly rejected the str arm; remediation replaced it with `OpenScrutinee`). Boundary-tested both
+ways: full-variant coverage, `_`-closed matches, and heterogeneous-literal+`_` still ACCEPT;
+missing-variant, unguarded-literal, and heterogeneous-literal-no-`_` matches now REJECT at `check`.
+Tests (graph_tests, real `build_graph`+`check_graph` CLI path):
+`match_unknown_param_missing_variant_rejects`, `…_literals_no_wildcard_rejects`,
+`…_all_variants_accepts`, `…_variants_plus_wildcard_accepts`, `…_literals_plus_wildcard_accepts`,
+`…_hetero_literals_plus_wildcard_accepts`, `…_hetero_literals_no_wildcard_rejects`,
+`…_bare_ident_catchall_accepts`. A **bare-ident catch-all** (`n:`) over an un-inferable scrutinee is an
+irrefutable binding that closes the match + binds the name (consistent with a typed-`int` scrutinee);
+the un-inferable bind path now declares it rather than treating it as a refutable nullary variant
+(which had both over-rejected the match as non-exhaustive and left the binding undeclared). Residual
+known-limits (pre-existing, **not** introduced here — main behaves identically): a **module-qualified**
+enum (`mod.Enum.Variant`) over an un-inferable scrutinee stays unchecked; and a match mixing a literal
+with a **shape-incompatible** pattern (a tuple/variant-payload) over an un-inferable scrutinee is
+accepted then traps at runtime if the off-shape arm is reached (a pattern-shape-consistency hole
+orthogonal to exhaustiveness — would need scrutinee annotation to close; tracked for follow-up). Docs:
+`docs/syntax.md` §match.
+
 **✅ Docs + resolver polish (2026-06-28).** Two low-severity fixes: (1) `docs/syntax.md` "Generic
 newtypes" `Stack[T].top` example used a Python-style **postfix** ternary
 (`return None if … else Some(…)`) that does not parse in Chezzi (only the **prefix** `if c: a else: b`
