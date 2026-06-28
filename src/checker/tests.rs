@@ -10572,3 +10572,33 @@ fn residual_unknown_hetero_literal_rejects() {
         "literal of type str cannot match scrutinee of type int",
     );
 }
+
+// Phase 5 — a free closure whose param NOTHING pins (no expected/slot type, no body match-
+// scrutinee or unique member) must be annotated; it must not degrade to a runtime `Unknown`.
+#[test]
+fn free_closure_unresolved_param_arith_requires_annotation() {
+    entry_rejects(
+        "g := fn(x): x + 1\nfn main(): print(g(2))\n",
+        "cannot infer type of parameter 'x'; add a type annotation",
+    );
+}
+
+#[test]
+fn free_closure_unresolved_param_print_requires_annotation() {
+    entry_rejects(
+        "g := fn(x): print(x)\nfn main(): g(2)\n",
+        "cannot infer type of parameter 'x'; add a type annotation",
+    );
+}
+
+#[test]
+fn annotated_free_closure_arith_ok() {
+    entry_ok("g := fn(x: int): x + 1\nfn main(): print(g(2))\n");
+}
+
+#[test]
+fn annotated_free_closure_match_ok() {
+    entry_ok(
+        "enum E:\n    A\n    B\ng := fn(x: E): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
+    );
+}

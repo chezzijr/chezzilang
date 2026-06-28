@@ -7614,15 +7614,29 @@ impl Checker {
                         )
                     }
                     Some(t) => self.resolve_type(t, body.span),
-                    None => exp_params
-                        .as_ref()
-                        .and_then(|ps| ps.get(i).cloned())
-                        // Free closure (no expected type): infer the param from its body —
-                        // source #2 (a match whose scrutinee is the bare param) / source #3 (a
-                        // uniquely-owned member access). Leaves `Unknown` if nothing pins it
-                        // (phase-5 then requires an annotation).
-                        .or_else(|| self.scan_free_closure_param(&p.name, body))
-                        .unwrap_or(Ty::Unknown),
+                    None => {
+                        // An unannotated param: prefer the expected (slot) param type (source #1);
+                        // else infer it from the body — source #2 (a match whose scrutinee is the
+                        // bare param) / source #3 (a uniquely-owned member access).
+                        if let Some(t) = exp_params.as_ref().and_then(|ps| ps.get(i).cloned()) {
+                            t
+                        } else if let Some(t) = self.scan_free_closure_param(&p.name, body) {
+                            t
+                        } else {
+                            // Genuinely unresolved: no expected/slot type and nothing in the body
+                            // pins it. Require an annotation rather than degrade the param to a
+                            // runtime `Unknown` value (the one place `Unknown` could reach a value).
+                            // Bind `Unknown` after erroring so the body still checks (no cascade).
+                            self.error(
+                                p.name_span,
+                                format!(
+                                    "cannot infer type of parameter '{}'; add a type annotation",
+                                    p.name
+                                ),
+                            );
+                            Ty::Unknown
+                        }
+                    }
                 };
                 self.declare(&p.name, ty.clone());
                 if p.is_ref {
