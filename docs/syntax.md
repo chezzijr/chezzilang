@@ -374,12 +374,17 @@ the context the closure appears in (it is never left dynamic). In priority order
 (`s.update(fn(x): x + 1)` → `x: T` of `Shared[T]`; `[1,2,3].map(fn(x): x + 1)` → `x: int`;
 `Mapped(it, fn(x): x * 2)` → `x` from the field type), an assignment/`:=` to a `fn`-typed target, a
 struct `fn`-field, or a `fn`-typed return position; **(2)** a `match` whose scrutinee is the bare
-param (`fn(x): match x: E.A: …; E.B: …` → `x: E`); **(3)** a member access unique to one type
-(`fn(x): x.f` where exactly one struct has field `f`). Arithmetic/comparison/indexing/shared methods
-do **not** pin (they fit many types) — they are *checked* against a type a higher source resolved.
-Once resolved, the closure's `fn` signature is filled in and **call sites are type-checked** like a
-named function. A parameter that *nothing* resolves (`g := fn(x): x + 1` with no slot or match) is an
-error: `cannot infer type of parameter 'x'; add a type annotation` — annotate it (`fn(x: int): …`).
+param (`fn(x): match x: E.A: …; E.B: …` → `x: E`); **(3)** a member access **uniquely owned by one
+type** — a method only `str`/`bytes` has (`fn(x): x.upper()` → `x: str`) or a field/method exactly
+one struct declares (`fn(x): x.f`). Arithmetic/comparison/indexing and any member shared by >1 type
+(`x.len()` — on `str`/`list`/`map`/`set`, so it never pins) do **not** pin — they are *checked*
+against a type a higher source resolved. Once resolved, the closure's `fn` signature is filled in and
+**call sites are type-checked** like a named function. A parameter that *nothing* resolves
+(`g := fn(x): x + 1` with no slot or match) is an error:
+`cannot infer type of parameter 'x'; add a type annotation` — annotate it (`fn(x: int): …`). A
+closure passed to a **generic** slot whose type parameter only *it* would pin (`store(fn(a): a + 1)`
+for `fn store[T](x: T) -> T`) is likewise un-inferable → annotate (`fn(a: int): …`): the param is
+never silently left dynamic, so a later call can never trap.
 
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a

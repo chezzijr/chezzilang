@@ -26,8 +26,10 @@ arg loops (`infer_generic_arg_tys` + `check_generic_arg`, re-inferring the closu
 substituted field/param type, first-pass body errors suppressed). (2) the remaining slots —
 `fn`-typed `let`/`:=`, struct `fn`-field assignment, `fn`-typed return. (3) **free**-closure inference:
 a shallow body scan pins a param from (source #2) a `match` whose scrutinee is the **bare param**
-(first concrete arm) or (source #3) a member access unique to one struct — not from arithmetic/
-comparison/indexing/shared methods (they fit many types; they're *checked*, never pin). (4) **§4.1
+(first concrete arm) or (source #3) a member access **uniquely owned by one type** — a `str`/`bytes`
+method (`fn(x): x.upper()` → `x: str`) or a field/method exactly one user struct declares — not from
+arithmetic/comparison/indexing or any member shared by >1 type (`x.len()` on `str`/`list`/`map`/`set`
+never pins; they fit many types, so they're *checked*, never pin). (4) **§4.1
 structural-over-`Unknown` reject** at `bind_subpattern` (nested tuple elements + variant/`Ok`/`Err`/
 `Some`/`None` payloads, inherited by or-alts/guards) PLUS `match_kind`/`reconstruct_unknown_kind` (the
 top-level residual-`Unknown` scrutinee arm) — `cannot match a <tuple|variant> pattern on a value of
@@ -35,6 +37,14 @@ un-inferable type; annotate it`; literal/range/`_`/binding sub-patterns over `Un
 (value-compare/bind never traps). This **flips** the old `OpenScrutinee` accept-heterogeneous-literals
 behaviour: the first literal arm now pins the scalar, so `1` + `"b"` rejects. (5) a genuinely
 unresolved free closure param errors `cannot infer type of parameter 'x'; add a type annotation`.
+**Soundness follow-up:** a closure passed to a **generic** slot whose type param only *it* binds
+unifies that param to `fn(Unknown) -> Unknown`, so the substituted expected param type is `Unknown` —
+an `Unknown` expected param is **not** a pin (it would re-open the launder-to-runtime hole:
+`store(fn(a): a + 1)` for `fn store[T](x: T) -> T` check-passed then trapped on both engines). It now
+falls through to the body scan / annotation rule and rejects at `check`. (Unification's first-pass
+`infer_generic_arg_tys` keeps closure params `Unknown` via a `generic_arg_prepass` guard so the free
+scan can't corrupt unification, e.g. `Mapped(int_iter, fn(x): x.upper())` still errors `no method
+'upper'`, not an element-type mismatch.)
 End-to-end verified on both engines: every reject errors at `check` (never executes — no trap); every
 accept runs byte-identically (corpus: `iterable`/`iter_adapters`/`shared`/`parallel_shared`/`rwshared`/
 `fn_field`). Tests in `src/checker/tests.rs` (real `build_graph`+`check_graph` CLI path) + migrated

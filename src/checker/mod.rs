@@ -1164,6 +1164,13 @@ struct Checker {
     /// Reset to 0 when descending into a (nested) function or closure body so an inner `break`
     /// can't escape into an outer loop. `> 0` ⇒ `break`/`continue` are legal here.
     loop_depth: usize,
+    /// True while inferring a generic ctor/call/method's args in the unification PREPASS
+    /// ([`Checker::infer_generic_arg_tys`]). In that pass an unannotated closure param must stay
+    /// `Ty::Unknown` (so unification is driven by the other args / substituted slot type, then the
+    /// per-arg [`Checker::check_generic_arg`] re-infers it in checking-mode) — the free-body scan
+    /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
+    /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
+    generic_arg_prepass: bool,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
@@ -1238,6 +1245,7 @@ impl Checker {
             current_ret: Ty::Nil,
             yield_ty: None,
             recover_depth: 0,
+            generic_arg_prepass: false,
             inferring_ret: false,
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
@@ -7591,7 +7599,20 @@ impl Checker {
     /// `Unknown`); else `None` (source #3 only fires for a UNIQUELY-owned member — a name shared by
     /// >1 type, or none, never pins). Read-only.
     fn unique_member_owner(&self, member: &str) -> Option<Ty> {
-        let mut found: Option<&String> = None;
+        // A member shared by any PARAMETERIZED collection (`len`/`map`/`get`/`push`/… on
+        // `list`/`map`/`set`) is never a unique pin: it is shared across types AND would only pin a
+        // weak `list[Unknown]`-style type (design §3 — "methods/fields shared by >1 type … never
+        // pin"). Bail before collecting owners so such members fall through to the annotation rule.
+        if list_method_sig(member, &Ty::Unknown).is_some()
+            || map_method_sig(member, &Ty::Unknown, &Ty::Unknown).is_some()
+            || set_method_sig(member, &Ty::Unknown).is_some()
+        {
+            return None;
+        }
+        // Collect every PINNABLE owner of `member`: user structs (by field or method) plus the
+        // concrete scalar builtins `str`/`bytes` (the design's `x.upper()` → `str` case). The pin
+        // fires only when exactly one type owns it.
+        let mut owners: Vec<Ty> = Vec::new();
         for (key, info) in &self.structs {
             // Source #3 pins only from a USER type. The `Builtin`-origin native structs
             // (Match/Response/ProcResult/…) are seeded into `self.structs` unconditionally at init
@@ -7603,19 +7624,21 @@ impl Checker {
             let has =
                 info.fields.iter().any(|(n, _)| n == member) || info.methods.contains_key(member);
             if has {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(key);
+                let n = info.type_params.len();
+                owners.push(Ty::Struct(key.clone(), vec![Ty::Unknown; n]));
             }
         }
-        let key = found?;
-        let n = self
-            .structs
-            .get(key)
-            .map(|i| i.type_params.len())
-            .unwrap_or(0);
-        Some(Ty::Struct(key.clone(), vec![Ty::Unknown; n]))
+        if str_method_sig(member).is_some() {
+            owners.push(Ty::Str);
+        }
+        if bytes_method_sig(member).is_some() {
+            owners.push(Ty::Bytes);
+        }
+        if owners.len() == 1 {
+            owners.pop()
+        } else {
+            None
+        }
     }
 
     fn infer_closure(
@@ -7682,11 +7705,28 @@ impl Checker {
                         // An unannotated param: prefer the expected (slot) param type (source #1);
                         // else infer it from the body — source #2 (a match whose scrutinee is the
                         // bare param) / source #3 (a uniquely-owned member access).
-                        if let Some(t) = exp_params.as_ref().and_then(|ps| ps.get(i).cloned()) {
+                        //
+                        // An `Unknown` expected param type is NOT a pin: it arises when a generic
+                        // slot's type param was unified ONLY from this closure (`store(fn(a): …)` →
+                        // `T = fn(Unknown) -> Unknown`), so binding the param to it silently would
+                        // leave the call site unchecked → check-passes-then-traps. Filter it out and
+                        // fall through to the body scan / annotation requirement (soundness).
+                        if let Some(t) = exp_params
+                            .as_ref()
+                            .and_then(|ps| ps.get(i))
+                            .filter(|t| !t.is_unknown())
+                            .cloned()
+                        {
                             t
                         } else if expected_arity_mismatch {
                             // Arity mismatch against a `fn`-typed slot — stay `Unknown`; the call
                             // site reports the mismatch (single diagnostic).
+                            Ty::Unknown
+                        } else if self.generic_arg_prepass {
+                            // Generic unification prepass: keep the param `Unknown` so the other
+                            // args / substituted slot type drive unification; `check_generic_arg`
+                            // re-infers it in checking-mode afterwards. Running the free scan here
+                            // would corrupt unification (see `generic_arg_prepass` doc).
                             Ty::Unknown
                         } else if let Some(t) = self.scan_free_closure_param(&p.name, body) {
                             t
@@ -9985,7 +10025,11 @@ impl Checker {
             .map(|a| {
                 if matches!(a.kind, ExprKind::Closure { .. }) {
                     let mark = self.errors.len();
+                    // Keep the closure's unannotated params `Unknown` in the unification prepass —
+                    // the free-body scan (sources #2/#3) must not pin them here (see the field doc).
+                    let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
                     let t = self.infer_value(a);
+                    self.generic_arg_prepass = saved;
                     self.errors.truncate(mark);
                     t
                 } else {

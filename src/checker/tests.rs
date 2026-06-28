@@ -10708,3 +10708,72 @@ fn closure_assign_bad_field_single_error() {
         "the bad-field error must be reported exactly once, got: {errs:?}"
     );
 }
+
+// SOUNDNESS — a closure passed to a GENERIC `T` slot whose type param is bound ONLY by the closure
+// itself unifies `T` to `fn(Unknown) -> Unknown`; the substituted expected param type is therefore
+// `Unknown`. Binding the unannotated closure param to that `Unknown` silently (source #1) leaves the
+// call site unchecked → check-passes-then-traps at runtime on both engines. An `Unknown` expected
+// param type must NOT count as a pin: fall through to the body scan / annotation requirement.
+#[test]
+fn closure_param_under_generic_unknown_slot_requires_annotation() {
+    let errs = check_entry(
+        "fn store[T](x: T) -> T:\n    return x\nfn main():\n    f := store(fn(a): a + 1)\n    print(f(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'a'")),
+        "an unannotated closure param under a generic Unknown slot must require annotation, got: {errs:?}"
+    );
+}
+
+// The same generic slot WITH an annotated closure param is fine, and the resolved `fn(int) -> int`
+// signature is propagated so a later mismatched call is rejected at the call site (no runtime trap).
+#[test]
+fn closure_param_under_generic_slot_annotated_propagates_to_call_site() {
+    let errs = check_entry(
+        "fn store[T](x: T) -> T:\n    return x\nfn main():\n    f := store(fn(a: int): a + 1)\n    print(f(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected int") || e.message.contains("found str")),
+        "annotated closure param must propagate fn(int)->int so the str call is rejected, got: {errs:?}"
+    );
+}
+
+// Source #3 (unique member) — the design's flagship builtin example: `x.upper()` is owned only by
+// `str`, so a free closure `fn(x): x.upper()` pins `x: str` and runs. (Previously the scan saw only
+// user structs, so this was wrongly reported un-inferable.)
+#[test]
+fn free_closure_pinned_by_unique_str_method() {
+    entry_ok("f := fn(x): x.upper()\nfn main(): print(f(\"hi\"))\n");
+}
+
+// …and the resolved `fn(str) -> str` signature propagates: a non-str call is rejected at the call
+// site (no permissive Unknown laundering).
+#[test]
+fn free_closure_str_pin_propagates_to_call_site() {
+    entry_rejects(
+        "f := fn(x): x.upper()\nfn main(): print(f(5))\n",
+        "expected str",
+    );
+}
+
+// Source #3 negative — a member shared by >1 type (`len` is on str/list/map/set/bytes) must NOT pin,
+// EVEN when exactly one USER struct also has it: it is ambiguous → require an annotation. (Pre-fix
+// the struct-only scan mis-pinned the param to the lone struct, wrongly rejecting a list call with
+// "expected <Struct>".)
+#[test]
+fn free_closure_shared_member_does_not_pin() {
+    let errs = check_entry(
+        "struct Counter:\n    n: int\n    fn len(self) -> int:\n        return self.n\nf := fn(x): x.len()\nfn main(): print(f([1, 2, 3]))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'x'")),
+        "a member shared with builtins must be un-inferable, not pinned, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("expected Counter")),
+        "param must NOT be mis-pinned to the lone struct, got: {errs:?}"
+    );
+}
