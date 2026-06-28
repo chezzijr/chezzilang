@@ -10522,7 +10522,7 @@ fn nested_some_payload_subpattern_over_unknown_rejected() {
 #[test]
 fn nested_guarded_subpattern_over_unknown_rejected() {
     entry_rejects(
-        "enum E:\n    A\n    B\ng := fn(x, c): match x:\n    (E.A, b) if c: \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9), true))\n",
+        "enum E:\n    A\n    B\ng := fn(x, c: bool): match x:\n    (E.A, b) if c: \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9), true))\n",
         "un-inferable type",
     );
 }
