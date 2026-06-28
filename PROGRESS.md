@@ -78,6 +78,29 @@ CLI via `cargo run --bin chezzi` not a hardcoded `target/` path; an `ok()` unit 
 is correct; adversarially verify every fix) — is now the **"Manual feature-audit playbook"** in
 [`docs/bug-discovery.md`](docs/bug-discovery.md) (lever #9). Run it every pre-freeze session.
 
+**✅ Checker — namespace/import-gating, two more holes closed (2026-06-28).** Checker-only, parity-safe
+by construction (rejected programs never reach the VM/interp; accepted programs are byte-identical — NO
+runtime/opcode change). **HOLE A — protocol-name type decls:** the 15 prebuilt PROTOCOL names
+(`Comparable`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Arithmetic`/`Iterable`/
+`Index`/`IndexSet`/`Slice` — `Iterator` was already blocked incidentally via `is_reserved_type`) could be
+declared as `struct`/`enum`/`newtype`/`type` alias because the five type-DECL guards consulted only
+`is_reserved_type`/`ffi::TYPE_NAMES`, never `is_reserved_protocol`. A `struct Comparable` silently shadowed
+the protocol and produced a self-contradictory diagnostic (*type Comparable does not satisfy Comparable
+(missing method 'compare')*). Added `|| is_reserved_protocol(name)` to all five decl guards (NewType,
+TypeAlias, Struct, Enum, NewType-with-methods) → now reject `type 'X' is reserved (builtin)`, uniform with
+every other reserved type. The protocol BOUND (`[T: Comparable]`) and a type-PARAM named like a protocol
+stay legal (only the standalone TYPE decl is reserved). **HOLE B — bare `owned_str`:** `resolve_type` mapped
+`owned_str => Ty::Str` UNCONDITIONALLY, so `fn f(x: owned_str) -> owned_str` checked clean and silently
+collapsed to `str` with no import (its sibling `ptr` correctly errors). `owned_str` is a RETURN-ONLY extern
+marshalling form, not importable — gated by CONTEXT (not import): an `in_extern_sig` flag set around the
+extern fn signature loop licenses the arm there; a bare non-extern use now errors *'owned_str' is a
+return-only extern marshalling type and cannot be used as a general type annotation*. Extern returns (no
+import) + the `id[owned_str]` type-param shadow + the extern-param surface guard all unchanged. Tests:
+`protocol_named_types_rejected_at_decl` (15 names × 4 decl forms + the literal repro),
+`protocol_bound_and_typeparam_named_protocol_still_ok`, `bare_owned_str_outside_extern_rejected`,
+`extern_owned_str_return_still_ok_no_import` (graph path). Mirrors the 7241b5e/1fde673 reserved-type
+precedent.
+
 **✅ Checker — builtin-type namespace name-leak, two holes closed (2026-06-27).** Checker-only,
 parity-safe by construction (mirrors the landed std.concurrency/std.time/std.ffi gates; NO runtime/opcode
 change beyond two byte-identical `bind_import` skips). **HOLE A — decl-guard incomplete:** `is_reserved_type`
