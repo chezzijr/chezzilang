@@ -3706,7 +3706,25 @@ impl Checker {
                 ..
             } => {
                 let is_ref = *is_ref;
-                let val_ty = self.infer_value(value);
+                // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
+                // resolve the annotation first so its unannotated params bind to the slot's param
+                // types. Only the single-name, non-`ref`, `fn`-typed case (a `ref` pointee is never a
+                // closure; destructuring never binds one). Otherwise ordinary bottom-up inference.
+                let val_ty = match ty {
+                    Some(t)
+                        if !is_ref
+                            && names.len() == 1
+                            && matches!(value.kind, ExprKind::Closure { .. }) =>
+                    {
+                        let expected = self.resolve_type(t, span);
+                        if matches!(expected, Ty::Func { .. }) {
+                            self.infer_arg(value, Some(&expected))
+                        } else {
+                            self.infer_value(value)
+                        }
+                    }
+                    _ => self.infer_value(value),
+                };
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     self.check_destructure(names, &val_ty, value.span);
@@ -3765,7 +3783,18 @@ impl Checker {
                 }
             }
             StmtKind::Assign { target, op, value } => {
-                let val_ty = self.infer_value(value);
+                // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
+                // fn-typed variable) binds its unannotated params from the target's type (source #1).
+                let val_ty = if matches!(value.kind, ExprKind::Closure { .. }) {
+                    let target_ty = self.infer(target);
+                    if matches!(target_ty, Ty::Func { .. }) {
+                        self.infer_arg(value, Some(&target_ty))
+                    } else {
+                        self.infer_value(value)
+                    }
+                } else {
+                    self.infer_value(value)
+                };
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
@@ -4480,7 +4509,9 @@ impl Checker {
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
-                let ty = self.infer(e);
+                // Checking-mode: a closure returned into a `fn`-typed return slot binds its
+                // unannotated params from the declared return type (source #1).
+                let ty = self.infer_arg(e, Some(&ret));
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, true) {

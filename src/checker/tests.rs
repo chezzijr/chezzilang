@@ -10420,3 +10420,49 @@ fn closure_param_inferred_in_generic_struct_ctor_conflict_rejected() {
         "has no method 'upper'",
     );
 }
+
+// Phase 2a — a closure bound to a `fn`-typed `let`/`:=` annotation is inferred
+// in checking-mode (source #1).
+#[test]
+fn closure_inferred_from_fn_typed_let_binding_ok() {
+    entry_ok("fn main():\n    cb: fn(int) -> int = fn(x): x + 1\n    print(cb(2))\n");
+}
+
+#[test]
+fn closure_inferred_from_fn_typed_let_binding_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    cb: fn(int) -> int = fn(x): x.upper()\n    print(cb(2))\n",
+        "has no method 'upper'",
+    );
+}
+
+// Phase 2b — struct fn-field assignment + fn-typed return position (source #1).
+#[test]
+fn closure_inferred_in_struct_fn_field_assignment_ok() {
+    entry_ok(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.cb = fn(x): x + 1\n    print(b.cb(2))\n",
+    );
+}
+
+#[test]
+fn closure_inferred_in_struct_fn_field_assignment_conflict_rejected() {
+    entry_rejects(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.cb = fn(x): x.upper()\n    print(b.cb(2))\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_inferred_in_fn_typed_return_ok() {
+    entry_ok(
+        "fn make() -> fn(int) -> int:\n    return fn(x): x + 1\nfn main():\n    f := make()\n    print(f(2))\n",
+    );
+}
+
+#[test]
+fn closure_inferred_in_fn_typed_return_conflict_rejected() {
+    entry_rejects(
+        "fn make() -> fn(int) -> int:\n    return fn(x): x.upper()\nfn main():\n    f := make()\n    print(f(2))\n",
+        "has no method 'upper'",
+    );
+}
