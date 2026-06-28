@@ -1289,6 +1289,12 @@ close the variant; only an unguarded arm whose payload is all wildcards/plain bi
 variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
 then `E.A(n)` — without a "duplicate arm" error.)
 
+Exhaustiveness still applies when the scrutinee's type is **un-inferable** (e.g. an unannotated
+closure param, `fn(x): match x: …`). The arms are inspected to recover the domain: if they name the
+variants of a single known enum, the match must cover them all (or add a `_`); if they are literals,
+a `_` is required. Only a genuinely unknowable match (no enum/literal signal, an ambiguous bare
+variant, or a module-qualified enum) is left unchecked.
+
 ```chezzi
 match n:
     x if x < 0: "neg"

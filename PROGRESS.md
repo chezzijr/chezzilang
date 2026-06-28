@@ -11,6 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Checker — match-exhaustiveness soundness hole on the `MatchKind::Skip` path closed (2026-06-28).**
+Checker-only, three-engine-parity-safe by construction (rejected programs never run; accepted programs
+byte-identical). An **un-inferable scrutinee** (`Ty::Unknown`, e.g. an unannotated closure param
+`fn(x): match x: …`) mapped to `MatchKind::Skip`, which **no-op'd exhaustiveness entirely** — so
+`g := fn(x) -> str: match x: E.A: "a"` over `enum E{A,B}` passed `check` clean then **trapped at
+runtime** on BOTH the VM and `--serial` (`no match arm for variant 'B'`); a literal arm was worse —
+`fn(x): match x: 1: "one"` then `g(99)` checked ok and the int scrutinee **leaked out** of the match.
+This predates the recent concrete-scrutinee exhaustiveness fixes (guarded-arms / refutable-payloads /
+nested-single-variant), which only run on the `Variants`/`Literal` path. **Root cause:** `match_kind`
+returned `Skip` for `Ty::Unknown`, and both `bind_match_arm` (inserts every named variant into
+`covered` unconditionally) + `check_exhaustive` (returns) skip coverage. **Fix:** a new
+`reconstruct_unknown_kind` recovers a concrete `MatchKind` from the arms' patterns — if they name the
+variants of a **single known enum** (resolved to its runtime key via `bare_key`) it rebuilds
+`MatchKind::Variants` and the normal coverage/guard/refutable logic applies for free; if they are
+**literals with no `_`** it rebuilds `MatchKind::Literal` (forces a `_`); genuinely unknowable matches
+(no signal, ambiguous bare variant, module-qualified enum) stay `Skip` (never over-reject). No closure-
+param type inference added. Boundary-tested both ways: full-variant coverage and `_`-closed matches
+still ACCEPT; missing-variant and unguarded-literal matches now REJECT at `check`. Tests (graph_tests,
+real `build_graph`+`check_graph` CLI path): `match_unknown_param_missing_variant_rejects`,
+`…_literals_no_wildcard_rejects`, `…_all_variants_accepts`, `…_variants_plus_wildcard_accepts`,
+`…_literals_plus_wildcard_accepts`. Residual known-limit: a **module-qualified** enum
+(`mod.Enum.Variant`) over an un-inferable scrutinee stays unchecked. Docs: `docs/syntax.md` §match.
+
 **✅ Checker — operator overloading + protocol satisfaction on GENERIC structs/enums (2026-06-28).**
 A generic type that defined an operator method (`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`) could
 **call it directly** but could NOT use the matching operator (`a + b`, `-a`, `a < b`), satisfy the

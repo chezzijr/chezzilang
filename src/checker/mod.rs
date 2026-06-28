@@ -5044,7 +5044,12 @@ impl Checker {
     }
 
     /// How a `match` is being checked, derived from the scrutinee's type.
-    fn match_kind(&mut self, scrutinee: &Expr) -> MatchKind {
+    ///
+    /// `patterns` are the arms' top-level patterns — used ONLY to recover exhaustiveness when the
+    /// scrutinee is un-inferable (`Ty::Unknown`, e.g. an unannotated closure param): a `Skip` there
+    /// would bypass coverage entirely (soundness hole — `match x: E.A: ..` over `enum E{A,B}` checked
+    /// ok then trapped at runtime). See `reconstruct_unknown_kind`.
+    fn match_kind(&mut self, scrutinee: &Expr, patterns: &[&Pattern]) -> MatchKind {
         let sty = self.infer(scrutinee);
         match &sty {
             Ty::Enum(name, targs) => {
@@ -5088,7 +5093,11 @@ impl Checker {
             Ty::Str => MatchKind::Literal(Ty::Str),
             Ty::Bool => MatchKind::Literal(Ty::Bool),
             Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
-            Ty::Unknown => MatchKind::Skip, // un-inferable: skip exhaustiveness
+            // Un-inferable scrutinee: rather than skip exhaustiveness outright (a soundness hole),
+            // reconstruct a concrete kind from the arm patterns when they unambiguously name a single
+            // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
+            // cases still fall back to `Skip`.
+            Ty::Unknown => self.reconstruct_unknown_kind(patterns),
             other => {
                 self.error(
                     scrutinee.span,
@@ -5097,6 +5106,110 @@ impl Checker {
                 MatchKind::Skip
             }
         }
+    }
+
+    /// Recover a concrete `MatchKind` for an un-inferable (`Ty::Unknown`) scrutinee by inspecting the
+    /// arms' top-level patterns, so exhaustiveness is still enforced (closing the Skip-path soundness
+    /// hole). The reconstructed kind feeds the SAME downstream coverage/guard/refutable logic as a
+    /// concrete scrutinee, so no new exhaustiveness rules are introduced here.
+    ///
+    /// Classification (top-level `Or` alternatives are flattened first):
+    /// - `Enum.Variant` qualified by a known enum, or a bare variant uniquely owned by one enum, or
+    ///   the builtin `Ok`/`Err` (Result) / `Some`/`None` (Option) — collect that enum.
+    /// - a bare name that is NOT a known variant is a catch-all binding → ignored for detection.
+    /// - `Literal`/`Range` → mark `saw_literal`.
+    /// - tuple/ident/wildcard → no signal (stay permissive).
+    ///
+    /// Decision: exactly ONE distinct enum → `Variants` (built from the real decl via `variants_of`);
+    /// ZERO enums + a literal → `Literal` (forces a `_` arm); anything else (no signal, an ambiguous
+    /// bare variant, an unknown qualifier, or multiple enums) → `Skip` (stay permissive — never
+    /// over-reject an un-inferable match).
+    fn reconstruct_unknown_kind(&self, patterns: &[&Pattern]) -> MatchKind {
+        use std::collections::BTreeSet;
+        // Each entry is an enum *identity*: a user enum's resolved runtime key (e.g. `main::E`), or
+        // the builtin marker `"Result"`/`"Option"` (reserved names — never a user enum key).
+        let mut enums: BTreeSet<String> = BTreeSet::new();
+        let mut lit_ty: Option<Ty> = None;
+        // Flatten top-level or-alternatives into a flat head list.
+        let mut heads: Vec<&Pattern> = Vec::new();
+        for p in patterns {
+            match p {
+                Pattern::Or(alts) => heads.extend(alts.iter()),
+                other => heads.push(other),
+            }
+        }
+        for h in heads {
+            match h {
+                Pattern::Variant {
+                    name,
+                    enum_name,
+                    module_name,
+                    ..
+                } => {
+                    if let Some(en) = enum_name {
+                        // A *module*-qualified enum (`mod.Enum.Variant`) doesn't resolve through the
+                        // bare-name table — can't classify safely; stay permissive.
+                        if module_name.is_some() {
+                            return MatchKind::Skip;
+                        }
+                        let key = self.bare_key(en);
+                        if self.enums.contains_key(&key) {
+                            enums.insert(key);
+                        } else {
+                            // Qualifier names an enum we can't resolve to a known key — bail.
+                            return MatchKind::Skip;
+                        }
+                    } else if matches!(name.as_str(), "Ok" | "Err") {
+                        enums.insert("Result".into());
+                    } else if matches!(name.as_str(), "Some" | "None") {
+                        enums.insert("Option".into());
+                    } else if let Some(owners) = self.variant_owners.get(name) {
+                        if owners.len() == 1 {
+                            let key = self.bare_key(&owners[0]);
+                            if self.enums.contains_key(&key) {
+                                enums.insert(key);
+                            } else {
+                                return MatchKind::Skip;
+                            }
+                        } else {
+                            // A bare variant name owned by multiple enums is ambiguous — bail.
+                            return MatchKind::Skip;
+                        }
+                    }
+                    // else: a bare name that is not a known variant is a catch-all binding → ignore.
+                }
+                Pattern::Literal(lit) => {
+                    if lit_ty.is_none() {
+                        lit_ty = Some(lit_pattern_ty(lit));
+                    }
+                }
+                Pattern::Range { .. } => {
+                    if lit_ty.is_none() {
+                        lit_ty = Some(Ty::Int);
+                    }
+                }
+                // Tuple/Ident/Wildcard/(nested Or) — no enum or literal signal; stay permissive.
+                _ => {}
+            }
+        }
+        if enums.len() == 1 {
+            let label = enums.into_iter().next().unwrap();
+            let ty = match label.as_str() {
+                "Result" => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+                "Option" => Ty::Option(Box::new(Ty::Unknown)),
+                key => Ty::Enum(key.to_string(), vec![]),
+            };
+            if let Some(variants) = self.variants_of(&ty) {
+                return MatchKind::Variants { label, variants };
+            }
+            return MatchKind::Skip;
+        }
+        if enums.is_empty()
+            && let Some(ty) = lit_ty
+        {
+            return MatchKind::Literal(ty);
+        }
+        MatchKind::Skip
     }
 
     /// The substitution from a generic enum's type parameters to a concrete instantiation's type
@@ -5765,7 +5878,8 @@ impl Checker {
     }
 
     fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {
-        let kind = self.match_kind(scrutinee);
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         for arm in arms {
@@ -5800,7 +5914,8 @@ impl Checker {
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
     /// types into one result. Exhaustiveness is still enforced.
     fn infer_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchExprArm]) -> Ty {
-        let kind = self.match_kind(scrutinee);
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut result: Option<Ty> = None;
@@ -13423,6 +13538,86 @@ mod graph_tests {
         assert!(
             !errs.iter().any(|e| e.contains("::")),
             "exhaustiveness error must use bare names: {errs:?}"
+        );
+    }
+
+    // Soundness: an unannotated closure param (`Ty::Unknown` scrutinee) whose match arms name a
+    // single known enum but miss a variant must STILL be rejected — the Skip path used to bypass
+    // exhaustiveness, letting `g(E.B)` reach the engine and runtime-trap "no match arm for variant".
+    #[test]
+    fn match_unknown_param_missing_variant_rejects() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "enum E:\n    A\n    B\ng := fn(x) -> str: match x:\n    E.A: \"a\"\nfn main(): print(g(E.B))\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("non-exhaustive") && e.contains("missing B")),
+            "expected non-exhaustive missing B, got: {errs:?}"
+        );
+    }
+
+    // Soundness: literal arms over an `Ty::Unknown` scrutinee with no `_` wildcard cannot be proven
+    // complete — must be rejected (the int-scrutinee value-leak `g(99) -> 99` otherwise).
+    #[test]
+    fn match_unknown_param_literals_no_wildcard_rejects() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "g := fn(x): match x:\n    1: \"one\"\nfn main(): print(g(99))\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("non-exhaustive") && e.contains("`_`")),
+            "expected non-exhaustive add a `_` arm, got: {errs:?}"
+        );
+    }
+
+    // Boundary (must STAY accepted): unannotated param covering ALL variants of E, no `_`.
+    #[test]
+    fn match_unknown_param_all_variants_accepts() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "enum E:\n    A\n    B\ng := fn(x) -> str: match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean (full coverage): {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Boundary (must STAY accepted): unannotated param over E variants PLUS a `_` wildcard.
+    #[test]
+    fn match_unknown_param_variants_plus_wildcard_accepts() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "enum E:\n    A\n    B\ng := fn(x) -> str: match x:\n    E.A: \"a\"\n    _: \"other\"\nfn main(): print(g(E.B))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean (wildcard closes): {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Boundary (must STAY accepted): literal arms PLUS a `_` wildcard.
+    #[test]
+    fn match_unknown_param_literals_plus_wildcard_accepts() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "g := fn(x) -> str: match x:\n    1: \"one\"\n    _: \"other\"\nfn main(): print(g(99))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean (wildcard closes literals): {:?}",
+            errors(&entry)
         );
     }
 }
