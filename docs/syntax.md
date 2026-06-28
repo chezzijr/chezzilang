@@ -1862,7 +1862,10 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`).
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 15
+  prebuilt PROTOCOL names (`Comparable`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
+  `Neg`/`Arithmetic`/`Iterable`/`Index`/`IndexSet`/`Slice`) are reserved the same way — usable as a
+  bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name.
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
@@ -2070,6 +2073,9 @@ forms (no `import`, no grammar change — both are recognized only inside an `ex
 - **`owned_str?`** composes both: nullable **and** freed (`NULL` → `None` and frees nothing).
 
 Both are **return-only** — an `owned_str`/`str?` *parameter* is rejected as *not C-marshallable*.
+`owned_str` is additionally legal **only inside an `extern` signature**: a bare non-extern annotation
+(`fn f(x: owned_str)`) is rejected (*'owned_str' is a return-only extern marshalling type and cannot be
+used as a general type annotation*) rather than silently collapsing to `str`.
 
 ```chezzi
 extern "libc.so.6":
@@ -2089,7 +2095,8 @@ frees memory you don't own and corrupts the heap, exactly like a non-NUL-termina
 
 **Fixed-width integers (`int8`..`uint64`) — bidirectional, imported from `std.ffi`.** Bare `int` marshals
 as C `long`; to bind a C function taking or returning a **fixed-width** integer, declare it with one of
-eight marshalling type names. These are **not global builtins** (like `ptr`, and unlike the still-bare `owned_str`): a module that
+eight marshalling type names. These are **not global builtins** (like `ptr`, and unlike `owned_str`, which
+is neither global nor importable — legal only inside an `extern` signature): a module that
 names a width type must **import it per-name from `std.ffi`** — Chezzi's first **type imports**, with the
 same `import <name>, … from std.ffi` form as the `null`/`is_null` value members:
 

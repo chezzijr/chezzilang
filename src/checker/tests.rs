@@ -7211,6 +7211,94 @@ fn extern_owned_str_param_via_alias_rejected() {
     );
 }
 
+#[test]
+fn protocol_named_types_rejected_at_decl() {
+    // The 15 prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
+    // redeclared as a struct/enum/newtype/type alias — left ungated such a decl silently shadowed
+    // the protocol and produced a self-contradictory diagnostic ("type Comparable does not satisfy
+    // Comparable"). Mirrors the reserved-TYPE-name reservation (Result/Channel/...). The DECL of the
+    // name is reserved; the protocol BOUND of the same name stays legal (see the boundary test).
+    for name in [
+        "Comparable",
+        "Stringable",
+        "Hashable",
+        "Error",
+        "Add",
+        "Sub",
+        "Mul",
+        "Div",
+        "Mod",
+        "Neg",
+        "Arithmetic",
+        "Iterable",
+        "Index",
+        "IndexSet",
+        "Slice",
+    ] {
+        for src in [
+            format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n"),
+            format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n"),
+            format!("newtype {name} = int\nfn main():\n    print(1)\nmain()\n"),
+            format!("type {name} = int\nfn main():\n    print(1)\nmain()\n"),
+        ] {
+            let errs = check_entry(&src);
+            assert!(
+                errs.iter()
+                    .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
+                "decl of protocol name {name} must be reserved, got: {errs:?}\nsrc: {src}"
+            );
+        }
+    }
+    // The literal repro from the task: a `struct Comparable` shadow used as a bound + ctor. Pre-fix
+    // this mis-errored "type Comparable does not satisfy Comparable (missing method 'compare')".
+    let errs = check_entry(
+        "struct Comparable:\n    x: int\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    c := Comparable(x=5)\n    print(pick(c).x)\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("Comparable") && e.message.contains("reserved (builtin)")),
+        "struct Comparable repro must reject as reserved, got: {errs:?}"
+    );
+}
+
+#[test]
+fn protocol_bound_and_typeparam_named_protocol_still_ok() {
+    // Boundary: the FIX-A reservation must NOT leak into the protocol BOUND or a type PARAM named
+    // like a protocol. (a) a user type that satisfies a prebuilt protocol used via its bound; and
+    // (b) a type param spelled `Comparable` shadowing the protocol locally — both stay legal.
+    entry_ok(
+        "struct P:\n    v: int\n    fn compare(self, o: P) -> int:\n        return self.v - o.v\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    print(pick(P(v=5)).compare(P(v=3)))\nmain()\n",
+    );
+    entry_ok(
+        "fn id[Comparable](x: Comparable) -> Comparable:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
+    );
+}
+
+#[test]
+fn bare_owned_str_outside_extern_rejected() {
+    // FIX B: `owned_str` is a RETURN-ONLY extern marshalling form. Used as a bare type annotation
+    // OUTSIDE an extern signature it silently collapsed to `str` with no import (its sibling `ptr`
+    // correctly errors). Now rejected with a return-only hint.
+    let errs = check_entry(
+        "fn f(x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(f(\"hi\"))\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("owned_str") && e.message.contains("return-only")),
+        "bare non-extern owned_str must be rejected, got: {errs:?}"
+    );
+}
+
+#[test]
+fn extern_owned_str_return_still_ok_no_import() {
+    // FIX B boundary on the graph path: an extern `owned_str` RETURN still type-checks with NO
+    // import (the context flag licenses it only inside the extern signature). Locks 7186 on the
+    // real CLI (build_graph + check_graph) path, not just the single-module `ok()` helper.
+    entry_ok(
+        "extern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\nfn main():\n    s: str = strdup(\"hi\")\n    print(s)\nmain()\n",
+    );
+}
+
 /// The checker is the true marshallability gate for a module-QUALIFIED extern type. A `mod.Struct`
 /// whose field is non-marshallable (`List[int]`) must be rejected at `check` time (the compiler's
 /// graceful backstop is only for paths that bypass the checker). Guards that resolving `Qualified`

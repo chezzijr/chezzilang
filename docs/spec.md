@@ -507,7 +507,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >     limit was *"scalars only: int ↔ long, no fixed-width int type"*). To bind a C function taking or
 >     returning a fixed-width integer (`int32_t`, `uint32_t`, …), declare the parameter/return with one
 >     of the **fixed-width marshalling type names** — `int8`, `int16`, `int32`, `int64`, `uint8`,
->     `uint16`, `uint32`, `uint64`. Like `ptr` (and unlike the still-bare `owned_str`), these are
+>     `uint16`, `uint32`, `uint64`. Like `ptr` (and unlike `owned_str`, which is neither global nor
+>     importable — it is licensed **only inside an `extern` signature**; a bare non-extern annotation is
+>     rejected *'owned_str' is a return-only extern marshalling type and cannot be used as a general type
+>     annotation*), these are
 >     **not global**: each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
 >     `import int32, uint32 from std.ffi` form as the `null`/`is_null` value members (`std.ffi` exports
 >     both callable members and these eight TYPE names; the declaring list is `native::ffi::TYPE_NAMES`,
@@ -541,7 +544,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >     deferred); if `free` can't be resolved the return degrades to the old leak rather than aborting;
 >     and `owned_str` is a **user assertion** that the buffer is genuinely `malloc`'d — declaring a
 >     static/string-literal return `owned_str` corrupts the heap (same C-trust-boundary stance as a
->     non-NUL-terminated over-read). `owned_str` is **return-only** (rejected as a parameter).
+>     non-NUL-terminated over-read). `owned_str` is **return-only** (rejected as a parameter) and is
+>     legal **only inside an `extern` signature** — a bare non-extern annotation (`fn f(x: owned_str)`)
+>     is rejected at the checker rather than silently collapsing to `str`.
 >     See `src/native/cffi.rs` (`CType::OwnedStr`) + `examples/ffi_str.chz`.
 >   - **Nullable `str?` returns (RESOLVED, opt-in):** a plain `str` return that comes back `NULL` is a
 >     recoverable **fault** (it would break the static non-null `str` guarantee). To opt into a legitimate

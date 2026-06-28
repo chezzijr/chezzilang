@@ -1100,6 +1100,12 @@ struct Checker {
     /// extern fn's resolved C signature is keyed under the SAME index the backends derive. `None`
     /// for a lone `check`.
     extern_module_idx: Option<usize>,
+    /// True only while resolving an `extern "lib":` fn's param/return signature. `owned_str` is a
+    /// RETURN-ONLY C marshalling form that collapses to `str`; it is legal ONLY inside an extern
+    /// signature. This flag licenses `resolve_type`'s `owned_str` arm there and rejects a bare
+    /// `owned_str` used as a general type annotation (where it would silently collapse to `str`
+    /// with no `import`). Set/reset around the extern fn loop in `hoist_types`.
+    in_extern_sig: bool,
     /// Reverse index built once across the whole graph: a user type name → the modules (in graph
     /// load order, deps-first) that declare it. Drives the "import it from <module>" hint when a bare
     /// type name is used without importing its declaring module. NOT cleared per-module.
@@ -1237,6 +1243,7 @@ impl Checker {
             imported_alias_ctypes: HashMap::new(),
             extern_sigs: ExternTable::new(),
             extern_module_idx: None,
+            in_extern_sig: false,
             struct_field_asts: HashMap::new(),
             struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
@@ -2142,6 +2149,7 @@ impl Checker {
                         name.as_str(),
                         "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
                     ) || is_reserved_type(name)
+                        || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2158,6 +2166,7 @@ impl Checker {
                         name.as_str(),
                         "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
                     ) || is_reserved_type(name)
+                        || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2349,6 +2358,7 @@ impl Checker {
                     // at runtime on a field mismatch. (A bare unimported `struct Match` stays legal —
                     // the name isn't in the set without the import event.)
                     if is_reserved_type(name)
+                        || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                         || self.imported_builtin_types.contains(name)
                     {
@@ -2406,6 +2416,7 @@ impl Checker {
                     ..
                 } => {
                     if is_reserved_type(name)
+                        || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
@@ -2482,7 +2493,7 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    if is_reserved_type(name) {
+                    if is_reserved_type(name) || is_reserved_protocol(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
                     let key = self.bare_key(name);
@@ -2551,6 +2562,11 @@ impl Checker {
                                 format!("function '{}' is already defined", ef.name),
                             );
                         }
+                        // `owned_str` is a return-only extern marshalling form — license its
+                        // `resolve_type` arm only while resolving THIS signature's params + return
+                        // (and the harvested C signature below), then reset so a bare non-extern use
+                        // is rejected.
+                        self.in_extern_sig = true;
                         let params: Vec<Ty> = ef
                             .params
                             .iter()
@@ -2636,6 +2652,7 @@ impl Checker {
                                 },
                             );
                         }
+                        self.in_extern_sig = false;
                     }
                 }
                 _ => {}
@@ -3206,7 +3223,22 @@ impl Checker {
                 // (the ownership/free is a runtime-only distinction the backends recover via
                 // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
                 // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
-                "owned_str" => Ty::Str,
+                // Bare use OUTSIDE an extern signature is rejected: it is not a general type — left
+                // ungated it would silently collapse a `fn f(x: owned_str) -> owned_str` to `str`
+                // with no import (mirrors how `ptr` errors when used without `import std.ffi`).
+                "owned_str" => {
+                    if self.in_extern_sig {
+                        Ty::Str
+                    } else {
+                        self.error(
+                            span,
+                            "'owned_str' is a return-only extern marshalling type and cannot be \
+                             used as a general type annotation"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
                 // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation). Like
                 // `Shared`/`RwShared`/`Atomic` below, `Executor` is NOT a global builtin: it resolves
                 // only in a module that imported `std.concurrency` (whole-module or per-name). The name
