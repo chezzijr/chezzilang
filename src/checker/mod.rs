@@ -51,14 +51,12 @@ enum MatchKind {
     Literal(Ty),
     /// Tuple scrutinee — arms are tuple patterns (gap #15). Carries the element types.
     Tuple(Vec<Ty>),
-    /// Un-inferable (`Ty::Unknown`) scrutinee — skip exhaustiveness, accept any pattern shape.
+    /// Un-inferable (`Ty::Unknown`) scrutinee with only binding/`_` arms — skip exhaustiveness, bind
+    /// permissively. A STRUCTURAL arm over an un-inferable scrutinee is rejected upstream (§4.1, in
+    /// `reconstruct_unknown_kind` for the top-level arm and `bind_subpattern` for nested positions);
+    /// a literal/range arm pins `MatchKind::Literal`. So `Skip` only carries the genuinely-permissive
+    /// residue.
     Skip,
-    /// Un-inferable (`Ty::Unknown`) scrutinee whose arms are literals/ranges (an open domain): bind
-    /// permissively like `Skip`, but exhaustiveness REQUIRES a `_` wildcard — a genuinely untyped
-    /// scrutinee over an open literal domain can't be proven complete any other way. Heterogeneous
-    /// literal arms (`1` + `"b"`) are fine: type agreement is irrelevant when the value has no
-    /// static type, and the `_` makes the match total regardless.
-    OpenScrutinee,
 }
 
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
@@ -5166,7 +5164,7 @@ impl Checker {
             // reconstruct a concrete kind from the arm patterns when they unambiguously name a single
             // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
             // cases still fall back to `Skip`.
-            Ty::Unknown => self.reconstruct_unknown_kind(patterns),
+            Ty::Unknown => self.reconstruct_unknown_kind(patterns, scrutinee.span),
             other => {
                 self.error(
                     scrutinee.span,
@@ -5177,28 +5175,23 @@ impl Checker {
         }
     }
 
-    /// Recover a concrete `MatchKind` for an un-inferable (`Ty::Unknown`) scrutinee by inspecting the
-    /// arms' top-level patterns, so exhaustiveness is still enforced (closing the Skip-path soundness
-    /// hole). The reconstructed kind feeds the SAME downstream coverage/guard/refutable logic as a
-    /// concrete scrutinee, so no new exhaustiveness rules are introduced here.
+    /// Classify a match over a residual un-inferable (`Ty::Unknown`) scrutinee — one that §3 closure
+    /// inference did NOT pin (e.g. a tuple-element binding `a` from `(a, b)`, or an `Unknown`-typed
+    /// expression). The top-level scrutinee arm goes through this path (not `bind_subpattern`), so it
+    /// is the OTHER half of the §4.1 structural-over-`Unknown` reject (the nested half is in
+    /// `bind_subpattern`):
+    /// - **Any STRUCTURAL arm** (a tuple, or a real variant — qualified, builtin `Ok`/`Err`/`Some`/
+    ///   `None`, an owned bare variant, or a `Name(..)` with a payload) tests a shape/tag against a
+    ///   value whose type we can't prove → it traps at runtime on a wrong shape (a trailing `_` cannot
+    ///   rescue it). Reject; annotate the enclosing param. Returns `Skip` afterwards so the arm bodies
+    ///   still bind permissively (no cascade).
+    /// - **Only literal/range arms** → `Literal(first-arm scalar)`: the existing literal-domain rule
+    ///   then makes a non-`_` match non-exhaustive AND a heterogeneous arm (`1` + `"b"`) a literal
+    ///   mismatch — restoring the pre-`OpenScrutinee` behaviour.
+    /// - **Only bindings / `_`** → `Skip` (a bare-ident catch-all closes it; nothing to enforce).
     ///
-    /// Classification (top-level `Or` alternatives are flattened first):
-    /// - `Enum.Variant` qualified by a known enum, or a bare variant uniquely owned by one enum, or
-    ///   the builtin `Ok`/`Err` (Result) / `Some`/`None` (Option) — collect that enum.
-    /// - a bare name that is NOT a known variant is a catch-all binding → ignored for detection.
-    /// - `Literal`/`Range` → mark `saw_literal`.
-    /// - tuple/ident/wildcard → no signal (stay permissive).
-    ///
-    /// Decision: exactly ONE distinct enum → `Variants` (built from the real decl via `variants_of`);
-    /// ZERO enums + a literal → `Literal` (forces a `_` arm); anything else (no signal, an ambiguous
-    /// bare variant, an unknown qualifier, or multiple enums) → `Skip` (stay permissive — never
-    /// over-reject an un-inferable match).
-    fn reconstruct_unknown_kind(&self, patterns: &[&Pattern]) -> MatchKind {
-        use std::collections::BTreeSet;
-        // Each entry is an enum *identity*: a user enum's resolved runtime key (e.g. `main::E`), or
-        // the builtin marker `"Result"`/`"Option"` (reserved names — never a user enum key).
-        let mut enums: BTreeSet<String> = BTreeSet::new();
-        let mut lit_ty: Option<Ty> = None;
+    /// Top-level `Or` alternatives are flattened first. `&mut self` (it may emit the §4.1 reject).
+    fn reconstruct_unknown_kind(&mut self, patterns: &[&Pattern], span: Span) -> MatchKind {
         // Flatten top-level or-alternatives into a flat head list.
         let mut heads: Vec<&Pattern> = Vec::new();
         for p in patterns {
@@ -5207,45 +5200,31 @@ impl Checker {
                 other => heads.push(other),
             }
         }
-        for h in heads {
+        let mut lit_ty: Option<Ty> = None;
+        // The kind word of the FIRST structural arm seen (`"tuple"` / `"variant"`), if any.
+        let mut structural: Option<&'static str> = None;
+        for h in &heads {
             match h {
+                Pattern::Tuple(_) => {
+                    structural.get_or_insert("tuple");
+                }
                 Pattern::Variant {
                     name,
                     enum_name,
                     module_name,
-                    ..
+                    bindings,
                 } => {
-                    if let Some(en) = enum_name {
-                        // A *module*-qualified enum (`mod.Enum.Variant`) doesn't resolve through the
-                        // bare-name table — can't classify safely; stay permissive.
-                        if module_name.is_some() {
-                            return MatchKind::Skip;
-                        }
-                        let key = self.bare_key(en);
-                        if self.enums.contains_key(&key) {
-                            enums.insert(key);
-                        } else {
-                            // Qualifier names an enum we can't resolve to a known key — bail.
-                            return MatchKind::Skip;
-                        }
-                    } else if matches!(name.as_str(), "Ok" | "Err") {
-                        enums.insert("Result".into());
-                    } else if matches!(name.as_str(), "Some" | "None") {
-                        enums.insert("Option".into());
-                    } else if let Some(owners) = self.variant_owners.get(name) {
-                        if owners.len() == 1 {
-                            let key = self.bare_key(&owners[0]);
-                            if self.enums.contains_key(&key) {
-                                enums.insert(key);
-                            } else {
-                                return MatchKind::Skip;
-                            }
-                        } else {
-                            // A bare variant name owned by multiple enums is ambiguous — bail.
-                            return MatchKind::Skip;
-                        }
+                    // A real variant pattern (qualified, builtin, owned, or carrying a payload) is
+                    // structural; a bare name that is NOT a known variant and binds nothing is a
+                    // catch-all binding → not structural.
+                    let is_variant = module_name.is_some()
+                        || enum_name.is_some()
+                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                        || self.variant_owners.contains_key(name)
+                        || !bindings.is_empty();
+                    if is_variant {
+                        structural.get_or_insert("variant");
                     }
-                    // else: a bare name that is not a known variant is a catch-all binding → ignore.
                 }
                 Pattern::Literal(lit) => {
                     if lit_ty.is_none() {
@@ -5257,28 +5236,21 @@ impl Checker {
                         lit_ty = Some(Ty::Int);
                     }
                 }
-                // Tuple/Ident/Wildcard/(nested Or) — no enum or literal signal; stay permissive.
+                // Ident/Wildcard/(nested Or) — no structural or literal signal.
                 _ => {}
             }
         }
-        if enums.len() == 1 {
-            let label = enums.into_iter().next().unwrap();
-            let ty = match label.as_str() {
-                "Result" => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
-                "Option" => Ty::Option(Box::new(Ty::Unknown)),
-                key => Ty::Enum(key.to_string(), vec![]),
-            };
-            if let Some(variants) = self.variants_of(&ty) {
-                return MatchKind::Variants { label, variants };
-            }
+        if let Some(kind) = structural {
+            self.error(
+                span,
+                format!(
+                    "cannot match a {kind} pattern on a value of un-inferable type; annotate it"
+                ),
+            );
             return MatchKind::Skip;
         }
-        if enums.is_empty() && lit_ty.is_some() {
-            // Literal/range arms over an un-inferable scrutinee: open domain — require a `_` for
-            // totality, but bind permissively (do NOT type-check arms against a single literal
-            // type, which would wrongly reject heterogeneous arms like `1` + `"b"` even when a
-            // `_` makes the match total).
-            return MatchKind::OpenScrutinee;
+        if let Some(t) = lit_ty {
+            return MatchKind::Literal(t);
         }
         MatchKind::Skip
     }
@@ -5414,11 +5386,20 @@ impl Checker {
                     irref
                 }
                 Ty::Unknown => {
-                    let mut irref = true;
+                    // §4.1 — a STRUCTURAL sub-pattern (here a tuple) over an un-inferable element/
+                    // payload would destructure a value whose shape we can't prove → it traps at
+                    // runtime on a wrong shape (a trailing `_` cannot rescue it). Reject; annotate the
+                    // enclosing param. Still bind the sub-patterns (as Unknown) so the arm body does
+                    // not cascade into spurious "unknown name" errors.
+                    self.error(
+                        span,
+                        "cannot match a tuple pattern on a value of un-inferable type; annotate it"
+                            .to_string(),
+                    );
                     for sub in subs {
-                        irref &= self.bind_subpattern(sub, &Ty::Unknown, span);
+                        self.bind_subpattern(sub, &Ty::Unknown, span);
                     }
-                    irref
+                    false
                 }
                 other => {
                     self.error(
@@ -5480,6 +5461,16 @@ impl Checker {
                         }
                     }
                     None if ty.is_unknown() => {
+                        // §4.1 — a STRUCTURAL sub-pattern (here an enum/variant) over an un-inferable
+                        // element/payload tests a variant tag against a value whose type we can't
+                        // prove → it traps at runtime on a wrong shape (a trailing `_` cannot rescue
+                        // it). Reject; annotate the enclosing param. Still bind the payload (as
+                        // Unknown) so the arm body does not cascade into "unknown name" errors.
+                        self.error(
+                            span,
+                            "cannot match a variant pattern on a value of un-inferable type; annotate it"
+                                .to_string(),
+                        );
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
                         }
@@ -5636,10 +5627,10 @@ impl Checker {
             );
         }
         match kind {
-            MatchKind::Skip | MatchKind::OpenScrutinee => {
-                // Un-inferable scrutinee: accept the pattern shape permissively, binding everything
-                // as `Unknown`. Still scope so the caller can `pop_scope` uniformly. (`OpenScrutinee`
-                // differs from `Skip` only in `check_exhaustive`, where it requires a `_` wildcard.)
+            MatchKind::Skip => {
+                // Un-inferable scrutinee with only binding/`_` arms: accept the pattern shape
+                // permissively, binding everything as `Unknown`. Still scope so the caller can
+                // `pop_scope` uniformly. (A structural arm here was already rejected upstream by §4.1.)
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
@@ -5901,11 +5892,6 @@ impl Checker {
         }
         match kind {
             MatchKind::Skip => {}
-            // Literal/range arms over an un-inferable scrutinee are total only via a `_` wildcard
-            // (already short-circuited above when present) — reaching here means none was given.
-            MatchKind::OpenScrutinee => {
-                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
-            }
             MatchKind::Variants { label, variants } => {
                 let mut missing: Vec<String> = variants
                     .keys()

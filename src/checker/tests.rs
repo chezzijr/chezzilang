@@ -10490,3 +10490,85 @@ fn free_closure_concrete_nested_tuple_not_swept() {
         "enum E:\n    A\n    B\nfn main():\n    g := fn(x: (E, int)): match x:\n        (E.A, b): \"a\"\n        _: \"o\"\n    print(g((E.A, 1)))\n",
     );
 }
+
+// Phase 4a — a STRUCTURAL sub-pattern over an un-inferable (Unknown) element/payload
+// is rejected at `bind_subpattern` (the trap class: matching a tuple/variant shape on
+// a value whose type we can't pin). The bare-param match pins x to a tuple/Result/Option
+// with Unknown elements, so the nested E.A is structural-over-Unknown → reject.
+#[test]
+fn nested_tuple_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_ok_payload_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    Ok(E.A): \"a\"\n    _: \"o\"\nfn main(): print(g(Ok(5)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_some_payload_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    Some(E.A): \"a\"\n    _: \"o\"\nfn main(): print(g(Some(5)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_guarded_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x, c): match x:\n    (E.A, b) if c: \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9), true))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn nested_or_alt_subpattern_over_unknown_rejected() {
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b) | (E.B, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
+        "un-inferable type",
+    );
+}
+
+// Phase 4a — boundary: a concrete-element structural sub-pattern must NOT be swept up.
+#[test]
+fn concrete_nested_ok_subpattern_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn main():\n    g := fn(x: Result[E, str]): match x:\n        Ok(E.A): \"a\"\n        _: \"o\"\n    print(g(Ok(E.A)))\n",
+    );
+}
+
+// Phase 4b — a residual-Unknown scrutinee (a tuple-element binding) with STRUCTURAL arms
+// rejects (the top-level scrutinee arm goes through match_kind/reconstruct, not bind_subpattern).
+#[test]
+fn residual_unknown_top_level_structural_rejected() {
+    // Unannotated `x`: source #2 pins it to `(Unknown, Unknown)` from the `(a, b)` arm, so the
+    // tuple-element binding `a` is Unknown; the inner `match a:` is a top-level structural match on a
+    // residual-Unknown scrutinee → reject (caught by match_kind/reconstruct, not bind_subpattern).
+    entry_rejects(
+        "enum E:\n    A\n    B\ng := fn(x): match x:\n    (a, b): match a:\n        E.A: \"a\"\n        E.B: \"b\"\nfn main(): print(g((E.A, 1)))\n",
+        "un-inferable type",
+    );
+}
+
+#[test]
+fn residual_unknown_top_level_structural_annotated_accepts() {
+    entry_ok(
+        "enum E:\n    A\n    B\nfn classify(p: (E, int)) -> str:\n    a, b := p\n    return match a:\n        E.A: \"a\"\n        E.B: \"b\"\nfn main(): print(classify((E.A, 1)))\n",
+    );
+}
+
+// Phase 4b — heterogeneous literal arms over a residual-Unknown scrutinee now reject (the first
+// arm pins the literal kind; the `OpenScrutinee` accept-with-`_` path is gone).
+#[test]
+fn residual_unknown_hetero_literal_rejects() {
+    entry_rejects(
+        "g := fn(x): match x:\n    (a, b): match a:\n        1: \"x\"\n        \"b\": \"y\"\n        _: \"z\"\n    _: \"o\"\nfn main(): print(g((1, 2)))\n",
+        "literal of type str cannot match scrutinee of type int",
+    );
+}
