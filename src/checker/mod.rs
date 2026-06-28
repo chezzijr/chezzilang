@@ -3784,7 +3784,14 @@ impl Checker {
                 // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
                 // fn-typed variable) binds its unannotated params from the target's type (source #1).
                 let val_ty = if matches!(value.kind, ExprKind::Closure { .. }) {
+                    // Discover the target's type for checking-mode WITHOUT diagnosing it: inferring
+                    // an lvalue as an rvalue would run read-side gates (non-sendable-captured-binding
+                    // read) and double-infer a Field/Index receiver. `check_assign` below is the sole
+                    // validator of the target, so snapshot+truncate any errors this probe produces
+                    // (mirrors the generic-arg recovery idiom).
+                    let mark = self.errors.len();
                     let target_ty = self.infer(target);
+                    self.errors.truncate(mark);
                     if matches!(target_ty, Ty::Func { .. }) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
@@ -4508,8 +4515,15 @@ impl Checker {
         match value {
             Some(e) => {
                 // Checking-mode: a closure returned into a `fn`-typed return slot binds its
-                // unannotated params from the declared return type (source #1).
-                let ty = self.infer_arg(e, Some(&ret));
+                // unannotated params from the declared return type (source #1). A NON-closure return
+                // keeps plain `infer` (NOT `infer_value`): returning `nil` just makes a void fn — it
+                // is not "using nil as a value", so it must not get `infer_value`'s nil-rejection on
+                // top of check_return's own `function returns nothing` diagnostic.
+                let ty = if matches!(e.kind, ExprKind::Closure { .. }) {
+                    self.infer_arg(e, Some(&ret))
+                } else {
+                    self.infer(e)
+                };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, true) {
@@ -7379,6 +7393,13 @@ impl Checker {
                 }
                 self.scan_expr_for_pin(name, scrutinee, match_pin, member_pin);
                 for arm in arms {
+                    // Scope-awareness: an arm whose pattern BINDS `name` (a tuple/variant sub-position
+                    // or a bare catch-all of the same spelling) shadows the closure param inside the
+                    // guard + body — a `match <name>:` there reads that binding, not the param, so it
+                    // must NOT pin. Skip the shadowed arm's guard/body.
+                    if pattern_binds(&arm.pattern, name) {
+                        continue;
+                    }
                     if let Some(g) = &arm.guard {
                         self.scan_expr_for_pin(name, g, match_pin, member_pin);
                     }
@@ -7415,15 +7436,29 @@ impl Checker {
             ExprKind::Comprehension {
                 key, elem, clauses, ..
             } => {
-                if let Some(k) = key {
-                    self.scan_expr_for_pin(name, k, match_pin, member_pin);
-                }
-                self.scan_expr_for_pin(name, elem, match_pin, member_pin);
+                // Scope-awareness: a clause's `vars` shadow `name` for every LATER clause's
+                // iter/guards and for the key/elem. Scan each clause's iter (evaluated before this
+                // clause binds), then stop once a clause binds `name` — its own guards and everything
+                // downstream read the shadowing binding, not the param.
+                let mut shadowed = false;
                 for c in clauses {
-                    self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
-                    for g in &c.guards {
-                        self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                    if !shadowed {
+                        self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
                     }
+                    if c.vars.iter().any(|v| v == name) {
+                        shadowed = true;
+                    }
+                    if !shadowed {
+                        for g in &c.guards {
+                            self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                        }
+                    }
+                }
+                if !shadowed {
+                    if let Some(k) = key {
+                        self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, elem, match_pin, member_pin);
                 }
             }
             ExprKind::Unary { expr, .. } => {
@@ -7468,9 +7503,25 @@ impl Checker {
                 self.scan_expr_for_pin(name, then, match_pin, member_pin);
                 self.scan_expr_for_pin(name, els, match_pin, member_pin);
             }
-            // `?.`/`??` carriers are lowered before checking; `recover:` carries a block (statements,
-            // not in the closure-body single-expression grammar). Leaves (`Ident`/literals/`TypeApply`)
-            // have no child to scan.
+            // String interpolation: the `{…}` fragment expressions are not stored as child `Expr`s —
+            // they live inside the raw text and are produced on demand by the shared interpolation
+            // parser (the same one `check_interpolation` uses). Parse + scan them so a param pinned
+            // ONLY by a member access inside an interpolation (`"{x.f}"`) resolves via source #3. A
+            // malformed interpolation is ignored here (it is diagnosed by `check_interpolation`).
+            ExprKind::Str(raw) => {
+                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
+                    for chunk in &chunks {
+                        if let crate::interpolation::Chunk::Expr(frag, _) = chunk {
+                            self.scan_expr_for_pin(name, frag, match_pin, member_pin);
+                        }
+                    }
+                }
+            }
+            // `?.`/`??` carriers are lowered before checking. `recover:` carries a statement block
+            // (which can introduce its own bindings); it is NOT scanned — a param pinnable only from
+            // inside a `recover:` body stays un-inferable and requires an annotation (sound: this is
+            // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`TypeApply`/
+            // `RawStr`) have no child to scan.
             _ => {}
         }
     }
@@ -7542,6 +7593,13 @@ impl Checker {
     fn unique_member_owner(&self, member: &str) -> Option<Ty> {
         let mut found: Option<&String> = None;
         for (key, info) in &self.structs {
+            // Source #3 pins only from a USER type. The `Builtin`-origin native structs
+            // (Match/Response/ProcResult/…) are seeded into `self.structs` unconditionally at init
+            // regardless of imports, so scanning them would mis-pin a param to an unimported,
+            // unreferenced builtin (their fields like `end`/`code`/`status`). Skip them.
+            if info.origin == StructOrigin::Builtin {
+                continue;
+            }
             let has =
                 info.fields.iter().any(|(n, _)| n == member) || info.methods.contains_key(member);
             if has {
@@ -7578,6 +7636,12 @@ impl Checker {
             }
             _ => (None, None),
         };
+        // A `fn`-typed slot whose arity does NOT match: keep unannotated params silently `Unknown`
+        // here and let the call site's `assignable` check report the single arity diagnostic — do
+        // NOT route them through the free-closure scan (which would emit a spurious, misdirecting
+        // "cannot infer type of parameter").
+        let expected_arity_mismatch =
+            matches!(expected, Some(Ty::Func { params: p, .. }) if p.len() != params.len());
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
@@ -7620,6 +7684,10 @@ impl Checker {
                         // bare param) / source #3 (a uniquely-owned member access).
                         if let Some(t) = exp_params.as_ref().and_then(|ps| ps.get(i).cloned()) {
                             t
+                        } else if expected_arity_mismatch {
+                            // Arity mismatch against a `fn`-typed slot — stay `Unknown`; the call
+                            // site reports the mismatch (single diagnostic).
+                            Ty::Unknown
                         } else if let Some(t) = self.scan_free_closure_param(&p.name, body) {
                             t
                         } else {
@@ -12790,6 +12858,24 @@ fn lit_pattern_ty(lit: &LitPattern) -> Ty {
         LitPattern::Int(_) => Ty::Int,
         LitPattern::Str(_) => Ty::Str,
         LitPattern::Bool(_) => Ty::Bool,
+    }
+}
+
+/// Whether a match-arm pattern introduces a binding of `name` (so a free-closure body scan must treat
+/// `name` as shadowed inside that arm — see [`Checker::scan_expr_for_pin`]). Covers a tuple/variant
+/// sub-position `Ident` binding, an or-pattern alternative (all alternatives bind the same set), and a
+/// top-level bare catch-all of the same spelling (parsed as a nullary `Variant`).
+fn pattern_binds(p: &Pattern, name: &str) -> bool {
+    match p {
+        Pattern::Ident(s) => s == name,
+        // A nullary bare-name pattern (`Variant{ bindings: [] }`) is a catch-all binding when it
+        // names neither a qualified variant nor a payload — scope-conservatively, a same-spelling one
+        // shadows. A payload variant's bindings are sub-positions; recurse.
+        Pattern::Variant {
+            name: vn, bindings, ..
+        } => (bindings.is_empty() && vn == name) || bindings.iter().any(|b| pattern_binds(b, name)),
+        Pattern::Tuple(subs) | Pattern::Or(subs) => subs.iter().any(|s| pattern_binds(s, name)),
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => false,
     }
 }
 

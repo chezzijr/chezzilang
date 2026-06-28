@@ -10602,3 +10602,109 @@ fn annotated_free_closure_match_ok() {
         "enum E:\n    A\n    B\ng := fn(x: E): match x:\n    E.A: \"a\"\n    E.B: \"b\"\nfn main(): print(g(E.A))\n",
     );
 }
+
+// ===== Adversarial-review fixes (closure-param inference) =====
+
+// BUG 1 — the free-closure match-scrutinee scan (source #2) must be scope-aware: a `match x:` whose
+// scrutinee `x` is a SHADOWING binding introduced by an enclosing tuple/variant sub-pattern is NOT
+// the closure param, so it must not pin the param. Here the param `x` is never used (the inner
+// `match x:` reads the `(x, _)` tuple binding), so the param is genuinely un-inferable → annotate.
+// Pre-fix: param wrongly pinned to `E` → spurious call-site reject "expected E, found str".
+#[test]
+fn free_closure_shadowing_match_does_not_pin_param() {
+    let errs = check_entry(
+        "enum E:\n    A\n    B\nfn foo() -> (E, int):\n    return (E.A, 1)\ng := fn(x): match foo():\n    (x, _): match x:\n        E.A: 1\n        E.B: 2\nfn main(): print(g(\"hello\"))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 'x'")),
+        "expected the annotate-param error (param is un-inferable), got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("expected E")),
+        "param must NOT be pinned to E from the shadowing inner match, got: {errs:?}"
+    );
+}
+
+// BUG 2 — a closure literal passed to a `fn`-typed slot with MISMATCHED arity must keep its params
+// silently `Unknown` (the call site's assignability check reports the single arity diagnostic); it
+// must NOT also route through the free-closure scan and emit "cannot infer type of parameter".
+#[test]
+fn closure_arity_mismatch_single_diagnostic() {
+    let errs = check_entry(
+        "fn g(f: fn(int) -> int) -> int:\n    return f(0)\nfn main(): print(g(fn(a, b): a + b))\n",
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("cannot infer type of parameter")),
+        "arity mismatch must not emit the annotate-param error, got: {errs:?}"
+    );
+    assert!(
+        !errs.is_empty(),
+        "the call-site arity/assignability mismatch must still be reported, got: {errs:?}"
+    );
+}
+
+// BUG 3 — source #3 (unique member access) must fire even when the only pinning use of the param is
+// inside a string-interpolation fragment (`"{x.name}"`). Pre-fix the scan was opaque to `Str` so the
+// param was reported un-inferable.
+#[test]
+fn free_closure_pinned_by_member_in_interpolation() {
+    entry_ok(
+        "struct P:\n    name: str\nf := fn(x): \"hello {x.name}\"\nfn main(): print(f(P(\"bob\")))\n",
+    );
+}
+
+// BUG 4/6 — a non-closure return expression must keep using plain `infer` (not `infer_value`): a
+// `return <void-call>` must report ONLY "function returns nothing", not ALSO the value-position
+// nil-rejection.
+#[test]
+fn return_void_call_single_diagnostic() {
+    let errs = check_entry("fn f():\n    return print(\"x\")\nfn main(): f()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("function returns nothing")),
+        "expected the 'function returns nothing' error, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("returns no value (nil)")),
+        "a return expr must not get the value-position nil rejection, got: {errs:?}"
+    );
+}
+
+// BUG 5 — source #3 must scan only USER structs; the always-seeded `Builtin`-origin native structs
+// (Match/Response/ProcResult) must never pin a param. `end` is a field of Match (Builtin) and of no
+// user struct, so the param is un-inferable → annotate, NOT pinned to the unimported `Match`.
+#[test]
+fn free_closure_member_does_not_pin_builtin_struct() {
+    let errs = check_entry("f := fn(s): s.end\nfn main(): print(f(5))\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type of parameter 's'")),
+        "expected the annotate-param error, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("Match")),
+        "param must NOT be pinned to the seeded Builtin struct Match, got: {errs:?}"
+    );
+}
+
+// BUG 7 — an assignment lvalue target must not be inferred as an rvalue (read-side gates / receiver
+// double-inference). A closure assigned to a bad field must report the field error ONCE.
+#[test]
+fn closure_assign_bad_field_single_error() {
+    let errs = check_entry(
+        "struct Box:\n    cb: fn(int) -> int\nfn main():\n    b := Box(fn(x: int) -> int: x)\n    b.nope = fn(x): x + 1\n",
+    );
+    let field_errs = errs
+        .iter()
+        .filter(|e| e.message.contains("no field 'nope'"))
+        .count();
+    assert_eq!(
+        field_errs, 1,
+        "the bad-field error must be reported exactly once, got: {errs:?}"
+    );
+}
