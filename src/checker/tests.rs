@@ -10347,3 +10347,76 @@ fn reserved_callables_all_have_builtin_sig() {
     assert!(builtin_sig("Ok").is_none());
     assert!(builtin_sig("totally_not_a_builtin").is_none());
 }
+
+// ============================================================================
+// Closure-parameter type inference (v1) — see docs/plan 2026-06-28.
+// ============================================================================
+
+// Phase 1a — expected type from a native HOF that routes through `check_args`
+// (`Shared.update`): an unannotated closure param binds to the element type, so
+// a body use incompatible with it is rejected (was accepted: param = Unknown).
+#[test]
+fn closure_param_inferred_from_shared_update_conflict_rejected() {
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_param_inferred_from_shared_update_ok() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
+    );
+}
+
+// Phase 1b — native list HOFs (`infer_list_hof`): the closure param binds to the
+// element type, so a body use incompatible with it is rejected.
+#[test]
+fn map_closure_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): x.upper())\n    print(ys)\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn closure_param_inferred_from_map_ok() {
+    entry_ok("fn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): x + 1)\n    print(ys)\n");
+}
+
+#[test]
+fn closure_param_inferred_from_filter_conflict_rejected() {
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    ys := xs.filter(fn(x): x.upper() == \"A\")\n    print(ys)\n",
+        "has no method 'upper'",
+    );
+}
+
+#[test]
+fn rwshared_read_len_ok() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",
+    );
+}
+
+// Phase 1c — generic struct constructor: a `fn`-typed field's closure arg is
+// re-inferred against the SUBSTITUTED field type, so its param binds concretely.
+const MAPPED_DEFS: &str = "struct Mapped[I: Iterator[T], T, U]:\n    inner: I\n    f: fn(T) -> U\n    fn next(self) -> Option[U]:\n        match self.inner.next():\n            Some(x):\n                return Some(self.f(x))\n            None:\n                return None\n";
+
+#[test]
+fn closure_param_inferred_in_generic_struct_ctor_ok() {
+    entry_ok(&format!(
+        "{MAPPED_DEFS}fn main():\n    m := Mapped([1, 2, 3].iter(), fn(x): x * 2)\n    print(m.next())\n"
+    ));
+}
+
+#[test]
+fn closure_param_inferred_in_generic_struct_ctor_conflict_rejected() {
+    entry_rejects(
+        &format!(
+            "{MAPPED_DEFS}fn main():\n    m := Mapped([1, 2, 3].iter(), fn(x): x.upper())\n    print(m.next())\n"
+        ),
+        "has no method 'upper'",
+    );
+}

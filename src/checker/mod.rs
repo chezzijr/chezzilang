@@ -6161,7 +6161,9 @@ impl Checker {
             }
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => {
-                self.infer_closure(params, ret.as_ref(), body)
+                // No expected type at the generic `infer` seam — free-closure inference (sources
+                // #2/#3) and the ambiguity check happen inside `infer_closure`.
+                self.infer_closure(params, ret.as_ref(), body, None)
             }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
@@ -7318,16 +7320,35 @@ impl Checker {
         }
     }
 
-    fn infer_closure(&mut self, params: &[Param], ret: Option<&Type>, body: &Expr) -> Ty {
+    fn infer_closure(
+        &mut self,
+        params: &[Param],
+        ret: Option<&Type>,
+        body: &Expr,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a
+        // `fn(..)` whose arity matches, an UNANNOTATED param binds to the expected param type
+        // (checking-mode), and a non-`Unknown` expected return becomes the body's return context.
+        // On an arity mismatch the params stay `Unknown` here and the call site's `assignable` check
+        // reports the mismatch (single diagnostic).
+        let (exp_params, exp_ret): (Option<Vec<Ty>>, Option<Ty>) = match expected {
+            Some(Ty::Func { params: p, ret: r }) if p.len() == params.len() => {
+                (Some(p.clone()), Some((**r).clone()))
+            }
+            _ => (None, None),
+        };
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
-        // errors). Mirrors `check_fn_body`'s `current_ret` handling.
+        // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
+        // supplies that context when the closure is unannotated.
         let declared_ret = ret
             .map(|t| self.resolve_type(t, body.span))
+            .or_else(|| exp_ret.clone().filter(|r| !r.is_unknown()))
             .unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
@@ -7337,11 +7358,13 @@ impl Checker {
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 // A closure `ref T` param is a `Ref[T]` box, exactly like a named-fn `ref` param
                 // (charge 3): the body's reads/writes were lowered to `.get()`/`.set()` by desugar,
                 // and a `ref` arg aliases at the call site. `check_ref_ty` rejects a non-boxable
-                // pointee. Without a `ref`, the param keeps its by-value type (or `Unknown`).
+                // pointee. Without a `ref`, the param keeps its by-value type, or — for an
+                // unannotated param — the expected (slot) param type (source #1), else `Unknown`.
                 let ty = match &p.ty {
                     Some(t) if p.is_ref => {
                         self.check_ref_ty(t, body.span);
@@ -7351,7 +7374,10 @@ impl Checker {
                         )
                     }
                     Some(t) => self.resolve_type(t, body.span),
-                    None => Ty::Unknown,
+                    None => exp_params
+                        .as_ref()
+                        .and_then(|ps| ps.get(i).cloned())
+                        .unwrap_or(Ty::Unknown),
                 };
                 self.declare(&p.name, ty.clone());
                 if p.is_ref {
@@ -7903,7 +7929,7 @@ impl Checker {
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct/newtype ctor + a generic free fn.
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
@@ -7918,12 +7944,7 @@ impl Checker {
         self.recover_index_args(&sig.type_params, &mut sub, span);
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{method}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(method, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &sub, span);
@@ -7979,7 +8000,7 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -7990,12 +8011,7 @@ impl Checker {
         self.recover_iter_elems(&tps, &mut sub, span);
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -8030,7 +8046,7 @@ impl Checker {
             self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != field_tys.len() {
             self.check_arity(name, field_tys.len(), args, span);
         }
@@ -8041,12 +8057,7 @@ impl Checker {
         self.recover_iter_elems(&tps, &mut sub, span);
         for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -8081,7 +8092,7 @@ impl Checker {
             self.check_args(name, std::slice::from_ref(underlying), args, span);
             return Ty::NewType(key.to_string(), Vec::new());
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         if arg_tys.len() != 1 {
             self.check_arity(name, 1, args, span);
         }
@@ -8092,12 +8103,7 @@ impl Checker {
         self.recover_iter_elems(tps, &mut sub, span);
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(tps, &sub, span);
         let targs_out = tps
@@ -8604,7 +8610,7 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+                    let arg_tys = self.infer_generic_arg_tys(args);
                     if arg_tys.len() != field_tys.len() {
                         self.check_arity(name, field_tys.len(), args, span);
                     }
@@ -8615,14 +8621,7 @@ impl Checker {
                     self.recover_iter_elems(&tps, &mut sub, span);
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        if !self.assignable(&expected, actual) {
-                            self.error(
-                                arg.span,
-                                format!(
-                                    "argument to '{name}' has type {actual}, expected {expected}"
-                                ),
-                            );
-                        }
+                        self.check_generic_arg(name, &expected, actual, arg);
                     }
                     self.enforce_bounds(&tps, &sub, span);
                     let targs = tps
@@ -9363,7 +9362,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Unknown),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Unknown,
                     Ty::Func { params, ret }
@@ -9390,7 +9393,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let pt = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Bool),
+                };
+                let pt = self.infer_arg(&args[0], Some(&expected));
                 match pt {
                     Ty::Unknown => Ty::list(elem.clone()),
                     Ty::Func { params, ret }
@@ -9419,8 +9426,12 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Unknown;
                 }
-                let init = self.infer(&args[0]);
-                let ft = self.infer(&args[1]);
+                let init = self.infer_value(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![init.clone(), elem.clone()],
+                    ret: Box::new(init.clone()),
+                };
+                let ft = self.infer_arg(&args[1], Some(&expected));
                 match ft {
                     Ty::Unknown => {
                         // Closure type unknown: fall back to the init type as the result.
@@ -9455,7 +9466,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Nil;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone(), elem.clone()],
+                    ret: Box::new(Ty::Int),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
                     Ty::Func { params, ret }
@@ -9489,7 +9504,11 @@ impl Checker {
                     self.infer_all(args);
                     return Ty::Nil;
                 }
-                let ft = self.infer(&args[0]);
+                let expected = Ty::Func {
+                    params: vec![elem.clone()],
+                    ret: Box::new(Ty::Unknown),
+                };
+                let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
                     Ty::Func { params, ret }
@@ -9613,6 +9632,67 @@ impl Checker {
         self.check_args_range_w(name, params, min_params, args, span, false);
     }
 
+    /// Infer a single call argument in *checking mode*: if the argument is a closure literal and the
+    /// expected slot type is a `fn(..)`, infer the closure WITH that expected type (source #1 — so its
+    /// unannotated params bind to the expected param types and call sites are checked); otherwise it is
+    /// the ordinary bottom-up [`Checker::infer_value`]. The single seam every `fn`-typed slot routes
+    /// through, so closure-detection lives in one place.
+    fn infer_arg(&mut self, arg: &Expr, expected: Option<&Ty>) -> Ty {
+        if let ExprKind::Closure { params, ret, body } = &arg.kind
+            && matches!(expected, Some(Ty::Func { .. }))
+        {
+            return self.infer_closure(params, ret.as_ref(), body, expected);
+        }
+        self.infer_value(arg)
+    }
+
+    /// First-pass bottom-up inference of a generic ctor/call's args (the pass that drives unification).
+    /// A closure arg is inferred WITHOUT an expected type here (its params would be `Unknown`); its body
+    /// errors — and the phase-5 "cannot infer parameter" error — are SUPPRESSED, because the per-arg
+    /// check ([`Checker::check_generic_arg`]) re-infers each closure against its SUBSTITUTED expected
+    /// type and reports cleanly there (mirrors the `RwShared.read` recovery-reinfer idiom). Every
+    /// generic ctor/variant/fn/method path uses this pair so closure params are pinned by the field/
+    /// param type, not left `Unknown`.
+    fn infer_generic_arg_tys(&mut self, args: &[Expr]) -> Vec<Ty> {
+        args.iter()
+            .map(|a| {
+                if matches!(a.kind, ExprKind::Closure { .. }) {
+                    let mark = self.errors.len();
+                    let t = self.infer_value(a);
+                    self.errors.truncate(mark);
+                    t
+                } else {
+                    self.infer_value(a)
+                }
+            })
+            .collect()
+    }
+
+    /// Per-argument check for a generic ctor/call/method. `expected` is the arg's SUBSTITUTED declared
+    /// type; `fallback` is its first-pass inferred type. A closure arg is re-inferred in checking-mode
+    /// against `expected` (binding its unannotated params + reporting body errors here, since
+    /// [`Checker::infer_generic_arg_tys`] suppressed them); other args keep `fallback`. Then assert
+    /// assignability with the uniform "argument to '<name>'" diagnostic.
+    fn check_generic_arg(&mut self, name: &str, expected: &Ty, fallback: &Ty, arg: &Expr) {
+        if matches!(arg.kind, ExprKind::Closure { .. }) {
+            // Re-infer the closure in checking-mode against the substituted expected type: this binds
+            // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
+            // suppressed). The assignability check below still uses the first-pass `fallback`
+            // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
+            // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
+            // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
+            // re-check is the real enforcement; the `fallback` check still catches an arity or
+            // annotated-return mismatch.
+            self.infer_arg(arg, Some(expected));
+        }
+        if !self.assignable(expected, fallback) {
+            self.error(
+                arg.span,
+                format!("argument to '{name}' has type {fallback}, expected {expected}"),
+            );
+        }
+    }
+
     /// [`Checker::check_args_range`] with an explicit `widen` flag — see [`Checker::assignable_w`].
     fn check_args_range_w(
         &mut self,
@@ -9635,7 +9715,7 @@ impl Checker {
             );
         }
         for (i, arg) in args.iter().enumerate() {
-            let at = self.infer_value(arg);
+            let at = self.infer_arg(arg, params.get(i));
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)
             {
@@ -11255,7 +11335,7 @@ impl Checker {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
@@ -11274,12 +11354,7 @@ impl Checker {
         // two positions with conflicting types, e.g. `max(1, "x")`).
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &subst_map);
-            if !self.assignable(&expected, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{name}' has type {actual}, expected {expected}"),
-                );
-            }
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         subst(&sig.ret, &subst_map)
     }
@@ -11321,7 +11396,7 @@ impl Checker {
                 ),
             );
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_value(a)).collect();
+        let arg_tys = self.infer_generic_arg_tys(args);
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
@@ -11349,12 +11424,7 @@ impl Checker {
         }
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
-            if !self.assignable(&want, actual) {
-                self.error(
-                    arg.span,
-                    format!("argument to '{method}' has type {actual}, expected {want}"),
-                );
-            }
+            self.check_generic_arg(method, &want, actual, arg);
         }
         subst(ret, &mmap)
     }
