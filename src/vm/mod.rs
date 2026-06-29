@@ -13961,16 +13961,22 @@ impl Vm {
         v
     }
 
-    /// `List(it)` → a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
+    /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
+    /// a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
     fn builtin_list(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let [one] = args else {
-            return Err(self.err(
-                "List() takes exactly one iterable argument — use [] for an empty list".to_string(),
-                span,
-            ));
+        let items = match args {
+            [] => Vec::new(),
+            [one] => {
+                let it = self.unwrap_newtype_value(*one);
+                self.drain_iterable(it, span)?
+            }
+            _ => {
+                return Err(self.err(
+                    format!("List() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                ));
+            }
         };
-        let it = self.unwrap_newtype_value(*one);
-        let items = self.drain_iterable(it, span)?;
         Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
     }
 
@@ -13978,11 +13984,16 @@ impl Vm {
     /// `{k: v}` literal). Mirrors `interp::Interp::builtin_map`. A struct key's `hash()` re-enters the
     /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
     fn builtin_map(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let [one] = args else {
-            return Err(self.err(
-                "Map() takes exactly one iterable argument — use {} for an empty map".to_string(),
-                span,
-            ));
+        let one = match args {
+            // `Map()` → a fresh empty map (the `Map[K, V]()` turbofish form; mirrors `Set()`).
+            [] => return Ok(Value::Obj(self.heap.alloc(Obj::Map(MapData::default())))),
+            [one] => one,
+            _ => {
+                return Err(self.err(
+                    format!("Map() expects 0 or 1 argument(s), got {}", args.len()),
+                    span,
+                ));
+            }
         };
         let it = self.unwrap_newtype_value(*one);
         // Cast-unwrapping a generic newtype over `Map[K, V]` (`Tally[T] = Map[T, int]`) yields the
@@ -22551,6 +22562,23 @@ main()";
     fn golden_hello_chz_matches_expected() {
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run(include_str!("../../examples/hello.chz")), expected);
+    }
+
+    /// Container-constructor golden: `examples/container_ctor.chz` exercises `List[T]()` / `Map[K,V]()`
+    /// / `Set[T]()` turbofish + bare 0-arg `List()`/`Map()`. Type args erase at runtime (an empty
+    /// `List[int]()` is just an empty list), so VM and interp are byte-identical — this is the
+    /// two-engine parity gate for the constructor-turbofish feature.
+    #[test]
+    fn golden_container_ctor_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/container_ctor.chz");
+        let expected = include_str!("../../examples/container_ctor.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from container_ctor.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on container_ctor");
     }
 
     /// Inline-expr fn body golden: `examples/inline_fn.chz` exercises Option A (inline-only) — a

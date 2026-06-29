@@ -64,7 +64,14 @@ impl LoadedModule {
     /// module-keyed (they keep their bare name, resolvable bare wherever the std module is imported), so
     /// the qualification pre-pass skips std modules exactly like the synthetic native ones.
     pub fn is_std(&self) -> bool {
-        self.native.is_some() || self.dotted.first().map(String::as_str) == Some("std")
+        self.native.is_some()
+            || self.dotted.first().map(String::as_str) == Some("std")
+            // Path-aware: a std file checked/run AS THE ENTRY (`chezzi check std/foo.chz`) has an
+            // empty `dotted` path, so the two checks above miss it — yet its body relies on stdlib
+            // auto-privilege (e.g. bare `RwShared`/`Map` field types in std/concurrency/collection.chz).
+            // Recognise it by its file location under `std_root()` so the entry `check`/`run` path
+            // grants the same auto-license the import path does (no false "unknown type" diagnostics).
+            || path_under_std_root(&self.id.0)
     }
 
     /// Human label for messages: the dotted name, or the file stem for the entry.
@@ -155,6 +162,17 @@ pub fn std_root() -> PathBuf {
     match std::env::var_os("CHEZZI_STD") {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std"),
+    }
+}
+
+/// Whether `p` lives under the stdlib directory ([`std_root`]). Used so a std file checked/run as the
+/// ENTRY (with no dotted import path) is still recognised as stdlib. Canonicalizes both sides so a
+/// relative entry path (`std/foo.chz`) and an absolute `std_root` compare correctly; a path that
+/// fails to canonicalize (e.g. a synthetic/native id) is conservatively NOT under the std root.
+fn path_under_std_root(p: &Path) -> bool {
+    match (p.canonicalize(), std_root().canonicalize()) {
+        (Ok(pc), Ok(rc)) => pc.starts_with(&rc),
+        _ => false,
     }
 }
 

@@ -111,9 +111,9 @@ the `--parallel` airlock by value (deep copy — a fresh independent buffer, lik
 | str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
 | bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
 | bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
-| any iterable → list | `List(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type |
-| any iterable → set | `Set(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set()` (0 args) is the empty set |
-| iterable of 2-tuples → map | `Map(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable` |
+| any iterable → list | `List(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type. `List[T]()` / `List()` are the empty forms. |
+| any iterable → set | `Set(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set[T]()` / `Set()` (0 args) is the empty set |
+| iterable of 2-tuples → map | `Map(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable`. `Map[K, V]()` / `Map()` are the empty forms. |
 
 `.encode()`/`.decode()` are **UTF-8 only** — there is no encoding-name argument (latin1/utf16 are an
 explicit future non-goal). `"héllo".encode().decode() == "héllo"` round-trips through a multi-byte
@@ -122,11 +122,16 @@ char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), n
 `List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
 `list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
 `range`, and a user struct with `next(self) -> Option[T]`. They do **not** require a formal
-`Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The argument is
-**required** (no zero-arg form): an empty `List`/`Map` is the `[]`/`{}` literal, so `List()` / `Map()`
-are checker errors directing you there (`Set()` keeps its empty-set 0-arg form). `Map(it)`'s element
-must be **exactly a 2-tuple** `(K, V)` — a non-2-tuple is a **static** type error (caught by the
-checker, not at runtime).
+`Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
+**container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
+**turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
+zero-arg forms produce an empty container whose type is refined from the expected type or first use
+(e.g. `xs: List[int] = List()`, then `xs.push(1)`) — exactly the inference that already served `Set()`
+and the `[]` / `{}` literals. (The `[]` / `{}` literals remain the idiomatic empty forms; the
+constructors are there for when a literal is awkward, e.g. binding a type parameter.) A turbofish with
+an iterable argument checks the elements against the type arg: `List[int]([1, 2])` is fine,
+`List[int](["a"])` is a static error. `Map(it)`'s element must be **exactly a 2-tuple** `(K, V)` — a
+non-2-tuple is a **static** type error (caught by the checker, not at runtime).
 
 > **`Map(it)` vs `xs.map(f)` — these do NOT clash.** `Map(pairs)` is the free-function **constructor**
 > (a bare-name call). `xs.map(f)` is the `List` higher-order **method** (a field/method call on a

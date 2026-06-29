@@ -8475,8 +8475,154 @@ fn constructor_iter_types() {
 }
 
 #[test]
-fn list_zero_arg_rejected() {
-    rejects("fn main():\n    a := List()\nmain()\n", "[]");
+fn container_ctor_turbofish_binds_elem_type() {
+    // `List[T]()` / `Map[K,V]()` / `Set[T]()` — turbofish on the container constructors yields a
+    // typed empty container (no longer "takes no type arguments").
+    ok(
+        "a: List[int] = List[int]()\nb: Map[str, int] = Map[str, int]()\nc: Set[int] = Set[int]()\n",
+    );
+    // The turbofish actually BINDS the element type (not Unknown): a mismatched annotation rejects.
+    rejects("a: List[str] = List[int]()\n", "List[int]");
+    rejects("a: Set[str] = Set[int]()\n", "Set[int]");
+    rejects("a: Map[str, str] = Map[str, int]()\n", "Map[str, int]");
+}
+
+#[test]
+fn container_ctor_turbofish_checks_elements() {
+    // `List[int]([1, 2])` checks supplied elements against the turbofish elem type.
+    ok("x := List[int]([1, 2])\n");
+    ok("x := Set[int]([1, 2])\n");
+    ok("x := Map[str, int]([(\"a\", 1)])\n");
+    rejects("x := List[int]([\"a\"])\n", "expected");
+    rejects("x := Set[int]([\"a\"])\n", "expected");
+    rejects("x := Map[str, int]([(\"a\", \"b\")])\n", "expected");
+}
+
+#[test]
+fn container_ctor_turbofish_arity() {
+    rejects(
+        "x := List[int, str]()\n",
+        "List[T]() takes exactly one type argument",
+    );
+    rejects(
+        "x := Set[int, str]()\n",
+        "Set[T]() takes exactly one type argument",
+    );
+    rejects(
+        "x := Map[int]()\n",
+        "Map[K, V]() takes exactly two type arguments",
+    );
+}
+
+#[test]
+fn list_map_zero_arg_now_legal() {
+    // A still allows the literal `[]`/`{}`, but bare `List()`/`Map()` are now legal too (mirror
+    // `Set()`), refined by the expected type / first use.
+    ok("a: List[int] = List()\nb: Map[str, int] = Map()\n");
+    // Refined by first use, like `Set()`.
+    ok("e := List()\ne.push(1)\nprint(e.len())\n");
+}
+
+// ===== B: un-inferable type-parameter deadlock diagnostic (generic ctor / fn with closure arg) =====
+
+#[test]
+fn uninferable_closure_param_ctor_emits_clear_error() {
+    // Both inference sources are empty: the `[]` gives no element type AND the comparator params
+    // are unannotated → a genuine two-way deadlock. The error must NAME the type parameter, not
+    // leak the misleading "cannot compare T and T" from inside the lambda.
+    let errs = check_src(
+        "struct H[T]:\n    data: List[T]\n    less: fn(T, T) -> bool\nx := H([], fn(a, b): a < b)\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "expected an inference-deadlock error, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("cannot compare")),
+        "the misleading 'cannot compare' must be suppressed, got: {errs:?}"
+    );
+}
+
+#[test]
+fn uninferable_closure_param_free_fn_emits_clear_error() {
+    // Same deadlock through a free generic function with a closure parameter.
+    let errs = check_src(
+        "fn build[T](xs: List[T], less: fn(T, T) -> bool) -> int:\n    return 0\nx := build([], fn(a, b): a < b)\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "expected an inference-deadlock error, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("cannot compare")),
+        "the misleading 'cannot compare' must be suppressed, got: {errs:?}"
+    );
+}
+
+#[test]
+fn inferable_closure_ctor_forms_still_ok() {
+    // The guard must NOT over-fire: every form that pins `T` from SOME source stays clean.
+    // Turbofish pins T.
+    ok(
+        "struct H[T]:\n    data: List[T]\n    less: fn(T, T) -> bool\nx := H[int]([], fn(a, b): a < b)\n",
+    );
+    // Elements pin T.
+    ok(
+        "struct H[T]:\n    data: List[T]\n    less: fn(T, T) -> bool\nx := H([1, 2, 3], fn(a, b): a < b)\n",
+    );
+    // Annotated closure params pin T backward.
+    ok(
+        "struct H[T]:\n    data: List[T]\n    less: fn(T, T) -> bool\nx := H([], fn(a: int, b: int): a < b)\n",
+    );
+}
+
+#[test]
+fn uninferable_guard_does_not_overfire_on_harmless_closure_body() {
+    // REGRESSION (confirmed bug #1): the un-inferable-closure-param guard must fire ONLY on a
+    // genuine deadlock (a body that NEEDS `T` known, e.g. `a < b`), not whenever an unannotated
+    // closure-param slot textually mentions an unbound `T`. A body that imposes NO constraint on
+    // `T` (e.g. `print(x)` / a constant) stays inferable-free and must keep type-checking clean —
+    // these compiled and ran on `main`; rejecting them breaks the don't-reject-valid-code contract.
+    ok("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): print(x))\n");
+    ok(
+        "fn mapper[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:\n    return []\nx := mapper([], fn(x): 42)\n",
+    );
+    // An UNRELATED body error (not about `T`) must surface as itself, not be masked by the
+    // inference-deadlock message.
+    let errs =
+        check_src("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): nope)\n");
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "an unrelated body error must not be reported as an inference deadlock, got: {errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("nope")
+            || e.message.to_lowercase().contains("undefined")
+            || e.message.to_lowercase().contains("unknown")),
+        "expected the real undefined-name error to surface, got: {errs:?}"
+    );
+}
+
+#[test]
+fn uninferable_closure_param_qualified_ctor_emits_clear_error() {
+    // REGRESSION (confirmed bug #2): the module-qualified generic struct-ctor path (`c.Heap(...)`)
+    // must get the SAME clear inference-deadlock message as the bare ctor / free-fn paths, not leak
+    // the misleading "cannot compare T and T" from inside the lambda.
+    let errs =
+        check_entry("import std.collections as c\nx := c.Heap([], fn(a, b): a < b)\nprint(x)\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "expected an inference-deadlock error from the qualified ctor, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("cannot compare")),
+        "the misleading 'cannot compare' must be suppressed on the qualified path, got: {errs:?}"
+    );
 }
 
 #[test]
@@ -9517,6 +9663,47 @@ fn all_shipped_examples_typecheck() {
     assert!(
         failures.is_empty(),
         "these shipped examples fail `chezzi check`:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn all_std_files_standalone_typecheck() {
+    // Std modules rely on stdlib AUTO-PRIVILEGE (e.g. `std/concurrency/collection.chz` uses bare
+    // `RwShared[Map[K, V]]` field types with no `import` of its own). That privilege used to be
+    // granted ONLY on the import path, so opening a std file directly (`chezzi check std/foo.chz`,
+    // or an editor/LSP) reported phantom "unknown type 'RwShared'" errors. The path-aware
+    // `LoadedModule::is_std` now grants it on the standalone-entry path too — assert every shipped
+    // `std/**/*.chz` type-checks clean as an ENTRY (build_graph + check_graph, mirroring `chezzi check`).
+    fn collect_chz(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("std dir readable").flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_chz(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("chz") {
+                out.push(p);
+            }
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std");
+    let mut entries = Vec::new();
+    collect_chz(&dir, &mut entries);
+    entries.sort();
+    assert!(!entries.is_empty(), "no std files found in {dir:?}");
+    let mut failures = Vec::new();
+    for path in &entries {
+        match crate::resolver::build_graph(path) {
+            Ok(graph) => {
+                if let Err(errs) = crate::checker::check_graph(&graph) {
+                    failures.push(format!("{}: {:?}", path.display(), errs));
+                }
+            }
+            Err(e) => failures.push(format!("{}: resolve/parse error: {e}", path.display())),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these std files fail standalone `chezzi check`:\n{}",
         failures.join("\n")
     );
 }

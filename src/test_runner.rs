@@ -477,14 +477,21 @@ struct Suite:
 
     #[test]
     fn d1_dogfood_example_tests_pass() {
-        // The committed `examples/*_test.chz` files (membership/operators/match_or + the suite) must
-        // all pass under the runner — the dogfood guard.
+        // The committed `examples/*_test.chz` files (membership/operators/match_or + the suite, plus
+        // the per-stdlib-module suites) must all pass under the runner — the dogfood guard. The
+        // `std.*` module test files exercise each public function of their module (Heap/Deque/Counter,
+        // datetime, path, the concurrent collections), so a regression in a std function no golden
+        // example happens to call is now caught by `cargo test`, not just by `chezzi test`.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
         for name in [
             "membership_test.chz",
             "operators_test.chz",
             "match_or_test.chz",
             "suite_test.chz",
+            "collections_test.chz",
+            "concurrent_collection_test.chz",
+            "datetime_test.chz",
+            "path_test.chz",
         ] {
             let f = root.join(name);
             let report = run_tests(&f);

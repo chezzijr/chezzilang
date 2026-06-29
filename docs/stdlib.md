@@ -31,9 +31,9 @@ Conventions used below:
 
 | Form | Result | Notes |
 |------|--------|-------|
-| `List[T]()` / `List(xs)` | `List[T]` | Empty list / convert an iterable to a list. List literal: `[a, b, c]`. |
-| `Map[K, V]()` / `{}` | `Map[K, V]` | Empty map. Map literal: `{k: v, ...}`. |
-| `Set(...elems)` | `Set[T]` | Set from elements. Empty set is `Set()` (`{}` is the empty **map**). |
+| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` is refined from the expected type / first use, like `Set()`) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
+| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` is refined from the expected type / first use). Map literal: `{k: v, ...}`. |
+| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
 | `bytes(s)` | `bytes` | UTF-8 encode a `str` (same as `s.encode()`). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 

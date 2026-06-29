@@ -1,0 +1,37 @@
+# Container constructors: List[T]() / Map[K, V]() / Set[T]() turbofish + bare 0-arg forms.
+# Type args erase at runtime (an empty List[int]() is just an empty list), so the VM and the
+# interpreter produce identical output — this is the two-engine parity gate for the feature.
+
+# Turbofish, empty:
+a := List[int]()
+a.push(1)
+a.push(2)
+print(a.len())
+
+# Bare 0-arg with an annotation (refined from the expected type, like Set()):
+b: List[int] = List()
+b.push(9)
+print(b.len())
+
+# Turbofish with an iterable argument (elements checked against the type arg):
+c := List[int]([1, 2, 3])
+print(c.len())
+
+# Map[K, V]() turbofish, empty:
+m := Map[str, int]()
+m["x"] = 1
+m["y"] = 2
+print(m["x"])
+print(m.len())
+
+# Bare Map() with an annotation:
+n: Map[str, int] = Map()
+n["k"] = 5
+print(n.len())
+
+# Set[T]() turbofish (dedupes):
+s := Set[int]()
+s.add(3)
+s.add(3)
+s.add(4)
+print(s.len())
