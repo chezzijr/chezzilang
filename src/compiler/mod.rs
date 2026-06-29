@@ -3204,6 +3204,40 @@ impl Compiler {
                     return Ok(());
                 }
             }
+            // `module.Type.method(args)` → QUALIFIED static method call on a struct/enum reached
+            // through a bound module name. The qualified-variant arm ran first (variant-first), so a
+            // variant always wins; here the member is a STATIC method (the checker validated it). Emit
+            // the SAME `Op::CallStatic` (NO receiver pushed) the bare `Type.method()` form emits, keyed
+            // by the type's module-scoped runtime key — byte-identical bytecode regardless of spelling.
+            if let ExprKind::Field {
+                obj: inner,
+                name: tname,
+                ..
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner.kind
+                && fc.resolve_local(mname).is_none()
+                && !fc.captures(mname)
+                && let Some(&tidx) = self.imported_modules.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(tname))
+                && let key = self.type_key(tidx, tname)
+                && self.static_methods.contains(&static_key(&key, name))
+            {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(
+                    Op::CallStatic {
+                        type_key: key,
+                        method: name.clone(),
+                        argc: args.len(),
+                    },
+                    span,
+                );
+                return Ok(());
+            }
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
             // below. Gated like the value form: an unbound enum name dotted with one of its variants.
             // The enum name resolves to its bare-visible runtime key (`enum_bare_key`).

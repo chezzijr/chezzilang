@@ -1965,7 +1965,20 @@ print(p)                         # Point(x=1, y=2)  — bare name, no `::`
 import Point from core.geo       # named import → bare use
 q := Point(3, 4)
 import Point as Pt from core.geo # rename (user types only; FFI widths can't be renamed)
+
+c0 := geo.Counter.zero()         # qualified type as a STATIC-method receiver
+col := geo.Color.first()         # enum static via the qualified type (variant still wins on a clash)
 ```
+
+A **qualified type** may also be the receiver of a **static (associated) method** —
+`module.Type.static_method(args)` — symmetric with qualified construction (`module.Type(args)`) and the
+bare `Type.static_method()` form after a named import. As on a bare type, an enum **variant** name
+always wins over a static-method name on `module.Enum.x`.
+
+**Type/value paths are TWO-LEVEL** (Go-style): `module.Symbol`, where `module` is the imported
+last-segment name (or an alias). Multi-level paths like `std.concurrency.Shared` are **not supported**
+(even though `import` paths *are* multi-level) — write `concurrency.Shared`, or alias with
+`import std.concurrency as c` then `c.Shared`. The deeper form gets a targeted two-level-path error.
 
 A bare type whose module was imported whole (`import geo`) but not named-imported is a **check-time
 error** (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name —

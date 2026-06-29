@@ -1,0 +1,13 @@
+import counter
+
+fn main():
+    # Qualified TYPE used as a static-method receiver: `module.Type.static_method()`.
+    c := counter.Counter.zero()
+    print(c.n)
+    d := counter.Counter.of(42)
+    print(d.n)
+    # Qualified ENUM used as a static-method receiver (NOT a variant).
+    col := counter.Color.first()
+    print(col)
+
+main()

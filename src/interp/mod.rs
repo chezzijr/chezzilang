@@ -607,6 +607,19 @@ impl Interp {
         method: &str,
     ) -> Option<(std::rc::Rc<FnDecl>, value::ModEnv)> {
         let key = self.bare_types.get(tname)?;
+        self.lookup_static_method_by_key(key, method)
+    }
+
+    /// Resolve a static method by the type's already-known runtime KEY (struct table first, then
+    /// enum). Shared by the bare `Type.method()` path (`lookup_static_method`, which maps the bare
+    /// name through `bare_types`) and the qualified `module.Type.method()` path (which computes the
+    /// module-scoped key directly). Returns the method's `FnDecl` + its home `ModEnv` iff it exists
+    /// and is STATIC (first param not `self`).
+    fn lookup_static_method_by_key(
+        &self,
+        key: &str,
+        method: &str,
+    ) -> Option<(std::rc::Rc<FnDecl>, value::ModEnv)> {
         if let Some(def) = self.structs.get(key)
             && let Some(decl) = def.methods.get(method)
             && is_static_method(decl)
@@ -1354,6 +1367,32 @@ impl Interp {
                 if let Some(def) = self.variants.get(&(ekey.clone(), name.clone())).cloned() {
                     return self.build_variant(&def, name, args, span);
                 }
+            }
+            // `module.Type.method(args)` → QUALIFIED static method call on a struct/enum reached
+            // through a bound module name. The qualified-variant arm ran first (variant-first), so a
+            // variant always wins; here the member is a STATIC method (the checker validated it).
+            // Resolve the type's module-scoped key and invoke the body with NO receiver bound —
+            // byte-identical to the VM's `Op::CallStatic` and the bare `Type.method()` interp path.
+            if let ExprKind::Field {
+                obj: inner,
+                name: tname,
+                ..
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(&tidx) = self.imported_module_idx.get(mname)
+                && self
+                    .module_types
+                    .get(tidx)
+                    .is_some_and(|t| t.contains(tname))
+                && let key = self.type_key(tidx, tname)
+                && let Some((decl, home)) = self.lookup_static_method_by_key(&key, name)
+            {
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self.call(&decl, &home, arg_vals, span);
             }
             // `Enum.Variant(args)` → variant constructor (current module's runtime key for the enum).
             if let ExprKind::Ident(ename) = &obj.kind
