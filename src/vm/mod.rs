@@ -3241,7 +3241,7 @@ impl Vm {
             .expect("resolver guarantees the import target is in the graph");
         let target_obj = self.module_objs[target_idx];
         match &imp.import {
-            Import::Module { path, alias } => {
+            Import::Module { path, alias, .. } => {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());

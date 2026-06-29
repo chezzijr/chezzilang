@@ -1479,6 +1479,106 @@ mod tests {
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 
+    // ===== decl-site NAME-token hovers (Tier A) =====
+
+    #[test]
+    fn hover_struct_decl_name() {
+        // Hovering the declared name `P` at `struct P:` reports the struct type.
+        let h = hov("struct P:\n    x: int\n", 0, 7).expect("hover on struct decl name");
+        assert_eq!(h.display, "P");
+        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
+    }
+
+    #[test]
+    fn hover_struct_decl_name_shows_doc() {
+        // A `#` doc immediately above the struct surfaces on its decl-name hover.
+        let h = hov("# a point\nstruct P:\n    x: int\n", 1, 7)
+            .expect("hover on documented struct decl name");
+        assert_eq!(h.display, "P");
+        assert_eq!(h.doc.as_deref(), Some("a point"));
+    }
+
+    #[test]
+    fn hover_enum_decl_name() {
+        let h = hov("enum Col:\n    Val(int)\n", 0, 5).expect("hover on enum decl name");
+        assert_eq!(h.display, "Col");
+        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
+    }
+
+    #[test]
+    fn hover_newtype_decl_name() {
+        let h = hov("newtype UserId = int\n", 0, 8).expect("hover on newtype decl name");
+        assert_eq!(h.display, "UserId");
+        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
+    }
+
+    #[test]
+    fn hover_type_alias_decl_name() {
+        // The alias name reports the aliased type it stands for.
+        let h = hov("type Id = int\n", 0, 5).expect("hover on type alias decl name");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
+    }
+
+    #[test]
+    fn hover_protocol_decl_name() {
+        let h = hov("protocol Bar:\n    fn f(self)\n", 0, 9).expect("hover on protocol decl name");
+        assert_eq!(h.display, "Bar");
+        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
+    }
+
+    #[test]
+    fn hover_type_param_decl_fn() {
+        // Hovering `T` at the fn DECLARATION `fn id[T](...)` reports the param name.
+        let h =
+            hov("fn id[T](x: T) -> T:\n    return x\n", 0, 6).expect("hover on fn type-param decl");
+        assert_eq!(h.display, "T");
+    }
+
+    #[test]
+    fn hover_type_param_decl_struct() {
+        // The same enter_type_params record covers a struct's `[T]`.
+        let h = hov("struct Box[T]:\n    x: T\n", 0, 11).expect("hover on struct type-param decl");
+        assert_eq!(h.display, "T");
+    }
+
+    #[test]
+    fn hover_assign_lhs() {
+        // Hovering the LHS `i` of a reassignment reports its type.
+        let h = hov("i := 0\ni = i + 1\n", 1, 0).expect("hover on assign lhs");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Local);
+    }
+
+    #[test]
+    fn hover_method_decl_name() {
+        // Hovering the method name at its definition reports the call signature (receiver stripped),
+        // matching the call-site method hover.
+        let src = "struct C:\n    n: int\n    fn dbl(self) -> int:\n        return self.n * 2\n";
+        let h = hov(src, 2, 7).expect("hover on method decl name");
+        assert_eq!(h.display, "fn() -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_import_module() {
+        let h = hov("import std.math\n", 0, 11).expect("hover on import module name");
+        assert_eq!(h.display, "module math");
+    }
+
+    #[test]
+    fn hover_import_module_alias() {
+        let h = hov("import std.math as m\n", 0, 19).expect("hover on import alias");
+        assert_eq!(h.display, "module m");
+    }
+
+    #[test]
+    fn hover_from_import_name() {
+        let h = hov("import sqrt from std.math\n", 0, 7).expect("hover on from-import name");
+        assert_eq!(h.display, "fn(float) -> float");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
     /// The `token_type` of the semantic token starting at 0-based `(line, start)`, or `None`.
     fn role_at(toks: &[SemTok], line: u32, start: u32) -> Option<u32> {
         toks.iter()

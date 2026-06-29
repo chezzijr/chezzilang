@@ -627,6 +627,7 @@ impl Parser {
         let mut params = Vec::new();
         if self.eat(&Token::LBracket) {
             loop {
+                let name_span = self.cur_span();
                 let name = self.expect_ident()?;
                 if params.iter().any(|p: &TypeParam| p.name == name) {
                     return Err(self.err(format!("duplicate type parameter '{name}'")));
@@ -639,7 +640,11 @@ impl Parser {
                         bounds.push(self.parse_bound()?);
                     }
                 }
-                params.push(TypeParam { name, bounds });
+                params.push(TypeParam {
+                    name,
+                    name_span,
+                    bounds,
+                });
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -683,6 +688,7 @@ impl Parser {
     fn parse_protocol(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Protocol)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         // `protocol Container[T]:` — optional type parameters, reusing the generic fn/struct parser.
         let type_params = self.parse_type_params()?;
@@ -709,6 +715,7 @@ impl Parser {
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Protocol {
             name,
+            name_span,
             type_params,
             methods,
             embeds,
@@ -822,6 +829,7 @@ impl Parser {
     fn parse_struct(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Struct)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.open_block()?;
@@ -869,6 +877,7 @@ impl Parser {
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Struct {
             name,
+            name_span,
             type_params,
             fields,
             methods,
@@ -880,15 +889,22 @@ impl Parser {
     fn parse_type_alias(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Type)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         self.expect(&Token::Assign)?;
         let ty = self.parse_type()?;
-        Ok(StmtKind::TypeAlias { name, ty, doc })
+        Ok(StmtKind::TypeAlias {
+            name,
+            name_span,
+            ty,
+            doc,
+        })
     }
 
     fn parse_enum(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Enum)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.open_block()?;
@@ -936,6 +952,7 @@ impl Parser {
         self.expect(&Token::Dedent)?;
         Ok(StmtKind::Enum {
             name,
+            name_span,
             type_params,
             variants,
             methods,
@@ -952,6 +969,7 @@ impl Parser {
     fn parse_newtype(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::NewType)?;
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.expect(&Token::Assign)?;
@@ -984,6 +1002,7 @@ impl Parser {
         }
         Ok(StmtKind::NewType {
             name,
+            name_span,
             type_params,
             underlying,
             methods,
@@ -1487,30 +1506,45 @@ impl Parser {
         if self.rest_of_line_has(&Token::From) {
             // `import n1[, n2 as a], … from a.b.c`
             let mut names = Vec::new();
+            // BOUND-NAME spans, parallel to `names`: the `as` alias token when present, else the
+            // member token. Diagnostic-only (decl-site hover); equality-neutral on `Import`.
+            let mut name_spans = Vec::new();
             loop {
+                let member_span = self.cur_span();
                 let name = self.expect_ident()?;
-                let alias = if self.eat(&Token::As) {
-                    Some(self.expect_ident()?)
+                let (alias, bound_span) = if self.eat(&Token::As) {
+                    let alias_span = self.cur_span();
+                    (Some(self.expect_ident()?), alias_span)
                 } else {
-                    None
+                    (None, member_span)
                 };
                 names.push((name, alias));
+                name_spans.push(bound_span);
                 if !self.eat(&Token::Comma) {
                     break;
                 }
             }
             self.expect(&Token::From)?;
             let path = self.parse_dotted_path()?;
-            Ok(Import::From { path, names })
+            Ok(Import::From {
+                path,
+                names,
+                name_spans,
+            })
         } else {
             // `import a.b.c [as alias]`
-            let path = self.parse_dotted_path()?;
-            let alias = if self.eat(&Token::As) {
-                Some(self.expect_ident()?)
+            let (path, last_seg_span) = self.parse_dotted_path_spanned()?;
+            let (alias, name_span) = if self.eat(&Token::As) {
+                let alias_span = self.cur_span();
+                (Some(self.expect_ident()?), alias_span)
             } else {
-                None
+                (None, last_seg_span)
             };
-            Ok(Import::Module { path, alias })
+            Ok(Import::Module {
+                path,
+                alias,
+                name_span,
+            })
         }
     }
 
@@ -1520,6 +1554,19 @@ impl Parser {
             path.push(self.expect_path_segment()?);
         }
         Ok(path)
+    }
+
+    /// Like [`parse_dotted_path`] but also returns the source span of the LAST segment token — the
+    /// bound name of a whole-module import when there is no `as` alias (`math` in `import std.math`).
+    /// Diagnostic-only (the LSP records a decl-site hover there); the span is equality-neutral.
+    fn parse_dotted_path_spanned(&mut self) -> PResult<(Vec<String>, Span)> {
+        let mut last_span = self.cur_span();
+        let mut path = vec![self.expect_path_segment()?];
+        while self.eat(&Token::Dot) {
+            last_span = self.cur_span();
+            path.push(self.expect_path_segment()?);
+        }
+        Ok((path, last_span))
     }
 
     /// A module-path segment: an identifier, or the `ref` keyword spelled as a path component (the
@@ -3761,11 +3808,14 @@ mod tests {
 
     #[test]
     fn all_import_forms() {
+        // `Import`'s `PartialEq` is equality-neutral on the bound-name spans, so the default spans
+        // here compare equal to the parser's real spans.
         assert_eq!(
             only("import std.io\n"),
             StmtKind::Import(Import::Module {
                 path: vec!["std".into(), "io".into()],
                 alias: None,
+                name_span: Span::default(),
             })
         );
         assert_eq!(
@@ -3773,6 +3823,7 @@ mod tests {
             StmtKind::Import(Import::Module {
                 path: vec!["std".into(), "io".into()],
                 alias: Some("fs".into()),
+                name_span: Span::default(),
             })
         );
         assert_eq!(
@@ -3780,6 +3831,7 @@ mod tests {
             StmtKind::Import(Import::From {
                 path: vec!["std".into(), "io".into()],
                 names: vec![("read".into(), None), ("write".into(), None)],
+                name_spans: vec![Span::default(), Span::default()],
             })
         );
         assert_eq!(
@@ -3787,6 +3839,7 @@ mod tests {
             StmtKind::Import(Import::From {
                 path: vec!["std".into(), "io".into()],
                 names: vec![("read".into(), Some("r".into()))],
+                name_spans: vec![Span::default()],
             })
         );
     }

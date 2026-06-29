@@ -4970,7 +4970,7 @@ impl Interp {
         }
         for imp in &lm.imports {
             match &imp.import {
-                Import::Module { path, alias } => {
+                Import::Module { path, alias, .. } => {
                     let bind = alias
                         .clone()
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
@@ -5042,13 +5042,13 @@ impl Interp {
                 span: imp.span,
             })?;
         match &imp.import {
-            Import::Module { path, alias } => {
+            Import::Module { path, alias, .. } => {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 self.env.define(&name, Value::Module(ns));
             }
-            Import::From { path: _, names } => {
+            Import::From { path: _, names, .. } => {
                 for (member, alias) in names {
                     // `std.ffi`'s exported FFI marshalling TYPE names — the fixed-width integers
                     // (`import int32 from std.ffi`) and the opaque `ptr` handle — carry NO runtime

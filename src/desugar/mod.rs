@@ -129,7 +129,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             let mut aliases: HashMap<String, ModuleId> = HashMap::new();
             for imp in &graph.modules[mi].imports {
                 match &imp.import {
-                    Import::Module { path, alias } => {
+                    Import::Module { path, alias, .. } => {
                         let local = alias
                             .clone()
                             .or_else(|| path.last().cloned())

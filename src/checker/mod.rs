@@ -1497,12 +1497,26 @@ impl Checker {
     /// a `from` import injects each member (function/value) into scope, validating it exists.
     fn bind_import(&mut self, imp: &ResolvedImport) {
         match &imp.import {
-            Import::Module { path, alias } => {
+            Import::Module {
+                path,
+                alias,
+                name_span,
+            } => {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 if self.note_import_bind(&name, imp.span) {
                     return;
+                }
+                // Editor hover (decl-site): record the bound module name's type at the bound-name
+                // token (`math` / the `as` alias). Probe-gated no-op off the probe / outside entry.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(
+                        *name_span,
+                        &Ty::Module(name.clone()),
+                        HoverKind::Other,
+                        None,
+                    );
                 }
                 self.imported_modules
                     .insert(name.clone(), imp.target.clone());
@@ -1640,13 +1654,20 @@ impl Checker {
                     }
                 }
             }
-            Import::From { path: _, names } => {
+            Import::From {
+                path: _,
+                names,
+                name_spans,
+            } => {
                 let sig = self
                     .module_sigs
                     .get(&imp.target)
                     .cloned()
                     .unwrap_or_default();
-                for (member, alias) in names {
+                // `name_spans` is parallel to `names`; zip truncates safely if they ever diverge (a
+                // bound name's hover is dropped, never a panic). Diagnostic-only — the per-name span
+                // anchors the decl-site hover at the bound import name.
+                for ((member, alias), name_span) in names.iter().zip(name_spans.iter()) {
                     let bind = alias.as_ref().unwrap_or(member);
                     // Reject a second import binding the same name (across ALL namespaces), but only
                     // when the member actually exists — a missing member is its own error below, and
@@ -1664,7 +1685,25 @@ impl Checker {
                         if sig.numeric_poly.contains(member) {
                             self.imported_poly.insert(bind.clone());
                         }
+                        // Editor hover (decl-site): record the imported function's signature at the
+                        // bound-name token (probe-gated no-op off the probe / outside the entry module).
+                        if self.hover_probe.is_some() {
+                            let fty = Ty::Func {
+                                params: fsig.params.clone(),
+                                ret: Box::new(fsig.ret.clone()),
+                            };
+                            self.hover_record_at(
+                                *name_span,
+                                &fty,
+                                HoverKind::Func,
+                                fsig.doc.clone(),
+                            );
+                        }
                     } else if let Some(vty) = sig.values.get(member) {
+                        // Editor hover (decl-site): record the imported value's type at the bound name.
+                        if self.hover_probe.is_some() {
+                            self.hover_record_at(*name_span, vty, HoverKind::Other, None);
+                        }
                         self.declare(bind, vty.clone());
                     } else if sig.types.contains(member) {
                         // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
@@ -3935,14 +3974,20 @@ impl Checker {
             }
             StmtKind::Struct {
                 name,
+                name_span,
                 type_params,
                 fields,
                 methods,
-                ..
+                doc,
             } => {
                 let self_ty = self.struct_self_ty(name);
                 // The struct's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
+                // Editor hover (decl-site): record the struct type at its declared-name token, with
+                // the struct's doc-comment. Probe-gated no-op off the probe.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
+                }
                 // Editor hover: record each field's declared type at its DECL-site name span. Reads
                 // the already-resolved field types out of `self.structs` (no re-`resolve_type`, so no
                 // duplicate errors); gated on the probe so normal checks stay strictly zero-overhead.
@@ -3994,6 +4039,7 @@ impl Checker {
                         .and_then(|s| s.methods.get(&m.name))
                         .cloned()
                     {
+                        self.record_method_decl_hover(m.name_span, &sig);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -4003,13 +4049,19 @@ impl Checker {
             // shapes are validated during hoisting.
             StmtKind::Enum {
                 name,
+                name_span,
                 type_params,
                 methods,
+                doc,
                 ..
             } => {
                 let self_ty = self.enum_self_ty(name);
                 // The enum's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
+                // Editor hover (decl-site): record the enum type at its declared-name token + doc.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
+                }
                 let is_suite = methods.iter().any(|m| m.is_test);
                 for m in methods {
                     if m.is_test {
@@ -4023,6 +4075,7 @@ impl Checker {
                         .and_then(|ms| ms.get(&m.name))
                         .cloned()
                     {
+                        self.record_method_decl_hover(m.name_span, &sig);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -4031,8 +4084,10 @@ impl Checker {
             // Newtype method bodies are checked here, mirroring the enum path (`self` is the newtype).
             StmtKind::NewType {
                 name,
+                name_span,
                 type_params,
                 methods,
+                doc,
                 ..
             } => {
                 let self_ty = self.newtype_self_ty(name);
@@ -4040,6 +4095,10 @@ impl Checker {
                 // The newtype's type parameters are in scope across its method bodies (like the
                 // struct/enum path), so a generic `fn peek(self) -> Option[T]` resolves `T`.
                 let saved = self.enter_type_params(type_params);
+                // Editor hover (decl-site): record the newtype at its declared-name token + doc.
+                if self.hover_probe.is_some() {
+                    self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
+                }
                 for m in methods {
                     if m.is_test {
                         // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
@@ -4052,17 +4111,45 @@ impl Checker {
                         .and_then(|(_, ms)| ms.get(&m.name))
                         .cloned()
                     {
+                        self.record_method_decl_hover(m.name_span, &sig);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
                 self.exit_type_params(saved);
             }
-            // Imports and protocols carry nothing to check in pass 2 (protocol method
-            // signatures are validated during hoisting).
-            StmtKind::Import(_)
-            | StmtKind::Protocol { .. }
-            | StmtKind::Extern { .. }
-            | StmtKind::TypeAlias { .. } => {}
+            // A protocol's method signatures are validated during hoisting; pass 2 only records its
+            // decl-site hover (the protocol existential at the protocol-name token + doc).
+            StmtKind::Protocol {
+                name,
+                name_span,
+                doc,
+                ..
+            } => {
+                if self.hover_probe.is_some() {
+                    let ty = Ty::Protocol(name.clone());
+                    self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
+                }
+            }
+            // A type alias is fully resolved during hoisting; pass 2 only records its decl-site hover.
+            StmtKind::TypeAlias {
+                name,
+                name_span,
+                doc,
+                ..
+            } => {
+                // Editor hover (decl-site): record the ALIASED type at the alias-name token. Gated
+                // strictly on the probe so the extra `resolve_type` never runs in normal checking; on
+                // an invalid alias it may add a duplicate error, but hover returns None on ANY error,
+                // so observable behavior is unchanged.
+                if self.hover_probe.is_some()
+                    && let Some(body) = self.aliases.get(name).cloned()
+                {
+                    let ty = self.resolve_type(&body, *name_span);
+                    self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
+                }
+            }
+            // Imports and extern blocks carry nothing to check in pass 2.
+            StmtKind::Import(_) | StmtKind::Extern { .. } => {}
             StmtKind::If {
                 branches,
                 else_block,
@@ -4410,6 +4497,12 @@ impl Checker {
                     );
                     return;
                 }
+                // Editor hover (decl-site): a reassignment's LHS `i` is an `Ident` lvalue the probe
+                // does NOT visit via `infer` (it's the assignment TARGET, not an evaluated expr), so
+                // record its type at the target span here. Probe-gated no-op off the probe; mirrors
+                // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
+                // targets are handled in their own arms below, where the receiver IS inferred).
+                self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
@@ -9457,6 +9550,25 @@ impl Checker {
         }
     }
 
+    /// Record a DECL-site method-name hover (the `dbl` in `fn dbl(self) -> int:`). Mirrors the
+    /// CALL-site method hover ([`infer_method_call`]): the receiver `self` is stripped for an
+    /// instance method (so `fn dbl(self) -> int` displays "fn() -> int"), but a STATIC method (no
+    /// receiver) keeps all its params. Probe-gated no-op like [`record_method_hover`].
+    fn record_method_decl_hover(&mut self, name_span: Span, sig: &FnSig) {
+        if self.hover_probe.is_some() {
+            let params: Vec<Ty> = if !sig.is_static && !sig.params.is_empty() {
+                sig.params[1..].to_vec()
+            } else {
+                sig.params.clone()
+            };
+            let fty = Ty::Func {
+                params,
+                ret: Box::new(sig.ret.clone()),
+            };
+            self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
+        }
+    }
+
     /// Type-check an instance method call `obj.method(args)`. `type_args` are the explicit
     /// member-level turbofish (`obj.method[A, B](x, y)`) — non-empty only when the parser stole a
     /// type list after the `.method`; they seed a generic method's own `[U]` params. A method-level
@@ -10761,6 +10873,17 @@ impl Checker {
     fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
         let saved = self.type_params.clone();
         for tp in tps {
+            // Editor hover (decl-site): record the bound generic param `T` at its DECLARATION token
+            // (`fn id[T]`, `struct Box[T]`, a method `[U]`). This is the single funnel for entering
+            // type params, so every generic decl form is covered. Probe-gated no-op off the probe.
+            // The hover renders the bare param name (`T`); a bound suffix (`T: Comparable`) is not
+            // representable through the `Ty`-only hover channel.
+            self.hover_record_at(
+                tp.name_span,
+                &Ty::Param(tp.name.clone()),
+                HoverKind::Struct,
+                None,
+            );
             self.type_params.insert(tp.name.clone(), tp.bounds.clone());
         }
         saved
