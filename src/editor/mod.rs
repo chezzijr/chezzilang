@@ -1105,6 +1105,43 @@ mod tests {
     }
 
     #[test]
+    fn hover_destructure_first() {
+        // `a, b := (1, 2)` — hovering the first binding `a` (col 0) reports its tuple-element type.
+        let h = hov("a, b := (1, 2)\nprint(a)\n", 0, 0).expect("hover on destructure first");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_destructure_second() {
+        // The second binding `b` (col 3) reports its own tuple-element type.
+        let h = hov("a, b := (1, 2)\nprint(a)\n", 0, 3).expect("hover on destructure second");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_single_let_regression() {
+        // The single-name let path must NOT regress when destructure plumbing is added.
+        let h = hov("x := 1\n", 0, 0).expect("hover on single let");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_match_variant_bind() {
+        // The `n` binding inside a variant pattern `Col.Val(n)` reports the payload type.
+        let src = "enum Col:\n    Val(int)\n\nc := Col.Val(3)\nmatch c:\n    Col.Val(n):\n        print(n)\n";
+        let h = hov(src, 5, 12).expect("hover on match variant bind");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_match_tuple_bind() {
+        // The `a` binding inside a tuple pattern `(a, b)` reports its element type.
+        let src = "p := (1, 2)\nmatch p:\n    (a, b):\n        print(a)\n";
+        let h = hov(src, 2, 5).expect("hover on match tuple bind");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
     fn hover_fn_param_type() {
         // The use of param `a` inside the body reports the declared param type `str`.
         let h = hov("fn f(a: str):\n    a\n", 1, 4).expect("hover on param use");

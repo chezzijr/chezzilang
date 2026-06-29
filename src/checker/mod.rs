@@ -3819,6 +3819,7 @@ impl Checker {
         match &stmt.kind {
             StmtKind::Let {
                 names,
+                name_spans,
                 ty,
                 value,
                 is_ref,
@@ -3846,7 +3847,7 @@ impl Checker {
                 };
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
-                    self.check_destructure(names, &val_ty, value.span);
+                    self.check_destructure(names, name_spans, &val_ty, value.span);
                     return;
                 }
                 let name = &names[0];
@@ -4331,7 +4332,13 @@ impl Checker {
     /// Check a destructuring let `a, b, … := value`. The value's type must be a tuple whose arity
     /// matches the binding count; each name is then declared with its element type. An `Unknown`
     /// value (an already-reported error) declares all names `Unknown` so no cascade follows.
-    fn check_destructure(&mut self, names: &[String], val_ty: &Ty, span: Span) {
+    fn check_destructure(
+        &mut self,
+        names: &[String],
+        name_spans: &[Span],
+        val_ty: &Ty,
+        span: Span,
+    ) {
         match val_ty {
             Ty::Unknown => {
                 for name in names {
@@ -4339,7 +4346,11 @@ impl Checker {
                 }
             }
             Ty::Tuple(elems) if elems.len() == names.len() => {
-                for (name, ty) in names.iter().zip(elems) {
+                for ((name, ty), name_span) in names.iter().zip(elems).zip(name_spans.iter()) {
+                    // EDITOR HOVER: each destructure target (`a`/`b` in `a, b := (1,2)`) is a NAME,
+                    // not an `Expr` the probe visits; record its tuple-element type at its own span
+                    // (no-op unless a probe is armed → zero overhead on normal checks).
+                    self.hover_record_at(*name_span, ty, HoverKind::Local, None);
                     self.declare(name, ty.clone());
                 }
             }
@@ -5458,7 +5469,7 @@ impl Checker {
     fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
         match pattern {
             Pattern::Wildcard => true,
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, bind_span) => {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
@@ -5493,6 +5504,11 @@ impl Checker {
                     self.error(span, hint);
                     return false;
                 }
+                // EDITOR HOVER: a pattern binding (`n` in `Col.Val(n)`, `a`/`b` in `(a, b)`) is a
+                // NAME, not an `Expr` the probe visits — record its decl-site hover at the binding
+                // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
+                // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
+                self.hover_record_at(*bind_span, ty, HoverKind::Local, None);
                 self.declare(name, ty.clone());
                 true
             }
@@ -5906,7 +5922,7 @@ impl Checker {
                             crate::compiler::bare_display(label.as_str())
                         ),
                     ),
-                    Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
+                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
                         unreachable!("ident/wildcard/or handled elsewhere")
                     }
                 }
@@ -5992,7 +6008,7 @@ impl Checker {
                     Pattern::Tuple(_) => {
                         self.error(span, format!("cannot match a tuple against {ty}"))
                     }
-                    Pattern::Ident(_) | Pattern::Wildcard | Pattern::Or(_) => {
+                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
                         unreachable!("ident/wildcard/or handled elsewhere")
                     }
                 }
@@ -7751,7 +7767,7 @@ impl Checker {
                     }
                 }
             }
-            Pattern::Ident(_) | Pattern::Wildcard => None,
+            Pattern::Ident(..) | Pattern::Wildcard => None,
         }
     }
 
@@ -12956,7 +12972,7 @@ fn pattern_bindings(p: &Pattern) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     fn go(p: &Pattern, out: &mut std::collections::HashSet<String>) {
         match p {
-            Pattern::Ident(n) => {
+            Pattern::Ident(n, _) => {
                 out.insert(n.clone());
             }
             Pattern::Variant { bindings, .. }
@@ -12986,7 +13002,7 @@ fn first_duplicate_binder(p: &Pattern, is_binder: &impl Fn(&str) -> bool) -> Opt
         is_binder: &impl Fn(&str) -> bool,
     ) -> Option<String> {
         match p {
-            Pattern::Ident(n) => {
+            Pattern::Ident(n, _) => {
                 if !is_binder(n) {
                     return None;
                 }
@@ -13517,7 +13533,7 @@ fn lit_pattern_ty(lit: &LitPattern) -> Ty {
 /// top-level bare catch-all of the same spelling (parsed as a nullary `Variant`).
 fn pattern_binds(p: &Pattern, name: &str) -> bool {
     match p {
-        Pattern::Ident(s) => s == name,
+        Pattern::Ident(s, _) => s == name,
         // A nullary bare-name pattern (`Variant{ bindings: [] }`) is a catch-all binding when it
         // names neither a qualified variant nor a payload — scope-conservatively, a same-spelling one
         // shadows. A payload variant's bindings are sub-positions; recurse.

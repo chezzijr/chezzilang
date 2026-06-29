@@ -883,6 +883,7 @@ impl Walker<'_> {
         match &mut stmt.kind {
             StmtKind::Let {
                 names,
+                name_spans: _,
                 ty,
                 value,
                 is_ref,
@@ -1338,7 +1339,10 @@ impl Walker<'_> {
                     scrutinee: lhs,
                     arms: vec![
                         MatchExprArm {
-                            pattern: variant_pat("Some", vec![Pattern::Ident(c.clone())]),
+                            pattern: variant_pat(
+                                "Some",
+                                vec![Pattern::Ident(c.clone(), Span::default())],
+                            ),
                             guard: None,
                             body: ident_expr(&c, span),
                         },
@@ -1390,7 +1394,7 @@ impl Walker<'_> {
                     scrutinee: obj,
                     arms: vec![
                         MatchExprArm {
-                            pattern: variant_pat("Some", vec![Pattern::Ident(c)]),
+                            pattern: variant_pat("Some", vec![Pattern::Ident(c, Span::default())]),
                             guard: None,
                             body: some_body,
                         },
@@ -1671,7 +1675,7 @@ impl Walker<'_> {
 /// Collect the binding names introduced by a `match` pattern.
 fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
     match pat {
-        Pattern::Ident(n) => f(n.clone()),
+        Pattern::Ident(n, _) => f(n.clone()),
         Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
             for b in bindings {
                 bind_pattern(b, f);
@@ -2226,7 +2230,7 @@ mod tests {
             let Pattern::Variant { bindings, .. } = &arms[0].pattern else {
                 panic!("variant")
             };
-            let Pattern::Ident(n) = &bindings[0] else {
+            let Pattern::Ident(n, _) = &bindings[0] else {
                 panic!("ident binding")
             };
             n.clone()

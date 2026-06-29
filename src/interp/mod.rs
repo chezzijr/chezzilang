@@ -7841,7 +7841,7 @@ impl Interp {
         let variants = &self.variants;
         match pattern {
             Pattern::Wildcard => Some(Vec::new()),
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, _) => {
                 // A bare nested identifier naming a *built-in* NULLARY variant (`None`) is a
                 // refutable variant match, binding nothing: it matches iff the value IS that variant
                 // of that built-in enum (mirrors the VM's pure-int variant_id routing, which keys on

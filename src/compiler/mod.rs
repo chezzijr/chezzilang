@@ -2175,10 +2175,10 @@ impl Compiler {
 
     fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
         match p {
-            Pattern::Ident(n) if !self.is_nullary_variant(None, n) => {
+            Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
                 out.insert(n.clone());
             }
-            Pattern::Ident(_) => {}
+            Pattern::Ident(..) => {}
             Pattern::Variant { bindings, .. }
             | Pattern::Tuple(bindings)
             | Pattern::Or(bindings) => {
@@ -2311,7 +2311,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match pattern {
             Pattern::Wildcard => {}
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, _) => {
                 // A nested bare identifier naming a known NULLARY variant is a refutable
                 // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
                 // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
@@ -2377,7 +2377,7 @@ impl Compiler {
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n) if !self.is_nullary_variant(None, n) => {
+                        Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
                             fc.add_local(n.clone());
                         }
                         _ => {
@@ -2404,7 +2404,7 @@ impl Compiler {
                 fails.push(arm_op);
                 for (i, b) in bindings.iter().enumerate() {
                     let is_plain_binding =
-                        matches!(b, Pattern::Ident(n) if !self.is_nullary_variant(None, n));
+                        matches!(b, Pattern::Ident(n, _) if !self.is_nullary_variant(None, n));
                     if !is_plain_binding {
                         self.emit_pattern(fc, b, bind_start + i, fails, span)?;
                     }
@@ -2604,7 +2604,7 @@ impl Compiler {
                     }
                     fc.end_scope();
                 }
-                Pattern::Variant { .. } | Pattern::Tuple(_) | Pattern::Ident(_) => {
+                Pattern::Variant { .. } | Pattern::Tuple(_) | Pattern::Ident(..) => {
                     unreachable!(
                         "literal match has only literal/range/wildcard/binding arms (arms_are_literal)"
                     )
