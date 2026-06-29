@@ -8579,6 +8579,53 @@ fn inferable_closure_ctor_forms_still_ok() {
 }
 
 #[test]
+fn uninferable_guard_does_not_overfire_on_harmless_closure_body() {
+    // REGRESSION (confirmed bug #1): the un-inferable-closure-param guard must fire ONLY on a
+    // genuine deadlock (a body that NEEDS `T` known, e.g. `a < b`), not whenever an unannotated
+    // closure-param slot textually mentions an unbound `T`. A body that imposes NO constraint on
+    // `T` (e.g. `print(x)` / a constant) stays inferable-free and must keep type-checking clean —
+    // these compiled and ran on `main`; rejecting them breaks the don't-reject-valid-code contract.
+    ok("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): print(x))\n");
+    ok(
+        "fn mapper[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:\n    return []\nx := mapper([], fn(x): 42)\n",
+    );
+    // An UNRELATED body error (not about `T`) must surface as itself, not be masked by the
+    // inference-deadlock message.
+    let errs =
+        check_src("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): nope)\n");
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "an unrelated body error must not be reported as an inference deadlock, got: {errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("nope")
+            || e.message.to_lowercase().contains("undefined")
+            || e.message.to_lowercase().contains("unknown")),
+        "expected the real undefined-name error to surface, got: {errs:?}"
+    );
+}
+
+#[test]
+fn uninferable_closure_param_qualified_ctor_emits_clear_error() {
+    // REGRESSION (confirmed bug #2): the module-qualified generic struct-ctor path (`c.Heap(...)`)
+    // must get the SAME clear inference-deadlock message as the bare ctor / free-fn paths, not leak
+    // the misleading "cannot compare T and T" from inside the lambda.
+    let errs =
+        check_entry("import std.collections as c\nx := c.Heap([], fn(a, b): a < b)\nprint(x)\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type parameter")),
+        "expected an inference-deadlock error from the qualified ctor, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("cannot compare")),
+        "the misleading 'cannot compare' must be suppressed on the qualified path, got: {errs:?}"
+    );
+}
+
+#[test]
 fn map_requires_two_tuple() {
     // element not a 2-tuple is a static error.
     rejects("fn main():\n    m := Map([1, 2])\nmain()\n", "");

@@ -8422,6 +8422,11 @@ impl Checker {
             unify(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
+        // Same un-inferable closure-param deadlock guard as the bare struct-ctor / free-fn paths
+        // (`Heap([], fn(a, b): a < b)` via a module-qualified ctor): report the cause and bind the
+        // params to Unknown BEFORE the per-arg closure body is checked, so it doesn't leak a
+        // misleading "cannot compare T and T" from inside the lambda.
+        self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
         for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
@@ -10172,6 +10177,39 @@ impl Checker {
         }
     }
 
+    /// Trial-check the given closure args (by index into `args`/`decl_tys`) against their declared
+    /// slot type substituted with `sub`, reporting whether ANY error was produced. Errors emitted
+    /// during the probe are rolled back (`truncate`) so the trial never leaks diagnostics — it only
+    /// answers "would these bodies error under this substitution?". Used by
+    /// [`Checker::report_uninferable_closure_params`] to discriminate a genuine type-param deadlock
+    /// from a harmless body. (Hover side effects are first-hit-wins and idempotent, so the eventual
+    /// real per-arg check records the same result.)
+    fn trial_check_closure_args(
+        &mut self,
+        idxs: &[usize],
+        decl_tys: &[Ty],
+        args: &[Expr],
+        sub: &HashMap<String, Ty>,
+        prepass: bool,
+    ) -> bool {
+        // `prepass` routes an unannotated closure param whose substituted slot type is `Unknown`
+        // through the silent-`Unknown` binding (see `infer_closure`) instead of the
+        // free-scan/annotation-required path — so the "params bound to `Unknown`" trial actually
+        // checks the body with `Unknown` params (no spurious "cannot infer parameter").
+        let saved = std::mem::replace(&mut self.generic_arg_prepass, prepass);
+        let mark = self.errors.len();
+        for &i in idxs {
+            if let (Some(decl), Some(arg)) = (decl_tys.get(i), args.get(i)) {
+                let expected = subst(decl, sub);
+                self.infer_arg(arg, Some(&expected));
+            }
+        }
+        let errored = self.errors.len() > mark;
+        self.errors.truncate(mark);
+        self.generic_arg_prepass = saved;
+        errored
+    }
+
     /// Detect (and clearly report) the un-inferable type-parameter DEADLOCK that arises when a
     /// generic ctor/fn is given an **unannotated closure** for a closure-typed slot AND no other
     /// argument pins the type parameter that slot mentions (e.g. `Heap([], fn(a, b): a < b)` — the
@@ -10180,13 +10218,18 @@ impl Checker {
     /// "cannot compare T and T" inside the user's lambda.
     ///
     /// Fires ONLY on the genuine deadlock: a still-unbound param (`!sub.contains_key`) that is
-    /// mentioned by a declared slot type whose matching argument is an unannotated closure. Every
-    /// form that pins the param from some source (turbofish, a concrete element, annotated closure
-    /// params) leaves `sub` populated, so the guard never fires there. On firing it binds the
-    /// offending params to `Unknown` in `sub` so the downstream substituted closure check sees
-    /// `Unknown` params (no cascade) — the resulting type is identical to the existing
-    /// `unwrap_or(Ty::Unknown)` fallback, so this is behavior-preserving apart from the message.
-    /// Returns `true` if it fired.
+    /// mentioned by an unannotated closure's PARAMETER slot AND whose body actually *constrains* it.
+    /// The mention is a NECESSARY condition (forms that pin the param — turbofish, a concrete
+    /// element, annotated closure params — leave `sub` populated, so the guard never reaches here);
+    /// the body PROBE ([`Checker::trial_check_closure_args`], two trials) is the SUFFICIENT one: it
+    /// fires only when leaving the param as the unbound `Ty::Param` errors the body but binding it to
+    /// `Unknown` does not. That keeps a harmless body that never uses the param (`fn(x): print(x)`,
+    /// `fn(x): 42`) type-checking — those ran on `main` and must not be newly rejected — and leaves an
+    /// unrelated body error (errors under BOTH trials) for the normal per-arg check to report.
+    /// On firing it binds the offending params to `Unknown` in `sub` so the downstream substituted
+    /// closure check sees `Unknown` params (no cascade) — the resulting type is identical to the
+    /// existing `unwrap_or(Ty::Unknown)` fallback, so this is behavior-preserving apart from the
+    /// message. Returns `true` if it fired.
     fn report_uninferable_closure_params(
         &mut self,
         name: &str,
@@ -10210,7 +10253,8 @@ impl Checker {
         // is still inferable from the body, so it must NOT trigger — scan declared param slots only,
         // aligned to the UNANNOTATED closure parameters.
         let mut mentioned: Vec<String> = Vec::new();
-        for (decl, arg) in decl_tys.iter().zip(args) {
+        let mut candidate_idxs: Vec<usize> = Vec::new();
+        for (ai, (decl, arg)) in decl_tys.iter().zip(args).enumerate() {
             if let ExprKind::Closure {
                 params: cparams, ..
             } = &arg.kind
@@ -10218,12 +10262,18 @@ impl Checker {
                     params: dparams, ..
                 } = decl
             {
+                let before = mentioned.len();
                 for (i, cp) in cparams.iter().enumerate() {
                     if cp.ty.is_none()
                         && let Some(dp) = dparams.get(i)
                     {
                         ty_collect_params(dp, &unbound, &mut mentioned);
                     }
+                }
+                // This closure arg has an unannotated param slot mentioning an unbound param — it is
+                // a candidate whose BODY we must probe before deciding the deadlock actually bites.
+                if mentioned.len() > before {
+                    candidate_idxs.push(ai);
                 }
             }
         }
@@ -10236,6 +10286,32 @@ impl Checker {
             .map(|tp| tp.name.clone())
             .filter(|n| mentioned.contains(n))
             .collect();
+        // PROBE the candidate closure bodies before firing. A still-unbound param in an unannotated
+        // closure slot is a *potential* deadlock, but only a GENUINE one when the body actually
+        // constrains that param (e.g. `a < b` — ordering on an unconstrained `Ty::Param` is
+        // rejected). A harmless body (`print(x)`, a constant) imposes no constraint, type-checks on
+        // every engine, and ran on `main`; firing there would reject previously-valid code. The
+        // discriminator: check the candidate bodies twice — once leaving the params as the unbound
+        // `Ty::Param` (the current `sub`), once with them bound to `Unknown`. Fire ONLY when the
+        // unbound form errors AND the `Unknown` form is clean. That isolates a true "needs `T`"
+        // body from a harmless one (clean under BOTH) and from an unrelated body error (errors under
+        // BOTH — left for the normal per-arg check to report as itself).
+        let errored_unbound =
+            self.trial_check_closure_args(&candidate_idxs, decl_tys, args, sub, false);
+        if !errored_unbound {
+            return false;
+        }
+        let mut sub_unknown = sub.clone();
+        for n in &names {
+            sub_unknown.insert(n.clone(), Ty::Unknown);
+        }
+        let errored_unknown =
+            self.trial_check_closure_args(&candidate_idxs, decl_tys, args, &sub_unknown, true);
+        if errored_unknown {
+            // The body errors even with the params known (Unknown) — the failure is unrelated to
+            // `T`. Don't mask it; let the normal per-arg check surface the real diagnostic.
+            return false;
+        }
         let list = names
             .iter()
             .map(|n| format!("`{n}`"))
