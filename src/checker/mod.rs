@@ -8575,15 +8575,19 @@ impl Checker {
                 if self.hover_probe.is_some()
                     && let Some(fty) = self.callee_display_ty(name)
                 {
-                    // doc: a free fn → its `FnSig::doc`; a struct ctor → the struct's `name_docs`
-                    // entry; a reserved builtin ctor (List/Map/Channel/Shared/…) → its
-                    // `builtin_type_doc` usage+methods blurb (Tier C). User docs win first.
-                    let doc = self
-                        .functions
-                        .get(name)
-                        .and_then(|s| s.doc.clone())
-                        .or_else(|| self.name_docs.get(name).cloned())
-                        .or_else(|| builtin_type_doc(name));
+                    // doc: a user-defined free fn owns its `FnSig::doc` and NOTHING else — an
+                    // undocumented user fn must NOT fall through to a builtin blurb (a user fn whose
+                    // name shadows a builtin, e.g. `fn range(...)`, would otherwise show the builtin's
+                    // usage text). Only a NON-user-fn callee (a struct/type-decl ctor via `name_docs`,
+                    // or a reserved builtin ctor via `builtin_type_doc`) consults those fallbacks.
+                    let doc = if let Some(sig) = self.functions.get(name) {
+                        sig.doc.clone()
+                    } else {
+                        self.name_docs
+                            .get(name)
+                            .cloned()
+                            .or_else(|| builtin_type_doc(name))
+                    };
                     self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
                 if let Some(ty) = self.infer_named_call(name, args, &targs, callee.span, span, None)
