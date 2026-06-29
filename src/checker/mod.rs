@@ -428,12 +428,13 @@ pub fn check_graph(graph: &ModuleGraph) -> Result<(), Vec<CheckError>> {
 
 /// Classification of the symbol a hover landed on, returned alongside the inferred type display so
 /// editor tooling can label it (`local`/`param`/`fn`/`field`/`struct`/literal). Secondary metadata —
-/// the type string is the load-bearing payload; `Param` is folded into `Local` (the checker's scope
-/// table does not distinguish them cheaply). `Other` covers a leaf the classifier can't bucket.
-// `Param`/`Struct` are part of the public hover-kind contract but not yet produced (Param is folded
-// into Local; a struct-name hover currently resolves through other paths) — they are constructed by
-// editor consumers, not this crate's default `chezzi` bin (which compiles `checker` privately and
-// reaches hover only via the lib's `editor`), so allow the bin-only dead-code lint.
+/// the type string is the load-bearing payload. `Param` is PRODUCED at param-DECL hover sites (fn /
+/// method / closure signature); a param's body-USE still reports `Local` (different span). `Other`
+/// covers a leaf the classifier can't bucket.
+// `Struct` is part of the public hover-kind contract but not yet produced (a struct-name hover
+// currently resolves through other paths) — these variants are also constructed by editor consumers,
+// not this crate's default `chezzi` bin (which compiles `checker` privately and reaches hover only
+// via the lib's `editor`), so allow the bin-only dead-code lint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum HoverKind {
@@ -3941,6 +3942,18 @@ impl Checker {
                 let self_ty = self.struct_self_ty(name);
                 // The struct's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
+                // Editor hover: record each field's declared type at its DECL-site name span. Reads
+                // the already-resolved field types out of `self.structs` (no re-`resolve_type`, so no
+                // duplicate errors); gated on the probe so normal checks stay strictly zero-overhead.
+                if self.hover_probe.is_some()
+                    && let Some(info) = self.structs.get(&self.bare_key(name)).cloned()
+                {
+                    for field in fields {
+                        if let Some((_, fty)) = info.fields.iter().find(|(n, _)| n == &field.name) {
+                            self.hover_record_at(field.name_span, fty, HoverKind::Field, None);
+                        }
+                    }
+                }
                 // A constant-literal field default must be assignable to the field's type (checked
                 // here so a wrong-typed default is caught at the declaration, not only when omitted).
                 for field in fields {
@@ -4878,6 +4891,9 @@ impl Checker {
                     );
                 }
             }
+            // Editor hover: record the param's declared type at its DECL-site name span (no-op
+            // off-probe; covers free fns AND methods, both routed through check_fn_body).
+            self.hover_record_at(param.name_span, &ty, HoverKind::Param, None);
             self.declare(&param.name, ty);
         }
         // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its single expression,
@@ -7902,6 +7918,9 @@ impl Checker {
                         }
                     }
                 };
+                // Editor hover: record the closure param's type at its DECL-site name span (no-op
+                // off-probe; first-hit-wins, so a body-use span records separately).
+                self.hover_record_at(p.name_span, &ty, HoverKind::Param, None);
                 self.declare(&p.name, ty.clone());
                 if p.is_ref {
                     self.declare_ref(&p.name);

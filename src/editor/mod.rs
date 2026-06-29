@@ -1371,6 +1371,65 @@ mod tests {
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 
+    #[test]
+    fn hover_fn_param_decl() {
+        // Hovering the param `a` at its DECL site in the signature reports its declared type.
+        let h = hov("fn f(a: str):\n    a\n", 0, 5).expect("hover on fn param decl");
+        assert_eq!(h.display, "str");
+        assert_eq!(h.kind, crate::checker::HoverKind::Param);
+    }
+
+    #[test]
+    fn hover_method_param_decl() {
+        // The same check_fn_body record also covers METHOD param decls.
+        let src = "struct C:\n    n: int\n    fn foo(self, n: int) -> int:\n        return n\nc := C(1)\nc.foo(2)\n";
+        let h = hov(src, 2, 17).expect("hover on method param decl");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Param);
+    }
+
+    #[test]
+    fn hover_closure_param_decl() {
+        // Hovering a closure param `a` at its DECL site reports its annotated type.
+        let h = hov("f := fn(a: int): a + 1\nprint(f(2))\n", 0, 8)
+            .expect("hover on closure param decl");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Param);
+    }
+
+    #[test]
+    fn hover_struct_field_decl() {
+        // Hovering the field `x` at its DECL site reports its declared type.
+        let h =
+            hov("struct P:\n    x: int\np := P(1)\n", 1, 4).expect("hover on struct field decl");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Field);
+    }
+
+    #[test]
+    fn hover_container_ctor_turbofish_callee() {
+        // CONFIRMING (already green): `List[int]()` callee is a bare Ident reaching builtin_sig.
+        let h = hov("a := List[int]()\n", 0, 5).expect("hover on List[int] ctor callee");
+        assert_eq!(h.display, "fn(?) -> List[?]");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_container_ctor_bare_callee() {
+        // CONFIRMING (already green): bare `List()` ctor callee records the same display sig.
+        let h = hov("b := List()\n", 0, 5).expect("hover on bare List ctor callee");
+        assert_eq!(h.display, "fn(?) -> List[?]");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_map_ctor_turbofish_callee() {
+        // CONFIRMING (already green): `Map[str, int]()` callee records its display sig.
+        let h = hov("m := Map[str, int]()\n", 0, 5).expect("hover on Map ctor callee");
+        assert_eq!(h.display, "fn(?) -> Map[?, ?]");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
     /// The `token_type` of the semantic token starting at 0-based `(line, start)`, or `None`.
     fn role_at(toks: &[SemTok], line: u32, start: u32) -> Option<u32> {
         toks.iter()

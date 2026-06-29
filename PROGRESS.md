@@ -221,6 +221,26 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for param + struct-field DECL sites (2026-06-29).** Hovering a
+parameter at its DECL site in a signature (free fn, method, OR closure) and a struct field at its DECL
+site previously returned `None` (only the body USE / field-access resolved); now both report the
+declared type, checker-only and probe-gated (each addition is a `hover_record_at` call — a no-op when
+no probe is armed — or inside `if self.hover_probe.is_some()` → NO type-check/codegen/VM/interp change,
+two-engine parity untouched). (1) **fn/method param decl** (`fn f(a: str)` → hover `a` = `str`) — one
+`hover_record_at(param.name_span, …, HoverKind::Param, …)` in `check_fn_body`'s param loop, covering
+free fns AND methods (both route through it); (2) **closure param decl** (`fn(a: int): …` → `a` = `int`)
+— same call in `infer_closure`'s param map; (3) **struct field decl** (`struct P:\n  x: int` → `x` =
+`int`) — a probe-gated loop in the `StmtKind::Struct` arm reading already-resolved field types from
+`self.structs` (no re-resolve → no duplicate errors). `HoverKind::Param` is now PRODUCED (a param's
+body-USE still reports `Local` — different span, first-hit-wins). The **qualified-static receiver**
+(`module.Type.method()` → method sig) and **container ctors** (`List[int]()` / `List()` / `Map[K,V]()` →
+display sig) were already covered (qualified-static threads through the same `infer_static_call` record;
+`List[int]()` parses as a bare-`Ident` callee reaching `callee_display_ty`→`builtin_sig`) — added
+regression guards. Tests: `editor::tests::hover_fn_param_decl`, `hover_method_param_decl`,
+`hover_closure_param_decl`, `hover_struct_field_decl`, `hover_container_ctor_turbofish_callee`,
+`hover_container_ctor_bare_callee`, `hover_map_ctor_turbofish_callee`. **Reinstall the LSP snapshot to
+serve it: `cargo install --path . --features lsp --bin chezzi-lsp`.**
+
 **✅ Editor tooling — LSP hover for value-producing call/ctor/static/receiver sites (2026-06-27).**
 Hover on four call categories previously returned `None`; now they report a signature, checker-only and
 probe-gated (every addition is inside `if self.hover_probe.is_some()` or routes through `hover_record_at`,
