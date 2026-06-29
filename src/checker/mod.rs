@@ -10875,15 +10875,18 @@ impl Checker {
         for tp in tps {
             // Editor hover (decl-site): record the bound generic param `T` at its DECLARATION token
             // (`fn id[T]`, `struct Box[T]`, a method `[U]`). This is the single funnel for entering
-            // type params, so every generic decl form is covered. Probe-gated no-op off the probe.
-            // The hover renders the bare param name (`T`); a bound suffix (`T: Comparable`) is not
-            // representable through the `Ty`-only hover channel.
-            self.hover_record_at(
-                tp.name_span,
-                &Ty::Param(tp.name.clone()),
-                HoverKind::Struct,
-                None,
-            );
+            // type params, so every generic decl form is covered. The hover renders the bare param
+            // name (`T`); a bound suffix (`T: Comparable`) is not representable through the `Ty`-only
+            // hover channel. GUARD on the probe so the `Ty::Param(..clone())` argument is not built on
+            // every generic check (enter_type_params is hot — runs for every generic fn/struct/method).
+            if self.hover_probe.is_some() {
+                self.hover_record_at(
+                    tp.name_span,
+                    &Ty::Param(tp.name.clone()),
+                    HoverKind::Struct,
+                    None,
+                );
+            }
             self.type_params.insert(tp.name.clone(), tp.bounds.clone());
         }
         saved
