@@ -1388,6 +1388,30 @@ impl Interp {
             {
                 return res;
             }
+            // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR reached through a bound
+            // native module name (`concurrency.Shared(0)`, aliased `c.Shared(0)`, `time.timer(0)`).
+            // Mirrors the VM's qualified-ctor lowering (the compiler emits the SAME opcode as the bare
+            // name), producing a byte-identical value. The native module name on the bound
+            // `Value::Module` is the discriminator; the (module, name) pair is matched so only the
+            // owning module's ctors fire. A non-ctor member (`time.now()`, qualified methods) is NOT
+            // matched and falls through to `eval_method_call`.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && self.env.get_local(mname).is_none()
+                && let Some(Value::Module(ns)) = self.env.get(mname)
+                && matches!(
+                    (&*ns.name, name.as_str()),
+                    (
+                        "std.concurrency",
+                        "Shared" | "RwShared" | "Atomic" | "Executor"
+                    ) | ("std.time", "timer")
+                )
+            {
+                let arg_vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self.construct_native_ctor(name, arg_vals, span);
+            }
             return self.eval_method_call(obj, name, args, span);
         }
         // Combined member-side turbofish: `Type[T].member[U](args)` / bare `Type.member[U](args)`.
@@ -1680,6 +1704,81 @@ impl Interp {
 
         let callee_val = self.eval(callee)?;
         self.call_value(callee_val, arg_vals, span)
+    }
+
+    /// Construct a native concurrency/time builtin value for a ctor reached by the QUALIFIED path
+    /// (`concurrency.Shared(0)`, `time.timer(0)`, …). Mirrors the bare-name ctor blocks in `eval_call`
+    /// EXACTLY (same arity guards + `deep_clone` + value shapes), so a qualified ctor yields a value
+    /// byte-identical to the bare form — the parity invariant the compiler upholds by emitting the
+    /// same opcode. `ctor` is one of `Shared`/`RwShared`/`Atomic`/`Executor`/`timer` (gated upstream).
+    fn construct_native_ctor(
+        &mut self,
+        ctor: &str,
+        arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match ctor {
+            "Shared" | "RwShared" | "Atomic" => {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{ctor}(v) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
+                        span,
+                    });
+                }
+                let init = deep_clone(&arg_vals[0]);
+                let cell = std::rc::Rc::new(std::cell::RefCell::new(init));
+                Ok(match ctor {
+                    "Shared" => Value::Shared(cell),
+                    "RwShared" => Value::RwShared(cell),
+                    _ => Value::Atomic(cell),
+                })
+            }
+            "timer" => {
+                if arg_vals.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "timer(ms) takes exactly one argument, got {}",
+                            arg_vals.len()
+                        ),
+                        span,
+                    });
+                }
+                let ms = match &arg_vals[0] {
+                    Value::Int(ms) => (*ms).max(0) as u64,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("timer(ms) expects int, got {}", other.type_name()),
+                            span,
+                        });
+                    }
+                };
+                let deadline = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(ms))
+                    .unwrap_or_else(|| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+                    });
+                let mut state = value::ChanState::new();
+                state.timer = Some(deadline);
+                Ok(Value::Channel(std::rc::Rc::new(std::cell::RefCell::new(
+                    state,
+                ))))
+            }
+            // "Executor"
+            _ => {
+                if !arg_vals.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Executor() takes no arguments".to_string(),
+                        span,
+                    });
+                }
+                let ex = std::rc::Rc::new(std::cell::RefCell::new(value::ExecState::new()));
+                self.executors.push(std::rc::Rc::clone(&ex));
+                Ok(Value::Executor(ex))
+            }
+        }
     }
 
     /// Resolve a declaration-site turbofish member CALL `Type[T…].member(args)` — a VARIANT

@@ -3188,6 +3188,39 @@ impl Checker {
         self.imported_net.contains(n) || self.current_module_is_stdlib
     }
 
+    /// Map an opaque/native builtin TYPE name (one that lives ONLY in its owning std module's
+    /// `sig.types` — reserved, so no user module can export it) to its builtin `Ty`, given already-
+    /// resolved type args. This is the additive "make a Rust type reachable by qualified path"
+    /// lever: `concurrency.Shared[int]` -> `Ty::shared(int)`, `net.Socket` -> `Ty::Socket`,
+    /// `ffi.int32` -> `Ty::Int`, etc. Returns `None` for a `sig.types` name that is NOT a builtin
+    /// TYPE in type position (`timer`, a function — the caller emits the "function, not a type"
+    /// error). Arity is NOT validated here — the mutable `resolve_type` caller emits arity
+    /// diagnostics; the read-only `resolve_qualified_ro` caller is permissive (no errors). Shared
+    /// by both qualified resolvers so the mapping can never drift between them.
+    fn qualified_builtin_ty(&self, name: &str, args: &[Ty]) -> Option<Ty> {
+        let one = || args.first().cloned().unwrap_or(Ty::Unknown);
+        match name {
+            "Shared" => Some(Ty::shared(one())),
+            "RwShared" => Some(Ty::rwshared(one())),
+            "Atomic" => Some(Ty::atomic(one())),
+            "Executor" => Some(Ty::Executor),
+            "Socket" => Some(Ty::Socket),
+            "Listener" => Some(Ty::Listener),
+            "ptr" => Some(Ty::Ptr),
+            _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(Ty::Int),
+            _ => None,
+        }
+    }
+
+    /// Expected type-argument arity for a builtin TYPE reached by qualified path (the generic
+    /// concurrency boxes take exactly one; every other in-scope native type is non-generic).
+    fn qualified_builtin_arity(name: &str) -> usize {
+        match name {
+            "Shared" | "RwShared" | "Atomic" => 1,
+            _ => 0,
+        }
+    }
+
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named { name: n, .. } => match n.as_str() {
@@ -3671,6 +3704,38 @@ impl Checker {
                     Ty::NewType(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     asig.body.clone()
+                } else if sig.types.contains(name) {
+                    // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
+                    // `net.Socket`, `ffi.int32`/`ffi.ptr`). These names live ONLY in their owning std
+                    // module's `sig.types` (reserved — no user module can export them), so this branch
+                    // fires solely for native builtins; user struct/enum/newtype/alias names were already
+                    // consumed by the def-map arms above. The arm required the module be imported (the
+                    // `imported_modules.get` above), so the import gate is unchanged: a non-imported
+                    // module still hit the `unknown module` error before reaching here. ADDITIVE — the
+                    // bare-after-import path (`imported_concurrency`/`_net`/`_ffi_types`) is untouched.
+                    if name == "timer" {
+                        self.error(
+                            span,
+                            "'timer' is a function, not a type — call it: `time.timer(ms)`"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    } else if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
+                        let expected = Self::qualified_builtin_arity(name);
+                        if resolved.len() != expected {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{module}.{name}' expects {expected} type argument(s), got {}",
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        ty
+                    } else {
+                        self.error(span, format!("module '{module}' has no type '{name}'"));
+                        Ty::Unknown
+                    }
                 } else {
                     self.error(span, format!("module '{module}' has no type '{name}'"));
                     Ty::Unknown
@@ -8018,6 +8083,45 @@ impl Checker {
                     &key, &tname, name, args, &resolved, &targs, *name_span, span,
                 );
             }
+            // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
+            // aliased `c.Shared(0)`, `time.timer(100)`). `module` is a bound (non-local) module name
+            // whose sig declares `name` in `sig.types` — and those reserved names live ONLY in the
+            // owning native module's sig, so this fires solely for native builtins. Concurrency
+            // ctors + `timer` delegate to `infer_named_call` (the SAME value-first inference + license
+            // check the bare name uses). The type-only handles (Socket/Listener) and FFI widths/ptr
+            // have NO from-nothing constructor — reject with a clear message. Placed AFTER the
+            // user-type qualified arms above and BEFORE the method-call fallthrough (so a genuine
+            // module method like `time.now()` still reaches `infer_method_call`).
+            if let ExprKind::Ident(mname) = &obj.kind
+                && !self.is_local_binding(mname)
+                && let Some(mid) = self.imported_modules.get(mname).cloned()
+                && let Some(sig) = self.module_sigs.get(&mid).cloned()
+                && sig.types.contains(name)
+            {
+                if matches!(
+                    name.as_str(),
+                    "Shared" | "RwShared" | "Atomic" | "Executor" | "timer"
+                ) {
+                    return self
+                        .infer_named_call(name, args, &targs, *name_span, span, None)
+                        .unwrap_or(Ty::Unknown);
+                }
+                // A type-only native name (Socket/Listener/FFI width/ptr) — no from-nothing ctor.
+                // Gated on `qualified_builtin_ty` so this fires ONLY for genuine native types; a
+                // (non-builtin) user `sig.types` name — e.g. an exported type alias used as a bogus
+                // `mod.Alias(x)` ctor — falls through to `infer_method_call` (its original error),
+                // not this native-specific message.
+                if self.qualified_builtin_ty(name, &[]).is_some() {
+                    self.infer_all(args);
+                    self.error(
+                        span,
+                        format!(
+                            "'{mname}.{name}' has no constructor — it is a type-only native type (a value is obtained from the module's functions, e.g. net.connect/net.listen for a Socket)"
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
+            }
             return self.infer_method_call(obj, name, *name_span, args, &targs, span);
         }
         // Combined member-side turbofish — DEFENSIVE FALLBACK. Since the parser steal was broadened to
@@ -11090,6 +11194,12 @@ impl Checker {
             Ty::NewType(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
+        } else if sig.types.contains(name) {
+            // Mirror `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
+            // EXPORTED `type S = concurrency.Shared[int]` / `newtype MyS[T] = concurrency.Shared[T]`
+            // resolved via `resolve_ty_ro_d` carries the right builtin `Ty`). Permissive: no errors,
+            // and a non-type `sig.types` name (`timer`) returns `Ty::Unknown`.
+            self.qualified_builtin_ty(name, args).unwrap_or(Ty::Unknown)
         } else {
             Ty::Unknown
         }
@@ -11189,6 +11299,29 @@ impl Checker {
             Type::Qualified { module, name, .. } => {
                 let mid = self.imported_modules.get(module)?;
                 let sig = self.module_sigs.get(mid)?;
+                // A qualified FFI marshalling TYPE name (`ffi.int32` / `ffi.ptr`) in an extern
+                // signature: map to its WIDTH-bearing CType, exactly like the bare `Type::Named`
+                // arm above. The surface name is unchanged (the backends' `ctype_of` reads the
+                // resulting CType, never re-derives from a module prefix), so it marshals identically
+                // to the bare width. Gated on `sig.types` membership — only `std.ffi`'s sig carries
+                // these reserved names — so this fires solely for genuine FFI types.
+                if sig.types.contains(name) {
+                    let c = match name.as_str() {
+                        "ptr" => Some(CType::Ptr),
+                        "int8" => Some(CType::Int8),
+                        "int16" => Some(CType::Int16),
+                        "int32" => Some(CType::Int32),
+                        "int64" => Some(CType::Int64),
+                        "uint8" => Some(CType::UInt8),
+                        "uint16" => Some(CType::UInt16),
+                        "uint32" => Some(CType::UInt32),
+                        "uint64" => Some(CType::UInt64),
+                        _ => None,
+                    };
+                    if c.is_some() {
+                        return c;
+                    }
+                }
                 if sig.struct_defs.contains_key(name) {
                     // CROSS-MODULE: read the qualified struct's CType from the cache VERBATIM (computed
                     // in ITS defining module's scope, deps-first). NEVER field-walk here — the current

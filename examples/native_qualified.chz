@@ -1,0 +1,42 @@
+# Golden: first-class native (Rust-implemented) types reached by the QUALIFIED / aliased module-member
+# path — `concurrency.Shared(0)`, aliased `c.Shared(0)`, `time.timer(0)` — plus a type-alias and a
+# newtype over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the bare-after-import
+# names, so the output is byte-identical on interp, the cooperative VM (--serial), and the M:N engine
+# (--parallel). This is the two-engine parity gate for the additive qualified native-ctor path.
+# Run with: chezzi run examples/native_qualified.chz   (also --serial / --parallel — byte-identical)
+import std.concurrency
+import std.concurrency as c
+import std.time
+
+# a type alias + a newtype over a QUALIFIED builtin type
+type IntBox = concurrency.Shared[int]
+newtype Counter[T] = concurrency.Shared[T]
+
+fn show(b: IntBox):
+    print(b.get())
+
+fn main():
+    s := concurrency.Shared(1)        # qualified constructor
+    s.set(s.get() + 4)
+    show(s)                            # 5  — also exercises the `type IntBox = concurrency.Shared[int]` alias
+
+    s2 := c.Shared(10)                 # ALIASED qualified constructor
+    s2.update(fn(x): x * 2)
+    print(s2.get())                    # 20
+
+    r := concurrency.RwShared(0)       # qualified RwShared
+    r.write(fn(x): x + 7)
+    print(r.read(fn(x): x))            # 7
+
+    a := concurrency.Atomic(3)         # qualified Atomic
+    a.store(a.load() + 5)
+    print(a.load())                    # 8
+
+    ex := c.Executor()                 # aliased qualified Executor
+    ex.submit(fn(): print("job ran"))
+    ex.shutdown()                      # drains FIFO -> job ran
+
+    t := time.timer(0)                 # qualified timer -> Channel[bool]
+    print(t.recv())                    # true
+
+main()

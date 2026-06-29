@@ -11,6 +11,33 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ First-class native (Rust-implemented) types — qualified / aliased module-member path (additive,
+2026-06-29).** The import-gated native types/ctors — `Shared`/`RwShared`/`Atomic`/`Executor`
+(std.concurrency), `Socket`/`Listener` (std.net), the FFI widths `int8`..`uint64` + `ptr` (std.ffi),
+and `timer` (std.time) — are now reachable by the **two-level qualified / aliased module path**, exactly
+like a `.chz` module type (`geo.Point`) or `regex.Match`: `concurrency.Shared[int]` / `concurrency.Shared(0)`,
+`import std.concurrency as c` → `c.Shared(0)`, `type S = concurrency.Shared[int]`,
+`newtype MyS[T] = concurrency.Shared[T]`, `net.Socket` annotation, `ffi.int32` (incl. inside an `extern`
+signature), `time.timer(0)`. **ADDITIVE** — the existing bare-after-import licensing
+(`imported_concurrency`/`_net`/`_ffi_types`/`_time`) is byte-unchanged, examples/grammar.bnf untouched,
+and the import gate stays sound (qualified access to a non-imported module is still `unknown module`).
+Implementation (all small/localized): (1) checker `resolve_type` `Type::Qualified` arm maps a
+`sig.types` builtin name → its builtin `Ty` (shared helper `qualified_builtin_ty` + arity check; `timer`
+in type position → "function, not a type"); (2) `resolve_qualified_ro` mirrors it for the RO export path
+(exported alias/newtype bodies); (3) `resolve_ctype_d` `Type::Qualified` arm maps `ffi.int32`/`ffi.ptr` →
+`CType::Int32`/`Ptr` for extern sigs; (4) `infer_call` Field-callee qualified-ctor arm delegates to
+`infer_named_call` (Socket/Listener/widths/ptr → "has no constructor" reject); (5) compiler Field-callee
+arm lowers `module.Ctor(args)` to the SAME opcode as the bare name, keyed on
+`program.modules[tidx].native` (NewShared/NewRwShared/NewAtomic/NewExecutor/NewTimer); interp gets a
+parity twin (`construct_native_ctor`). `bind_import` skips (VM + interp) untouched — a qualified ctor
+lowers to an opcode, no runtime module-member lookup. **TWO-LEVEL ONLY** (parser is two-level for every
+module; `std.concurrency.Shared` is out of scope). **Future:** retiring the bare-name licensing is its
+own later milestone (one-way ratchet). Tests: `src/checker/tests.rs`
+(`qualified_native_type_annotation_resolves` / `qualified_native_ctor_call_infers` /
+`alias_and_newtype_over_qualified_builtin` / `ffi_qualified_width_in_extern_sig` + unlicensed/timer/Socket
+negatives), three-engine goldens `examples/native_qualified.chz` (VM/interp/M:N) and
+`examples/ffi_qualified.chz` (CLI-verified libc `abs(ffi.int32)`). Docs: `docs/syntax.md`, `docs/stdlib.md`.
+
 **✅ Checker — Closure-parameter type inference (v1) + structural-match-over-`Unknown` soundness close
 (2026-06-28).** Checker-only, three-engine-parity-safe by construction (rejected programs never run;
 accepted programs byte-identical). **Supersedes** the earlier `MatchKind::Skip`/`OpenScrutinee`

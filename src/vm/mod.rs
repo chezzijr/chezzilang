@@ -22581,6 +22581,59 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on container_ctor");
     }
 
+    /// First-class native-type golden: `examples/native_qualified.chz` exercises the ADDITIVE
+    /// qualified / aliased module-member path for import-gated native types — `concurrency.Shared(0)`,
+    /// aliased `c.Shared(0)`, qualified RwShared/Atomic/Executor, `time.timer(0)`, plus a type-alias
+    /// and a newtype over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the
+    /// bare-after-import names, so output is byte-identical on interp, the cooperative VM, AND the M:N
+    /// engine (`run_capture_parallel`) — the three-engine parity gate for the qualified-ctor lowering.
+    #[test]
+    fn golden_native_qualified_chz_matches_expected_and_interp() {
+        // Imports (`std.concurrency` / `std.time`) require the module-graph path, so drive `run_file`
+        // (not `run_capture`, which skips resolution and never populates `imported_modules`). Three
+        // engines must agree byte-for-byte: VM(serial), interp, and the M:N OS-thread engine.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/native_qualified.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/native_qualified.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("native_qualified.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from native_qualified.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("native_qualified.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on native_qualified");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("native_qualified.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
+    }
+
+    /// Qualified-FFI-width golden: `examples/ffi_qualified.chz` declares `extern fn abs(ffi.int32) ->
+    /// ffi.int32` — a QUALIFIED width name in an extern signature. `resolve_ctype_d` maps it to the
+    /// SAME `CType::Int32` the bare `int32` resolves to, so the C ABI marshalling is identical. Linux-
+    /// only (needs libc.so.6); drives `run_file` (extern decls need the module-graph) and asserts VM +
+    /// interp parity. FFI is layout-dependent, hence a real C call rather than a unit assert.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn golden_ffi_qualified_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/ffi_qualified.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/ffi_qualified.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("ffi_qualified.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from ffi_qualified.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("ffi_qualified.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on ffi_qualified");
+    }
+
     /// Inline-expr fn body golden: `examples/inline_fn.chz` exercises Option A (inline-only) — a
     /// `fn a(): <expr>` (and the annotated `fn a() -> int: <expr>`) implicitly returns its single
     /// expression, usable as a value and a `.map` argument. Byte-identical on VM, interp, and the

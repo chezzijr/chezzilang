@@ -1,0 +1,15 @@
+# Golden: a QUALIFIED FFI width type (`ffi.int32`) inside an `extern` signature. The width name is
+# reached through the bound `ffi` module (mirrors `concurrency.Shared`), and `resolve_ctype_d` maps
+# it to the SAME `CType::Int32` the bare `int32` resolves to — so the C ABI marshalling is identical.
+# `abs(int)` is libc's C `int abs(int)`; a C `int` is 32-bit on the LP64/ILP32 targets we run on.
+# Run with: chezzi run examples/ffi_qualified.chz
+import std.ffi
+
+extern "libc.so.6":
+    fn abs(x: ffi.int32) -> ffi.int32
+
+fn main():
+    print(abs(-5))      # 5
+    print(abs(42))      # 42
+
+main()
