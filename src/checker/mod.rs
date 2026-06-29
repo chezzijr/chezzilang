@@ -7919,8 +7919,14 @@ impl Checker {
                     }
                 };
                 // Editor hover: record the closure param's type at its DECL-site name span (no-op
-                // off-probe; first-hit-wins, so a body-use span records separately).
-                self.hover_record_at(p.name_span, &ty, HoverKind::Param, None);
+                // off-probe; first-hit-wins, so a body-use span records separately). SKIP during the
+                // generic-arg unification prepass: there an unannotated param is forced `Unknown`
+                // (see the `generic_arg_prepass` arm above), and first-hit-wins would latch that `?`
+                // over the real type the later per-arg check (run with the substituted slot type and
+                // `generic_arg_prepass=false`) infers — so `xs.map(fn(a): a + 1)` would hover `?`.
+                if !self.generic_arg_prepass {
+                    self.hover_record_at(p.name_span, &ty, HoverKind::Param, None);
+                }
                 self.declare(&p.name, ty.clone());
                 if p.is_ref {
                     self.declare_ref(&p.name);

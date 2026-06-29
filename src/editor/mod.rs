@@ -1398,6 +1398,18 @@ mod tests {
     }
 
     #[test]
+    fn hover_unannotated_closure_param_decl_in_generic_arg() {
+        // An UNANNOTATED closure param passed to a generic fn: its decl-site hover must report the
+        // INFERRED type (`int`), not the `?` the generic-arg unification prepass forces. Regression
+        // guard for the prepass first-hit-wins latch (the record is gated on `!generic_arg_prepass`).
+        let src = "fn apply[T](x: T, g: fn(T) -> T) -> T:\n    return g(x)\nprint(apply(1, fn(a): a + 1))\n";
+        // line 2: `print(apply(1, fn(a): a + 1))` — the closure param `a` is at char 18.
+        let h = hov(src, 2, 18).expect("hover on unannotated closure param decl");
+        assert_eq!(h.display, "int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Param);
+    }
+
+    #[test]
     fn hover_struct_field_decl() {
         // Hovering the field `x` at its DECL site reports its declared type.
         let h =
