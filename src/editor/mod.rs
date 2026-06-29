@@ -1163,6 +1163,73 @@ mod tests {
     }
 
     #[test]
+    fn hover_type_alias_transparent() {
+        // Hovering the type token `Id` in `x: Id` shows the RESOLVED type (`int`, the alias body).
+        let h =
+            hov("type Id = int\nx: Id = 5\nprint(x)\n", 1, 3).expect("hover on alias type token");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_param_type_token() {
+        // The `int` param-type token (line0 col8) hovers to `int`.
+        let h = hov("fn f(a: int) -> int:\n    return a\nprint(f(1))\n", 0, 8)
+            .expect("hover on param type token");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_return_type_token() {
+        // The return-type `int` token (line0 col16) hovers to `int`.
+        let h = hov("fn f(a: int) -> int:\n    return a\nprint(f(1))\n", 0, 16)
+            .expect("hover on return type token");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_field_type_token() {
+        // The struct field-type `int` token (line1 col7) hovers to `int`.
+        let h = hov("struct S:\n    x: int\ns := S(1)\nprint(s.x)\n", 1, 7)
+            .expect("hover on field type token");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_struct_name_type_token() {
+        // The `P` param-type token (line2 col8) hovers to the struct `P`.
+        let h = hov(
+            "struct P:\n    v: int\nfn g(p: P):\n    print(p.v)\ng(P(1))\n",
+            2,
+            8,
+        )
+        .expect("hover on struct-name type token");
+        assert_eq!(h.display, "P");
+    }
+
+    #[test]
+    fn hover_generic_inner_type_token() {
+        // The inner `int` of `List[int]` (line0 col9) hovers via composite recursion.
+        let h = hov("xs: List[int] = [1]\nprint(xs)\n", 0, 9)
+            .expect("hover on generic inner type token");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn hover_generic_fn_param_type_no_latch() {
+        // The param-type `T` (line0 col11) must show `T` (Ty::Param), not `?` (prepass-latch guard).
+        let h = hov("fn f[T](x: T) -> T:\n    return x\nprint(f(1))\n", 0, 11)
+            .expect("hover on generic fn param type token");
+        assert_eq!(h.display, "T");
+    }
+
+    #[test]
+    fn hover_type_kind_is_type() {
+        // A type-annotation hover is classified `HoverKind::Type`.
+        let h = hov("x: int = 5\nprint(x)\n", 0, 3).expect("hover on let annotation type token");
+        assert_eq!(h.kind, crate::checker::HoverKind::Type);
+    }
+
+    #[test]
     fn hover_fn_shows_doc() {
         // A `#` comment immediately above a `fn` becomes its doc, surfaced on hover of the fn's use.
         let h = hov("# greet the world\nfn f():\n    1\nf\n", 3, 0).expect("hover on fn use");
