@@ -60,6 +60,10 @@ pub enum StmtKind {
     /// `struct Name:` (or `struct Name[A, B]:`) with fields and (optionally) methods.
     Struct {
         name: String,
+        /// Source span of the declared-NAME token (`P` in `struct P:`). Diagnostic-only (the LSP
+        /// records a decl-site hover at the type name); runtime-inert, like `Field.name_span` /
+        /// `For.var_spans`. `Span::default()` for any synthesized decl.
+        name_span: Span,
         type_params: Vec<TypeParam>,
         fields: Vec<Field>,
         methods: Vec<FnDecl>,
@@ -72,6 +76,9 @@ pub enum StmtKind {
     /// method signatures may reference `T`, and a bound names concrete args (`[X: Container[int]]`).
     Protocol {
         name: String,
+        /// Source span of the declared-NAME token (`Bar` in `protocol Bar:`). Diagnostic-only
+        /// (decl-site hover); runtime-inert, like `Struct::name_span`.
+        name_span: Span,
         type_params: Vec<TypeParam>,
         methods: Vec<MethodSig>,
         /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` → `[Add, Sub]`. A type
@@ -87,6 +94,9 @@ pub enum StmtKind {
     /// generic structs — the parameters matter only to the checker.
     Enum {
         name: String,
+        /// Source span of the declared-NAME token (`Col` in `enum Col:`). Diagnostic-only
+        /// (decl-site hover); runtime-inert, like `Struct::name_span`.
+        name_span: Span,
         type_params: Vec<TypeParam>,
         variants: Vec<Variant>,
         methods: Vec<FnDecl>,
@@ -97,6 +107,9 @@ pub enum StmtKind {
     /// type everywhere; structural, not a distinct nominal type).
     TypeAlias {
         name: String,
+        /// Source span of the declared-NAME token (`Id` in `type Id = int`). Diagnostic-only
+        /// (decl-site hover); runtime-inert, like `Struct::name_span`.
+        name_span: Span,
         ty: Type,
         /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the alias name.
         doc: Option<String>,
@@ -110,6 +123,9 @@ pub enum StmtKind {
     /// from its own methods + protocol satisfaction). `methods` are name-keyed like struct/enum.
     NewType {
         name: String,
+        /// Source span of the declared-NAME token (`UserId` in `newtype UserId = int`).
+        /// Diagnostic-only (decl-site hover); runtime-inert, like `Struct::name_span`.
+        name_span: Span,
         type_params: Vec<TypeParam>,
         underlying: Type,
         methods: Vec<FnDecl>,
@@ -316,6 +332,10 @@ pub struct FnDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
+    /// Source span of the param-NAME token (`T` in `fn id[T]` / `struct Box[T]`). Diagnostic-only
+    /// (the LSP records a decl-site hover at the type-param name); runtime-inert, like
+    /// `Param.name_span`. `Span::default()` for any synthesized type param.
+    pub name_span: Span,
     pub bounds: Vec<Bound>,
 }
 
@@ -438,18 +458,65 @@ pub enum LitPattern {
 }
 
 /// The four import forms (syntax.md §12).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `PartialEq` is hand-written (NOT derived) so the bound-NAME spans are EQUALITY-NEUTRAL (mirrors
+/// `Type`'s `Named` span): the spans are pure editor-tooling metadata (the LSP records a decl-site
+/// hover at the bound import name); making position flip equality would break the parser tests that
+/// compare whole `Import`s and is semantically meaningless (runtime-inert, never read by a backend).
+#[derive(Debug, Clone)]
 pub enum Import {
     /// `import a.b.c` or `import a.b.c as alias`.
     Module {
         path: Vec<String>,
         alias: Option<String>,
+        /// Source span of the BOUND-NAME token: the `as` alias token when present, else the last
+        /// path segment (`math` in `import std.math`, `m` in `import std.math as m`). Diagnostic-only
+        /// (decl-site hover); equality-neutral, runtime-inert. `Span::default()` for synthesized.
+        name_span: Span,
     },
     /// `import n1, n2 as a, … from a.b` — each name with an optional alias.
     From {
         path: Vec<String>,
         names: Vec<(String, Option<String>)>,
+        /// Source span of each BOUND-NAME token, parallel to `names` (same order/length): the `as`
+        /// alias token when present, else the member token. Diagnostic-only (decl-site hover);
+        /// equality-neutral, runtime-inert.
+        name_spans: Vec<Span>,
     },
+}
+
+/// Hand-written so the bound-NAME spans are EQUALITY-NEUTRAL (see the `Import` doc): everything else
+/// is a structural field-by-field comparison, exactly as a derive would produce.
+impl PartialEq for Import {
+    fn eq(&self, other: &Import) -> bool {
+        match (self, other) {
+            (
+                Import::Module {
+                    path: p1,
+                    alias: a1,
+                    ..
+                },
+                Import::Module {
+                    path: p2,
+                    alias: a2,
+                    ..
+                },
+            ) => p1 == p2 && a1 == a2,
+            (
+                Import::From {
+                    path: p1,
+                    names: n1,
+                    ..
+                },
+                Import::From {
+                    path: p2,
+                    names: n2,
+                    ..
+                },
+            ) => p1 == p2 && n1 == n2,
+            _ => false,
+        }
+    }
 }
 
 // ===== types =====

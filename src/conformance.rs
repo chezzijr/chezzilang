@@ -356,6 +356,10 @@ fn parser_rules_match_fns() {
         // `parse_with_docs` is the doc-comment-carrying entry point (same grammar as `parse`, plus the
         // lexer's doc-comment side-channel); it maps to no distinct grammar rule.
         "parse_with_docs",
+        // `parse_dotted_path_spanned` is the span-tracking sibling of `parse_dotted_path` (same
+        // `dottedPath` grammar; it only also returns the last-segment span for the import bound-name
+        // hover) — a structural helper with no distinct grammar rule.
+        "parse_dotted_path_spanned",
     ]
     .into_iter()
     .collect();

@@ -221,6 +221,34 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for the five decl-site NAME tokens (Tier A) (2026-06-30).** Five
+decl-site name positions that returned `None` now hover, all via the established additive-`Span`
+precedent (`Field.name_span` / `Param.name_span` / `For.var_spans` / `Pattern::Ident(_, Span)`): a new
+diagnostic-only span captured by the parser at the name token, then a probe-gated `hover_record_at` in
+the checker — every new span is runtime-inert (never read by desugar/compiler/vm/interp), so VM↔interp
+parity + all goldens stay byte-identical. (1) **type-decl name** — `struct P:` / `enum Col:` /
+`newtype UserId = int` / `type Id = int` / `protocol Bar:` add `name_span: Span` to the five
+`StmtKind` decl variants; the checker pass-2 arms record the decl's own `Ty` (`struct`/`enum`/`newtype`
+self-ty, the aliased ty for `type`, `Ty::Protocol` for `protocol`) + the decl's doc-comment at the
+name token (`HoverKind::Struct`, now PRODUCED). (2) **generic type-param decl** — `fn id[T]` /
+`struct Box[T]` / method `[U]` add `name_span: Span` to `TypeParam`; the single `enter_type_params`
+funnel records `Ty::Param("T")` (the bound suffix `T: Comparable` is not representable through the
+`Ty`-only hover channel — bare param name only). (3) **import bound name** — `import std.math` (the
+`math`), `import std.math as m` (the alias), `import sqrt from std.math` (the `sqrt`) add
+`name_span`/`name_spans` to `Import::Module`/`Import::From`; `bind_import` records `Ty::Module` for the
+module name and the imported fn/value type for `from`-members. `Import` gets a hand-written
+equality-neutral `PartialEq` (the bound-name spans don't flip equality — `Type::Named` precedent).
+From-import **type-only** members (e.g. `import Point from geo`) are not hovered (only fn/value
+members) — a deliberate scope cut. (4) **assign-LHS** — `i = i + 1` records the target's type at the
+simple-`Ident` lvalue span (no AST change). (5) **method decl name** — `fn dbl(self) -> int:` records
+the call signature (receiver stripped for instance methods, kept for statics) at the method-name token,
+matching the call-site method hover. New parser helper `parse_dotted_path_spanned` (allowlisted in
+conformance — same `dottedPath` grammar). Tests: `editor::tests::hover_struct_decl_name`(`_shows_doc`),
+`hover_enum_decl_name`, `hover_newtype_decl_name`, `hover_type_alias_decl_name`,
+`hover_protocol_decl_name`, `hover_type_param_decl_fn`/`_struct`, `hover_assign_lhs`,
+`hover_method_decl_name`, `hover_import_module`(`_alias`), `hover_from_import_name`. **Reinstall the LSP
+snapshot to serve it: `cargo install --path . --features lsp --bin chezzi-lsp`.**
+
 **✅ Editor tooling — LSP hover for the two remaining binding decl-sites (2026-06-29).** The last
 two binding decl-sites that returned `None` now report their inferred type, closing out the
 decl-site-hover batch (after the for-loop/param/field work): **(A) tuple-destructure** (`a, b := (1,2)`
