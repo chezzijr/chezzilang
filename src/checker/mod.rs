@@ -1063,6 +1063,20 @@ struct Checker {
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
     imported_modules: HashMap<String, ModuleId>,
+    /// First segment of each imported DOTTED module path (`std` from `import std.concurrency`) →
+    /// `(dotted_path, bound_name)` of the FIRST import that introduced it. Used ONLY to give a
+    /// targeted two-level-path hint for a multi-level mistake like `std.concurrency.Shared(0)` (the
+    /// head `std` is a path PREFIX, not a bound name) instead of the misleading "unknown name 'std'".
+    /// Never a bound value/type itself, so it cannot mask a genuine typo.
+    import_path_heads: HashMap<String, (String, String)>,
+    /// The first TWO segments of each imported module's dotted path → its bound name (last segment /
+    /// alias), or `None` when two imports share those two segments (ambiguous). Keyed on two segments
+    /// because a too-deep-path mistake fires from `infer_field` with only the head + the NEXT segment
+    /// visible (the call/field already consumed the rest): `(std, net)` → `net`, and
+    /// `(std, concurrency)` → `collection` for `import std.concurrency.collection`. Correct for 2- and
+    /// 3+-level imports and sibling collisions alike — unlike `import_path_heads` (head-only,
+    /// first-wins), which named the wrong sibling / the wrong segment.
+    module_prefix2: HashMap<(String, String), Option<(String, String)>>,
     /// Every name an `import`/`import … from` binds in the *current* module → the span of its first
     /// import, across ALL import namespaces (values, functions, modules, type-names). Used to reject
     /// a SECOND import binding the same name (`import f from lib` + `import f from lib2`, or
@@ -1250,6 +1264,8 @@ impl Checker {
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
+            import_path_heads: HashMap::new(),
+            module_prefix2: HashMap::new(),
             import_binds: HashMap::new(),
             imported_alias_tys: HashMap::new(),
             imported_alias_ctypes: HashMap::new(),
@@ -1375,6 +1391,8 @@ impl Checker {
         self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
+        self.import_path_heads.clear();
+        self.module_prefix2.clear();
         self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
@@ -1487,6 +1505,35 @@ impl Checker {
                 }
                 self.imported_modules
                     .insert(name.clone(), imp.target.clone());
+                // Record the first TWO path segments → bound name (`(std,net)` → `net`,
+                // `(std,concurrency)` → `collection` for `import std.concurrency.collection`) so a
+                // too-deep-path mistake — which fires with only head + next segment visible — names
+                // the EXACT module's bound name. `None` marks a genuine ambiguity (two imports sharing
+                // both segments) so we fall back to a generic hint rather than guess.
+                if path.len() >= 2 {
+                    let key = (path[0].clone(), path[1].clone());
+                    match self.module_prefix2.get(&key) {
+                        Some(Some((_, prev))) if prev != &name => {
+                            self.module_prefix2.insert(key, None);
+                        }
+                        None => {
+                            self.module_prefix2
+                                .insert(key, Some((path.join("."), name.clone())));
+                        }
+                        _ => {}
+                    }
+                }
+                // Record the path HEAD (`std` of `import std.concurrency`) so a multi-level mistake
+                // (`std.concurrency.Shared(...)`) gets the two-level hint, not "unknown name 'std'".
+                // Only for a genuine dotted path whose head isn't itself the bound name (first wins).
+                if path.len() >= 2 {
+                    let head = path[0].clone();
+                    if head != name {
+                        self.import_path_heads
+                            .entry(head)
+                            .or_insert_with(|| (path.join("."), name.clone()));
+                    }
+                }
                 self.declare(&name, Ty::Module(name.clone()));
                 // Register the imported module's struct/enum LAYOUTS into the per-module shape tables
                 // (so `geo.Point(1,2).x` and `geo`'s enum methods resolve), but NOT into the bare
@@ -6472,6 +6519,21 @@ impl Checker {
             self.error(span, self.unknown_type_msg(name));
             return Ty::Unknown;
         }
+        // A multi-level path mistake (`std.concurrency.Shared(0)`): the head `std` is the first
+        // segment of a real imported dotted module path, NOT a bound name. Steer to the two-level form
+        // instead of the misleading bare "unknown name 'std'". Narrow: fires ONLY for a literal import
+        // path head, never a genuine typo (which has no `import_path_heads` entry).
+        if let Some((dotted, bound)) = self.import_path_heads.get(name).cloned() {
+            self.error(
+                span,
+                format!(
+                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
+                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
+                     multi-level paths like `{name}.….<Name>` are not supported"
+                ),
+            );
+            return Ty::Unknown;
+        }
         self.error(span, format!("unknown name '{name}'"));
         Ty::Unknown
     }
@@ -6971,6 +7033,35 @@ impl Checker {
     }
 
     fn infer_field(&mut self, obj: &Expr, name: &str) -> Ty {
+        // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
+        // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
+        // an imported dotted module path (`std`) — never a bound name — and `name` is the NEXT segment.
+        // The enclosing call/field already consumed the rest, so we identify the module by its
+        // (head, next) prefix and name its EXACT bound name (correct for 2- and 3+-level imports and
+        // sibling collisions; the trailing type isn't visible here, hence the `<Name>` placeholder).
+        if let ExprKind::Ident(head) = &obj.kind
+            && self.lookup(head).is_none()
+            && !self.imported_modules.contains_key(head)
+            && let Some(slot) = self
+                .module_prefix2
+                .get(&(head.clone(), name.to_string()))
+                .cloned()
+        {
+            let hint = match slot {
+                Some((dotted, bound)) => format!(
+                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
+                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
+                     multi-level paths like `{head}.{name}.<Name>` are not supported"
+                ),
+                None => format!(
+                    "Chezzi uses two-level paths — reference an imported module by its bound name \
+                     (its last path segment, or an alias); multi-level paths like \
+                     `{head}.{name}.<Name>` are not supported"
+                ),
+            };
+            self.error(obj.span, hint);
+            return Ty::Unknown;
+        }
         // `module.Enum.Variant` used as a value: a bound module dotted with one of its enums dotted
         // with a nullary variant — the qualified analogue of the bare `Enum.Variant` value form.
         if let ExprKind::Field {
@@ -7951,11 +8042,49 @@ impl Checker {
                     vi.enum_name = self.type_key(&mid, ename);
                     return self.infer_variant_call(&vi, name, args, &targs, *name_span, span);
                 }
-                self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
-                for a in args {
-                    self.infer(a);
-                }
-                return Ty::Unknown;
+                // Not a variant — a QUALIFIED enum STATIC method `module.Enum.method(args)`. Mirror the
+                // bare enum-static path: variant-first ran above (a variant always wins, disjointness
+                // enforced at decl), so delegate to `infer_static_call` keyed by the declaring module's
+                // runtime key. Emits "type 'Enum' has no static method 'm'" for a genuine miss.
+                let key = self.type_key(&mid, ename);
+                return self.infer_static_call(
+                    &key,
+                    ename,
+                    name,
+                    args,
+                    &[],
+                    &targs,
+                    *name_span,
+                    span,
+                );
+            }
+            // `module.Struct.method(args)` — a QUALIFIED struct STATIC method. The enum arm above
+            // consumed enum names; this covers structs declared in a bound (non-local) module. Resolve
+            // the type's module-scoped key and delegate to `infer_static_call` (the SAME path the bare
+            // `Type.static_method()` form uses). Placed before the bare-type / native-ctor arms so a
+            // qualified static call no longer falls through to "module has no member 'Struct'".
+            if let ExprKind::Field {
+                obj: inner_obj,
+                name: tname,
+                ..
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner_obj.kind
+                && !self.is_local_binding(mname)
+                && let Some(mid) = self.imported_modules.get(mname).cloned()
+                && let Some(sig) = self.module_sigs.get(&mid).cloned()
+                && sig.struct_defs.contains_key(tname)
+            {
+                let key = self.type_key(&mid, tname);
+                return self.infer_static_call(
+                    &key,
+                    tname,
+                    name,
+                    args,
+                    &[],
+                    &targs,
+                    *name_span,
+                    span,
+                );
             }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
             // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
@@ -14648,6 +14777,214 @@ mod graph_tests {
             check_entry(&entry).is_ok(),
             "expected clean (bare-ident catch-all closes + binds): {:?}",
             errors(&entry)
+        );
+    }
+
+    // === Qualified-type-as-static-method-receiver (Part 1) ===
+
+    // `module.Struct.static_method()` — qualified type dotted with a static method checks clean.
+    #[test]
+    fn qualified_type_struct_static_ok() {
+        let t = TmpDir::new();
+        t.write(
+            "counter.chz",
+            "struct Counter:\n    n: int\n    fn zero() -> Counter:\n        return Counter(0)\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import counter\nfn main():\n    c := counter.Counter.zero()\n    print(c.n)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean qualified static call: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Negative: a non-existent static method on a qualified type is a clear "no static method" error.
+    #[test]
+    fn qualified_type_struct_static_unknown_rejects() {
+        let t = TmpDir::new();
+        t.write(
+            "counter.chz",
+            "struct Counter:\n    n: int\n    fn zero() -> Counter:\n        return Counter(0)\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import counter\nfn main():\n    c := counter.Counter.no_such()\n    print(c)\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("has no static method 'no_such'")),
+            "got: {errs:?}"
+        );
+    }
+
+    // `module.Enum.static_method()` — qualified enum dotted with a static method (NOT a variant).
+    #[test]
+    fn qualified_type_enum_static_ok() {
+        let t = TmpDir::new();
+        t.write(
+            "col.chz",
+            "enum Color:\n    Red\n    Green\n    fn first() -> Color:\n        return Color.Red\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import col\nfn main():\n    c := col.Color.first()\n    print(c)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "expected clean qualified enum-static call: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Regression KEEP-WORKING: bare static after `from` import.
+    #[test]
+    fn qualified_keep_bare_static() {
+        let t = TmpDir::new();
+        t.write(
+            "counter.chz",
+            "struct Counter:\n    n: int\n    fn zero() -> Counter:\n        return Counter(0)\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import Counter from counter\nfn main():\n    c := Counter.zero()\n    print(c.n)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "bare static regressed: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Regression KEEP-WORKING: qualified constructor `module.Type(args)`.
+    #[test]
+    fn qualified_keep_qualified_ctor() {
+        let t = TmpDir::new();
+        t.write("counter.chz", "struct Counter:\n    n: int\n");
+        let entry = t.write(
+            "main.chz",
+            "import counter\nfn main():\n    c := counter.Counter(7)\n    print(c.n)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "qualified ctor regressed: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // Regression KEEP-WORKING: qualified enum VARIANT (variant-first wins over static).
+    #[test]
+    fn qualified_keep_enum_variant() {
+        let t = TmpDir::new();
+        t.write(
+            "col.chz",
+            "enum Color:\n    Red\n    Green\n    fn first() -> Color:\n        return Color.Red\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import col\nfn main():\n    c := col.Color.Red\n    print(c)\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "qualified enum variant regressed: {:?}",
+            errors(&entry)
+        );
+    }
+
+    // === Two-level path diagnostics (Part 2) ===
+
+    // EXPR position: `std.concurrency.Shared(0)` head `std` is an import-path prefix → two-level hint
+    // (NOT the misleading bare "unknown name 'std'").
+    #[test]
+    fn multilevel_expr_path_two_level_hint() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "import std.concurrency\nfn main():\n    s := std.concurrency.Shared(0)\n    print(s)\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|m| m.contains("two-level")),
+            "expected two-level hint, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|m| m == "unknown name 'std'"),
+            "should not emit bare unknown-name: {errs:?}"
+        );
+    }
+
+    // EXPR position, SIBLING COLLISION: two `std.*` imports share head `std`. A `std.net.Socket(0)`
+    // mistake must name the module the user REFERENCED (`net`), not the first-imported sibling
+    // (`concurrency`). Regression for the first-wins head-map bug (3 confirmed adversarial charges).
+    #[test]
+    fn multilevel_expr_collision_names_referenced_module() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "import std.concurrency\nimport std.net\nfn main():\n    s := std.net.Socket(0)\n    print(s)\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("two-level") && m.contains("`net.<Name>`")),
+            "expected hint naming the referenced module `net`, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|m| m.contains("concurrency")),
+            "must NOT steer to the first-imported sibling `concurrency`: {errs:?}"
+        );
+    }
+
+    // EXPR position, THREE-LEVEL import: `import std.concurrency.collection` binds `collection` (the
+    // LAST segment), NOT `concurrency`. A `std.concurrency.collection.X(...)` mistake must name
+    // `collection`, not the second segment. Regression for the adversarial 3-level charge.
+    #[test]
+    fn multilevel_expr_three_level_import_names_bound_name() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "import std.concurrency.collection\nfn main():\n    c := std.concurrency.collection.Nope(0)\n    print(c)\n",
+        );
+        let errs = errors(&entry);
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("two-level") && m.contains("`collection.<Name>`")),
+            "expected hint naming the bound name `collection`, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|m| m.contains("write `concurrency")),
+            "must NOT name the second segment `concurrency` as the module: {errs:?}"
+        );
+    }
+
+    // Negative: a genuine undefined name still gives the normal "unknown name" error.
+    #[test]
+    fn multilevel_expr_real_typo_still_unknown_name() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "fn main():\n    nope_xyz()\n");
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|m| m.contains("unknown name 'nope_xyz'")),
+            "got: {errs:?}"
+        );
+    }
+
+    // Negative: a real undefined TYPE still gives the normal unknown-type error (not the hint).
+    #[test]
+    fn multilevel_unknown_type_still_normal_error() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "fn f(x: Nope): print(1)\nfn main(): f(1)\n");
+        let errs = errors(&entry);
+        assert!(
+            errs.iter().any(|m| m.contains("Nope")),
+            "expected unknown-type error mentioning Nope, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|m| m.contains("two-level")),
+            "should not emit two-level hint for a real typo: {errs:?}"
         );
     }
 }

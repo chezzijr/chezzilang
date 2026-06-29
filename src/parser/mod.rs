@@ -1621,6 +1621,23 @@ impl Parser {
             } else {
                 Vec::new()
             };
+            // A THIRD dot (`std.concurrency.Shared`) is a multi-level path. Chezzi type paths are
+            // intentionally TWO-LEVEL (`module.Type`, where `module` is the imported last-segment /
+            // alias name) — multi-level type paths are NOT supported. Emit the targeted two-level hint
+            // here instead of letting the trailing `.` surface as the generic "expected '=', found '.'".
+            // A qualified type has no `.` postfix, so a `.` at this point can ONLY be the 3-level
+            // mistake (never a false positive).
+            if self.check(&Token::Dot) {
+                let third = match self.peek_at(1) {
+                    Token::Ident(s) => s.clone(),
+                    _ => "Type".to_string(),
+                };
+                return Err(self.err(format!(
+                    "Chezzi uses two-level type paths — write `{member}.{third}` (the imported \
+                     module's bound name) or alias with `import {name}.{member} as {member}` then \
+                     `{member}.{third}`; multi-level paths like `{name}.{member}.{third}` are not supported"
+                )));
+            }
             let ty = Type::Qualified {
                 module: name,
                 name: member,
@@ -5531,5 +5548,29 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    // A three-level type path `std.concurrency.Shared[int]` is NOT supported (paths are two-level).
+    // The parser emits the targeted two-level hint instead of the cryptic "expected '=', found '.'".
+    #[test]
+    fn multilevel_type_path_two_level_hint() {
+        let e = parse_err("x: std.concurrency.Shared[int] = 0\n");
+        assert!(
+            e.message.contains("two-level"),
+            "expected two-level hint, got: {}",
+            e.message
+        );
+        assert!(
+            e.message.contains("concurrency.Shared"),
+            "hint should name the supported form, got: {}",
+            e.message
+        );
+    }
+
+    // A correct two-level qualified type still parses fine (no false positive).
+    #[test]
+    fn two_level_type_path_parses() {
+        // `c.Shared[int]` is a valid qualified type annotation.
+        parse_ok("fn f(x: c.Shared[int]): print(1)\n");
     }
 }

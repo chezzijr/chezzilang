@@ -11,6 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Qualified type as static-method receiver + two-level-path diagnostics (additive, 2026-06-29).**
+Two small ADDITIVE qualified-path improvements, break nothing.
+**Part 1 — `module.Type.static_method()` now works** for cross-module struct AND enum statics
+(`counter.Counter.zero()`, `col.Color.first()`), closing an arbitrary asymmetry (qualified
+*construction* `module.Type(args)` already worked, but the qualified *static call* errored "module has
+no member 'Type'"). Mirrors the bare `Type.static_method()` path exactly: checker adds a qualified
+struct-static arm + reuses the qualified-enum-variant arm's no-variant fallthrough → `infer_static_call`
+(variant-first preserved); compiler adds a Field-over-Field arm emitting the SAME `Op::CallStatic` keyed
+by `type_key`; interp extracts `lookup_static_method_by_key` and adds the parity twin. Negative
+`module.Type.no_such()` → "type 'Type' has no static method 'no_such'". Newtype statics stay unsupported
+(struct/enum-gated, fall through to the existing error).
+**Part 2 — clear two-level-path diagnostics** for the natural 3+-level mistake (import paths *are*
+multi-level, so users assume type refs are too). TYPE position (`x: std.concurrency.Shared[int]`): the
+parser detects a third `.` after a qualified type and emits the targeted hint instead of cryptic
+"expected '=', found '.'". EXPR position (`std.concurrency.Shared(0)`): a new checker `import_path_heads`
+map (head segment → dotted path + bound name, populated in `bind_import`) turns the misleading
+"unknown name 'std'" into the two-level hint; narrow — fires ONLY for a literal import-path head, never a
+real typo. No grammar.bnf change (both surfaces stay two-level; Part 1 is an existing parse, Part 2 is
+error-text only) — conformance green. Tests: `src/checker/mod.rs` graph_tests
+(`qualified_type_struct_static_ok` / `_enum_static_ok` / `_unknown_rejects` + 3 KEEP-WORKING regressions +
+`multilevel_expr_*` positives/negatives), parser `multilevel_type_path_two_level_hint`, three-engine
+golden `examples/qualified_static/` (VM/interp/M:N byte-identical). Docs: `docs/syntax.md`.
+
 **✅ First-class native (Rust-implemented) types — qualified / aliased module-member path (additive,
 2026-06-29).** The import-gated native types/ctors — `Shared`/`RwShared`/`Atomic`/`Executor`
 (std.concurrency), `Socket`/`Listener` (std.net), the FFI widths `int8`..`uint64` + `ptr` (std.ffi),

@@ -1,0 +1,16 @@
+struct Counter:
+    n: int
+
+    fn zero() -> Counter:
+        return Counter(0)
+
+    fn of(n: int) -> Counter:
+        return Counter(n)
+
+enum Color:
+    Red
+    Green
+    Blue
+
+    fn first() -> Color:
+        return Color.Red

@@ -22611,6 +22611,33 @@ main()";
         assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
     }
 
+    /// Qualified-type-as-static-method-receiver golden: `examples/qualified_static/main.chz` imports a
+    /// sibling module and calls `counter.Counter.zero()` / `counter.Counter.of(42)` (struct statics)
+    /// and `counter.Color.first()` (enum static) through a QUALIFIED type. These lower to the SAME
+    /// `Op::CallStatic` the bare `Counter.zero()` form emits, so output is byte-identical across all
+    /// three engines (VM serial, interp, M:N) — the three-engine parity gate for the qualified-static
+    /// lowering. Multi-file (sibling import) needs the module-graph path, so drive `run_file`.
+    #[test]
+    fn golden_qualified_static_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/qualified_static/main.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/qualified_static/main.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("qualified_static/main.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from qualified_static/main.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("qualified_static/main.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on qualified_static");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("qualified_static/main.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on qualified_static");
+    }
+
     /// Qualified-FFI-width golden: `examples/ffi_qualified.chz` declares `extern fn abs(ffi.int32) ->
     /// ffi.int32` — a QUALIFIED width name in an extern signature. `resolve_ctype_d` maps it to the
     /// SAME `CType::Int32` the bare `int32` resolves to, so the C ABI marshalling is identical. Linux-
