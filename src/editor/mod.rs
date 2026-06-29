@@ -1546,6 +1546,55 @@ mod tests {
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 
+    // ===== builtin / stdlib doc-on-hover (Tier C) =====
+
+    #[test]
+    fn hover_builtin_type_list_shows_methods() {
+        // Hovering the `List` ctor callee surfaces its usage blurb + the "methods:" line.
+        let h = hov("xs := List[int]()\n", 0, 6).expect("hover on List ctor callee");
+        let doc = h
+            .doc
+            .as_deref()
+            .expect("List ctor should carry a Tier-C doc");
+        assert!(doc.contains("methods:"), "missing methods line: {doc:?}");
+        assert!(doc.contains("push"), "missing push method: {doc:?}");
+    }
+
+    #[test]
+    fn hover_builtin_type_token_str_shows_doc() {
+        // Hovering the `str` type token in an annotation surfaces its usage blurb + methods.
+        let h = hov("s: str = \"x\"\n", 0, 3).expect("hover on str type token");
+        let doc = h
+            .doc
+            .as_deref()
+            .expect("str token should carry a Tier-C doc");
+        assert!(doc.contains("methods:"), "missing methods line: {doc:?}");
+        assert!(doc.contains("upper"), "missing upper method: {doc:?}");
+    }
+
+    #[test]
+    fn hover_module_fn_sqrt_shows_doc() {
+        // Hovering `math.sqrt` surfaces the authored stdlib-fn blurb.
+        let h = hov("import std.math\nr := math.sqrt(2.0)\n", 1, 10).expect("hover on math.sqrt");
+        let doc = h
+            .doc
+            .as_deref()
+            .expect("math.sqrt should carry a Tier-C doc");
+        assert!(
+            doc.to_lowercase().contains("square root"),
+            "expected 'square root' blurb, got: {doc:?}"
+        );
+    }
+
+    #[test]
+    fn hover_builtin_does_not_break_user_doc() {
+        // The `.or_else(builtin_type_doc)` fallback must not shadow a user fn's own docstring:
+        // a documented user fn still surfaces ITS doc at the call-callee hover (Tier A intact).
+        let src = "# doubles n\nfn dbl(n: int) -> int:\n    return n * 2\ndbl(3)\n";
+        let h = hov(src, 3, 0).expect("hover on user fn callee");
+        assert_eq!(h.doc.as_deref(), Some("doubles n"));
+    }
+
     // ===== decl-site NAME-token hovers (Tier A) =====
 
     #[test]

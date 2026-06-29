@@ -221,6 +221,32 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover docs for BUILTIN/STDLIB types & stdlib module fns (Tier C) (2026-06-30).**
+Hovering a builtin/stdlib TYPE or ctor (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`/`Channel`/`Shared`/
+`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`range`/`tuple`/`Result`/`Option`/`Iterator`) now shows
+a concise one-line usage blurb, and — for a type with a built-in method table — an appended `methods: a, b, c`
+line. The method-name lists come from authored `const *_METHODS: &[&str]` slices beside the `*_method_sig`
+fns, each drift-guarded by `checker::tests::builtin_method_slices_all_resolve` (every listed name must resolve
+from its `*_method_sig`, so the hover can't advertise a method that doesn't exist). New `fn builtin_type_doc(name)`
+builds the blurb; it's threaded as the `doc` arg at the by-name CALL-callee hover site (covers `List[int]()` etc.)
+and the bare Type-token hover site (covers `str`/`bytes`/`Executor`/bare `Shared`…), both already
+`hover_probe.is_some()`-gated so the doc is built ONLY under a probe. Stdlib MODULE FUNCTIONS (`math.sqrt`…)
+now hover with a doc too: authored `MODULE_FN_DOCS` slices set `FnSig.doc` (excluded from `fn_sig_eq`) inside
+`native_module_sig`, surfaced unchanged via the existing `record_method_hover` — coverage is **`std.math` /
+`std.io` / `std.os`** for v1 (drift-guarded by `module_fn_docs_all_resolve`); the other native modules hover
+doc-less for now (follow-up). **Skipped (task-sanctioned): protocol per-method docs** — a doc-comment above a
+`protocol` method sig still does NOT surface; AST `MethodSig` carries no `doc` field, so it'd need a parser +
+`grammar.bnf` + conformance + new hover-site change (multi-file, out of Tier-C scope). **Known v1 gaps:**
+`list.sort` and `bytes`/`bytearray.extend` are real methods handled in `infer_method_call` (not the `*_method_sig`
+tables), so they're intentionally absent from the hover `methods:` lists; a GENERIC builtin written as an
+annotation head (`xs: List[int]`) goes through `Type::Generic`, which records no head-name hover, so docs there
+show only via the call form / scalar type token. Checker+editor only; every doc is an `Option<String>` passed to
+`hover_record_at` (probe-gated no-op off-probe) → zero runtime/typecheck/codegen/VM/interp change, goldens
+byte-identical. Tests: `editor::tests::hover_builtin_type_list_shows_methods`, `hover_builtin_type_token_str_shows_doc`,
+`hover_module_fn_sqrt_shows_doc`, `hover_builtin_does_not_break_user_doc` (Tier-A fallback intact) +
+`hover_struct_decl_name_shows_doc` (Tier-A regression). **Reinstall the LSP** (`cargo install --path . --features
+lsp --bin chezzi-lsp`) to pick it up.
+
 **✅ Editor tooling — LSP hover for TYPE tokens in annotations (Tier B) (2026-06-30).** Hovering a
 TYPE token in an annotation now shows the RESOLVED type — `x: Id` (the `Id` → `int` if `type Id = int`),
 a param type `fn f(a: int)` (the `int`), a return type `fn f() -> P` (the `P`), a struct field type

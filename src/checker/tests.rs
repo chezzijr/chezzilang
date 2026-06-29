@@ -10535,6 +10535,70 @@ fn reserved_callables_all_have_builtin_sig() {
     assert!(builtin_sig("totally_not_a_builtin").is_none());
 }
 
+/// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST
+/// resolve to `Some` from its owning `*_method_sig` lookup — so the per-type "methods: …" line
+/// `builtin_type_doc` renders can only list methods that provably EXIST. An out-of-date slice (a
+/// renamed/removed method, or a typo) fails here instead of shipping a hover that lies. `Ty::Int` is
+/// the sampled element type for the generic tables so the numeric-gated entries (`sum`/`add`/`sub`)
+/// resolve. (`list.sort` and `bytes`/`bytearray.extend` are handled in `infer_method_call`, NOT these
+/// tables, so they are deliberately absent from the slices — see PROGRESS.md.)
+#[test]
+fn builtin_method_slices_all_resolve() {
+    let chk = |slice: &[&str], name: &str, f: &dyn Fn(&str) -> Option<FnSig>| {
+        for m in slice {
+            assert!(
+                f(m).is_some(),
+                "{name} slice lists '{m}' but its *_method_sig has no such method (drift)"
+            );
+        }
+    };
+    chk(STR_METHODS, "STR_METHODS", &str_method_sig);
+    chk(LIST_METHODS, "LIST_METHODS", &|m| {
+        list_method_sig(m, &Ty::Int)
+    });
+    chk(MAP_METHODS, "MAP_METHODS", &|m| {
+        map_method_sig(m, &Ty::Int, &Ty::Int)
+    });
+    chk(SET_METHODS, "SET_METHODS", &|m| set_method_sig(m, &Ty::Int));
+    chk(CHANNEL_METHODS, "CHANNEL_METHODS", &|m| {
+        channel_method_sig(m, &Ty::Int)
+    });
+    chk(SHARED_METHODS, "SHARED_METHODS", &|m| {
+        shared_method_sig(m, &Ty::Int)
+    });
+    chk(RWSHARED_METHODS, "RWSHARED_METHODS", &|m| {
+        rwshared_method_sig(m, &Ty::Int)
+    });
+    chk(ATOMIC_METHODS, "ATOMIC_METHODS", &|m| {
+        atomic_method_sig(m, &Ty::Int)
+    });
+    chk(SOCKET_METHODS, "SOCKET_METHODS", &socket_method_sig);
+    chk(LISTENER_METHODS, "LISTENER_METHODS", &listener_method_sig);
+    chk(EXECUTOR_METHODS, "EXECUTOR_METHODS", &executor_method_sig);
+    chk(BYTES_METHODS, "BYTES_METHODS", &bytes_method_sig);
+    chk(
+        BYTEARRAY_METHODS,
+        "BYTEARRAY_METHODS",
+        &bytearray_method_sig,
+    );
+}
+
+/// Drift guard (editor hover, Tier C): every `(module, fn)` named in an authored module-fn doc slice
+/// MUST exist in that module's `native_module_sig`, so the module-fn hover doc can only annotate a
+/// function that is really exported. A renamed/removed native fn fails here.
+#[test]
+fn module_fn_docs_all_resolve() {
+    for (module, docs) in MODULE_FN_DOCS {
+        let sig = native_module_sig(module);
+        for (fname, _doc) in *docs {
+            assert!(
+                sig.functions.contains_key(*fname),
+                "{module} doc slice lists fn '{fname}' but native_module_sig has no such function"
+            );
+        }
+    }
+}
+
 // ============================================================================
 // Closure-parameter type inference (v1) — see docs/plan 2026-06-28.
 // ============================================================================
