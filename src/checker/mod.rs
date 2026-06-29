@@ -984,8 +984,97 @@ fn native_module_sig(name: &str) -> ModuleSig {
         ),
         _ => {}
     }
+    // Editor hover (Tier C): attach a concise one-line doc to each native module function that has an
+    // authored blurb (`MODULE_FN_DOCS`). `FnSig.doc` is excluded from `fn_sig_eq`, so this is purely
+    // informational — `record_method_hover` already forwards `sig.doc` at the `module.fn` hover site,
+    // so no extra threading is needed. Drift-guarded by `module_fn_docs_all_resolve`.
+    if let Some((_, docs)) = MODULE_FN_DOCS.iter().find(|(m, _)| *m == name) {
+        for (fname, doc) in *docs {
+            if let Some(f) = sig.functions.get_mut(*fname) {
+                f.doc = Some((*doc).to_string());
+            }
+        }
+    }
     sig
 }
+
+/// Editor hover (Tier C): concise one-line `(module, [(fn, doc)])` blurbs for native stdlib module
+/// functions, paraphrased from `docs/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`
+/// and surfaced verbatim at the `module.fn` hover site. Drift-guarded by `module_fn_docs_all_resolve`
+/// (every listed fn must exist). Coverage is `std.math` / `std.io` / `std.os` for v1; other native
+/// modules are a follow-up (noted in PROGRESS.md) — their fns simply hover doc-less, as before.
+#[allow(clippy::type_complexity)]
+const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "std.math",
+        &[
+            (
+                "abs",
+                "absolute value (numeric-polymorphic: int→int, float→float)",
+            ),
+            ("floor", "round down to the nearest integer (toward -inf)"),
+            ("ceil", "round up to the nearest integer (toward +inf)"),
+            (
+                "round",
+                "round to the nearest integer (half away from zero)",
+            ),
+            ("pow", "pow(base, exp): base raised to exp"),
+            ("sqrt", "square root (NaN for a negative argument)"),
+            ("sin", "sine of an angle in radians"),
+            ("cos", "cosine of an angle in radians"),
+            ("tan", "tangent of an angle in radians"),
+            ("asin", "arcsine in radians (NaN outside [-1, 1])"),
+            ("acos", "arccosine in radians (NaN outside [-1, 1])"),
+            ("atan", "arctangent in radians"),
+            (
+                "atan2",
+                "atan2(y, x): angle of the vector (x, y) in radians",
+            ),
+            ("exp", "e raised to the power x"),
+            ("ln", "natural (base-e) logarithm (-inf at 0, NaN below)"),
+            ("log2", "base-2 logarithm"),
+            ("log10", "base-10 logarithm"),
+            (
+                "log",
+                "log(value, base): logarithm of value in the given base",
+            ),
+            ("is_nan", "true if x is NaN"),
+            ("is_inf", "true if x is +inf or -inf"),
+            ("is_finite", "true if x is neither NaN nor infinite"),
+        ],
+    ),
+    (
+        "std.io",
+        &[
+            ("print", "write a line to stdout (with a trailing newline)"),
+            ("eprint", "write a line to stderr (with a trailing newline)"),
+            (
+                "read_line",
+                "read one line from stdin, newline stripped (None at EOF)",
+            ),
+            ("read_file", "read a whole file as text (Result)"),
+            (
+                "write_file",
+                "write/overwrite a file with the given text (Result)",
+            ),
+        ],
+    ),
+    (
+        "std.os",
+        &[
+            (
+                "args",
+                "program arguments (positionals after the script path)",
+            ),
+            ("env", "look up an environment variable (None if unset)"),
+            ("getcwd", "the current working directory (Result)"),
+            (
+                "exit",
+                "halt the program with an exit code (does NOT run defers)",
+            ),
+        ],
+    ),
+];
 
 struct Checker {
     errors: Vec<CheckError>,
@@ -3548,8 +3637,16 @@ impl Checker {
                 // nothing; gated on `!generic_arg_prepass` so the generic-arg unification prepass
                 // can't first-hit-wins latch an incomplete type. Composite inner names
                 // (`int` in `List[int]`) record via this same arm when resolve_type recurses.
+                // A builtin/stdlib type name (`str`/`bytes`/bare `Shared`/…) also carries its
+                // `builtin_type_doc` usage+methods blurb (Tier C); user types stay doc-less here
+                // (their decl-name docstring surfaces via the Tier-A decl-name hover instead).
                 if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    self.hover_record_at(*name_span, &resolved, HoverKind::Type, None);
+                    self.hover_record_at(
+                        *name_span,
+                        &resolved,
+                        HoverKind::Type,
+                        builtin_type_doc(n),
+                    );
                 }
                 resolved
             }
@@ -8478,12 +8575,15 @@ impl Checker {
                 if self.hover_probe.is_some()
                     && let Some(fty) = self.callee_display_ty(name)
                 {
-                    // doc: a free fn → its `FnSig::doc`; a struct ctor → the struct's `name_docs` entry.
+                    // doc: a free fn → its `FnSig::doc`; a struct ctor → the struct's `name_docs`
+                    // entry; a reserved builtin ctor (List/Map/Channel/Shared/…) → its
+                    // `builtin_type_doc` usage+methods blurb (Tier C). User docs win first.
                     let doc = self
                         .functions
                         .get(name)
                         .and_then(|s| s.doc.clone())
-                        .or_else(|| self.name_docs.get(name).cloned());
+                        .or_else(|| self.name_docs.get(name).cloned())
+                        .or_else(|| builtin_type_doc(name));
                     self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
                 if let Some(ty) = self.infer_named_call(name, args, &targs, callee.span, span, None)
@@ -13778,6 +13878,63 @@ fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'stati
     None
 }
 
+// Editor hover (Tier C): authored method-NAME lists per built-in type, rendered by `builtin_type_doc`
+// as a "methods: a, b, c" line. Each slice is drift-guarded by `builtin_method_slices_all_resolve`
+// (every name MUST resolve from its `*_method_sig`), so the hover can only advertise methods that
+// provably exist. `list.sort` and `bytes`/`bytearray.extend` live in `infer_method_call` (not the
+// `*_method_sig` tables), so they are intentionally absent here — see PROGRESS.md.
+const STR_METHODS: &[&str] = &[
+    "len",
+    "upper",
+    "lower",
+    "trim",
+    "strip",
+    "split",
+    "split_lines",
+    "chars",
+    "join",
+    "starts_with",
+    "ends_with",
+    "contains",
+    "replace",
+    "repeat",
+    "reverse",
+    "pad_left",
+    "index_of",
+    "count",
+    "strip_prefix",
+    "strip_suffix",
+    "to_int",
+    "to_float",
+    "encode",
+];
+const LIST_METHODS: &[&str] = &[
+    "len", "push", "pop", "reverse", "contains", "index_of", "concat", "extend", "sum",
+];
+const MAP_METHODS: &[&str] = &[
+    "len", "has", "get", "keys", "values", "remove", "merge", "update",
+];
+const SET_METHODS: &[&str] = &[
+    "len",
+    "has",
+    "add",
+    "remove",
+    "union",
+    "intersection",
+    "difference",
+];
+const CHANNEL_METHODS: &[&str] = &[
+    "send", "try_send", "recv", "try_recv", "close", "trip", "len",
+];
+const SHARED_METHODS: &[&str] = &["get", "set", "update"];
+const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
+const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
+const SOCKET_METHODS: &[&str] = &["read", "write", "close"];
+const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
+const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
+const BYTES_METHODS: &[&str] = &["decode", "len"];
+const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
+
 fn str_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "len" => (vec![], Ty::Int),
@@ -14095,6 +14252,101 @@ fn builtin_sig(name: &str) -> Option<FnSig> {
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
+}
+
+/// Editor hover (Tier C): a concise one-line "how to use" blurb for a BUILTIN/STDLIB type or ctor
+/// name, paraphrased from `docs/stdlib.md §1–3`. For a type that owns a method table, a
+/// `\nmethods: a, b, c` line is appended from the authored `*_METHODS` slice (drift-guarded by
+/// `builtin_method_slices_all_resolve`, so every advertised method provably exists). Returns `None`
+/// for any non-builtin name (a user type's own docstring already flows via `name_docs`). Built only
+/// under the hover probe (the call sites are `hover_probe.is_some()`-gated), never on the hot check
+/// path. The method-bearing types are listed first; the no-method types (range/tuple/Result/…) only
+/// get a usage line.
+fn builtin_type_doc(name: &str) -> Option<String> {
+    let (usage, methods): (&str, Option<&[&str]>) = match name {
+        // Containers (own a method table) --------------------------------------------------------
+        "List" => (
+            "growable ordered sequence — List[T](); index with xs[i], iterate with `for x in xs:`",
+            Some(LIST_METHODS),
+        ),
+        "Map" => (
+            "key→value hash map — Map[K, V](); index with m[k], iterate with `for k, v in m:`",
+            Some(MAP_METHODS),
+        ),
+        "Set" => (
+            "unordered collection of unique elements — Set[T](); operators | & - ^",
+            Some(SET_METHODS),
+        ),
+        "str" => (
+            "immutable UTF-8 text; index/slice by codepoint, concatenate with +",
+            Some(STR_METHODS),
+        ),
+        "bytes" => (
+            "immutable byte sequence — bytes(x); index with b[i] (byte as int)",
+            Some(BYTES_METHODS),
+        ),
+        "bytearray" => (
+            "mutable byte buffer — bytearray(x); index/assign b[i], push/pop bytes",
+            Some(BYTEARRAY_METHODS),
+        ),
+        // Concurrency / runtime types (own a method table) ---------------------------------------
+        "Channel" => (
+            "FIFO mailbox between tasks — Channel[T](); iterate received values with `for v in ch:`",
+            Some(CHANNEL_METHODS),
+        ),
+        "Shared" => (
+            "cross-task shared cell — Shared(v) (import std.concurrency)",
+            Some(SHARED_METHODS),
+        ),
+        "RwShared" => (
+            "cross-task read-write cell, many readers OR one writer — RwShared(v) (import std.concurrency)",
+            Some(RWSHARED_METHODS),
+        ),
+        "Atomic" => (
+            "cross-task atomic cell — Atomic(v) (import std.concurrency; add/sub need numeric T)",
+            Some(ATOMIC_METHODS),
+        ),
+        "Executor" => (
+            "task pool — Executor() (import std.concurrency)",
+            Some(EXECUTOR_METHODS),
+        ),
+        "Socket" => (
+            "TCP connection handle from std.net connect()/accept()",
+            Some(SOCKET_METHODS),
+        ),
+        "Listener" => (
+            "TCP listening socket from std.net listen()",
+            Some(LISTENER_METHODS),
+        ),
+        // Types without a built-in method table (usage line only) --------------------------------
+        "range" => (
+            "end-exclusive sequence of ints — range(end) / range(start, end) / range(start, end, step)",
+            None,
+        ),
+        "tuple" => (
+            "fixed-size heterogeneous group — (a, b); destructure with `x, y := t`",
+            None,
+        ),
+        "Result" => (
+            "success-or-error — Result[T] / Result[T, E]; Ok(v) / Err(e), unwrap with ? or match",
+            None,
+        ),
+        "Option" => (
+            "a value or nothing — Option[T]; Some(v) / None, unwrap with ? or match",
+            None,
+        ),
+        "Iterator" => (
+            "lazy element cursor — Iterator[T] from a generator or `.iter()`; drive with `for x in it:`",
+            None,
+        ),
+        _ => return None,
+    };
+    let mut doc = usage.to_string();
+    if let Some(ms) = methods {
+        doc.push_str("\nmethods: ");
+        doc.push_str(&ms.join(", "));
+    }
+    Some(doc)
 }
 
 #[cfg(test)]
