@@ -443,6 +443,9 @@ pub enum HoverKind {
     Func,
     Field,
     Struct,
+    /// A TYPE token inside an annotation (`x: Id`, a param/return/field type, a `let` annotation):
+    /// the hovered name resolves through `resolve_type` and the display is the resolved `Ty`.
+    Type,
     Literal,
     Other,
 }
@@ -3310,230 +3313,246 @@ impl Checker {
 
     fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
-            Type::Named { name: n, .. } => match n.as_str() {
-                "int" => Ty::Int,
-                "float" => Ty::Float,
-                "bool" => Ty::Bool,
-                "str" => Ty::Str,
-                "bytes" => Ty::Bytes,
-                "bytearray" => Ty::ByteArray,
-                "nil" => Ty::Nil,
-                // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
-                // signature/body or a protocol method. Resolved BEFORE every reserved/module name
-                // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
-                // and before user structs/aliases, so an in-scope type param uniformly shadows them
-                // (e.g. `fn id[Executor](x: Executor)`), instead of being hijacked by the builtin
-                // arm or mis-erroring with a bogus import hint. Placed below the scalar primitives
-                // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
-                // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
-                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
-                // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
-                // builtin: it resolves only in a module that imported `std.ffi` (whole-module
-                // `import std.ffi` OR selective `import ptr from std.ffi`), OR via a LICENSED
-                // transparent alias body (`ffi_alias_ok`). Since extern blocks use `ptr` pervasively,
-                // the hint points at the whole-module form. See `Ty::Ptr`.
-                "ptr" => {
-                    if self.imported_ffi_types.contains("ptr")
-                        || self
-                            .alias_resolving
-                            .last()
-                            .is_some_and(|a| self.ffi_alias_ok.contains(a))
-                    {
-                        Ty::Ptr
-                    } else {
-                        self.error(
-                            span,
-                            "unknown type 'ptr' (import it from std.ffi: `import std.ffi`)"
-                                .to_string(),
-                        );
-                        Ty::Unknown
+            Type::Named {
+                name: n,
+                span: name_span,
+            } => {
+                let resolved = match n.as_str() {
+                    "int" => Ty::Int,
+                    "float" => Ty::Float,
+                    "bool" => Ty::Bool,
+                    "str" => Ty::Str,
+                    "bytes" => Ty::Bytes,
+                    "bytearray" => Ty::ByteArray,
+                    "nil" => Ty::Nil,
+                    // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
+                    // signature/body or a protocol method. Resolved BEFORE every reserved/module name
+                    // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
+                    // and before user structs/aliases, so an in-scope type param uniformly shadows them
+                    // (e.g. `fn id[Executor](x: Executor)`), instead of being hijacked by the builtin
+                    // arm or mis-erroring with a bogus import hint. Placed below the scalar primitives
+                    // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
+                    // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
+                    _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
+                    // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
+                    // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
+                    // builtin: it resolves only in a module that imported `std.ffi` (whole-module
+                    // `import std.ffi` OR selective `import ptr from std.ffi`), OR via a LICENSED
+                    // transparent alias body (`ffi_alias_ok`). Since extern blocks use `ptr` pervasively,
+                    // the hint points at the whole-module form. See `Ty::Ptr`.
+                    "ptr" => {
+                        if self.imported_ffi_types.contains("ptr")
+                            || self
+                                .alias_resolving
+                                .last()
+                                .is_some_and(|a| self.ffi_alias_ok.contains(a))
+                        {
+                            Ty::Ptr
+                        } else {
+                            self.error(
+                                span,
+                                "unknown type 'ptr' (import it from std.ffi: `import std.ffi`)"
+                                    .to_string(),
+                            );
+                            Ty::Unknown
+                        }
                     }
-                }
-                // A RETURN-ONLY C-ABI marshalling type name (sibling of `ptr`): an OWNED `char*`
-                // the runtime copies into a `str` and then frees. To the program it IS a plain `str`
-                // (the ownership/free is a runtime-only distinction the backends recover via
-                // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
-                // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
-                // Bare use OUTSIDE an extern signature is rejected: it is not a general type — left
-                // ungated it would silently collapse a `fn f(x: owned_str) -> owned_str` to `str`
-                // with no import (mirrors how `ptr` errors when used without `import std.ffi`).
-                "owned_str" => {
-                    if self.in_extern_sig {
-                        Ty::Str
-                    } else {
-                        self.error(
+                    // A RETURN-ONLY C-ABI marshalling type name (sibling of `ptr`): an OWNED `char*`
+                    // the runtime copies into a `str` and then frees. To the program it IS a plain `str`
+                    // (the ownership/free is a runtime-only distinction the backends recover via
+                    // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
+                    // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
+                    // Bare use OUTSIDE an extern signature is rejected: it is not a general type — left
+                    // ungated it would silently collapse a `fn f(x: owned_str) -> owned_str` to `str`
+                    // with no import (mirrors how `ptr` errors when used without `import std.ffi`).
+                    "owned_str" => {
+                        if self.in_extern_sig {
+                            Ty::Str
+                        } else {
+                            self.error(
                             span,
                             "'owned_str' is a return-only extern marshalling type and cannot be \
                              used as a general type annotation"
                                 .to_string(),
                         );
-                        Ty::Unknown
+                            Ty::Unknown
+                        }
                     }
-                }
-                // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation). Like
-                // `Shared`/`RwShared`/`Atomic` below, `Executor` is NOT a global builtin: it resolves
-                // only in a module that imported `std.concurrency` (whole-module or per-name). The name
-                // STAYS reserved (no user `struct Executor`); this is the separate import requirement.
-                "Executor" => {
-                    if self.concurrency_licensed("Executor") {
-                        Ty::Executor
-                    } else {
-                        self.error(
+                    // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation). Like
+                    // `Shared`/`RwShared`/`Atomic` below, `Executor` is NOT a global builtin: it resolves
+                    // only in a module that imported `std.concurrency` (whole-module or per-name). The name
+                    // STAYS reserved (no user `struct Executor`); this is the separate import requirement.
+                    "Executor" => {
+                        if self.concurrency_licensed("Executor") {
+                            Ty::Executor
+                        } else {
+                            self.error(
                             span,
                             "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
                                 .to_string(),
                         );
-                        Ty::Unknown
+                            Ty::Unknown
+                        }
                     }
-                }
-                // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation. Like `Executor`
-                // above these names are NOT global builtins and STAY reserved; but they are generic,
-                // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
-                // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
-                // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
-                // can't fall through to a hint-less "unknown type". (An in-scope type param of the
-                // same name, e.g. `fn f[Shared]`, was already resolved by the hoisted `type_params`
-                // arm above this match, so no per-arm guard is needed here.)
-                n @ ("Shared" | "RwShared" | "Atomic") => {
-                    if self.concurrency_licensed(n) {
-                        self.error(
-                            span,
-                            format!("type '{n}' expects 1 type argument(s), got 0"),
-                        );
-                    } else {
-                        self.error(
+                    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation. Like `Executor`
+                    // above these names are NOT global builtins and STAY reserved; but they are generic,
+                    // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
+                    // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
+                    // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
+                    // can't fall through to a hint-less "unknown type". (An in-scope type param of the
+                    // same name, e.g. `fn f[Shared]`, was already resolved by the hoisted `type_params`
+                    // arm above this match, so no per-arm guard is needed here.)
+                    n @ ("Shared" | "RwShared" | "Atomic") => {
+                        if self.concurrency_licensed(n) {
+                            self.error(
+                                span,
+                                format!("type '{n}' expects 1 type argument(s), got 0"),
+                            );
+                        } else {
+                            self.error(
                             span,
                             format!(
                                 "unknown type '{n}' (import it from std.concurrency: `import std.concurrency`)"
                             ),
                         );
-                    }
-                    Ty::Unknown
-                }
-                // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
-                // Like `Executor`/`Shared`/`ptr` above, these are NOT global builtins: they resolve
-                // only in a module that imported `std.net` (whole-module or per-name). The names STAY
-                // reserved (no user `struct Socket`); this is the separate import requirement. (An
-                // in-scope type param of the same name was already resolved by the hoisted `type_params`
-                // arm above this match.)
-                n @ ("Socket" | "Listener") => {
-                    if self.net_licensed(n) {
-                        if n == "Socket" {
-                            Ty::Socket
-                        } else {
-                            Ty::Listener
                         }
-                    } else {
-                        self.error(
-                            span,
-                            format!(
-                                "unknown type '{n}' (import it from std.net: `import std.net`)"
-                            ),
-                        );
                         Ty::Unknown
                     }
-                }
-                // A transparent type alias resolves to its underlying type (recursively). The
-                // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
-                _ if self.aliases.contains_key(n) => {
-                    if self.alias_resolving.iter().any(|a| a == n) {
-                        self.error(span, format!("recursive type alias '{n}'"));
-                        Ty::Unknown
-                    } else {
-                        let aliased = self.aliases[n].clone();
-                        self.alias_resolving.push(n.clone());
-                        let ty = self.resolve_type(&aliased, span);
-                        self.alias_resolving.pop();
-                        ty
+                    // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
+                    // Like `Executor`/`Shared`/`ptr` above, these are NOT global builtins: they resolve
+                    // only in a module that imported `std.net` (whole-module or per-name). The names STAY
+                    // reserved (no user `struct Socket`); this is the separate import requirement. (An
+                    // in-scope type param of the same name was already resolved by the hoisted `type_params`
+                    // arm above this match.)
+                    n @ ("Socket" | "Listener") => {
+                        if self.net_licensed(n) {
+                            if n == "Socket" {
+                                Ty::Socket
+                            } else {
+                                Ty::Listener
+                            }
+                        } else {
+                            self.error(
+                                span,
+                                format!(
+                                    "unknown type '{n}' (import it from std.net: `import std.net`)"
+                                ),
+                            );
+                            Ty::Unknown
+                        }
                     }
-                }
-                // A `from`-imported type alias resolves to its pre-resolved body (computed in the
-                // defining module's scope). A licensed FFI-width alias was already re-seeded into
-                // `ffi_alias_ok`, but since the body is already a concrete `Ty` no width re-check is
-                // needed here.
-                _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
-                // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
-                // type imports. Each resolves to a plain `int` (`Ty::Int`) — the width/signedness is a
-                // runtime-only marshalling distinction the backends recover via `ctype_of`, and they're
-                // BIDIRECTIONAL (valid as both param and return). But they are NOT global builtins: a
-                // width name resolves only in a module that imported it per-name from `std.ffi`
-                // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
-                // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
-                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
-                    // Accept the width name if THIS module imported it, OR if we reached it by
-                    // expanding a LICENSED transparent alias body — one whose defining module
-                    // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
-                    // opt-in that stays valid wherever the alias is used, including cross-module
-                    // (the alias is program-global but the per-module import set is not). A bare
-                    // width name in ordinary code still needs the import — and crucially an alias
-                    // whose module never imported the width does NOT launder it (the closed gate
-                    // hole): only a licensed alias indirection bypasses the per-module requirement.
-                    if self.imported_ffi_types.contains(n)
-                        || self
-                            .alias_resolving
-                            .last()
-                            .is_some_and(|a| self.ffi_alias_ok.contains(a))
-                    {
-                        Ty::Int
-                    } else {
-                        self.error(
+                    // A transparent type alias resolves to its underlying type (recursively). The
+                    // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
+                    _ if self.aliases.contains_key(n) => {
+                        if self.alias_resolving.iter().any(|a| a == n) {
+                            self.error(span, format!("recursive type alias '{n}'"));
+                            Ty::Unknown
+                        } else {
+                            let aliased = self.aliases[n].clone();
+                            self.alias_resolving.push(n.clone());
+                            let ty = self.resolve_type(&aliased, span);
+                            self.alias_resolving.pop();
+                            ty
+                        }
+                    }
+                    // A `from`-imported type alias resolves to its pre-resolved body (computed in the
+                    // defining module's scope). A licensed FFI-width alias was already re-seeded into
+                    // `ffi_alias_ok`, but since the body is already a concrete `Ty` no width re-check is
+                    // needed here.
+                    _ if self.imported_alias_tys.contains_key(n) => {
+                        self.imported_alias_tys[n].clone()
+                    }
+                    // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
+                    // type imports. Each resolves to a plain `int` (`Ty::Int`) — the width/signedness is a
+                    // runtime-only marshalling distinction the backends recover via `ctype_of`, and they're
+                    // BIDIRECTIONAL (valid as both param and return). But they are NOT global builtins: a
+                    // width name resolves only in a module that imported it per-name from `std.ffi`
+                    // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
+                    // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
+                    _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
+                        // Accept the width name if THIS module imported it, OR if we reached it by
+                        // expanding a LICENSED transparent alias body — one whose defining module
+                        // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
+                        // opt-in that stays valid wherever the alias is used, including cross-module
+                        // (the alias is program-global but the per-module import set is not). A bare
+                        // width name in ordinary code still needs the import — and crucially an alias
+                        // whose module never imported the width does NOT launder it (the closed gate
+                        // hole): only a licensed alias indirection bypasses the per-module requirement.
+                        if self.imported_ffi_types.contains(n)
+                            || self
+                                .alias_resolving
+                                .last()
+                                .is_some_and(|a| self.ffi_alias_ok.contains(a))
+                        {
+                            Ty::Int
+                        } else {
+                            self.error(
                             span,
                             format!(
                                 "unknown type '{n}' (import it from std.ffi: `import {n} from std.ffi`)"
                             ),
                         );
+                            Ty::Unknown
+                        }
+                    }
+                    _ if self.struct_names.contains(n) => {
+                        // The layout is keyed by the runtime key (bare unless disambiguated); the written
+                        // name's bare-visibility is the `struct_names` gate above. Carry the key on the Ty.
+                        let key = self.bare_key(n);
+                        // A generic struct written without type arguments is missing them.
+                        let nparams = self.structs.get(&key).map_or(0, |i| i.type_params.len());
+                        if nparams > 0 {
+                            self.error(
+                                span,
+                                format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                            );
+                        }
+                        Ty::strukt(key)
+                    }
+                    _ if self.enum_names.contains(n) => {
+                        let key = self.bare_key(n);
+                        // A generic enum written without type arguments is missing them.
+                        let nparams = self.enum_type_params.get(&key).map_or(0, |tps| tps.len());
+                        if nparams > 0 {
+                            self.error(
+                                span,
+                                format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                            );
+                        }
+                        Ty::Enum(key, Vec::new())
+                    }
+                    _ if self.newtype_names.contains(n) => {
+                        let key = self.bare_key(n);
+                        // A generic newtype written without type arguments is missing them.
+                        let nparams = self
+                            .newtype_type_params
+                            .get(&key)
+                            .map_or(0, |tps| tps.len());
+                        if nparams > 0 {
+                            self.error(
+                                span,
+                                format!("type '{n}' expects {nparams} type argument(s), got 0"),
+                            );
+                        }
+                        Ty::NewType(key, Vec::new())
+                    }
+                    // A protocol name used as a value type (existential), e.g. `Error`.
+                    _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
+                    _ => {
+                        self.error(span, self.unknown_type_msg(n));
                         Ty::Unknown
                     }
+                };
+                // Editor hover (LSP): record the resolved type at the name token's OWN span (NOT
+                // the enclosing-annotation `span` param). Probe-gated so off-probe checks pay
+                // nothing; gated on `!generic_arg_prepass` so the generic-arg unification prepass
+                // can't first-hit-wins latch an incomplete type. Composite inner names
+                // (`int` in `List[int]`) record via this same arm when resolve_type recurses.
+                if self.hover_probe.is_some() && !self.generic_arg_prepass {
+                    self.hover_record_at(*name_span, &resolved, HoverKind::Type, None);
                 }
-                _ if self.struct_names.contains(n) => {
-                    // The layout is keyed by the runtime key (bare unless disambiguated); the written
-                    // name's bare-visibility is the `struct_names` gate above. Carry the key on the Ty.
-                    let key = self.bare_key(n);
-                    // A generic struct written without type arguments is missing them.
-                    let nparams = self.structs.get(&key).map_or(0, |i| i.type_params.len());
-                    if nparams > 0 {
-                        self.error(
-                            span,
-                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
-                        );
-                    }
-                    Ty::strukt(key)
-                }
-                _ if self.enum_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    // A generic enum written without type arguments is missing them.
-                    let nparams = self.enum_type_params.get(&key).map_or(0, |tps| tps.len());
-                    if nparams > 0 {
-                        self.error(
-                            span,
-                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
-                        );
-                    }
-                    Ty::Enum(key, Vec::new())
-                }
-                _ if self.newtype_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    // A generic newtype written without type arguments is missing them.
-                    let nparams = self
-                        .newtype_type_params
-                        .get(&key)
-                        .map_or(0, |tps| tps.len());
-                    if nparams > 0 {
-                        self.error(
-                            span,
-                            format!("type '{n}' expects {nparams} type argument(s), got 0"),
-                        );
-                    }
-                    Ty::NewType(key, Vec::new())
-                }
-                // A protocol name used as a value type (existential), e.g. `Error`.
-                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
-                _ => {
-                    self.error(span, self.unknown_type_msg(n));
-                    Ty::Unknown
-                }
-            },
+                resolved
+            }
             Type::Func { params, ret } => Ty::Func {
                 params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
                 ret: Box::new(self.resolve_type(ret, span)),

@@ -221,6 +221,29 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for TYPE tokens in annotations (Tier B) (2026-06-30).** Hovering a
+TYPE token in an annotation now shows the RESOLVED type — `x: Id` (the `Id` → `int` if `type Id = int`),
+a param type `fn f(a: int)` (the `int`), a return type `fn f() -> P` (the `P`), a struct field type
+`x: int`, a `let` annotation `x: int = 5`. Almost no new code: `Type::Named { name, span }` already
+carries a name-token span (its prior reader was the semantic-token overlay) and `resolve_type` already
+computes the resolved `Ty` for every annotation — so the fix is a single probe-gated `hover_record_at(
+*name_span, &resolved, HoverKind::Type, None)` in the `Type::Named` arm, recording at the inner
+name-token span (NOT the enclosing-annotation `span` param). Gated `self.hover_probe.is_some() &&
+!self.generic_arg_prepass`: the probe gate keeps off-probe checks free in this hot path (resolve_type
+runs per annotation per check), the prepass gate stops the generic-arg unification prepass from
+first-hit-wins latching an incomplete type. Display follows `Ty::Display`: a transparent
+`type Id = int` shows `int` (consistent with the Tier-A alias-decl hover), a struct name shows the
+struct, an in-scope type param shows the param. Composite inner names fall out for free — the
+`Type::Generic`/`Func`/`Tuple` arms recurse into `resolve_type`, so the `int` in `List[int]` records at
+its own span. New `HoverKind::Type` variant. **Known gap:** `Type::Qualified` (the `Point` in
+`geo.Point`) and the OUTER generic constructor name (`List` in `List[int]`) carry no name-token span, so
+they don't hover; inner type args do. Checker/editor-only, zero runtime/codegen/parity impact (goldens
+byte-identical). Tests: `editor::tests::hover_type_alias_transparent`, `hover_param_type_token`,
+`hover_return_type_token`, `hover_field_type_token`, `hover_struct_name_type_token`,
+`hover_generic_inner_type_token`, `hover_generic_fn_param_type_no_latch` (prepass-latch guard),
+`hover_type_kind_is_type`. **Reinstall the LSP** (`cargo install --path . --features lsp --bin
+chezzi-lsp`) — the editor binary is a snapshot.
+
 **✅ Editor tooling — LSP hover for the five decl-site NAME tokens (Tier A) (2026-06-30).** Five
 decl-site name positions that returned `None` now hover, all via the established additive-`Span`
 precedent (`Field.name_span` / `Param.name_span` / `For.var_spans` / `Pattern::Ident(_, Span)`): a new
