@@ -10964,3 +10964,84 @@ fn free_closure_shared_member_does_not_pin() {
         "param must NOT be mis-pinned to the lone struct, got: {errs:?}"
     );
 }
+
+// ===== first-class native (Rust-implemented) types: qualified / aliased module-member path =====
+// These pin the ADDITIVE qualified-path surface (`concurrency.Shared[int]` etc.) that makes an
+// import-gated native type behave like a `.chz` module type. The bare-after-import path is unchanged
+// (covered by the existing concurrency/net/ffi/time tests).
+
+#[test]
+fn qualified_native_type_annotation_resolves() {
+    // concurrency.Shared[int] in annotation position (whole-module import binds `concurrency`).
+    entry_ok("import std.concurrency\nfn f(s: concurrency.Shared[int]):\n    print(s.get())\n");
+    // aliased: `import std.concurrency as c` -> `c.Shared[int]`.
+    entry_ok("import std.concurrency as c\nfn f(s: c.Shared[int]):\n    print(s.get())\n");
+    // net.Socket / net.Listener (type-only, no ctor).
+    entry_ok("import std.net\nfn f(s: net.Socket):\n    print(\"ok\")\n");
+    entry_ok("import std.net\nfn f(s: net.Listener):\n    print(\"ok\")\n");
+    // ffi width + ptr in annotation position.
+    entry_ok("import std.ffi\nfn f(x: ffi.int32) -> ffi.ptr:\n    return ffi.null()\n");
+    // NEGATIVE: qualified access with NO import still rejects (gate stays sound).
+    entry_rejects(
+        "fn f(s: concurrency.Shared[int]):\n    print(\"x\")\n",
+        "unknown module 'concurrency'",
+    );
+    // NEGATIVE: timer is a FUNCTION, not a type — reject in type position.
+    entry_rejects(
+        "import std.time\nfn f(x: time.timer):\n    print(\"x\")\n",
+        "'timer' is a function, not a type",
+    );
+    // NEGATIVE: wrong arity on a qualified generic box.
+    entry_rejects(
+        "import std.concurrency\nfn f(s: concurrency.Shared):\n    print(\"x\")\n",
+        "expects 1 type argument",
+    );
+}
+
+#[test]
+fn qualified_native_ctor_call_infers() {
+    // concurrency.Shared(0) / aliased c.Shared(0) construct + method-call.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := concurrency.Shared(0)\n    print(s.get())\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency as c\nfn main():\n    s := c.Shared(0)\n    print(s.get())\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := concurrency.RwShared(0)\n    print(r.read(fn(x): x))\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := concurrency.Atomic(0)\n    print(a.load())\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ex := concurrency.Executor()\n    ex.shutdown()\nmain()\n",
+    );
+    // time.timer(ms) -> Channel[bool].
+    entry_ok("import std.time\nfn main():\n    t := time.timer(0)\n    print(t.recv())\nmain()\n");
+    // NEGATIVE: net.Socket(...) has no from-nothing constructor.
+    entry_rejects(
+        "import std.net\nfn main():\n    s := net.Socket()\n    print(\"x\")\nmain()\n",
+        "has no constructor",
+    );
+}
+
+#[test]
+fn alias_and_newtype_over_qualified_builtin() {
+    // type alias over a qualified builtin.
+    entry_ok(
+        "import std.concurrency\ntype S = concurrency.Shared[int]\nfn f(s: S):\n    print(s.get())\n",
+    );
+    // newtype over a qualified builtin (generic).
+    entry_ok(
+        "import std.concurrency\nnewtype MyS[T] = concurrency.Shared[T]\nfn main():\n    print(\"ok\")\nmain()\n",
+    );
+}
+
+#[test]
+fn ffi_qualified_width_in_extern_sig() {
+    // A qualified FFI width name inside an extern signature must type-check (resolve_ctype_d must map
+    // ffi.int32 -> CType::Int32 so the marshal gate accepts it).
+    entry_ok(
+        "import std.ffi\nextern \"libc.so.6\":\n    fn abs(x: ffi.int32) -> ffi.int32\n\nfn main():\n    print(abs(-5))\nmain()\n",
+    );
+}

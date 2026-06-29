@@ -1883,6 +1883,21 @@ fn fetch_all(urls: List[str]):
   four; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
   **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global; `timer` now
   requires `import std.time` (it stays a reserved name too — see below).
+  These import-gated native types are **also reachable by the qualified / aliased module-member path**,
+  exactly like a `.chz` module type (`geo.Point`) or `regex.Match`: after `import std.concurrency` you
+  may write `concurrency.Shared[int]` / `concurrency.Shared(0)`, and `import std.concurrency as c` gives
+  `c.Shared[int]` / `c.Shared(0)`. The qualified form works in every position — annotation, constructor
+  call, `type S = concurrency.Shared[int]`, `newtype MyS[T] = concurrency.Shared[T]`, and method calls —
+  and lowers to the same value as the bare name. (Paths are two-level: `concurrency.Shared`, never
+  `std.concurrency.Shared`, like every Chezzi module.) The qualified path still requires the `import`
+  (qualified access to a non-imported module is an `unknown module` error), so the gate is unchanged.
+  `net.Socket` / `net.Listener` (`import std.net`) and the FFI width types / `ptr` (`import std.ffi`,
+  usable as `ffi.int32` incl. inside an `extern` signature) resolve the same qualified way but are
+  **type-only** — they have no from-nothing constructor (a value comes from `net.connect`/`net.listen`
+  or an FFI call), so `net.Socket(...)` is rejected. `time.timer(ms)` works as a qualified call;
+  `time.timer` in **type** position is rejected (it is a function, not a type). The bare-after-import
+  spelling remains fully supported; the qualified path is **additive** (the bare-name licensing may be
+  deprecated in a later milestone, but is not going away in this change).
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
   `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow

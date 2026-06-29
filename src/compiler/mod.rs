@@ -3305,6 +3305,38 @@ impl Compiler {
                 );
                 return Ok(());
             }
+            // `module.Ctor(args)` → a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
+            // aliased `c.Shared(0)`, `time.timer(100)`). Lower to the SAME opcode the bare name emits
+            // (3387-3429) so the bytecode — and thus the runtime value — is byte-identical regardless
+            // of how the ctor was spelled. The discriminator is the imported module's `.native` path
+            // (NOT `module_types`: `assign_type_keys` does not register opaque builtin names for a
+            // native module). Gated on a non-local, non-captured module Ident so a local var named
+            // `concurrency` can't be hijacked. A non-matching (native-module, name) pair falls through
+            // to `CallMethod` (so `time.now()` and qualified methods still dispatch normally). The
+            // type-only handles (net.Socket/Listener, ffi widths/ptr) have no ctor — the checker
+            // already rejected `net.Socket(...)`, so they never reach here.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && fc.resolve_local(mname).is_none()
+                && !fc.captures(mname)
+                && let Some(&tidx) = self.imported_modules.get(mname)
+                && let Some(nat) = self.program.modules.get(tidx).and_then(|m| m.native)
+            {
+                let op = match (nat, name.as_str()) {
+                    ("std.concurrency", "Shared") => Some(Op::NewShared),
+                    ("std.concurrency", "RwShared") => Some(Op::NewRwShared),
+                    ("std.concurrency", "Atomic") => Some(Op::NewAtomic),
+                    ("std.concurrency", "Executor") => Some(Op::NewExecutor),
+                    ("std.time", "timer") => Some(Op::NewTimer),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(op, span);
+                    return Ok(());
+                }
+            }
             self.compile_expr(fc, obj)?;
             for a in args {
                 self.compile_expr(fc, a)?;
