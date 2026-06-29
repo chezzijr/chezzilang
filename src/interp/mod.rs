@@ -3463,23 +3463,30 @@ impl Interp {
         Ok(Value::Set(std::rc::Rc::new(std::cell::RefCell::new(set))))
     }
 
-    /// `List(it)` → a list drained from ANY for-iterable. On `Interp` because a user iterator's
-    /// `next()` re-enters the engine. Mirrors `vm::Vm::builtin_list`.
+    /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
+    /// a list drained from ANY for-iterable. On `Interp` because a user iterator's `next()` re-enters
+    /// the engine. Mirrors `vm::Vm::builtin_list`.
     fn builtin_list(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
-        let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "List() takes exactly one iterable argument — use [] for an empty list"
-                .to_string(),
-            span,
-        })?;
-        // A generic aggregate newtype (`Stack[T] = List[T]`) cast-unwraps to its inner list — the
-        // checker verified the underlying is a list, so just peel the wrapper (the type args are
-        // erased at runtime). The inner is itself a list, copied like any `List(xs)`.
-        let it = newtype_unwrap_value(it);
-        let items: Vec<Value> = self
-            .drain_value_to_rows(it, 1, span)?
-            .into_iter()
-            .flatten()
-            .collect();
+        let items: Vec<Value> = match args.len() {
+            0 => Vec::new(),
+            1 => {
+                let it = args.into_iter().next().unwrap();
+                // A generic aggregate newtype (`Stack[T] = List[T]`) cast-unwraps to its inner list —
+                // the checker verified the underlying is a list, so just peel the wrapper (the type
+                // args are erased at runtime). The inner is itself a list, copied like any `List(xs)`.
+                let it = newtype_unwrap_value(it);
+                self.drain_value_to_rows(it, 1, span)?
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            n => {
+                return Err(RuntimeError {
+                    message: format!("List() expects 0 or 1 argument(s), got {n}"),
+                    span,
+                });
+            }
+        };
         Ok(Value::List(std::rc::Rc::new(std::cell::RefCell::new(
             items,
         ))))
@@ -3489,11 +3496,19 @@ impl Interp {
     /// `{k: v}` literal). On `Interp` because a struct key's `hash()` and a user iterator's `next()`
     /// re-enter the engine. Mirrors `vm::Vm::builtin_map`.
     fn builtin_map(&mut self, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
-        let it = args.into_iter().next().ok_or_else(|| RuntimeError {
-            message: "Map() takes exactly one iterable argument — use {} for an empty map"
-                .to_string(),
-            span,
-        })?;
+        // `Map()` → a fresh empty map (the `Map[K, V]()` turbofish form; mirrors `Set()`).
+        if args.is_empty() {
+            return Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
+                MapData::default(),
+            ))));
+        }
+        if args.len() > 1 {
+            return Err(RuntimeError {
+                message: format!("Map() expects 0 or 1 argument(s), got {}", args.len()),
+                span,
+            });
+        }
+        let it = args.into_iter().next().unwrap();
         // A generic aggregate newtype (`Tally[T] = Map[T, int]`) cast-unwraps to its inner map. When
         // that inner is a map, the cast yields it DIRECTLY (a copy) — iterating a map gives keys, not
         // the 2-tuples the general path expects.

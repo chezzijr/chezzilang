@@ -8675,36 +8675,79 @@ impl Checker {
             // "what `for x in X` accepts". The argument is REQUIRED: an empty list is the `[]` literal
             // (zero args can't infer T).
             "List" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        "List() takes exactly one iterable argument — use [] for an empty list",
-                    );
-                    return Some(Ty::list(Ty::Unknown));
-                }
-                let it = self.infer_value(&args[0]);
-                if let Some(result) = self.newtype_aggregate_cast("List", &it, args[0].span) {
-                    return Some(result);
-                }
-                let elem = match self.iter_elem(&it) {
-                    Some(e) => e,
-                    None if it.is_unknown() => Ty::Unknown,
-                    None => {
-                        self.error(
-                            args[0].span,
-                            format!("List() expects an iterable, got {it}"),
-                        );
-                        Ty::Unknown
+                // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
+                // element type is refined from the expected type / first use (mirrors `Set()`), and
+                // `List(it)` builds from any for-iterable. With a turbofish AND an iterable, the
+                // iterable's elements are checked against `T`.
+                let targ_elem = match targs {
+                    [] => None,
+                    [t] => Some(t.clone()),
+                    _ => {
+                        self.error(span, "List[T]() takes exactly one type argument");
+                        Some(Ty::Unknown)
                     }
                 };
-                Some(Ty::list(elem))
+                match args.len() {
+                    0 => Some(Ty::list(targ_elem.unwrap_or(Ty::Unknown))),
+                    1 => {
+                        let it = self.infer_value(&args[0]);
+                        if let Some(result) = self.newtype_aggregate_cast("List", &it, args[0].span)
+                        {
+                            return Some(result);
+                        }
+                        let elem = match self.iter_elem(&it) {
+                            Some(e) => e,
+                            None if it.is_unknown() => Ty::Unknown,
+                            None => {
+                                self.error(
+                                    args[0].span,
+                                    format!("List() expects an iterable, got {it}"),
+                                );
+                                Ty::Unknown
+                            }
+                        };
+                        match targ_elem {
+                            Some(t) => {
+                                if !t.is_unknown()
+                                    && !elem.is_unknown()
+                                    && !self.assignable(&t, &elem)
+                                {
+                                    self.error(
+                                        args[0].span,
+                                        format!(
+                                            "List[{t}]() expected elements of type {t}, found {elem}"
+                                        ),
+                                    );
+                                }
+                                Some(Ty::list(t))
+                            }
+                            None => Some(Ty::list(elem)),
+                        }
+                    }
+                    _ => {
+                        self.error(
+                            span,
+                            "List() takes at most one iterable argument — use [] for an empty list",
+                        );
+                        Some(Ty::list(targ_elem.unwrap_or(Ty::Unknown)))
+                    }
+                }
             }
             "Set" => {
-                // `set()` → empty set (element inferred from later use, like `{}` for maps);
-                // `set(it)` → a set from ANY for-iterable (broadened from list-only), deduped.
-                // The element type flows through `iter_elem`; it must be Hashable.
-                match args.len() {
-                    0 => Some(Ty::set(Ty::Unknown)),
+                // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
+                // later use, like `{}` for maps); `Set(it)` → a set from ANY for-iterable (broadened
+                // from list-only), deduped. The element type flows through `iter_elem`; it must be
+                // Hashable. With a turbofish AND an iterable, elements are checked against `T`.
+                let targ_elem = match targs {
+                    [] => None,
+                    [t] => Some(t.clone()),
+                    _ => {
+                        self.error(span, "Set[T]() takes exactly one type argument");
+                        Some(Ty::Unknown)
+                    }
+                };
+                let elem = match args.len() {
+                    0 => targ_elem.unwrap_or(Ty::Unknown),
                     1 => {
                         let it = self.infer_value(&args[0]);
                         if let Some(result) = self.newtype_aggregate_cast("Set", &it, args[0].span)
@@ -8722,55 +8765,114 @@ impl Checker {
                                 Ty::Unknown
                             }
                         };
-                        if !elem.is_unknown() && !self.is_hashable_key(&elem) {
-                            self.error(
-                                span,
-                                format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
-                            );
+                        match targ_elem {
+                            Some(t) => {
+                                if !t.is_unknown()
+                                    && !elem.is_unknown()
+                                    && !self.assignable(&t, &elem)
+                                {
+                                    self.error(
+                                        args[0].span,
+                                        format!(
+                                            "Set[{t}]() expected elements of type {t}, found {elem}"
+                                        ),
+                                    );
+                                }
+                                t
+                            }
+                            None => elem,
                         }
-                        Some(Ty::set(elem))
                     }
                     _ => {
                         self.error(span, "Set() expects Set() or Set(iterable)");
-                        Some(Ty::set(Ty::Unknown))
+                        targ_elem.unwrap_or(Ty::Unknown)
                     }
+                };
+                if !elem.is_unknown() && !self.is_hashable_key(&elem) {
+                    self.error(
+                        span,
+                        format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
+                    );
                 }
+                Some(Ty::set(elem))
             }
             // `map(it)` → a map from an iterable of EXACTLY 2-tuples `(K, V)`. A non-2-tuple element is
             // a STATIC error here (not a runtime surprise). K must be Hashable. Last-wins on duplicate
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "Map" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        "Map() takes exactly one iterable argument — use {} for an empty map",
-                    );
-                    return Some(Ty::map(Ty::Unknown, Ty::Unknown));
-                }
-                let it = self.infer_value(&args[0]);
-                if let Some(result) = self.newtype_aggregate_cast("Map", &it, args[0].span) {
-                    return Some(result);
-                }
-                let elem = match self.iter_elem(&it) {
-                    Some(e) => e,
-                    None if it.is_unknown() => return Some(Ty::map(Ty::Unknown, Ty::Unknown)),
-                    None => {
-                        self.error(args[0].span, format!("Map() expects an iterable, got {it}"));
-                        return Some(Ty::map(Ty::Unknown, Ty::Unknown));
+                // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map refined from
+                // the expected type / first use (mirrors the `{}` literal and `Set()`); `Map(it)` →
+                // a map from an iterable of EXACTLY 2-tuples. With a turbofish AND an iterable, the
+                // tuple parts are checked against `[K, V]`.
+                let targ_kv = match targs {
+                    [] => None,
+                    [k, v] => Some((k.clone(), v.clone())),
+                    _ => {
+                        self.error(span, "Map[K, V]() takes exactly two type arguments");
+                        Some((Ty::Unknown, Ty::Unknown))
                     }
                 };
-                let (k, v) = match elem {
-                    Ty::Tuple(ref parts) if parts.len() == 2 => {
-                        (parts[0].clone(), parts[1].clone())
+                let (k, v) = match args.len() {
+                    0 => targ_kv.clone().unwrap_or((Ty::Unknown, Ty::Unknown)),
+                    1 => {
+                        let it = self.infer_value(&args[0]);
+                        if let Some(result) = self.newtype_aggregate_cast("Map", &it, args[0].span)
+                        {
+                            return Some(result);
+                        }
+                        let elem = match self.iter_elem(&it) {
+                            Some(e) => e,
+                            None if it.is_unknown() => Ty::Unknown,
+                            None => {
+                                self.error(
+                                    args[0].span,
+                                    format!("Map() expects an iterable, got {it}"),
+                                );
+                                Ty::Unknown
+                            }
+                        };
+                        let (k, v) = match elem {
+                            Ty::Tuple(ref parts) if parts.len() == 2 => {
+                                (parts[0].clone(), parts[1].clone())
+                            }
+                            Ty::Unknown => (Ty::Unknown, Ty::Unknown),
+                            other => {
+                                self.error(
+                                    args[0].span,
+                                    format!("Map() expects an iterable of (key, value) 2-tuples, found element {other}"),
+                                );
+                                (Ty::Unknown, Ty::Unknown)
+                            }
+                        };
+                        if let Some((tk, tv)) = &targ_kv {
+                            if !tk.is_unknown() && !k.is_unknown() && !self.assignable(tk, &k) {
+                                self.error(
+                                    args[0].span,
+                                    format!(
+                                        "Map[{tk}, {tv}]() expected keys of type {tk}, found {k}"
+                                    ),
+                                );
+                            }
+                            if !tv.is_unknown() && !v.is_unknown() && !self.assignable(tv, &v) {
+                                self.error(
+                                    args[0].span,
+                                    format!(
+                                        "Map[{tk}, {tv}]() expected values of type {tv}, found {v}"
+                                    ),
+                                );
+                            }
+                            (tk.clone(), tv.clone())
+                        } else {
+                            (k, v)
+                        }
                     }
-                    Ty::Unknown => (Ty::Unknown, Ty::Unknown),
-                    other => {
+                    _ => {
                         self.error(
-                            args[0].span,
-                            format!("Map() expects an iterable of (key, value) 2-tuples, found element {other}"),
+                            span,
+                            "Map() takes at most one iterable argument — use {} for an empty map",
                         );
-                        (Ty::Unknown, Ty::Unknown)
+                        targ_kv.clone().unwrap_or((Ty::Unknown, Ty::Unknown))
                     }
                 };
                 if !k.is_unknown() && !self.is_hashable_key(&k) {
@@ -8986,6 +9088,12 @@ impl Checker {
                         unify(decl, actual, &mut sub);
                     }
                     self.recover_iter_elems(&tps, &mut sub, span);
+                    // Detect the un-inferable closure-param deadlock (e.g. `Heap([], fn(a,b): a<b)`)
+                    // BEFORE the per-arg check, so it reports the cause instead of leaking a
+                    // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
+                    self.report_uninferable_closure_params(
+                        name, &tps, &field_tys, args, &mut sub, span,
+                    );
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
                         self.check_generic_arg(name, &expected, actual, arg);
@@ -10062,6 +10170,93 @@ impl Checker {
                 format!("argument to '{name}' has type {fallback}, expected {expected}"),
             );
         }
+    }
+
+    /// Detect (and clearly report) the un-inferable type-parameter DEADLOCK that arises when a
+    /// generic ctor/fn is given an **unannotated closure** for a closure-typed slot AND no other
+    /// argument pins the type parameter that slot mentions (e.g. `Heap([], fn(a, b): a < b)` — the
+    /// empty `[]` gives no element type and the bare comparator params give none either). Without
+    /// this, the leftover `Ty::Param(T)` flows into the closure body and surfaces as a misleading
+    /// "cannot compare T and T" inside the user's lambda.
+    ///
+    /// Fires ONLY on the genuine deadlock: a still-unbound param (`!sub.contains_key`) that is
+    /// mentioned by a declared slot type whose matching argument is an unannotated closure. Every
+    /// form that pins the param from some source (turbofish, a concrete element, annotated closure
+    /// params) leaves `sub` populated, so the guard never fires there. On firing it binds the
+    /// offending params to `Unknown` in `sub` so the downstream substituted closure check sees
+    /// `Unknown` params (no cascade) — the resulting type is identical to the existing
+    /// `unwrap_or(Ty::Unknown)` fallback, so this is behavior-preserving apart from the message.
+    /// Returns `true` if it fired.
+    fn report_uninferable_closure_params(
+        &mut self,
+        name: &str,
+        tps: &[TypeParam],
+        decl_tys: &[Ty],
+        args: &[Expr],
+        sub: &mut HashMap<String, Ty>,
+        span: Span,
+    ) -> bool {
+        let unbound: std::collections::HashSet<String> = tps
+            .iter()
+            .map(|tp| tp.name.clone())
+            .filter(|n| !sub.contains_key(n))
+            .collect();
+        if unbound.is_empty() {
+            return false;
+        }
+        // Only an unbound param appearing in a closure's PARAMETER position is a deadlock: such a
+        // param can't be recovered from the closure body (the params would have to be typed first).
+        // A param that appears ONLY in the closure's RETURN slot (e.g. `Mapped`'s `f: fn(T) -> U`)
+        // is still inferable from the body, so it must NOT trigger — scan declared param slots only,
+        // aligned to the UNANNOTATED closure parameters.
+        let mut mentioned: Vec<String> = Vec::new();
+        for (decl, arg) in decl_tys.iter().zip(args) {
+            if let ExprKind::Closure {
+                params: cparams, ..
+            } = &arg.kind
+                && let Ty::Func {
+                    params: dparams, ..
+                } = decl
+            {
+                for (i, cp) in cparams.iter().enumerate() {
+                    if cp.ty.is_none()
+                        && let Some(dp) = dparams.get(i)
+                    {
+                        ty_collect_params(dp, &unbound, &mut mentioned);
+                    }
+                }
+            }
+        }
+        if mentioned.is_empty() {
+            return false;
+        }
+        // Preserve declaration order of the type params in the message.
+        let names: Vec<String> = tps
+            .iter()
+            .map(|tp| tp.name.clone())
+            .filter(|n| mentioned.contains(n))
+            .collect();
+        let list = names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let turbo = names.join(", ");
+        let word = if names.len() == 1 {
+            "type parameter"
+        } else {
+            "type parameters"
+        };
+        self.error(
+            span,
+            format!(
+                "cannot infer {word} {list} of `{name}`; annotate `{name}[{turbo}](…)` or the closure parameters"
+            ),
+        );
+        for n in names {
+            sub.insert(n, Ty::Unknown);
+        }
+        true
     }
 
     /// [`Checker::check_args_range`] with an explicit `widen` flag — see [`Checker::assignable_w`].
@@ -11499,7 +11694,9 @@ impl Checker {
 
     fn name_is_generic(&self, name: &str) -> bool {
         // The built-in `Channel[T]()` constructor takes its element type as an explicit type arg.
-        if name == "Channel" {
+        // The container constructors `List[T]()` / `Set[T]()` / `Map[K, V]()` likewise accept a
+        // turbofish that pins the (otherwise un-inferable, for an empty container) element type.
+        if matches!(name, "Channel" | "List" | "Set" | "Map") {
             return true;
         }
         // Look the struct up by its module-scoped runtime key (`bare_key`), NOT the bare name: under
@@ -11720,6 +11917,16 @@ impl Checker {
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
         self.recover_index_args(&sig.type_params, &mut subst_map, span);
+        // Same un-inferable closure-param deadlock guard as the struct-ctor path: report the cause
+        // (and bind the params to Unknown) before the per-arg closure body is checked.
+        self.report_uninferable_closure_params(
+            name,
+            &sig.type_params,
+            &sig.params,
+            args,
+            &mut subst_map,
+            span,
+        );
         self.enforce_bounds(&sig.type_params, &subst_map, span);
         // Each argument must match its parameter's substituted type (catches a type param used in
         // two positions with conflicting types, e.g. `max(1, "x")`).
@@ -12891,6 +13098,42 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         ) if dp.len() == ap.len() => {
             dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
             unify(dr, ar, map);
+        }
+        _ => {}
+    }
+}
+
+/// Collect (into `out`, dedup, in first-seen order) the names from `wanted` that appear as a
+/// `Ty::Param` anywhere inside `ty`. Used by the un-inferable-closure-param deadlock diagnostic to
+/// find which still-unbound type parameters a closure-typed slot mentions.
+fn ty_collect_params(ty: &Ty, wanted: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+    match ty {
+        Ty::Param(n) => {
+            if wanted.contains(n) && !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+        Ty::List(e)
+        | Ty::Set(e)
+        | Ty::Option(e)
+        | Ty::Channel(e)
+        | Ty::Shared(e)
+        | Ty::Atomic(e)
+        | Ty::RwShared(e) => ty_collect_params(e, wanted, out),
+        Ty::Map(a, b) | Ty::Result(a, b) => {
+            ty_collect_params(a, wanted, out);
+            ty_collect_params(b, wanted, out);
+        }
+        Ty::Tuple(parts) | Ty::Struct(_, parts) | Ty::Enum(_, parts) | Ty::NewType(_, parts) => {
+            for p in parts {
+                ty_collect_params(p, wanted, out);
+            }
+        }
+        Ty::Func { params, ret } => {
+            for p in params {
+                ty_collect_params(p, wanted, out);
+            }
+            ty_collect_params(ret, wanted, out);
         }
         _ => {}
     }
