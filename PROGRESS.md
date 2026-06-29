@@ -221,6 +221,22 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for the two remaining binding decl-sites (2026-06-29).** The last
+two binding decl-sites that returned `None` now report their inferred type, closing out the
+decl-site-hover batch (after the for-loop/param/field work): **(A) tuple-destructure** (`a, b := (1,2)`
+→ hover `a` or `b` = `int`) and **(B) match-pattern binds** (`Col.Val(n)` → hover `n` = the payload
+type; tuple pattern `(a, b)` → each element's type). Both follow the for-loop `var_spans` precedent
+EXACTLY — purely additive, runtime-inert span metadata. (A) adds `name_spans: Vec<Span>` to
+`StmtKind::Let` (parallel to `names`; `Span::default()` for synthesized/desugar lets), captured by the
+parser at each binding token; `check_destructure` zips it and `hover_record_at`s each tuple-element type
+(single-name let path unchanged — no regression). (B) changes `Pattern::Ident(String)` →
+`Pattern::Ident(String, Span)` (the binding token's span), captured in `parse_subpattern`; the checker's
+`bind_subpattern` `Pattern::Ident` arm records the hover at the binding's OWN span before `declare`. The
+new `Span`s are never read by either engine (patterns route by NAME / lets lower by `names`/`value`/`ty`),
+so VM↔interp parity and every golden stay byte-identical; the grammar is syntax-only (`IDENT` lists /
+pattern idents) so conformance is untouched. Tests: `editor::hover_destructure_first`/`_second`,
+`hover_single_let_regression` (guard), `hover_match_variant_bind`, `hover_match_tuple_bind`.
+
 **✅ Editor tooling — LSP hover for param + struct-field DECL sites (2026-06-29).** Hovering a
 parameter at its DECL site in a signature (free fn, method, OR closure) and a struct field at its DECL
 site previously returned `None` (only the body USE / field-access resolved); now both report the

@@ -31,6 +31,11 @@ pub enum StmtKind {
     /// let always has `ty = None`.
     Let {
         names: Vec<String>,
+        /// Source span of each binding-NAME token, parallel to `names` (same order/length).
+        /// Diagnostic-only (the LSP records a decl-site hover at each binding); runtime-inert,
+        /// like `For.var_spans`/`Param.name_span`. `Span::default()` for synthesized lets (e.g.
+        /// comprehension/desugar), which never collide with a real hover position.
+        name_spans: Vec<Span>,
         ty: Option<Type>,
         value: Expr,
         /// True for a `ref T` binding (`r: ref int = 0`) — a transparent by-reference local that
@@ -390,8 +395,10 @@ pub struct MatchArm {
 pub enum Pattern {
     /// A binding name in a sub-position (a variant payload slot or tuple element), e.g. the `h` and
     /// `t` in `Cons(h, t)` or the `a`/`b` in `(a, b)`. A bare identifier at the *top* of an arm is a
-    /// nullary `Variant` instead (it names a variant like `None`).
-    Ident(String),
+    /// nullary `Variant` instead (it names a variant like `None`). The `Span` is the binding-name
+    /// token's source position — diagnostic-only (the LSP records a decl-site hover there);
+    /// runtime-inert (both engines route patterns by NAME and ignore the span, like `For.var_spans`).
+    Ident(String, Span),
     Variant {
         name: String,
         bindings: Vec<Pattern>,

@@ -383,6 +383,8 @@ impl Parser {
         let stmt_doc = self.doc_above(self.cur_span().line);
         // typed let: `name: Type = value`
         if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Colon {
+            // Capture the binding-name token span (parallel to `names`) for decl-site hover.
+            let name_span = self.cur_span();
             let name = self.expect_ident()?;
             self.expect(&Token::Colon)?;
             // `r: ref T = …` — a by-reference binding. `ref` is consumed only here (a binding
@@ -394,6 +396,7 @@ impl Parser {
             let value = self.parse_expr()?;
             return Ok(StmtKind::Let {
                 names: vec![name],
+                name_spans: vec![name_span],
                 ty: Some(ty),
                 value,
                 is_ref,
@@ -419,9 +422,14 @@ impl Parser {
                 self.advance();
                 let value = self.parse_expr()?;
                 let mut names = Vec::with_capacity(targets.len());
+                // Each target ident's span (parallel to `names`) for per-binding decl-site hover.
+                let mut name_spans = Vec::with_capacity(targets.len());
                 for t in targets {
                     match t.kind {
-                        ExprKind::Ident(n) => names.push(n),
+                        ExprKind::Ident(n) => {
+                            names.push(n);
+                            name_spans.push(t.span);
+                        }
                         _ => {
                             return Err(ParseError {
                                 message: "expected an identifier on the left of ':=' (destructuring binds names)".to_string(),
@@ -432,6 +440,7 @@ impl Parser {
                 }
                 return Ok(StmtKind::Let {
                     names,
+                    name_spans,
                     ty: None,
                     value,
                     is_ref: false,
@@ -517,6 +526,8 @@ impl Parser {
                 };
                 return Ok(StmtKind::Let {
                     names: vec![name],
+                    // The lvalue ident's span IS the binding-name span (single `:=`).
+                    name_spans: vec![expr.span],
                     ty: None,
                     value,
                     is_ref: false,
@@ -1232,6 +1243,9 @@ impl Parser {
             }
             _ => {}
         }
+        // Span of the binding-name token (used only when this resolves to a bare-ident binding,
+        // below) for the decl-site hover. A qualified/variant pattern ignores it.
+        let name_span = self.cur_span();
         let name = self.expect_ident()?;
         // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
         // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
@@ -1281,7 +1295,7 @@ impl Parser {
                 module_name,
             })
         } else {
-            Ok(Pattern::Ident(name))
+            Ok(Pattern::Ident(name, name_span))
         }
     }
 
@@ -3657,7 +3671,8 @@ mod tests {
                 match &arms[0].pattern {
                     Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Circle");
-                        assert_eq!(bindings, &vec![Pattern::Ident("r".to_string())]);
+                        assert_eq!(bindings.len(), 1);
+                        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
                     }
                     other => panic!("{other:?}"),
                 }
@@ -4656,15 +4671,21 @@ mod tests {
             panic!("area body should be a match")
         };
         assert_eq!(arms.len(), 2);
-        assert_eq!(
-            arms[0].pattern,
+        match &arms[0].pattern {
             Pattern::Variant {
-                name: "Circle".into(),
-                bindings: vec![Pattern::Ident("r".into())],
-                enum_name: Some("Shape".into()),
-                module_name: None,
+                name,
+                bindings,
+                enum_name,
+                module_name,
+            } => {
+                assert_eq!(name, "Circle");
+                assert_eq!(enum_name.as_deref(), Some("Shape"));
+                assert_eq!(module_name, &None);
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
             }
-        );
+            other => panic!("{other:?}"),
+        }
     }
 
     // ===== M6: pipe operator desugars to a call =====
@@ -5304,7 +5325,7 @@ mod tests {
             Pattern::Tuple(elems) => {
                 assert_eq!(elems.len(), 2);
                 assert!(matches!(&elems[0], Pattern::Or(a) if a.len() == 2));
-                assert!(matches!(&elems[1], Pattern::Ident(n) if n == "x"));
+                assert!(matches!(&elems[1], Pattern::Ident(n, _) if n == "x"));
             }
             other => panic!("{other:?}"),
         }
@@ -5336,7 +5357,7 @@ mod tests {
             } => {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
-                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "r"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
             }
             other => panic!("{other:?}"),
         }
@@ -5395,7 +5416,7 @@ mod tests {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
                 assert_eq!(module_name.as_deref(), Some("geo"));
-                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "r"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
             }
             other => panic!("{other:?}"),
         }
@@ -5423,8 +5444,8 @@ mod tests {
                 match &bindings[0] {
                     Pattern::Or(alts) => {
                         assert_eq!(alts.len(), 2);
-                        assert!(matches!(&alts[0], Pattern::Ident(n) if n == "a"));
-                        assert!(matches!(&alts[1], Pattern::Ident(n) if n == "b"));
+                        assert!(matches!(&alts[0], Pattern::Ident(n, _) if n == "a"));
+                        assert!(matches!(&alts[1], Pattern::Ident(n, _) if n == "b"));
                     }
                     other => panic!("{other:?}"),
                 }
@@ -5449,7 +5470,7 @@ mod tests {
             Pattern::Variant { name, bindings, .. } => {
                 assert_eq!(name, "Some");
                 assert_eq!(bindings.len(), 1);
-                assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "None"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "None"));
             }
             other => panic!("{other:?}"),
         }
@@ -5464,7 +5485,7 @@ mod tests {
                 match &bindings[0] {
                     Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Err");
-                        assert!(matches!(&bindings[0], Pattern::Ident(n) if n == "e"));
+                        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "e"));
                     }
                     other => panic!("{other:?}"),
                 }
