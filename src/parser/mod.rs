@@ -929,6 +929,7 @@ impl Parser {
                         self.err("enum variants must be declared before methods".to_string())
                     );
                 }
+                let vname_span = self.cur_span();
                 let vname = self.expect_ident()?;
                 let mut payload = Vec::new();
                 if self.eat(&Token::LParen) {
@@ -944,6 +945,7 @@ impl Parser {
                 }
                 variants.push(Variant {
                     name: vname,
+                    name_span: vname_span,
                     payload,
                 });
             }

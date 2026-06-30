@@ -33,7 +33,10 @@ struct Point:
   LSP hover above the `chezzi` type fence **today for free functions, methods, struct constructors, and
   top-level bindings**; for `enum`, `protocol`, `newtype`, and `type` aliases the doc is parsed and
   attached to the declaration but does **not** yet surface on hover (their names/constructors record no
-  hover info). The doc is the *contiguous* run of comment lines with NO blank line
+  hover info). Enum-variant **constructor names** are the exception: they hover their ctor signature at
+  both the declaration and the use site (e.g. `Val(int)` → `fn(int) -> Col`, generic `Full(T)` →
+  `fn(T) -> Box[T]`), but a variant carries no doc-comment of its own (there is no per-variant doc
+  field), so only the signature surfaces. The doc is the *contiguous* run of comment lines with NO blank line
   between the last one and the declaration — a blank line detaches earlier comments. Stacked lines join
   with newlines (one leading `# ` stripped per line). An inline trailing comment on the decl line is
   not a doc. Purely informational: doc-comments never affect type-checking or execution.

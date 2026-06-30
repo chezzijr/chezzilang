@@ -4458,16 +4458,36 @@ impl Checker {
                 name,
                 name_span,
                 type_params,
+                variants,
                 methods,
                 doc,
-                ..
             } => {
                 let self_ty = self.enum_self_ty(name);
                 // The enum's type parameters are in scope across its method bodies.
                 let saved = self.enter_type_params(type_params);
-                // Editor hover (decl-site): record the enum type at its declared-name token + doc.
+                // Editor hover (decl-site): record the enum type at its declared-name token + doc,
+                // plus each variant's ctor signature at its declared-name token (`Val(int)` →
+                // "fn(int) -> Col"). Mirrors the use-site hover at `infer_variant_call`: the enum's
+                // declared `Ty::Param`s are preserved in the return type so a generic variant Displays
+                // "fn(T) -> Box[T]". Probe-gated no-op (parity-neutral), emits no error.
                 if self.hover_probe.is_some() {
                     self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
+                    let key = self.bare_key(name);
+                    let targs_disp: Vec<Ty> = self
+                        .enum_type_params
+                        .get(&key)
+                        .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+                        .unwrap_or_default();
+                    for v in variants {
+                        if let Some(vi) = self.variants.get(&(key.clone(), v.name.clone())).cloned()
+                        {
+                            let fty = Ty::Func {
+                                params: vi.payload,
+                                ret: Box::new(Ty::Enum(vi.enum_name, targs_disp.clone())),
+                            };
+                            self.hover_record_at(v.name_span, &fty, HoverKind::Func, None);
+                        }
+                    }
                 }
                 let is_suite = methods.iter().any(|m| m.is_test);
                 for m in methods {

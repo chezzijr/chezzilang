@@ -312,6 +312,26 @@ probe-gated → zero runtime/typecheck/codegen/VM/interp change, two-engine pari
 byte-identical, conformance unchanged (no syntax/grammar change). Tests:
 `editor::tests::hover_free_fn_decl_name`, `hover_free_fn_decl_name_shows_doc`,
 `hover_generic_free_fn_decl_name`, and end-to-end `lsp_smoke::hover_fn_decl_name_round_trip`.
+
+**✅ Editor tooling — LSP hover for the ENUM-VARIANT decl name (2026-06-30).** Sibling of the free-fn
+decl-hover note above: hovering a variant name at its declaration (`Val` in `enum Col:\n    Val(int)`)
+showed nothing, while the USE site (`Col.Val(3)`) already hovered its ctor signature. Root cause: the
+`Variant` AST node carried no `name_span` (unlike its sibling `Field`), so the token position was
+unrecoverable at check time. Fix is additive + runtime-inert, mirroring `Field.name_span` /
+`FnDecl.name_span`: (1) add `pub name_span: Span` to `ast::Variant` (diagnostic-only, never read by
+desugar/compiler/vm/interp; derived `PartialEq` kept — identical source ⇒ identical spans); (2) the
+parser captures the variant-name token span; (3) the `StmtKind::Enum` arm, under the existing
+`hover_probe` guard, loops the variants and records `hover_record_at(v.name_span, &Ty::Func { params:
+<resolved payload>, ret: Ty::Enum(name, targs_disp) }, HoverKind::Func, None)` — reusing the EXACT
+type construction `infer_variant_call` uses at the use site, so decl-site and use-site displays agree
+(`Val(int)` → `fn(int) -> Col`, generic `Full(T)` → `fn(T) -> Box[T]`, nullary `Red` → `fn() -> Col`).
+No `!generic_arg_prepass` gate needed (this arm runs in `check_stmt`, not the localized inference
+prepass — proven by `hover_generic_enum_variant_decl_name`). A variant has no doc field, so doc=None
+(only the signature surfaces, NOT variant doc-comments). Checker/editor-only, probe-gated → zero
+runtime/typecheck/codegen/VM/interp change, two-engine parity green, goldens byte-identical, conformance
+unchanged (the AST-only field adds no surface syntax). Tests:
+`editor::tests::hover_enum_variant_decl_name`, `hover_generic_enum_variant_decl_name`,
+`hover_nullary_enum_variant_decl_name`, and end-to-end `lsp_smoke::hover_enum_variant_decl_name_round_trip`.
 **Reinstall the LSP snapshot to serve it: `cargo install --path . --features lsp --bin chezzi-lsp`.**
 
 **✅ Editor tooling — LSP hover for IMPORTED user types + GENERIC annotation heads (Tier-C follow-up) (2026-06-30).**
