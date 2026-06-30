@@ -75,7 +75,7 @@ pub fn from_type(
                 struct_descriptor(&key, env, visiting)
             }
         },
-        Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
+        Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
             ("List", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(
                 t,
                 call_module,

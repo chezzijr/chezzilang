@@ -1714,7 +1714,9 @@ impl Parser {
                 args.push(self.parse_type()?);
             }
             self.expect(&Token::RBracket)?;
-            Type::Generic(name, args)
+            // The head-name token's OWN span (captured before `expect_ident`) rides along for the
+            // editor hover overlay; equality-neutral, never read by the engines.
+            Type::Generic(name, args, name_span)
         } else {
             Type::Named {
                 name,
@@ -1731,15 +1733,15 @@ impl Parser {
     fn parse_type_postfix(&mut self, mut ty: Type) -> PResult<Type> {
         loop {
             if self.eat(&Token::Question) {
-                ty = Type::Generic("Option".to_string(), vec![ty]);
+                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
             } else if self.eat(&Token::Bang) {
                 // An explicit error type follows only if the next token can start one; otherwise
                 // `T!` defaults the error type to `Error` (resolved later by the checker).
                 if matches!(self.peek(), Token::Ident(_) | Token::LParen | Token::Fn) {
                     let err = self.parse_type()?;
-                    ty = Type::Generic("Result".to_string(), vec![ty, err]);
+                    ty = Type::Generic("Result".to_string(), vec![ty, err], Span::default());
                 } else {
-                    ty = Type::Generic("Result".to_string(), vec![ty]);
+                    ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
                 }
             } else {
                 break;
@@ -3525,7 +3527,7 @@ mod tests {
                 assert_eq!(type_params[0].name, "T");
                 assert_eq!(
                     underlying,
-                    Type::Generic("List".into(), vec![Type::named("T")])
+                    Type::Generic("List".into(), vec![Type::named("T")], Span::default())
                 );
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "peek");
@@ -4324,13 +4326,13 @@ mod tests {
             panic!()
         };
         match &f.params[0].ty {
-            Some(Type::Generic(name, args)) => {
+            Some(Type::Generic(name, args, _)) => {
                 assert_eq!(name, "Map");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], Type::named("str"));
                 assert_eq!(
                     args[1],
-                    Type::Generic("List".into(), vec![Type::named("int")])
+                    Type::Generic("List".into(), vec![Type::named("int")], Span::default())
                 );
             }
             other => panic!("{other:?}"),
@@ -4422,7 +4424,11 @@ mod tests {
         };
         assert_eq!(
             decl.params[0].ty,
-            Some(Type::Generic("Option".into(), vec![Type::named("int")]))
+            Some(Type::Generic(
+                "Option".into(),
+                vec![Type::named("int")],
+                Span::default()
+            ))
         );
     }
 
@@ -4434,7 +4440,11 @@ mod tests {
         };
         assert_eq!(
             decl.ret,
-            Some(Type::Generic("Result".into(), vec![Type::named("int")]))
+            Some(Type::Generic(
+                "Result".into(),
+                vec![Type::named("int")],
+                Span::default()
+            ))
         );
     }
 
@@ -4448,7 +4458,12 @@ mod tests {
             decl.params[0].ty,
             Some(Type::Generic(
                 "Option".into(),
-                vec![Type::Generic("List".into(), vec![Type::named("int")])]
+                vec![Type::Generic(
+                    "List".into(),
+                    vec![Type::named("int")],
+                    Span::default()
+                )],
+                Span::default()
             ))
         );
     }
@@ -4499,7 +4514,8 @@ mod tests {
                     module: "geo".into(),
                     name: "Point".into(),
                     args: vec![],
-                }]
+                }],
+                Span::default()
             ))
         );
     }
@@ -4710,7 +4726,11 @@ mod tests {
         assert_eq!(safe_div.name, "safe_div");
         assert_eq!(
             safe_div.ret,
-            Some(Type::Generic("Result".into(), vec![Type::named("int")]))
+            Some(Type::Generic(
+                "Result".into(),
+                vec![Type::named("int")],
+                Span::default()
+            ))
         );
         // body: `if b == 0:` then `return Ok(a / b)`
         assert!(matches!(safe_div.body[0].kind, StmtKind::If { .. }));

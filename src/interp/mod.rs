@@ -191,7 +191,7 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
         return;
     }
     match ty {
-        crate::ast::Type::Generic(n, args)
+        crate::ast::Type::Generic(n, args, ..)
             if n == "List" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
         {
             if let Value::List(items) = v {
@@ -201,7 +201,7 @@ fn coerce_value_to_annotation(v: &mut Value, ty: &crate::ast::Type, is_literal: 
                 }
             }
         }
-        crate::ast::Type::Generic(n, args)
+        crate::ast::Type::Generic(n, args, ..)
             if n == "Map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
         {
             if let Value::Map(map) = v {
@@ -7094,7 +7094,7 @@ fn ffi_type_display(ty: Option<&crate::ast::Type>) -> String {
     match ty {
         Some(crate::ast::Type::Named { name: n, .. }) => n.clone(),
         Some(crate::ast::Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
-        Some(crate::ast::Type::Generic(n, _)) => n.clone(),
+        Some(crate::ast::Type::Generic(n, ..)) => n.clone(),
         Some(_) => "<unsupported>".to_string(),
         None => "nil".to_string(),
     }

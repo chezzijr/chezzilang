@@ -153,7 +153,7 @@ fn numeric_mix(a: &Ty, b: &Ty) -> bool {
 fn describe_extern_type(t: &Type) -> String {
     match t {
         Type::Named { name: n, .. } => n.clone(),
-        Type::Generic(n, args) if n == "Option" => match args.first() {
+        Type::Generic(n, args, ..) if n == "Option" => match args.first() {
             Some(Type::Named { name: inner, .. }) => format!("{inner}?"),
             _ => "str?".to_string(),
         },
@@ -304,6 +304,10 @@ struct StructInfo {
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
     origin: StructOrigin,
+    /// The struct's own decl docstring (the `#` block above `struct X:`), captured in `capture_sig`
+    /// from `name_docs` so it crosses the module boundary to an importer's hover. Editor-only; `None`
+    /// for a builtin/native struct and until `capture_sig` populates it. Never read by checking/codegen.
+    doc: Option<String>,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
@@ -385,6 +389,9 @@ struct NewTypeSigInfo {
     /// boundary so an imported generic newtype's instantiation/dispatch/cast-unwrap resolves.
     type_params: Vec<TypeParam>,
     methods: HashMap<String, FnSig>,
+    /// The newtype's own decl docstring, carried across the module boundary for an importer's hover
+    /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
+    doc: Option<String>,
 }
 
 /// An enum's exported shape inside a `ModuleSig`: variant names in declaration order, the enum's
@@ -397,6 +404,9 @@ struct EnumSigInfo {
     /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
     /// the module boundary so an imported enum's methods resolve in the importer.
     methods: HashMap<String, FnSig>,
+    /// The enum's own decl docstring, carried across the module boundary for an importer's hover
+    /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
+    doc: Option<String>,
 }
 
 /// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
@@ -953,6 +963,7 @@ fn native_module_sig(name: &str) -> ModuleSig {
                     .collect(),
                 methods: HashMap::new(),
                 origin: StructOrigin::Builtin,
+                doc: None,
             },
         );
         sig.types.insert(sname.to_string());
@@ -1441,6 +1452,7 @@ impl Checker {
                 .collect(),
             methods: HashMap::new(),
             origin: StructOrigin::Builtin,
+            doc: None,
         };
         // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
         // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
@@ -1759,7 +1771,7 @@ impl Checker {
                 }
             }
             Import::From {
-                path: _,
+                path,
                 names,
                 name_spans,
             } => {
@@ -1902,13 +1914,26 @@ impl Checker {
                             let key = self.type_key(&imp.target, member);
                             self.structs.insert(key.clone(), info.clone());
                             self.struct_names.insert(bind.clone());
-                            self.bare_types.insert(bind.clone(), key);
+                            self.bare_types.insert(bind.clone(), key.clone());
                             // Same soundness gate as the whole-module path: a Builtin-origin std
                             // struct imported by name reserves its BIND name against a same-named user
                             // `struct` decl (else accept-then-trap on the native shape mismatch).
                             if info.origin == StructOrigin::Builtin {
                                 self.imported_builtin_types.insert(bind.clone());
                             }
+                            // Editor hover (Tier C): the imported type's doc — its own decl docstring
+                            // carried across the boundary, else a `kind (from module)` fallback. Seed
+                            // `name_docs[bind]` so a later bare/annotation/generic-head use surfaces it
+                            // (the `Type::Named`/`Type::Generic` hover arms read `name_docs`), AND record
+                            // the import-line token hover here. Both are probe-gated no-ops off-probe.
+                            self.record_imported_type_hover(
+                                bind,
+                                *name_span,
+                                &Ty::strukt(key),
+                                info.doc.as_deref(),
+                                "struct",
+                                path,
+                            );
                         } else if let Some(edef) = sig.enum_defs.get(member) {
                             // A user enum imported by name: inject its variant names, type params, and
                             // each variant's payload under the declaring module's runtime key; expose
@@ -1929,6 +1954,14 @@ impl Checker {
                                     .or_default()
                                     .push(bind.clone());
                             }
+                            self.record_imported_type_hover(
+                                bind,
+                                *name_span,
+                                &Ty::Enum(key, vec![]),
+                                edef.doc.as_deref(),
+                                "enum",
+                                path,
+                            );
                         } else if let Some(ntdef) = sig.newtype_defs.get(member) {
                             // A user newtype imported by name: inject its underlying + methods under
                             // the declaring module's runtime key; expose it bare under the bind name.
@@ -1940,7 +1973,15 @@ impl Checker {
                             self.newtype_type_params
                                 .insert(key.clone(), ntdef.type_params.clone());
                             self.newtype_names.insert(bind.clone());
-                            self.bare_types.insert(bind.clone(), key);
+                            self.bare_types.insert(bind.clone(), key.clone());
+                            self.record_imported_type_hover(
+                                bind,
+                                *name_span,
+                                &Ty::NewType(key, vec![]),
+                                ntdef.doc.as_deref(),
+                                "newtype",
+                                path,
+                            );
                         } else if let Some(asig) = sig.type_aliases.get(member) {
                             // A user type alias imported by name. An unlicensed alias embedding an
                             // un-imported FFI width cannot be laundered — reject it here, mirroring the
@@ -2007,7 +2048,11 @@ impl Checker {
                     // `type_key`).
                     let key = self.bare_key(name);
                     if let Some(info) = self.structs.get(&key) {
-                        sig.struct_defs.insert(name.clone(), info.clone());
+                        let mut info = info.clone();
+                        // Carry the decl docstring onto the EXPORTED sig (editor hover) so an
+                        // importer's `from M import S` / `x: S` hover surfaces it across the boundary.
+                        info.doc = self.name_docs.get(name).cloned();
+                        sig.struct_defs.insert(name.clone(), info);
                     }
                 }
                 StmtKind::Enum { name, .. } => {
@@ -2027,6 +2072,7 @@ impl Checker {
                                 type_params,
                                 variants,
                                 methods: self.enum_methods.get(&key).cloned().unwrap_or_default(),
+                                doc: self.name_docs.get(name).cloned(),
                             },
                         );
                     }
@@ -2045,6 +2091,7 @@ impl Checker {
                                     .cloned()
                                     .unwrap_or_default(),
                                 methods: methods.clone(),
+                                doc: self.name_docs.get(name).cloned(),
                             },
                         );
                     }
@@ -2455,7 +2502,7 @@ impl Checker {
                     out.push(n.clone());
                 }
             }
-            Type::Generic(_, args) => {
+            Type::Generic(_, args, ..) => {
                 for a in args {
                     Self::collect_width_names(a, out);
                 }
@@ -2608,6 +2655,9 @@ impl Checker {
                             fields,
                             methods,
                             origin,
+                            // Decl docstring is attached later in `capture_sig` (from `name_docs`),
+                            // only for the module's exported sig; the in-checker layout doesn't need it.
+                            doc: None,
                         },
                     );
                 }
@@ -2921,7 +2971,7 @@ impl Checker {
                 false
             }
             // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
-            Type::Generic(n, args) if n == "Option" => args.first().is_some_and(|inner| {
+            Type::Generic(n, args, ..) if n == "Option" => args.first().is_some_and(|inner| {
                 matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
                     || self.is_return_only_extern_type_seen(inner, seen)
             }),
@@ -3068,7 +3118,10 @@ impl Checker {
                 // by desugar). `check_ref_ty` rejects a non-boxable pointee (e.g. a bare generic).
                 Some(t) if p.is_ref => {
                     self.check_ref_ty(t, span);
-                    self.resolve_type(&Type::Generic("Ref".to_string(), vec![t.clone()]), span)
+                    self.resolve_type(
+                        &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
+                        span,
+                    )
                 }
                 Some(t) => self.resolve_type(t, span),
                 None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
@@ -3649,16 +3702,28 @@ impl Checker {
                 // nothing; gated on `!generic_arg_prepass` so the generic-arg unification prepass
                 // can't first-hit-wins latch an incomplete type. Composite inner names
                 // (`int` in `List[int]`) record via this same arm when resolve_type recurses.
-                // A builtin/stdlib type name (`str`/`bytes`/bare `Shared`/…) also carries its
-                // `builtin_type_doc` usage+methods blurb (Tier C); user types stay doc-less here
-                // (their decl-name docstring surfaces via the Tier-A decl-name hover instead).
+                // A builtin/stdlib type name (`str`/`bytes`/bare `Shared`/…) carries its
+                // `builtin_type_doc` usage+methods blurb (Tier C); a user type falls back to its
+                // `name_docs` docstring — for an imported non-generic type used as `x: Foo`, the
+                // import-line binding seeded `name_docs[Foo]` (its decl docstring or a kind+module
+                // blurb). A current-module user type's own docstring also surfaces here (additive;
+                // the Tier-A decl-name hover already covers the decl site). `builtin_type_doc` stays
+                // FIRST so a builtin name is never shadowed by a same-named `name_docs` entry.
                 if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    self.hover_record_at(
-                        *name_span,
-                        &resolved,
-                        HoverKind::Type,
-                        builtin_type_doc(n),
-                    );
+                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
+                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
+                    // the param is an unrelated entity and must not borrow that decl's docstring
+                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
+                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
+                    // is a no-op at the head site.
+                    let doc = builtin_type_doc(n).or_else(|| {
+                        if matches!(resolved, Ty::Param(_)) {
+                            None
+                        } else {
+                            self.name_docs.get(n).cloned()
+                        }
+                    });
+                    self.hover_record_at(*name_span, &resolved, HoverKind::Type, doc);
                 }
                 resolved
             }
@@ -3667,203 +3732,230 @@ impl Checker {
                 ret: Box::new(self.resolve_type(ret, span)),
             },
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
-            Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
-                ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
-                ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
-                ("Result", [t, e]) => {
-                    Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
-                }
-                ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
-                // `Iterator[T]` as a *value* type — the result of calling a generator function.
-                // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
-                // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it).
-                // Experimental: only generators produce these; ordinary code still uses adapter
-                // structs / built-in collections.
-                ("Iterator", [elem]) => {
-                    Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
-                }
-                ("Channel", [inner]) => {
-                    let elem = self.resolve_type(inner, span);
-                    if !self.sendable(&elem) {
-                        self.error(
-                            span,
-                            format!("Channel element type must be sendable, found {elem}"),
-                        );
+            Type::Generic(n, args, head_span) => {
+                let resolved = match (n.as_str(), args.as_slice()) {
+                    ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
+                    ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
+                    ("Result", [t, e]) => {
+                        Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
                     }
-                    Ty::channel(elem)
-                }
-                // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
-                // isn't gated on sendability — the value lives in one owner and is copied in/out
-                // through `get`/`set`; the *handle* is what crosses (always sendable). NOT a global
-                // builtin: requires `import std.concurrency` (the inner type is still resolved on the
-                // unlicensed path so a nested error surfaces; the name STAYS reserved). Same for the
-                // RwShared/Atomic siblings below.
-                ("Shared", [inner]) => {
-                    let elem = self.resolve_type(inner, span);
-                    if self.concurrency_licensed("Shared") {
-                        Ty::shared(elem)
-                    } else {
-                        self.error(
+                    ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
+                    // `Iterator[T]` as a *value* type — the result of calling a generator function.
+                    // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
+                    // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it).
+                    // Experimental: only generators produce these; ordinary code still uses adapter
+                    // structs / built-in collections.
+                    ("Iterator", [elem]) => {
+                        Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
+                    }
+                    ("Channel", [inner]) => {
+                        let elem = self.resolve_type(inner, span);
+                        if !self.sendable(&elem) {
+                            self.error(
+                                span,
+                                format!("Channel element type must be sendable, found {elem}"),
+                            );
+                        }
+                        Ty::channel(elem)
+                    }
+                    // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
+                    // isn't gated on sendability — the value lives in one owner and is copied in/out
+                    // through `get`/`set`; the *handle* is what crosses (always sendable). NOT a global
+                    // builtin: requires `import std.concurrency` (the inner type is still resolved on the
+                    // unlicensed path so a nested error surfaces; the name STAYS reserved). Same for the
+                    // RwShared/Atomic siblings below.
+                    ("Shared", [inner]) => {
+                        let elem = self.resolve_type(inner, span);
+                        if self.concurrency_licensed("Shared") {
+                            Ty::shared(elem)
+                        } else {
+                            self.error(
                             span,
                             "unknown type 'Shared' (import it from std.concurrency: `import std.concurrency`)"
                                 .to_string(),
                         );
-                        Ty::Unknown
+                            Ty::Unknown
+                        }
                     }
-                }
-                // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
-                // element type isn't gated on sendability — the handle is what crosses.
-                ("RwShared", [inner]) => {
-                    let elem = self.resolve_type(inner, span);
-                    if self.concurrency_licensed("RwShared") {
-                        Ty::rwshared(elem)
-                    } else {
-                        self.error(
+                    // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
+                    // element type isn't gated on sendability — the handle is what crosses.
+                    ("RwShared", [inner]) => {
+                        let elem = self.resolve_type(inner, span);
+                        if self.concurrency_licensed("RwShared") {
+                            Ty::rwshared(elem)
+                        } else {
+                            self.error(
                             span,
                             "unknown type 'RwShared' (import it from std.concurrency: `import std.concurrency`)"
                                 .to_string(),
                         );
-                        Ty::Unknown
+                            Ty::Unknown
+                        }
                     }
-                }
-                // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
-                // type isn't gated on sendability — the handle is what crosses.
-                ("Atomic", [inner]) => {
-                    let elem = self.resolve_type(inner, span);
-                    if self.concurrency_licensed("Atomic") {
-                        Ty::atomic(elem)
-                    } else {
-                        self.error(
+                    // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
+                    // type isn't gated on sendability — the handle is what crosses.
+                    ("Atomic", [inner]) => {
+                        let elem = self.resolve_type(inner, span);
+                        if self.concurrency_licensed("Atomic") {
+                            Ty::atomic(elem)
+                        } else {
+                            self.error(
                             span,
                             "unknown type 'Atomic' (import it from std.concurrency: `import std.concurrency`)"
                                 .to_string(),
                         );
-                        Ty::Unknown
+                            Ty::Unknown
+                        }
                     }
-                }
-                ("Map", [k, v]) => {
-                    let key = self.resolve_type(k, span);
-                    let value = self.resolve_type(v, span);
-                    if !self.is_hashable_key(&key) {
-                        self.error(
+                    ("Map", [k, v]) => {
+                        let key = self.resolve_type(k, span);
+                        let value = self.resolve_type(v, span);
+                        if !self.is_hashable_key(&key) {
+                            self.error(
                             span,
                             format!("Map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {key}"),
                         );
+                        }
+                        Ty::map(key, value)
                     }
-                    Ty::map(key, value)
-                }
-                ("Set", [t]) => {
-                    let elem = self.resolve_type(t, span);
-                    if !self.is_hashable_key(&elem) {
-                        self.error(
+                    ("Set", [t]) => {
+                        let elem = self.resolve_type(t, span);
+                        if !self.is_hashable_key(&elem) {
+                            self.error(
                             span,
                             format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
                         );
-                    }
-                    Ty::set(elem)
-                }
-                // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
-                _ if self.struct_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    let resolved: Vec<Ty> =
-                        args.iter().map(|a| self.resolve_type(a, span)).collect();
-                    // Clone the param list out so the borrow on `self.structs` is dropped before
-                    // the `satisfies`/`error` calls below.
-                    let tps = self.structs.get(&key).map(|i| i.type_params.clone());
-                    if let Some(tps) = tps {
-                        if tps.len() != resolved.len() {
-                            self.error(
-                                span,
-                                format!(
-                                    "type '{n}' expects {} type argument(s), got {}",
-                                    tps.len(),
-                                    resolved.len()
-                                ),
-                            );
                         }
-                        // Enforce each type parameter's protocol bounds against its argument.
-                        for (tp, arg) in tps.iter().zip(&resolved) {
-                            for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                    self.error(span, msg);
+                        Ty::set(elem)
+                    }
+                    // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
+                    _ if self.struct_names.contains(n) => {
+                        let key = self.bare_key(n);
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        // Clone the param list out so the borrow on `self.structs` is dropped before
+                        // the `satisfies`/`error` calls below.
+                        let tps = self.structs.get(&key).map(|i| i.type_params.clone());
+                        if let Some(tps) = tps {
+                            if tps.len() != resolved.len() {
+                                self.error(
+                                    span,
+                                    format!(
+                                        "type '{n}' expects {} type argument(s), got {}",
+                                        tps.len(),
+                                        resolved.len()
+                                    ),
+                                );
+                            }
+                            // Enforce each type parameter's protocol bounds against its argument.
+                            for (tp, arg) in tps.iter().zip(&resolved) {
+                                for bound in &tp.bounds {
+                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
+                                        self.error(span, msg);
+                                    }
                                 }
                             }
                         }
+                        Ty::Struct(key, resolved)
                     }
-                    Ty::Struct(key, resolved)
-                }
-                // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
-                _ if self.enum_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    let resolved: Vec<Ty> =
-                        args.iter().map(|a| self.resolve_type(a, span)).collect();
-                    let tps = self.enum_type_params.get(&key).cloned();
-                    if let Some(tps) = tps {
-                        if tps.len() != resolved.len() {
-                            self.error(
-                                span,
-                                format!(
-                                    "type '{n}' expects {} type argument(s), got {}",
-                                    tps.len(),
-                                    resolved.len()
-                                ),
-                            );
-                        }
-                        for (tp, arg) in tps.iter().zip(&resolved) {
-                            for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                    self.error(span, msg);
+                    // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
+                    _ if self.enum_names.contains(n) => {
+                        let key = self.bare_key(n);
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        let tps = self.enum_type_params.get(&key).cloned();
+                        if let Some(tps) = tps {
+                            if tps.len() != resolved.len() {
+                                self.error(
+                                    span,
+                                    format!(
+                                        "type '{n}' expects {} type argument(s), got {}",
+                                        tps.len(),
+                                        resolved.len()
+                                    ),
+                                );
+                            }
+                            for (tp, arg) in tps.iter().zip(&resolved) {
+                                for bound in &tp.bounds {
+                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
+                                        self.error(span, msg);
+                                    }
                                 }
                             }
                         }
+                        Ty::Enum(key, resolved)
                     }
-                    Ty::Enum(key, resolved)
-                }
-                // A parameterized protocol may only be a bound (`[X: Container[int]]`), not an
-                // existential value type — `Ty::Protocol` carries no args. Resolve the args anyway so
-                // an unknown type inside is still reported.
-                _ if self.protocols.contains_key(n) => {
-                    for a in args {
-                        let _ = self.resolve_type(a, span);
-                    }
-                    self.error(
+                    // A parameterized protocol may only be a bound (`[X: Container[int]]`), not an
+                    // existential value type — `Ty::Protocol` carries no args. Resolve the args anyway so
+                    // an unknown type inside is still reported.
+                    _ if self.protocols.contains_key(n) => {
+                        for a in args {
+                            let _ = self.resolve_type(a, span);
+                        }
+                        self.error(
                         span,
                         format!("parameterized protocol '{n}' can only be used as a bound, not as a value type"),
                     );
-                    Ty::Unknown
-                }
-                // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
-                _ if self.newtype_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    let resolved: Vec<Ty> =
-                        args.iter().map(|a| self.resolve_type(a, span)).collect();
-                    let tps = self.newtype_type_params.get(&key).cloned();
-                    if let Some(tps) = tps {
-                        if tps.len() != resolved.len() {
-                            self.error(
-                                span,
-                                format!(
-                                    "type '{n}' expects {} type argument(s), got {}",
-                                    tps.len(),
-                                    resolved.len()
-                                ),
-                            );
-                        }
-                        for (tp, arg) in tps.iter().zip(&resolved) {
-                            for bound in &tp.bounds {
-                                if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                    self.error(span, msg);
+                        Ty::Unknown
+                    }
+                    // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
+                    _ if self.newtype_names.contains(n) => {
+                        let key = self.bare_key(n);
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        let tps = self.newtype_type_params.get(&key).cloned();
+                        if let Some(tps) = tps {
+                            if tps.len() != resolved.len() {
+                                self.error(
+                                    span,
+                                    format!(
+                                        "type '{n}' expects {} type argument(s), got {}",
+                                        tps.len(),
+                                        resolved.len()
+                                    ),
+                                );
+                            }
+                            for (tp, arg) in tps.iter().zip(&resolved) {
+                                for bound in &tp.bounds {
+                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
+                                        self.error(span, msg);
+                                    }
                                 }
                             }
                         }
+                        Ty::NewType(key, resolved)
                     }
-                    Ty::NewType(key, resolved)
+                    _ => {
+                        self.error(span, format!("unknown generic type '{n}'"));
+                        Ty::Unknown
+                    }
+                };
+                // Editor hover (LSP, Tier C): record the resolved type at the GENERIC HEAD-name
+                // token's OWN span (`List`/`Heap` in `List[int]`/`Heap[int]`) — the gap the bare
+                // `Type::Named` arm already covers for non-generic heads. A builtin/stdlib head
+                // (`List`/`Map`/`Set`/`Channel`/…) carries its `builtin_type_doc` usage+methods
+                // blurb; a user head (an imported generic struct/enum/newtype like `Heap`) falls back
+                // to its `name_docs` docstring (the import-line binding seeds that entry). Probe-gated
+                // so off-probe checks pay nothing; gated `!generic_arg_prepass` so the generic-arg
+                // unification prepass can't first-hit-wins latch an incomplete type.
+                if self.hover_probe.is_some() && !self.generic_arg_prepass {
+                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
+                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
+                    // the param is an unrelated entity and must not borrow that decl's docstring
+                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
+                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
+                    // is a no-op at the head site.
+                    let doc = builtin_type_doc(n).or_else(|| {
+                        if matches!(resolved, Ty::Param(_)) {
+                            None
+                        } else {
+                            self.name_docs.get(n).cloned()
+                        }
+                    });
+                    self.hover_record_at(*head_span, &resolved, HoverKind::Type, doc);
                 }
-                _ => {
-                    self.error(span, format!("unknown generic type '{n}'"));
-                    Ty::Unknown
-                }
-            },
+                resolved
+            }
             // A module-qualified type `module.Type[args]` (mirrors how a function is reached via its
             // bound module name). Resolve `module` in `imported_modules` → the target's `ModuleSig`,
             // confirm the type exists there, and return the matching `Ty`. Enforces arity for generic
@@ -4042,7 +4134,7 @@ impl Checker {
                         let expected = if is_ref {
                             self.check_ref_ty(t, span);
                             self.resolve_type(
-                                &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                                &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
                                 span,
                             )
                         } else {
@@ -6642,6 +6734,31 @@ impl Checker {
         }
     }
 
+    /// Editor hover for a `from M import T` user type (struct/enum/newtype). Computes the effective
+    /// doc — the type's own decl docstring carried across the module boundary, else a `kind (from
+    /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
+    /// (`x: T[..]`) annotation use surfaces the same doc (those arms read `name_docs`), and (2) records
+    /// the import-line token hover at `name_span`. Both halves are probe-gated no-ops off the hover
+    /// probe (`name_docs` is editor-tooling-only and entry-module-scoped), so this is parity-neutral.
+    fn record_imported_type_hover(
+        &mut self,
+        bind: &str,
+        name_span: Span,
+        ty: &Ty,
+        own_doc: Option<&str>,
+        kind_word: &str,
+        path: &[String],
+    ) {
+        if self.hover_probe.is_none() {
+            return;
+        }
+        let doc = own_doc
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{kind_word} (from {})", path.join(".")));
+        self.name_docs.insert(bind.to_string(), doc.clone());
+        self.hover_record_at(name_span, ty, HoverKind::Type, Some(doc));
+    }
+
     /// Hover-record a LEAF expression (identifier / literal) or a field-name access. Non-leaf kinds
     /// (Binary/Index/Call/…) are skipped so hovering `a` in `a[0]` reports `a`'s type, not the element
     /// type — the parent never overwrites the child. The field-name access anchors on `name_span` (the
@@ -8144,7 +8261,7 @@ impl Checker {
                     Some(t) if p.is_ref => {
                         self.check_ref_ty(t, body.span);
                         self.resolve_type(
-                            &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                            &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
                             body.span,
                         )
                     }
@@ -8743,7 +8860,11 @@ impl Checker {
             ExprKind::Ident(n) => Some(Type::named(n.clone())),
             ExprKind::Index { obj, index } => {
                 if let ExprKind::Ident(n) = &obj.kind {
-                    Some(Type::Generic(n.clone(), vec![self.index_as_type(index)?]))
+                    Some(Type::Generic(
+                        n.clone(),
+                        vec![self.index_as_type(index)?],
+                        Span::default(),
+                    ))
                 } else {
                     None
                 }
@@ -11223,7 +11344,7 @@ impl Checker {
                         Some(t) if p.is_ref => {
                             self.check_ref_ty(t, span);
                             self.resolve_type(
-                                &Type::Generic("Ref".to_string(), vec![t.clone()]),
+                                &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
                                 span,
                             )
                         }
@@ -11654,7 +11775,7 @@ impl Checker {
                 _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
                 _ => Ty::Unknown,
             },
-            Type::Generic(n, args) => match (n.as_str(), args.as_slice()) {
+            Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
                 ("List", [x]) => Ty::list(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Set", [x]) => Ty::set(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Option", [x]) => Ty::option(self.resolve_ty_ro_d(x, depth + 1)),
@@ -11823,7 +11944,7 @@ impl Checker {
             }
             // RETURN-ONLY nullable `char*` (`str?` / `owned_str?`): the inner type decides
             // borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
-            Type::Generic(n, args) if n == "Option" && args.len() == 1 => {
+            Type::Generic(n, args, ..) if n == "Option" && args.len() == 1 => {
                 match self.resolve_ctype_d(&args[0], depth + 1) {
                     Some(CType::Str) => Some(CType::OptStr),
                     Some(CType::OwnedStr) => Some(CType::OptOwnedStr),
