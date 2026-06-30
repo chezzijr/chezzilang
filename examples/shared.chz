@@ -10,7 +10,7 @@ fn bump(s: Shared[int]):
     s.update(fn(x): x + 1)
 
 fn main():
-    s := Shared(0)               # one owner holds the value
+    s := Shared[int](0)          # one owner holds the value (turbofish optional, checked vs value)
     parallel:
         spawn bump(s)            # the handle is copied in — all three reach the same box
         spawn bump(s)

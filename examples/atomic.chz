@@ -1,7 +1,7 @@
 import std.concurrency
 
 fn main():
-    a := Atomic(0)
+    a := Atomic[int](0)
     print(a.load())          # 0
     a.store(10)
     print(a.load())          # 10

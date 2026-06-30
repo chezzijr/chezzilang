@@ -1944,7 +1944,8 @@ fn fetch_all(urls: List[str]):
   spelling remains fully supported; the qualified path is **additive** (the bare-name licensing may be
   deprecated in a later milestone, but is not going away in this change).
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
-  `Atomic(v)`): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
+  `Atomic(v)`; an optional `Atomic[T](v)` turbofish pins the element type and is checked against the
+  value): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
   like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
   arbitrary-transform updates.

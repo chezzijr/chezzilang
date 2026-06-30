@@ -9752,11 +9752,13 @@ impl Checker {
             }
             "Shared" => {
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
-                // inferred from the value (value-first, unlike `Channel[T]()`); a `[T]` type arg is
-                // rejected upstream by the `name_is_generic` gate. NOT a global builtin: requires
-                // `import std.concurrency` (the arg is still inferred on the unlicensed path so a nested
-                // error surfaces; the name STAYS reserved). Same for RwShared/Atomic/Executor below.
-                let elem = self.one_arg("Shared", args, span);
+                // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
+                // turbofish pins it and is checked against the value's type (`Shared[str](0)` rejects).
+                // NOT a global builtin: requires `import std.concurrency` (the arg is still inferred on
+                // the unlicensed path so a nested error surfaces; the name STAYS reserved). Same for
+                // RwShared/Atomic/Executor below.
+                let inferred = self.one_arg("Shared", args, span);
+                let elem = self.concurrency_turbofish_elem("Shared", targs, inferred, span);
                 if self.concurrency_licensed("Shared") {
                     Some(Ty::shared(elem))
                 } else {
@@ -9770,9 +9772,10 @@ impl Checker {
             }
             "RwShared" => {
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
-                // type is inferred from the value (value-first, like `Shared`); a `[T]` type arg is
-                // rejected upstream by the `name_is_generic` gate.
-                let elem = self.one_arg("RwShared", args, span);
+                // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
+                // turbofish pins it and is checked against the value's type.
+                let inferred = self.one_arg("RwShared", args, span);
+                let elem = self.concurrency_turbofish_elem("RwShared", targs, inferred, span);
                 if self.concurrency_licensed("RwShared") {
                     Some(Ty::rwshared(elem))
                 } else {
@@ -9786,8 +9789,10 @@ impl Checker {
             }
             "Atomic" => {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
-                // `Shared`; a `[T]` type arg is rejected upstream by the `name_is_generic` gate.
-                let elem = self.one_arg("Atomic", args, span);
+                // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
+                // the value's type.
+                let inferred = self.one_arg("Atomic", args, span);
+                let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
                 if self.concurrency_licensed("Atomic") {
                     Some(Ty::atomic(elem))
                 } else {
@@ -12677,11 +12682,48 @@ impl Checker {
         }
     }
 
+    /// Resolve the element type of a value-first concurrency box (`Shared`/`RwShared`/`Atomic`) from
+    /// an OPTIONAL turbofish, mirroring the container-ctor turbofish pattern (the `List` arm above).
+    /// With no turbofish the value's `inferred` type wins; with one type arg that arg pins the element
+    /// type and is checked against `inferred` (a mismatch like `Shared[str](0)` errors); arity > 1 is
+    /// rejected and falls back to `inferred`.
+    fn concurrency_turbofish_elem(
+        &mut self,
+        name: &str,
+        targs: &[Ty],
+        inferred: Ty,
+        span: Span,
+    ) -> Ty {
+        match targs {
+            [] => inferred,
+            [t] => {
+                let t = t.clone();
+                if !t.is_unknown() && !inferred.is_unknown() && !self.assignable(&t, &inferred) {
+                    self.error(
+                        span,
+                        format!("{name}[{t}]() expected element type {t}, found {inferred}"),
+                    );
+                }
+                t
+            }
+            _ => {
+                self.error(span, format!("{name}[T]() takes exactly one type argument"));
+                inferred
+            }
+        }
+    }
+
     fn name_is_generic(&self, name: &str) -> bool {
         // The built-in `Channel[T]()` constructor takes its element type as an explicit type arg.
         // The container constructors `List[T]()` / `Set[T]()` / `Map[K, V]()` likewise accept a
         // turbofish that pins the (otherwise un-inferable, for an empty container) element type.
         if matches!(name, "Channel" | "List" | "Set" | "Map") {
+            return true;
+        }
+        // The value-first concurrency boxes accept an OPTIONAL turbofish that pins the element type
+        // (`Shared[T](v)`); when present it is checked against the value's inferred type. Unlike
+        // `Channel[T]()` the type arg is optional (the value is required and inference still works).
+        if matches!(name, "Shared" | "RwShared" | "Atomic") {
             return true;
         }
         // Look the struct up by its module-scoped runtime key (`bare_key`), NOT the bare name: under

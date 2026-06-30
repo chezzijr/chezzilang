@@ -26,7 +26,7 @@ fn sum_values(m: Map[str, int]) -> int:
     return s
 
 fn main():
-    r := RwShared({"seed": 0})
+    r := RwShared[Map[str, int]]({"seed": 0})
     parallel:
         spawn put(r, "a", 1)
         spawn put(r, "b", 2)
