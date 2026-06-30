@@ -6624,18 +6624,25 @@ impl Checker {
     /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
     /// stays the compiler's job — we discard the parsed spec and only infer the expression.
     ///
-    /// Span imprecision: fragment errors point at the whole string literal, not the fragment's byte
-    /// offset within it. This matches the compiler's existing emit site (it uses the string span for
-    /// fragment bytecode too); narrowing the span is out of scope and fragments are short. Always
-    /// returns `Ty::Str`.
+    /// Span: a fragment expr is parsed from the `{…}` substring with fragment-relative spans (its
+    /// root is `line 1, col 1`), so an error keyed on the fragment ROOT node — the nil-in-value-position
+    /// ban, the only diagnostic anchored there — would otherwise report the bogus `(1,1)` fallback.
+    /// We stamp the whole-string-literal `span` onto each fragment's root before inferring, matching
+    /// the compiler's existing emit site (it uses the string span for fragment bytecode too) so the
+    /// nil error points at the real string literal. Errors raised DEEPER inside a fragment (an
+    /// undefined name in a nested call) keep their fragment-relative child spans; narrowing those is
+    /// out of scope and fragments are short. Always returns `Ty::Str`.
     fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => {
-                for chunk in &chunks {
-                    if let crate::interpolation::Chunk::Expr(e, _spec) = chunk {
+                for chunk in chunks {
+                    if let crate::interpolation::Chunk::Expr(mut e, _spec) = chunk {
+                        // Anchor the fragment root at the string literal so a nil-fragment error
+                        // points at the literal, not the `(1,1)` fragment-relative fallback.
+                        e.span = span;
                         // Discard the inferred type; we only want the side-effecting checks
                         // (name resolution, arity/type/method validation, nil ban).
-                        let _ = self.infer_value(e);
+                        let _ = self.infer_value(&e);
                     }
                 }
             }
@@ -6935,6 +6942,18 @@ impl Checker {
             match &last.kind {
                 StmtKind::Expr(e) => value_ty = self.infer(e),
                 _ => self.check_stmt(last),
+            }
+            // A `recover:` whose tail provably diverges (a statement-form `match` whose every arm
+            // `panic`s, `while true:`, all-branch-returning `if/else`, a trailing `exit`/`panic`)
+            // yields no normal value, so its `Ok` payload is bottom (`Unknown`), not `nil` — exactly
+            // like the direct `recover: panic(...)` form, which `infer`s `panic` to `Unknown` via the
+            // `Expr` arm above. Without this, a diverging *statement* tail leaves `value_ty = Nil` and
+            // its `Ok(v)` is wrongly nil-banned in value position. Guarding on `== Ty::Nil` keeps every
+            // concrete-tail recover (`recover: 5` -> `int`) and non-diverging statement tail
+            // (`recover: x := 5` -> `Result[nil]`) untouched. Reuses the sound, conservative
+            // `stmt_terminates` divergence predicate.
+            if value_ty == Ty::Nil && Self::stmt_terminates(last) {
+                value_ty = Ty::Unknown;
             }
         }
         self.recover_depth -= 1;
