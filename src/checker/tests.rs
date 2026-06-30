@@ -9712,6 +9712,23 @@ fn empty_then_reassign_still_empty_rejected() {
     );
 }
 
+#[test]
+fn empty_into_typed_binding_value_ok() {
+    // REGRESSION (bug #1): `b := []` then `c: List[int] = b` — binding the empty into a
+    // CONCRETE-typed annotated let constrains b's element type (the spec's typed-binding
+    // false-positive guard, one binding away from `b: List[int] = []`). The annotated-let branch
+    // must drop b's pending site; base accepts this.
+    ok("fn main():\n b := []\n c: List[int] = b\n print(c.len())\nmain()");
+}
+
+#[test]
+fn empty_captured_then_push_ok() {
+    // REGRESSION (bug #2): `acc := []` then a `spawn:` body that supplies the element via
+    // `acc.push(1)` constrains acc — the capture early-return in `refine_receiver` must still drop
+    // the pending annotation site. Base accepts this; the element type IS supplied (via push).
+    ok("fn main():\n acc := []\n spawn:\n  acc.push(1)\n print(acc)\nmain()");
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----

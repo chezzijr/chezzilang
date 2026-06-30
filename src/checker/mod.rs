@@ -4274,6 +4274,16 @@ impl Checker {
                 if ty.is_none() && !self.inferring_ret && Self::is_unrefined_empty_coll(&declared) {
                     self.empty_coll_sites
                         .push((self.scopes.len() - 1, name.clone(), span));
+                } else if ty.is_some()
+                    && !contains_unknown_in_slot(&declared)
+                    && let ExprKind::Ident(src) = &value.kind
+                {
+                    // PART A: binding a bare empty-collection ident into a CONCRETE-typed annotated
+                    // let (`c: List[int] = b`) constrains `b`'s element type — drop its pending
+                    // requirement (the typed-binding false-positive guard, one binding away from the
+                    // direct-literal `b: List[int] = []`). Gated on the annotation being fully
+                    // concrete so `c: List[?] = b` does not spuriously satisfy the requirement.
+                    self.drop_empty_site(src);
                 }
                 // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
                 // probe visits during `infer`; record it here. The statement span starts at the first
@@ -11787,6 +11797,15 @@ impl Checker {
         if self.lookup(name).is_none() {
             return;
         }
+        // PART A: a slot-supplying mutator (`push`/`add`/`insert`/`extend` with an arg) constrains
+        // this binding's element type, so clear any pending empty-collection annotation requirement.
+        // Done BEFORE the `is_captured` early-return below so a `spawn:`/`Executor.submit` body that
+        // supplies the element only via a mutator (`acc := []` outside, `acc.push(1)` captured) still
+        // drops the site — the element WAS supplied, so requiring an annotation would be wrong. A
+        // no-op when no site exists (`drop_empty_site` only removes a matching `(owner, name)`).
+        if matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
+            self.drop_empty_site(name);
+        }
         // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
         // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
         if self.is_captured(name) {
@@ -11810,11 +11829,6 @@ impl Checker {
             _ => return,
         };
         let Some(elem) = elem else { return };
-        // PART A: a mutating op (`push`/`add`/`insert`/`extend`) targets this binding — its empty
-        // collection is now constrained, so clear any pending annotation requirement. Done BEFORE the
-        // speculative-error truncate-return below so an erroring mutator arg (`xs.push(undefined)`)
-        // still drops the site (the program already has its one real error).
-        self.drop_empty_site(name);
         // Wrap the element into a RECEIVER-SHAPED value so the structural merge lines up the slot:
         // a list receiver merges with `list[elem]`, a set receiver with `set[elem]`. Any other
         // receiver kind isn't a push/add/extend target, so nothing to refine.
