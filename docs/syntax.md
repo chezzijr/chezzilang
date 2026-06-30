@@ -255,6 +255,25 @@ print(r + 100)     # 106 — usable anywhere its value is
   `Channel` airlock is **rejected** by the checker. To move a value across, deref the ref into a plain
   copy first; for genuine cross-task shared mutation use `Shared[T]`, never `ref`.
 
+### Closure capture — by binding kind
+
+A closure's capture semantics depend on **what kind of binding** the captured name is. The rule is
+consistency-by-rule, not by uniformity: a *local* dies with its frame, so it is **copied** (snapshot
+at closure creation); a *global* never dies, so it is **referenced live**. Opt a local into
+by-reference sharing with `ref T` (above).
+
+| binding | captured as | `x := 10; f := fn() -> int: x; x = 20; f()` |
+|---|---|---|
+| plain local | snapshot at creation | `10` |
+| global | live reference | `20` |
+| `ref` local | shared box | `20` |
+
+So a closure over a plain local sees the value *as of* the closure's creation (later writes to the
+local are invisible); a closure over a global reads the module binding's *current* value each call
+(later writes are visible); a closure over a `ref` local shares the box, so writes are visible both
+ways. Across tasks use `Shared[T]` (a `ref`/`Ref` box is non-sendable). Runnable contrast:
+[`examples/closure_capture_scopes.chz`](../examples/closure_capture_scopes.chz).
+
 ### Built-in types
 
 | Type | Example | Notes |
@@ -1759,6 +1778,16 @@ spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`. (Edge case:
 over a side-effecting expression, the interpreter evaluates the expression before erroring while the
 VM errors at compile time, so observable stdout-before-error can differ; well-formed programs are
 always byte-identical.)
+
+**Float formatting (plain) never uses scientific notation.** A bare float — `print(x)`, `str(x)`, or
+a `{x}` interpolation with no spec — always renders its **full decimal expansion**, never an `e`
+exponent. So `1.0e20` prints `100000000000000000000.0` (Python's `repr` gives `1e+20`), `1.5e-9`
+prints `0.0000000015` (Python `1.5e-09`), and very large / very small magnitudes print out in full
+rather than collapsing to an exponent. The rendered digits are **shortest-round-trip-correct** (the
+fewest digits that parse back to the same `f64`), just spelled out in full — so output stays exact
+and Python-feel readable, only more verbose at the extremes. This is an **intended divergence** from
+CPython, which switches to scientific notation past a magnitude threshold. When you *want* an
+exponent, ask for it explicitly with the `:e` format spec (`"{1.0e20:e}"` → `"1e20"`).
 
 Core-type string methods (built in — no import needed):
 

@@ -1,0 +1,25 @@
+# Closure capture across scopes: a local snapshots, a global is live, a `ref` local shares.
+import std.ref
+
+g := 10                          # module global
+
+fn local_snapshot() -> int:
+    x := 10
+    f := fn() -> int: x          # captures the LOCAL by value (snapshot taken now)
+    x = 20
+    return f()                   # 10 — the snapshot, not the later write
+
+fn ref_shared() -> int:
+    x: ref int = 10              # a `ref` local: captured by reference (shared box)
+    f := fn() -> int: x
+    x = 20
+    return f()                   # 20 — the closure sees the write through the box
+
+fn read_global() -> int:
+    f := fn() -> int: g          # `g` is global: referenced live, not captured
+    return f()
+
+print(local_snapshot())          # 10
+print(ref_shared())              # 20
+g = 20                           # mutate the global after the closure was created
+print(read_global())             # 20 — live read of the current global value

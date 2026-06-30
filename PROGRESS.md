@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Closure-capture model documented + golden-locked, pre-JIT (docs + golden only, 2026-06-30).**
+No engine/checker change — the engines already implement the rule (`src/compiler/mod.rs:1604-1620`
+`emit_load`: a local → `GetCaptured` snapshot, a global → `GetGlobalSlot` live read). Pinned the
+**capture-by-binding-kind** rule before the JIT can freeze it: a **plain local** is captured **by value**
+(snapshot at closure creation → `10`), a **global** is **not captured** but **referenced live** (current
+value each call → `20`), and a **`ref` local** is captured **by reference** (shared box → `20`). New
+three-engine golden `examples/closure_capture_scopes.chz` (+ `.expected` `10/20/20`) and its twin
+`#[test] golden_closure_capture_scopes_chz_matches_expected_and_interp` in `src/vm/mod.rs` (VM ==
+`.expected` == `interp::run_file` == `run_file_parallel`; runs via `run_file` through the real module
+graph because the example uses `import std.ref` for the `ref int` annotation, which
+`compile_module_standalone`/`run_capture` does not resolve). Reworded the over-claiming uniform-"snapshot"
+header in `examples/closure_capture.chz` (and narrowed the `examples/edge_cases.chz` capture comment) to
+the precise local/global/`ref` rule. Docs: a **capture subsection** (3-row table + example pointer) in
+`docs/syntax.md` next to `ref T`. **Plus two doc-only clarifications:** (a) **float formatting never uses
+scientific notation** — a plain `print`/`str`/`{x}` always renders the full decimal expansion
+(`1.0e20` → `100000000000000000000.0`, `1.5e-9` → `0.0000000015`), shortest-round-trip-correct but verbose;
+an intended Python-feel divergence, with `:e` available when an exponent is wanted (`docs/syntax.md`).
+(b) **single project root** — `find_root` runs once on the entry and governs every import in the graph;
+a nested `chezzi.toml` in a subdirectory is silently ignored (not a second root), so a root-level file
+silently shadows a same-named subdir file (`docs/spec.md`).
+
 **✅ Resolver diagnostic-quality fixes (diagnostic-only, 2026-06-30).** Two message/JSON fixes in the
 module resolver error path; the accept/reject set is unchanged (resolve errors fire before any engine
 runs, so two-engine parity is structurally untouched). **Bug 1 — missing-module / bare-`std` errors now

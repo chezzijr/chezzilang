@@ -31522,6 +31522,32 @@ main()";
         assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
     }
 
+    /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
+    /// documented capture rule before the JIT — a plain local snapshots at creation (`10`), a
+    /// `ref` local is a shared box (`20`), and a global is referenced live (`20`). Byte-identical
+    /// on the VM, the interpreter, the `--parallel` engine, and its `.expected`. The example uses
+    /// `import std.ref` (the `ref int` annotation resolves to `Ref`), so it runs through the real
+    /// module graph via `run_file` (a temp entry), not `run_capture`/`compile_module_standalone`.
+    #[test]
+    fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/closure_capture_scopes.chz");
+        let expected = include_str!("../../examples/closure_capture_scopes.expected");
+        let dir = std::env::temp_dir().join(format!("chezzi_vm_cap_scopes_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.chz");
+        std::fs::write(&entry, src).unwrap();
+        let (vo, _ve, vr, _vc) = run_file(&entry);
+        let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+        let (po, _pe, pr, _pc) = run_file_parallel(&entry, crate::native::HostConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(vr.is_ok(), "VM faulted: {vr:?}");
+        assert!(ir.is_ok(), "interp faulted: {ir:?}");
+        assert!(pr.is_ok(), "parallel faulted: {pr:?}");
+        assert_eq!(vo, expected, "VM output vs .expected");
+        assert_eq!(vo, io, "VM vs interp divergence");
+        assert_eq!(vo, po, "VM vs parallel divergence");
+    }
+
     #[test]
     fn capture_single_var_parity() {
         // 1-var capture: the single slot read via GetCaptured.
