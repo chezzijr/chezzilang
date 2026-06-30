@@ -201,7 +201,11 @@ impl LanguageServer for Backend {
         // (Neovim 0.12, commit 0f36a59). `untag_fences` keeps the (untagged) fence, so code blocks in
         // docs still render as monospace; it just removes the injection trigger.
         let value = match &info.doc {
-            Some(doc) => format!("{}\n\n```\n{}\n```", untag_fences(doc), info.display),
+            Some(doc) => format!(
+                "{}\n\n```\n{}\n```",
+                escape_brackets_outside_code(&untag_fences(doc)),
+                info.display
+            ),
             None => format!("```\n{}\n```", info.display),
         };
         Ok(Some(Hover {
@@ -239,6 +243,62 @@ fn untag_fences(s: &str) -> String {
         .join("\n")
 }
 
+/// Backslash-escape every `[`/`]` that is OUTSIDE an inline code span and outside a fenced code
+/// block, so a bare type reference in a doc-comment (`Heap[T]`, `List[T]()`, `xs[i]`) renders
+/// literally instead of being eaten by the Markdown hover renderer as link syntax (`[text]` /
+/// `[text](url)` — `List[T]()` is literally an empty-URL link, so an unescaped doc shows `ListT`).
+/// Brackets INSIDE a code span (`` `List[T]` ``) or a fenced block are left untouched — there they
+/// already render verbatim and a backslash would show through. CommonMark renders `\[` as a literal
+/// `[`. Applied after [`untag_fences`] in the hover render path (the type fence appended afterwards
+/// is not passed through here — it is already literal monospace).
+fn escape_brackets_outside_code(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut in_fence = false;
+    for (i, line) in s.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start();
+        // A fenced-block delimiter (3+ of the same fence char) toggles fence state; emit verbatim.
+        if let Some(d @ ('`' | '~')) = trimmed.chars().next()
+            && trimmed.chars().take_while(|&c| c == d).count() >= 3
+        {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        // Outside a fence: escape brackets, but skip those inside an inline code span. A run of
+        // backticks is one span delimiter (so `` ``x[0]`` `` keeps its brackets too).
+        let mut in_code = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '`' => {
+                    in_code = !in_code;
+                    out.push('`');
+                    while chars.peek() == Some(&'`') {
+                        out.push('`');
+                        chars.next();
+                    }
+                }
+                '[' | ']' if !in_code => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                _ => out.push(c),
+            }
+        }
+    }
+    if s.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() {
     let stdin = tokio::io::stdin();
@@ -252,7 +312,37 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{legend_token_types, untag_fences};
+    use super::{escape_brackets_outside_code, legend_token_types, untag_fences};
+
+    #[test]
+    fn escape_brackets_outside_code_escapes_bare_type_refs() {
+        // Bare `Heap[T]` / `List[T]()` in prose would be eaten as Markdown link syntax (rendering
+        // `HeapT` / `ListT`); escape so they render literally.
+        assert_eq!(
+            escape_brackets_outside_code("Heap[T] — a heap; build with List[T]()"),
+            "Heap\\[T\\] — a heap; build with List\\[T\\]()"
+        );
+    }
+
+    #[test]
+    fn escape_brackets_outside_code_leaves_code_spans_and_fences() {
+        // Brackets inside an inline code span render verbatim already — must NOT be escaped (a
+        // backslash would show through inside the span).
+        assert_eq!(
+            escape_brackets_outside_code("use `List[T]` here"),
+            "use `List[T]` here"
+        );
+        // Brackets inside a fenced block are likewise left untouched.
+        assert_eq!(
+            escape_brackets_outside_code("```\nm[k] = v\n```"),
+            "```\nm[k] = v\n```"
+        );
+        // Mixed: bare ref escaped, code-span ref preserved, on the same line.
+        assert_eq!(
+            escape_brackets_outside_code("Heap[T] vs `Heap[T]`"),
+            "Heap\\[T\\] vs `Heap[T]`"
+        );
+    }
 
     #[test]
     fn untag_fences_strips_language_tag() {

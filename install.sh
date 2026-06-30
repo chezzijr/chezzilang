@@ -5,6 +5,7 @@
 #
 # Requires cargo (the Rust toolchain). Installs via `cargo install --path .`, which places the
 # `chezzi` binary in ~/.cargo/bin — already on PATH for anyone who installed Rust via rustup.
+# Also installs the feature-gated `chezzi-lsp` editor server in a second invocation.
 
 set -e
 
@@ -22,7 +23,15 @@ fi
 echo "Installing chezzi via 'cargo install --path .' ..."
 cargo install --path .
 
+# The editor LSP server is a separate, feature-gated binary (it needs the `lsp` feature's async
+# deps), so it installs in its own invocation. RE-RUN this script after any lexer/checker/grammar
+# change to refresh the snapshot the editor serves diagnostics/hover from.
 echo ""
-echo "Done. The 'chezzi' binary is installed in ~/.cargo/bin."
+echo "Installing chezzi-lsp (editor LSP server) via 'cargo install --path . --features lsp --bin chezzi-lsp' ..."
+cargo install --path . --features lsp --bin chezzi-lsp
+
+echo ""
+echo "Done. The 'chezzi' and 'chezzi-lsp' binaries are installed in ~/.cargo/bin."
 echo "Ensure ~/.cargo/bin is on your PATH (rustup adds it for you; otherwise add it to your shell profile)."
 echo "Try:  chezzi help"
+echo "Editor setup (neovim/lvim): see editors/README.md"

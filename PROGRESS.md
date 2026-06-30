@@ -241,6 +241,16 @@ regressions intact). Validated end-to-end against the worktree-built `chezzi-lsp
 nvim client speaks): hovering `Heap` (import line + `Heap[int]` head) and `List` in `xs: List[int]` all return the
 doc. **Reinstall the LSP** (`cargo install --path . --features lsp --bin chezzi-lsp`) to pick it up.
 
+**✅ Editor tooling — hover Markdown escapes bare bracketed type refs (2026-06-30).** The LSP renders
+the hover doc body as Markdown, so a bare type reference in a doc-comment (`Heap[T]`, `List[T]()`,
+`xs[i]`) was being eaten as link syntax (`[text]` / `[text](url)` — `List[T]()` is literally an
+empty-URL link) and shown as `HeapT`/`ListT`. `chezzi-lsp::escape_brackets_outside_code` now
+backslash-escapes `[`/`]` that are OUTSIDE an inline code span and outside a fenced block (so
+`` `List[T]` `` and fenced code stay verbatim), applied after `untag_fences` in the hover render path.
+Tests: `escape_brackets_outside_code_escapes_bare_type_refs`, `..._leaves_code_spans_and_fences`;
+validated end-to-end in headless nvim. **Reinstall the LSP** to pick it up. Also: `install.sh` now
+installs `chezzi-lsp` (feature-gated) alongside `chezzi`.
+
 **✅ Editor tooling — LSP hover docs for BUILTIN/STDLIB types & stdlib module fns (Tier C) (2026-06-30).**
 Hovering a builtin/stdlib TYPE or ctor (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`/`Channel`/`Shared`/
 `RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`range`/`tuple`/`Result`/`Option`/`Iterator`) now shows
