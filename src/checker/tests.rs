@@ -5779,11 +5779,11 @@ fn shared_update_fn_arity_rejected() {
 }
 
 #[test]
-fn shared_rejects_type_arg() {
-    // The element type comes from the value — `Shared[int](...)` is not the constructor form.
-    rejects(
-        "fn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
-        "'Shared' takes no type arguments",
+fn shared_accepts_turbofish() {
+    // `Shared[T](v)` — the turbofish is OPTIONAL (value-first), and when present pins the element
+    // type. It must agree with the value's inferred type.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -5869,10 +5869,9 @@ fn rwshared_unknown_method_rejected() {
 }
 
 #[test]
-fn rwshared_rejects_type_arg() {
-    rejects(
-        "fn main():\n    r := RwShared[int](0)\n    print(r.get())\nmain()\n",
-        "'RwShared' takes no type arguments",
+fn rwshared_accepts_turbofish() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    r := RwShared[int](0)\n    print(r.get())\nmain()\n",
     );
 }
 
@@ -6205,11 +6204,43 @@ fn atomic_add_non_numeric_rejected() {
 }
 
 #[test]
-fn atomic_rejects_type_arg() {
-    // The element type comes from the value — `Atomic[int](...)` is not the constructor form.
-    rejects(
-        "fn main():\n    a := Atomic[int](0)\n    print(a.load())\nmain()\n",
-        "'Atomic' takes no type arguments",
+fn atomic_accepts_turbofish() {
+    // `Atomic[T](v)` — turbofish optional (value-first); when present it pins the element type.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic[int](0)\n    print(a.load())\nmain()\n",
+    );
+}
+
+#[test]
+fn concurrency_ctor_turbofish_checks_value() {
+    // A turbofish element type that disagrees with the value's inferred type is rejected.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared[str](0)\nmain()\n",
+        "expected element type str, found int",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    r := RwShared[str](0)\nmain()\n",
+        "expected element type str, found int",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    a := Atomic[str](0)\nmain()\n",
+        "expected element type str, found int",
+    );
+}
+
+#[test]
+fn concurrency_ctor_turbofish_arity() {
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared[int, str](0)\nmain()\n",
+        "Shared[T]() takes exactly one type argument",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    r := RwShared[int, str](0)\nmain()\n",
+        "RwShared[T]() takes exactly one type argument",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    a := Atomic[int, str](0)\nmain()\n",
+        "Atomic[T]() takes exactly one type argument",
     );
 }
 

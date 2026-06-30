@@ -175,7 +175,8 @@ Iterate received values with `for v in ch:` (ends when closed and drained).
 result, no write-back) · `write(f: fn(T) -> T) -> nil` (exclusive write guard; `Shared.update` under
 the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
 `Shared.update`: a closure that re-acquires the **same** box's write lock deadlocks. Constructed
-value-first: `RwShared(v)`.
+value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
+`RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·

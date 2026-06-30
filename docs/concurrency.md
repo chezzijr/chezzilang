@@ -296,7 +296,8 @@ from C3 with no locking; under C5 it becomes a real owner-task + channel, same A
 `Atomic[T]` is `Shared[T]`'s sibling for when you want **atomic operation primitives** (compare-and-swap,
 exchange, fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks; the
 **handle is sendable**, the value is copied in/out under a lock; constructed value-first (`Atomic(v)`,
-`T` inferred). Generic over any `T`; the arithmetic methods are restricted to numeric `T`.
+`T` inferred — an optional `Atomic[T](v)` turbofish pins it and is checked against the value). Generic
+over any `T`; the arithmetic methods are restricted to numeric `T`.
 
 ```chezzi
 a := Atomic(0)
@@ -330,7 +331,8 @@ vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is 
 
 `RwShared[T]` is `Shared[T]`'s read-write counterpart: **MANY concurrent readers OR one exclusive
 writer**. Same shape as `Shared` — one box, many tasks; the **handle is sendable**, the value is
-copied in/out under a lock; constructed value-first (`RwShared(v)`, `T` inferred) — but the lock is a
+copied in/out under a lock; constructed value-first (`RwShared(v)`, `T` inferred — an optional
+`RwShared[T](v)` turbofish pins it and is checked against the value) — but the lock is a
 `RwLock` instead of a `Mutex`. **Reach for `RwShared` over `Shared` when reads dominate**: read-heavy
 workloads (a shared config/registry/map read on every request) scale because read guards don't exclude
 each other; `Shared`'s `get`/`update` serialise *every* access.
