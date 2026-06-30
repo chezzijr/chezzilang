@@ -5249,6 +5249,19 @@ impl Checker {
         // not an enclosing recover at the definition site.
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
         self.push_scope();
+        // Editor hover: record the function's OWN signature at its decl-site name token (no-op
+        // off-probe; parity-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
+        // both routed through here. For a method, `record_method_decl_hover` (called from the
+        // struct/enum/newtype arm BEFORE this) already latched the receiver-stripped sig first
+        // (first-hit-wins in `hover_record_at`), so this is a harmless no-op there; for a free fn
+        // there is no prior record, so this produces the previously-missing fn-name hover.
+        if self.hover_probe.is_some() {
+            let fty = Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+            };
+            self.hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone());
+        }
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
                 self_ty.clone().unwrap_or(Ty::Unknown)

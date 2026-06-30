@@ -180,6 +180,46 @@ fn hover_doc_comment_round_trip() {
 }
 
 #[test]
+fn hover_fn_decl_name_round_trip() {
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+    // didOpen a document with a free function, then hover the FUNCTION-NAME token at its declaration
+    // (`foo` at line 0, char 3) — the decl-site fn-name hover must surface the signature, matching
+    // the call-site hover.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover_fn.chz","languageId":"chezzi","version":1,"text":"fn foo(bar: int) -> int:\n    return bar\n"}}}"#,
+    );
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/chezzi_lsp_hover_fn.chz"},"position":{"line":0,"character":3}}}"#,
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_hover = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("\"id\":2") {
+                    // The fn signature is rendered inside the code fence.
+                    assert!(
+                        msg.contains("fn(int) -> int"),
+                        "hover response missing the fn signature at the decl name: {msg}"
+                    );
+                    assert!(
+                        msg.contains("```"),
+                        "hover response missing the code block fence: {msg}"
+                    );
+                    saw_hover = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(saw_hover, "never received a hover response for id 2");
+}
+
+#[test]
 fn diagnostics_round_trip() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi-lsp"))
         .stdin(Stdio::piped())

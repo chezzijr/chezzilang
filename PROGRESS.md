@@ -280,6 +280,24 @@ params untouched. Tests: `reserved_builtin_type_names_rejected_as_type_params`,
 `reserved_typeparam_fix_does_not_overreject` (boundary), `vm::parity_tests::
 type_param_named_like_reserved_rejected_at_check` (inverted; full build_graph+check_graph CLI path).
 
+**✅ Editor tooling — LSP hover for the FREE-FUNCTION decl name (2026-06-30).** Closes the lone
+decl-site gap left by Tier-A point (5), which recorded a decl-name hover only for METHODS
+(`record_method_decl_hover`, called from the struct/enum/newtype arms) — a FREE function name
+(`fn foo(...)`) still hovered nothing, even though its params, return type, and the call site already
+did. Fix is one probe-gated block in `check_fn_body` (the single funnel every free fn AND method routes
+through): build `Ty::Func { params: sig.params.clone(), ret: sig.ret.clone() }` and
+`hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone())` at the existing
+runtime-inert `FnDecl.name_span`. For methods this is a harmless no-op — `record_method_decl_hover`
+latches the receiver-stripped sig FIRST (first-hit-wins in `hover_record_at`), guarded by the unchanged
+`hover_method_decl_name` test asserting `fn() -> int` with `self` stripped. No `!generic_arg_prepass`
+gate is needed: `check_fn_body` never runs under the generic-arg prepass (proven green by
+`hover_generic_free_fn_decl_name`, which Displays `fn(T, T) -> T` with no `?` latch). Checker/editor-only,
+probe-gated → zero runtime/typecheck/codegen/VM/interp change, two-engine parity green, goldens
+byte-identical, conformance unchanged (no syntax/grammar change). Tests:
+`editor::tests::hover_free_fn_decl_name`, `hover_free_fn_decl_name_shows_doc`,
+`hover_generic_free_fn_decl_name`, and end-to-end `lsp_smoke::hover_fn_decl_name_round_trip`.
+**Reinstall the LSP snapshot to serve it: `cargo install --path . --features lsp --bin chezzi-lsp`.**
+
 **✅ Editor tooling — LSP hover for IMPORTED user types + GENERIC annotation heads (Tier-C follow-up) (2026-06-30).**
 Closes the two "No information available" type-name hover gaps the Tier-C entry below flagged. (a) An IMPORTED
 user type (`import Heap from std.collections`): its own decl docstring now crosses the module boundary — added an
