@@ -548,7 +548,11 @@ container yields `None`, never a fault, matching the builtin `list.pop() -> Opti
 contract (the footgun): `less(a, b) == true` means `a` is **more extreme** than `b`, so `a` pops
 **first**. Pass `fn(a,b): a < b` for a **min-heap** (smallest first) and `fn(a,b): a > b` for a
 **max-heap** — a "reverse" heap is just the flipped comparator. This generalises to any `T` (floats,
-custom priorities, `(priority, item)` tuples) with **no `Comparable` impl** required.
+custom priorities, `(priority, item)` tuples) with **no `Comparable` impl** required. With an empty
+backing list the element type `T` cannot come from the data, so it is taken from the binding/return/
+parameter **annotation**: `h: Heap[int] = Heap([], fn(x, y): x < y)` type-checks (the `Heap[int]`
+pins `T=int`, which gives the comparator `x, y: int`); a turbofish `Heap[int]([], …)` or annotated
+comparator params (`fn(x: int, y: int): …`) work too.
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |

@@ -379,7 +379,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   are NOT satisfiable by a newtype method (a newtype's own `add`/`div`/… is never dispatched as an
   operator — the same-type arm auto-flows to the underlying's native op), so they come only from a
   numeric underlying's intrinsic auto-flow. **Generic newtypes** (`newtype Stack[T] = List[T]`) are methods-only
-  (no native operator auto-flow even for `Box[T] = T`): ctor infers type args (turbofish
+  (no native operator auto-flow even for `Box[T] = T`): ctor infers type args (from the binding/
+  return/parameter **annotation** — `e: Stack[str] = Stack([])` — or a turbofish
   `Stack[int]([])` when an empty literal can't bind `T`), cast-unwrap propagates the instantiation
   (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get
   identity+construct+unwrap+own-methods only (no `.push`/index/iterate forwarding); no `derive`;
@@ -435,6 +436,23 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > `--parallel` are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
 > methods on `newtype` and associated protocol requirements (`T.zero()`) — the latter **SHELVED**
 > after two rejected attempts (see `docs/future.md` §3.13).
+
+> **Expected-type inference — an annotation pins a generic ctor / generic fn-call (landed).** Beyond
+> the turbofish above, a type **annotation** that surrounds a generic constructor or generic function
+> call now flows INTO its type-parameter inference: a `let`-binding's declared type, a function's
+> declared **return** type, and a call **argument**'s declared parameter type each pre-seed the
+> generic's params, which in turn pin any closure params that depend on them. So
+> `h: Heap[int] = Heap([], fn(x, y): x < y)`, `fn mk() -> Heap[int]: return Heap([], …)`, and
+> `take(Heap([], …))` (with `take(h: Heap[int])`) all type-check — previously each needed an explicit
+> turbofish or annotated comparator params. The annotation fills **only** the params the arguments
+> left free (precedence: **turbofish > arguments > annotation**), so a concrete argument still wins and
+> a conflicting annotation is the usual assignability error. It also reaches generic **newtype** ctors
+> (`e: Stack[str] = Stack([])`) and a return-only param of a generic fn (`xs: List[int] = empty()` for
+> `fn empty[T]() -> List[T]`). Checker-only (a new expected-type hint threaded into the ctor/call
+> inference, consumed by `unify` before the un-inferable-closure-param probe); runtime is type-erased,
+> so VM, interp, and `--parallel` stay byte-identical. **Remaining gap:** the hint does not yet reach a
+> generic ctor nested inside a **container literal** (`a: List[Heap[int]] = [Heap([], …)]`) — that
+> outer expression is a list literal, not a call, so annotate the closure params or turbofish there.
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
@@ -653,7 +671,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving + two-engine parity on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (both-engine statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
-| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable`/`Add`/`Comparable` via the newtype's own methods (runtime hash/str dispatch, both engines). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note). Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable`/`Add`/`Comparable` via the newtype's own methods (runtime hash/str dispatch, both engines). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (from the binding/return/parameter annotation — `e: Stack[str] = Stack([])` — or a turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note). Surface in [`docs/syntax.md §7b`](syntax.md) |
 | ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, numeric scalar newtypes via the underlying's native auto-flow (`Div`/`Mod` only — `Neg` is out of scope for newtypes, and a newtype operator *method* is never dispatched) wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at bound sites. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Checker/parser/grammar + both-engine operator dispatch; parity-tested. Surface in [`docs/syntax.md`](syntax.md) |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 
