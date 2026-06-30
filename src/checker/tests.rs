@@ -6372,15 +6372,13 @@ fn bare_concurrency_type_with_import_needs_type_arg() {
 }
 
 #[test]
-fn type_param_named_like_concurrency_type_not_shadowed() {
-    // A user generic type parameter named `Shared`/`RwShared`/`Atomic` must resolve as the type
-    // param, NOT be hijacked by the bare-concurrency arm (regression guard for arm ordering vs the
-    // `type_params` guard). No import, used purely as a parameter type — must type-check clean.
-    // The same shape covers EVERY reserved/module type name that precedes the `type_params`
-    // fallthrough in `resolve_type` (regression for the hijack bug): the bare-concurrency arm
-    // (Shared/RwShared/Atomic), the license-gated arms (Executor, ptr), and the unconditional
-    // builtin arms (Socket, Listener, owned_str). `owned_str` is a degenerate/return-only name
-    // (≡ str) but a type param named after it must still resolve as the param, not collapse to str.
+fn type_param_named_like_reserved_type_rejected() {
+    // ONE-WAY RATCHET: a reserved builtin TYPE name used as a generic type PARAMETER is rejected with
+    // the same `type 'X' is reserved (builtin)` error `struct int` gives — it is NOT silently
+    // shadowed. Pre-fix these all type-checked clean and shadowed kind-dependently (a scalar param =
+    // dead/unreferenceable, a container/enum-builtin param = real shadowing generic). Covers the
+    // bare-concurrency names (Shared/RwShared/Atomic), the license-gated names (Executor, ptr), and
+    // the runtime-handle names (Socket, Listener, owned_str) — all in `is_reserved_type`.
     for (src, name) in [
         (
             "fn id[Shared](x: Shared) -> Shared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
@@ -6420,10 +6418,59 @@ fn type_param_named_like_concurrency_type_not_shadowed() {
     ] {
         let errs = check_entry(src);
         assert!(
-            errs.is_empty(),
-            "type param named {name} must not be shadowed by the reserved/builtin arm, got: {errs:?}"
+            errs.iter()
+                .any(|e| e.message.contains("reserved (builtin)")),
+            "{name} as a type param must be rejected as reserved (builtin), got: {errs:?}"
         );
     }
+}
+
+#[test]
+fn reserved_builtin_type_names_rejected_as_type_params() {
+    // A reserved builtin type name used as a generic type-PARAMETER identifier must be rejected with
+    // the same `type 'X' is reserved (builtin)` error `struct int` produces — across struct, enum,
+    // newtype, free fn, struct method (its own `[U]`), protocol, AND the fixed-width FFI integer
+    // names. Pre-fix every one of these type-checked clean (then shadowed kind-dependently). Uses the
+    // real build_graph + check_graph entrypoint path (module-prefixed keys), guarding the CLI path.
+    for (src, name) in [
+        // struct, scalar param (dead/unreferenceable shadow pre-fix)
+        ("struct Box[int]:\n    v: int\n", "int"),
+        // struct, container builtin (real shadowing generic pre-fix)
+        ("struct Box[List]:\n    v: int\n", "List"),
+        // struct, enum builtin
+        ("struct Box[Result]:\n    v: int\n", "Result"),
+        // enum
+        ("enum E[int]:\n    A\n", "int"),
+        // newtype
+        ("newtype N[List] = int\n", "List"),
+        // free fn
+        ("fn id[int](x: int) -> int:\n    return x\n", "int"),
+        // struct method's OWN type param (covered at fn_sig, distinct from the struct's `[T]`)
+        (
+            "struct Box[T]:\n    v: T\n    fn get[str](self) -> T:\n        return self.v\n",
+            "str",
+        ),
+        // protocol type param
+        ("protocol P[int]:\n    fn f(self)\n", "int"),
+        // FFI fixed-width name (reserved via native::ffi::TYPE_NAMES)
+        ("struct Box[int32]:\n    v: int\n", "int32"),
+    ] {
+        entry_rejects(src, "reserved (builtin)");
+        let _ = name;
+    }
+}
+
+#[test]
+fn reserved_typeparam_fix_does_not_overreject() {
+    // BOUNDARY (must-NOT-over-reject): the reserved-type-param guard checks param NAMES only. A
+    // normal `[T]`, multi-param `[K, V]`, a word param, a free generic fn, and a protocol-BOUNDED
+    // param `[T: Comparable]` (the bound — not the param name — is the reserved protocol) must all
+    // still type-check clean. Stays GREEN both before and after the fix.
+    entry_ok("struct Box[T]:\n    v: T\n");
+    entry_ok("struct Pair[K, V]:\n    k: K\n    v: V\n");
+    entry_ok("struct Box[Item]:\n    v: Item\n");
+    entry_ok("fn id[T](x: T) -> T:\n    return x\n");
+    entry_ok("fn pick[T: Comparable](a: T, b: T) -> T:\n    return a\n");
 }
 
 #[test]

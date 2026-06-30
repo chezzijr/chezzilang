@@ -2648,6 +2648,9 @@ impl Checker {
                     if already_defined {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
+                    // A type PARAMETER may not be named after a reserved builtin type (`struct
+                    // Box[int]`/`[List]`/`[Result]`) — same one-way-ratchet rule as the decl NAME.
+                    self.reject_reserved_type_params(type_params);
                     // The struct's type parameters are in scope across its field and method
                     // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
                     let saved = self.enter_type_params(type_params);
@@ -2704,6 +2707,8 @@ impl Checker {
                     if self.enums.contains_key(&key) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
+                    // A type PARAMETER may not be named after a reserved builtin type (`enum E[int]`).
+                    self.reject_reserved_type_params(type_params);
                     // The enum's type parameters are in scope across its variant payloads (so a
                     // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
                     let saved = self.enter_type_params(type_params);
@@ -2775,6 +2780,9 @@ impl Checker {
                     if self.newtype_defs.contains_key(&key) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
+                    // A type PARAMETER may not be named after a reserved builtin type (`newtype
+                    // N[List] = int`).
+                    self.reject_reserved_type_params(type_params);
                     // A type-parameterized newtype puts its params in scope across the underlying type
                     // + method signatures (so `newtype Stack[T] = list[T]` and `fn push(self, x: T)`
                     // resolve `T`), exactly like the struct/enum generic path. Validate each bound.
@@ -3114,6 +3122,11 @@ impl Checker {
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
     /// each declared bound is validated against the known protocols.
     fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
+        // A free fn's or method's own type param `[U]` may not be named after a reserved builtin type
+        // (`fn id[int]`). This is the SOLE funnel for free fns AND struct/enum/newtype methods (it is
+        // hoist-only, so it fires once per decl — a method's `[U]` is checked here while the struct's
+        // `[T]` is checked at the struct hoist, no overlap).
+        self.reject_reserved_type_params(&decl.type_params);
         // A method's own `[U]` may not reuse a type parameter already in scope (the struct's `[T]`):
         // it would be a confusing double-binding. `self.type_params` is empty for a free fn, so this
         // only fires for methods declared inside a generic struct.
@@ -11273,6 +11286,34 @@ impl Checker {
         Ty::NewType(key, args)
     }
 
+    /// Reject a reserved builtin type name used as a generic type-PARAMETER identifier (`struct
+    /// Box[int]` / `[List]` / `[Result]`, a method's own `[U]`, a `protocol P[int]`). A reserved name
+    /// as a param is a one-way-ratchet violation that otherwise type-checks clean and then shadows
+    /// kind-dependently — a scalar param (`int`/`str`/…) is dead/unreferenceable (the scalar wins in
+    /// `resolve_type`), while a container/enum-builtin param (`List`/`Result`/…) silently SHADOWS the
+    /// builtin and acts as a real generic. Mirror the decl-NAME guards (`struct int` →
+    /// `reserved (builtin)`) so the param form errors identically. Predicate = `is_reserved_type` +
+    /// the fixed-width FFI integer names (`int32`/`int64`/…, reserved TYPE names via
+    /// `native::ffi::TYPE_NAMES`). Deliberately NOT `is_reserved_protocol`: a param named after a
+    /// prebuilt protocol (`fn id[Comparable]`) is a protocol-name shadow, not a builtin-TYPE shadow,
+    /// and is kept legal by design (guarded by `protocol_bound_and_typeparam_named_protocol_still_ok`,
+    /// commit b2aa8ac). A param BOUND `[T: Comparable]` is likewise untouched (the bound is a separate
+    /// `Bound` list, not the param name). Called once per decl at the hoist sites (struct/enum/newtype/
+    /// fn_sig/protocol), NOT inside `enter_type_params` (which is re-entered during body checking and
+    /// would double-report).
+    fn reject_reserved_type_params(&mut self, tps: &[TypeParam]) {
+        for tp in tps {
+            if is_reserved_type(&tp.name)
+                || crate::native::ffi::TYPE_NAMES.contains(&tp.name.as_str())
+            {
+                self.error(
+                    tp.name_span,
+                    format!("type '{}' is reserved (builtin)", tp.name),
+                );
+            }
+        }
+    }
+
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
     fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
         let saved = self.type_params.clone();
@@ -11356,6 +11397,9 @@ impl Checker {
         if self.protocols.contains_key(name) {
             self.error(span, format!("protocol '{name}' is already defined"));
         }
+        // A protocol's own type param may not be named after a reserved builtin type (`protocol
+        // P[int]`) — same rule as struct/enum/newtype/fn params.
+        self.reject_reserved_type_params(type_params);
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
         self.type_params.insert("Self".to_string(), Vec::new());
