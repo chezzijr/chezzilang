@@ -400,7 +400,9 @@ which gives the comparator `x, y: int` — and likewise for `fn mk() -> Heap[int
 y): x < y)` and `take(Heap([], fn(x, y): x < y))` where `take(h: Heap[int])`. The annotation only
 fills type params the *arguments* leave free, so an explicit turbofish or a concrete argument still
 wins over it (an argument that pins `T` differently from the annotation is the usual mismatch error).
-The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
+When the bound value is an `if`/`match` *expression*, the annotation reaches **every** branch
+(`h: Heap[int] = if rev: Heap([], fn(x, y): x > y) else: Heap([], fn(x, y): x < y)`), independent of
+branch order. The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
 literal* (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`) — annotate the closure params or use a
 turbofish there.
 

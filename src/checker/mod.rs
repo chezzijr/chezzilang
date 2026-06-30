@@ -6405,6 +6405,11 @@ impl Checker {
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
     /// types into one result. Exhaustiveness is still enforced.
     fn infer_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchExprArm]) -> Ty {
+        // Capture + clear the expected-type hint before the scrutinee/guards (the hint is for the
+        // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
+        // is equally the value, and `infer_call` drains the single take()-once slot, so without
+        // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
+        let hint = self.expected_hint.take();
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
@@ -6425,24 +6430,35 @@ impl Checker {
                 self.expect_bool(guard, "match guard");
             }
             has_wildcard |= irref && arm.guard.is_none();
+            self.expected_hint = hint.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
             self.restore_refinable(snap);
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
+        self.expected_hint = None;
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
         result.unwrap_or(Ty::Unknown)
     }
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
     fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
+        // Capture + clear the expected-type hint before the condition: the hint is for the branch
+        // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
+        // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
+        // re-installing it the second-inferred branch would lose the hint and a generic ctor there
+        // would deadlock (acceptance would depend on branch order).
+        let hint = self.expected_hint.take();
         self.expect_bool(cond, "if condition");
         // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
         // conditionally — refinement inside one must not leak into the other or past the `if`.
         let snap = self.snapshot_refinable();
+        self.expected_hint = hint.clone();
         let t_then = self.infer(then);
         self.restore_refinable(snap.clone());
+        self.expected_hint = hint;
         let t_els = self.infer(els);
+        self.expected_hint = None;
         self.restore_refinable(snap);
         let acc = self.unify_branch(None, t_then, then.span);
         self.unify_branch(Some(acc), t_els, els.span)
@@ -15669,6 +15685,52 @@ mod graph_tests {
         assert!(
             check_entry(&bad).is_err(),
             "args-pinned int vs H[str] annotation must still error"
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_in_if_else_branches() {
+        // An if-else in value position is itself the bound value; BOTH branches are the tail
+        // value, so each must receive the expected-type hint. The hint is a take()-once slot, so
+        // without re-installing it per branch the SECOND-inferred branch starves and a generic
+        // ctor there deadlocks on `T` — making acceptance depend purely on branch order.
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let e1 = t.write(
+            "e1.chz",
+            "import H from a\nfn main():\n    r := true\n    h: H[int] = if r: H([], fn(x, y): x > y) else: H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e1).is_ok(),
+            "if-else both branches: {:?}",
+            errors(&e1)
+        );
+        // Swapping the branches must behave identically (no order dependence).
+        let e2 = t.write(
+            "e2.chz",
+            "import H from a\nfn main():\n    r := true\n    h: H[int] = if r: H([], fn(x, y): x < y) else: H([], fn(x, y): x > y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e2).is_ok(),
+            "if-else swapped branches: {:?}",
+            errors(&e2)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_in_match_arms() {
+        // Same per-branch hint requirement for an expression-`match` value: every arm body is a
+        // tail value and must see the hint, not just the first-inferred arm.
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let e = t.write(
+            "m.chz",
+            "import H from a\nfn main():\n    k := 1\n    h: H[int] = match k:\n        0: H([], fn(x, y): x > y)\n        _: H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e).is_ok(),
+            "match arms both pinned: {:?}",
+            errors(&e)
         );
     }
 
