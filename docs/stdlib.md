@@ -168,7 +168,10 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 Iterate received values with `for v in ch:` (ends when closed and drained).
 
 ### `Shared[T]` — cross-task shared cell
-`get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`.
+`get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**
+(the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
+throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
+`RwShared`/`Atomic`; *unlike* `Ref[T]` (`std.ref`), whose `get()` aliases the live value but can't cross a spawn.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s

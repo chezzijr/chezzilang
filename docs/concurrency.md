@@ -274,9 +274,17 @@ fn bump(s: Shared[int]):
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `get`    | `get(self) -> T` | read (a request/reply under real concurrency) |
+| `get`    | `get(self) -> T` | **snapshot copy out** (a request/reply under real concurrency) |
 | `set`    | `set(self, v: T) -> nil` | overwrite |
 | `update` | `update(self, f: fn(T) -> T) -> nil` | read-modify-write, serialised by the owner |
+
+> **Gotcha — `get()` returns a copy, not the box.** The value lives **off the GC heap** (a
+> lock-guarded wire form so it can cross OS threads safely), so `get` deep-copies it *out* into a
+> fresh value each call. Mutating that value — `s.get().push(x)`, `s.get().value = 1` — changes a
+> throwaway, **not** the box: the write is silently lost. Mutate only via `update` (or `set` a whole
+> new value). Same for `RwShared` (`read`/`write`) and `Atomic` (`load`/`store`). This is *unlike*
+> `Ref[T]`, an in-task struct whose `get()` aliases the live value (push-through works) but which
+> can't cross the airlock.
 
 **The ladder:** bare value (copied) → `Ref[T]` (in-task box, `std/ref.chz`) → `Shared[T]` (cross-task
 box). One `get`/`set`/`update` API across the two boxes; the **type names the scope**. `Ref[T]` is
@@ -347,7 +355,7 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `get`   | `get(self) -> T` | shared read guard; snapshot copy out (== `read(identity)`) |
+| `get`   | `get(self) -> T` | shared read guard; **snapshot copy out** (== `read(identity)`) — mutating it is a no-op (see the `Shared` `get()` gotcha above); mutate via `write` |
 | `set`   | `set(self, v: T) -> nil` | exclusive write guard; overwrite |
 | `read`  | `read(self, f: fn(T) -> R) -> R` | **shared** read guard: run `f` against the current value, return `f`'s result; **no** write-back. Many `read`s run concurrently |
 | `write` | `write(self, f: fn(T) -> T) -> nil` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
