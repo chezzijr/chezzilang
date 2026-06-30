@@ -239,6 +239,26 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Checker — reserved builtin TYPE names rejected as generic type-PARAMETER names (2026-06-30).**
+Checker-only, three-engine parity by construction (rejected programs never reach codegen/runtime; no
+vm/interp edits). Closed the last reserved-name discipline hole: the five decl guards applied
+`is_reserved_type` only to the declared type NAME, so a type-PARAMETER named after a builtin type
+(`struct Box[int]` / `[List]` / `[Result]`, `enum E[int]`, `newtype N[List]`, a method's own `[U]`,
+`protocol P[int]`, the FFI width `[int32]`) type-checked clean and then shadowed kind-dependently — a
+scalar param was dead/unreferenceable (the scalar wins in `resolve_type`), a container/enum-builtin
+param silently SHADOWED the builtin as a real generic. This **reverses commit 9829f94** (which had
+deliberately made such params shadow-and-run) to honor the one-way-ratchet rule (*a reserved builtin
+type name must error `reserved (builtin)`, not silently shadow*). New `reject_reserved_type_params`
+helper (predicate = `is_reserved_type` + `ffi::TYPE_NAMES`, span = the param-name token) called once
+per decl at the five hoist sites (struct/enum/newtype/fn_sig/protocol — hoist-only so fired exactly
+once, no double-report). Scope: reserved builtin TYPE names only — a type-param named like a prebuilt
+PROTOCOL (`fn id[Comparable]`) and a protocol BOUND (`[T: Comparable]`) stay legal (unchanged,
+guarded by `protocol_bound_and_typeparam_named_protocol_still_ok`). Normal `[T]` / `[K, V]` / word
+params untouched. Tests: `reserved_builtin_type_names_rejected_as_type_params`,
+`type_param_named_like_reserved_type_rejected` (inverted from the old not_shadowed guard),
+`reserved_typeparam_fix_does_not_overreject` (boundary), `vm::parity_tests::
+type_param_named_like_reserved_rejected_at_check` (inverted; full build_graph+check_graph CLI path).
+
 **✅ Editor tooling — LSP hover for IMPORTED user types + GENERIC annotation heads (Tier-C follow-up) (2026-06-30).**
 Closes the two "No information available" type-name hover gaps the Tier-C entry below flagged. (a) An IMPORTED
 user type (`import Heap from std.collections`): its own decl docstring now crosses the module boundary — added an

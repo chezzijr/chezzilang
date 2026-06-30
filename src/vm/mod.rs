@@ -27052,48 +27052,31 @@ main()
         }
     }
 
-    /// Reserved/builtin type names used as a user generic type parameter must resolve as the type
-    /// param END-TO-END on EVERY engine (regression for the `resolve_type` hijack bug — `Executor`
-    /// and `ptr` mis-errored at check time, `Socket`/`Listener`/`owned_str` silently hijacked to the
-    /// builtin). This drives the FULL pipeline including the checker (`check_graph`, which the bare
-    /// `run_capture` helpers skip): each `fn id[NAME](x: NAME) -> NAME` must type-check clean, then
-    /// round-trip its argument identically on the cooperative VM, the OS-thread engine, and interp.
+    /// ONE-WAY RATCHET (supersedes commit 9829f94): a reserved builtin TYPE name used as a user
+    /// generic type parameter is REJECTED at check time with `type 'X' is reserved (builtin)` — it is
+    /// NOT silently shadowed into a usable type param. 9829f94 made these shadow-and-run (the
+    /// behavior this guards-against now), which violated the reserved-name discipline (a scalar param
+    /// is dead/unreferenceable; a container/enum-builtin param silently shadows the builtin). The
+    /// reject happens in `check_graph` (the gate the bare `run_capture` helpers skip), so the program
+    /// never reaches any engine — three-engine parity is by construction (no run needed). Asserted via
+    /// the full `build_graph` + `check_graph` CLI path.
     #[test]
-    fn type_param_named_like_reserved_runs_both_engines() {
-        for (name, arg, want) in [
-            ("Executor", "3", "3\n"),
-            ("ptr", "3", "3\n"),
-            ("Socket", "3", "3\n"),
-            ("Listener", "3", "3\n"),
-            // Int arg (not a str literal): pre-fix `owned_str` hijacks to Ty::Str so `id(1)` fails
-            // check_graph (int vs str) — a GENUINE red-before-green gate. A str arg would pass in
-            // both the hijacked and fixed states, guarding nothing.
-            ("owned_str", "1", "1\n"),
-        ] {
+    fn type_param_named_like_reserved_rejected_at_check() {
+        for name in ["Executor", "ptr", "Socket", "Listener", "owned_str"] {
             let src = format!(
-                "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id({arg}))\nmain()\n"
+                "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id(1))\nmain()\n"
             );
-            // 1) The checker must accept it (the bug: hijack → bogus error / type mismatch). This is
-            //    the gate the `run_capture` helpers don't exercise — it goes RED without the fix.
             let t = TmpDir::new();
             let entry = t.write("main.chz", &src);
             let graph = crate::resolver::build_graph(&entry).expect("resolve");
-            if let Err(errs) = crate::checker::check_graph(&graph) {
-                panic!("type param named {name} must type-check clean, got: {errs:?}");
+            match crate::checker::check_graph(&graph) {
+                Ok(()) => panic!("type param named {name} must be rejected as reserved (builtin)"),
+                Err(errs) => assert!(
+                    errs.iter()
+                        .any(|e| e.message.contains("reserved (builtin)")),
+                    "type param named {name} must error reserved (builtin), got: {errs:?}"
+                ),
             }
-            // 2) cooperative VM + interp parity (the established oracle pair), and the value round-trips.
-            assert_parity(&src);
-            assert_eq!(
-                run_capture(&src).expect("cooperative VM should run"),
-                want,
-                "cooperative VM output for type param named {name}"
-            );
-            // 3) default OS-thread engine agrees too.
-            assert_eq!(
-                run_capture_parallel(&src).expect("OS-thread engine should run"),
-                want,
-                "OS-thread engine output for type param named {name}"
-            );
         }
     }
 
