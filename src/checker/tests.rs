@@ -4541,6 +4541,74 @@ fn recover_question_mark_on_option_rejected() {
     );
 }
 
+// A `recover:` whose tail statement provably diverges (here a statement-form `match` whose every
+// arm `panic`s) yields no normal value, so its `Ok` payload is bottom (`Unknown`), not `nil` — and
+// `Ok(v)`'s `v` must be usable in value position (e.g. interpolated), exactly like a direct
+// `recover: panic(...)`. Pins the Never/bottom-payload inconsistency fix.
+#[test]
+fn recover_diverging_match_tail_payload_is_bottom() {
+    entry_ok(
+        "fn main():\n    r := recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        Ok(v): print(\"got {v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+}
+
+// The consistency invariant the bug violated: a direct-panic recover and a match-all-panic recover
+// must both accept (both have a bottom `Ok` payload). Pre-fix the second was rejected at (1,1).
+#[test]
+fn recover_payload_consistent_direct_vs_match_panic() {
+    // r1: direct panic tail (already accepted pre-fix).
+    entry_ok(
+        "fn main():\n    r := recover:\n        panic(\"x\")\n    match r:\n        Ok(v): print(\"got {v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+    // r2: panic reached through an extra statement-form match layer (rejected pre-fix).
+    entry_ok(
+        "fn main():\n    r := recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        Ok(v): print(\"got {v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+}
+
+// Regression fence: a concrete-tail recover keeps its concrete payload (the divergence upgrade only
+// fires on a provably-diverging nil tail), and a non-diverging statement tail (a `let`) still yields
+// `Result[nil]` so its `Ok(v)` is correctly nil-banned in value position.
+#[test]
+fn recover_non_never_value_unaffected() {
+    // Concrete value tail -> Ok payload is `int`, interpolation accepts.
+    entry_ok(
+        "fn main():\n    r := recover:\n        5\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+    // Non-diverging statement tail (a `let`) -> Ok payload stays nil -> value use rejected.
+    entry_rejects(
+        "fn main():\n    r := recover:\n        x := 5\n    match r:\n        Ok(v): print(\"{v}\")\n        Err(e): print(\"err\")\nmain()\n",
+        "expression returns no value (nil) and cannot be used as a value",
+    );
+}
+
+// A void-call fragment inside an interpolated string is a real nil-in-value-position error, but the
+// span must point at the string literal (the print call line), never the fallback (1,1).
+#[test]
+fn interpolation_void_fragment_error_span_is_not_one_one() {
+    let errs =
+        check_entry("fn f():\n    print(\"hi\")\nfn main():\n    print(\"got {f()}\")\nmain()\n");
+    let nil_errs: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("cannot be used as a value"))
+        .collect();
+    assert_eq!(
+        nil_errs.len(),
+        1,
+        "expected exactly one nil error, got: {errs:?}"
+    );
+    let span = nil_errs[0].span;
+    assert_eq!(
+        span.line, 4,
+        "nil-fragment error should point at the print line, got: {span}"
+    );
+    assert_ne!(
+        (span.line, span.col),
+        (1, 1),
+        "span must not be the (1,1) fallback"
+    );
+}
+
 // ===== `?` inside a closure is checked against the closure's return (soundness fix) =====
 
 #[test]
