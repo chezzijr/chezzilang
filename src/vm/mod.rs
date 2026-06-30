@@ -4960,7 +4960,15 @@ impl Vm {
         {
             Some(_) => {
                 let src = items.clone();
-                let mut out = Vec::with_capacity(src.len() * n);
+                let total = src.len() * n;
+                // The outer guard only bounds the byte size by `isize::MAX`; a huge-but-representable
+                // total (e.g. 1e17) still passes it yet cannot actually be allocated, and
+                // `Vec::with_capacity` would ABORT the process. `try_reserve_exact` converts that
+                // into the same recoverable fault.
+                let mut out: Vec<Value> = Vec::new();
+                if out.try_reserve_exact(total).is_err() {
+                    return Err(self.err("list repeat capacity overflow".to_string(), span));
+                }
                 for _ in 0..n {
                     out.extend(src.iter().copied());
                 }
@@ -7822,7 +7830,24 @@ impl Vm {
                                 .checked_mul(n as usize)
                                 .filter(|&t| t <= isize::MAX as usize)
                             {
-                                Some(_) => Ok(self.alloc_str(s.repeat(n as usize))),
+                                Some(total) => {
+                                    // The byte-size guard passes huge-but-representable totals that
+                                    // `str::repeat` would still abort on. Probe allocation
+                                    // feasibility with `try_reserve_exact` (uninitialized capacity,
+                                    // freed immediately) so an infeasible request is a recoverable
+                                    // fault, then fall through to the optimized `str::repeat` — which
+                                    // also short-circuits to "" for an empty receiver (`total == 0`)
+                                    // instead of looping `n` times.
+                                    let mut probe = String::new();
+                                    if probe.try_reserve_exact(total).is_err() {
+                                        return Err(self.err(
+                                            "string repeat capacity overflow".to_string(),
+                                            span,
+                                        ));
+                                    }
+                                    drop(probe);
+                                    Ok(self.alloc_str(s.repeat(n as usize)))
+                                }
                                 None => {
                                     Err(self
                                         .err("string repeat capacity overflow".to_string(), span))
@@ -25882,6 +25907,26 @@ main()
         let it = crate::interp::run_capture(src).expect_err("interp: repeat overflow should fault");
         assert_eq!(it.message, "string repeat capacity overflow");
 
+        // Huge-but-representable count: passes the `isize::MAX` byte guard but the allocation is
+        // infeasible. Before the `try_reserve_exact` guard this ABORTED the process (SIGABRT).
+        let huge = r#"print("ab".repeat(100000000000000000))"#;
+        let vm = run_capture(huge).expect_err("vm: huge repeat should fault");
+        assert_eq!(vm.message, "string repeat capacity overflow");
+        let it = crate::interp::run_capture(huge).expect_err("interp: huge repeat should fault");
+        assert_eq!(it.message, "string repeat capacity overflow");
+
+        // Empty receiver with a huge count: `total == 0` passes BOTH the byte guard and
+        // `try_reserve_exact`, so the result must be "" produced INSTANTLY. A naive
+        // `for _ in 0..n { out.push_str("") }` fill would loop ~1e17 times (an uncatchable hang);
+        // `str::repeat` short-circuits the empty receiver. The `expect`/value assertion only
+        // returns if no hang occurred.
+        let empty_huge = r#"print("".repeat(100000000000000000))"#;
+        assert_eq!(run_capture(empty_huge).expect("vm"), "\n");
+        assert_eq!(
+            crate::interp::run_capture(empty_huge).expect("interp"),
+            "\n"
+        );
+
         // Sane repeats are unaffected and agree across engines.
         let ok = r#"print("ab".repeat(3))"#;
         assert_eq!(run_capture(ok).expect("vm"), "ababab\n");
@@ -25965,6 +26010,22 @@ main()
         assert_eq!(vm.message, "list repeat capacity overflow");
         let it = crate::interp::run_capture(src).expect_err("interp: list repeat overflow");
         assert_eq!(it.message, "list repeat capacity overflow");
+
+        // Huge-but-representable count: passes the `isize::MAX` byte guard (1e17 * 16B = 1.6e18 <
+        // isize::MAX ≈ 9.2e18) but the allocation itself is infeasible. Before the
+        // `try_reserve_exact` guard this ABORTED the process (SIGABRT) instead of faulting.
+        let huge = "print([0] * 100000000000000000)";
+        let vm = run_capture(huge).expect_err("vm: huge list repeat should fault");
+        assert_eq!(vm.message, "list repeat capacity overflow");
+        let it = crate::interp::run_capture(huge).expect_err("interp: huge list repeat");
+        assert_eq!(it.message, "list repeat capacity overflow");
+
+        // Boundary: small repeats still work on both engines.
+        assert_eq!(run_capture("print([0] * 3)").expect("vm"), "[0, 0, 0]\n");
+        assert_eq!(
+            crate::interp::run_capture("print([0] * 3)").expect("interp"),
+            "[0, 0, 0]\n"
+        );
     }
 
     /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
