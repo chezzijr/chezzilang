@@ -4,6 +4,9 @@
 # git worktrees (local, not tracked)
 .worktrees/
 
+# local scratch / bug-repro scripts (not part of the project)
+/playground/
+
 # scratch dir written by examples/fs_mutations.chz (self-cleaning; this guards a crashed run)
 /examples/.fs_scratch
 
