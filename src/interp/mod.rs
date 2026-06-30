@@ -7255,7 +7255,17 @@ fn list_repeat(
         .filter(|&bytes| bytes <= isize::MAX as usize)
     {
         Some(_) => {
-            let mut out = Vec::with_capacity(src.len() * n);
+            let total = src.len() * n;
+            // The outer guard only bounds the byte size by `isize::MAX`; a huge-but-representable
+            // total still passes it yet cannot be allocated, and `Vec::with_capacity` would ABORT
+            // the process. `try_reserve_exact` converts that into the same recoverable fault.
+            let mut out: Vec<Value> = Vec::new();
+            if out.try_reserve_exact(total).is_err() {
+                return Err(RuntimeError {
+                    message: "list repeat capacity overflow".to_string(),
+                    span,
+                });
+            }
             for _ in 0..n {
                 out.extend(src.iter().cloned());
             }

@@ -188,7 +188,22 @@ fn str_method(
                     .checked_mul(n as usize)
                     .filter(|&t| t <= isize::MAX as usize)
                 {
-                    Some(_) => Ok(Value::Str(s.repeat(n as usize).into())),
+                    Some(total) => {
+                        // The byte-size guard passes huge-but-representable totals that
+                        // `str::repeat` would still abort on; `try_reserve_exact` makes that a
+                        // recoverable fault.
+                        let mut out = String::new();
+                        if out.try_reserve_exact(total).is_err() {
+                            return Err(RuntimeError {
+                                message: "string repeat capacity overflow".to_string(),
+                                span,
+                            });
+                        }
+                        for _ in 0..(n as usize) {
+                            out.push_str(s);
+                        }
+                        Ok(Value::Str(out.into()))
+                    }
                     None => Err(RuntimeError {
                         message: "string repeat capacity overflow".to_string(),
                         span,

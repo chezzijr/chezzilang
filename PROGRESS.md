@@ -1048,8 +1048,11 @@ desugar — the compiler has no operand type info): new value-typed match arms i
 (list/set element types must match — a mismatch is the existing `cannot apply …`/`bitwise operator …
 requires int operands or two sets` error; `[] + [1]` infers `List[int]` via `merge_unknown`).
 `list * int` is **commutative** (`3 * [0]` too, Python-style); `n <= 0` → `[]`; a giant `n` raises a
-recoverable `list repeat capacity overflow` (byte-bounded by `isize::MAX`, like `str.repeat`), never a
-process abort. Set results preserve insertion order (union = mine-then-other; intersection/difference =
+recoverable `list repeat capacity overflow`, never a process abort. The guard is two-layered: an
+`isize::MAX` byte-size check (overflow-safe `checked_mul`) **plus** a `Vec::try_reserve_exact`
+allocation-feasibility check — the latter catches huge-but-representable counts (~1e17..5.7e17 for a
+1-element list) that pass the byte bound yet abort `Vec::with_capacity`; `str.repeat` carries the same
+two-layered guard. Set results preserve insertion order (union = mine-then-other; intersection/difference =
 mine-filtered; symmetric-difference = mine∉other then other∉mine) so both engines print identically.
 Plain int bitwise + `<< >>` are unchanged (`<< >>` stay int-only). **Parity:** golden
 `examples/collection_ops.chz` runs VM == interp == `.expected` (via `assert_file_parity`), confirmed on
