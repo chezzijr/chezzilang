@@ -31,9 +31,9 @@ Conventions used below:
 
 | Form | Result | Notes |
 |------|--------|-------|
-| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` is refined from the expected type / first use, like `Set()`) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
-| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` is refined from the expected type / first use). Map literal: `{k: v, ...}`. |
-| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
+| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` is refined from the expected type / first use, like `Set()` — but a *never*-pinned empty is a static error: annotate it) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
+| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` is refined from the expected type / first use — a *never*-pinned empty errors, annotate it). Map literal: `{k: v, ...}`. |
+| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; a *never*-pinned bare `Set()` errors, annotate it) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
 | `bytes(s)` | `bytes` | UTF-8 encode a `str` (same as `s.encode()`). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 
@@ -618,8 +618,11 @@ all-sendable fields is too.)
 **Construction (no factory):** there is **no** `new_Map()`/`new_counter()` — a no-argument generic
 factory cannot bind `K`/`V` (turbofish does not propagate into the inner `RwShared({})`). Construct
 **directly** at the use site: **`ConcurrentMap(RwShared({}))`** / **`ConcurrentCounter(RwShared({}))`**;
-`K`/`V` are deferred from the empty `{}` and inferred from the first method call (same idiom as
-`Counter({})`). Note the use-site `RwShared({})` means user code also needs **`import std.concurrency`**
+`K`/`V` are deferred from the empty `{}` and stay `Unknown` on the wrapper (the methods operate on the
+`ConcurrentMap`, they do not pin the inner map type). That is fine for the wrapper itself, but a value
+*derived* from it whose type surfaces the map — e.g. `snap := m.snapshot()` (`-> Map[K, V]`) — lands an
+unpinned `Map[Unknown, Unknown]` local, which the empty-collection rule flags; annotate it
+(`snap: Map[str, int] = m.snapshot()`). Note the use-site `RwShared({})` means user code also needs **`import std.concurrency`**
 in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
 the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 

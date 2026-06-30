@@ -1859,10 +1859,15 @@ fn inferred_pure_mutual_recursion_stays_permissive() {
 #[test]
 fn non_recursive_unknown_return_not_falsely_rejected() {
     // Regression: a NON-recursive un-annotated fn whose return infers `Unknown` for a reason
-    // unrelated to recursion (here `x[0]` of an empty list literal → element type `Unknown`) must
-    // NOT be rejected by the recursive-return inference — that empty-collection case is the sibling
-    // producer's domain. Accepted on base; the fixpoint change must not regress it.
-    ok("fn f():\n    x := []\n    return x[0]\nprint(\"ok\")\n");
+    // unrelated to recursion must NOT be rejected by the recursive-return inference. PART A now
+    // requires the empty `x := []` to be annotated, so the annotated form drives this: `x[0]` is a
+    // concrete `int`, the return infers `int`, and the recursive-return fixpoint must not regress.
+    ok("fn f():\n    x: List[int] = []\n    return x[0]\nprint(\"ok\")\n");
+    // The un-annotated empty itself is the sibling producer's domain — it is now its own error.
+    rejects(
+        "fn f():\n    x := []\n    return x[0]\nf()\n",
+        "empty collection",
+    );
 }
 
 #[test]
@@ -9600,6 +9605,161 @@ fn pinned_hint_preserved_for_bound_generic_param() {
     );
 }
 
+// ---- PART A: a never-constrained empty collection requires an annotation ----
+
+#[test]
+fn unconstrained_empty_list_rejected() {
+    // `b := []` whose element type is NEVER inferred (only read) is now a static error.
+    rejects(
+        "fn main():\n b := []\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_map_rejected() {
+    rejects(
+        "fn main():\n b := {}\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_set_rejected() {
+    rejects(
+        "fn main():\n b := Set()\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_at_module_level_rejected() {
+    // top-level script binding, never constrained → error (caught at the module seam).
+    rejects("b := []\nprint(b)\n", "empty collection");
+}
+
+// false-positive matrix: a typed sink unifies the Unknown away → NO error.
+
+#[test]
+fn typed_annotation_empty_list_ok() {
+    ok("fn main():\n b: List[int] = []\n print(b)\nmain()");
+}
+
+#[test]
+fn typed_annotation_empty_map_ok() {
+    ok("fn main():\n m: Map[str, int] = {}\n print(m)\nmain()");
+}
+
+#[test]
+fn typed_annotation_empty_set_ok() {
+    ok("fn main():\n s: Set[int] = Set()\n print(s)\nmain()");
+}
+
+#[test]
+fn typed_param_empty_arg_ok() {
+    // `f([])` where the param is List[int] — the literal flows into a typed sink, no local site.
+    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n f([])\nmain()");
+}
+
+#[test]
+fn typed_return_empty_ok() {
+    ok("fn g() -> List[int]:\n return []\nfn main():\n print(g().len())\nmain()");
+}
+
+#[test]
+fn turbofish_empty_ctor_ok() {
+    ok("fn main():\n b := List[int]()\n print(b)\nmain()");
+}
+
+#[test]
+fn turbofish_empty_ctor_from_list_ok() {
+    ok("fn main():\n b := List[int]([])\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_push_then_read_no_false_error() {
+    // refine-on-first-use constrains the binding → no annotation required.
+    ok("fn main():\n out := []\n out.push(1)\n print(out)\nmain()");
+}
+
+// false-positive matrix #2 — a binding constrained by a CONCRETE value flowing into it (NOT just the
+// two refine-on-first-use gates: push/add/insert/extend + index-assign) must NOT be flagged. These
+// were rejected by the original impl (drop_empty_site wired only into the two refine gates).
+
+#[test]
+fn empty_then_plain_reassign_concrete_ok() {
+    // `b := []` then a whole-binding reassignment `b = [1, 2, 3]` determines the element type → no
+    // annotation required (the binding IS constrained).
+    ok("fn main():\n b := []\n b = [1, 2, 3]\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_compound_assign_concrete_ok() {
+    // `b := []` then `b += [1, 2, 3]` (compound list-extend) constrains the element type.
+    ok("fn main():\n b := []\n b += [1, 2, 3]\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_tuple_assign_concrete_ok() {
+    // tuple-assignment `a, b = [1], [2]` constrains both bindings (recurses into the Ident arm).
+    ok("fn main():\n a := []\n b := []\n a, b = [1], [2]\n print(a)\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_reassign_from_call_ok() {
+    // `result := []` then `result = compute()` where `compute() -> List[int]` constrains it.
+    ok(
+        "fn compute() -> List[int]:\n return [1, 2]\nfn main():\n result := []\n result = compute()\n print(result)\nmain()",
+    );
+}
+
+#[test]
+fn empty_binding_into_typed_param_ok() {
+    // the spec's typed-parameter false-positive guard, one binding away: `f(b)` where the param is
+    // `List[int]` constrains `b` (the direct-literal form `f([])` is covered separately above).
+    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n b := []\n f(b)\nmain()");
+}
+
+#[test]
+fn empty_then_conditional_reassign_ok() {
+    // 'declare empty, fill in a branch' idiom — the reassignment lives in an inner block but
+    // constrains the fn-scope binding.
+    ok("fn main():\n out := []\n if true:\n  out = [\"x\"]\n print(out)\nmain()");
+}
+
+#[test]
+fn empty_binding_into_typed_return_ok() {
+    // the typed-return false-positive guard, one binding away: `b := []` then `return b` where the
+    // return type is `List[int]` constrains `b` (the direct-literal form `return []` is covered above).
+    ok("fn g() -> List[int]:\n b := []\n return b\nfn main():\n print(g().len())\nmain()");
+}
+
+#[test]
+fn empty_then_reassign_still_empty_rejected() {
+    // GUARD: reassigning ANOTHER empty literal does NOT constrain — still no element type → error.
+    rejects(
+        "fn main():\n b := []\n b = []\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn empty_into_typed_binding_value_ok() {
+    // REGRESSION (bug #1): `b := []` then `c: List[int] = b` — binding the empty into a
+    // CONCRETE-typed annotated let constrains b's element type (the spec's typed-binding
+    // false-positive guard, one binding away from `b: List[int] = []`). The annotated-let branch
+    // must drop b's pending site; base accepts this.
+    ok("fn main():\n b := []\n c: List[int] = b\n print(c.len())\nmain()");
+}
+
+#[test]
+fn empty_captured_then_push_ok() {
+    // REGRESSION (bug #2): `acc := []` then a `spawn:` body that supplies the element via
+    // `acc.push(1)` constrains acc — the capture early-return in `refine_receiver` must still drop
+    // the pending annotation site. Base accepts this; the element type IS supplied (via push).
+    ok("fn main():\n acc := []\n spawn:\n  acc.push(1)\n print(acc)\nmain()");
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----
@@ -9731,8 +9891,16 @@ fn expr_arm_pin_independence_ok() {
 // ---- step 6: invariants — never-refined empties, homogeneous builds, residual hole ----
 
 #[test]
-fn never_refined_empty_ok() {
-    ok("fn main():\n empty := {}\n print(empty)\n xs := []\n print(xs)\nmain()");
+fn never_refined_empty_needs_annotation() {
+    // PART A: a never-constrained empty (only read, never refined) now requires an annotation —
+    // un-annotated it errors, and the annotated form is the escape hatch.
+    rejects(
+        "fn main():\n empty := {}\n print(empty)\nmain()",
+        "empty collection",
+    );
+    ok(
+        "fn main():\n empty: Map[str, int] = {}\n print(empty)\n xs: List[int] = []\n print(xs)\nmain()",
+    );
 }
 
 #[test]
@@ -10495,7 +10663,7 @@ fn lowercase_containers_rejected() {
 #[test]
 fn pascal_ctor_calls() {
     ok(
-        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d := Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
+        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d: Set[int] = Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
     );
 }
 

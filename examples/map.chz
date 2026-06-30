@@ -42,7 +42,7 @@ fn main():
     print(scores)
 
     # Empty map.
-    empty := {}
+    empty: Map[str, int] = {}
     print(empty)
     print(empty.len())
 

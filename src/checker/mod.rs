@@ -1345,6 +1345,20 @@ struct Checker {
     /// where this table holds exactly that module's decls (mirrors how `functions` is entry-scoped).
     /// Free fns / methods carry their doc on `FnSig::doc` instead. Runtime-inert (LSP only).
     name_docs: HashMap<String, String>,
+    /// PART A — pending "un-constrained empty collection" sites: a local `b := []`/`{}`/`Set()` whose
+    /// element/key/value slot is still `Unknown` (an un-annotated empty literal). Each entry is
+    /// `(owning_scope_idx, name, decl_span)`. A later constraining op (`push`/`add`/`insert`/`extend`,
+    /// `m[k]=v`) calls `drop_empty_site` to clear the requirement; at end-of-scope (fn body / module)
+    /// `finalize_empty_coll_sites` errors on any site whose binding STILL carries `Unknown`-in-slot
+    /// (never refined → no element type could be inferred → require an annotation).
+    empty_coll_sites: Vec<(usize, String, Span)>,
+    /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
+    /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
+    /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at
+    /// the end-of-scope seam that OWNS the binding overwrite `hover_result` with the binding's FINAL
+    /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
+    /// can't resolve it prematurely to the still-unrefined type. Probe-gated; parity-neutral.
+    hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
 }
 
 impl Checker {
@@ -1409,6 +1423,8 @@ impl Checker {
             hover_entry: None,
             hover_result: None,
             name_docs: HashMap::new(),
+            empty_coll_sites: Vec::new(),
+            hover_pending: None,
         };
         c.seed_stdlib_structs();
         c
@@ -1592,6 +1608,8 @@ impl Checker {
         }
         self.check_spawn_global_mutation(stmts);
         let sig = self.capture_sig(stmts);
+        self.finalize_empty_coll_sites();
+        self.finalize_hover_pending();
         self.pop_scope();
         sig
     }
@@ -2320,6 +2338,63 @@ impl Checker {
             {
                 scope.insert(name, ty);
             }
+        }
+    }
+    /// PART A — is `t` an empty collection type whose own DIRECT element/key/value slot is still a bare
+    /// `Unknown` (the shape produced by an un-constrained empty literal: `[]`→`List[Unknown]`,
+    /// `{}`→`Map[Unknown,Unknown]`, `Set()`→`Set[Unknown]`)? The slot must be DIRECTLY `Unknown`, not
+    /// merely nested-Unknown: `[[]]` is `List[List[Unknown]]` (a NON-empty list whose element is an
+    /// empty list) — its direct slot is `List[Unknown]`, so it is NOT an empty collection and must not
+    /// be flagged. This also DELIBERATELY excludes `Option[Unknown]` (`x := None`) and nullary-enum
+    /// producers (`Box[Unknown]`): the requirement is scoped to the three literal container kinds.
+    fn is_unrefined_empty_coll(t: &Ty) -> bool {
+        match t {
+            Ty::List(e) | Ty::Set(e) => e.is_unknown(),
+            Ty::Map(k, v) => k.is_unknown() || v.is_unknown(),
+            _ => false,
+        }
+    }
+    /// PART A — a constraining op (`push`/`add`/`insert`/`extend`, `m[k]=v`) targeted `name`, so clear
+    /// its pending empty-collection requirement. Resolves `name`'s OWNING scope (reverse walk, like
+    /// `repin`) and drops only that binding's site, so an inner-scope shadow of the same name does not
+    /// clear an outer binding's requirement.
+    fn drop_empty_site(&mut self, name: &str) {
+        let owner = (0..self.scopes.len())
+            .rev()
+            .find(|&i| self.scopes[i].contains_key(name));
+        if let Some(owner) = owner {
+            self.empty_coll_sites
+                .retain(|(o, n, _)| !(*o == owner && n == name));
+        }
+    }
+    /// PART A — at end-of-scope (the fn-body / module seam, called BEFORE `pop_scope`), error on every
+    /// pending empty-collection site owned by the scope being popped whose binding is STILL an
+    /// unrefined empty collection (never constrained → no element type → require an annotation). Sites
+    /// owned by an enclosing scope (`owning < idx`) are kept for that scope's own finalize; sites whose
+    /// owning scope was already popped (a block/for/match-body residual — `get(owning)` is `None`) are
+    /// silently drained without erroring, matching the refine machinery's block-local limits.
+    fn finalize_empty_coll_sites(&mut self) {
+        let idx = self.scopes.len() - 1;
+        let mut to_error: Vec<Span> = Vec::new();
+        self.empty_coll_sites.retain(|(owning, name, span)| {
+            if *owning < idx {
+                return true; // an enclosing scope owns it — its finalize handles it
+            }
+            if self
+                .scopes
+                .get(*owning)
+                .and_then(|s| s.get(name))
+                .is_some_and(Self::is_unrefined_empty_coll)
+            {
+                to_error.push(*span);
+            }
+            false // drained: either errored now, or its scope is already gone
+        });
+        for span in to_error {
+            self.error(
+                span,
+                "cannot infer element type of empty collection; add a type annotation".to_string(),
+            );
         }
     }
     /// Is `name` bound *below* the module-global scope (scope 0) — i.e. a local, parameter, or
@@ -4191,6 +4266,27 @@ impl Checker {
                     }
                     None => val_ty,
                 };
+                // PART A: an UN-annotated empty literal (`b := []`/`{}`/`Set()`) whose element/key/value
+                // slot is still `Unknown` records a pending site; if no later op constrains it, the
+                // end-of-scope finalize requires an annotation. Gated on `!inferring_ret` so the
+                // return-inference passes (whose errors are truncated + re-run) don't record duplicates.
+                // The annotated branch never reaches here as an unrefined-empty (a `List[int]`
+                // annotation leaves no `Unknown`-in-slot), and an expression-position literal (`f([])`,
+                // `return []`) binds no local, so the false-positive guards fall out structurally.
+                if ty.is_none() && !self.inferring_ret && Self::is_unrefined_empty_coll(&declared) {
+                    self.empty_coll_sites
+                        .push((self.scopes.len() - 1, name.clone(), span));
+                } else if ty.is_some()
+                    && !contains_unknown_in_slot(&declared)
+                    && let ExprKind::Ident(src) = &value.kind
+                {
+                    // PART A: binding a bare empty-collection ident into a CONCRETE-typed annotated
+                    // let (`c: List[int] = b`) constrains `b`'s element type — drop its pending
+                    // requirement (the typed-binding false-positive guard, one binding away from the
+                    // direct-literal `b: List[int] = []`). Gated on the annotation being fully
+                    // concrete so `c: List[?] = b` does not spuriously satisfy the requirement.
+                    self.drop_empty_site(src);
+                }
                 // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
@@ -4204,7 +4300,7 @@ impl Checker {
                     } else {
                         None
                     };
-                    self.hover_record_at(span, &declared, HoverKind::Local, doc);
+                    self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
                 self.declare(name, declared);
                 if is_ref {
@@ -4774,6 +4870,17 @@ impl Checker {
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
+                // PART A: a whole-binding (re)assignment / compound-assign / tuple-assign element that
+                // supplies a CONCRETE-typed value into an unrefined empty-collection binding constrains
+                // its element type — clear the pending annotation requirement (the binding IS
+                // constrained, just not through the two refine-on-first-use mutator gates). Gated on the
+                // value being fully concrete (`!contains_unknown_in_slot`) so reassigning ANOTHER empty
+                // literal (`b = []`, still `List[Unknown]`) does NOT drop the requirement. No re-pin —
+                // the binding's stored type is intentionally left permissive (behavior-preserving;
+                // matches base, which never narrowed on plain `=`).
+                if !contains_unknown_in_slot(&val_ty) {
+                    self.drop_empty_site(name);
+                }
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
@@ -5043,6 +5150,14 @@ impl Checker {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, true) {
                     self.error(e.span, format!("expected return type {ret}, found {ty}"));
+                } else if let ExprKind::Ident(name) = &e.kind
+                    && !contains_unknown_in_slot(&ret)
+                {
+                    // PART A: returning a bare empty-collection binding into a CONCRETE collection
+                    // return type constrains its element type (the typed-return false-positive guard,
+                    // one binding away from the direct-literal `return []`). Drop its pending
+                    // annotation requirement.
+                    self.drop_empty_site(name);
                 }
             }
             None => {
@@ -5346,6 +5461,8 @@ impl Checker {
                 ),
             );
         }
+        self.finalize_empty_coll_sites();
+        self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
         self.yield_ty = saved_yield;
@@ -6789,6 +6906,66 @@ impl Checker {
         }
     }
 
+    /// PART B — like [`Self::hover_record_at`], but for an occurrence of a NAMED binding. When the
+    /// probe lands on an occurrence whose recorded type still carries an `Unknown`-in-slot (a
+    /// not-yet-refined empty collection), DON'T lock `hover_result` to that provisional type; instead
+    /// stash the binding's `(name, kind, doc)` in `hover_pending`. The end-of-scope finalize then looks
+    /// up the binding's FINAL (refined) type and writes it to `hover_result`, so an earlier occurrence
+    /// of `b` (its `b := []` decl or any use before the refining `b.push(0)`) shows `List[int]`, not
+    /// `List[Unknown]`. A concrete (fully-known) type records immediately like `hover_record_at`.
+    /// Probe-gated; entirely inert off the hover probe → VM/interp parity-neutral.
+    fn hover_record_binding(
+        &mut self,
+        span: Span,
+        ty: &Ty,
+        name: &str,
+        kind: HoverKind,
+        doc: Option<String>,
+    ) {
+        let Some((pl, pc)) = self.hover_probe else {
+            return;
+        };
+        if self.hover_result.is_some() || self.current_module_id != self.hover_entry {
+            return;
+        }
+        if span.line == pl && span.col == pc {
+            if contains_unknown_in_slot(ty) {
+                // defer: the binding may be refined later; resolve to its final type at the end-of-scope
+                // seam that OWNS it. Record that owning scope (reverse walk, like `repin`/`drop_empty_site`)
+                // so an intervening inner fn/method `check_fn_body` seam doesn't finalize it prematurely
+                // (correctness-0). Fall back to the innermost scope if the binding isn't declared yet
+                // (a decl-site hover recorded before `declare`) — at top level that is the module scope.
+                let owning = (0..self.scopes.len())
+                    .rev()
+                    .find(|&i| self.scopes[i].contains_key(name))
+                    .unwrap_or(self.scopes.len().saturating_sub(1));
+                self.hover_pending = Some((owning, name.to_string(), kind, doc));
+            } else {
+                self.hover_result = Some((ty.clone(), kind, doc));
+            }
+        }
+    }
+
+    /// PART B — at end-of-scope (fn body / module, BEFORE `pop_scope`), if the probe deferred onto an
+    /// unrefined-empty binding (`hover_pending` set) and no concrete hover landed elsewhere, resolve
+    /// the binding's FINAL (now-refined) type from its owning scope and commit it to `hover_result`.
+    /// A no-op off the probe (`hover_pending` stays `None`).
+    fn finalize_hover_pending(&mut self) {
+        if self.hover_result.is_some() {
+            return; // a concrete hover already landed elsewhere
+        }
+        // Only resolve at the seam that OWNS the pending binding (the scope about to be popped). A
+        // pending binding owned by an ENCLOSING scope (`owning < idx`) is still refinable after this
+        // pop — leave it for that scope's own finalize, else an intervening inner fn/method seam would
+        // lock it to the still-unrefined `List[Unknown]` (correctness-0). Mirrors `finalize_empty_coll_sites`.
+        let idx = self.scopes.len().saturating_sub(1);
+        let owns_here = matches!(&self.hover_pending, Some((owning, ..)) if *owning >= idx);
+        if owns_here && let Some((_owning, name, kind, doc)) = self.hover_pending.take() {
+            let ty = self.lookup(&name).unwrap_or(Ty::Unknown);
+            self.hover_result = Some((ty, kind, doc));
+        }
+    }
+
     /// Editor hover for a `from M import T` user type (struct/enum/newtype). Computes the effective
     /// doc — the type's own decl docstring carried across the module boundary, else a `kind (from
     /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
@@ -6850,7 +7027,7 @@ impl Checker {
                 // doc source mirrors the resolution: a `let`-bound local/global → `name_docs`; a free
                 // fn → its `FnSig::doc`; a bare type/ctor name used as a value → `name_docs`. All keyed
                 // by simple name, entry-module-scoped (safe — hover only fires in the entry module).
-                let (kind, doc) = if self.lookup(name).is_some() {
+                if self.lookup(name).is_some() {
                     // Only a TRUE module-top-level binding (resolves at scope 0) owns its `name_docs`
                     // entry; a shadowing param/local of the same name has no doc of its own and must
                     // NOT borrow the global's (`name_docs` is keyed by bare name).
@@ -6863,13 +7040,15 @@ impl Checker {
                     } else {
                         None
                     };
-                    (HoverKind::Local, doc)
+                    // PART B: a use of a binding whose recorded type is still an unrefined empty
+                    // collection defers to the binding's final (refined) type via `hover_record_binding`.
+                    self.hover_record_binding(expr.span, ty, name, HoverKind::Local, doc);
                 } else if let Some(sig) = self.functions.get(name) {
-                    (HoverKind::Func, sig.doc.clone())
+                    self.hover_record_at(expr.span, ty, HoverKind::Func, sig.doc.clone());
                 } else {
-                    (HoverKind::Other, self.name_docs.get(name).cloned())
-                };
-                self.hover_record_at(expr.span, ty, kind, doc);
+                    let doc = self.name_docs.get(name).cloned();
+                    self.hover_record_at(expr.span, ty, HoverKind::Other, doc);
+                }
             }
             ExprKind::Field { name_span, .. } => {
                 self.hover_record_at(*name_span, ty, HoverKind::Field, None);
@@ -11198,6 +11377,18 @@ impl Checker {
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_arg(arg, params.get(i));
+            // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
+            // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
+            // requirement (the spec's typed-parameter false-positive guard, one binding away from the
+            // direct-literal `f([])` form). Gated on the param being a fully-concrete type so an
+            // un-inferred / generic slot does not spuriously satisfy the requirement.
+            if let Some(pt) = params.get(i)
+                && !contains_unknown_in_slot(pt)
+                && self.assignable_w(pt, &at, widen)
+                && let ExprKind::Ident(name) = &arg.kind
+            {
+                self.drop_empty_site(name);
+            }
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)
             {
@@ -11641,6 +11832,15 @@ impl Checker {
         if self.lookup(name).is_none() {
             return;
         }
+        // PART A: a slot-supplying mutator (`push`/`add`/`insert`/`extend` with an arg) constrains
+        // this binding's element type, so clear any pending empty-collection annotation requirement.
+        // Done BEFORE the `is_captured` early-return below so a `spawn:`/`Executor.submit` body that
+        // supplies the element only via a mutator (`acc := []` outside, `acc.push(1)` captured) still
+        // drops the site — the element WAS supplied, so requiring an annotation would be wrong. A
+        // no-op when no site exists (`drop_empty_site` only removes a matching `(owner, name)`).
+        if matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
+            self.drop_empty_site(name);
+        }
         // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
         // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
         if self.is_captured(name) {
@@ -11717,6 +11917,10 @@ impl Checker {
         if self.is_captured(name) || !contains_unknown_in_slot(&obj_ty) {
             return;
         }
+        // PART A: an index-assign (`m[k]=v` / `xs[i]=v`) constrains this binding — clear any pending
+        // empty-collection annotation requirement (BEFORE the speculative-index-infer truncate-return,
+        // mirroring `refine_receiver`, so an erroring key like `m[undefined_k]=1` still drops the site).
+        self.drop_empty_site(name);
         if val_ty.is_unknown() {
             return;
         }
