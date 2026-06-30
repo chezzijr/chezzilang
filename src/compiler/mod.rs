@@ -245,12 +245,12 @@ pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> 
 /// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
 fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
     match ty {
-        Type::Generic(n, args)
+        Type::Generic(n, args, ..)
             if n == "List" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
         {
             Some(ElemFloatHint::Elem)
         }
-        Type::Generic(n, args)
+        Type::Generic(n, args, ..)
             if n == "Map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
         {
             Some(ElemFloatHint::MapValue)
@@ -3866,7 +3866,7 @@ fn ffi_type_display(ty: Option<&Type>) -> String {
     match ty {
         Some(Type::Named { name: n, .. }) => n.clone(),
         Some(Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
-        Some(Type::Generic(n, _)) => n.clone(),
+        Some(Type::Generic(n, ..)) => n.clone(),
         Some(_) => "<unsupported>".to_string(),
         None => "nil".to_string(),
     }

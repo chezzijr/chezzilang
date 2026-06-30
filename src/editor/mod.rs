@@ -348,7 +348,7 @@ fn overlay_type(ty: &crate::ast::Type, map: &mut std::collections::HashMap<(usiz
     use crate::ast::Type;
     match ty {
         Type::Named { span, .. } => overlay_mark(map, *span, TYPE),
-        Type::Qualified { args, .. } | Type::Generic(_, args) => {
+        Type::Qualified { args, .. } | Type::Generic(_, args, ..) => {
             for a in args {
                 overlay_type(a, map);
             }
@@ -1593,6 +1593,44 @@ mod tests {
         let src = "# doubles n\nfn dbl(n: int) -> int:\n    return n * 2\ndbl(3)\n";
         let h = hov(src, 3, 0).expect("hover on user fn callee");
         assert_eq!(h.doc.as_deref(), Some("doubles n"));
+    }
+
+    #[test]
+    fn hover_generic_annotation_head_shows_doc() {
+        // Hovering the GENERIC head `List` in `xs: List[int]` (goes through Type::Generic) surfaces
+        // the builtin usage+methods blurb (Tier-C), same as the non-generic `str` token does.
+        let h = hov("xs: List[int] = []\n", 0, 4).expect("hover on List generic head");
+        let doc = h
+            .doc
+            .as_deref()
+            .expect("List head should carry a Tier-C doc");
+        assert!(doc.contains("methods:"), "missing methods line: {doc:?}");
+        assert!(doc.contains("push"), "missing push method: {doc:?}");
+    }
+
+    #[test]
+    fn hover_imported_type_shows_doc() {
+        // Hovering the imported user type `Heap` on the import line surfaces a doc (its own decl
+        // docstring carried across the module boundary, else a kind+module fallback).
+        let h = hov("import Heap from std.collections\n", 0, 7).expect("hover on imported Heap");
+        assert!(
+            h.doc.is_some(),
+            "imported type should carry a doc, got: {:?}",
+            h.doc
+        );
+    }
+
+    #[test]
+    fn hover_imported_generic_head_shows_doc() {
+        // Case (a)+(b) together: a later GENERIC use of the imported type (`Heap[int]` head) surfaces
+        // the imported doc carried into name_docs by the import-line binding.
+        let src = "import Heap from std.collections\nfn f(h: Heap[int]):\n    print(h.len())\n";
+        let h = hov(src, 1, 8).expect("hover on Heap generic head in param annotation");
+        assert!(
+            h.doc.is_some(),
+            "imported generic head should carry a doc, got: {:?}",
+            h.doc
+        );
     }
 
     // ===== decl-site NAME-token hovers (Tier A) =====

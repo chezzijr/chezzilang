@@ -221,6 +221,26 @@ blast radius zero (all std.net examples already import it). Tests: `reserved_bui
 `net_type_from_import_partial_does_not_license_other`, `net_type_rename_rejected`,
 `vm::tests::net_from_import_runs_both_engines` (both engines).
 
+**✅ Editor tooling — LSP hover for IMPORTED user types + GENERIC annotation heads (Tier-C follow-up) (2026-06-30).**
+Closes the two "No information available" type-name hover gaps the Tier-C entry below flagged. (a) An IMPORTED
+user type (`import Heap from std.collections`): its own decl docstring now crosses the module boundary — added an
+editor-only `doc: Option<String>` to `StructInfo`/`EnumSigInfo`/`NewTypeSigInfo`, populated in `capture_sig` from
+the defining module's `name_docs`. `bind_import`'s From-arm records the import-line token hover at the bound name
+(`record_imported_type_hover`) — the type's own docstring, else a `kind (from module)` fallback (`struct (from
+std.collections)`) — AND seeds `name_docs[bind]` so later bare/annotation/generic-head uses surface the same doc.
+(b) A GENERIC annotation head (`xs: List[int]`, `h: Heap[int]`): the `Type::Generic` arm now carries the head-name
+token span (added an equality-NEUTRAL 3rd `Span` field to AST `Type::Generic`, exactly like `Type::Named`'s span —
+the hand-written `PartialEq` ignores it, no engine/codegen ever reads it) and records a probe-gated, `!generic_arg_prepass`
+head hover REUSING `builtin_type_doc` for builtin heads (`List`/`Map`/…) and falling back to `name_docs` for user
+heads. The existing `Type::Named` hover also gained the `name_docs` fallback, so a non-generic imported type used
+as `x: Foo` surfaces its doc too. Checker + 1 AST field + parser plumbing; every doc is an `Option<String>` into
+`hover_record_at` (probe-gated no-op off-probe) → ZERO runtime/typecheck/codegen/VM/interp change, two-engine parity
+green, goldens byte-identical, conformance unchanged (surface syntax identical). Tests: `editor::tests::hover_generic_
+annotation_head_shows_doc`, `hover_imported_type_shows_doc`, `hover_imported_generic_head_shows_doc` (+ Tier-A/B/C
+regressions intact). Validated end-to-end against the worktree-built `chezzi-lsp` over JSON-RPC (the protocol the
+nvim client speaks): hovering `Heap` (import line + `Heap[int]` head) and `List` in `xs: List[int]` all return the
+doc. **Reinstall the LSP** (`cargo install --path . --features lsp --bin chezzi-lsp`) to pick it up.
+
 **✅ Editor tooling — LSP hover docs for BUILTIN/STDLIB types & stdlib module fns (Tier C) (2026-06-30).**
 Hovering a builtin/stdlib TYPE or ctor (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`/`Channel`/`Shared`/
 `RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`range`/`tuple`/`Result`/`Option`/`Iterator`) now shows
@@ -238,9 +258,9 @@ doc-less for now (follow-up). **Skipped (task-sanctioned): protocol per-method d
 `protocol` method sig still does NOT surface; AST `MethodSig` carries no `doc` field, so it'd need a parser +
 `grammar.bnf` + conformance + new hover-site change (multi-file, out of Tier-C scope). **Known v1 gaps:**
 `list.sort` and `bytes`/`bytearray.extend` are real methods handled in `infer_method_call` (not the `*_method_sig`
-tables), so they're intentionally absent from the hover `methods:` lists; a GENERIC builtin written as an
-annotation head (`xs: List[int]`) goes through `Type::Generic`, which records no head-name hover, so docs there
-show only via the call form / scalar type token. Checker+editor only; every doc is an `Option<String>` passed to
+tables), so they're intentionally absent from the hover `methods:` lists. (The generic-annotation-head and
+imported-user-type hover gaps noted here in the original entry are now CLOSED — see the follow-up entry directly
+above.) Checker+editor only; every doc is an `Option<String>` passed to
 `hover_record_at` (probe-gated no-op off-probe) → zero runtime/typecheck/codegen/VM/interp change, goldens
 byte-identical. Tests: `editor::tests::hover_builtin_type_list_shows_methods`, `hover_builtin_type_token_str_shows_doc`,
 `hover_module_fn_sqrt_shows_doc`, `hover_builtin_does_not_break_user_doc` (Tier-A fallback intact) +
@@ -261,9 +281,10 @@ first-hit-wins latching an incomplete type. Display follows `Ty::Display`: a tra
 `type Id = int` shows `int` (consistent with the Tier-A alias-decl hover), a struct name shows the
 struct, an in-scope type param shows the param. Composite inner names fall out for free — the
 `Type::Generic`/`Func`/`Tuple` arms recurse into `resolve_type`, so the `int` in `List[int]` records at
-its own span. New `HoverKind::Type` variant. **Known gap:** `Type::Qualified` (the `Point` in
-`geo.Point`) and the OUTER generic constructor name (`List` in `List[int]`) carry no name-token span, so
-they don't hover; inner type args do. Checker/editor-only, zero runtime/codegen/parity impact (goldens
+its own span. New `HoverKind::Type` variant. **Known gap (partly CLOSED):** `Type::Qualified` (the `Point`
+in `geo.Point`) still carries no name-token span, so it doesn't hover; the OUTER generic head (`List` in
+`List[int]`) gap was CLOSED by the Tier-C follow-up (a head-name `Span` field was added to `Type::Generic`).
+Inner type args hover via the recursive `resolve_type`. Checker/editor-only, zero runtime/codegen/parity impact (goldens
 byte-identical). Tests: `editor::tests::hover_type_alias_transparent`, `hover_param_type_token`,
 `hover_return_type_token`, `hover_field_type_token`, `hover_struct_name_type_token`,
 `hover_generic_inner_type_token`, `hover_generic_fn_param_type_no_latch` (prepass-latch guard),

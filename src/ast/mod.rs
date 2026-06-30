@@ -550,7 +550,12 @@ pub enum Type {
         name: String,
         args: Vec<Type>,
     },
-    Generic(String, Vec<Type>),
+    /// A generic instantiation `Head[args]` (`List[int]`, `Map[K, V]`, `Heap[int]`). The trailing
+    /// `Span` points at the HEAD-name token (`List`/`Heap`) — diagnostic-only, equality-neutral (see
+    /// the type-level doc; `Span::default()` for a synthesized annotation). Its only reader is the
+    /// lib-only `editor` hover/semantic-token overlay (the default `chezzi` bin doesn't compile
+    /// `editor`), so allow the bin's dead-code lint, exactly like `Named`'s span.
+    Generic(String, Vec<Type>, #[allow(dead_code)] Span),
     Func {
         params: Vec<Type>,
         ret: Box<Type>,
@@ -589,7 +594,7 @@ impl PartialEq for Type {
                     args: a2,
                 },
             ) => m1 == m2 && n1 == n2 && a1 == a2,
-            (Type::Generic(n1, a1), Type::Generic(n2, a2)) => n1 == n2 && a1 == a2,
+            (Type::Generic(n1, a1, ..), Type::Generic(n2, a2, ..)) => n1 == n2 && a1 == a2,
             (
                 Type::Func {
                     params: p1,
