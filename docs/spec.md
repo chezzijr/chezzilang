@@ -233,6 +233,17 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.
 
+**One root governs the whole graph.** The root is found **once** — by walking up from the *entry*
+file (step 2) — and that single root resolves **every** import in the program (`a.b.c` → `<root>/a/b/c.chz`,
+step 4), no matter which module the `import` appears in. There are **no per-directory roots**: a
+*nested* `chezzi.toml` placed in a subdirectory is **silently ignored** (it is neither a second root
+nor consulted for that subtree's imports). So if you vendor a sub-package under, say, `vendor/lib/`,
+its internal `import util` does **not** resolve to `vendor/lib/util.chz` — it resolves to
+`<root>/util.chz`, and a root-level `util.chz` therefore **silently shadows** a same-named file in the
+subdirectory. This is a deliberate single-root design (one unambiguous resolution per dotted path),
+but the shadowing is a footgun: keep module paths unique across the whole tree, and don't rely on a
+nested `chezzi.toml` to scope a vendored subtree.
+
 **Types are module-scoped (Python-style).** A `struct` / `enum` / `type` alias is private to its
 declaring module — every top-level type is exported by default (like functions; no `pub`), and is
 reachable elsewhere **only via import**, accessed by the same bound last-segment name a function uses:

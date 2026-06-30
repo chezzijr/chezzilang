@@ -167,7 +167,7 @@ fn shadow():
         print(x)          # 100
     print(x)              # 1 (outer unchanged)
 
-# ---- closures capture by value (snapshot at definition; reassign is invisible) ------------------
+# ---- a closure captures a LOCAL by value (snapshot at definition; reassign is invisible) --------
 
 fn make_reader() -> fn() -> int:
     v := 10
