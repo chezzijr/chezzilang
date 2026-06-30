@@ -1834,8 +1834,12 @@ with `compare`), stable, in place.
 > `b += [1]`, `a, b = [1], [2]`), or passing/returning it into a concrete collection sink — a typed
 > binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
 > direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
-> those never error. (Reassigning *another* empty — `b = []` — does not constrain it; the requirement
-> stands.) The
+> those never error. A binding is *also* considered constrained — so it does not error — once it **escapes
+> as a value** into another binding or structure: an alias (`c := b`), a plain or field assignment
+> (`c = b`, `bx.items = b`), or nesting in a collection literal (`c := [b]`); the requirement then moves
+> to the new binding (which records its own if *it* stays unrefined) rather than firing a false positive.
+> (Reassigning *another* empty — `b = []` — does not constrain it; the requirement
+> stands. A terminal read that does not escape — `print(b)`, `b.len()` — likewise does not constrain it.) The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
 > like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
 > **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the

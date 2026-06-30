@@ -9760,6 +9760,50 @@ fn empty_captured_then_push_ok() {
     ok("fn main():\n acc := []\n spawn:\n  acc.push(1)\n print(acc)\nmain()");
 }
 
+// false-positive matrix #3 — an empty binding READ AS A VALUE that ESCAPES into another binding or
+// structure (RHS of plain/field assign, untyped alias, or nested in a collection literal) is no
+// longer provably-unconstrained and must NOT be flagged. These regressed when the feature landed:
+// the drop-guard covered only typed sinks + the LHS-target of reassign, never the RHS source.
+
+#[test]
+fn empty_into_plain_assign_target_ok() {
+    // REGRESSION: `c := [1]` (List[int]) then `c = b` (b := []) flows b into a typed slot via plain
+    // `=`. Sound (annotated `c: List[int] = b` accepts); must not error on b.
+    ok("fn main():\n c := [1]\n b := []\n c = b\n print(c)\nmain()");
+}
+
+#[test]
+fn empty_into_field_assign_ok() {
+    // REGRESSION: assigning an empty binding into a CONCRETE-typed struct field via `bx.items = b`
+    // constrains b's element type — must not error on b.
+    ok(
+        "struct Box:\n items: List[int]\nfn main():\n bx := Box([1])\n b := []\n bx.items = b\n print(bx.items)\nmain()",
+    );
+}
+
+#[test]
+fn empty_alias_then_push_ok() {
+    // REGRESSION: `c := b` aliases the same list; `c.push(1)` establishes the element type. b escapes
+    // into the alias, so its pending site must drop (annotated `b: List[int] = []` runs, prints [1]).
+    ok("fn main():\n b := []\n c := b\n c.push(1)\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_nested_in_list_literal_then_push_ok() {
+    // REGRESSION: `c := [b]` nests b in a list literal; b escapes and its site must drop.
+    ok("fn main():\n b := []\n c := [b]\n c[0].push(1)\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_alias_both_unconstrained_still_rejected() {
+    // GUARD (no new false-negative): aliasing drops the SOURCE site, but the alias `c` is itself an
+    // unrefined empty — the requirement moves to c, it does not vanish. Still an error.
+    rejects(
+        "fn main():\n b := []\n c := b\n print(c)\nmain()",
+        "empty collection",
+    );
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----

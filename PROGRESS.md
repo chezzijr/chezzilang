@@ -1387,14 +1387,26 @@ in `check_args_range_w`, a typed `return` in `check_return`). `finalize_empty_co
 scope. **False-positive guards fall out structurally for the literal sinks** (annotation
 `b: List[int] = []`, typed param `f([])`, typed `return []`, turbofish `List[int]()` leave no
 `Unknown`-in-slot or bind no local → never recorded) **and are dropped explicitly for the one-binding-away
-sinks** (`b := []` then `f(b)` / `return b` / `b = [1,2]` / `a, b = [1], [2]`). Scope coverage is fn-body
+sinks** (`b := []` then `f(b)` / `return b` / `b = [1,2]` / `a, b = [1], [2]`). A post-merge adversarial
+review found the one-binding-away drop missed the case where the empty binding is read as an **RHS value
+that escapes** into another binding/structure — `c = b` / `bx.items = b` (assign), `c := b` (alias),
+`c := [b]` (nested in a literal) — spuriously erroring on `b` though the program is type-sound; fixed with
+`drop_value_escape_sites(value)` at the let + assign seams (drops the source ident's site; the alias
+records its own if it stays unrefined, so the requirement *moves* rather than vanishes — no false-negative).
+A terminal non-escaping read (`print(b)`, `b.len()`) is intentionally NOT a drop, so the headline error
+still fires. Scope coverage is fn-body
 + module (an empty declared inside an if/for/match body that pops before the seam is a documented
 residual, matching the refine machinery's block-local limits). **PART B:** retroactive hover — when the
 probe lands on an occurrence of a binding whose recorded type still carries `Unknown`-in-slot,
-`hover_record_binding` does NOT lock `hover_result`; it stashes `(name, kind, doc)` in `hover_pending`,
-and `finalize_hover_pending` (same seam) overwrites `hover_result` with the binding's FINAL refined type
-via `lookup`. So hovering the `b := []` decl (or any use before `b.push(0)`) now shows `List[int]`, not
-`List[Unknown]`. Entirely `hover_probe`-gated → parity-neutral by construction. Tests: `checker::tests`
+`hover_record_binding` does NOT lock `hover_result`; it stashes `(owning_scope_idx, name, kind, doc)` in
+`hover_pending`, and `finalize_hover_pending` (same seam) overwrites `hover_result` with the binding's
+FINAL refined type via `lookup`. So hovering the `b := []` decl (or any use before `b.push(0)`) now shows
+`List[int]`, not `List[Unknown]`. The owning-scope index gates the finalize (`owning >= idx`, mirroring
+`finalize_empty_coll_sites`): a post-merge review caught that without it, an intervening fn/method
+`check_fn_body` seam between a module-level empty decl and its refining op would prematurely lock the
+hover to the still-unrefined type — so the finalize only resolves at the seam that OWNS the pending
+binding (regression test `hover_refined_empty_decl_intervening_fn_shows_final_type`). Entirely
+`hover_probe`-gated → parity-neutral by construction. Tests: `checker::tests`
 `unconstrained_empty_{list,map,set,at_module_level}_rejected` + full typed-sink ok matrix
 (`typed_annotation_*`, `typed_param_empty_arg_ok`, `typed_return_empty_ok`, `turbofish_empty_ctor*`,
 `empty_push_then_read_no_false_error`) + the one-binding-away constrained matrix

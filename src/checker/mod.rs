@@ -2367,6 +2367,39 @@ impl Checker {
                 .retain(|(o, n, _)| !(*o == owner && n == name));
         }
     }
+    /// PART A — an empty-collection binding READ AS A VALUE that ESCAPES into another binding or
+    /// structure (the RHS of `:=`/`=`/field-/index-/tuple-assign, or an element of a list/set/map/tuple
+    /// literal) is no longer provably-unconstrained: drop its pending requirement. Without this,
+    /// `c = b` / `c := b` / `c := [b]` (with `b := []`) spuriously errored on `b` even though the
+    /// program is type-sound (b aliases / flows into a typed-or-later-refined slot) — the drop-guard
+    /// otherwise covers only typed sinks (annotation/param/return) and the LHS target of reassign,
+    /// never the RHS source. Scans the value one level. A bare-ident read that is NOT a value-escape
+    /// (a call arg like `print(b)`) is intentionally NOT covered — that case must still require the
+    /// annotation. The alias binding itself, if left unrefined, records its own site, so the
+    /// requirement moves rather than vanishes (no new false-negative).
+    fn drop_value_escape_sites(&mut self, value: &Expr) {
+        match &value.kind {
+            ExprKind::Ident(name) => self.drop_empty_site(name),
+            ExprKind::List(elems) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
+                for e in elems {
+                    if let ExprKind::Ident(n) = &e.kind {
+                        self.drop_empty_site(n);
+                    }
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    if let ExprKind::Ident(n) = &k.kind {
+                        self.drop_empty_site(n);
+                    }
+                    if let ExprKind::Ident(n) = &v.kind {
+                        self.drop_empty_site(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     /// PART A — at end-of-scope (the fn-body / module seam, called BEFORE `pop_scope`), error on every
     /// pending empty-collection site owned by the scope being popped whose binding is STILL an
     /// unrefined empty collection (never constrained → no element type → require an annotation). Sites
@@ -4287,6 +4320,10 @@ impl Checker {
                     // concrete so `c: List[?] = b` does not spuriously satisfy the requirement.
                     self.drop_empty_site(src);
                 }
+                // An empty binding read as the let VALUE escapes into the new binding (alias `c := b`
+                // or nested `c := [b]`) — drop the source's pending site (the alias records its own if
+                // it stays unrefined). Runs for every binding kind; only an active site is affected.
+                self.drop_value_escape_sites(value);
                 // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
@@ -4327,6 +4364,10 @@ impl Checker {
                 } else {
                     self.infer_value(value)
                 };
+                // An empty binding read as the assignment VALUE escapes into the target slot (`c = b`,
+                // `bx.items = b`) — drop the source's pending empty-collection site, mirroring the
+                // typed-binding-value guard for `c: List[int] = b`. Covers every target shape.
+                self.drop_value_escape_sites(value);
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
