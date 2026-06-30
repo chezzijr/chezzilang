@@ -271,14 +271,26 @@ impl Builder {
             return Ok(());
         }
 
+        // The dotted path of the module that contains the failing `import` statement (empty for an
+        // entry-level import). For the cannot-find-module path below, the TARGET is not yet on the
+        // stack (its push is later), so `on_stack.last()` is the importing parent — exactly the
+        // module whose `line N` the diagnostic refers to. Attributes the error like parse/type errors.
+        let importer: Vec<String> = self
+            .on_stack
+            .last()
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default();
         let source = match &self.entry_override {
             // The entry buffer is supplied in-memory (live LSP doc); imports still hit disk.
             Some((oid, osrc)) if oid == id => osrc.clone(),
             _ => std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
-                message: format!(
-                    "cannot find module '{}' (looked for {})",
-                    dotted_label(dotted),
-                    id.0.display()
+                message: prefix(
+                    &importer,
+                    format!(
+                        "cannot find module '{}' (looked for {})",
+                        dotted_label(dotted),
+                        id.0.display()
+                    ),
                 ),
                 span: import_span,
                 module: Some(dotted_label(dotted)),
@@ -308,9 +320,19 @@ impl Builder {
             // project-local `std.chz` and leaks the internal install path. Reject it up front with a
             // filesystem-agnostic diagnostic. (Submodules like `std.math` / `std.x.y` are unaffected.)
             if path.len() == 1 && path.first().map(String::as_str) == Some("std") {
+                // The current module is already on the stack (pushed above), so `on_stack.last()`
+                // is the module whose import loop we are in — the importer.
+                let importer: Vec<String> = self
+                    .on_stack
+                    .last()
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
                 return Err(ResolveError {
-                    message: "'std' is a reserved namespace (import a submodule, e.g. 'std.math')"
-                        .into(),
+                    message: prefix(
+                        &importer,
+                        "'std' is a reserved namespace (import a submodule, e.g. 'std.math')"
+                            .into(),
+                    ),
                     span,
                     module: Some(dotted_label(&path)),
                 });
@@ -585,6 +607,56 @@ mod tests {
             err.message
         );
         assert!(err.message.contains("nope.thing"), "got: {}", err.message);
+        // Entry-level import: no "in module" prefix (matches how type errors at entry level carry
+        // no module attribution). Guards against over-prefixing once Bug-1 wraps with prefix().
+        assert!(
+            !err.message.contains("in module"),
+            "entry-level import must not be module-prefixed, got: {}",
+            err.message
+        );
+    }
+
+    // 6b. A missing module imported from a NON-entry module names the importing module, so a
+    // user invoking the entry can tell which file `line N` is in. (Bug 1.)
+    #[test]
+    fn missing_module_in_imported_module_names_importer() {
+        let t = TmpDir::new();
+        let main = t.write("main.chz", "import deep\nfn main(): print(1)\n");
+        t.write(
+            "deep.chz",
+            "# pad\n# pad\n# pad\nimport ghost from doesnotexist\nfn f(): print(1)\n",
+        );
+        let err = build_graph(&main).unwrap_err();
+        assert!(
+            err.message.contains("in module 'deep'"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("cannot find module 'doesnotexist'"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(err.span.line, 4, "span should point at the bad import line");
+    }
+
+    // 6c. A bare `import std` inside a NON-entry module likewise names the importing module. (Bug 1.)
+    #[test]
+    fn bare_std_in_imported_module_names_importer() {
+        let t = TmpDir::new();
+        let main = t.write("main.chz", "import deep\nfn main(): print(1)\n");
+        t.write("deep.chz", "import std\nfn f(): print(1)\n");
+        let err = build_graph(&main).unwrap_err();
+        assert!(
+            err.message.contains("reserved namespace"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("in module 'deep'"),
+            "got: {}",
+            err.message
+        );
     }
 
     // 7. A bare `import std` is a clear reserved-namespace diagnostic, NOT a confusing internal

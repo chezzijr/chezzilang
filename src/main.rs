@@ -157,8 +157,13 @@ fn cmd_check(args: &[String]) -> ExitCode {
             report_check_errors(&errs, json);
             ExitCode::FAILURE
         }
-        CheckOutcome::Fatal { text, line, col } => {
-            report_fatal(&text, line, col, json);
+        CheckOutcome::Fatal {
+            text,
+            message,
+            line,
+            col,
+        } => {
+            report_fatal(&text, &message, line, col, json);
             ExitCode::FAILURE
         }
     }
@@ -277,8 +282,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
             report_check_errors(&errs, json);
             return ExitCode::FAILURE;
         }
-        CheckOutcome::Fatal { text, line, col } => {
-            report_fatal(&text, line, col, json);
+        CheckOutcome::Fatal {
+            text,
+            message,
+            line,
+            col,
+        } => {
+            report_fatal(&text, &message, line, col, json);
             return ExitCode::FAILURE;
         }
     }
@@ -642,10 +652,14 @@ fn write_stdout(s: &str) -> std::io::Result<()> {
 enum CheckOutcome {
     Ok,
     Errors(Vec<checker::CheckError>),
-    /// A lex or parse error (the program never reaches the checker). `text` is the full rendered
-    /// message; `line`/`col` are carried so `--errors=json` still emits structured output.
+    /// A resolve, lex, or parse error (the program never reaches the checker). `text` is the full
+    /// rendered message (Display, with the `resolve error (...)` prefix) used for plain-text output;
+    /// `message` is the clean message body (no Display prefix, with any `in module 'X':` attribution)
+    /// used for `--errors=json` so its shape matches type-error JSON. `line`/`col` are carried so
+    /// `--errors=json` still emits structured output.
     Fatal {
         text: String,
+        message: String,
         line: usize,
         col: usize,
     },
@@ -659,6 +673,7 @@ fn type_check(path: &str) -> CheckOutcome {
         Err(e) => {
             return CheckOutcome::Fatal {
                 text: e.to_string(),
+                message: e.message.clone(),
                 line: e.span.line,
                 col: e.span.col,
             };
@@ -737,12 +752,15 @@ fn report_check_errors(errs: &[checker::CheckError], json: bool) {
     }
 }
 
-/// Report a fatal lex/parse error, preserving the `--errors=json` contract (valid JSON on stdout).
-fn report_fatal(text: &str, line: usize, col: usize, json: bool) {
+/// Report a fatal resolve/lex/parse error, preserving the `--errors=json` contract (valid JSON on
+/// stdout). Plain text uses `text` (the full Display rendering, with the `resolve error (...)`
+/// prefix); JSON uses the clean `message` (no embedded Display prefix) so its shape matches
+/// type-error JSON — the `in module 'X':` attribution rides along inside `message`.
+fn report_fatal(text: &str, message: &str, line: usize, col: usize, json: bool) {
     if json {
         println!(
             "[{{\"line\":{line},\"col\":{col},\"message\":{}}}]",
-            json_string(text)
+            json_string(message)
         );
     } else {
         eprintln!("{text}");

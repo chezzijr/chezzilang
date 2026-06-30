@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Resolver diagnostic-quality fixes (diagnostic-only, 2026-06-30).** Two message/JSON fixes in the
+module resolver error path; the accept/reject set is unchanged (resolve errors fire before any engine
+runs, so two-engine parity is structurally untouched). **Bug 1 — missing-module / bare-`std` errors now
+name the importing module.** A bad `import` inside a NON-entry module (e.g. `deep.chz` imported by
+`main.chz`) previously printed `cannot find module 'x' (line N)` with no hint which file `line N` is in;
+now it carries the same `in module 'deep':` prefix the parse/type errors use (via the existing
+`prefix()` helper keyed on `on_stack.last()` = the importer). Entry-level imports stay unprefixed
+(matches type-error attribution). **Bug 2 — `check --errors=json` resolve-error shape now matches
+type-error JSON.** It previously emitted `{"message":"resolve error (line N, col M): ..."}` (the Display
+prefix doubled into the message, redundant with the `line`/`col` fields); now the JSON `message` is the
+clean body (with the Bug-1 `in module 'X':` attribution), while plain-text output keeps the
+`resolve error (...)` Display prefix byte-identical. Implemented by carrying a clean `message` field on
+`CheckOutcome::Fatal` alongside the rendered `text` (`src/main.rs`), JSON uses `message`, plain uses
+`text`. New tests: `resolver::{missing_module_in_imported_module_names_importer,
+bare_std_in_imported_module_names_importer}` + a negative entry-level guard on
+`missing_module_is_clean_error`, and integration `tests/check_errors_json.rs` (CLI JSON shape +
+plain-text via `env!("CARGO_BIN_EXE_chezzi")`).
+
 **✅ Qualified type as static-method receiver + two-level-path diagnostics (additive, 2026-06-29).**
 Two small ADDITIVE qualified-path improvements, break nothing.
 **Part 1 — `module.Type.static_method()` now works** for cross-module struct AND enum statics
