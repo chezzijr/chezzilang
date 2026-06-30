@@ -190,19 +190,20 @@ fn str_method(
                 {
                     Some(total) => {
                         // The byte-size guard passes huge-but-representable totals that
-                        // `str::repeat` would still abort on; `try_reserve_exact` makes that a
-                        // recoverable fault.
-                        let mut out = String::new();
-                        if out.try_reserve_exact(total).is_err() {
+                        // `str::repeat` would still abort on. Probe allocation feasibility with
+                        // `try_reserve_exact` (uninitialized capacity, freed immediately) so an
+                        // infeasible request is a recoverable fault, then fall through to the
+                        // optimized `str::repeat` — which also short-circuits to "" for an empty
+                        // receiver (`total == 0`) instead of looping `n` times.
+                        let mut probe = String::new();
+                        if probe.try_reserve_exact(total).is_err() {
                             return Err(RuntimeError {
                                 message: "string repeat capacity overflow".to_string(),
                                 span,
                             });
                         }
-                        for _ in 0..(n as usize) {
-                            out.push_str(s);
-                        }
-                        Ok(Value::Str(out.into()))
+                        drop(probe);
+                        Ok(Value::Str(s.repeat(n as usize).into()))
                     }
                     None => Err(RuntimeError {
                         message: "string repeat capacity overflow".to_string(),

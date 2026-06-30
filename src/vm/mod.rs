@@ -7832,19 +7832,21 @@ impl Vm {
                             {
                                 Some(total) => {
                                     // The byte-size guard passes huge-but-representable totals that
-                                    // `str::repeat` would still abort on; `try_reserve_exact` makes
-                                    // that a recoverable fault.
-                                    let mut out = String::new();
-                                    if out.try_reserve_exact(total).is_err() {
+                                    // `str::repeat` would still abort on. Probe allocation
+                                    // feasibility with `try_reserve_exact` (uninitialized capacity,
+                                    // freed immediately) so an infeasible request is a recoverable
+                                    // fault, then fall through to the optimized `str::repeat` — which
+                                    // also short-circuits to "" for an empty receiver (`total == 0`)
+                                    // instead of looping `n` times.
+                                    let mut probe = String::new();
+                                    if probe.try_reserve_exact(total).is_err() {
                                         return Err(self.err(
                                             "string repeat capacity overflow".to_string(),
                                             span,
                                         ));
                                     }
-                                    for _ in 0..(n as usize) {
-                                        out.push_str(&s);
-                                    }
-                                    Ok(self.alloc_str(out))
+                                    drop(probe);
+                                    Ok(self.alloc_str(s.repeat(n as usize)))
                                 }
                                 None => {
                                     Err(self
@@ -25912,6 +25914,18 @@ main()
         assert_eq!(vm.message, "string repeat capacity overflow");
         let it = crate::interp::run_capture(huge).expect_err("interp: huge repeat should fault");
         assert_eq!(it.message, "string repeat capacity overflow");
+
+        // Empty receiver with a huge count: `total == 0` passes BOTH the byte guard and
+        // `try_reserve_exact`, so the result must be "" produced INSTANTLY. A naive
+        // `for _ in 0..n { out.push_str("") }` fill would loop ~1e17 times (an uncatchable hang);
+        // `str::repeat` short-circuits the empty receiver. The `expect`/value assertion only
+        // returns if no hang occurred.
+        let empty_huge = r#"print("".repeat(100000000000000000))"#;
+        assert_eq!(run_capture(empty_huge).expect("vm"), "\n");
+        assert_eq!(
+            crate::interp::run_capture(empty_huge).expect("interp"),
+            "\n"
+        );
 
         // Sane repeats are unaffected and agree across engines.
         let ok = r#"print("ab".repeat(3))"#;
