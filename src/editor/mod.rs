@@ -1144,6 +1144,17 @@ mod tests {
     }
 
     #[test]
+    fn hover_refined_empty_decl_intervening_fn_shows_final_type() {
+        // PART B / correctness-0 regression: a fn decl BETWEEN the module-level `b := []` and its
+        // refining `b.push(0)` must NOT let the inner fn's check_fn_body finalize seam lock the hover
+        // to the still-unrefined List[Unknown]. Only the module seam (which owns b) resolves it — so
+        // the decl-site hover shows the FINAL List[int]. Was "List[?]" before the owning-scope gate.
+        let src = "b := []\nfn foo():\n print(\"x\")\nb.push(0)\nprint(b)\n";
+        let h = hov(src, 0, 0).expect("hover on module-level empty-list decl");
+        assert_eq!(h.display, "List[int]");
+    }
+
+    #[test]
     fn hover_match_variant_bind() {
         // The `n` binding inside a variant pattern `Col.Val(n)` reports the payload type.
         let src = "enum Col:\n    Val(int)\n\nc := Col.Val(3)\nmatch c:\n    Col.Val(n):\n        print(n)\n";

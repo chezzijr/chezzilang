@@ -1354,9 +1354,11 @@ struct Checker {
     empty_coll_sites: Vec<(usize, String, Span)>,
     /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
     /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
-    /// binding's `(name, kind, doc)` here INSTEAD of locking `hover_result`, then at end-of-scope
-    /// overwrite `hover_result` with the binding's FINAL (refined) type. Probe-gated; parity-neutral.
-    hover_pending: Option<(String, HoverKind, Option<String>)>,
+    /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at
+    /// the end-of-scope seam that OWNS the binding overwrite `hover_result` with the binding's FINAL
+    /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
+    /// can't resolve it prematurely to the still-unrefined type. Probe-gated; parity-neutral.
+    hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
 }
 
 impl Checker {
@@ -6915,8 +6917,16 @@ impl Checker {
         }
         if span.line == pl && span.col == pc {
             if contains_unknown_in_slot(ty) {
-                // defer: the binding may be refined later; resolve to its final type at end-of-scope.
-                self.hover_pending = Some((name.to_string(), kind, doc));
+                // defer: the binding may be refined later; resolve to its final type at the end-of-scope
+                // seam that OWNS it. Record that owning scope (reverse walk, like `repin`/`drop_empty_site`)
+                // so an intervening inner fn/method `check_fn_body` seam doesn't finalize it prematurely
+                // (correctness-0). Fall back to the innermost scope if the binding isn't declared yet
+                // (a decl-site hover recorded before `declare`) — at top level that is the module scope.
+                let owning = (0..self.scopes.len())
+                    .rev()
+                    .find(|&i| self.scopes[i].contains_key(name))
+                    .unwrap_or(self.scopes.len().saturating_sub(1));
+                self.hover_pending = Some((owning, name.to_string(), kind, doc));
             } else {
                 self.hover_result = Some((ty.clone(), kind, doc));
             }
@@ -6928,9 +6938,16 @@ impl Checker {
     /// the binding's FINAL (now-refined) type from its owning scope and commit it to `hover_result`.
     /// A no-op off the probe (`hover_pending` stays `None`).
     fn finalize_hover_pending(&mut self) {
-        if self.hover_result.is_none()
-            && let Some((name, kind, doc)) = self.hover_pending.take()
-        {
+        if self.hover_result.is_some() {
+            return; // a concrete hover already landed elsewhere
+        }
+        // Only resolve at the seam that OWNS the pending binding (the scope about to be popped). A
+        // pending binding owned by an ENCLOSING scope (`owning < idx`) is still refinable after this
+        // pop — leave it for that scope's own finalize, else an intervening inner fn/method seam would
+        // lock it to the still-unrefined `List[Unknown]` (correctness-0). Mirrors `finalize_empty_coll_sites`.
+        let idx = self.scopes.len().saturating_sub(1);
+        let owns_here = matches!(&self.hover_pending, Some((owning, ..)) if *owning >= idx);
+        if owns_here && let Some((_owning, name, kind, doc)) = self.hover_pending.take() {
             let ty = self.lookup(&name).unwrap_or(Ty::Unknown);
             self.hover_result = Some((ty, kind, doc));
         }
