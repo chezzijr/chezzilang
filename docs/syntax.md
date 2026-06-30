@@ -391,6 +391,21 @@ closure passed to a **generic** slot whose type parameter only *it* would pin (`
 for `fn store[T](x: T) -> T`) is likewise un-inferable → annotate (`fn(a: int): …`): the param is
 never silently left dynamic, so a later call can never trap.
 
+A type *annotation* also counts as expected-type context for source **(1)** when it surrounds a
+generic constructor or generic function call: a `let`-binding's declared type, a function's declared
+return type, and a call argument's declared parameter type each pin the called generic's type
+parameters, which in turn fix any closure params that depend on them. So
+`h: Heap[int] = Heap([], fn(x, y): x < y)` type-checks — the `Heap[int]` annotation pins `T=int`,
+which gives the comparator `x, y: int` — and likewise for `fn mk() -> Heap[int]: return Heap([], fn(x,
+y): x < y)` and `take(Heap([], fn(x, y): x < y))` where `take(h: Heap[int])`. The annotation only
+fills type params the *arguments* leave free, so an explicit turbofish or a concrete argument still
+wins over it (an argument that pins `T` differently from the annotation is the usual mismatch error).
+When the bound value is an `if`/`match` *expression*, the annotation reaches **every** branch
+(`h: Heap[int] = if rev: Heap([], fn(x, y): x > y) else: Heap([], fn(x, y): x < y)`), independent of
+branch order. The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
+literal* (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`) — annotate the closure params or use a
+turbofish there.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure
@@ -1049,8 +1064,9 @@ auto-flow** — even `newtype Box[T] = T` over a numeric `T` does not get `+`/`<
 come strictly from the newtype's own methods + protocol satisfaction (the scalar `UserId = int` /
 `Meters = float` numeric auto-flow above is unchanged). Construction infers the type args from the
 argument (`Stack([1, 2])` ⇒ `Stack[int]`); when an argument can't bind them (an empty `[]` can't
-pin `T`), supply them with a **turbofish**: `Stack[int]([])` (the same inference gap as
-`ConcurrentMap(RwShared({}))` — expected, not a bug). A cast-unwrap propagates the instantiation:
+pin `T`), an enclosing **annotation** (a `let`/return/parameter type) now pins them
+(`e: Stack[str] = Stack([])`), or supply them with a **turbofish**: `Stack[int]([])` (still needed
+where there is no annotation, e.g. a nested `ConcurrentMap(RwShared({}))` — expected, not a bug). A cast-unwrap propagates the instantiation:
 for `s: Stack[int]`, `List(s)` is `List[int]` (not bare `list`), and `int(b)` for `b: Box[int]`
 unwraps to `int`.
 
@@ -1066,7 +1082,7 @@ s := Stack([1, 2, 3])      # inferred Stack[int]
 print(s.size())            # 3
 t: Option[int] = s.top()   # method dispatch substitutes T -> int
 xs: List[int] = List(s)    # cast-unwrap propagates: List[int]
-e: Stack[str] = Stack[str]([])   # turbofish — the empty list can't bind T
+e: Stack[str] = Stack([])        # annotation pins T=str (the empty list can't); turbofish also works
 ```
 
 (Static / associated methods like `Type.method()` and typeclass-style associated requirements

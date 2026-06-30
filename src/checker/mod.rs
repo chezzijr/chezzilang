@@ -1278,6 +1278,17 @@ struct Checker {
     /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
     /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
     generic_arg_prepass: bool,
+    /// Expected-type HINT (checking-mode) for the OUTERMOST generic ctor / generic fn-call currently
+    /// being inferred — pure transport from the three annotation sites (a `let`-binding's declared
+    /// type, a `return`'s declared return type, a call argument's declared parameter type) into
+    /// [`Checker::infer_call`]. `infer_call` `take()`s it FIRST (before inferring any argument), so a
+    /// nested arg call sees `None` and the hint never leaks past the one call it was set for. Consumed
+    /// to pre-seed the type-param substitution (via `unify` against the ctor/call's declared return
+    /// SHAPE) AFTER arg-unification but BEFORE `report_uninferable_closure_params`, so it fills ONLY
+    /// the params the arguments left free — turbofish > args > annotation. This breaks the
+    /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
+    /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
+    expected_hint: Option<Ty>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
@@ -1353,6 +1364,7 @@ impl Checker {
             yield_ty: None,
             recover_depth: 0,
             generic_arg_prepass: false,
+            expected_hint: None,
             inferring_ret: false,
             collected_rets: Vec::new(),
             module_sigs: HashMap::new(),
@@ -3998,6 +4010,21 @@ impl Checker {
                             self.infer_value(value)
                         }
                     }
+                    // Expected-type checking-mode for a NON-closure value bound to an annotation:
+                    // thread the annotation as a hint into the value's inference so a generic
+                    // ctor / generic fn-call pre-seeds its type params from it — `a: Heap[int] =
+                    // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
+                    // params. A `ref` binding is excluded (its init was desugared to a `Ref(...)`
+                    // wrapper whose param is the pointee, not this annotation). `infer_call` clears
+                    // the hint, but pair the set with an immediate clear so a non-call value never
+                    // leaks it into the next statement.
+                    Some(t) if !is_ref && names.len() == 1 => {
+                        let expected = self.resolve_type(t, span);
+                        self.expected_hint = Some(expected);
+                        let vt = self.infer_value(value);
+                        self.expected_hint = None;
+                        vt
+                    }
                     _ => self.infer_value(value),
                 };
                 if names.len() > 1 {
@@ -4875,7 +4902,15 @@ impl Checker {
                 let ty = if matches!(e.kind, ExprKind::Closure { .. }) {
                     self.infer_arg(e, Some(&ret))
                 } else {
-                    self.infer(e)
+                    // Expected-type checking-mode: thread the declared return type as a hint so a
+                    // returned generic ctor / generic fn-call pre-seeds its type params from it —
+                    // `fn mk() -> Heap[int]: return Heap([], fn(x, y): x < y)` pins `T=int`. `unify`
+                    // no-ops on a `Nil` (void) ret, so setting it unconditionally is safe; pair with
+                    // an immediate clear so a non-call return value never leaks the hint.
+                    self.expected_hint = Some(ret.clone());
+                    let t = self.infer(e);
+                    self.expected_hint = None;
+                    t
                 };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
@@ -6370,6 +6405,11 @@ impl Checker {
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
     /// types into one result. Exhaustiveness is still enforced.
     fn infer_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchExprArm]) -> Ty {
+        // Capture + clear the expected-type hint before the scrutinee/guards (the hint is for the
+        // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
+        // is equally the value, and `infer_call` drains the single take()-once slot, so without
+        // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
+        let hint = self.expected_hint.take();
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
@@ -6390,24 +6430,35 @@ impl Checker {
                 self.expect_bool(guard, "match guard");
             }
             has_wildcard |= irref && arm.guard.is_none();
+            self.expected_hint = hint.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
             self.restore_refinable(snap);
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
+        self.expected_hint = None;
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
         result.unwrap_or(Ty::Unknown)
     }
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
     fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
+        // Capture + clear the expected-type hint before the condition: the hint is for the branch
+        // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
+        // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
+        // re-installing it the second-inferred branch would lose the hint and a generic ctor there
+        // would deadlock (acceptance would depend on branch order).
+        let hint = self.expected_hint.take();
         self.expect_bool(cond, "if condition");
         // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
         // conditionally — refinement inside one must not leak into the other or past the `if`.
         let snap = self.snapshot_refinable();
+        self.expected_hint = hint.clone();
         let t_then = self.infer(then);
         self.restore_refinable(snap.clone());
+        self.expected_hint = hint;
         let t_els = self.infer(els);
+        self.expected_hint = None;
         self.restore_refinable(snap);
         let acc = self.unify_branch(None, t_then, then.span);
         self.unify_branch(Some(acc), t_els, els.span)
@@ -8196,6 +8247,12 @@ impl Checker {
         type_args: &[Type],
         span: Span,
     ) -> Ty {
+        // Consume the expected-type hint FIRST (before any argument is inferred): it belongs to THIS
+        // call only. `take()` clears the slot so a nested arg call (inferred later inside the ctor/call
+        // dispatchers) sees `None` — the hint never leaks past the outermost call it was set for. It is
+        // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
+        let expected = self.expected_hint.take();
+        let expected = expected.as_ref();
         // `print(..., sep=, end=)` is the only call whose named args survive desugar. Type-check the
         // `sep`/`end` value(s) as `str` here (desugar already validated the key names). Any other
         // call should have an empty `named` post-desugar.
@@ -8238,7 +8295,8 @@ impl Checker {
                 && let Some(info) = sig.struct_defs.get(name)
             {
                 let key = self.type_key(&mid, name);
-                return self.infer_qualified_struct_call(info, name, &key, args, &targs, span);
+                return self
+                    .infer_qualified_struct_call(info, name, &key, args, &targs, span, expected);
             }
             // `module.NewType(args)` — qualified newtype constructor: one arg of the underlying
             // type, returns the newtype keyed to the declaring module (mirrors the bare newtype
@@ -8252,7 +8310,8 @@ impl Checker {
                 let key = self.type_key(&mid, name);
                 let under = info.underlying.clone();
                 let tps = info.type_params.clone();
-                return self.infer_newtype_call(name, &key, &under, &tps, args, &targs, span);
+                return self
+                    .infer_newtype_call(name, &key, &under, &tps, args, &targs, span, expected);
             }
             // `module.Enum.Variant(args)` — qualified payload-variant constructor.
             if let ExprKind::Field {
@@ -8290,7 +8349,8 @@ impl Checker {
                     // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
                     // genuine clash), matching the layout tables + the declaring module's signatures.
                     vi.enum_name = self.type_key(&mid, ename);
-                    return self.infer_variant_call(&vi, name, args, &targs, *name_span, span);
+                    return self
+                        .infer_variant_call(&vi, name, args, &targs, *name_span, span, expected);
                 }
                 // Not a variant — a QUALIFIED enum STATIC method `module.Enum.method(args)`. Mirror the
                 // bare enum-static path: variant-first ran above (a variant always wins, disjointness
@@ -8372,9 +8432,15 @@ impl Checker {
                         );
                         return Ty::Unknown;
                     }
-                    if let Some(ty) =
-                        self.infer_named_call(name, args, &targs, *name_span, span, Some(&ekey))
-                    {
+                    if let Some(ty) = self.infer_named_call(
+                        name,
+                        args,
+                        &targs,
+                        *name_span,
+                        span,
+                        Some(&ekey),
+                        expected,
+                    ) {
                         return ty;
                     }
                 } else {
@@ -8452,7 +8518,8 @@ impl Checker {
                             format!("variant '{name}' of '{tname}' takes no method type arguments"),
                         );
                     }
-                    return self.infer_variant_call(&v, name, args, &resolved, *name_span, span);
+                    return self
+                        .infer_variant_call(&v, name, args, &resolved, *name_span, span, expected);
                 }
                 // `targs` is the member-level (method) turbofish — `Box[int].make[str](x)` arrives here
                 // as a Field callee under the broadened steal, with the enclosing `[int]` in `resolved`
@@ -8482,7 +8549,7 @@ impl Checker {
                     "Shared" | "RwShared" | "Atomic" | "Executor" | "timer"
                 ) {
                     return self
-                        .infer_named_call(name, args, &targs, *name_span, span, None)
+                        .infer_named_call(name, args, &targs, *name_span, span, None, expected)
                         .unwrap_or(Ty::Unknown);
                 }
                 // A type-only native name (Socket/Listener/FFI width/ptr) — no from-nothing ctor.
@@ -8547,7 +8614,9 @@ impl Checker {
                         span,
                         format!("variant '{name}' of '{tname}' takes no method type arguments"),
                     );
-                    return self.infer_variant_call(&v, name, args, &enclosing, *name_span, span);
+                    return self.infer_variant_call(
+                        &v, name, args, &enclosing, *name_span, span, expected,
+                    );
                 }
                 return self.infer_static_call(
                     &key,
@@ -8590,7 +8659,8 @@ impl Checker {
                     };
                     self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
-                if let Some(ty) = self.infer_named_call(name, args, &targs, callee.span, span, None)
+                if let Some(ty) =
+                    self.infer_named_call(name, args, &targs, callee.span, span, None, expected)
                 {
                     return ty;
                 }
@@ -8821,6 +8891,7 @@ impl Checker {
     /// Handles both non-generic and generic enums (type args from explicit `[T]` or inferred from the
     /// payload). Shared by the qualified-call fast path and reachable only once the `(enum, variant)`
     /// pair is known.
+    #[allow(clippy::too_many_arguments)] // variant shape + call args + span + expected-type hint
     fn infer_variant_call(
         &mut self,
         v: &VariantInfo,
@@ -8829,6 +8900,7 @@ impl Checker {
         targs: &[Ty],
         name_span: Span,
         span: Span,
+        hint: Option<&Ty>,
     ) -> Ty {
         let tps = self
             .enum_type_params
@@ -8866,6 +8938,14 @@ impl Checker {
             unify(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
+        // Expected-type checking-mode: an annotation (`let`/return/param `Enum[int]`) seeds any type
+        // param the args left FREE — unify the declared enum SHAPE (Param-bearing) against the hint
+        // AFTER arg-unification, so turbofish/args win and the seed only breaks a genuine deadlock.
+        seed_from_hint(
+            hint,
+            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &mut sub,
+        );
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
@@ -8884,6 +8964,7 @@ impl Checker {
     /// (`key`, bare in the common case, `<dotted>::Name` on a genuine cross-module clash) so the value
     /// resolves its fields/methods against the right module's layout — and so it unifies with the
     /// declaring module's own signatures (which carry the same key).
+    #[allow(clippy::too_many_arguments)] // struct shape + call args + span + expected-type hint
     fn infer_qualified_struct_call(
         &mut self,
         info: &StructInfo,
@@ -8892,6 +8973,7 @@ impl Checker {
         args: &[Expr],
         targs: &[Ty],
         span: Span,
+        hint: Option<&Ty>,
     ) -> Ty {
         let tps = info.type_params.clone();
         let field_tys: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
@@ -8912,6 +8994,14 @@ impl Checker {
             unify(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
+        // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds any type
+        // param the args left FREE, BEFORE the deadlock probe — so the annotation breaks the
+        // `Heap([], fn(a, b): a < b)` deadlock (it pins `T`, which then pins the closure params).
+        seed_from_hint(
+            hint,
+            &Ty::Struct(key.to_string(), param_shape(&tps)),
+            &mut sub,
+        );
         // Same un-inferable closure-param deadlock guard as the bare struct-ctor / free-fn paths
         // (`Heap([], fn(a, b): a < b)` via a module-qualified ctor): report the cause and bind the
         // params to Unknown BEFORE the per-arg closure body is checked, so it doesn't leak a
@@ -8946,6 +9036,7 @@ impl Checker {
         args: &[Expr],
         targs: &[Ty],
         span: Span,
+        hint: Option<&Ty>,
     ) -> Ty {
         if tps.is_empty() {
             if !targs.is_empty() {
@@ -8963,6 +9054,13 @@ impl Checker {
             unify(underlying, actual, &mut sub);
         }
         self.recover_iter_elems(tps, &mut sub, span);
+        // Expected-type checking-mode: a `let`/return/param annotation (`Stack[int]`) seeds any type
+        // param the single arg left FREE (e.g. `Stack[int] = Stack([])`).
+        seed_from_hint(
+            hint,
+            &Ty::NewType(key.to_string(), param_shape(tps)),
+            &mut sub,
+        );
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
@@ -9058,6 +9156,7 @@ impl Checker {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // call name/args/targs/spans + enum-qual + expected-type hint
     fn infer_named_call(
         &mut self,
         name: &str,
@@ -9066,6 +9165,7 @@ impl Checker {
         name_span: Span,
         span: Span,
         enum_qual: Option<&str>,
+        hint: Option<&Ty>,
     ) -> Option<Ty> {
         // Qualified `Enum.Variant(args)`: resolve strictly within the named enum, bypassing the bare
         // dispatch below — so a variant named like a built-in (`enum E: Ok(int)`) or a struct can't be
@@ -9075,7 +9175,7 @@ impl Checker {
                 .variants
                 .get(&(en.to_string(), name.to_string()))
                 .cloned()?;
-            return Some(self.infer_variant_call(&v, name, args, targs, name_span, span));
+            return Some(self.infer_variant_call(&v, name, args, targs, name_span, span, hint));
         }
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
@@ -9550,7 +9650,7 @@ impl Checker {
                         .cloned()
                         .unwrap_or_default();
                     return Some(
-                        self.infer_newtype_call(name, &key, &under, &tps, args, targs, span),
+                        self.infer_newtype_call(name, &key, &under, &tps, args, targs, span, hint),
                     );
                 }
                 // Struct constructor? Only a BARE-resolvable struct (`struct_names`): a locally
@@ -9583,6 +9683,11 @@ impl Checker {
                         unify(decl, actual, &mut sub);
                     }
                     self.recover_iter_elems(&tps, &mut sub, span);
+                    // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
+                    // any type param the args left FREE, BEFORE the deadlock probe — so the annotation
+                    // breaks the `Heap([], fn(a, b): a < b)` deadlock (it pins `T`, which in turn pins
+                    // the comparator's closure params via the per-arg checking-mode re-infer below).
+                    seed_from_hint(hint, &Ty::Struct(key.clone(), param_shape(&tps)), &mut sub);
                     // Detect the un-inferable closure-param deadlock (e.g. `Heap([], fn(a,b): a<b)`)
                     // BEFORE the per-arg check, so it reports the cause instead of leaking a
                     // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
@@ -9620,7 +9725,7 @@ impl Checker {
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
-                        return Some(self.infer_generic_call(name, &sig, args, targs, span));
+                        return Some(self.infer_generic_call(name, &sig, args, targs, span, hint));
                     }
                     // Float params are coerced at the callee's prologue (compile_fn / extern).
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
@@ -9768,7 +9873,9 @@ impl Checker {
                     // A generic module function (`cmp.max`): infer its type parameters from the
                     // arguments, enforce bounds, and substitute into the return type.
                     if !fsig.type_params.is_empty() {
-                        return self.infer_generic_call(method, &fsig, args, &[], span);
+                        // A module-qualified generic fn call (`m.f(...)`) does not thread the
+                        // expected-type hint (only the 3 primary annotation sites do); pass None.
+                        return self.infer_generic_call(method, &fsig, args, &[], span, None);
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for
@@ -10627,10 +10734,21 @@ impl Checker {
     /// the ordinary bottom-up [`Checker::infer_value`]. The single seam every `fn`-typed slot routes
     /// through, so closure-detection lives in one place.
     fn infer_arg(&mut self, arg: &Expr, expected: Option<&Ty>) -> Ty {
-        if let ExprKind::Closure { params, ret, body } = &arg.kind
-            && matches!(expected, Some(Ty::Func { .. }))
-        {
-            return self.infer_closure(params, ret.as_ref(), body, expected);
+        if let ExprKind::Closure { params, ret, body } = &arg.kind {
+            if matches!(expected, Some(Ty::Func { .. })) {
+                return self.infer_closure(params, ret.as_ref(), body, expected);
+            }
+            return self.infer_value(arg);
+        }
+        // Non-closure arg: thread the declared parameter type as an expected-type hint so a generic
+        // ctor / generic fn-call passed directly as a call argument pre-seeds its type params —
+        // `take(Heap([], fn(x, y): x < y))` with `fn take(h: Heap[int])` pins `T=int`. `infer_call`
+        // consumes the hint; pair set+clear so a non-call arg never leaks it into a sibling arg.
+        if let Some(e) = expected {
+            self.expected_hint = Some(e.clone());
+            let t = self.infer_value(arg);
+            self.expected_hint = None;
+            return t;
         }
         self.infer_value(arg)
     }
@@ -12527,6 +12645,7 @@ impl Checker {
         args: &[Expr],
         targs: &[Ty],
         span: Span,
+        hint: Option<&Ty>,
     ) -> Ty {
         if args.len() != sig.params.len() {
             self.check_arity(name, sig.params.len(), args, span);
@@ -12545,6 +12664,11 @@ impl Checker {
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
         self.recover_index_args(&sig.type_params, &mut subst_map, span);
+        // Expected-type checking-mode: a `let`/return/param annotation seeds any type param the args
+        // left FREE by unifying the declared RETURN type (already `Ty::Param`-bearing) against the
+        // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
+        // sees it bound. After arg-unification ⇒ turbofish/args win.
+        seed_from_hint(hint, &sig.ret, &mut subst_map);
         // Same un-inferable closure-param deadlock guard as the struct-ctor path: report the cause
         // (and bind the params to Unknown) before the per-arg closure body is checked.
         self.report_uninferable_closure_params(
@@ -13686,6 +13810,24 @@ fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
 
 /// Bind type parameters in `decl` to the corresponding concrete `actual` types (first binding wins;
 /// `Unknown` actuals are ignored so an un-inferable argument doesn't pin a param).
+/// The `Ty::Param` vector for a list of type parameters — the type-arg slots of a generic type's
+/// declared SHAPE (`Struct(key, [Param(T), …])`). Used to build the expected-type-hint unify target.
+fn param_shape(tps: &[TypeParam]) -> Vec<Ty> {
+    tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect()
+}
+
+/// Pre-seed a generic ctor/call's type-param substitution `sub` from an expected-type `hint` (a
+/// `let`/return/parameter annotation). `shape` is the ctor/call's declared return type in terms of its
+/// OWN params (e.g. `Struct(key, [Param(T)])`, or a generic fn's `sig.ret`). Unify is a no-op on a
+/// key/shape mismatch and only binds a param still FREE in `sub`, so this runs AFTER arg-unification
+/// to give precedence turbofish > args > annotation — it fills only the params the arguments left
+/// unbound (the genuine deadlock, e.g. `Heap([], fn(x, y): x < y)` annotated `Heap[int]`).
+fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<String, Ty>) {
+    if let Some(e) = hint {
+        unify(shape, e, sub);
+    }
+}
+
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {
@@ -15428,5 +15570,174 @@ mod graph_tests {
             !errs.iter().any(|m| m.contains("two-level")),
             "should not emit two-level hint for a real typo: {errs:?}"
         );
+    }
+
+    // ===== expected-type-hint inference: an ANNOTATION pins a generic ctor/fn-call's type params =====
+    // (a self-contained Heap clone — fields `data: List[T]`, `less: fn(T,T)->bool` — exercises the
+    // module-prefixed-key check_graph path, decoupled from the std.collections path.)
+    const HEAP_MOD: &str = "struct H[T]:\n    data: List[T]\n    less: fn(T, T) -> bool\n\n    fn len(self) -> int:\n        return self.data.len()\n";
+
+    #[test]
+    fn annotation_pins_generic_ctor_let() {
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let entry = t.write(
+            "main.chz",
+            "import H from a\nfn main():\n    h: H[int] = H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "annotation should pin H[int] T=int: {:?}",
+            errors(&entry)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_return() {
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let entry = t.write(
+            "main.chz",
+            "import H from a\nfn mk() -> H[int]:\n    return H([], fn(x, y): x < y)\nfn main():\n    print(mk().len())\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "declared return H[int] should pin T=int: {:?}",
+            errors(&entry)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_call_arg() {
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let entry = t.write(
+            "main.chz",
+            "import H from a\nfn take(h: H[int]): print(h.len())\nfn main():\n    take(H([], fn(x, y): x < y))\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "param type H[int] should pin T=int: {:?}",
+            errors(&entry)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_qualified_generic_ctor() {
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let entry = t.write(
+            "main.chz",
+            "import a\nfn main():\n    h: a.H[int] = a.H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&entry).is_ok(),
+            "qualified ctor annotation should pin T=int: {:?}",
+            errors(&entry)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_free_fn_return() {
+        let t = TmpDir::new();
+        t.write("a.chz", "fn empty[T]() -> List[T]:\n    return []\n");
+        let entry = t.write(
+            "main.chz",
+            "import empty from a\nfn main():\n    xs: List[int] = empty()\n    print(xs.len())\n",
+        );
+        let errs = errors_or_empty(&entry);
+        assert!(
+            errs.is_empty(),
+            "annotation should pin empty()'s T=int: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|m| m.contains("cannot assign List[T] to")),
+            "stale leaked-Param error: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_does_not_override_explicit_or_args() {
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        // (a) turbofish, no annotation — still works.
+        let tf = t.write(
+            "tf.chz",
+            "import H from a\nfn main():\n    h := H[int]([], fn(x: int, y: int): x < y)\n    print(h.len())\n",
+        );
+        assert!(check_entry(&tf).is_ok(), "turbofish: {:?}", errors(&tf));
+        // (b) annotated closure params, no annotation — still works.
+        let ann = t.write(
+            "ann.chz",
+            "import H from a\nfn main():\n    h := H([], fn(x: int, y: int): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&ann).is_ok(),
+            "annotated closure params: {:?}",
+            errors(&ann)
+        );
+        // (c) args win over annotation: a concrete int element vs an H[str] annotation is STILL a
+        // type error (the seed only fills params left FREE by args; it must not override a pinned T).
+        let bad = t.write(
+            "bad.chz",
+            "import H from a\nfn main():\n    h: H[str] = H([1], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&bad).is_err(),
+            "args-pinned int vs H[str] annotation must still error"
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_in_if_else_branches() {
+        // An if-else in value position is itself the bound value; BOTH branches are the tail
+        // value, so each must receive the expected-type hint. The hint is a take()-once slot, so
+        // without re-installing it per branch the SECOND-inferred branch starves and a generic
+        // ctor there deadlocks on `T` — making acceptance depend purely on branch order.
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let e1 = t.write(
+            "e1.chz",
+            "import H from a\nfn main():\n    r := true\n    h: H[int] = if r: H([], fn(x, y): x > y) else: H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e1).is_ok(),
+            "if-else both branches: {:?}",
+            errors(&e1)
+        );
+        // Swapping the branches must behave identically (no order dependence).
+        let e2 = t.write(
+            "e2.chz",
+            "import H from a\nfn main():\n    r := true\n    h: H[int] = if r: H([], fn(x, y): x < y) else: H([], fn(x, y): x > y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e2).is_ok(),
+            "if-else swapped branches: {:?}",
+            errors(&e2)
+        );
+    }
+
+    #[test]
+    fn annotation_pins_generic_ctor_in_match_arms() {
+        // Same per-branch hint requirement for an expression-`match` value: every arm body is a
+        // tail value and must see the hint, not just the first-inferred arm.
+        let t = TmpDir::new();
+        t.write("a.chz", HEAP_MOD);
+        let e = t.write(
+            "m.chz",
+            "import H from a\nfn main():\n    k := 1\n    h: H[int] = match k:\n        0: H([], fn(x, y): x > y)\n        _: H([], fn(x, y): x < y)\n    print(h.len())\n",
+        );
+        assert!(
+            check_entry(&e).is_ok(),
+            "match arms both pinned: {:?}",
+            errors(&e)
+        );
+    }
+
+    fn errors_or_empty(entry: &Path) -> Vec<String> {
+        match check_entry(entry) {
+            Ok(()) => Vec::new(),
+            Err(es) => es.into_iter().map(|e| e.message).collect(),
+        }
     }
 }
