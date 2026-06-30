@@ -392,6 +392,11 @@ pub struct Field {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub name: String,
+    /// Source span of the variant-NAME token. Diagnostic-only (the editor records a decl-site hover
+    /// here showing the variant's ctor signature); runtime-inert and parity-neutral — never read by
+    /// desugar/compiler/vm/interp, exactly like `Field.name_span` / `FnDecl.name_span`. Synthesized
+    /// variants (none today) should use `Span::default()`.
+    pub name_span: Span,
     pub payload: Vec<Type>,
 }
 

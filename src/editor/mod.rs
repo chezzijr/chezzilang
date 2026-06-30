@@ -1517,6 +1517,36 @@ mod tests {
     }
 
     #[test]
+    fn hover_enum_variant_decl_name() {
+        // Hovering the variant-name `Val` AT ITS DECLARATION (line 2, col 4) reports the variant's
+        // ctor signature, matching the use-site hover (`fn(int) -> Col`).
+        let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
+        let h = hov(src, 2, 4).expect("hover on enum-variant decl name");
+        assert_eq!(h.display, "fn(int) -> Col");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_generic_enum_variant_decl_name() {
+        // LATCH/shape guard: a generic enum's variant decl preserves the enum's `Ty::Param` shape —
+        // `Full(T)` Displays "fn(T) -> Box[T]" (T not `?`/Unknown). `Full` token starts at line 1 col 4.
+        let src = "enum Box[T]:\n    Full(T)\n    Empty\nx := Box[int].Full(3)\n";
+        let h = hov(src, 1, 4).expect("hover on generic enum-variant decl name");
+        assert_eq!(h.display, "fn(T) -> Box[T]");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_nullary_enum_variant_decl_name() {
+        // A no-payload variant decl `Red` (line 1, col 4) Displays "fn() -> Col" — the nullary
+        // convention locked by hover_enum_variant_callee.
+        let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
+        let h = hov(src, 1, 4).expect("hover on nullary enum-variant decl name");
+        assert_eq!(h.display, "fn() -> Col");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
     fn hover_enum_variant_receiver() {
         // Hovering the receiver `Col` of `Col.Val(3)` reports the enum type.
         let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
