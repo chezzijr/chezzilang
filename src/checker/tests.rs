@@ -9651,6 +9651,67 @@ fn empty_push_then_read_no_false_error() {
     ok("fn main():\n out := []\n out.push(1)\n print(out)\nmain()");
 }
 
+// false-positive matrix #2 — a binding constrained by a CONCRETE value flowing into it (NOT just the
+// two refine-on-first-use gates: push/add/insert/extend + index-assign) must NOT be flagged. These
+// were rejected by the original impl (drop_empty_site wired only into the two refine gates).
+
+#[test]
+fn empty_then_plain_reassign_concrete_ok() {
+    // `b := []` then a whole-binding reassignment `b = [1, 2, 3]` determines the element type → no
+    // annotation required (the binding IS constrained).
+    ok("fn main():\n b := []\n b = [1, 2, 3]\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_compound_assign_concrete_ok() {
+    // `b := []` then `b += [1, 2, 3]` (compound list-extend) constrains the element type.
+    ok("fn main():\n b := []\n b += [1, 2, 3]\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_tuple_assign_concrete_ok() {
+    // tuple-assignment `a, b = [1], [2]` constrains both bindings (recurses into the Ident arm).
+    ok("fn main():\n a := []\n b := []\n a, b = [1], [2]\n print(a)\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_then_reassign_from_call_ok() {
+    // `result := []` then `result = compute()` where `compute() -> List[int]` constrains it.
+    ok(
+        "fn compute() -> List[int]:\n return [1, 2]\nfn main():\n result := []\n result = compute()\n print(result)\nmain()",
+    );
+}
+
+#[test]
+fn empty_binding_into_typed_param_ok() {
+    // the spec's typed-parameter false-positive guard, one binding away: `f(b)` where the param is
+    // `List[int]` constrains `b` (the direct-literal form `f([])` is covered separately above).
+    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n b := []\n f(b)\nmain()");
+}
+
+#[test]
+fn empty_then_conditional_reassign_ok() {
+    // 'declare empty, fill in a branch' idiom — the reassignment lives in an inner block but
+    // constrains the fn-scope binding.
+    ok("fn main():\n out := []\n if true:\n  out = [\"x\"]\n print(out)\nmain()");
+}
+
+#[test]
+fn empty_binding_into_typed_return_ok() {
+    // the typed-return false-positive guard, one binding away: `b := []` then `return b` where the
+    // return type is `List[int]` constrains `b` (the direct-literal form `return []` is covered above).
+    ok("fn g() -> List[int]:\n b := []\n return b\nfn main():\n print(g().len())\nmain()");
+}
+
+#[test]
+fn empty_then_reassign_still_empty_rejected() {
+    // GUARD: reassigning ANOTHER empty literal does NOT constrain — still no element type → error.
+    rejects(
+        "fn main():\n b := []\n b = []\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----

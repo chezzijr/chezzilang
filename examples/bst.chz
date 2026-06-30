@@ -73,7 +73,7 @@ fn main():
     for v in [5, 3, 8, 1, 4, 7, 9, 2, 6]:
         root = insert(root, v)
 
-    walk: List[int] = []
+    walk := []
     inorder(root, walk)
     print("inorder: " + join_ints(walk))
     print("height: {height(root)}")

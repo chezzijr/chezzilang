@@ -1825,12 +1825,17 @@ with `compare`), stable, in place.
 > against that pinned type. So `out := []; out.push(1)` is `List[int]` and a later `out.push("s")` is a
 > type error (it would read as `List[int]`). A **heterogeneous / protocol** collection therefore needs
 > an explicit annotation — `shapes: List[Shape] = []` — which is also clearer to readers.
-> A **never-constrained** empty — one that no later op ever pins (e.g. `b := []` that is only *read*:
-> `print(b)`, `b.len()`, passed by value, returned) — is a **static error**: `cannot infer element type
+> A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
+> *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
 > of empty collection; add a type annotation`. Annotate it (`b: List[int] = []`, `m: Map[str,int] = {}`,
-> `s: Set[int] = Set()`) or pin it with a turbofish constructor (`List[int]()`). A typed *sink* counts as
-> the annotation: the literal flowing into a typed binding, a typed function parameter (`f([])` where the
-> param is `List[int]`), or a typed `return` leaves no un-inferred slot, so those never error. The
+> `s: Set[int] = Set()`) or pin it with a turbofish constructor (`List[int]()`). Besides the mutating
+> first-use ops above, a binding is also **constrained** (so it does *not* error) when a concrete-typed
+> value flows into it: a whole-binding reassignment / compound-assign / tuple-assignment (`b = [1, 2]`,
+> `b += [1]`, `a, b = [1], [2]`), or passing/returning it into a concrete collection sink — a typed
+> binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
+> direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
+> those never error. (Reassigning *another* empty — `b = []` — does not constrain it; the requirement
+> stands.) The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
 > like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
 > **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the

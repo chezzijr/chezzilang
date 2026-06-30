@@ -4858,6 +4858,17 @@ impl Checker {
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
+                // PART A: a whole-binding (re)assignment / compound-assign / tuple-assign element that
+                // supplies a CONCRETE-typed value into an unrefined empty-collection binding constrains
+                // its element type — clear the pending annotation requirement (the binding IS
+                // constrained, just not through the two refine-on-first-use mutator gates). Gated on the
+                // value being fully concrete (`!contains_unknown_in_slot`) so reassigning ANOTHER empty
+                // literal (`b = []`, still `List[Unknown]`) does NOT drop the requirement. No re-pin —
+                // the binding's stored type is intentionally left permissive (behavior-preserving;
+                // matches base, which never narrowed on plain `=`).
+                if !contains_unknown_in_slot(&val_ty) {
+                    self.drop_empty_site(name);
+                }
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
@@ -5127,6 +5138,14 @@ impl Checker {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, true) {
                     self.error(e.span, format!("expected return type {ret}, found {ty}"));
+                } else if let ExprKind::Ident(name) = &e.kind
+                    && !contains_unknown_in_slot(&ret)
+                {
+                    // PART A: returning a bare empty-collection binding into a CONCRETE collection
+                    // return type constrains its element type (the typed-return false-positive guard,
+                    // one binding away from the direct-literal `return []`). Drop its pending
+                    // annotation requirement.
+                    self.drop_empty_site(name);
                 }
             }
             None => {
@@ -11313,6 +11332,18 @@ impl Checker {
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_arg(arg, params.get(i));
+            // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
+            // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
+            // requirement (the spec's typed-parameter false-positive guard, one binding away from the
+            // direct-literal `f([])` form). Gated on the param being a fully-concrete type so an
+            // un-inferred / generic slot does not spuriously satisfy the requirement.
+            if let Some(pt) = params.get(i)
+                && !contains_unknown_in_slot(pt)
+                && self.assignable_w(pt, &at, widen)
+                && let ExprKind::Ident(name) = &arg.kind
+            {
+                self.drop_empty_site(name);
+            }
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)
             {
