@@ -241,6 +241,22 @@ regressions intact). Validated end-to-end against the worktree-built `chezzi-lsp
 nvim client speaks): hovering `Heap` (import line + `Heap[int]` head) and `List` in `xs: List[int]` all return the
 doc. **Reinstall the LSP** (`cargo install --path . --features lsp --bin chezzi-lsp`) to pick it up.
 
+**✅ Editor tooling — hover on the import-line token for native/reserved TYPE imports (2026-06-30).**
+`import Shared from std.concurrency` (and `RwShared`/`Atomic`/`Executor`, `import Socket/Listener from
+std.net`, `import ptr`/width-types from std.ffi) showed "No information available" when hovering the
+imported NAME on the import line — those per-name branches license the type via the per-module sets and
+short-circuit BEFORE the user-struct import arm that records a hover. New
+`record_native_type_import_hover` records that token hover with the type's `builtin_type_doc` blurb (else
+a `(from <module>)` fallback) and its resolved native `Ty` for display. The bare/annotation use already
+worked (the `Type::Named`/`Type::Generic` hover arms read `builtin_type_doc`); this fills the import-line
+gap. `import timer from std.time` is handled too — `timer` is a reserved FUNCTION (`timer(ms) ->
+Channel[bool]`), so it records a function-style hover (not the type path). Imported MODULE FUNCTIONS
+(`from std.rand import randint`) and VALUES already recorded an import-line hover (their signature/type;
+doc only where `MODULE_FN_DOCS` covers the module — std.math/io/os today). Probe-gated/editor-only →
+parity-neutral, goldens byte-identical. Tests: `editor::tests::hover_native_type_import_shows_doc`,
+`hover_timer_import_shows_func_doc`. **Minor remaining gap:** a USER type-ALIAS imported by name
+(`from M import Len` where `type Len = …`) records no import-line hover yet.
+
 **✅ Editor tooling — hover Markdown escapes bare bracketed type refs (2026-06-30).** The LSP renders
 the hover doc body as Markdown, so a bare type reference in a doc-comment (`Heap[T]`, `List[T]()`,
 `xs[i]`) was being eaten as link syntax (`[text]` / `[text](url)` — `List[T]()` is literally an

@@ -1845,6 +1845,25 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_time.insert(member.clone());
+                                // Editor hover: `timer` is a reserved FUNCTION (`timer(ms) ->
+                                // Channel[bool]`), not a type — record a function-style import-line
+                                // hover (probe-gated no-op off the probe).
+                                if self.hover_probe.is_some() {
+                                    let fty = Ty::Func {
+                                        params: vec![Ty::Int],
+                                        ret: Box::new(Ty::channel(Ty::Bool)),
+                                    };
+                                    self.hover_record_at(
+                                        *name_span,
+                                        &fty,
+                                        HoverKind::Func,
+                                        Some(
+                                            "one-shot timeout channel — timer(ms) delivers `true` \
+                                             once after ms milliseconds (import std.time)"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
                             }
                         } else if matches!(
                             member.as_str(),
@@ -1865,6 +1884,7 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_concurrency.insert(member.clone());
+                                self.record_native_type_import_hover(member, *name_span, path);
                             }
                         } else if crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
                             || member == "ptr"
@@ -1886,6 +1906,7 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_ffi_types.insert(member.clone());
+                                self.record_native_type_import_hover(member, *name_span, path);
                             }
                         } else if matches!(member.as_str(), "Socket" | "Listener") {
                             // A selective `import Socket from std.net` licenses just the named TCP
@@ -1905,6 +1926,7 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_net.insert(member.clone());
+                                self.record_native_type_import_hover(member, *name_span, path);
                             }
                         } else if let Some(info) = sig.struct_defs.get(member) {
                             // A user struct imported by name: inject its resolved shape under the
@@ -6757,6 +6779,26 @@ impl Checker {
             .unwrap_or_else(|| format!("{kind_word} (from {})", path.join(".")));
         self.name_docs.insert(bind.to_string(), doc.clone());
         self.hover_record_at(name_span, ty, HoverKind::Type, Some(doc));
+    }
+
+    /// Editor hover for a per-name import of a native/reserved TYPE (`import Shared from
+    /// std.concurrency`, `import Socket from std.net`, `import ptr from std.ffi`, …). These branches
+    /// license the name via the per-module sets and short-circuit BEFORE the user-struct import arm
+    /// that records a hover, so the import-line token would otherwise show nothing. Records that
+    /// token hover with the type's `builtin_type_doc` blurb (else a `(from <module>)` fallback) and
+    /// its resolved native `Ty` for display. Probe-gated no-op off the hover probe; unlike a user
+    /// `.chz` type NO `name_docs` seeding is needed — the bare/annotation use already resolves its
+    /// doc through `builtin_type_doc` in the `Type::Named`/`Type::Generic` hover arms.
+    fn record_native_type_import_hover(&mut self, member: &str, name_span: Span, path: &[String]) {
+        if self.hover_probe.is_none() {
+            return;
+        }
+        let ty = self
+            .qualified_builtin_ty(member, &[])
+            .unwrap_or(Ty::Unknown);
+        let doc = builtin_type_doc(member)
+            .unwrap_or_else(|| format!("{member} (from {})", path.join(".")));
+        self.hover_record_at(name_span, &ty, HoverKind::Type, Some(doc));
     }
 
     /// Hover-record a LEAF expression (identifier / literal) or a field-name access. Non-leaf kinds

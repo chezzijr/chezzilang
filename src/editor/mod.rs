@@ -1223,6 +1223,38 @@ mod tests {
     }
 
     #[test]
+    fn hover_native_type_import_shows_doc() {
+        // A per-name import of a native/reserved TYPE (`import Shared from std.concurrency`) must
+        // show its builtin blurb on the IMPORT-LINE token — not "No information available". `Shared`
+        // is at line0 col7. (The annotation use `Shared[int]` already worked via builtin_type_doc.)
+        let src = "import Shared from std.concurrency\nfn main():\n    s: Shared[int] = Shared(0)\n    print(s.get())\n";
+        let h = hov(src, 0, 7).expect("hover on native-type import token");
+        assert!(h.display.contains("Shared"), "display: {:?}", h.display);
+        assert!(
+            h.doc
+                .as_deref()
+                .is_some_and(|d| d.contains("cross-task shared cell")),
+            "import-line hover should carry the Shared blurb, got: {:?}",
+            h.doc
+        );
+    }
+
+    #[test]
+    fn hover_timer_import_shows_func_doc() {
+        // `timer` is a reserved FUNCTION (`timer(ms) -> Channel[bool]`); its import-line token
+        // (`import timer from std.time`, `timer` at line0 col7) shows a function-style hover.
+        let src = "import timer from std.time\nfn main():\n    t := timer(10)\n    print(1)\n";
+        let h = hov(src, 0, 7).expect("hover on timer import token");
+        assert!(
+            h.doc
+                .as_deref()
+                .is_some_and(|d| d.contains("one-shot timeout channel")),
+            "timer import should carry its blurb, got: {:?}",
+            h.doc
+        );
+    }
+
+    #[test]
     fn hover_generic_param_shadowing_decl_no_doc_leak() {
         // A type param that SHADOWS a documented same-named top-level decl resolves to Ty::Param —
         // an unrelated entity — so its annotation-token hover must NOT borrow the decl's docstring
