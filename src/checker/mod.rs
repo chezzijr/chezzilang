@@ -3698,7 +3698,19 @@ impl Checker {
                 // the Tier-A decl-name hover already covers the decl site). `builtin_type_doc` stays
                 // FIRST so a builtin name is never shadowed by a same-named `name_docs` entry.
                 if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    let doc = builtin_type_doc(n).or_else(|| self.name_docs.get(n).cloned());
+                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
+                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
+                    // the param is an unrelated entity and must not borrow that decl's docstring
+                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
+                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
+                    // is a no-op at the head site.
+                    let doc = builtin_type_doc(n).or_else(|| {
+                        if matches!(resolved, Ty::Param(_)) {
+                            None
+                        } else {
+                            self.name_docs.get(n).cloned()
+                        }
+                    });
                     self.hover_record_at(*name_span, &resolved, HoverKind::Type, doc);
                 }
                 resolved
@@ -3915,7 +3927,19 @@ impl Checker {
                 // so off-probe checks pay nothing; gated `!generic_arg_prepass` so the generic-arg
                 // unification prepass can't first-hit-wins latch an incomplete type.
                 if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    let doc = builtin_type_doc(n).or_else(|| self.name_docs.get(n).cloned());
+                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
+                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
+                    // the param is an unrelated entity and must not borrow that decl's docstring
+                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
+                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
+                    // is a no-op at the head site.
+                    let doc = builtin_type_doc(n).or_else(|| {
+                        if matches!(resolved, Ty::Param(_)) {
+                            None
+                        } else {
+                            self.name_docs.get(n).cloned()
+                        }
+                    });
                     self.hover_record_at(*head_span, &resolved, HoverKind::Type, doc);
                 }
                 resolved

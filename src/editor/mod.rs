@@ -1223,6 +1223,21 @@ mod tests {
     }
 
     #[test]
+    fn hover_generic_param_shadowing_decl_no_doc_leak() {
+        // A type param that SHADOWS a documented same-named top-level decl resolves to Ty::Param —
+        // an unrelated entity — so its annotation-token hover must NOT borrow the decl's docstring
+        // (the name_docs fallback is keyed by bare name). `v: Item` is at line3 col20; the param
+        // `Item` shadows the documented `struct Item`.
+        let src = "# an item\nstruct Item:\n    x: int\nfn process[Item](v: Item) -> Item:\n    return v\nprint(1)\n";
+        let h = hov(src, 3, 20).expect("hover on shadowing param type token");
+        assert_eq!(h.display, "Item");
+        assert_eq!(
+            h.doc, None,
+            "type param must not show the shadowed struct's doc"
+        );
+    }
+
+    #[test]
     fn hover_type_kind_is_type() {
         // A type-annotation hover is classified `HoverKind::Type`.
         let h = hov("x: int = 5\nprint(x)\n", 0, 3).expect("hover on let annotation type token");
