@@ -1859,10 +1859,15 @@ fn inferred_pure_mutual_recursion_stays_permissive() {
 #[test]
 fn non_recursive_unknown_return_not_falsely_rejected() {
     // Regression: a NON-recursive un-annotated fn whose return infers `Unknown` for a reason
-    // unrelated to recursion (here `x[0]` of an empty list literal → element type `Unknown`) must
-    // NOT be rejected by the recursive-return inference — that empty-collection case is the sibling
-    // producer's domain. Accepted on base; the fixpoint change must not regress it.
-    ok("fn f():\n    x := []\n    return x[0]\nprint(\"ok\")\n");
+    // unrelated to recursion must NOT be rejected by the recursive-return inference. PART A now
+    // requires the empty `x := []` to be annotated, so the annotated form drives this: `x[0]` is a
+    // concrete `int`, the return infers `int`, and the recursive-return fixpoint must not regress.
+    ok("fn f():\n    x: List[int] = []\n    return x[0]\nprint(\"ok\")\n");
+    // The un-annotated empty itself is the sibling producer's domain — it is now its own error.
+    rejects(
+        "fn f():\n    x := []\n    return x[0]\nf()\n",
+        "empty collection",
+    );
 }
 
 #[test]
@@ -9569,6 +9574,83 @@ fn pinned_hint_preserved_for_bound_generic_param() {
     );
 }
 
+// ---- PART A: a never-constrained empty collection requires an annotation ----
+
+#[test]
+fn unconstrained_empty_list_rejected() {
+    // `b := []` whose element type is NEVER inferred (only read) is now a static error.
+    rejects(
+        "fn main():\n b := []\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_map_rejected() {
+    rejects(
+        "fn main():\n b := {}\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_set_rejected() {
+    rejects(
+        "fn main():\n b := Set()\n print(b)\nmain()",
+        "empty collection",
+    );
+}
+
+#[test]
+fn unconstrained_empty_at_module_level_rejected() {
+    // top-level script binding, never constrained → error (caught at the module seam).
+    rejects("b := []\nprint(b)\n", "empty collection");
+}
+
+// false-positive matrix: a typed sink unifies the Unknown away → NO error.
+
+#[test]
+fn typed_annotation_empty_list_ok() {
+    ok("fn main():\n b: List[int] = []\n print(b)\nmain()");
+}
+
+#[test]
+fn typed_annotation_empty_map_ok() {
+    ok("fn main():\n m: Map[str, int] = {}\n print(m)\nmain()");
+}
+
+#[test]
+fn typed_annotation_empty_set_ok() {
+    ok("fn main():\n s: Set[int] = Set()\n print(s)\nmain()");
+}
+
+#[test]
+fn typed_param_empty_arg_ok() {
+    // `f([])` where the param is List[int] — the literal flows into a typed sink, no local site.
+    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n f([])\nmain()");
+}
+
+#[test]
+fn typed_return_empty_ok() {
+    ok("fn g() -> List[int]:\n return []\nfn main():\n print(g().len())\nmain()");
+}
+
+#[test]
+fn turbofish_empty_ctor_ok() {
+    ok("fn main():\n b := List[int]()\n print(b)\nmain()");
+}
+
+#[test]
+fn turbofish_empty_ctor_from_list_ok() {
+    ok("fn main():\n b := List[int]([])\n print(b)\nmain()");
+}
+
+#[test]
+fn empty_push_then_read_no_false_error() {
+    // refine-on-first-use constrains the binding → no annotation required.
+    ok("fn main():\n out := []\n out.push(1)\n print(out)\nmain()");
+}
+
 // ---- step 4: PERSISTENT refine-on-first-use — the first use pins the element/key/value type
 // for the binding's whole scope, even across sibling STATEMENT branches/arms. Building a
 // heterogeneous collection split across branches is now a type error, exactly like `[1, "s"]`. ----
@@ -9700,8 +9782,16 @@ fn expr_arm_pin_independence_ok() {
 // ---- step 6: invariants — never-refined empties, homogeneous builds, residual hole ----
 
 #[test]
-fn never_refined_empty_ok() {
-    ok("fn main():\n empty := {}\n print(empty)\n xs := []\n print(xs)\nmain()");
+fn never_refined_empty_needs_annotation() {
+    // PART A: a never-constrained empty (only read, never refined) now requires an annotation —
+    // un-annotated it errors, and the annotated form is the escape hatch.
+    rejects(
+        "fn main():\n empty := {}\n print(empty)\nmain()",
+        "empty collection",
+    );
+    ok(
+        "fn main():\n empty: Map[str, int] = {}\n print(empty)\n xs: List[int] = []\n print(xs)\nmain()",
+    );
 }
 
 #[test]
@@ -10464,7 +10554,7 @@ fn lowercase_containers_rejected() {
 #[test]
 fn pascal_ctor_calls() {
     ok(
-        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d := Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
+        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d: Set[int] = Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
     );
 }
 

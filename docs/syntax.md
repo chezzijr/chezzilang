@@ -127,7 +127,9 @@ char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), n
 **turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
 zero-arg forms produce an empty container whose type is refined from the expected type or first use
 (e.g. `xs: List[int] = List()`, then `xs.push(1)`) — exactly the inference that already served `Set()`
-and the `[]` / `{}` literals. (The `[]` / `{}` literals remain the idiomatic empty forms; the
+and the `[]` / `{}` literals. (As with those literals, a bare `List()`/`Map()`/`Set()` that is *never*
+pinned — neither annotated nor constrained by a later op — is a static error requiring an annotation;
+see "Empty-collection element typing" below.) (The `[]` / `{}` literals remain the idiomatic empty forms; the
 constructors are there for when a literal is awkward, e.g. binding a type parameter.) A turbofish with
 an iterable argument checks the elements against the type arg: `List[int]([1, 2])` is fine,
 `List[int](["a"])` is a static error. `Map(it)`'s element must be **exactly a 2-tuple** `(K, V)` — a
@@ -1822,7 +1824,13 @@ with `compare`), stable, in place.
 > `.insert`/`.extend`, or `m[k]=v` — **pins** the element/key/value type, and later ops are checked
 > against that pinned type. So `out := []; out.push(1)` is `List[int]` and a later `out.push("s")` is a
 > type error (it would read as `List[int]`). A **heterogeneous / protocol** collection therefore needs
-> an explicit annotation — `shapes: List[Shape] = []` — which is also clearer to readers. The
+> an explicit annotation — `shapes: List[Shape] = []` — which is also clearer to readers.
+> A **never-constrained** empty — one that no later op ever pins (e.g. `b := []` that is only *read*:
+> `print(b)`, `b.len()`, passed by value, returned) — is a **static error**: `cannot infer element type
+> of empty collection; add a type annotation`. Annotate it (`b: List[int] = []`, `m: Map[str,int] = {}`,
+> `s: Set[int] = Set()`) or pin it with a turbofish constructor (`List[int]()`). A typed *sink* counts as
+> the annotation: the literal flowing into a typed binding, a typed function parameter (`f([])` where the
+> param is `List[int]`), or a typed `return` leaves no un-inferred slot, so those never error. The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
 > like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
 > **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the

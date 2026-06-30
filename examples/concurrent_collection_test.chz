@@ -45,7 +45,7 @@ test fn map_snapshot():
     m := collection.ConcurrentMap(RwShared({}))
     m.set("x", 10)
     m.set("y", 20)
-    snap := m.snapshot()
+    snap: Map[str, int] = m.snapshot()
     assert snap.len() == 2
     assert snap["x"] == 10
     # mutating the original after the snapshot does not change the copy

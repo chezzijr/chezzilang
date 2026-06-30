@@ -146,7 +146,7 @@ fn index_faults():
 
 fn truthy():
     print("-- truthiness --")
-    xs := []
+    xs: List[int] = []
     if xs.len() > 0:
         print("nonempty")
     else:

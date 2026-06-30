@@ -1331,6 +1331,36 @@ conflict_in_second_arm,stmt_match_arm_conflict,loop_body_pin_then_post_loop_conf
 zero_trip_loop_over_approximation}_rejects`, `expr_arm_pin_independence_ok`; must-stay-green
 `refine_inside_block_on_outer_list_ok` etc. All 2444 tests + conformance + clippy clean.
 
+**✅ Soundness + tooling — un-constrained empty collection now errors (PART A) + retroactive hover for a
+refined empty (PART B)** (`auto-task/empty-coll-infer`, checker-only, VM==interp parity-neutral). Two
+related improvements to empty-collection element-type inference, sharing one end-of-scope finalize seam.
+**PART A:** a bare `b := []`/`{}`/`Set()` whose element/key/value slot is NEVER inferred (only read —
+`print(b)`, `b.len()`, passed by value, returned) used to type-check silently as `List[Unknown]`; it is
+now a static error `cannot infer element type of empty collection; add a type annotation`. Mechanism: the
+let-handler's un-annotated branch records a pending site `(owning_scope_idx, name, decl_span)` in
+`empty_coll_sites` when the declared type is an empty literal shape (`is_unrefined_empty_coll` — a
+List/Set/Map whose DIRECT slot is bare `Unknown`; `[[]]`=`List[List[Unknown]]` is NOT empty and excluded,
+as are `None`/nullary-variant `Unknown`-in-slot producers), gated `!inferring_ret` so return-inference
+passes don't double-record. A later constraining op clears it: `drop_empty_site(name)` at the two refine
+gates (`refine_receiver`/`refine_index_receiver`, before their speculative-error truncate-returns, so an
+erroring mutator arg like `xs.push(undefined)` still drops the site and its exactly-one-error tests stay
+green). `finalize_empty_coll_sites` runs before `pop_scope` at the fn-body + module seams and errors on
+any still-unrefined site owned by the popping scope. **False-positive guards fall out structurally:** a
+typed sink (annotation `b: List[int] = []`, typed param `f([])`, typed `return []`, turbofish
+`List[int]()`) leaves no `Unknown`-in-slot or binds no local → never recorded. Scope coverage is fn-body
++ module (an empty declared inside an if/for/match body that pops before the seam is a documented
+residual, matching the refine machinery's block-local limits). **PART B:** retroactive hover — when the
+probe lands on an occurrence of a binding whose recorded type still carries `Unknown`-in-slot,
+`hover_record_binding` does NOT lock `hover_result`; it stashes `(name, kind, doc)` in `hover_pending`,
+and `finalize_hover_pending` (same seam) overwrites `hover_result` with the binding's FINAL refined type
+via `lookup`. So hovering the `b := []` decl (or any use before `b.push(0)`) now shows `List[int]`, not
+`List[Unknown]`. Entirely `hover_probe`-gated → parity-neutral by construction. Tests: `checker::tests`
+`unconstrained_empty_{list,map,set,at_module_level}_rejected` + full typed-sink ok matrix
+(`typed_annotation_*`, `typed_param_empty_arg_ok`, `typed_return_empty_ok`, `turbofish_empty_ctor*`,
+`empty_push_then_read_no_false_error`); `editor::tests::hover_refined_empty_{decl,pre_use}_shows_final_type`.
+Annotated the 4 shipped examples that relied on the old permissiveness (`bst.chz`, `edge_cases.chz`,
+`map.chz`, `concurrent_collection_test.chz`). All tests + conformance + clippy clean.
+
 **✅ Soundness fix — empty-collection / nullary-variant / `None` `Ty::Unknown` slot is now closed via
 FULL refine-on-first-use + insertion-site Hashable check + (originally BLOCK-LOCAL, now PERSISTENT —
 see the entry above) flow-sensitivity (the
