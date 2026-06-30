@@ -1762,6 +1762,39 @@ mod tests {
     }
 
     #[test]
+    fn hover_free_fn_decl_name() {
+        // Hovering the free-function name at its definition reports the function signature (no `self`
+        // to strip for a free fn), matching the call-site hover. `foo` token starts at col 3.
+        let h = hov("fn foo(bar: int) -> int:\n    return bar\n", 0, 3)
+            .expect("hover on free fn decl name");
+        assert_eq!(h.display, "fn(int) -> int");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
+    fn hover_free_fn_decl_name_shows_doc() {
+        // The fn-name token surfaces the decl's doc-comment (unlike a param, which has none).
+        let h = hov(
+            "# doubles it\nfn foo(bar: int) -> int:\n    return bar\n",
+            1,
+            3,
+        )
+        .expect("hover on free fn decl name with doc");
+        assert_eq!(h.display, "fn(int) -> int");
+        assert_eq!(h.doc.as_deref(), Some("doubles it"));
+    }
+
+    #[test]
+    fn hover_generic_free_fn_decl_name() {
+        // LATCH guard: the generic-arg prepass must NOT latch a `?`/Unknown at the fn name; the
+        // generic sig Displays its type params. `pick` token starts at col 3.
+        let h = hov("fn pick[T](a: T, b: T) -> T:\n    return a\n", 0, 3)
+            .expect("hover on generic free fn decl name");
+        assert_eq!(h.display, "fn(T, T) -> T");
+        assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    #[test]
     fn hover_import_module() {
         let h = hov("import std.math\n", 0, 11).expect("hover on import module name");
         assert_eq!(h.display, "module math");
