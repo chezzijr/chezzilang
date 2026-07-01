@@ -11,6 +11,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
+universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old
+gate error *"built-ins and constructors must be wrapped in a function"* is gone for these names), and
+they can be bound / passed like any function (`f := ord; f("a")`, HOF arg). Scope is **exactly** those
+four — `len` stays method-only (`xs.len()`), and **type / container / runtime constructors** (`int`,
+`str`, `List`, `Map`, `Channel`, `range`, …) plus user struct/enum ctors remain **non-first-class**
+(still wrapped, uniform with `f := Point`). A new dedicated runtime value variant carries them:
+`Obj::Builtin(Box<str>)` (VM) / `Value::Builtin(Rc<str>)` (interp) — pure-code, **SENDABLE** (crosses
+the spawn airlock by cloning the name; `SnapValue::Builtin`). Checker: `is_firstclass_builtin_fn`
+whitelist relaxes the `defer` gate + gives `infer_ident` a `Ty::Func` (from `builtin_sig`) in value
+position; `is_reserved_name` still bans `fn print` (no shadow loophole). Compiler emits `Op::LoadBuiltin`
+**only** for value-position uses — DIRECT calls (`print(x)`, `ord(c)`) are intercepted before the value
+fallthrough and keep their specialized `CallPrint`/`CallPrintSep`/`CallBuiltin` opcodes, so the hot path
++ benches are untouched (no bench run needed). VM/interp `invoke_value`/`call_value` route the value by
+name into the SAME logic direct calls use: `print` → space-join + trailing `\n` (value form is
+**default `sep=" "`/`end="\n"` only** — `sep=`/`end=` stay direct-call-only via `CallPrintSep`); `ord`/`chr`
+→ `builtin_ord`/`builtin_chr`; `panic` → the recoverable `RuntimeError` (`Err`, never `Ok`) so defers
+still unwind through a `panic()` value. Two-engine (three-engine incl. M:N) parity is byte-identical.
+Golden `examples/defer_builtin_value.chz` (+ `.expected`) exercises all three behaviors on VM ==
+`.expected` == interp == M:N; unit tests: rewrote `defer_builtin_rejected` → `defer_builtin_accepted`,
+kept `defer_constructor_rejected`, added `defer_type_rejected` / `type_name_not_firstclass_value` /
+`firstclass_builtin_fn_value_position` / `panic_as_value_uncaught_raises_both_engines` /
+`ord_chr_as_value_both_engines`. Docs: `docs/syntax.md` §`defer` (first-class list + value-form
+sep/end limit). **What's next:** unchanged — M19 perf Tier-1 (method-call IC, `run_until` trim,
+`Op::Call` specialization).
+
 **✅ Resolver — deep-import-chain host-crash backstop (pre-JIT audit, 2026-07-01).** A pathological
 *acyclic* linear import chain (~8-10k modules deep) recursed the resolver's DFS `Builder::visit`
 (`src/resolver/mod.rs`) with no depth limit → host **stack overflow / SIGABRT** (`check` exited 134;

@@ -1560,8 +1560,14 @@ for path in paths:
 ```
 
 `defer` targets a **method call** or a call to a **first-class callable value** (a function or
-closure, or a name bound to one). Built-ins (`print`, `range`, …) and constructors aren't first-class
-values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`. `defer` composes with
+closure, or a name bound to one). The four **universe builtin functions** `print`, `ord`, `chr`, and
+`panic` are first-class values, so `defer print("done")` (etc.) works directly — and they can be
+bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
+constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
+are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
+Note: the value form of `print` always uses the defaults **`sep=" "`, `end="\n"`** — the `sep=`/`end=`
+named arguments are available **only on the direct-call form** `print(a, b, sep=",")`, not on a
+`print` bound to a name. `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's

@@ -3030,6 +3030,15 @@ impl Compiler {
             );
             return;
         }
+        // A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) used in VALUE position
+        // (`f := ord`, HOF arg, bare `defer print(...)`) — emit a dedicated `LoadBuiltin` that pushes
+        // an `Obj::Builtin` handle. DIRECT calls never reach here: `compile_call` intercepts `print`
+        // and `is_builtin(name)` before the generic value fallthrough, so `print(x)`/`ord(c)` keep
+        // their specialized `CallPrint`/`CallBuiltin` opcodes (no hot-path change).
+        if crate::checker::is_firstclass_builtin_fn(name) {
+            fc.emit(Op::LoadBuiltin(name.to_string()), span);
+            return;
+        }
         self.emit_load(fc, name, span);
     }
 

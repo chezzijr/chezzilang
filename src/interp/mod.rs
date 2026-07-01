@@ -245,6 +245,9 @@ fn deep_clone(v: &Value) -> Value {
         | Value::Func(_, _)
         | Value::Closure(_)
         | Value::Native(_)
+        // A first-class builtin fn is pure code identified by name — sendable, so clone the `Rc`
+        // (like `Str`), never deep-copied. Crosses the airlock by value.
+        | Value::Builtin(_)
         // An extern C fn passes by handle (clone the `Arc`) — a callable entry point, not data.
         | Value::Cffi(_)
         | Value::Module(_)
@@ -664,6 +667,13 @@ impl Interp {
                         variant: name.as_str().into(),
                         payload: Vec::new(),
                     });
+                }
+                // A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) read in value
+                // position resolves to a `Value::Builtin` before the env miss — the runtime twin of
+                // the checker's `infer_ident` first-class arm. A user binding can never shadow it
+                // (`is_reserved_name` bans `fn print`), so this ordering is safe.
+                if crate::checker::is_firstclass_builtin_fn(name) {
+                    return Ok(Value::Builtin(name.as_str().into()));
                 }
                 self.env.get(name).ok_or_else(|| RuntimeError {
                     message: format!("undefined name '{name}'"),
@@ -1871,6 +1881,31 @@ impl Interp {
             Value::Closure(clo) => self.call_closure(&clo, args, span),
             Value::Native(e) => self.call_native(e.func, args, span),
             Value::Cffi(c) => self.call_cffi(&c, args, span),
+            // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route back into
+            // the SAME logic direct calls use. `print` replicates `eval_call`'s special-case with the
+            // value-form defaults (sep=" ", end="\n"; sep=/end= are direct-call-only). `panic` must
+            // return `Err` (not the pure `builtins::call`, which returns `Ok`) so defers still unwind.
+            // `ord`/`chr` go through the pure `builtins::call` table (matches the fallthrough).
+            Value::Builtin(name) => match name.as_ref() {
+                "print" => {
+                    let mut parts = Vec::with_capacity(args.len());
+                    for v in &args {
+                        parts.push(self.stringify(v, span, 0)?);
+                    }
+                    self.out.push_str(&parts.join(" "));
+                    self.out.push('\n');
+                    Ok(Value::Nil)
+                }
+                "panic" => {
+                    let message = match args.first() {
+                        Some(Value::Str(s)) => s.to_string(),
+                        Some(other) => other.type_name().to_string(),
+                        None => String::new(),
+                    };
+                    Err(RuntimeError { message, span })
+                }
+                _ => builtins::call(&name, args, span),
+            },
             other => Err(RuntimeError {
                 message: format!("'{}' is not callable", other.type_name()),
                 span,
@@ -9317,6 +9352,19 @@ b := Buf([10, 20, 30])
         let expected = include_str!("../../examples/range_step.expected");
         assert_eq!(
             run_capture(source).expect("range_step.chz should run"),
+            expected
+        );
+    }
+
+    /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
+    /// as a bare first-class call, plus value-position use (`f := ord`/`chr`, `p := panic`). The
+    /// interpreter must match `.expected` byte-for-byte (VM + M:N parity asserted on the VM side).
+    #[test]
+    fn golden_defer_builtin_value_chz() {
+        let source = include_str!("../../examples/defer_builtin_value.chz");
+        let expected = include_str!("../../examples/defer_builtin_value.expected");
+        assert_eq!(
+            run_capture(source).expect("defer_builtin_value.chz should run"),
             expected
         );
     }

@@ -5288,12 +5288,13 @@ fn defer_non_call_rejected() {
 }
 
 #[test]
-fn defer_builtin_rejected() {
-    // Built-ins are not first-class values — they must be wrapped in a function.
-    rejects(
-        "fn w():\n    defer print(\"x\")\n",
-        "built-ins and constructors must be wrapped",
-    );
+fn defer_builtin_accepted() {
+    // The universe builtin FUNCTIONS print/ord/chr/panic are first-class values now — a bare
+    // `defer print(...)` (etc.) is accepted (no wrapping needed).
+    ok("fn w():\n    defer print(\"x\")\n");
+    ok("fn w():\n    defer ord(\"a\")\n");
+    ok("fn w():\n    defer chr(65)\n");
+    ok("fn w():\n    defer panic(\"boom\")\n");
 }
 
 #[test]
@@ -5302,6 +5303,29 @@ fn defer_constructor_rejected() {
         "struct P:\n    x: int\nfn w():\n    defer P(1)\n",
         "built-ins and constructors must be wrapped",
     );
+}
+
+#[test]
+fn defer_type_rejected() {
+    // A reserved TYPE/ctor builtin (not one of the first-class fns) is still NOT first-class in
+    // defer position — must be wrapped.
+    rejects(
+        "fn w():\n    defer int(1)\n",
+        "built-ins and constructors must be wrapped",
+    );
+}
+
+#[test]
+fn firstclass_builtin_fn_value_position() {
+    // The 4 universe fns type-check in value position (bound to a name, used as a HOF arg).
+    ok("fn w():\n    f := ord\n    print(f(\"a\"))\n");
+    ok("fn w():\n    p := panic\n    p(\"boom\")\n");
+}
+
+#[test]
+fn type_name_not_firstclass_value() {
+    // A reserved TYPE/ctor name is still NOT a first-class value (`f := List` fails).
+    rejects("fn w():\n    f := List\n", "List");
 }
 
 #[test]

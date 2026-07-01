@@ -238,6 +238,12 @@ pub enum Obj {
         name: Box<str>,
         func: crate::native::NativeFn,
     },
+    /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by name.
+    /// Produced by `Op::LoadBuiltin` when the name is used in value position; calling it (via
+    /// `invoke_value`) routes back into the same builtin logic direct calls use. A GC LEAF (holds
+    /// only a name `Box<str>`, no `GcRef`s), like `Native`. SENDABLE (pure code) — crosses the airlock
+    /// by cloning the name. The interp twin is `Value::Builtin`.
+    Builtin(Box<str>),
     /// A dynamic C-ABI FFI function (`extern "lib":`). Wraps the `dlopen`'d library + resolved
     /// symbol + marshalling signature behind an `Arc` (so it is `Send` for `--parallel` and shared
     /// by the M:N snapshot path without re-`dlopen`). Holds no `GcRef`s, so it has no GC children.
@@ -419,6 +425,8 @@ impl Heap {
             }
             Obj::Module { slots, .. } => slots.iter().for_each(&mut push),
             Obj::Native { .. } => {}
+            // A GC leaf: holds only a name, no embedded `GcRef`s (like `Native`).
+            Obj::Builtin(_) => {}
             Obj::Cffi(_) => {}
             Obj::Ptr(_) => {}
             // B3.1: the core lives in an `Arc` outside this heap and holds `WireValue`s, but those

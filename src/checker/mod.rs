@@ -205,6 +205,15 @@ fn is_reserved_name(name: &str) -> bool {
     RESERVED_CALLABLE.contains(&name)
 }
 
+/// The universe builtin FUNCTIONS that are FIRST-CLASS values (bindable, passable, `defer`-able as a
+/// bare call). Unlike type/container/runtime constructors (`int`/`List`/`Channel`/…) and user
+/// struct/enum ctors — which stay non-first-class and must be wrapped in a function — these carry a
+/// dedicated runtime value (`Value::Builtin`/`Obj::Builtin`). Direct calls still lower to their
+/// specialized opcodes; only value-position uses take the first-class path.
+pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
+    matches!(name, "print" | "ord" | "chr" | "panic")
+}
+
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
 /// [`prebuilt_protocols`]).
 fn is_reserved_protocol(name: &str) -> bool {
@@ -4674,7 +4683,8 @@ impl Checker {
                         ExprKind::Field { .. } => {} // method call
                         ExprKind::Ident(name)
                             if self.lookup(name).is_none()
-                                && !self.functions.contains_key(name) =>
+                                && !self.functions.contains_key(name)
+                                && !is_firstclass_builtin_fn(name) =>
                         {
                             self.error(
                                 e.span,
@@ -7269,6 +7279,18 @@ impl Checker {
             return Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+            };
+        }
+        // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
+        // `defer print(...)`): its type is the `Ty::Func` derived from `builtin_sig` (the same
+        // canonical shape used for hover). Only the four first-class fns — type/ctor names fall
+        // through to the "unknown/not first-class" arms below (uniform with `f := Point`).
+        if is_firstclass_builtin_fn(name)
+            && let Some(sig) = builtin_sig(name)
+        {
+            return Ty::Func {
+                params: sig.params,
+                ret: Box::new(sig.ret),
             };
         }
         if name == "None" {

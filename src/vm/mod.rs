@@ -1091,6 +1091,9 @@ enum SnapValue {
         name: Box<str>,
         func: crate::native::NativeFn,
     },
+    /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
+    /// only the name; replayed as a fresh `Obj::Builtin`.
+    Builtin(Box<str>),
     /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
     /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
     Cffi(Arc<crate::native::cffi::Cffi>),
@@ -4103,6 +4106,10 @@ impl Vm {
                 argc,
             } => self.do_static_call(type_key, method, *argc, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
+            Op::LoadBuiltin(name) => {
+                let h = self.heap.alloc(Obj::Builtin(name.as_str().into()));
+                self.push(Value::Obj(h));
+            }
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
             Op::Return => self.do_return(false)?,
@@ -6042,6 +6049,7 @@ impl Vm {
                         func: crate::native::NativeFn,
                         name: Box<str>,
                     },
+                    Builtin(Box<str>),
                     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
                     NotCallable,
                 }
@@ -6058,6 +6066,7 @@ impl Vm {
                         func: *func,
                         name: name.clone(),
                     },
+                    Obj::Builtin(name) => Callee::Builtin(name.clone()),
                     Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
                     _ => Callee::NotCallable,
                 };
@@ -6093,6 +6102,36 @@ impl Vm {
                         self.run_proto(proto, home, Some(h), args, true, false, span)
                     }
                     Callee::Native { func, name } => self.invoke_native(func, &name, args, span),
+                    // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
+                    // back into the SAME logic direct calls use. `print` replicates `do_print`'s
+                    // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
+                    // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
+                    // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
+                    Callee::Builtin(name) => match name.as_ref() {
+                        "print" => {
+                            let mut parts = Vec::with_capacity(args.len());
+                            for v in &args {
+                                parts.push(self.stringify(*v, span, 0)?);
+                            }
+                            self.out.push_str(&parts.join(" "));
+                            self.out.push('\n');
+                            Ok(Value::Nil)
+                        }
+                        "ord" => self.builtin_ord(&args, span),
+                        "chr" => self.builtin_chr(&args, span),
+                        "panic" => {
+                            let message = match args.first() {
+                                Some(Value::Obj(h)) => match self.heap.get(*h) {
+                                    Obj::Str(s) => s.to_string(),
+                                    _ => self.type_name(args[0]).to_string(),
+                                },
+                                Some(other) => self.type_name(*other).to_string(),
+                                None => String::new(),
+                            };
+                            Err(self.err(message, span))
+                        }
+                        _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
+                    },
                     Callee::Cffi(cffi) => {
                         // Arity is checker-guaranteed, but guard defensively (a hand-built program
                         // could bypass the checker) so a wrong arg count never indexes out of bounds.
@@ -10294,6 +10333,9 @@ impl Vm {
                 | Obj::Closure { .. }
                 | Obj::Module { .. }
                 | Obj::Native { .. }
+                // A first-class builtin fn crosses as the existing handle (same-heap channel send),
+                // exactly like `Native`; the spawn airlock takes the `SnapValue::Builtin` path.
+                | Obj::Builtin(_)
                 // A Cffi handle crosses as the existing handle — same shared heap (B3.0); under the
                 // M:N engine the worker shares the parent address space, so the symbol stays valid.
                 | Obj::Cffi(_) => WireValue::Handle(h),
@@ -10983,6 +11025,9 @@ impl Vm {
                 }
             },
             Obj::Native { name, func } => SnapValue::Native { name, func },
+            // A first-class builtin fn is pure code — SENDABLE. Carry the name; the worker re-allocs
+            // a fresh `Obj::Builtin` on replay (like `Native`, but with no fn pointer to share).
+            Obj::Builtin(name) => SnapValue::Builtin(name),
             // A Cffi shares its `Arc` to the worker (which shares the parent address space): the
             // worker re-allocs `Obj::Cffi` from the SAME Arc — no re-dlopen, no symbol re-resolution.
             Obj::Cffi(c) => SnapValue::Cffi(Arc::clone(&c)),
@@ -11188,6 +11233,8 @@ impl Vm {
                 name: name.clone(),
                 func: *func,
             })),
+            // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
+            SnapValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name.clone()))),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => Value::Obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
@@ -14400,6 +14447,7 @@ impl Vm {
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
+                Obj::Builtin(_) => "function",
                 Obj::Cffi(_) => "function",
                 Obj::Ptr(_) => "ptr",
                 Obj::Channel(_) => "Channel",
@@ -14532,6 +14580,7 @@ impl Vm {
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module { name, .. } => Ok(format!("<module {name}>")),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+                Obj::Builtin(name) => Ok(format!("<builtin fn {name}>")),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
                 // A raw address is non-deterministic (differs per run/engine), so never render it —
                 // that would break two-engine parity if a `ptr` is printed. Only null vs live (a
@@ -14968,6 +15017,9 @@ impl Vm {
             }
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
+            }
+            Obj::Builtin(name) => {
+                let _ = write!(out, "<builtin fn {name}>");
             }
             Obj::Cffi(c) => {
                 let _ = write!(out, "<extern fn {}>", c.name());
@@ -23637,6 +23689,42 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let expected = include_str!("../../examples/print_kwargs.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
+    /// as a bare first-class call, plus value-position use (`f := ord`/`chr`, `p := panic` raising
+    /// through the value call path). Byte-identical on the cooperative VM, the M:N OS-thread engine,
+    /// the interpreter, and `.expected` — the parity guard across all engines.
+    #[test]
+    fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/defer_builtin_value.chz");
+        let expected = include_str!("../../examples/defer_builtin_value.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
+    /// value call path — NOT a returned value / NOT silent nil — byte-identical on VM + interp. If the
+    /// value path returned `Ok`, an uncaught `p(...)` would fall through instead of faulting.
+    #[test]
+    fn panic_as_value_uncaught_raises_both_engines() {
+        let src = "fn main():\n    p := panic\n    p(\"boom\")\nmain()\n";
+        let vm_err = run_capture(src).expect_err("vm: panic value must fault");
+        let it_err = crate::interp::run_capture(src).expect_err("interp: panic value must fault");
+        assert_eq!(vm_err.message, "boom");
+        assert_eq!(it_err.message, "boom");
+    }
+
+    /// `ord`/`chr` as VALUES (`f := ord`) called back yield the same result as a direct call, VM +
+    /// interp identical.
+    #[test]
+    fn ord_chr_as_value_both_engines() {
+        let src = "fn main():\n    f := ord\n    g := chr\n    print(f(\"a\"))\n    print(g(66))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "97\nB\n");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
     }
 
