@@ -8,7 +8,7 @@ use crate::ast::{
 };
 use crate::{lexer, parser};
 
-mod builtins;
+pub(crate) mod builtins;
 mod env;
 mod value;
 

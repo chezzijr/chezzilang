@@ -206,13 +206,88 @@ fn is_reserved_name(name: &str) -> bool {
     RESERVED_CALLABLE.contains(&name)
 }
 
-/// The universe builtin FUNCTIONS that are FIRST-CLASS values (bindable, passable, `defer`-able as a
-/// bare call). Unlike type/container/runtime constructors (`int`/`List`/`Channel`/…) and user
-/// struct/enum ctors — which stay non-first-class and must be wrapped in a function — these carry a
-/// dedicated runtime value (`Value::Builtin`/`Obj::Builtin`). Direct calls still lower to their
-/// specialized opcodes; only value-position uses take the first-class path.
+/// The kind of intrinsic a first-class universe function lowers to on a DIRECT call. `Print` → the
+/// dedicated `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
+/// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`. Metadata only — runtime
+/// dispatch stays name-keyed and unchanged (the `NativeFn` host seam only accepts int/str/map args,
+/// which is exactly why `print` needs its own `Value::Builtin`/opcode path).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Intrinsic {
+    Print,
+    Builtin,
+}
+
+/// One row of the synthetic native-prelude table (phase 1: pure FUNCTIONS only). This table is the
+/// SINGLE SOURCE OF TRUTH for the four first-class universe fns (`print`/`ord`/`chr`/`panic`): the
+/// checker, compiler, and interp all READ it instead of each keeping its own hard-coded match arm
+/// (drift-guarded by `prelude_table_is_single_source_of_truth`). `make_sig` is a const-safe fn
+/// pointer — a `FnSig` holds `Vec`/`Box`, so it can't be a literal `const` field — and stays PRIVATE
+/// so the `pub(crate)` row never leaks the module-private `FnSig` type.
+pub(crate) struct PreludeFn {
+    pub(crate) name: &'static str,
+    pub(crate) intrinsic: Intrinsic,
+    pub(crate) first_class: bool,
+    make_sig: fn() -> FnSig,
+}
+
+// The four prelude signatures — exactly the shapes `builtin_sig` carried before the table landed.
+// Variadic + named args (`sep`/`end`) collapse to one `?` slot; `print` always returns `nil`.
+fn sig_print() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::Nil)
+}
+// `panic(msg)` is diverging (bottom-typed): renders `fn(str) -> ?`.
+fn sig_panic() -> FnSig {
+    FnSig::plain(vec![Ty::Str], Ty::Unknown)
+}
+fn sig_ord() -> FnSig {
+    FnSig::plain(vec![Ty::Str], Ty::Int)
+}
+fn sig_chr() -> FnSig {
+    FnSig::plain(vec![Ty::Int], Ty::Str)
+}
+
+/// The native prelude (phase 1). The four universe FUNCTIONS that are FIRST-CLASS values (bindable,
+/// passable, `defer`-able as a bare call) — unlike type/container/runtime constructors
+/// (`int`/`List`/`Channel`/…) and user struct/enum ctors, which stay non-first-class and must be
+/// wrapped in a function. First-class fns carry a dedicated runtime value
+/// (`Value::Builtin`/`Obj::Builtin`); direct calls still lower to their specialized opcodes, only
+/// value-position uses take the first-class path. Constructors are intentionally ABSENT here — they
+/// land in phase 2 as `Intrinsic::Ctor` (see PROGRESS.md "native-prelude table").
+pub(crate) const PRELUDE: &[PreludeFn] = &[
+    PreludeFn {
+        name: "print",
+        intrinsic: Intrinsic::Print,
+        first_class: true,
+        make_sig: sig_print,
+    },
+    PreludeFn {
+        name: "ord",
+        intrinsic: Intrinsic::Builtin,
+        first_class: true,
+        make_sig: sig_ord,
+    },
+    PreludeFn {
+        name: "chr",
+        intrinsic: Intrinsic::Builtin,
+        first_class: true,
+        make_sig: sig_chr,
+    },
+    PreludeFn {
+        name: "panic",
+        intrinsic: Intrinsic::Builtin,
+        first_class: true,
+        make_sig: sig_panic,
+    },
+];
+
+/// Look up a native-prelude row by name (linear scan over the four rows).
+pub(crate) fn prelude_fn(name: &str) -> Option<&'static PreludeFn> {
+    PRELUDE.iter().find(|p| p.name == name)
+}
+
+/// True if `name` is a first-class universe builtin fn — the table's `.first_class` view.
 pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
-    matches!(name, "print" | "ord" | "chr" | "panic")
+    prelude_fn(name).is_some_and(|p| p.first_class)
 }
 
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (mirrors
@@ -15405,12 +15480,13 @@ fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 /// a future reserved builtin that forgets an entry here fails that test rather than silently losing
 /// hover. (`Ok`/`Err`/`Some` are not reserved and stay hover-`None`.)
 fn builtin_sig(name: &str) -> Option<FnSig> {
+    // The four first-class universe FUNCTIONS (print/ord/chr/panic) source their signature from the
+    // synthetic native-prelude table — the single source of truth (drift-guarded). The remaining
+    // reserved CTOR names (range/int/List/Channel/…) stay here until phase 2 (`Intrinsic::Ctor`).
+    if let Some(p) = prelude_fn(name) {
+        return Some((p.make_sig)());
+    }
     let (params, ret) = match name {
-        // Free functions ----------------------------------------------------------------------
-        // Variadic + named args (`sep`/`end`) collapse to one `?` slot; always returns `nil`.
-        "print" => (vec![Ty::Unknown], Ty::Nil),
-        // Diverging (bottom-typed): renders `fn(str) -> ?`.
-        "panic" => (vec![Ty::Str], Ty::Unknown),
         // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the
         // canonical `range(end)`.
         "range" => (vec![Ty::Int], Ty::list(Ty::Int)),
@@ -15418,8 +15494,6 @@ fn builtin_sig(name: &str) -> Option<FnSig> {
         "int" => (vec![Ty::Unknown], Ty::Int),
         "float" => (vec![Ty::Unknown], Ty::Float),
         "str" => (vec![Ty::Unknown], Ty::Str),
-        "ord" => (vec![Ty::Str], Ty::Int),
-        "chr" => (vec![Ty::Int], Ty::Str),
         // Container constructors --------------------------------------------------------------
         // Element/key/value types are inferred from the argument → `?` slots.
         "List" => (vec![Ty::Unknown], Ty::list(Ty::Unknown)),

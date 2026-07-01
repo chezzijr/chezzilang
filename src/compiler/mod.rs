@@ -44,23 +44,20 @@ pub struct CompileError {
 #[cfg(test)]
 pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
 
-fn is_builtin(name: &str) -> bool {
+/// Names dispatched to `Op::CallBuiltin(name, argc)` (name-keyed to the VM's `do_builtin`). Two
+/// sources: the type/container CONSTRUCTOR names (hard-coded until phase 2), and the native-prelude
+/// table's `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) — READ from the table so the four-fn
+/// whitelist lives in exactly one place (drift-guarded by `prelude_table_is_single_source_of_truth`).
+/// `print` is `Intrinsic::Print`, NOT here — it keeps its own `CallPrint`/`CallPrintSep` opcodes.
+/// (`panic(msg)` → `CallBuiltin("panic", 1)`; the VM's `do_builtin` arm raises the recoverable
+/// `RuntimeError` instead of pushing a value.)
+pub(crate) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "range"
-            | "int"
-            | "float"
-            | "str"
-            | "ord"
-            | "chr"
-            | "Set"
-            | "List"
-            | "Map"
-            | "bytes"
-            | "bytearray"
-            // `panic(msg)` compiles to `Op::CallBuiltin("panic", 1)`; the VM's `do_builtin` arm
-            // raises the recoverable `RuntimeError` instead of pushing a value.
-            | "panic"
+        "range" | "int" | "float" | "str" | "Set" | "List" | "Map" | "bytes" | "bytearray"
+    ) || matches!(
+        crate::checker::prelude_fn(name).map(|p| p.intrinsic),
+        Some(crate::checker::Intrinsic::Builtin)
     )
 }
 
@@ -3596,28 +3593,40 @@ impl Compiler {
                 fc.emit(Op::NewExecutor, span);
                 return Ok(());
             }
-            if name == "print" {
+            // Native-prelude direct-call dispatch (single source of truth): the four first-class
+            // universe fns lower by their table `intrinsic`. `Print` → the dedicated
+            // `CallPrint`/`CallPrintSep` opcodes; `Builtin` (ord/chr/panic) → `CallBuiltin`. This is
+            // byte-identical to the old `if name == "print"` + `is_builtin` arms — the constructor
+            // names still fall through to the generic `is_builtin` arm below.
+            if let Some(p) = crate::checker::prelude_fn(name) {
                 for a in args {
                     self.compile_expr(fc, a)?;
                 }
-                if named.is_empty() {
-                    // Plain `print(...)`: byte-identical to before (space-join, trailing newline).
-                    fc.emit(Op::CallPrint(args.len()), span);
-                } else {
-                    // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or its
-                    // default str), then a dedicated op joins+terminates. Eval order matches the
-                    // interpreter: positional args, then sep, then end.
-                    let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
-                    let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
-                    match sep {
-                        Some(e) => self.compile_expr(fc, e)?,
-                        None => fc.emit(Op::ConstStr(" ".to_string()), span),
+                match p.intrinsic {
+                    crate::checker::Intrinsic::Print => {
+                        if named.is_empty() {
+                            // Plain `print(...)`: byte-identical (space-join, trailing newline).
+                            fc.emit(Op::CallPrint(args.len()), span);
+                        } else {
+                            // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
+                            // its default str), then a dedicated op joins+terminates. Eval order
+                            // matches the interpreter: positional args, then sep, then end.
+                            let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
+                            let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
+                            match sep {
+                                Some(e) => self.compile_expr(fc, e)?,
+                                None => fc.emit(Op::ConstStr(" ".to_string()), span),
+                            }
+                            match end {
+                                Some(e) => self.compile_expr(fc, e)?,
+                                None => fc.emit(Op::ConstStr("\n".to_string()), span),
+                            }
+                            fc.emit(Op::CallPrintSep { argc: args.len() }, span);
+                        }
                     }
-                    match end {
-                        Some(e) => self.compile_expr(fc, e)?,
-                        None => fc.emit(Op::ConstStr("\n".to_string()), span),
+                    crate::checker::Intrinsic::Builtin => {
+                        fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
                     }
-                    fc.emit(Op::CallPrintSep { argc: args.len() }, span);
                 }
                 return Ok(());
             }
@@ -4383,5 +4392,47 @@ mod capture_layout_tests {
                 "plain fn proto has no capture names"
             );
         }
+    }
+
+    /// Native-prelude phase 1 — BYTE-IDENTICAL LOWERING PIN. Direct calls of the four first-class
+    /// universe fns must lower to their specialized opcodes regardless of whether the intrinsic is
+    /// selected by an ad-hoc match arm (old) or the synthetic `PRELUDE` table (new). This is the
+    /// characterization lock the refactor must not move: `print(x)`→`CallPrint(1)`,
+    /// `print(x, sep=…)`→`CallPrintSep{argc:1}`, `ord("a")`/`panic("m")`→`CallBuiltin(name, 1)`.
+    fn all_ops(prog: &crate::vm::op::Program) -> Vec<Op> {
+        prog.protos
+            .iter()
+            .flat_map(|p| p.code.iter().cloned())
+            .collect()
+    }
+
+    #[test]
+    fn direct_builtin_calls_lower_to_specialized_opcodes() {
+        let ops = all_ops(&compile("print(1)\n"));
+        assert!(
+            ops.iter().any(|o| matches!(o, Op::CallPrint(1))),
+            "print(x) must lower to CallPrint(1); got {ops:?}"
+        );
+
+        let ops = all_ops(&compile("print(1, sep=\"-\")\n"));
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::CallPrintSep { argc: 1 })),
+            "print(x, sep=…) must lower to CallPrintSep{{argc:1}}; got {ops:?}"
+        );
+
+        let ops = all_ops(&compile("ord(\"a\")\n"));
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == "ord")),
+            "ord(c) must lower to CallBuiltin(\"ord\", 1); got {ops:?}"
+        );
+
+        let ops = all_ops(&compile("panic(\"m\")\n"));
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == "panic")),
+            "panic(m) must lower to CallBuiltin(\"panic\", 1); got {ops:?}"
+        );
     }
 }

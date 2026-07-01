@@ -11,6 +11,35 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE TABLE — phase 1 (refactor-only, pure functions) (2026-07-01).** A single synthetic
+Rust `const PRELUDE: &[PreludeFn]` in `src/checker/mod.rs` is now the **SINGLE SOURCE OF TRUTH** for the
+four first-class universe FUNCTIONS (`print`/`ord`/`chr`/`panic`), replacing the scattered hard-coded
+match arm each phase used to keep. Row shape: `PreludeFn { name, intrinsic: Intrinsic, first_class,
+make_sig }` where `enum Intrinsic { Print, Builtin }` (`Print` ⇒ direct call lowers to
+`CallPrint`/`CallPrintSep`; `Builtin` ⇒ `Op::CallBuiltin(name, argc)`). The signature is carried as a
+const-safe `make_sig: fn() -> FnSig` fn pointer (a `FnSig` holds `Vec`/`Box`, so it can't be a literal
+`const` field) and stays PRIVATE so the `pub(crate)` row never leaks the module-private `FnSig`.
+Every phase now READS the table: checker `is_firstclass_builtin_fn` = table `.first_class`, `builtin_sig`
+delegates the four sigs to `(make_sig)()`, the value-position `Ty::BuiltinFn` arm is unchanged (already
+sources `builtin_sig`); compiler `is_builtin` + `compile_call`'s direct-call opcode selection derive from
+`prelude_fn(name).intrinsic`; interp `builtins::is_builtin` derives the same way. **ZERO observable
+behavior change** — direct calls emit byte-identical bytecode (`print(x)`→`CallPrint(1)`,
+`print(x, sep=…)`→`CallPrintSep`, `ord`/`chr`/`panic`→`CallBuiltin`), the hot path only gains a
+compile-time table lookup, and three-engine byte-identical parity (interp / `--serial` VM / M:N VM) on
+`examples/defer_builtin_value.chz` + all existing guard tests stays green. **Native impls UNTOUCHED**:
+`vm::do_builtin` arms, `builtin_ord`/`builtin_chr`, the print stringify, and all name-keyed runtime
+dispatch (`Value::Builtin`/`Obj::Builtin`, `LoadBuiltin`, spawn/wire/snapshot) stay exactly where they
+are — the table is COMPILE-TIME METADATA ONLY (the `NativeFn` host seam only takes int/str/map args,
+which is precisely why `print` needs its dedicated value/opcode path). New drift guard
+`prelude_table_is_single_source_of_truth` (checker/tests.rs) + a bytecode pin test
+`direct_builtin_calls_lower_to_specialized_opcodes` (compiler tests) lock the invariant that every phase
+agrees with the table — the whack-a-mole class this track kills. **Type/container/runtime CONSTRUCTOR
+names** (`range`/`int`/`float`/`str`/`List`/`Map`/`Set`/`bytes`/`bytearray`/`Channel`/…) are
+intentionally OUT of phase 1 (still hard-coded in `builtin_sig`/`is_builtin`) → **phase 2** adds
+`Intrinsic::Ctor` and folds them in. **North-star (deferred):** a real `.chz`-source prelude file is
+blocked on **user-facing variadics** (`fn f(*args)`, a separate milestone) — `print`'s `sep=`/`end=`
+variadic can't be expressed in `.chz` until then, so the synthetic Rust table is the mechanism for now.
+
 **✅ Swift-style KEYWORD ARGUMENTS through a function VALUE (2026-07-01).** Named arguments now work
 through a first-class **function value**, not just a direct call: `g := greet; g(name="Bob",
 greeting="Hi")` prints `Hi Bob`, keywords may be reordered, and a `fn(name: str)->nil` **HOF parameter**

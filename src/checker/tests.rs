@@ -11057,6 +11057,73 @@ fn reserved_callables_all_have_builtin_sig() {
     assert!(builtin_sig("totally_not_a_builtin").is_none());
 }
 
+/// Native-prelude phase 1 — DRIFT GUARD (the real payoff of this track). The synthetic `PRELUDE`
+/// table is the SINGLE SOURCE OF TRUTH for the four first-class universe FUNCTIONS
+/// (`print`/`ord`/`chr`/`panic`). This test locks every phase that used to hard-code these names to
+/// the table, so a future edit to one phase that silently diverges from the table (the whack-a-mole
+/// bug class this track kills) fails here instead of shipping a three-engine skew.
+#[test]
+fn prelude_table_is_single_source_of_truth() {
+    use std::collections::BTreeSet;
+
+    // (1) The table's name-set is EXACTLY the four first-class pure fns (phase 1 = pure fns only;
+    //     type/ctor names like List/Map/int stay OUT — they are phase 2's `Intrinsic::Ctor`).
+    let names: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["print", "ord", "chr", "panic"]),
+        "PRELUDE must hold exactly the four first-class universe fns"
+    );
+
+    // (2) `is_firstclass_builtin_fn` is the table's `.first_class` view — over the WHOLE reserved
+    //     callable universe, so a table row (or its absence) is the one truth for first-classness.
+    for name in RESERVED_CALLABLE {
+        assert_eq!(
+            is_firstclass_builtin_fn(name),
+            prelude_fn(name).is_some_and(|p| p.first_class),
+            "'{name}': is_firstclass_builtin_fn must equal PRELUDE .first_class"
+        );
+    }
+    // A name with no table row is not first-class.
+    assert!(!is_firstclass_builtin_fn("List"));
+    assert!(prelude_fn("List").is_none());
+
+    // (3) Every table row has a checker `builtin_sig` (drives editor hover + value-position typing).
+    for p in PRELUDE {
+        assert!(
+            builtin_sig(p.name).is_some(),
+            "PRELUDE row '{}' has no builtin_sig",
+            p.name
+        );
+        assert!(p.first_class, "every phase-1 PRELUDE row is first-class");
+    }
+
+    // (4) Cross-phase invariant: the compiler and interp `is_builtin` sets must AGREE per row, and the
+    //     table's `intrinsic` decides membership — `Builtin` ⇒ handled by `is_builtin` (CallBuiltin);
+    //     `Print` ⇒ excluded (its own CallPrint/CallPrintSep opcodes, handled outside `is_builtin`).
+    for p in PRELUDE {
+        let comp = crate::compiler::is_builtin(p.name);
+        let interp = crate::interp::builtins::is_builtin(p.name);
+        assert_eq!(
+            comp, interp,
+            "'{}': compiler::is_builtin and interp::builtins::is_builtin diverge",
+            p.name
+        );
+        match p.intrinsic {
+            Intrinsic::Builtin => assert!(
+                comp,
+                "'{}' is Intrinsic::Builtin but is_builtin is false",
+                p.name
+            ),
+            Intrinsic::Print => assert!(
+                !comp,
+                "'{}' is Intrinsic::Print but is_builtin is true (must keep CallPrint path)",
+                p.name
+            ),
+        }
+    }
+}
+
 /// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST
 /// resolve to `Some` from its owning `*_method_sig` lookup — so the per-type "methods: …" line
 /// `builtin_type_doc` renders can only list methods that provably EXIST. An out-of-date slice (a
