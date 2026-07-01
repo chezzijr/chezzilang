@@ -465,11 +465,15 @@ impl std::fmt::Display for Value {
     }
 }
 
-/// Format a float the way Chezzi prints it: integral values keep one decimal place (`5.0`),
-/// everything else uses Rust's shortest round-trip form.
+/// Format a float the way Chezzi prints it: integral values print the shortest round-trip decimal
+/// with an always-present `.0` (`5.0`, `150000000000000000000000.0`), everything else uses Rust's
+/// shortest round-trip form. (Matches `vm::format_float`.)
 fn format_float(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
-        format!("{x:.1}")
+        // Shortest round-trip decimal (`{}`) + an always-present `.0`: large integral floats
+        // print the shortest form that round-trips, not the exact fixed-point binary expansion.
+        // Rust's f64 Display never uses scientific notation.
+        format!("{x}.0")
     } else {
         format!("{x}")
     }

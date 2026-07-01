@@ -362,11 +362,14 @@ fn sign_prefix(neg: bool, force_plus: bool) -> String {
 }
 
 /// Mirror the engines' canonical float rendering (`vm::format_float` / `interp::value::format_float`:
-/// a finite whole-valued float prints with one decimal, e.g. `5.0`) for a bare `{f:>10}` with no
-/// type char. `x` is the already-non-negative magnitude; the sign is handled by the caller.
+/// a finite whole-valued float prints the shortest round-trip decimal with an always-present `.0`,
+/// e.g. `5.0`, `150000000000000000000000.0`) for a bare `{f:>10}` with no type char. `x` is the
+/// already-non-negative magnitude; the sign is handled by the caller.
 fn format_float_like(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
-        format!("{x:.1}")
+        // Shortest round-trip decimal (`{}`) + an always-present `.0`. Rust's f64 Display never
+        // uses scientific notation, so the integral branch never emits an exponent.
+        format!("{x}.0")
     } else {
         format!("{x}")
     }
