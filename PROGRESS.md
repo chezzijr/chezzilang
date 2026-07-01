@@ -58,6 +58,17 @@ hot-path cost, `benches/run.chz` unchanged). Three-engine byte-identical parity
     non-interpolation keying and the positional hot path are unchanged). `examples/keyword_value.chz`
     grew a colliding-offset interpolation line; regression test
     `keyword_value_interpolation_fragments_do_not_alias`.
+  - **KNOWN LIMITATION (interp-only, accepted 2026-07-01):** the interp's `kw_frag_ctx`/`kw_frag_ord`
+    are live mutable state set per interpolation fragment; they **leak** into callee bodies invoked from
+    a `{…}` fragment and across a `recover:`-caught fault (save/restore only on the Ok path), so a
+    value+keyword call reached that way is looked up under the wrong key → interp mis-resolves while the
+    VM (static, resolves at compile time) is correct. **The user-facing engines (default M:N + `--serial`,
+    both VM) are correct**; the divergence is only against the **deprecated interp parity oracle**, in the
+    narrow `recover:`+interpolation+value-keyword combo, and no current golden test exercises it. Accepted
+    rather than fixed because **interp is slated for removal** (decision: don't harden a dying engine).
+    **When interp is deleted, also strip the frag-context machinery** (`kw_frag_ctx`/`kw_frag_ord` in
+    `checker`/`compiler`/`interp`, ~47 refs) — the `KeywordTable` key simplifies to
+    `(module, first-named-arg span)` since fragment discriminators only existed for the interp lookup.
 
 **✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
 universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old
