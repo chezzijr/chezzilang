@@ -5385,6 +5385,24 @@ fn type_name_not_firstclass_value() {
 }
 
 #[test]
+fn scalar_ctor_not_firstclass_value() {
+    // Phase 2a: folding the five scalar-conversion ctors (int/float/str/bytes/bytearray) into the
+    // native-prelude table as `Intrinsic::Ctor` rows must NOT make them first-class values — a
+    // value-position use (`f := int`) stays REJECTED, on the same fall-through path as `f := List`
+    // (the `first_class == false` gate keeps them off the `LoadBuiltin`/`Ty::BuiltinFn` arm).
+    rejects("fn w():\n    f := int\n", "int");
+    rejects("fn w():\n    f := float\n", "float");
+    rejects("fn w():\n    f := str\n", "str");
+    rejects("fn w():\n    f := bytes\n", "bytes");
+    rejects("fn w():\n    f := bytearray\n", "bytearray");
+    // A scalar ctor in `defer` single-call position must still be wrapped (not first-class).
+    rejects(
+        "fn w():\n    defer str(\"x\")\n",
+        "built-ins and constructors must be wrapped",
+    );
+}
+
+#[test]
 fn defer_block_form_ok() {
     // The block body is ordinary statements — built-ins like `print` are fine here (the call-only
     // restriction applies only to the single-call form).
@@ -11083,14 +11101,36 @@ fn reserved_callables_all_have_builtin_sig() {
 fn prelude_table_is_single_source_of_truth() {
     use std::collections::BTreeSet;
 
-    // (1) The table's name-set is EXACTLY the four first-class pure fns (phase 1 = pure fns only;
-    //     type/ctor names like List/Map/int stay OUT — they are phase 2's `Intrinsic::Ctor`).
-    let names: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
+    // (1) Phase 2a: the table now holds two families — the four FIRST-CLASS universe pure fns AND the
+    //     five NON-first-class scalar-conversion CTORS (`Intrinsic::Ctor`). The container/reserved-type
+    //     ctors (List/Map/Set/range) are GENERIC / carry reserved-type identity → phase 2b, still OUT.
+    let firstclass: BTreeSet<&str> = PRELUDE
+        .iter()
+        .filter(|p| p.first_class)
+        .map(|p| p.name)
+        .collect();
     assert_eq!(
-        names,
+        firstclass,
         BTreeSet::from(["print", "ord", "chr", "panic"]),
-        "PRELUDE must hold exactly the four first-class universe fns"
+        "the first-class PRELUDE rows must be exactly the four universe fns"
     );
+    let ctors: BTreeSet<&str> = PRELUDE
+        .iter()
+        .filter(|p| p.intrinsic == Intrinsic::Ctor)
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        ctors,
+        BTreeSet::from(["int", "float", "str", "bytes", "bytearray"]),
+        "the Ctor PRELUDE rows must be exactly the five scalar-conversion ctors"
+    );
+    // Container/reserved-type ctors stay OUT of the table (phase 2b).
+    for c in ["List", "Map", "Set", "range"] {
+        assert!(
+            prelude_fn(c).is_none(),
+            "'{c}' must stay out of PRELUDE (container/reserved-type ctor = phase 2b)"
+        );
+    }
 
     // (2) `is_firstclass_builtin_fn` is the table's `.first_class` view — over the WHOLE reserved
     //     callable universe, so a table row (or its absence) is the one truth for first-classness.
@@ -11101,23 +11141,43 @@ fn prelude_table_is_single_source_of_truth() {
             "'{name}': is_firstclass_builtin_fn must equal PRELUDE .first_class"
         );
     }
-    // A name with no table row is not first-class.
+    // A container ctor name (no first-class row) is not first-class.
     assert!(!is_firstclass_builtin_fn("List"));
-    assert!(prelude_fn("List").is_none());
+    // A scalar-ctor name IS now in the table but is NON-first-class (types are not first-class values).
+    assert!(prelude_fn("int").is_some());
+    assert!(!is_firstclass_builtin_fn("int"));
 
     // (3) Every table row has a checker `builtin_sig` (drives editor hover + value-position typing).
+    //     `first_class` is true IFF the row lowers to a first-class runtime value — Print|Builtin — and
+    //     is NEVER true for a Ctor (the hard invariant: no scalar ctor is first-class).
     for p in PRELUDE {
         assert!(
             builtin_sig(p.name).is_some(),
             "PRELUDE row '{}' has no builtin_sig",
             p.name
         );
-        assert!(p.first_class, "every phase-1 PRELUDE row is first-class");
+        let expect_fc = matches!(p.intrinsic, Intrinsic::Print | Intrinsic::Builtin);
+        assert_eq!(
+            p.first_class, expect_fc,
+            "'{}': first_class must be true iff intrinsic is Print|Builtin",
+            p.name
+        );
+    }
+    // Explicit invariant: NO `Intrinsic::Ctor` row is first-class (guards against a ctor accidentally
+    // leaking a `LoadBuiltin`/`Ty::BuiltinFn` and becoming a first-class value).
+    for p in PRELUDE {
+        if p.intrinsic == Intrinsic::Ctor {
+            assert!(
+                !p.first_class,
+                "Ctor row '{}' must be non-first-class",
+                p.name
+            );
+        }
     }
 
     // (4) Cross-phase invariant: the compiler and interp `is_builtin` sets must AGREE per row, and the
-    //     table's `intrinsic` decides membership — `Builtin` ⇒ handled by `is_builtin` (CallBuiltin);
-    //     `Print` ⇒ excluded (its own CallPrint/CallPrintSep opcodes, handled outside `is_builtin`).
+    //     table's `intrinsic` decides membership — `Builtin`/`Ctor` ⇒ handled by `is_builtin`
+    //     (CallBuiltin-dispatched); `Print` ⇒ excluded (its own CallPrint/CallPrintSep opcodes).
     for p in PRELUDE {
         let comp = crate::compiler::is_builtin(p.name);
         let interp = crate::interp::builtins::is_builtin(p.name);
@@ -11127,9 +11187,9 @@ fn prelude_table_is_single_source_of_truth() {
             p.name
         );
         match p.intrinsic {
-            Intrinsic::Builtin => assert!(
+            Intrinsic::Builtin | Intrinsic::Ctor => assert!(
                 comp,
-                "'{}' is Intrinsic::Builtin but is_builtin is false",
+                "'{}' is CallBuiltin-dispatched but is_builtin is false",
                 p.name
             ),
             Intrinsic::Print => assert!(

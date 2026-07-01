@@ -27320,6 +27320,39 @@ mod parity_tests {
         );
     }
 
+    /// Native-prelude phase 2a — the scalar-conversion CTORS (int/float/str/bytes/bytearray) are now
+    /// sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) instead of hard-coded arms. This
+    /// is a pure metadata refactor: the runtime `do_builtin` dispatch is unchanged, so every conversion
+    /// must produce byte-identical output on BOTH engines (VM == interp), including the base-16 int
+    /// parse, float rendering, str-of-scalar, and the byte-buffer ctors.
+    #[test]
+    fn scalar_ctor_conversions_parity() {
+        let src = r#"
+fn main():
+    print(int("5"))
+    print(int("-42"))
+    print(int(3.9))
+    print(float("1.5"))
+    print(float(2))
+    print(str(123))
+    print(str(4.5))
+    print(str(true))
+    b := bytes([104, 105])
+    print(b.len())
+    print(b[0])
+    print(b[1])
+    ba := bytearray([65, 66])
+    print(ba.len())
+    print(ba[0])
+    ba.push(67)
+    print(ba.len())
+    print(ba[2])
+
+main()
+"#;
+        assert_parity(src);
+    }
+
     /// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
     /// the `ChzStr` inline/heap boundary (`INLINE_CAP` = 22 bytes), including multi-byte UTF-8.
     /// Exercises concat, split/join, indexing, iteration, `==`, `.chars()`, and string map keys.

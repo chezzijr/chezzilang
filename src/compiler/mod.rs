@@ -45,20 +45,19 @@ pub struct CompileError {
 pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
 
 /// Names dispatched to `Op::CallBuiltin(name, argc)` (name-keyed to the VM's `do_builtin`). Two
-/// sources: the type/container CONSTRUCTOR names (hard-coded until phase 2), and the native-prelude
-/// table's `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) — READ from the table so the four-fn
-/// whitelist lives in exactly one place (drift-guarded by `prelude_table_is_single_source_of_truth`).
-/// `print` is `Intrinsic::Print`, NOT here — it keeps its own `CallPrint`/`CallPrintSep` opcodes.
-/// (`panic(msg)` → `CallBuiltin("panic", 1)`; the VM's `do_builtin` arm raises the recoverable
-/// `RuntimeError` instead of pushing a value.)
+/// sources: the GENERIC / reserved-type container CONSTRUCTOR names (range/List/Map/Set — hard-coded
+/// until phase 2b), and the native-prelude table's `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) plus
+/// the phase-2a `Intrinsic::Ctor` scalar conversions (`int`/`float`/`str`/`bytes`/`bytearray`) — READ
+/// from the table so those whitelists live in exactly one place (drift-guarded by
+/// `prelude_table_is_single_source_of_truth`). `print` is `Intrinsic::Print`, NOT here — it keeps its
+/// own `CallPrint`/`CallPrintSep` opcodes. (`panic(msg)` → `CallBuiltin("panic", 1)`; the VM's
+/// `do_builtin` arm raises the recoverable `RuntimeError` instead of pushing a value.)
 pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "range" | "int" | "float" | "str" | "Set" | "List" | "Map" | "bytes" | "bytearray"
-    ) || matches!(
-        crate::checker::prelude_fn(name).map(|p| p.intrinsic),
-        Some(crate::checker::Intrinsic::Builtin)
-    )
+    matches!(name, "range" | "Set" | "List" | "Map")
+        || matches!(
+            crate::checker::prelude_fn(name).map(|p| p.intrinsic),
+            Some(crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor)
+        )
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -3603,11 +3602,12 @@ impl Compiler {
                 fc.emit(Op::NewExecutor, span);
                 return Ok(());
             }
-            // Native-prelude direct-call dispatch (single source of truth): the four first-class
-            // universe fns lower by their table `intrinsic`. `Print` → the dedicated
-            // `CallPrint`/`CallPrintSep` opcodes; `Builtin` (ord/chr/panic) → `CallBuiltin`. This is
-            // byte-identical to the old `if name == "print"` + `is_builtin` arms — the constructor
-            // names still fall through to the generic `is_builtin` arm below.
+            // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its
+            // `intrinsic`. `Print` → the dedicated `CallPrint`/`CallPrintSep` opcodes; `Builtin`
+            // (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a) → `CallBuiltin`.
+            // This is byte-identical to the old `if name == "print"` + `is_builtin` arms — the GENERIC /
+            // reserved-type container ctor names (range/List/Map/Set) still fall through to the generic
+            // `is_builtin` arm below (phase 2b).
             if let Some(p) = crate::checker::prelude_fn(name) {
                 for a in args {
                     self.compile_expr(fc, a)?;
@@ -3634,7 +3634,10 @@ impl Compiler {
                             fc.emit(Op::CallPrintSep { argc: args.len() }, span);
                         }
                     }
-                    crate::checker::Intrinsic::Builtin => {
+                    // `Builtin` (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a)
+                    // both lower to the name-keyed `CallBuiltin` — byte-identical to the old
+                    // `is_builtin` fall-through the scalar ctors took before the table folded them in.
+                    crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor => {
                         fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
                     }
                 }
@@ -4444,5 +4447,16 @@ mod capture_layout_tests {
                 .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == "panic")),
             "panic(m) must lower to CallBuiltin(\"panic\", 1); got {ops:?}"
         );
+
+        // Phase 2a — the scalar-conversion CTORS must STILL lower to the name-keyed CallBuiltin,
+        // byte-identical to their old `is_builtin` fall-through (now table-driven via `Intrinsic::Ctor`).
+        for name in ["int", "float", "str", "bytes", "bytearray"] {
+            let ops = all_ops(&compile(&format!("{name}(\"5\")\n")));
+            assert!(
+                ops.iter()
+                    .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == name)),
+                "{name}(x) must lower to CallBuiltin(\"{name}\", 1); got {ops:?}"
+            );
+        }
     }
 }

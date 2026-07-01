@@ -33,12 +33,29 @@ are — the table is COMPILE-TIME METADATA ONLY (the `NativeFn` host seam only t
 which is precisely why `print` needs its dedicated value/opcode path). New drift guard
 `prelude_table_is_single_source_of_truth` (checker/tests.rs) + a bytecode pin test
 `direct_builtin_calls_lower_to_specialized_opcodes` (compiler tests) lock the invariant that every phase
-agrees with the table — the whack-a-mole class this track kills. **Type/container/runtime CONSTRUCTOR
-names** (`range`/`int`/`float`/`str`/`List`/`Map`/`Set`/`bytes`/`bytearray`/`Channel`/…) are
-intentionally OUT of phase 1 (still hard-coded in `builtin_sig`/`is_builtin`) → **phase 2** adds
-`Intrinsic::Ctor` and folds them in. **North-star (deferred):** a real `.chz`-source prelude file is
-blocked on **user-facing variadics** (`fn f(*args)`, a separate milestone) — `print`'s `sep=`/`end=`
-variadic can't be expressed in `.chz` until then, so the synthetic Rust table is the mechanism for now.
+agrees with the table — the whack-a-mole class this track kills.
+
+**✅ NATIVE-PRELUDE TABLE — phase 2a (refactor-only, scalar-conversion ctors) (2026-07-02).** Added a
+third intrinsic kind `Intrinsic::Ctor` and folded the **five scalar-conversion CONSTRUCTORS**
+(`int`/`float`/`str`/`bytes`/`bytearray`) into the table as rows with `first_class: false` (ALWAYS —
+types/ctors are NOT first-class values, uniform with `f := Point` / `f := List` staying rejected). Each
+row carries the exact `FnSig` its old hard-coded `builtin_sig` arm did (`int`/`float`/`str` take `?`→
+`Int`/`Float`/`Str`; `bytes`/`bytearray` take `?`→`Bytes`/`ByteArray`) and dispatches on a direct call
+to the same name-keyed `Op::CallBuiltin(name, argc)` — so `int("5")`, `int("ff")`… emit **byte-identical
+bytecode** and `vm::do_builtin`'s native conversion arms are **UNTOUCHED** (metadata only). The now-dead
+`int`/`float`/`str`/`bytes`/`bytearray` arms in `builtin_sig` were deleted (the `prelude_fn` early-return
+supplies them); `is_builtin` in compiler + interp drop those five from the hard-coded `matches!` and
+read them from the table via `Intrinsic::Builtin | Intrinsic::Ctor`. **NON-FIRST-CLASS enforced**: every
+first-class value path (`is_firstclass_builtin_fn`, `Ty::BuiltinFn` arm, `LoadBuiltin`) gates on
+`.first_class == true`, so a `Ctor` row never leaks a first-class value — `f := int` / `defer str(...)`
+stay rejected on the identical fall-through path as `f := List`, with zero new guard code. The drift
+guard is extended (Ctor name-set == `{int,float,str,bytes,bytearray}`, no `Ctor` row is first-class,
+container names stay OUT) plus a `scalar_ctor_conversions_parity` two-engine test and the extended
+bytecode pin. **The GENERIC / reserved-type container ctors** (`List`/`Map`/`Set`/`range`) stay
+hard-coded → **phase 2b** (they are generic and/or carry reserved-type identity). **North-star
+(deferred):** a real `.chz`-source prelude file is blocked on **user-facing variadics** (`fn f(*args)`, a
+separate milestone) — `print`'s `sep=`/`end=` variadic can't be expressed in `.chz` until then, so the
+synthetic Rust table is the mechanism for now.
 
 **✅ `Ref` promoted to a RESERVED GLOBAL backing the `ref` keyword — import-free (2026-07-01).** The
 `ref T` binding modifier and the explicit `Ref[T]` box now work with **no `import std.ref`**. `Ref`
