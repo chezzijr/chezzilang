@@ -5323,6 +5323,27 @@ fn firstclass_builtin_fn_value_position() {
 }
 
 #[test]
+fn print_as_value_is_variadic() {
+    // Regression (bug 2): direct `print` is VARIADIC, so its value form must accept ANY arg count —
+    // zero, one, or many — not just exactly one. A rigid `fn(?) -> nil` Func typing wrongly rejected
+    // `p()` / `p("a", "b")` (labelled 'closure'). `print` value-position types as `Unknown` so the
+    // value-call path accepts every shape the direct call does.
+    ok("fn w():\n    p := print\n    p()\n");
+    ok("fn w():\n    p := print\n    p(\"a\")\n");
+    ok("fn w():\n    p := print\n    p(\"a\", \"b\", \"c\")\n");
+}
+
+#[test]
+fn user_binding_shadows_firstclass_builtin_typechecks() {
+    // Regression (bugs 1 & 3): a user binding named like a first-class builtin fn is legal
+    // (`is_reserved_name` bans only `fn`/type/import-alias decls) and the checker types it as the
+    // BINDING, not the builtin. A param, a top-level `:=`, and a loop var each shadow.
+    ok("fn f(ord: int):\n    print(ord)\nf(42)\n");
+    ok("chr := \"hi\"\nx := chr\nprint(x)\n");
+    ok("for chr in [\"a\", \"b\"]:\n    print(chr)\n");
+}
+
+#[test]
 fn type_name_not_firstclass_value() {
     // A reserved TYPE/ctor name is still NOT a first-class value (`f := List` fails).
     rejects("fn w():\n    f := List\n", "List");

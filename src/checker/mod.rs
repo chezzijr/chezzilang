@@ -7282,16 +7282,24 @@ impl Checker {
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
-        // `defer print(...)`): its type is the `Ty::Func` derived from `builtin_sig` (the same
-        // canonical shape used for hover). Only the four first-class fns — type/ctor names fall
-        // through to the "unknown/not first-class" arms below (uniform with `f := Point`).
-        if is_firstclass_builtin_fn(name)
-            && let Some(sig) = builtin_sig(name)
-        {
-            return Ty::Func {
-                params: sig.params,
-                ret: Box::new(sig.ret),
-            };
+        // `defer print(...)`). Only the four first-class fns — type/ctor names fall through to the
+        // "unknown/not first-class" arms below (uniform with `f := Point`).
+        if is_firstclass_builtin_fn(name) {
+            // `print` is VARIADIC (any number of positional args; `sep=`/`end=` stay direct-call-only).
+            // `Ty::Func` can only express a FIXED arity, so a rigid `fn(?) -> nil` would reject the
+            // value form `p := print; p()` / `p("a", "b")` even though the direct call allows them.
+            // Type it as `Unknown` (the "callable with any shape" bottom the value-call path already
+            // accepts) so value-form `print` matches direct-call `print`'s arity flexibility. `ord`/
+            // `chr`/`panic` are genuinely fixed-arity → a proper `Ty::Func` (HOF-safe).
+            if name == "print" {
+                return Ty::Unknown;
+            }
+            if let Some(sig) = builtin_sig(name) {
+                return Ty::Func {
+                    params: sig.params,
+                    ret: Box::new(sig.ret),
+                };
+            }
         }
         if name == "None" {
             return Ty::option(Ty::Unknown);

@@ -669,13 +669,19 @@ impl Interp {
                     });
                 }
                 // A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) read in value
-                // position resolves to a `Value::Builtin` before the env miss — the runtime twin of
-                // the checker's `infer_ident` first-class arm. A user binding can never shadow it
-                // (`is_reserved_name` bans `fn print`), so this ordering is safe.
+                // position resolves to a `Value::Builtin` — the runtime twin of the checker's
+                // `infer_ident` first-class arm. But a USER BINDING SHADOWS it: `is_reserved_name`
+                // bans only `fn print`/type/import-alias, NOT local/param/loop/global bindings
+                // (`ord := 5`, `fn f(ord: int)`, `for chr in xs`), and the checker resolves
+                // `lookup(name)` (bindings) BEFORE the builtin arm — so we MUST check `env.get` first
+                // (mirrors the VM's `compile_ident`, which resolves locals/globals before `LoadBuiltin`).
+                if let Some(v) = self.env.get(name) {
+                    return Ok(v);
+                }
                 if crate::checker::is_firstclass_builtin_fn(name) {
                     return Ok(Value::Builtin(name.as_str().into()));
                 }
-                self.env.get(name).ok_or_else(|| RuntimeError {
+                Err(RuntimeError {
                     message: format!("undefined name '{name}'"),
                     span: expr.span,
                 })

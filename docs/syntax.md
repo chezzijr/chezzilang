@@ -1567,7 +1567,11 @@ constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user s
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
 Note: the value form of `print` always uses the defaults **`sep=" "`, `end="\n"`** — the `sep=`/`end=`
 named arguments are available **only on the direct-call form** `print(a, b, sep=",")`, not on a
-`print` bound to a name. `defer` composes with
+`print` bound to a name. It is otherwise **variadic** like the direct call — `p := print` accepts any
+number of positional args (`p()`, `p("a")`, `p("a", "b")`). A **user binding shadows** one of these
+names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
+`for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
+only an unbound name resolves to the first-class builtin. `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's

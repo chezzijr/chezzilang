@@ -6109,10 +6109,23 @@ impl Vm {
                     // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
                     Callee::Builtin(name) => match name.as_ref() {
                         "print" => {
-                            let mut parts = Vec::with_capacity(args.len());
+                            // ROOT the args on the operand stack while stringifying. `args` was
+                            // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
+                            // `Stringable` `str` method runs user code that can `collect()` at a
+                            // safepoint and would sweep the LATER (still-unrendered) args — a
+                            // use-after-free. `do_print` guards this exact hazard by keeping the args
+                            // on the operand stack across the whole stringify loop; mirror it here:
+                            // push them back, render from the rooted slots, then truncate.
+                            let at = self.stack.len();
                             for v in &args {
-                                parts.push(self.stringify(*v, span, 0)?);
+                                self.push(*v);
                             }
+                            let mut parts = Vec::with_capacity(args.len());
+                            for i in 0..args.len() {
+                                let v = self.stack[at + i];
+                                parts.push(self.stringify(v, span, 0)?);
+                            }
+                            self.stack.truncate(at);
                             self.out.push_str(&parts.join(" "));
                             self.out.push('\n');
                             Ok(Value::Nil)
@@ -23726,6 +23739,64 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, "97\nB\n");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Regression (bugs 1 & 3): a user binding named like a first-class builtin fn SHADOWS the builtin
+    /// in value position on BOTH engines — the compiler resolved `LoadBuiltin` before local/global
+    /// binding lookup (and the interp returned `Value::Builtin` before `env.get`), so a shadowed name
+    /// type-checked as the binding but printed `<builtin fn …>` at runtime. Param, global (`:=`), and
+    /// loop-var shadows must each resolve to the BINDING, byte-identical VM == interp.
+    #[test]
+    fn user_binding_shadows_firstclass_builtin_both_engines() {
+        // parameter shadow
+        let a = "fn f(ord: int):\n    print(ord)\nf(42)\n";
+        assert_eq!(run_capture(a).expect("vm"), "42\n");
+        assert_eq!(
+            run_capture(a).expect("vm"),
+            crate::interp::run_capture(a).expect("interp")
+        );
+        // top-level global (`:=`) shadow, read in value position
+        let b = "chr := \"hello\"\nx := chr\nprint(x)\n";
+        assert_eq!(run_capture(b).expect("vm"), "hello\n");
+        assert_eq!(
+            run_capture(b).expect("vm"),
+            crate::interp::run_capture(b).expect("interp")
+        );
+        // loop-variable shadow
+        let c = "for chr in [\"a\", \"b\"]:\n    print(chr)\n";
+        assert_eq!(run_capture(c).expect("vm"), "a\nb\n");
+        assert_eq!(
+            run_capture(c).expect("vm"),
+            crate::interp::run_capture(c).expect("interp")
+        );
+    }
+
+    /// Regression (bug 2): `print` AS A VALUE is variadic like the direct call — zero, one, or many
+    /// args all work (value form always uses the defaults `sep=" "`/`end="\n"`). A rigid 1-arg Func
+    /// typing rejected `p()` / `p("a", "b")`. Byte-identical VM == interp.
+    #[test]
+    fn print_as_value_variadic_both_engines() {
+        let src = "fn main():\n    p := print\n    p()\n    p(\"a\")\n    p(\"a\", \"b\", \"c\")\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "\na\na b c\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Regression (bug 4): value-form `print` (`f := print; f(a, b)`) must keep its args GC-ROOTED
+    /// while stringifying — a `Stringable` `str` method runs user code that can `collect()` and would
+    /// sweep the later (off-stack) args, a use-after-free. Under `gc_stress` (collect before every
+    /// instruction) the output must still be correct and match the non-stress run + the interp.
+    #[test]
+    fn print_as_value_args_rooted_under_gc_stress() {
+        let src = "struct Loud:\n    n: int\n    fn str(self) -> str:\n        return \"L{self.n}\"\n\
+                   fn main():\n    f := print\n    f(Loud(1), Loud(2), Loud(3))\nmain()\n";
+        let stressed = run_capture_stress(src);
+        assert_eq!(stressed, "L1 L2 L3\n");
+        assert_eq!(stressed, run_capture(src).expect("vm run"));
+        assert_eq!(
+            stressed,
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on
