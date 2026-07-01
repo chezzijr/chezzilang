@@ -15372,7 +15372,10 @@ fn as_f64(v: Value) -> f64 {
 /// Format a float the way Chezzi prints it (matches `interp::value::format_float`).
 fn format_float(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
-        format!("{x:.1}")
+        // Shortest round-trip decimal (`{}`) + an always-present `.0`: large integral floats
+        // (`1.5e23`) print the shortest form that round-trips, not the exact fixed-point
+        // expansion of the binary value. Rust's f64 Display never uses scientific notation.
+        format!("{x}.0")
     } else {
         format!("{x}")
     }
@@ -23205,6 +23208,21 @@ main()";
     fn golden_literals_chz_matches_expected_and_interp() {
         let src = include_str!("../../examples/literals.chz");
         let expected = include_str!("../../examples/literals.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Large-integral float golden: `examples/float_large_integral.chz`. A finite whole-valued float
+    /// must print the SHORTEST decimal that round-trips (docs/syntax.md contract), not the exact
+    /// fixed-point expansion of the binary value (`1.5e23` → `150000000000000000000000.0`, not the
+    /// old artifact `150000000000000004194304.0`). Exercises BOTH the engine `format_float` path
+    /// (bare interpolation) and `fmtspec::format_float_like` (bare format-spec, no type char), and
+    /// asserts VM==interp==`.expected` (parity is the M19 bar).
+    #[test]
+    fn golden_float_large_integral_matches_expected_and_interp() {
+        let src = include_str!("../../examples/float_large_integral.chz");
+        let expected = include_str!("../../examples/float_large_integral.expected");
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));

@@ -1,0 +1,22 @@
+# examples/float_large_integral.chz — golden for shortest-round-trip float formatting.
+# Large integral-valued floats must print the SHORTEST decimal that round-trips
+# (docs/syntax.md contract), not the exact fixed-point expansion of the binary value.
+
+fn main():
+    # --- bare interpolation → engine format_float ---
+    print("a: {1.5e23}")
+    print("b: {1.5e30}")
+    print("c: {2.5e23}")
+    print("d: {6.022e23}")
+    print("e: {-1.5e23}")
+
+    # --- bare format-spec (no type char) → fmtspec::format_float_like ---
+    print("f: {1.5e23:>30}")
+    print("g: {2.5e23:}")
+
+    # --- controls: small integral floats keep their exact spelling ---
+    print("h: {3.0}")
+    print("i: {-0.0}")
+    print("j: {100.0}")
+
+main()
