@@ -8,20 +8,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// The names handled here. Used so the interpreter can tell a builtin call from a user call. Mirrors
-/// `compiler::is_builtin`: the type/container CONSTRUCTOR names (hard-coded until phase 2) ∪ the
-/// native-prelude table's `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`), READ from the table so the
-/// four-fn whitelist lives in one place (drift-guarded by `prelude_table_is_single_source_of_truth`).
-/// `print` (`Intrinsic::Print`) is handled by the interpreter itself, NOT here; `panic(msg)` is
-/// intercepted in `eval_call` (raises an Err, not an Ok value), so the pure `call` table below never
-/// sees it — but it must be a recognized builtin name.
+/// `compiler::is_builtin`: the GENERIC / reserved-type container CONSTRUCTOR names (range/List/Map/Set,
+/// hard-coded until phase 2b) ∪ the native-prelude table's `Intrinsic::Builtin` fns (`ord`/`chr`/
+/// `panic`) plus the phase-2a `Intrinsic::Ctor` scalar conversions (`int`/`float`/`str`/`bytes`/
+/// `bytearray`), READ from the table so those whitelists live in one place (drift-guarded by
+/// `prelude_table_is_single_source_of_truth`). `print` (`Intrinsic::Print`) is handled by the
+/// interpreter itself, NOT here; `panic(msg)` is intercepted in `eval_call` (raises an Err, not an Ok
+/// value), so the pure `call` table below never sees it — but it must be a recognized builtin name.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "range" | "int" | "float" | "str" | "Set" | "List" | "Map" | "bytes" | "bytearray"
-    ) || matches!(
-        crate::checker::prelude_fn(name).map(|p| p.intrinsic),
-        Some(crate::checker::Intrinsic::Builtin)
-    )
+    matches!(name, "range" | "Set" | "List" | "Map")
+        || matches!(
+            crate::checker::prelude_fn(name).map(|p| p.intrinsic),
+            Some(crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor)
+        )
 }
 
 /// Dispatch a builtin by name. Caller guarantees `is_builtin(name)`.

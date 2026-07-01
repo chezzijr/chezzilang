@@ -211,21 +211,27 @@ fn is_reserved_name(name: &str) -> bool {
     RESERVED_CALLABLE.contains(&name)
 }
 
-/// The kind of intrinsic a first-class universe function lowers to on a DIRECT call. `Print` → the
-/// dedicated `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
-/// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`. Metadata only — runtime
-/// dispatch stays name-keyed and unchanged (the `NativeFn` host seam only accepts int/str/map args,
-/// which is exactly why `print` needs its own `Value::Builtin`/opcode path).
+/// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
+/// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
+/// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`; `Ctor` → likewise
+/// `Op::CallBuiltin` (phase 2a: the scalar-conversion constructors int/float/str/bytes/bytearray).
+/// The `Print`/`Builtin` kinds back FIRST-CLASS fn values; `Ctor` rows are NON-first-class (types are
+/// not first-class values — uniform with user struct ctors), so a `Ctor` row never emits a
+/// `LoadBuiltin`/`Ty::BuiltinFn`. Metadata only — runtime dispatch stays name-keyed and unchanged (the
+/// `NativeFn` host seam only accepts int/str/map args, which is exactly why `print` needs its own
+/// `Value::Builtin`/opcode path).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Intrinsic {
     Print,
     Builtin,
+    Ctor,
 }
 
-/// One row of the synthetic native-prelude table (phase 1: pure FUNCTIONS only). This table is the
-/// SINGLE SOURCE OF TRUTH for the four first-class universe fns (`print`/`ord`/`chr`/`panic`): the
-/// checker, compiler, and interp all READ it instead of each keeping its own hard-coded match arm
-/// (drift-guarded by `prelude_table_is_single_source_of_truth`). `make_sig` is a const-safe fn
+/// One row of the synthetic native-prelude table. This table is the SINGLE SOURCE OF TRUTH for the
+/// four first-class universe fns (`print`/`ord`/`chr`/`panic`) AND the five non-first-class
+/// scalar-conversion ctors (`int`/`float`/`str`/`bytes`/`bytearray`, phase 2a): the checker, compiler,
+/// and interp all READ it instead of each keeping its own hard-coded match arm (drift-guarded by
+/// `prelude_table_is_single_source_of_truth`). `make_sig` is a const-safe fn
 /// pointer — a `FnSig` holds `Vec`/`Box`, so it can't be a literal `const` field — and stays PRIVATE
 /// so the `pub(crate)` row never leaks the module-private `FnSig` type.
 pub(crate) struct PreludeFn {
@@ -250,14 +256,36 @@ fn sig_ord() -> FnSig {
 fn sig_chr() -> FnSig {
     FnSig::plain(vec![Ty::Int], Ty::Str)
 }
+// The five scalar-conversion CTORS (phase 2a). `int`/`float`/`str` accept ~anything → `?` arg, a
+// concrete scalar return; `bytes`/`bytearray` likewise take a `?` source. Exactly the shapes the
+// hard-coded `builtin_sig` arms carried before the table folded them in (drift-guarded).
+fn sig_int() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::Int)
+}
+fn sig_float() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::Float)
+}
+fn sig_str() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::Str)
+}
+fn sig_bytes() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::Bytes)
+}
+fn sig_bytearray() -> FnSig {
+    FnSig::plain(vec![Ty::Unknown], Ty::ByteArray)
+}
 
 /// The native prelude (phase 1). The four universe FUNCTIONS that are FIRST-CLASS values (bindable,
 /// passable, `defer`-able as a bare call) — unlike type/container/runtime constructors
 /// (`int`/`List`/`Channel`/…) and user struct/enum ctors, which stay non-first-class and must be
 /// wrapped in a function. First-class fns carry a dedicated runtime value
 /// (`Value::Builtin`/`Obj::Builtin`); direct calls still lower to their specialized opcodes, only
-/// value-position uses take the first-class path. Constructors are intentionally ABSENT here — they
-/// land in phase 2 as `Intrinsic::Ctor` (see PROGRESS.md "native-prelude table").
+/// value-position uses take the first-class path. The SCALAR-CONVERSION constructors
+/// (`int`/`float`/`str`/`bytes`/`bytearray`) landed in phase 2a as `Intrinsic::Ctor` rows —
+/// `first_class: false` (types are not first-class values), so they source their signature +
+/// `CallBuiltin` dispatch from the table but never emit a `LoadBuiltin`/`Ty::BuiltinFn`. The GENERIC /
+/// reserved-type container ctors (`List`/`Map`/`Set`/`range`) stay OUT — phase 2b (see PROGRESS.md
+/// "native-prelude table").
 pub(crate) const PRELUDE: &[PreludeFn] = &[
     PreludeFn {
         name: "print",
@@ -282,6 +310,38 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
         intrinsic: Intrinsic::Builtin,
         first_class: true,
         make_sig: sig_panic,
+    },
+    // Phase 2a — the five scalar-conversion CTORS. `first_class: false` (ALWAYS, for every Ctor row):
+    // a value-position use (`f := int`) stays rejected, uniform with `f := Point` / `f := List`.
+    PreludeFn {
+        name: "int",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+        make_sig: sig_int,
+    },
+    PreludeFn {
+        name: "float",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+        make_sig: sig_float,
+    },
+    PreludeFn {
+        name: "str",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+        make_sig: sig_str,
+    },
+    PreludeFn {
+        name: "bytes",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+        make_sig: sig_bytes,
+    },
+    PreludeFn {
+        name: "bytearray",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+        make_sig: sig_bytearray,
     },
 ];
 
@@ -15520,9 +15580,10 @@ fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 /// a future reserved builtin that forgets an entry here fails that test rather than silently losing
 /// hover. (`Ok`/`Err`/`Some` are not reserved and stay hover-`None`.)
 fn builtin_sig(name: &str) -> Option<FnSig> {
-    // The four first-class universe FUNCTIONS (print/ord/chr/panic) source their signature from the
-    // synthetic native-prelude table — the single source of truth (drift-guarded). The remaining
-    // reserved CTOR names (range/int/List/Channel/…) stay here until phase 2 (`Intrinsic::Ctor`).
+    // The universe FUNCTIONS (print/ord/chr/panic) AND the scalar-conversion CTORS
+    // (int/float/str/bytes/bytearray, phase 2a) source their signature from the synthetic
+    // native-prelude table — the single source of truth (drift-guarded). The GENERIC / reserved-type
+    // container ctor names (range/List/Map/Set/Channel/…) stay here until phase 2b.
     if let Some(p) = prelude_fn(name) {
         return Some((p.make_sig)());
     }
@@ -15530,17 +15591,11 @@ fn builtin_sig(name: &str) -> Option<FnSig> {
         // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the
         // canonical `range(end)`.
         "range" => (vec![Ty::Int], Ty::list(Ty::Int)),
-        // `int`/`float`/`str` accept ~anything → `?` arg, concrete scalar return.
-        "int" => (vec![Ty::Unknown], Ty::Int),
-        "float" => (vec![Ty::Unknown], Ty::Float),
-        "str" => (vec![Ty::Unknown], Ty::Str),
         // Container constructors --------------------------------------------------------------
         // Element/key/value types are inferred from the argument → `?` slots.
         "List" => (vec![Ty::Unknown], Ty::list(Ty::Unknown)),
         "Set" => (vec![Ty::Unknown], Ty::set(Ty::Unknown)),
         "Map" => (vec![Ty::Unknown], Ty::map(Ty::Unknown, Ty::Unknown)),
-        "bytes" => (vec![Ty::Unknown], Ty::Bytes),
-        "bytearray" => (vec![Ty::Unknown], Ty::ByteArray),
         // Runtime constructors ----------------------------------------------------------------
         // `Channel[T]()` is type-arg-driven, no value arg → no params.
         "Channel" => (vec![], Ty::channel(Ty::Unknown)),
