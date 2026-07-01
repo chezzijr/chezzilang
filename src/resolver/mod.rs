@@ -17,13 +17,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Maximum depth of a transitive import chain before the resolver gives up with a clean diagnostic
-/// instead of recursing further. The DFS `Builder::visit` recurses once per import *edge* on the
-/// 8MB main thread; a pathological linear chain (~8-10k modules deep) otherwise overflows the host
-/// stack and aborts the process (SIGABRT). 2000 sits ~4-5x below the observed overflow point
-/// (≈2MB of frames, generous margin) yet far above any real project (tens/hundreds of modules — a
-/// diamond re-import dedupes via `visited` and does *not* count toward depth). Cycles are caught
-/// separately; this backstops the acyclic-but-very-deep case only.
-const MAX_IMPORT_DEPTH: usize = 2000;
+/// instead of recursing further. The DFS `Builder::visit` recurses once per import *edge*; a
+/// pathological linear chain (~8-10k modules deep) otherwise overflows the host stack and aborts the
+/// process (SIGABRT). The limit MUST be safe on the *smallest* stack this recursion runs on — not
+/// just the 8MB main thread used by `check`/`run`, but the **~2MB default tokio worker** the LSP
+/// resolves on (`chezzi-lsp` → `editor::diagnostics` → `build_graph_with_entry_source`, no
+/// `thread_stack_size` override), **and** debug builds whose per-frame stack use is ~3-5x a release
+/// frame. Sizing for the worst case (2MB worker × ~5KB debug frame ≈ 400 frames, less the tower-lsp
+/// task future's own usage): 256 clears every build×path combo with margin (≈1.3MB debug-worst,
+/// ≈256KB release) while sitting far above any real project (tens/hundreds of modules — a diamond
+/// re-import dedupes via `visited` and does *not* count toward depth; a 256-deep *linear* import
+/// chain is not a real program). Cycles are caught separately; this backstops the
+/// acyclic-but-very-deep case only.
+const MAX_IMPORT_DEPTH: usize = 256;
 
 /// A module's stable identity: its canonicalized absolute path. De-dupes diamond imports and never
 /// aliases `std.io` with a same-named local file.
