@@ -989,6 +989,15 @@ enum Lowered {
         home: Option<usize>,
         span: Span,
     },
+    /// `spawn f(args)` where `f` is a first-class builtin fn value (`Obj::Builtin`) — the callee is
+    /// pure code (no captures, no home), so it crosses by name and the worker re-allocs a fresh
+    /// `Obj::Builtin`, mirroring `Func`. Without this arm a builtin callee hit `prepare_worker`'s
+    /// reject `_` on the M:N engine only (serial/interp dispatch it directly) — a parity divergence.
+    Builtin {
+        name: Box<str>,
+        args: Vec<WireValue>,
+        span: Span,
+    },
     /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
     /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
     Method {
@@ -1005,6 +1014,7 @@ impl Lowered {
         match self {
             Lowered::Closure { span, .. }
             | Lowered::Func { span, .. }
+            | Lowered::Builtin { span, .. }
             | Lowered::Method { span, .. } => *span,
         }
     }
@@ -10685,6 +10695,13 @@ impl Vm {
                             home: self.home_index(home),
                             span,
                         },
+                        // A first-class builtin fn value (`f := ord; spawn f(x)`) is pure code — cross
+                        // it by name; the worker re-allocs a fresh `Obj::Builtin`. Mirrors `Func`.
+                        Obj::Builtin(name) => Lowered::Builtin {
+                            name,
+                            args: wargs,
+                            span,
+                        },
                         _ => {
                             return Err(self.err(
                                 format!(
@@ -10766,6 +10783,11 @@ impl Vm {
             } => {
                 let home = worker.worker_home(home);
                 let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
+                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                (ReadyCall::Invoke { callee, args }, span)
+            }
+            Lowered::Builtin { name, args, span } => {
+                let callee = Value::Obj(worker.heap.alloc(Obj::Builtin(name)));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
@@ -23808,6 +23830,21 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, "97\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// A first-class builtin fn value spawned as a DIRECT CALL callee (`f := print; spawn f(x)`,
+    /// distinct from the `spawn:` block form above) must lower + run on all three engines. The
+    /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
+    /// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
+    /// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
+    /// checker-accepted program. Fixed by the `Lowered::Builtin` arm (cross by name, worker re-allocs).
+    #[test]
+    fn spawn_builtin_fn_value_as_call_callee_both_engines() {
+        let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "from-task\n");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
         assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
     }
