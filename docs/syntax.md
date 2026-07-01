@@ -1568,9 +1568,12 @@ are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `d
 Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
 defaults **`sep=" "`, `end="\n"`** — the variadic multi/zero-arg shapes AND the `sep=`/`end=` named
 arguments stay **direct-call-only** (`print(a, b, sep=",")`), because they need the specialized print
-opcode a bound value doesn't reach. The direct call keeps its full variadic surface. All four builtins
+opcode a bound value doesn't reach. The direct call keeps its full variadic surface. Because a
+deferred/spawned `print` runs its value form, passing `sep=`/`end=` there is a **type error**
+(`defer print(a, sep="-")` is rejected) rather than silently ignored. All four builtins
 are **sendable** — a value bound to one (`f := ord`) crosses the `spawn` airlock and runs in the
-spawned task, on both the serial and the OS-thread engine. A **user binding shadows** one of these
+spawned task, on both the serial and the OS-thread engine; likewise **`spawn print(...)` is accepted**
+directly, symmetric with `defer print(...)`. A **user binding shadows** one of these
 names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
 `for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
 only an unbound name resolves to the first-class builtin (and a same-named module global read *before*

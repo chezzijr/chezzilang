@@ -54,7 +54,16 @@ handle, so identity was wrong; interp already name-compares via derived `Partial
 (checker), `builtin_value_equality_both_engines` / `builtin_value_sendable_across_airlock_both_engines` /
 `user_binding_shadows_firstclass_builtin_both_engines` / `print_as_value_arg_rooted_under_gc_stress`
 (VM==interp==M:N). Docs: `docs/syntax.md` §`defer` (first-class list + value-form 1-arg limit +
-sendable + shadowing + use-before-def). **What's next:** unchanged — M19 perf Tier-1 (method-call IC,
+sendable + shadowing + use-before-def). **Post-review parity fixes (2026-07-01):** (1) a first-class
+builtin spawned as a **call callee** (`f := ord; spawn f("a")`, and bare `spawn print("hi")`) faulted
+`spawn: 'function' is not an isolable task` on the **M:N engine only** — `prepare_worker`'s
+`PendingCall::Call` arm handled only `Closure`/`Func`; added a `Lowered::Builtin` arm (crosses by name,
+worker re-allocs `Obj::Builtin`), restoring three-engine parity. (2) The `spawn` gate now **accepts**
+first-class builtins (symmetric with `defer`), and (3) `sep=`/`end=` on a deferred/spawned `print` are
+a **type error** (the value form can't carry them) instead of being silently dropped. Tests:
+`spawn_builtin_fn_value_as_call_callee_both_engines` / `spawn_bare_builtin_print_both_engines`
+(VM==interp==M:N), `spawn_firstclass_builtin_accepted_like_defer` / `defer_spawn_builtin_named_args_rejected`
+(checker). **What's next:** unchanged — M19 perf Tier-1 (method-call IC,
 `run_until` trim, `Op::Call` specialization).
 
 **✅ Resolver — deep-import-chain host-crash backstop (pre-JIT audit, 2026-07-01).** A pathological

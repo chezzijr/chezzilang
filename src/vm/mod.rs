@@ -23849,6 +23849,19 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
     }
 
+    /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
+    /// symmetric with `defer print(...)`. `print` lowers to `Op::LoadBuiltin` (value position) then
+    /// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the airlock by name on all three
+    /// engines. The checker gate accepts it (parity-perf-0 fix); runtime prints identically.
+    #[test]
+    fn spawn_bare_builtin_print_both_engines() {
+        let src = "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "hi\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
     /// Value-form `print` (`f := print; f(x)`) keeps its (single) arg GC-ROOTED while stringifying —
     /// a `Stringable` `str` method runs user code that can `collect()` at a safepoint and would sweep
     /// the off-stack arg, a use-after-free. Under `gc_stress` (collect before every instruction) the

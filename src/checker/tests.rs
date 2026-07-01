@@ -5753,10 +5753,28 @@ fn spawn_sendable_args_ok() {
 }
 
 #[test]
-fn spawn_builtin_rejected_like_defer() {
+fn spawn_firstclass_builtin_accepted_like_defer() {
+    // The universe fns print/ord/chr/panic are first-class values that cross the airlock by name,
+    // so `spawn print(...)` is accepted — symmetric with `defer print(...)`. A non-first-class
+    // builtin/ctor still must be wrapped.
+    ok("fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n");
     rejects(
-        "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n",
+        "fn main():\n    parallel:\n        spawn int(1)\nmain()\n",
         "spawn requires a function or method call",
+    );
+}
+
+#[test]
+fn defer_spawn_builtin_named_args_rejected() {
+    // sep=/end= are direct-call-only (the specialized print opcode); a deferred/spawned print runs
+    // its value form and can't carry them, so they are rejected rather than silently dropped.
+    rejects(
+        "fn w():\n    defer print(\"a\", sep=\"-\")\n",
+        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a deferred one",
+    );
+    rejects(
+        "fn main():\n    parallel:\n        spawn print(\"a\", end=\"!\")\nmain()\n",
+        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a spawned one",
     );
 }
 

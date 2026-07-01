@@ -4699,7 +4699,7 @@ impl Checker {
                 // function/closure, or a name bound to one). Built-ins (`print`, `len`, …) and
                 // struct/enum constructors are not first-class values — wrap them in a function.
                 match &e.kind {
-                    ExprKind::Call { callee, .. } => match &callee.kind {
+                    ExprKind::Call { callee, named, .. } => match &callee.kind {
                         ExprKind::Field { .. } => {} // method call
                         ExprKind::Ident(name)
                             if self.lookup(name).is_none()
@@ -4710,6 +4710,20 @@ impl Checker {
                                 e.span,
                                 "defer requires a function or method call (built-ins and \
                                  constructors must be wrapped in a function)",
+                            );
+                        }
+                        // A deferred first-class builtin runs via its VALUE form, which cannot carry
+                        // named args — `sep=`/`end=` are direct-call-only (the specialized `print`
+                        // opcode). Reject them rather than silently dropping them: the direct-call
+                        // typing would otherwise accept `defer print(a, sep="-")` and then print `a`
+                        // with the default separator, a wrong result vs. the accepted contract.
+                        ExprKind::Ident(name)
+                            if is_firstclass_builtin_fn(name) && !named.is_empty() =>
+                        {
+                            self.error(
+                                e.span,
+                                "named arguments (sep=/end=) are only supported on a direct \
+                                 print(...) call, not a deferred one",
                             );
                         }
                         _ => {} // a name bound to a callable, or an arbitrary value-producing callee
@@ -4754,20 +4768,34 @@ impl Checker {
                 match target {
                     SpawnTarget::Call(e) => {
                         // `spawn` targets a method call or a call to a first-class callable (a user
-                        // function/closure, or a name bound to one). Built-ins (`print`, `len`, …)
+                        // function/closure, a name bound to one, or a first-class builtin fn value —
+                        // `print`/`ord`/`chr`/`panic`, which cross the airlock by name). Other built-ins
                         // and struct/enum constructors are not first-class values — wrap them in a
                         // function. Mirrors `defer`'s guard so the two features agree.
-                        if let ExprKind::Call { callee, .. } = &e.kind {
+                        if let ExprKind::Call { callee, named, .. } = &e.kind {
                             match &callee.kind {
                                 ExprKind::Field { .. } => {} // method call
                                 ExprKind::Ident(name)
                                     if self.lookup(name).is_none()
-                                        && !self.functions.contains_key(name) =>
+                                        && !self.functions.contains_key(name)
+                                        && !is_firstclass_builtin_fn(name) =>
                                 {
                                     self.error(
                                         e.span,
                                         "spawn requires a function or method call (built-ins and \
                                          constructors must be wrapped in a function)",
+                                    );
+                                }
+                                // A spawned first-class builtin runs via its VALUE form (fixed sep/end),
+                                // which cannot carry `sep=`/`end=` — reject rather than silently drop
+                                // (mirrors the deferred-builtin guard).
+                                ExprKind::Ident(name)
+                                    if is_firstclass_builtin_fn(name) && !named.is_empty() =>
+                                {
+                                    self.error(
+                                        e.span,
+                                        "named arguments (sep=/end=) are only supported on a direct \
+                                         print(...) call, not a spawned one",
                                     );
                                 }
                                 _ => {}
