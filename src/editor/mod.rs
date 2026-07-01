@@ -353,7 +353,7 @@ fn overlay_type(ty: &crate::ast::Type, map: &mut std::collections::HashMap<(usiz
                 overlay_type(a, map);
             }
         }
-        Type::Func { params, ret } => {
+        Type::Func { params, ret, .. } => {
             for p in params {
                 overlay_type(p, map);
             }

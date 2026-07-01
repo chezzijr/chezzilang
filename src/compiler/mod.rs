@@ -71,6 +71,10 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // every alias spelling), then lower each extern from that table — never re-resolving alias names
     // in the backend's flat bare map (the collision whack-a-mole's root). Keyed by graph module idx.
     c.extern_sigs = crate::checker::resolve_extern_signatures(graph);
+    // Swift-style keyword args through a function VALUE: the checker resolves each value+keyword call
+    // to a positional slot permutation (module-scoped, keyed like extern sigs); the value path lowers
+    // it to a plain positional `Op::Call`, so the runtime ABI stays positional.
+    c.keyword_calls = crate::checker::resolve_keyword_calls(graph);
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -133,6 +137,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
+    c.keyword_calls = crate::checker::resolve_keyword_calls_standalone(&module.stmts);
     let toplevel = c.compile_module(0, module, &[], true)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -203,6 +208,11 @@ struct Compiler {
     /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
     /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
+    /// Swift-style keyword-arg resolution for VALUE calls, keyed `(graph module index, call span)`;
+    /// `perm[i]` = index into `[positional args ++ named exprs]` that fills parameter slot `i`. Filled
+    /// in `compile_graph`/`compile_module_standalone` from the checker's `resolve_keyword_calls`;
+    /// consumed by the value path of `compile_call` to emit a positional `Op::Call`.
+    keyword_calls: crate::checker::KeywordTable,
     /// One-way int→float widening — the element-coercion hint for the collection literal currently
     /// being compiled as a typed `let` value (`xs: List[float] = [..]`). Set transiently by
     /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
@@ -385,6 +395,7 @@ impl Compiler {
             current_module_idx: 0,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
+            keyword_calls: crate::checker::KeywordTable::new(),
             float_elem_hint: None,
         }
     }
@@ -1388,7 +1399,13 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match target {
             SpawnTarget::Call(call) => {
-                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                let ExprKind::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = &call.kind
+                else {
                     return Err(CompileError {
                         message: "spawn requires a function or method call".to_string(),
                         span,
@@ -1400,6 +1417,24 @@ impl Compiler {
                         self.compile_expr(fc, a)?;
                     }
                     fc.emit(Op::SpawnMethod(name.clone(), args.len()), call.span);
+                } else if !named.is_empty()
+                    && let Some(perm) = self
+                        .keyword_calls
+                        .get(&(self.current_module_idx, call.span))
+                        .cloned()
+                {
+                    // A spawned VALUE call carrying keyword arguments: reorder to positional by the
+                    // checker-recorded permutation, then spawn positionally (same as the eager form).
+                    self.compile_expr(fc, callee)?;
+                    for &ci in &perm {
+                        let e = if ci < args.len() {
+                            &args[ci]
+                        } else {
+                            &named[ci - args.len()].1
+                        };
+                        self.compile_expr(fc, e)?;
+                    }
+                    fc.emit(Op::SpawnCall(perm.len()), call.span);
                 } else {
                     self.compile_expr(fc, callee)?;
                     for a in args {
@@ -3094,7 +3129,13 @@ impl Compiler {
                 return Ok(());
             }
         };
-        let ExprKind::Call { callee, args, .. } = &call.kind else {
+        let ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } = &call.kind
+        else {
             return Err(CompileError {
                 message: "defer requires a function or method call".to_string(),
                 span,
@@ -3106,6 +3147,27 @@ impl Compiler {
                 self.compile_expr(fc, a)?;
             }
             fc.emit(Op::DeferMethod(name.clone(), args.len()), call.span);
+            return Ok(());
+        }
+        // A deferred VALUE call carrying keyword arguments (Swift-style): reorder the combined
+        // `[positional ++ named]` args by the checker-recorded permutation, then defer positionally —
+        // same lowering as the eager value keyword call, just via `DeferCall`.
+        if !named.is_empty()
+            && let Some(perm) = self
+                .keyword_calls
+                .get(&(self.current_module_idx, call.span))
+                .cloned()
+        {
+            self.compile_expr(fc, callee)?;
+            for &ci in &perm {
+                let e = if ci < args.len() {
+                    &args[ci]
+                } else {
+                    &named[ci - args.len()].1
+                };
+                self.compile_expr(fc, e)?;
+            }
+            fc.emit(Op::DeferCall(perm.len()), call.span);
             return Ok(());
         }
         self.compile_expr(fc, callee)?;
@@ -3590,6 +3652,28 @@ impl Compiler {
             }
         }
         // General callable value.
+        // Swift-style keyword arguments through a function VALUE (`g(name="Bob")`): the checker
+        // recorded a slot PERMUTATION over the combined `[positional args ++ named exprs]` list. Emit
+        // the callee, then the combined exprs in slot order, and a plain positional `Op::Call` — the
+        // runtime ABI is unchanged. Positional-only calls (`named` empty) never consult the table.
+        if !named.is_empty()
+            && let Some(perm) = self
+                .keyword_calls
+                .get(&(self.current_module_idx, span))
+                .cloned()
+        {
+            self.compile_expr(fc, callee)?;
+            for &ci in &perm {
+                let e = if ci < args.len() {
+                    &args[ci]
+                } else {
+                    &named[ci - args.len()].1
+                };
+                self.compile_expr(fc, e)?;
+            }
+            fc.emit(Op::Call(perm.len()), span);
+            return Ok(());
+        }
         self.compile_expr(fc, callee)?;
         for a in args {
             self.compile_expr(fc, a)?;

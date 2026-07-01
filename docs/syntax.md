@@ -547,6 +547,35 @@ joins the positional args) and `end=` (default `"\n"`, appended after) — both 
 So `print("a", end="")` writes `a` with no trailing newline, and `print("a","b", sep="-", end="!")`
 writes `a-b!`. Any other named argument on a built-in is an error.
 
+**Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
+first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
+**labels**, so a value bound to a user function (or closure), or reached through a `fn(...)`-typed
+parameter, accepts keyword args:
+
+```chezzi
+fn greet(name: str, greeting: str):
+    print(greeting, name)
+
+g := greet
+g(name="Bob", greeting="Hi")           # "Hi Bob" — by label, through a value
+g(greeting="Hi", name="Bob")           # same — labels may be reordered
+g("Bob", "Hi")                         # positional through the value still works
+
+fn apply(f: fn(name: str) -> nil):     # labels ride on the fn TYPE
+    f(name="X")                        # keyword through a HOF parameter
+```
+
+Labels are **surface-only** (Swift SE-0111): `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
+type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
+(no impact on existing HOF/callback/protocol code). Two limits, both by design: **(1)** a value call
+must supply **every** parameter — declaration-site **defaults do not fill through a value** (`h :=
+hasdefault; h()` is an error, while a **direct** `hasdefault()` still fills the default); **(2)**
+first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
+user-function surface). Named arguments through a value evaluate in **parameter-declaration order**, the
+same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
+is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
+`DeferCall` / `SpawnCall` stay positional), so all engines produce identical output.
+
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
 return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type

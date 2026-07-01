@@ -11601,3 +11601,83 @@ fn ffi_qualified_width_in_extern_sig() {
         "import std.ffi\nextern \"libc.so.6\":\n    fn abs(x: ffi.int32) -> ffi.int32\n\nfn main():\n    print(abs(-5))\nmain()\n",
     );
 }
+
+// ===== Swift-style keyword arguments through a function VALUE (SE-0111 labels, surface-only) =====
+
+/// Labels on a `fn(...)` TYPE are SURFACE-ONLY: `fn(str)->nil` and `fn(name:str)->nil` are the same
+/// type, mutually assignable (a labelled fn value flows into an unlabelled param and vice-versa).
+#[test]
+fn kw_labels_are_surface_only() {
+    // A labelled user-fn value flows into an UNLABELLED fn param.
+    ok(
+        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nuse_it(greet)\n",
+    );
+    // A closure passed to a LABELLED fn param (labels ignored in the arity/assignability check).
+    ok("fn use_it(f: fn(name: str) -> nil):\n    f(\"a\")\nuse_it(fn(s: str): print(s))\n");
+    entry_ok(
+        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nfn main():\n    use_it(greet)\nmain()\n",
+    );
+}
+
+/// A value call carrying keyword arguments resolves against the value's labels (both by-name and
+/// reordered), through both the single-module and multi-module check paths.
+#[test]
+fn kw_value_call_accepts() {
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(name=\"Bob\", greeting=\"Hi\")\n",
+    );
+    // Reordered keywords.
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(greeting=\"Hi\", name=\"Bob\")\n",
+    );
+    // Positional still works alongside (named empty → fast path).
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(\"Bob\", \"Hi\")\n",
+    );
+    entry_ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\nfn main():\n    g := greet\n    g(name=\"Bob\", greeting=\"Hi\")\nmain()\n",
+    );
+}
+
+/// A keyword argument through a HOF parameter resolves against the ANNOTATION's labels.
+#[test]
+fn kw_value_call_hof_param_labels() {
+    ok(
+        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\napply(fn(name: str): print(name))\n",
+    );
+    entry_ok(
+        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\nfn main():\n    apply(fn(name: str): print(name))\nmain()\n",
+    );
+}
+
+/// An unknown label through a value is a clean type error that NAMES the bad label.
+#[test]
+fn kw_value_unknown_label_rejected() {
+    rejects(
+        "fn greet(name: str):\n    print(name)\ng := greet\ng(nope=\"x\")\n",
+        "unknown parameter label 'nope'",
+    );
+    entry_rejects(
+        "fn greet(name: str):\n    print(name)\nfn main():\n    g := greet\n    g(nope=\"x\")\nmain()\n",
+        "unknown parameter label 'nope'",
+    );
+}
+
+/// SCOPE-CUT: a value call omitting a defaulted parameter is a TYPE ERROR (defaults do NOT fill
+/// through a value), while a DIRECT call still fills the default.
+#[test]
+fn kw_value_scope_cut_defaults() {
+    // Direct call fills the default (a desugar feature) — clean.
+    ok_desugared("fn hasdefault(x: int = 5):\n    print(x)\nhasdefault()\n");
+    // Through a value: every parameter must be supplied (defaults do NOT fill through a value).
+    rejects_desugared(
+        "fn hasdefault(x: int = 5):\n    print(x)\nh := hasdefault\nh()\n",
+        "argument",
+    );
+}
+
+/// A first-class BUILTIN function value takes NO keyword arguments (labels are a user-fn surface).
+#[test]
+fn kw_value_builtin_rejects_keywords() {
+    rejects("p := ord\np(x=\"a\")\n", "takes no keyword arguments");
+}

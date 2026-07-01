@@ -1594,6 +1594,16 @@ impl Walker<'_> {
                         ),
                     ));
                 }
+                // A genuine call through a first-class function VALUE reached by an Ident (a local /
+                // param bound to a fn) or an arbitrary expression, carrying keyword arguments
+                // (`g(name="Bob")`, Swift-style). LEAVE the named args intact so the checker can
+                // resolve each label against the value's labelled function type and record the
+                // positional permutation for the backends. A METHOD-syntax callee (`recv.f(name=…)`)
+                // still routes to the method path, which does not resolve value keywords — keep the
+                // historical error for it (no silent drop of a keyword).
+                if !matches!(&callee.kind, ExprKind::Field { .. }) {
+                    return Ok(());
+                }
                 return Err(err(
                     span,
                     "named arguments are only supported on functions, struct constructors, and struct methods"
@@ -1889,10 +1899,16 @@ mod tests {
     }
 
     #[test]
-    fn named_on_non_callable_errors() {
-        // a local closure called with a named arg is unsupported
+    fn named_on_value_call_left_intact_for_checker() {
+        // Swift-style keyword args through a function VALUE: a value call (Ident/expr callee) carrying
+        // named args is LEFT INTACT by desugar (named preserved) so the checker resolves it against the
+        // value's labels — no longer a desugar error.
+        let stmts = desugar_ok("g := fn(x: int): x\nr := g(x=1)\n");
+        assert_eq!(call_named_keys(&stmts), vec!["x".to_string()]);
+        // A METHOD-syntax callee (`recv.f(name=…)`) still routes to the method path and keeps the
+        // historical error (it does not resolve value keywords — no silent keyword drop).
         assert!(
-            desugar_err("g := fn(x: int): x\nr := g(x=1)\n")
+            desugar_err("struct S:\n    v: int\nfn go(s: S):\n    s.missing(name=1)\n")
                 .message
                 .contains("only supported on functions, struct constructors, and struct methods")
         );

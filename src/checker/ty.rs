@@ -4,7 +4,43 @@
 //! [`Ty::Unknown`] is a top/bottom element that is compatible with everything so a single error
 //! doesn't cascade into a storm of follow-on errors.
 
+use crate::lexer::Span;
+use std::collections::HashMap;
 use std::fmt;
+
+/// Checker-resolved keyword-argument reordering for VALUE calls that carry labels (`g(name="Bob")`).
+/// Keyed by `(graph module index, call-expression span)` — module-scoped exactly like [`ExternTable`]
+/// so line:col collisions across modules can't alias. The value is the slot PERMUTATION: `perm[i]` is
+/// the index into the combined `[positional args ++ named-arg exprs]` list that fills parameter slot
+/// `i`. Both backends read it to lower a value+keyword call to a plain POSITIONAL `Op::Call` — the
+/// runtime ABI stays positional and UNCHANGED. Only consulted when a call's `named` list is non-empty
+/// (the positional hot path never touches it). Produced by `resolve_keyword_calls{,_standalone}`.
+pub type KeywordTable = HashMap<(usize, Span), Vec<usize>>;
+
+/// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
+/// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
+/// identity: two function types differing only in labels are the SAME type (mutually assignable,
+/// unifiable, protocol-conforming, identically displayed). This wrapper's `PartialEq` is therefore
+/// EQUALITY-NEUTRAL (always `true`), so the derived `PartialEq` on `Ty` transparently ignores labels
+/// — no hand-written `Ty` equality, zero regression to HOF/callback/protocol/subtyping code. The
+/// labels are consulted ONLY when resolving a value call that carries keyword arguments
+/// (`g(name="Bob")`), turning each label into a positional slot.
+#[derive(Debug, Clone, Default)]
+pub struct FnLabels(pub Vec<Option<String>>);
+
+impl PartialEq for FnLabels {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl FnLabels {
+    /// A label-less function type of `n` params (a bare `fn(T, …)` annotation, a builtin-fn value, or
+    /// any construction site that has no parameter names to offer).
+    pub fn none(n: usize) -> FnLabels {
+        FnLabels(vec![None; n])
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
@@ -31,6 +67,11 @@ pub enum Ty {
     Func {
         params: Vec<Ty>,
         ret: Box<Ty>,
+        /// Surface-only parameter labels (parallel to `params`); equality-neutral (see [`FnLabels`]).
+        /// Built with the fn's/closure's param names (or an annotation's optional labels) so a value
+        /// call can resolve `g(name="Bob")` to a positional slot. IGNORED by `compatible`/`unify`/
+        /// `Display`/`sendable`.
+        labels: FnLabels,
     },
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) used in value
     /// position (`f := ord`, a HOF arg, a bare `defer print(...)`). DISTINCT from [`Ty::Func`] (a user
@@ -198,14 +239,18 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         }
         (Executor, Executor) | (Socket, Socket) | (Listener, Listener) | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
+        // Labels are surface-only: two function types differing only in parameter labels are the SAME
+        // type — `compatible` matches on arity + param/ret compatibility and IGNORES labels (`..`).
         (
             Func {
                 params: p1,
                 ret: r1,
+                ..
             },
             Func {
                 params: p2,
                 ret: r2,
+                ..
             },
         ) => {
             p1.len() == p2.len()
@@ -219,6 +264,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
             Func {
                 params: p1,
                 ret: r1,
+                ..
             }
             | BuiltinFn {
                 params: p1,
@@ -227,6 +273,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
             Func {
                 params: p2,
                 ret: r2,
+                ..
             }
             | BuiltinFn {
                 params: p2,
@@ -331,7 +378,7 @@ impl fmt::Display for Ty {
             }
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
-            Ty::Func { params, ret } | Ty::BuiltinFn { params, ret } => {
+            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
@@ -406,7 +453,8 @@ mod tests {
         assert_eq!(
             Ty::Func {
                 params: vec![Ty::Int, Ty::Str],
-                ret: Box::new(Ty::Bool)
+                ret: Box::new(Ty::Bool),
+                labels: FnLabels::none(2)
             }
             .to_string(),
             "fn(int, str) -> bool"

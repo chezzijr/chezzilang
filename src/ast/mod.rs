@@ -564,6 +564,11 @@ pub enum Type {
     Func {
         params: Vec<Type>,
         ret: Box<Type>,
+        /// Optional Swift-style parameter labels (parallel to `params`; `None` for a bare param).
+        /// SURFACE-ONLY — equality-neutral (see `PartialEq`): `fn(str)->nil` and `fn(name:str)->nil`
+        /// are the SAME annotation. Carried through `resolve_type` onto `Ty::Func` so a value call
+        /// through this type can resolve keyword arguments.
+        labels: Vec<Option<String>>,
     },
     /// `(T1, T2, …)` — a tuple type (always ≥2 elements; a 1-element `(T)` unwraps to `T`).
     Tuple(Vec<Type>),
@@ -600,14 +605,17 @@ impl PartialEq for Type {
                 },
             ) => m1 == m2 && n1 == n2 && a1 == a2,
             (Type::Generic(n1, a1, ..), Type::Generic(n2, a2, ..)) => n1 == n2 && a1 == a2,
+            // Labels are surface-only (SE-0111): equality-neutral, exactly like the `Named` span.
             (
                 Type::Func {
                     params: p1,
                     ret: r1,
+                    ..
                 },
                 Type::Func {
                     params: p2,
                     ret: r2,
+                    ..
                 },
             ) => p1 == p2 && r1 == r2,
             (Type::Tuple(t1), Type::Tuple(t2)) => t1 == t2,

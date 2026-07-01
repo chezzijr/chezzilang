@@ -84,7 +84,14 @@ listed here as a non-goal; they have since shipped as a complete VM-only corouti
 below.)
 **Variadics** — neither variadic arguments (`fn log(*args)`) nor variadic generics (`Foo[T...]`):
 pass an explicit `list`, and generics are always fixed-arity. Default + named arguments cover the
-ergonomic cases variadics usually serve. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
+ergonomic cases variadics usually serve. Named arguments also work through a first-class **function
+value** (Swift-style labels: a `fn(...)` type carries its parameter labels, so `g := greet;
+g(name="Bob")` and a `fn(name: str)->nil` HOF parameter both accept keywords). Labels are
+**surface-only** (SE-0111) — `fn(str)->nil` ≡ `fn(name:str)->nil`, so no impact on HOF/callback/protocol
+typing — and a value call is scope-cut: it must supply every parameter (declaration-site **defaults do
+not fill through a value**; a direct call still does), and built-in fn values take no keywords.
+Resolution is fully static (the checker rewrites the keyword call to positional), so the runtime ABI
+stays positional and all engines agree. **Spread/unpack syntax** (`[*a, *b]`, `{**m}`, `f(*args)`)
 is likewise dropped — list concatenation and map merge are served by plain methods/operators, not
 new syntax.
 

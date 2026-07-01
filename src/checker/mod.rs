@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
+pub use ty::{FnLabels, KeywordTable};
 use ty::{compatible, ref_display};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -248,6 +249,11 @@ fn is_lifecycle_hook(name: &str) -> bool {
 #[derive(Clone)]
 struct FnSig {
     params: Vec<Ty>,
+    /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
+    /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
+    /// in `infer_ident` so `g := f; g(name=…)` resolves. Excluded from `fn_sig_eq` (labels are not
+    /// type identity). Empty for synthetic/native sigs built via `plain`/`optional_tail`.
+    labels: Vec<Option<String>>,
     ret: Ty,
     type_params: Vec<TypeParam>,
     /// D6c — the minimum number of arguments this signature accepts; `params.len()` for an ordinary
@@ -271,6 +277,7 @@ impl FnSig {
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
         FnSig {
+            labels: Vec::new(),
             params,
             ret,
             type_params: Vec::new(),
@@ -285,6 +292,7 @@ impl FnSig {
     fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
         let min_params = params.len() - optional;
         FnSig {
+            labels: Vec::new(),
             params,
             ret,
             type_params: Vec::new(),
@@ -538,6 +546,42 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
     resolve_extern_signatures(&graph)
 }
 
+/// Swift-style keyword arguments through a function VALUE: resolve every value call that carries
+/// labels (`g(name="Bob")`) into a positional slot PERMUTATION, keyed `(graph module index, call
+/// span)`. Runs the SAME deps-first checking pass as [`check_graph`] (full inference — the callee's
+/// labelled `Ty::Func` must be known), but harvests the keyword table and ignores type errors (the
+/// error gate is `check_graph`, run separately). Both backends consume the returned table to lower a
+/// value+keyword call to a plain positional `Op::Call`, so the runtime ABI stays positional.
+pub fn resolve_keyword_calls(graph: &ModuleGraph) -> KeywordTable {
+    let mut c = Checker::new();
+    c.harvest_keywords = true;
+    c.run_graph_pass(graph, false);
+    std::mem::take(&mut c.keyword_calls)
+}
+
+/// Resolve value-keyword calls for a SINGLE-FILE (standalone, source-string) program, through the
+/// EXACT SAME [`resolve_keyword_calls`] pass as the multi-file CLI (one resolver, both engines
+/// consume, module index `0`). Wraps `stmts` in a synthetic one-module graph, mirroring
+/// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
+/// `#[cfg(test)]`; production always goes through `build_graph`).
+#[cfg(test)]
+pub fn resolve_keyword_calls_standalone(stmts: &[Stmt]) -> KeywordTable {
+    let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
+    let graph = ModuleGraph {
+        entry: id.clone(),
+        modules: vec![crate::resolver::LoadedModule {
+            id,
+            dotted: Vec::new(),
+            ast: crate::ast::Module {
+                stmts: stmts.to_vec(),
+            },
+            imports: Vec::new(),
+            native: None,
+        }],
+    };
+    resolve_keyword_calls(&graph)
+}
+
 impl Checker {
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
@@ -650,6 +694,9 @@ impl Checker {
             // Stamp the current module's graph index so the extern loop keys its resolved C signatures
             // the SAME way both backends look them up. `None` outside the harvesting pass.
             c.extern_module_idx = if harvest_externs { Some(idx) } else { None };
+            // Maintained on every graph pass (cheap) so a recorded value+keyword call is keyed under
+            // the SAME module index the backends derive — mirrors the extern-sig keying.
+            c.keyword_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
             c.module_sigs.insert(lm.id.clone(), sig);
@@ -1238,6 +1285,20 @@ struct Checker {
     /// extern fn's resolved C signature is keyed under the SAME index the backends derive. `None`
     /// for a lone `check`.
     extern_module_idx: Option<usize>,
+    /// Swift-style keyword-argument resolution for VALUE calls: `perm[i]` = index into the combined
+    /// `[positional args ++ named exprs]` list that fills parameter slot `i`. Keyed `(module idx,
+    /// call span)` — module-scoped exactly like [`Self::extern_sigs`]. Recorded during `infer_call`
+    /// (only when [`Self::harvest_keywords`] is set — the error-gate `check_graph` leaves it empty) and
+    /// consumed by both backends to lower a value+keyword call to a positional `Op::Call`. Produced by
+    /// [`resolve_keyword_calls`].
+    keyword_calls: KeywordTable,
+    /// True only while [`resolve_keyword_calls`] drives the pass, licensing `infer_call` to record
+    /// into [`Self::keyword_calls`]. Off during the normal error-gate check (which discards the table).
+    harvest_keywords: bool,
+    /// The CURRENT module's graph index, maintained across every graph pass (set per module in
+    /// `run_graph_pass`), so a recorded keyword-call permutation is keyed under the SAME index the
+    /// backends derive. `0` for a lone `check` (single synthetic module).
+    keyword_module_idx: usize,
     /// True only while resolving an `extern "lib":` fn's param/return signature. `owned_str` is a
     /// RETURN-ONLY C marshalling form that collapses to `str`; it is legal ONLY inside an extern
     /// signature. This flag licenses `resolve_type`'s `owned_str` arm there and rejects a bare
@@ -1418,6 +1479,9 @@ impl Checker {
             imported_alias_ctypes: HashMap::new(),
             extern_sigs: ExternTable::new(),
             extern_module_idx: None,
+            keyword_calls: KeywordTable::new(),
+            harvest_keywords: false,
+            keyword_module_idx: 0,
             in_extern_sig: false,
             struct_field_asts: HashMap::new(),
             struct_ctypes: HashMap::new(),
@@ -1886,6 +1950,7 @@ impl Checker {
                             let fty = Ty::Func {
                                 params: fsig.params.clone(),
                                 ret: Box::new(fsig.ret.clone()),
+                                labels: crate::checker::FnLabels::default(),
                             };
                             self.hover_record_at(
                                 *name_span,
@@ -1931,6 +1996,7 @@ impl Checker {
                                     let fty = Ty::Func {
                                         params: vec![Ty::Int],
                                         ret: Box::new(Ty::channel(Ty::Bool)),
+                                        labels: crate::checker::FnLabels::default(),
                                     };
                                     self.hover_record_at(
                                         *name_span,
@@ -2698,7 +2764,7 @@ impl Checker {
                     Self::collect_width_names(a, out);
                 }
             }
-            Type::Func { params, ret } => {
+            Type::Func { params, ret, .. } => {
                 for p in params {
                     Self::collect_width_names(p, out);
                 }
@@ -3207,7 +3273,7 @@ impl Checker {
         // function-typed RETURN (`allow_void`) is rejected (no C marshalling for a returned function
         // pointer in v1). A non-scalar part (str/struct/nested callback/void return) falls through to
         // the uniform error below, which names the offending function type.
-        if let Ty::Func { params, ret } = ty
+        if let Ty::Func { params, ret, .. } = ty
             && !allow_void
         {
             let part_ok =
@@ -3353,8 +3419,22 @@ impl Checker {
         // `Type.method(args)`. This flag is consulted only when the sig is reached as a struct/enum
         // method; for a free fn it is meaningless (free fns are never reached via the method maps).
         let is_static = decl.params.first().is_none_or(|p| p.name != "self");
+        // Surface-only labels for a value form of this fn: the param NAMES (parallel to `params`),
+        // with `self` contributing `None` (a value keyword call never names the receiver).
+        let labels: Vec<Option<String>> = decl
+            .params
+            .iter()
+            .map(|p| {
+                if p.name == "self" {
+                    None
+                } else {
+                    Some(p.name.clone())
+                }
+            })
+            .collect();
         FnSig {
             min_params: params.len(),
+            labels,
             params,
             ret,
             type_params: decl.type_params.clone(),
@@ -3931,9 +4011,16 @@ impl Checker {
                 }
                 resolved
             }
-            Type::Func { params, ret } => Ty::Func {
+            Type::Func {
+                params,
+                ret,
+                labels,
+            } => Ty::Func {
                 params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
                 ret: Box::new(self.resolve_type(ret, span)),
+                // Carry the annotation's optional labels onto the type (surface-only), so a value call
+                // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
+                labels: FnLabels(labels.clone()),
             },
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args, head_span) => {
@@ -4545,6 +4632,7 @@ impl Checker {
                             let fty = Ty::Func {
                                 params: vi.payload,
                                 ret: Box::new(Ty::Enum(vi.enum_name, targs_disp.clone())),
+                                labels: crate::checker::FnLabels::default(),
                             };
                             self.hover_record_at(v.name_span, &fty, HoverKind::Func, None);
                         }
@@ -5525,6 +5613,7 @@ impl Checker {
             let fty = Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+                labels: crate::checker::FnLabels::default(),
             };
             self.hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
@@ -7221,6 +7310,7 @@ impl Checker {
             return Some(Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+                labels: crate::checker::FnLabels::default(),
             });
         }
         if let Some(info) = self.structs.get(&self.bare_key(name)) {
@@ -7233,6 +7323,7 @@ impl Checker {
             return Some(Ty::Func {
                 params,
                 ret: Box::new(Ty::Struct(name.to_string(), targs)),
+                labels: FnLabels::default(),
             });
         }
         // A newtype constructor (`UserId(10)`): one arg of the underlying type → the newtype. Mirrors
@@ -7249,6 +7340,7 @@ impl Checker {
                 return Some(Ty::Func {
                     params: vec![under.clone()],
                     ret: Box::new(Ty::NewType(name.to_string(), targs)),
+                    labels: crate::checker::FnLabels::default(),
                 });
             }
         }
@@ -7259,6 +7351,7 @@ impl Checker {
             return Some(Ty::Func {
                 params: sig.params,
                 ret: Box::new(sig.ret),
+                labels: crate::checker::FnLabels::default(),
             });
         }
         None
@@ -7327,6 +7420,9 @@ impl Checker {
             return Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+                // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
+                // labelled function value and `g(name="Bob")` resolves through it.
+                labels: FnLabels(sig.labels.clone()),
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
@@ -8037,6 +8133,7 @@ impl Checker {
                         return Ty::Func {
                             params,
                             ret: Box::new(subst(&sig.ret, &map)),
+                            labels: FnLabels::default(),
                         };
                     }
                 }
@@ -8057,6 +8154,7 @@ impl Checker {
                             Some(Ty::Func {
                                 params: fsig.params[..fsig.min_params].to_vec(),
                                 ret: Box::new(fsig.ret.clone()),
+                                labels: crate::checker::FnLabels::default(),
                             })
                         } else {
                             sig.values.get(name).cloned()
@@ -8659,9 +8757,9 @@ impl Checker {
         // On an arity mismatch the params stay `Unknown` here and the call site's `assignable` check
         // reports the mismatch (single diagnostic).
         let (exp_params, exp_ret): (Option<Vec<Ty>>, Option<Ty>) = match expected {
-            Some(Ty::Func { params: p, ret: r }) if p.len() == params.len() => {
-                (Some(p.clone()), Some((**r).clone()))
-            }
+            Some(Ty::Func {
+                params: p, ret: r, ..
+            }) if p.len() == params.len() => (Some(p.clone()), Some((**r).clone())),
             _ => (None, None),
         };
         // A `fn`-typed slot whose arity does NOT match: keep unannotated params silently `Unknown`
@@ -8788,9 +8886,13 @@ impl Checker {
             }
             None => body_ty,
         };
+        // A closure/lambda value carries its param names as labels, so a keyword call through a
+        // closure value (`cb := fn(name: str): …; cb(name="X")`) resolves.
+        let labels: Vec<Option<String>> = params.iter().map(|p| Some(p.name.clone())).collect();
         Ty::Func {
             params: param_tys,
             ret: Box::new(ret_ty),
+            labels: FnLabels(labels),
         }
     }
 
@@ -9234,10 +9336,36 @@ impl Checker {
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
         match callee_ty {
+            // A user fn / closure VALUE carrying keyword arguments (`g := greet; g(name="Bob")`):
+            // resolve each label to a positional slot against the value's surface labels (Swift-style
+            // keyword args through a value). Positional-only value calls skip this entirely (hot path).
+            Ty::Func {
+                params,
+                ret,
+                labels,
+            } if !named.is_empty() => {
+                self.check_value_keyword_call(&params, &labels.0, args, named, span);
+                *ret
+            }
             // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
             // canonical signature, exactly like a closure/fn value. `print`'s value form is thus a
-            // fixed 1-arg call — the variadic / `sep=`/`end=` surface stays direct-call-only.
-            Ty::Func { params, ret } | Ty::BuiltinFn { params, ret } => {
+            // fixed 1-arg call — the variadic / `sep=`/`end=` surface stays direct-call-only. Its value
+            // form takes NO keyword arguments (labels are a user-fn surface).
+            Ty::BuiltinFn { params: _, ret } if !named.is_empty() => {
+                for a in args {
+                    self.infer(a);
+                }
+                for (_, v) in named {
+                    self.infer(v);
+                }
+                self.error(
+                    span,
+                    "a first-class builtin function value takes no keyword arguments (labels apply only to user function values)"
+                        .to_string(),
+                );
+                *ret
+            }
+            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
                 // A closure/fn value coerces its float params at the prologue.
                 self.check_args_w("closure", &params, args, span);
                 *ret
@@ -9255,6 +9383,147 @@ impl Checker {
                 self.error(span, format!("{other} is not callable"));
                 Ty::Unknown
             }
+        }
+    }
+
+    /// Resolve + type-check a VALUE call carrying keyword arguments (`g(name="Bob", greeting="Hi")`)
+    /// against the value's surface parameter `labels` (parallel to `params`). Builds the slot
+    /// PERMUTATION `perm[i]` = index into the combined `[positional args ++ named exprs]` list that
+    /// fills parameter slot `i`, records it into [`Self::keyword_calls`] (when harvesting) for the
+    /// backends to lower to a positional `Op::Call`, and type-checks each slot. SCOPE-CUT (Swift
+    /// SE-0111): every parameter must be supplied — declaration-site defaults do NOT apply through a
+    /// value. Eval order is slot order, matching how direct keyword calls already reorder in desugar,
+    /// so all three engines observe identical argument side-effect order.
+    fn check_value_keyword_call(
+        &mut self,
+        params: &[Ty],
+        labels: &[Option<String>],
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) {
+        // `fill[i]` = which combined-list index fills slot `i`. Combined index space: `0..args.len()`
+        // are the positional args; `args.len() + j` is `named[j]`.
+        let mut fill: Vec<Option<usize>> = vec![None; params.len()];
+        let mut ok = true;
+
+        if args.len() > params.len() {
+            self.error(
+                span,
+                format!(
+                    "too many arguments in call through a function value: expected {}, got {} positional",
+                    params.len(),
+                    args.len()
+                ),
+            );
+            ok = false;
+        }
+        // Leading positional slots fill in order.
+        for (i, slot) in fill
+            .iter_mut()
+            .enumerate()
+            .take(args.len().min(params.len()))
+        {
+            *slot = Some(i);
+        }
+        // Named args resolve by label.
+        for (j, (label, _)) in named.iter().enumerate() {
+            let combined = args.len() + j;
+            match labels
+                .iter()
+                .position(|l| l.as_deref() == Some(label.as_str()))
+            {
+                Some(k) if k < params.len() => {
+                    if k < args.len() {
+                        self.error(
+                            span,
+                            format!("parameter '{label}' was already given positionally"),
+                        );
+                        ok = false;
+                    } else if fill[k].is_some() {
+                        self.error(span, format!("duplicate keyword argument '{label}'"));
+                        ok = false;
+                    } else {
+                        fill[k] = Some(combined);
+                    }
+                }
+                _ => {
+                    let known: Vec<&str> = labels.iter().filter_map(|l| l.as_deref()).collect();
+                    let hint = if known.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (its parameters are: {})", known.join(", "))
+                    };
+                    self.error(
+                        span,
+                        format!(
+                            "unknown parameter label '{label}' in call through a function value{hint}"
+                        ),
+                    );
+                    ok = false;
+                }
+            }
+        }
+        // SCOPE-CUT: every slot must be filled — defaults do NOT apply through a value.
+        let missing: Vec<String> = (0..params.len())
+            .filter(|&i| fill[i].is_none())
+            .map(|i| {
+                labels
+                    .get(i)
+                    .and_then(|l| l.clone())
+                    .unwrap_or_else(|| format!("#{}", i + 1))
+            })
+            .collect();
+        if !missing.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "a call through a function value must supply every parameter (defaults do not apply through a value); missing: {}",
+                    missing.join(", ")
+                ),
+            );
+            ok = false;
+        }
+
+        if !ok {
+            // Resolution failed: still infer every argument once (surface any body errors) and bail —
+            // no permutation is recorded, so the backends never lower this (invalid) call.
+            for a in args {
+                self.infer(a);
+            }
+            for (_, v) in named {
+                self.infer(v);
+            }
+            return;
+        }
+
+        // Type-check each slot against the combined expr that fills it (slot order = eval order).
+        for (i, pt) in params.iter().enumerate() {
+            let ci = fill[i].expect("every slot filled");
+            let e = if ci < args.len() {
+                &args[ci]
+            } else {
+                &named[ci - args.len()].1
+            };
+            let at = self.infer_arg(e, Some(pt));
+            if !self.assignable_w(pt, &at, true) {
+                let pname = labels
+                    .get(i)
+                    .and_then(|l| l.as_deref())
+                    .map(|s| format!("parameter '{s}'"))
+                    .unwrap_or_else(|| format!("argument {}", i + 1));
+                self.error(
+                    e.span,
+                    format!("{pname} of a function-value call: expected {pt}, found {at}"),
+                );
+            }
+        }
+
+        // Record the permutation for the backends (only while harvesting; the error-gate discards it).
+        if self.harvest_keywords {
+            let perm: Vec<usize> = fill.iter().map(|f| f.expect("filled")).collect();
+            self.keyword_calls
+                .insert((self.keyword_module_idx, span), perm);
         }
     }
 
@@ -9393,6 +9662,7 @@ impl Checker {
             let fty = Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+                labels: crate::checker::FnLabels::default(),
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
@@ -9479,6 +9749,7 @@ impl Checker {
             let fty = Ty::Func {
                 params: v.payload.clone(),
                 ret: Box::new(Ty::Enum(v.enum_name.clone(), targs_disp)),
+                labels: crate::checker::FnLabels::default(),
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, None);
         }
@@ -10342,6 +10613,7 @@ impl Checker {
             let fty = Ty::Func {
                 params: sig.params.clone(),
                 ret: Box::new(sig.ret.clone()),
+                labels: crate::checker::FnLabels::default(),
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
@@ -10361,6 +10633,7 @@ impl Checker {
             let fty = Ty::Func {
                 params,
                 ret: Box::new(sig.ret.clone()),
+                labels: FnLabels::default(),
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
@@ -10548,6 +10821,7 @@ impl Checker {
                                 let fty = Ty::Func {
                                     params: expected.to_vec(),
                                     ret: Box::new(ret.clone()),
+                                    labels: crate::checker::FnLabels::default(),
                                 };
                                 self.hover_record_at(
                                     name_span,
@@ -10579,7 +10853,7 @@ impl Checker {
                         .find(|(f, _)| f == method)
                         .map(|(_, ty)| subst(ty, &map))
                 });
-                if let Some(Ty::Func { params, ret }) = field_fn {
+                if let Some(Ty::Func { params, ret, .. }) = field_fn {
                     // A fn-typed field is a closure/fn value; its prologue coerces float params.
                     self.check_args_w(method, &params, args, span);
                     return *ret;
@@ -11030,11 +11304,12 @@ impl Checker {
                 let expected = Ty::Func {
                     params: vec![elem.clone()],
                     ret: Box::new(Ty::Unknown),
+                    labels: crate::checker::FnLabels::default(),
                 };
                 let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Unknown,
-                    Ty::Func { params, ret }
+                    Ty::Func { params, ret, .. }
                         if params.len() == 1 && compatible(&params[0], elem) =>
                     {
                         Ty::list(*ret)
@@ -11061,11 +11336,12 @@ impl Checker {
                 let expected = Ty::Func {
                     params: vec![elem.clone()],
                     ret: Box::new(Ty::Bool),
+                    labels: crate::checker::FnLabels::default(),
                 };
                 let pt = self.infer_arg(&args[0], Some(&expected));
                 match pt {
                     Ty::Unknown => Ty::list(elem.clone()),
-                    Ty::Func { params, ret }
+                    Ty::Func { params, ret, .. }
                         if params.len() == 1
                             && compatible(&params[0], elem)
                             && compatible(&ret, &Ty::Bool) =>
@@ -11095,6 +11371,7 @@ impl Checker {
                 let expected = Ty::Func {
                     params: vec![init.clone(), elem.clone()],
                     ret: Box::new(init.clone()),
+                    labels: crate::checker::FnLabels::default(),
                 };
                 let ft = self.infer_arg(&args[1], Some(&expected));
                 match ft {
@@ -11102,7 +11379,7 @@ impl Checker {
                         // Closure type unknown: fall back to the init type as the result.
                         init
                     }
-                    Ty::Func { params, ret }
+                    Ty::Func { params, ret, .. }
                         if params.len() == 2
                             && compatible(&params[0], &init)
                             && compatible(&params[1], elem)
@@ -11134,11 +11411,12 @@ impl Checker {
                 let expected = Ty::Func {
                     params: vec![elem.clone(), elem.clone()],
                     ret: Box::new(Ty::Int),
+                    labels: crate::checker::FnLabels::default(),
                 };
                 let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
-                    Ty::Func { params, ret }
+                    Ty::Func { params, ret, .. }
                         if params.len() == 2
                             && compatible(&params[0], elem)
                             && compatible(&params[1], elem)
@@ -11172,11 +11450,12 @@ impl Checker {
                 let expected = Ty::Func {
                     params: vec![elem.clone()],
                     ret: Box::new(Ty::Unknown),
+                    labels: crate::checker::FnLabels::default(),
                 };
                 let ft = self.infer_arg(&args[0], Some(&expected));
                 match ft {
                     Ty::Unknown => Ty::Nil,
-                    Ty::Func { params, ret }
+                    Ty::Func { params, ret, .. }
                         if params.len() == 1 && compatible(&params[0], elem) =>
                     {
                         let key = (*ret).clone();
@@ -12144,14 +12423,17 @@ impl Checker {
             (Tuple(e), Tuple(a)) => {
                 e.len() == a.len() && e.iter().zip(a).all(|(x, y)| self.assignable(x, y))
             }
+            // Labels are surface-only: assignability matches on arity + param/ret only (`..`).
             (
                 Func {
                     params: p1,
                     ret: r1,
+                    ..
                 },
                 Func {
                     params: p2,
                     ret: r2,
+                    ..
                 },
             ) => {
                 p1.len() == p2.len()
@@ -12316,12 +12598,17 @@ impl Checker {
                 ),
                 _ => Ty::Unknown,
             },
-            Type::Func { params, ret } => Ty::Func {
+            Type::Func {
+                params,
+                ret,
+                labels,
+            } => Ty::Func {
                 params: params
                     .iter()
                     .map(|p| self.resolve_ty_ro_d(p, depth + 1))
                     .collect(),
                 ret: Box::new(self.resolve_ty_ro_d(ret, depth + 1)),
+                labels: FnLabels(labels.clone()),
             },
             Type::Tuple(ts) => Ty::Tuple(
                 ts.iter()
@@ -12428,7 +12715,7 @@ impl Checker {
             // `CType::Callback`. Every part must lower to a C SCALAR (`is_scalar`) — a non-scalar
             // part (str/struct/nested callback) yields `None`, so the marshal gate rejects it cleanly.
             // (Param-only; a function-typed RETURN is rejected by `assert_marshallable`, never lowered.)
-            Type::Func { params, ret } => {
+            Type::Func { params, ret, .. } => {
                 let mut cparams = Vec::with_capacity(params.len());
                 for p in params {
                     let cp = self.resolve_ctype_d(p, depth + 1)?;
@@ -12817,6 +13104,7 @@ impl Checker {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
             let min_params = subst_params.len();
             let want = FnSig {
+                labels: Vec::new(),
                 params: subst_params,
                 ret: subst(&msig.ret, &pmap),
                 type_params: Vec::new(),
@@ -14341,7 +14629,9 @@ fn ty_fully_concrete(ty: &Ty) -> bool {
         Ty::Result(a, b) => ty_fully_concrete(a) && ty_fully_concrete(b),
         Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().all(ty_fully_concrete),
         Ty::Tuple(ts) => ts.iter().all(ty_fully_concrete),
-        Ty::Func { params, ret } => params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret),
+        Ty::Func { params, ret, .. } => {
+            params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret)
+        }
         _ => true,
     }
 }
@@ -14448,9 +14738,15 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::Map(k, v) => Ty::map(subst(k, map), subst(v, map)),
         Ty::Set(t) => Ty::set(subst(t, map)),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| subst(t, map)).collect()),
-        Ty::Func { params, ret } => Ty::Func {
+        Ty::Func {
+            params,
+            ret,
+            labels,
+        } => Ty::Func {
             params: params.iter().map(|t| subst(t, map)).collect(),
             ret: Box::new(subst(ret, map)),
+            // Preserve surface labels across generic substitution (they name params, not types).
+            labels: labels.clone(),
         },
         Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         Ty::Enum(n, args) => Ty::Enum(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
@@ -14523,14 +14819,17 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {
             ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));
         }
+        // Labels are surface-only: unify on params + ret only, ignoring labels (`..`).
         (
             Ty::Func {
                 params: dp,
                 ret: dr,
+                ..
             },
             Ty::Func {
                 params: ap,
                 ret: ar,
+                ..
             },
         ) if dp.len() == ap.len() => {
             dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
@@ -14566,7 +14865,7 @@ fn ty_collect_params(ty: &Ty, wanted: &std::collections::HashSet<String>, out: &
                 ty_collect_params(p, wanted, out);
             }
         }
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             for p in params {
                 ty_collect_params(p, wanted, out);
             }
@@ -14863,6 +15162,7 @@ fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func {
                 params: vec![elem.clone()],
                 ret: Box::new(elem.clone()),
+                labels: crate::checker::FnLabels::default(),
             }],
             Ty::Nil,
         ),
@@ -14884,6 +15184,7 @@ fn rwshared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func {
                 params: vec![elem.clone()],
                 ret: Box::new(elem.clone()),
+                labels: crate::checker::FnLabels::default(),
             }],
             Ty::Nil,
         ),
@@ -14893,6 +15194,7 @@ fn rwshared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
             vec![Ty::Func {
                 params: vec![elem.clone()],
                 ret: Box::new(Ty::Unknown),
+                labels: crate::checker::FnLabels::default(),
             }],
             Ty::Unknown,
         ),
@@ -14969,6 +15271,7 @@ fn executor_method_sig(method: &str) -> Option<FnSig> {
             vec![Ty::Func {
                 params: vec![],
                 ret: Box::new(Ty::Unknown),
+                labels: crate::checker::FnLabels::default(),
             }],
             Ty::Nil,
         ),

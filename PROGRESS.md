@@ -11,6 +11,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Swift-style KEYWORD ARGUMENTS through a function VALUE (2026-07-01).** Named arguments now work
+through a first-class **function value**, not just a direct call: `g := greet; g(name="Bob",
+greeting="Hi")` prints `Hi Bob`, keywords may be reordered, and a `fn(name: str)->nil` **HOF parameter**
+accepts `f(name="X")`. `Ty::Func`/`Type::Func` gained a `labels` field (parallel to `params`) — built
+from a user fn's / closure's param names and from an annotation's optional `IDENT:` labels (parser
+`parse_fn_type_param`). Labels are **SURFACE-ONLY** (Swift SE-0111): a new equality-neutral `FnLabels`
+wrapper makes the derived `Ty` `PartialEq` ignore them, and `compatible`/`assignable`/`unify`/`Display`/
+`sendable` all `..`-ignore them, so `fn(str)->nil` ≡ `fn(name:str)->nil` — **zero** regression to
+HOF/callback/protocol/subtyping and no Display/snapshot churn. Resolution is a checker-recorded
+**side table** (`KeywordTable = HashMap<(module idx, span), Vec<usize>>`) mirroring the `extern_sigs`
+precedent EXACTLY: `resolve_keyword_calls{,_standalone}` run the same deps-first pass and harvest a slot
+**permutation** over the combined `[positional ++ named]` arg list, populated in BOTH the single-module
+(`ok`/`check_src`) and multi-module (`check_graph`) paths; both backends read it in `compile_call` /
+`eval_call` to lower a value+keyword call to a **plain positional `Op::Call`** — the runtime ABI stays
+positional and UNCHANGED (`src/vm` untouched — the `DeferCall`/`SpawnCall` lowerings consult the same
+table so `defer d(name=…)` / `spawn s(name=…)` reorder too, no check-passes-then-traps hole). **SCOPE-CUT** (SE-0111): a value call must supply every
+parameter — declaration-site **defaults do NOT fill through a value** (`h := hasdefault; h()` errors,
+direct `hasdefault()` still fills); a first-class **built-in** value takes no keywords. Direct-call
+keyword resolution (desugar), struct ctor/method named+default args, and `print` `sep=`/`end=` are all
+UNCHANGED — desugar just stops rejecting value+keyword calls (Ident/expr callee) and defers them to the
+checker. Positional value calls are untouched (the table is read only when `named` is non-empty → no
+hot-path cost, `benches/run.chz` unchanged). Three-engine byte-identical parity
+(`examples/keyword_value.chz` + a cross-module `keyword_value_xmod/`); grammar/`docs` updated
+(`<fnParam>` optional label, conformance green).
+
 **✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
 universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old
 gate error *"built-ins and constructors must be wrapped in a function"* is gone for these names), and
