@@ -1,0 +1,64 @@
+# Swift-style keyword arguments through a first-class function VALUE (SE-0111 labels, surface-only).
+# A value call may supply parameters by label, in any order; the checker resolves each label to a
+# positional slot and both engines lower it to a plain positional call (identical output).
+
+fn greet(name: str, greeting: str):
+    print(greeting, name)
+
+# A free fn bound to a value carries its param names as labels.
+g := greet
+g(name="Bob", greeting="Hi")     # by label
+g(greeting="Yo", name="Al")      # reordered labels
+g("Sam", "Hey")                  # positional through the value still works
+g("Kim", greeting="Sup")         # mixed: positional then label
+
+# Keyword through a higher-order-function parameter: `f`'s labels come from the annotation.
+fn apply(f: fn(name: str) -> nil):
+    f(name="X")
+apply(fn(name: str): print(name))
+
+# A closure value carries its own param labels.
+add := fn(a: int, b: int) -> int: a + b
+print(add(b=3, a=10))            # 13 — reordered through a closure value
+
+# Two value+keyword calls in ONE string interpolation whose first named-arg value sits at the
+# SAME fragment-relative column must NOT alias one keyword-table slot: every `{...}` fragment is
+# re-lexed from column 1, so a span-only key collides — the fragment context disambiguates them.
+fn subAB(x: int, y: int) -> int:
+    return x - y
+fn subPQ(p: int, q: int) -> int:
+    return p - q
+sA := subAB
+sP := subPQ
+print("{sA(y=1, x=10)} {sP(p=3, q=2)}")   # 9 1
+
+# Chained value keyword calls (currying): a function value RETURNS another function value, and each
+# link of the postfix chain carries its OWN keyword permutation. The two calls must not alias one
+# table slot even though the parser gives both the same call-node span.
+fn make_greeter(prefix: str) -> fn(name: str, punct: str) -> nil:
+    return fn(name: str, punct: str): print(prefix, name, punct)
+mk := make_greeter
+mk(prefix="Hello")(punct="!", name="World")   # inner a=Hello; outer reordered -> Hello World !
+
+# Side-effecting args evaluate in SLOT order (declaration order), not source order.
+fn log(s: str) -> str:
+    print("eval " + s)
+    return s
+fn record(first: str, second: str):
+    print(first + "|" + second)
+r := record
+r(second=log("B"), first=log("A"))   # eval A, eval B, then A|B
+
+# Keyword args through a value also work in `defer` and `spawn` position (the DeferCall / SpawnCall
+# lowering consumes the same permutation). A single deferred/spawned call is deterministic.
+fn with_defer():
+    d := greet
+    defer d(greeting="Bye", name="Zoe")   # fires at function exit → "Bye Zoe"
+    print("in body")
+with_defer()
+
+fn with_spawn():
+    s := greet
+    parallel:
+        spawn s(name="Nia", greeting="Hey")   # "Hey Nia"
+with_spawn()

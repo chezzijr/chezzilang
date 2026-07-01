@@ -335,10 +335,16 @@
 <type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "IDENT" "DOT" "IDENT" | "IDENT" "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
-             | "FN" "LPAREN" <typeList> "RPAREN" "ARROW" <type>
+             | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN"
              | <type> "QUESTION" | <type> "BANG" | <type> "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
+# A `fn(...)` TYPE parameter may carry an OPTIONAL Swift-style LABEL (`IDENT ":"`) before its type
+# (`fn(name: str, greeting: str) -> nil`), enabling keyword arguments through a function VALUE
+# (`g := greet; g(name="Bob")`). Labels are SURFACE-ONLY: `fn(str)->nil` and `fn(name:str)->nil` are
+# the same type (mutually assignable). A bare param (no label) is still valid.
+<fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
+<fnParam>     ::= <type> | "IDENT" "COLON" <type>
 
 # A declaration-site type-application HEAD: a bare TYPE name applied to a MULTI type-arg list
 # (`Result[int, str]`, `Pair[int, str]`). Only ever the receiver of a `.member` access / call. The

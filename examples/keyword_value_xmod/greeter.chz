@@ -1,0 +1,2 @@
+fn greet(name: str, greeting: str):
+    print(greeting, name)

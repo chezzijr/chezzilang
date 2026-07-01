@@ -129,7 +129,7 @@ pub enum Token {
 /// other than the parser (e.g. a `Type::Named` the checker builds from an inferred name). Because
 /// the lexer's lines/cols are 1-based, `(0, 0)` can never collide with a real source position, so a
 /// synthesized span never matches an editor hover/overlay key. Diagnostic-only; runtime-inert.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     pub line: usize,
     pub col: usize,

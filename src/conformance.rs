@@ -346,6 +346,9 @@ fn parser_rules_match_fns() {
         "parse_subscript",
         "parse_call_args",
         "parse_type_postfix",
+        // `parse_fn_type_param` parses ONE `fn(...)` type parameter with its optional Swift-style
+        // label (`<fnParam>` in the grammar) — a structural helper of `parse_type`, no distinct rule.
+        "parse_fn_type_param",
         "parse_primary",
         "parse_closure",
         "parse_match_expr",

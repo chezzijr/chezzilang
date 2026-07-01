@@ -1,0 +1,6 @@
+# rule: type, fnDecl, params
+fn apply(f: fn(name: str) -> nil):
+    f("X")
+
+fn pick(g: fn(name: str, greeting: str) -> nil, h: fn(int) -> int):
+    g("a", "b")

@@ -1,0 +1,7 @@
+import greet from greeter
+
+# The call SITE lives in `main`; the callee fn is imported from `greeter`. The keyword permutation is
+# keyed by the call-site module, so cross-module value+keyword calls resolve on every engine.
+g := greet
+g(greeting="Hi", name="Bob")
+g(name="Al", greeting="Yo")

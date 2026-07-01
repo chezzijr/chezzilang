@@ -412,6 +412,19 @@ struct Interp {
     /// extern-type resolver: filled in `run_file_inner` (multi-file) via `resolve_extern_signatures`,
     /// and in `execute` (standalone) via `resolve_extern_signatures_standalone`.
     extern_sigs: crate::checker::ExternTable,
+    /// Swift-style keyword-arg resolution for VALUE calls, keyed `(graph module index, call span)`;
+    /// `perm[i]` = index into `[positional args ++ named exprs]` filling parameter slot `i`. Filled in
+    /// `run_file_inner` (multi-file) / `execute` (standalone) from the checker's `resolve_keyword_calls`
+    /// — the SAME table + key the VM consumes. `eval_call` consults it (only when `named` is non-empty)
+    /// to reorder a value+keyword call to positional, byte-identical to the VM.
+    keyword_calls: crate::checker::KeywordTable,
+    /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
+    /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
+    /// fragment in `interpolate`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
+    /// key computed at lookup matches the checker's record. Inert (`Span::default()`/`0`) outside
+    /// interpolation.
+    kw_frag_ctx: crate::lexer::Span,
+    kw_frag_ord: usize,
     /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
     /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
     /// resolve through the program-global struct/variant tables by name), so `bind_import` skips a
@@ -537,6 +550,9 @@ impl Interp {
             nurseries: Vec::new(),
             executors: Vec::new(),
             extern_sigs: crate::checker::ExternTable::new(),
+            keyword_calls: crate::checker::KeywordTable::new(),
+            kw_frag_ctx: crate::lexer::Span::default(),
+            kw_frag_ord: 0,
             type_names: std::collections::HashSet::new(),
             type_keys: std::collections::HashMap::new(),
             module_idx_of: std::collections::HashMap::new(),
@@ -1241,6 +1257,13 @@ impl Interp {
     fn interpolate(&mut self, raw: &str, span: Span) -> Result<String, RuntimeError> {
         let mut out = String::new();
         let mut chars = raw.chars().peekable();
+        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal) so
+        // the lookup matches the checker's record (each fragment re-lexes from a fresh source, so span
+        // alone can't tell two fragments apart). Save/restore for nested interpolations; `frag_ord`
+        // counts `{…}` fragments in source order, matching the checker/compiler's per-Expr-chunk count.
+        let saved_ctx = self.kw_frag_ctx;
+        let saved_ord = self.kw_frag_ord;
+        let mut frag_ord = 0usize;
         while let Some(c) = chars.next() {
             match c {
                 '{' if chars.peek() == Some(&'{') => {
@@ -1274,6 +1297,9 @@ impl Interp {
                     // compile time — the message string is identical.
                     let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
                     let expr = parse_expr_str(expr_src)?;
+                    self.kw_frag_ctx = span;
+                    self.kw_frag_ord = frag_ord;
+                    frag_ord += 1;
                     let value = self.eval(&expr)?;
                     match spec_src {
                         None => out.push_str(&self.stringify(&value, span, 0)?),
@@ -1324,6 +1350,8 @@ impl Interp {
                 _ => out.push(c),
             }
         }
+        self.kw_frag_ctx = saved_ctx;
+        self.kw_frag_ord = saved_ord;
         Ok(out)
     }
 
@@ -1337,6 +1365,33 @@ impl Interp {
     }
 
     /// Evaluate a call expression: builtins by name, otherwise a user function value.
+    /// Evaluate a VALUE call carrying keyword arguments (Swift-style), reordered by the checker-
+    /// recorded slot `perm` over the combined `[positional args ++ named exprs]` list. Evaluate the
+    /// callee, then the combined exprs in slot order (matching the VM's reordered `Op::Call`), and
+    /// invoke positionally. Kept out of `eval_call` so its stack frame stays small on the hot
+    /// positional-recursion path (`#[inline(never)]`).
+    #[inline(never)]
+    fn eval_value_keyword_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        perm: &[usize],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let callee_val = self.eval(callee)?;
+        let mut arg_vals = Vec::with_capacity(perm.len());
+        for &ci in perm {
+            let e = if ci < args.len() {
+                &args[ci]
+            } else {
+                &named[ci - args.len()].1
+            };
+            arg_vals.push(self.eval(e)?);
+        }
+        self.call_value(callee_val, arg_vals, span)
+    }
+
     fn eval_call(
         &mut self,
         callee: &Expr,
@@ -1344,6 +1399,29 @@ impl Interp {
         named: &[(String, Expr)],
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // Swift-style keyword arguments through a function VALUE (`g(name="Bob")`): the checker
+        // recorded a slot PERMUTATION over the combined `[positional args ++ named exprs]` list, keyed
+        // `(module idx, span)`. Evaluate the callee, then the combined exprs in slot order, and invoke
+        // the value positionally — byte-identical to the VM (which emits the same reordered
+        // `Op::Call`). Only recorded for genuine value calls, so this never fires for a method/ctor.
+        // `cur_module_idx` is the module of the executing code (the call site), matching how the
+        // checker keyed it and how the compiler looks it up.
+        if !named.is_empty()
+            && let Some(perm) = self
+                .keyword_calls
+                .get(&crate::checker::keyword_key(
+                    self.cur_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    named,
+                    span,
+                ))
+                .cloned()
+        {
+            // Extracted to keep `eval_call`'s stack frame small on the hot positional-recursion path
+            // (this branch, entered only for a value+keyword call, owns the `Vec`/value locals).
+            return self.eval_value_keyword_call(callee, args, named, &perm, span);
+        }
         // A method call `obj.name(args)` — bind `obj` as `self`. But `Enum.Variant(args)` is a
         // qualified variant constructor, not a method: an unbound enum name dotted with its variant.
         if let ExprKind::Field { obj, name, .. } = &callee.kind {
@@ -1941,17 +2019,23 @@ impl Interp {
                 }
             }
             DeferTarget::Call(call) => {
-                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                let ExprKind::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = &call.kind
+                else {
                     return Err(RuntimeError {
                         message: "defer requires a function or method call".to_string(),
                         span,
                     });
                 };
-                let arg_vals = args
-                    .iter()
-                    .map(|a| self.eval(a))
-                    .collect::<Result<Vec<_>, _>>()?;
                 if let ExprKind::Field { obj, name, .. } = &callee.kind {
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let recv = self.eval(obj)?;
                     Deferred::Method {
                         recv,
@@ -1959,7 +2043,41 @@ impl Interp {
                         args: arg_vals,
                         span: call.span,
                     }
+                } else if !named.is_empty()
+                    && let Some(perm) = self
+                        .keyword_calls
+                        .get(&crate::checker::keyword_key(
+                            self.cur_module_idx,
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            named,
+                            call.span,
+                        ))
+                        .cloned()
+                {
+                    // A deferred VALUE call with keyword arguments: reorder to positional by the
+                    // checker-recorded permutation (callee first, then slot-order args — matching the
+                    // VM's `DeferCall` lowering and the eager value keyword call).
+                    let callee_val = self.eval(callee)?;
+                    let mut arg_vals = Vec::with_capacity(perm.len());
+                    for &ci in &perm {
+                        let e = if ci < args.len() {
+                            &args[ci]
+                        } else {
+                            &named[ci - args.len()].1
+                        };
+                        arg_vals.push(self.eval(e)?);
+                    }
+                    Deferred::Call {
+                        callee: callee_val,
+                        args: arg_vals,
+                        span: call.span,
+                    }
                 } else {
+                    let arg_vals = args
+                        .iter()
+                        .map(|a| self.eval(a))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let callee_val = self.eval(callee)?;
                     Deferred::Call {
                         callee: callee_val,
@@ -2177,7 +2295,13 @@ impl Interp {
     fn exec_spawn(&mut self, target: &SpawnTarget, span: Span) -> Result<Flow, RuntimeError> {
         let task = match target {
             SpawnTarget::Call(call) => {
-                let ExprKind::Call { callee, args, .. } = &call.kind else {
+                let ExprKind::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = &call.kind
+                else {
                     return Err(RuntimeError {
                         message: "spawn requires a function or method call".to_string(),
                         span,
@@ -2195,6 +2319,36 @@ impl Interp {
                     Task::Method {
                         recv,
                         name: name.clone(),
+                        args: arg_vals,
+                        span: call.span,
+                    }
+                } else if !named.is_empty()
+                    && let Some(perm) = self
+                        .keyword_calls
+                        .get(&crate::checker::keyword_key(
+                            self.cur_module_idx,
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            named,
+                            call.span,
+                        ))
+                        .cloned()
+                {
+                    // A spawned VALUE call with keyword arguments: reorder to positional by the
+                    // checker-recorded permutation (callee first, then slot-order args — matching the
+                    // VM's `SpawnCall` lowering and the eager value keyword call).
+                    let callee_val = self.eval(callee)?;
+                    let mut arg_vals = Vec::with_capacity(perm.len());
+                    for &ci in &perm {
+                        let e = if ci < args.len() {
+                            &args[ci]
+                        } else {
+                            &named[ci - args.len()].1
+                        };
+                        arg_vals.push(deep_clone(&self.eval(e)?));
+                    }
+                    Task::Call {
+                        callee: callee_val,
                         args: arg_vals,
                         span: call.span,
                     }
@@ -4902,6 +5056,7 @@ impl Interp {
         // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver
         // the multi-file path uses (no second backend resolver exists). Consumed verbatim below.
         self.extern_sigs = crate::checker::resolve_extern_signatures_standalone(stmts);
+        self.keyword_calls = crate::checker::resolve_keyword_calls_standalone(stmts);
         for s in stmts {
             if let StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
@@ -6550,6 +6705,9 @@ fn run_file_inner(entry: &std::path::Path, cfg: crate::native::HostConfig) -> Ru
     // every alias spelling) and consume it at extern lowering — the same table + key the VM uses, so
     // the C ABI width is byte-identical across engines by construction. Keyed by graph module index.
     interp.extern_sigs = crate::checker::resolve_extern_signatures(&graph);
+    // Value+keyword call resolution (Swift-style), keyed like extern sigs; `eval_call` reorders a
+    // value call's keyword args to positional using this, byte-identical to the VM.
+    interp.keyword_calls = crate::checker::resolve_keyword_calls(&graph);
     // Gather every module's user type names (struct/enum/alias) so a `from`-imported type — which
     // carries no runtime value — is skipped at `bind_import` rather than erroring (module-scoped
     // types resolve through the program-global tables by name). ROOT REDESIGN — assign each user type
@@ -9385,6 +9543,37 @@ b := Buf([10, 20, 30])
         assert_eq!(
             run_capture(source).expect("print_kwargs.chz should run"),
             expected
+        );
+    }
+
+    /// Swift-style keyword args through a function VALUE golden: `examples/keyword_value.chz` — the
+    /// interpreter must match `.expected` byte-for-byte (three-engine parity asserted on the VM side).
+    #[test]
+    fn golden_keyword_value_chz() {
+        let source = include_str!("../../examples/keyword_value.chz");
+        let expected = include_str!("../../examples/keyword_value.expected");
+        assert_eq!(
+            run_capture(source).expect("keyword_value.chz should run"),
+            expected
+        );
+    }
+
+    /// Regression: two (or more) value+keyword function-value calls inside ONE string interpolation
+    /// whose first named-arg value lands at the same fragment-relative column must NOT alias a single
+    /// keyword-table slot. Each `{…}` fragment re-lexes from a fresh source, so its sub-expression
+    /// spans restart at `(1,1)`; keying the table on span alone collided two distinct calls and applied
+    /// the wrong permutation. The (string span, fragment ordinal) discriminators fix it. Covers the
+    /// colliding-offset case, multiple keyword calls within one fragment, and nested interpolation.
+    #[test]
+    fn keyword_value_interpolation_fragments_do_not_alias() {
+        let src = "fn sub2(x: int, y: int) -> int:\n    return x - y\n\
+                   s := sub2\n\
+                   print(\"{s(y=1, x=10)} {s(y=2, x=5)}\")\n\
+                   print(\"{s(y=1, x=10) + s(y=3, x=30)}\")\n\
+                   print(\"{s(y=1, x=10)}=[{s(y=100, x=1)}]\")\n";
+        assert_eq!(
+            run_capture(src).expect("interpolated value+keyword calls should run"),
+            "9 3\n36\n9=[-99]\n"
         );
     }
 

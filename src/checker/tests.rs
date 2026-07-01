@@ -5746,6 +5746,36 @@ fn spawn_non_sendable_arg_rejected() {
 }
 
 #[test]
+fn spawn_non_sendable_keyword_arg_rejected() {
+    // The spawn airlock gate must reject a non-sendable value whether it crosses positionally OR by
+    // LABEL through a function VALUE. Regression guard: the gate iterated only positional `args`, so
+    // `spawn h(f=g)` smuggled a non-sendable closure across the airlock while the positional
+    // `spawn h(g)` was correctly rejected — a checker-accepts / runtime-diverges hole.
+    rejects(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(f=g)\nmain()\n",
+        "non-sendable value of type fn() -> int",
+    );
+    // The positional form of the SAME call is (and stays) rejected — parity of the two spellings.
+    rejects(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(g)\nmain()\n",
+        "non-sendable value of type fn() -> int",
+    );
+}
+
+#[test]
+fn spawn_non_sendable_ref_keyword_arg_rejected() {
+    // A `Ref[T]` (std.ref mutable box) is non-sendable; passing it by label to a spawned function
+    // value must be rejected, exactly like the positional form (else the task silently mutates a
+    // deep-cloned copy and the parent box is unchanged — the footgun the gate exists to prevent).
+    // Uses the graph path (`entry_rejects`) so the spawn gate is exercised through `check_graph`
+    // too, not only the single-module `check_src` path (checker-test-helper-key-divergence).
+    entry_rejects(
+        "import std.ref\nfn run(r: Ref[int]):\n    r.set(1)\nfn main():\n    h := run\n    b := Ref(0)\n    parallel:\n        spawn h(r=b)\nmain()\n",
+        "non-sendable value of type Ref[int]",
+    );
+}
+
+#[test]
 fn spawn_sendable_args_ok() {
     ok(
         "fn worker(id: int, prefix: str, out: Channel[str]):\n    out.send(\"{prefix}-{id}\")\nfn main():\n    ch := Channel[str]()\n    parallel:\n        spawn worker(1, \"t\", ch)\nmain()\n",
@@ -11600,4 +11630,84 @@ fn ffi_qualified_width_in_extern_sig() {
     entry_ok(
         "import std.ffi\nextern \"libc.so.6\":\n    fn abs(x: ffi.int32) -> ffi.int32\n\nfn main():\n    print(abs(-5))\nmain()\n",
     );
+}
+
+// ===== Swift-style keyword arguments through a function VALUE (SE-0111 labels, surface-only) =====
+
+/// Labels on a `fn(...)` TYPE are SURFACE-ONLY: `fn(str)->nil` and `fn(name:str)->nil` are the same
+/// type, mutually assignable (a labelled fn value flows into an unlabelled param and vice-versa).
+#[test]
+fn kw_labels_are_surface_only() {
+    // A labelled user-fn value flows into an UNLABELLED fn param.
+    ok(
+        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nuse_it(greet)\n",
+    );
+    // A closure passed to a LABELLED fn param (labels ignored in the arity/assignability check).
+    ok("fn use_it(f: fn(name: str) -> nil):\n    f(\"a\")\nuse_it(fn(s: str): print(s))\n");
+    entry_ok(
+        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nfn main():\n    use_it(greet)\nmain()\n",
+    );
+}
+
+/// A value call carrying keyword arguments resolves against the value's labels (both by-name and
+/// reordered), through both the single-module and multi-module check paths.
+#[test]
+fn kw_value_call_accepts() {
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(name=\"Bob\", greeting=\"Hi\")\n",
+    );
+    // Reordered keywords.
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(greeting=\"Hi\", name=\"Bob\")\n",
+    );
+    // Positional still works alongside (named empty → fast path).
+    ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\ng := greet\ng(\"Bob\", \"Hi\")\n",
+    );
+    entry_ok(
+        "fn greet(name: str, greeting: str):\n    print(greeting, name)\nfn main():\n    g := greet\n    g(name=\"Bob\", greeting=\"Hi\")\nmain()\n",
+    );
+}
+
+/// A keyword argument through a HOF parameter resolves against the ANNOTATION's labels.
+#[test]
+fn kw_value_call_hof_param_labels() {
+    ok(
+        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\napply(fn(name: str): print(name))\n",
+    );
+    entry_ok(
+        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\nfn main():\n    apply(fn(name: str): print(name))\nmain()\n",
+    );
+}
+
+/// An unknown label through a value is a clean type error that NAMES the bad label.
+#[test]
+fn kw_value_unknown_label_rejected() {
+    rejects(
+        "fn greet(name: str):\n    print(name)\ng := greet\ng(nope=\"x\")\n",
+        "unknown parameter label 'nope'",
+    );
+    entry_rejects(
+        "fn greet(name: str):\n    print(name)\nfn main():\n    g := greet\n    g(nope=\"x\")\nmain()\n",
+        "unknown parameter label 'nope'",
+    );
+}
+
+/// SCOPE-CUT: a value call omitting a defaulted parameter is a TYPE ERROR (defaults do NOT fill
+/// through a value), while a DIRECT call still fills the default.
+#[test]
+fn kw_value_scope_cut_defaults() {
+    // Direct call fills the default (a desugar feature) — clean.
+    ok_desugared("fn hasdefault(x: int = 5):\n    print(x)\nhasdefault()\n");
+    // Through a value: every parameter must be supplied (defaults do NOT fill through a value).
+    rejects_desugared(
+        "fn hasdefault(x: int = 5):\n    print(x)\nh := hasdefault\nh()\n",
+        "argument",
+    );
+}
+
+/// A first-class BUILTIN function value takes NO keyword arguments (labels are a user-fn surface).
+#[test]
+fn kw_value_builtin_rejects_keywords() {
+    rejects("p := ord\np(x=\"a\")\n", "takes no keyword arguments");
 }

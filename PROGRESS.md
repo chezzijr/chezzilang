@@ -11,6 +11,54 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Swift-style KEYWORD ARGUMENTS through a function VALUE (2026-07-01).** Named arguments now work
+through a first-class **function value**, not just a direct call: `g := greet; g(name="Bob",
+greeting="Hi")` prints `Hi Bob`, keywords may be reordered, and a `fn(name: str)->nil` **HOF parameter**
+accepts `f(name="X")`. `Ty::Func`/`Type::Func` gained a `labels` field (parallel to `params`) — built
+from a user fn's / closure's param names and from an annotation's optional `IDENT:` labels (parser
+`parse_fn_type_param`). Labels are **SURFACE-ONLY** (Swift SE-0111): a new equality-neutral `FnLabels`
+wrapper makes the derived `Ty` `PartialEq` ignore them, and `compatible`/`assignable`/`unify`/`Display`/
+`sendable` all `..`-ignore them, so `fn(str)->nil` ≡ `fn(name:str)->nil` — **zero** regression to
+HOF/callback/protocol/subtyping and no Display/snapshot churn. Resolution is a checker-recorded
+**side table** (`KeywordTable = HashMap<KeywordKey, Vec<usize>>`, `KeywordKey = (module idx, fragment-ctx span, fragment ordinal, first-named-arg span)`) mirroring the `extern_sigs`
+precedent EXACTLY: `resolve_keyword_calls{,_standalone}` run the same deps-first pass and harvest a slot
+**permutation** over the combined `[positional ++ named]` arg list, populated in BOTH the single-module
+(`ok`/`check_src`) and multi-module (`check_graph`) paths; both backends read it in `compile_call` /
+`eval_call` to lower a value+keyword call to a **plain positional `Op::Call`** — the runtime ABI stays
+positional and UNCHANGED (`src/vm` untouched — the `DeferCall`/`SpawnCall` lowerings consult the same
+table so `defer d(name=…)` / `spawn s(name=…)` reorder too, no check-passes-then-traps hole). **SCOPE-CUT** (SE-0111): a value call must supply every
+parameter — declaration-site **defaults do NOT fill through a value** (`h := hasdefault; h()` errors,
+direct `hasdefault()` still fills); a first-class **built-in** value takes no keywords. Direct-call
+keyword resolution (desugar), struct ctor/method named+default args, and `print` `sep=`/`end=` are all
+UNCHANGED — desugar just stops rejecting value+keyword calls (Ident/expr callee) and defers them to the
+checker. Positional value calls are untouched (the table is read only when `named` is non-empty → no
+hot-path cost, `benches/run.chz` unchanged). Three-engine byte-identical parity
+(`examples/keyword_value.chz` + a cross-module `keyword_value_xmod/`); grammar/`docs` updated
+(`<fnParam>` optional label, conformance green).
+  - **Fix (post-review):** two soundness holes in the above. (1) **Chained value keyword calls**
+    (currying: `g(a=…)(b=…)` where a value returns another value) aliased one `KeywordTable` slot —
+    the parser gives every link of a postfix chain the SAME call-node span (`parse_postfix`'s
+    `let span = e.span;`), so the later permutation overwrote the earlier and the compiler/interp
+    applied the wrong perm (out-of-range index → panic, or silent mis-route). The table is now keyed
+    by a per-call-unique span (`checker::keyword_key_span` = the first named-arg VALUE expr's span,
+    always present when recording), computed identically at the record site and all six backend
+    lookups. (2) The **spawn airlock** sendability gate iterated only positional `args`, so a
+    non-sendable value passed by LABEL to a spawned function value (`spawn h(f=cb)`, `spawn h(r=box)`)
+    crossed unchecked while the positional form was rejected — the gate now chains `named` too.
+    Regression tests: `golden_keyword_value_chz*` (chained curry line), `spawn_non_sendable_keyword_arg_rejected`,
+    `spawn_non_sendable_ref_keyword_arg_rejected`.
+  - **Fix (post-review #2):** the first-named-arg span above is unique only *within one lexed source*.
+    Every `{…}` **string-interpolation** fragment is re-lexed from a fresh source, so its sub-expression
+    spans restart at `(1,1)`; two value+keyword calls in different fragments whose first named-arg value
+    lands at the same fragment-relative column (`"{a(y=1, x=10)} {b(p=3, q=2)}"`) collided on one
+    `KeywordTable` slot and the earlier call was lowered with the WRONG permutation on all three engines.
+    The key gained two **fragment discriminators** — the whole-string span + the fragment's 0-based
+    ordinal — maintained identically by the checker (`check_interpolation`), compiler (`compile_str`),
+    and interp (`interpolate`) at the interpolation boundary (inert defaults outside interpolation, so
+    non-interpolation keying and the positional hot path are unchanged). `examples/keyword_value.chz`
+    grew a colliding-offset interpolation line; regression test
+    `keyword_value_interpolation_fragments_do_not_alias`.
+
 **✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
 universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old
 gate error *"built-ins and constructors must be wrapped in a function"* is gone for these names), and

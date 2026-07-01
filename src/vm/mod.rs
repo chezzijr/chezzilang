@@ -22805,6 +22805,55 @@ main()";
         assert_eq!(vm_out, interp_out, "vm/interp divergence on inline_fn");
     }
 
+    /// Swift-style keyword arguments through a function VALUE golden: `examples/keyword_value.chz`
+    /// exercises by-label / reordered / mixed positional+label / HOF-param-labels / closure-value /
+    /// slot-order-eval keyword calls. The checker resolves each to a positional slot permutation and
+    /// both engines lower it to the SAME positional `Op::Call`, so output is byte-identical across all
+    /// three engines (VM serial, interp, M:N) — the three-engine parity gate for the feature.
+    #[test]
+    fn golden_keyword_value_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/keyword_value.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/keyword_value.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("keyword_value.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from keyword_value.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("keyword_value.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("keyword_value.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on keyword_value");
+    }
+
+    /// Cross-module value+keyword parity: `examples/keyword_value_xmod/main.chz` calls an IMPORTED fn
+    /// through a value with reordered keyword args. The permutation is keyed by the CALL-SITE module
+    /// index, so this locks that module-scoped keying (the extern-sig precedent) resolves correctly
+    /// across module boundaries on all three engines.
+    #[test]
+    fn golden_keyword_value_xmod_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/keyword_value_xmod/main.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/keyword_value_xmod/main.expected"))
+                .unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("keyword_value_xmod should run on the VM");
+        assert_eq!(vm_out, expected, "vm output drifted on keyword_value_xmod");
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("keyword_value_xmod should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on keyword_value_xmod");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("keyword_value_xmod should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
+    }
+
     /// Chained `else if` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
     /// `if p: a else if q: b else: c` chain (right-associative nesting) selecting each branch.
     /// Byte-identical on VM, interp, and the checked-in `.expected` is the parity gate.

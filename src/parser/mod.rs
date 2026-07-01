@@ -1625,6 +1625,21 @@ impl Parser {
 
     // ----- types -----
 
+    /// One parameter slot of a `fn(...)` TYPE, with an OPTIONAL Swift-style label: `name: T` yields
+    /// `(Some("name"), T)`; a bare `T` yields `(None, T)`. A label is an `IDENT` IMMEDIATELY followed
+    /// by `:` — disambiguated by lookahead so a bare qualified/generic type head (`m.Type` = `IDENT
+    /// Dot`, `List[int]` = `IDENT LBracket`) is never mistaken for a label.
+    fn parse_fn_type_param(&mut self) -> PResult<(Option<String>, Type)> {
+        if matches!(self.peek(), Token::Ident(_)) && *self.peek_at(1) == Token::Colon {
+            let label = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let ty = self.parse_type()?;
+            Ok((Some(label), ty))
+        } else {
+            Ok((None, self.parse_type()?))
+        }
+    }
+
     fn parse_type(&mut self) -> PResult<Type> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
@@ -1634,10 +1649,15 @@ impl Parser {
         if self.eat(&Token::Fn) {
             self.expect(&Token::LParen)?;
             let mut params = Vec::new();
+            let mut labels: Vec<Option<String>> = Vec::new();
             if !self.check(&Token::RParen) {
-                params.push(self.parse_type()?);
+                let (l, t) = self.parse_fn_type_param()?;
+                labels.push(l);
+                params.push(t);
                 while self.eat(&Token::Comma) {
-                    params.push(self.parse_type()?);
+                    let (l, t) = self.parse_fn_type_param()?;
+                    labels.push(l);
+                    params.push(t);
                 }
             }
             self.expect(&Token::RParen)?;
@@ -1646,6 +1666,7 @@ impl Parser {
             let mut ty = Type::Func {
                 params,
                 ret: Box::new(ret),
+                labels,
             };
             ty = self.parse_type_postfix(ty)?;
             self.depth -= 1;
@@ -4531,7 +4552,7 @@ mod tests {
             panic!()
         };
         match &f.params[0].ty {
-            Some(Type::Func { params, ret }) => {
+            Some(Type::Func { params, ret, .. }) => {
                 assert_eq!(params.as_slice(), &[Type::named("int")]);
                 assert_eq!(**ret, Type::named("int"));
             }
@@ -4546,7 +4567,7 @@ mod tests {
             panic!()
         };
         match &f.params[0].ty {
-            Some(Type::Func { params, ret }) => {
+            Some(Type::Func { params, ret, .. }) => {
                 assert!(params.is_empty());
                 assert_eq!(**ret, Type::named("int"));
             }
