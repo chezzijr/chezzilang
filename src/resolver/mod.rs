@@ -239,6 +239,18 @@ pub fn build_graph_with_entry_source(
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
     };
+    // ALWAYS-LINK std.ref: `Ref[T]` is a reserved global backing the `ref` keyword (`a: ref int`
+    // lowers to a bare `Ref[T]` box), so its `.chz` layout+methods must be present in EVERY program's
+    // graph — import-free — for the checker to seed it and both engines to construct it. Injected
+    // BEFORE the entry DFS: std.ref imports nothing, so it lands at order[0] and the entry still ends
+    // up LAST (the compiler/resolver `modules.last() == entry` invariant holds). Deduped by `visited`,
+    // so a program that already imports std.ref (or IS std.ref) doesn't double-read; the entry_override
+    // id-match reuses the in-memory buffer. If std.ref can't be found this fails for ALL programs, which
+    // is correct (a misconfigured std root should surface loudly, not silently).
+    let ref_path = ["std".to_string(), "ref".to_string()];
+    let ref_file = module_file(&ref_path, &b.project_root, &b.std_root);
+    let ref_id = ModuleId(canonical_or_abs(&ref_file));
+    b.visit(&ref_id, &ref_path, Span { line: 1, col: 1 })?;
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
     let mut graph = ModuleGraph {
         entry: entry_id,

@@ -31259,6 +31259,26 @@ main()
         assert_file_parity("examples/ref.chz");
     }
 
+    /// `Ref` reserved-global golden: `examples/ref_no_import.chz` exercises the `ref` keyword, the
+    /// explicit `Ref[int]`/`Ref(0)` box, and a closure that mutates a captured `ref` local through the
+    /// shared box — all with NO `import std.ref` (std.ref is always linked). Asserts all THREE engines
+    /// byte-identical: cooperative VM == interp (`assert_file_parity`) PLUS the M:N OS-thread engine
+    /// (`run_file_parallel`).
+    #[test]
+    fn golden_ref_no_import_via_run_file() {
+        let path = fixture("examples/ref_no_import.chz");
+        let expected = std::fs::read_to_string(fixture("examples/ref_no_import.expected")).unwrap();
+        let (out, _err, res, _) = run_file(&path);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(out, expected);
+        assert_file_parity("examples/ref_no_import.chz");
+        // M:N OS-thread engine (default `run`) must match byte-for-byte too.
+        let (par_out, _par_err, par_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        assert!(par_res.is_ok(), "{par_res:?}");
+        assert_eq!(par_out, expected, "M:N engine divergence for ref_no_import");
+    }
+
     /// `ref T` golden: `examples/ref_binding.chz` — the transparent by-reference binding modifier
     /// (sugar over `std.ref` `Ref[T]`): create + read/write auto-deref, alias-shares-box, a plain
     /// `:=` copy that does NOT share, pass-by-ref mutating the caller's binding, a `ref -> T` param

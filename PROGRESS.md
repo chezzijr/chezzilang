@@ -40,6 +40,26 @@ intentionally OUT of phase 1 (still hard-coded in `builtin_sig`/`is_builtin`) �
 blocked on **user-facing variadics** (`fn f(*args)`, a separate milestone) — `print`'s `sep=`/`end=`
 variadic can't be expressed in `.chz` until then, so the synthetic Rust table is the mechanism for now.
 
+**✅ `Ref` promoted to a RESERVED GLOBAL backing the `ref` keyword — import-free (2026-07-01).** The
+`ref T` binding modifier and the explicit `Ref[T]` box now work with **no `import std.ref`**. `Ref`
+joins `Result`/`Option`/`Iterator`/`Channel` in the reserved-global class (`is_reserved_type`) — the
+sanctioned set that backs core syntax — so a user `struct Ref` is always rejected as reserved. Mechanism
+(minimal, three seams, NOT a native rewrite — the `.chz` stays the single source): (1) the resolver
+**always-links `std/ref.chz`** into every program's module graph (injected as `order[0]` before the entry
+DFS in `build_graph_with_entry_source`, deduped if already imported; entry stays LAST so
+`modules.last()==entry` holds); (2) the checker **caches std.ref's real `StructInfo`** (layout +
+`get`/`set`/`update` from the checked module — `ref_seed`) and **re-seeds it bare** in every module's
+`seed_stdlib_structs` (import-free `struct_names`/`bare_types`), with `is_reserved_type += "Ref"` and a
+`current_module_is_stdlib` exemption so std.ref's own `struct Ref[T]` decl stays legal; (3) the compiler
+and interpreter each expose `Ref` **bare in every module's `bare_types`** (guarded on the struct being
+registered) so the ctor lowers import-free on all engines. `import std.ref` is now a **harmless no-op**
+kept for compatibility (idempotent `bind_import` inserts — no dup/shadow error). Three-engine
+byte-identical parity via new golden `examples/ref_no_import.chz` (ref keyword + explicit `Ref[int]` +
+closure-capture aliasing; `run_file` == `interp` == `run_file_parallel`); checker tests
+`ref_keyword_and_type_work_without_import` / `import_std_ref_is_harmless_noop` /
+`user_struct_named_ref_now_reserved`. `ref T` semantics (Rc<RefCell> box, persists through closure
+capture) unchanged — only the import requirement removed. Docs: `docs/syntax.md`/`docs/stdlib.md`.
+
 **✅ Swift-style KEYWORD ARGUMENTS through a function VALUE (2026-07-01).** Named arguments now work
 through a first-class **function value**, not just a direct call: `g := greet; g(name="Bob",
 greeting="Hi")` prints `Hi Bob`, keywords may be reordered, and a `fn(name: str)->nil` **HOF parameter**
@@ -379,7 +399,9 @@ boundaries covered by new failing-first rejection tests.
 **✅ Checker — import+same-name-struct collision soundness hole closed (2026-06-28).** Checker-only,
 three-engine-parity-safe by construction (rejected programs never run; accepted programs byte-identical).
 The four native **struct-modeled** types (`Ref`/`std.ref`, `Match`/`std.regex`, `Response`/`std.request`,
-`ProcResult`/`std.process`) slipped through the decl guard: a program that BOTH imported one AND declared a
+`ProcResult`/`std.process`) slipped through the decl guard: (**NOTE (2026-07-01):** `Ref` has since been
+promoted to a **reserved global** — always import-free, a user `struct Ref` is now *always* reserved; see
+the top "reserved global backing the `ref` keyword" entry. The other three stay import-gated as below.) a program that BOTH imported one AND declared a
 same-named `struct` passed `check` clean then **trapped at runtime on both engines** (e.g. `no field 'v' on
 Ref(value=5)`) — the user layout overwrote the Builtin seed in the hoist while the runtime kept constructing/
 returning the native shape. Root cause: the struct-hoist `already_defined` test (`mod.rs`) only treats a

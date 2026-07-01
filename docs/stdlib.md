@@ -706,6 +706,9 @@ struct Ref[T]:
     value: T
 ```
 Construct `Ref(v)`; methods `get() -> T` · `set(v: T) -> nil` · `update(f: fn(T) -> T) -> nil`.
+`Ref` is a **reserved global** backing the `ref` keyword, so it is usable bare with **no import**
+(the always-linked `std/ref.chz` supplies the layout). `import std.ref` is a harmless no-op kept
+for compatibility.
 
 ### `std.cancel` — cooperative cancellation & timeouts
 `struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·

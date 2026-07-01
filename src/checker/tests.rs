@@ -7178,12 +7178,29 @@ fn spawn_global_mutation_inside_recover_rejected() {
 // ----- C5 refinement #2: `Ref` non-sendability keys on origin, not the bare name -----
 
 #[test]
-fn user_struct_named_ref_is_sendable() {
-    // A *user-defined* struct that happens to be named `Ref` (no std.ref import) is an ordinary
-    // sendable struct — the non-sendability gate applies only to the builtin std.ref `Ref[T]`.
-    entry_ok(
-        "struct Ref:\n    val: int\nfn use_it(r: Ref):\n    print(r.val)\nfn main():\n    r := Ref(1)\n    parallel:\n        spawn use_it(r)\nmain()\n",
-    );
+fn user_struct_named_ref_now_reserved() {
+    // `Ref` is now a reserved global backing the `ref` keyword (std.ref is always linked), so a
+    // user `struct Ref` is rejected at declaration with the same `reserved (builtin)` error as
+    // `struct Result`/`struct Option` — no longer a legal user struct.
+    entry_rejects("struct Ref:\n    val: int\nprint(1)\n", "reserved");
+}
+
+/// `ref T` (keyword) AND the explicit `Ref[T]` box both type-check with NO `import std.ref`, because
+/// `Ref` is a reserved global whose std.ref layout+methods are always linked into the graph.
+#[test]
+fn ref_keyword_and_type_work_without_import() {
+    entry_ok("a: ref int = 0\nprint(a)\n");
+    entry_ok("x: Ref[int] = Ref(0)\nx.set(5)\nprint(x.get())\n");
+    entry_ok("x: Ref[str] = Ref(\"hi\")\nx.update(fn(v: str) -> str: v.upper())\nprint(x.get())\n");
+}
+
+/// `import std.ref` stays a HARMLESS NO-OP now that `Ref` is pre-seeded bare: importing it (whole-
+/// module or `from`-form) must NOT produce a dup-def / shadow error — the bind_import inserts are
+/// idempotent over the always-present seed.
+#[test]
+fn import_std_ref_is_harmless_noop() {
+    entry_ok("import std.ref\na: ref int = 0\nx: Ref[int] = Ref(1)\nprint(a + x.get())\n");
+    entry_ok("import Ref from std.ref\nx: Ref[int] = Ref(1)\nprint(x.get())\n");
 }
 
 // ----- D6c: optional `timeout_ms` on net socket read/accept/write -----

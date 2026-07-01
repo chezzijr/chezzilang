@@ -210,13 +210,13 @@ a, b = compute()                         # compute() returns (int, int)
 
 `ref T` is a **binding modifier** (on **locals and params only**) that makes a binding carry
 *reference* semantics while still being spelled and used as a plain `T`. It is pure sugar over the
-`std.ref` `Ref[T]` box (`import std.ref` to use it). Roughly C++'s `int&`, where the explicit
-`Ref[T]` (`r.get()/.Set()/.update()`) is closer to Rust's `Rc`.
+`Ref[T]` box. `Ref` is a **reserved global** (like `Result`/`Option`/`Iterator`) that backs the
+`ref` keyword, so **no import is needed** — both `ref T` and the explicit `Ref[T]` work standalone.
+(`import std.ref` still works as a harmless no-op for older code.) Roughly C++'s `int&`, where the
+explicit `Ref[T]` (`r.get()/.set()/.update()`) is closer to Rust's `Rc`.
 
 ```chezzi
-import std.ref
-
-r: ref int = 0     # a fresh box holding 0
+r: ref int = 0     # a fresh box holding 0 — no import needed
 r = 5              # WRITE mutates the pointee (never rebinds the box)
 r += 1             # compound works too → 6
 print(r)           # 6   — a READ auto-derefs (no `.get()`, no `^` operator)
@@ -1979,7 +1979,7 @@ fn fetch_all(urls: List[str]):
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
   (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender can't reuse a sent
   value.
-- **`Ref[T]`** (`import std.ref`) — the **in-task** mutable box: `Ref(v)` then `r.get() -> T`,
+- **`Ref[T]`** (reserved global, no import needed) — the **in-task** mutable box: `Ref(v)` then `r.get() -> T`,
   `r.set(v)`, `r.update(fn(x): ...)`. Backed by `Rc<RefCell>`, so it is a true *shared reference*
   within one task: a closure that closes over a `Ref[T]` and any other holder see each other's writes
   — the answer to "I need a mutable value to close over or pass by reference" without hand-rolling a
@@ -2408,9 +2408,12 @@ A few cross-cutting notes (full detail in `stdlib.md`):
   user types **only when the owning module is not imported** — a user `struct Response` without `import
   std.request` is their own type. But importing the type **and** declaring a same-named `struct` in the
   same module is a collision, rejected at check (`type 'Response' is reserved (builtin)`) — never accept-
-  then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (Same
-  for `Ref` from `std.ref` and every other import-gated std struct.) A merely-similar name (`struct
-  RefBox` alongside `import Ref from std.ref`) stays legal.
+  then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (This applies
+  to `Match`/`Response`/`ProcResult` and every import-gated std struct.) A merely-similar name (`struct
+  ResponseBox`) stays legal. **`Ref` (`std.ref`) is different**: it backs the `ref` keyword, so it is a
+  full **reserved program-global** (like `Result`/`Option`/`Iterator`) — always present, usable bare
+  with **no import**, and a user `struct Ref` is *always* rejected as reserved. `import std.ref` is a
+  harmless no-op kept for compatibility.
 
 ---
 

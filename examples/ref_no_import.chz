@@ -1,0 +1,25 @@
+# examples/ref_no_import.chz — `ref T` and explicit `Ref[T]` WITHOUT `import std.ref`.
+#
+# `Ref` is a reserved global backing the `ref` keyword, so it (and the explicit `Ref[T]` box) work
+# import-free — std.ref is always linked into every program. This mirrors examples/ref.chz +
+# examples/ref_binding.chz but deliberately omits the import.
+
+# --- ref keyword: transparent by-reference binding (no import) -----------------------------------
+r: ref int = 0
+r = r + 5
+print(r)                 # 5
+
+# --- explicit Ref[T] box (no import) -------------------------------------------------------------
+x: Ref[int] = Ref(1)
+x.set(9)
+print(x.get())           # 9
+x.update(fn(v: int) -> int: v + 1)
+print(x.get())           # 10
+
+# --- closure captures a `ref` local and mutates through the shared box; caller sees it -----------
+total: ref int = 0
+fn add(n: int):
+    total = total + n    # mutate through the captured shared box
+add(3)
+add(4)
+print(total)             # 7

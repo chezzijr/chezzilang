@@ -101,6 +101,11 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result"
         || name == "Option"
         || name == "Iterator"
+        // `Ref` backs the reserved `ref` keyword (`a: ref int` lowers to a bare `Ref[T]`), so it's a
+        // reserved global alongside Result/Option/Iterator — always present (std.ref is always linked),
+        // import-free, and a user `struct Ref` is rejected here. std.ref's OWN `struct Ref[T]` decl is
+        // exempted at the decl guard via `current_module_is_stdlib`.
+        || name == "Ref"
         // Builtin scalar primitives — a user `struct int` / `enum str` would shadow the scalar arm in
         // `resolve_type`.
         || name == "int"
@@ -807,6 +812,16 @@ impl Checker {
             c.keyword_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+            // Cache std.ref's real `Ref[T]` StructInfo (layout + get/set/update) the first time it's
+            // checked, so `seed_stdlib_structs` can re-seed it bare (import-free) in every subsequent
+            // module — `Ref` backs the reserved `ref` keyword. Only std.ref declares `Ref`, and the
+            // resolver injects it as order[0] (no deps), so this is populated before entry/all others.
+            if c.ref_seed.is_none()
+                && lm.is_std()
+                && let Some(info) = sig.struct_defs.get("Ref")
+            {
+                c.ref_seed = Some(info.clone());
+            }
             c.module_sigs.insert(lm.id.clone(), sig);
         }
     }
@@ -1509,6 +1524,13 @@ struct Checker {
     defer_floors: Vec<usize>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
+    /// The real `StructInfo` for `std.ref`'s `Ref[T]` (layout + get/set/update methods), harvested
+    /// from the checked `std.ref` module the FIRST time it's seen in the graph (it's order[0], so
+    /// cached before any other module checks). Re-seeded bare (import-free) in every module by
+    /// [`seed_stdlib_structs`], because `Ref` backs the reserved `ref` keyword — `std.ref` is always
+    /// linked into the graph, so this is single-sourced from the `.chz` rather than hand-built. `None`
+    /// until harvested (and on the lone single-module `check` path, which has no graph).
+    ref_seed: Option<StructInfo>,
     /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
     /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
     /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's
@@ -1616,6 +1638,7 @@ impl Checker {
             capture_floors: Vec::new(),
             defer_floors: Vec::new(),
             current_module_is_stdlib: false,
+            ref_seed: None,
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),
@@ -1704,6 +1727,19 @@ impl Checker {
                 ("code", Ty::Int),
             ]),
         );
+        // `Ref` is a reserved global backing the `ref` keyword: its layout+methods (harvested from the
+        // always-linked std.ref module into `ref_seed`) are seeded BARE — unlike Match/Response/
+        // ProcResult above, whose bare NAME stays import-gated. So both the keyword's lowered
+        // `.get()/.set()` calls AND an explicit `Ref[int]`/`Ref(0)` typecheck import-free (`struct_names`
+        // + `bare_types` make the bare name resolvable; `self.structs` carries the layout). `import
+        // std.ref` re-inserting the same info via `bind_import` is idempotent (no dup/shadow error).
+        if let Some(info) = self.ref_seed.clone() {
+            self.structs.insert("Ref".into(), info);
+            self.struct_names.insert("Ref".into());
+            self.bare_types
+                .entry("Ref".into())
+                .or_insert_with(|| "Ref".into());
+        }
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
@@ -2983,7 +3019,11 @@ impl Checker {
                     // still constructs/returns the native shape, so the check-clean program would trap
                     // at runtime on a field mismatch. (A bare unimported `struct Match` stays legal —
                     // the name isn't in the set without the import event.)
-                    if is_reserved_type(name)
+                    // `Ref` is a reserved global, but std.ref's OWN `struct Ref[T]` decl is the single
+                    // source of its layout — exempt it (a trusted std authoring boundary, the same
+                    // `current_module_is_stdlib` licensing pattern the concurrency/time/net gates use).
+                    let ref_self_decl = name == "Ref" && self.current_module_is_stdlib;
+                    if (is_reserved_type(name) && !ref_self_decl)
                         || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                         || self.imported_builtin_types.contains(name)

@@ -1744,8 +1744,9 @@ fn method_call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
     }
 }
 
-/// `Ref(<value>)` — a fresh-box constructor call for a `ref T` create-init. `Ref` resolves to the
-/// `std.ref` struct (the program must `import std.ref`, like any other use of `Ref`).
+/// `Ref(<value>)` — a fresh-box constructor call for a `ref T` create-init. `Ref` is a reserved
+/// global (backs the `ref` keyword): `std/ref.chz` is always linked into the graph, so this resolves
+/// import-free, like `Result`/`Option`. No `import std.ref` needed.
 fn ref_ctor(value: Expr) -> Expr {
     let span = value.span;
     Expr {
