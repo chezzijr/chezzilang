@@ -722,6 +722,16 @@ impl Compiler {
                 }
             }
         }
+        // `Ref` is a reserved global backing the `ref` keyword: std.ref is ALWAYS linked into the
+        // graph, and its `struct Ref[T]` is keyed BARE ("Ref"), so expose the bare name import-free in
+        // EVERY module (mirrors the checker's always-present `Ref` seed). Guarded on the struct actually
+        // being registered so it's a no-op if std.ref somehow isn't present. `or_insert` never clobbers
+        // a local — `Ref` is reserved, so there can be no user `struct Ref` to disambiguate.
+        if self.program.structs.contains_key("Ref") {
+            self.bare_types
+                .entry("Ref".to_string())
+                .or_insert_with(|| "Ref".to_string());
+        }
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
             if let StmtKind::Struct {

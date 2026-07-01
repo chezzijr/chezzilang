@@ -5200,6 +5200,16 @@ impl Interp {
                 }
             }
         }
+        // `Ref` is a reserved global backing the `ref` keyword: std.ref is ALWAYS linked and its
+        // `struct Ref[T]` is keyed BARE ("Ref"), so expose the bare name import-free in EVERY module
+        // (mirrors the checker seed + the compiler's `bare_types` injection — 3-engine parity). Guarded
+        // on the struct being registered so it's a no-op if std.ref is somehow absent; `or_insert`
+        // never clobbers a local (`Ref` is reserved — no user `struct Ref` can exist).
+        if self.structs.contains_key("Ref") {
+            self.bare_types
+                .entry("Ref".to_string())
+                .or_insert_with(|| "Ref".to_string());
+        }
         // Cache this module's fully-built `bare_types` + record its `home` env address → idx, so a
         // cross-module runtime call can re-establish the callee's module context (Blocker C: a
         // disambiguated enum match inside this module, called from elsewhere, must resolve its pattern
