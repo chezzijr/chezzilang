@@ -379,8 +379,13 @@ fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
 /// `set_extension` rewrites the project-root dir's own extension and escapes the root (e.g.
 /// `<root>.chz`), producing a baffling "cannot read" error. Pure (no cwd/env) so it is unit-testable.
 fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let segs: Vec<String> = entrypoint.split('.').map(str::to_string).collect();
-    if entrypoint.trim().is_empty() || segs.iter().any(|s| s.trim().is_empty()) {
+    // Trim surrounding whitespace on EACH segment before building the path, so a padded value like
+    // `" app "` resolves to `app.chz` rather than the baffling `<root>/ app .chz` ("cannot read").
+    let segs: Vec<String> = entrypoint
+        .split('.')
+        .map(|s| s.trim().to_string())
+        .collect();
+    if segs.iter().any(String::is_empty) {
         return Err(format!(
             "has an invalid [project] entrypoint {entrypoint:?}; expected a dotted module path like \"src.main\""
         ));
@@ -1027,8 +1032,19 @@ mod init_tests {
             entrypoint_file("src.main", root).unwrap(),
             root.join("src/main.chz")
         );
+        // Surrounding whitespace on segments is trimmed before the path is built, so a padded
+        // entrypoint resolves to the same file as its trimmed form (was: `<root>/ app .chz`).
+        assert_eq!(
+            entrypoint_file(" app ", root).unwrap(),
+            root.join("app.chz")
+        );
+        assert_eq!(
+            entrypoint_file(" src . main ", root).unwrap(),
+            root.join("src/main.chz")
+        );
         // Bad forms must be REJECTED, not mangle the root path (push("") + set_extension footgun).
-        for bad in ["", "   ", ".", ".main", "src.main.", "src..main"] {
+        // `"a. .b"` has a whitespace-only middle segment that trims to empty → still rejected.
+        for bad in ["", "   ", ".", ".main", "src.main.", "src..main", "a. .b"] {
             assert!(
                 entrypoint_file(bad, root).is_err(),
                 "entrypoint {bad:?} should be rejected"

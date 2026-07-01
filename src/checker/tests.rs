@@ -6319,6 +6319,42 @@ fn timer_still_reserved() {
     );
 }
 
+#[test]
+fn import_alias_to_reserved_int_from_rejected() {
+    // `import sqrt as int from std.math` silently rebinds the reserved builtin `int` callable:
+    // at runtime the `int()` conversion wins and the `as int` binding is dead — a SILENT WRONG
+    // RESULT. Aliasing an import TO a reserved builtin name must be rejected as `reserved (builtin)`,
+    // exactly like `fn int()` / an extern named `int`.
+    entry_rejects(
+        "import sqrt as int from std.math\nfn main():\n    print(int(9.0))\nmain()\n",
+        "reserved",
+    );
+}
+
+#[test]
+fn import_module_as_reserved_int_rejected() {
+    // `import std.math as int` was accepted, then `int(9.0)` failed with the confusing
+    // `module int is not callable`. Reject the alias-to-reserved binding up front.
+    entry_rejects(
+        "import std.math as int\nfn main():\n    print(int(9.0))\nmain()\n",
+        "reserved",
+    );
+}
+
+#[test]
+fn reserved_name_local_shadow_still_ok() {
+    // BOUNDARY: only the IMPORT-ALIAS binding target is gated. Value-level local shadowing of a
+    // reserved name (Python-style) MUST still check clean — it goes through `declare`, not
+    // `bind_import`.
+    ok("range := 5\nprint(range)\n");
+    ok("fn f(range: int) -> int:\n    return range\nprint(f(3))\n");
+    // A reserved *member* imported UN-aliased (bind == member) must still pass — the `a != member`
+    // guard keeps `import Shared from std.concurrency` legal.
+    entry_ok(
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    print(s.get())\nmain()\n",
+    );
+}
+
 // ----- C5: the `Executor` escape hatch -----
 
 #[test]

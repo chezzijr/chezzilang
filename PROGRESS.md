@@ -64,6 +64,27 @@ an intended Python-feel divergence, with `:e` available when an exponent is want
 a nested `chezzi.toml` in a subdirectory is silently ignored (not a second root), so a root-level file
 silently shadows a same-named subdir file (`docs/spec.md`).
 
+**✅ Import-alias reserved-name gate + entrypoint-segment trim (diagnostic-only, 2026-07-01).** Two
+disjoint checker/CLI-only fixes; no engine code, so VM↔interp parity holds by construction.
+**FIX A — import-alias forms now honor the reserved-builtin-name guard** (`src/checker/mod.rs`,
+`bind_import`). The guard that rejects `fn int()` / an extern named `int` as `reserved (builtin)` was
+NOT applied to either import-alias form, so a reserved builtin *callable* could be silently rebound:
+`import sqrt as int from std.math` was accepted, then the builtin `int()` conversion silently won and
+the `as int` binding was dead (a SILENT WRONG RESULT — `print(int(9.0))` printed `9`, not `3.0`); and
+`import std.math as int` was accepted, then failed with the confusing `module int is not callable`.
+Both alias targets (`import M as X` and `import Y as X from M`) now run `is_reserved_name` and reject
+`import alias 'X' is reserved (builtin)`. BOUNDARY held: value-level local shadowing (`range := 5`, a
+fn param named `range`) goes through `declare` not `bind_import` and stays legal; the `a != member`
+guard keeps a reserved member imported UN-aliased (`import Shared from std.concurrency`) / self-renamed
+legal. Tests: `import_alias_to_reserved_int_from_rejected`, `import_module_as_reserved_int_rejected`,
+`reserved_name_local_shadow_still_ok` (all via the `entry_*` build_graph→check_graph path).
+**FIX B — entrypoint path segments are now whitespace-trimmed** (`src/main.rs` `entrypoint_file`).
+Segments were trimmed only for the emptiness check but the RAW segment fed `module_file`, so
+`entrypoint=" app "` slipped through to `<root>/ app .chz` → `cannot read ' app .chz'`. Each segment is
+now trimmed before the path is built, so `" src . main "` resolves to `src/main.chz`; a whitespace-only
+segment (`"a. .b"`) still trims to empty and is rejected. Test: `entrypoint_file_validates_dotted_path`
+extended with the trim asserts.
+
 **✅ Resolver diagnostic-quality fixes (diagnostic-only, 2026-06-30).** Two message/JSON fixes in the
 module resolver error path; the accept/reject set is unchanged (resolve errors fire before any engine
 runs, so two-engine parity is structurally untouched). **Bug 1 — missing-module / bare-`std` errors now
