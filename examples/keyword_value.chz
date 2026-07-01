@@ -21,6 +21,14 @@ apply(fn(name: str): print(name))
 add := fn(a: int, b: int) -> int: a + b
 print(add(b=3, a=10))            # 13 — reordered through a closure value
 
+# Chained value keyword calls (currying): a function value RETURNS another function value, and each
+# link of the postfix chain carries its OWN keyword permutation. The two calls must not alias one
+# table slot even though the parser gives both the same call-node span.
+fn make_greeter(prefix: str) -> fn(name: str, punct: str) -> nil:
+    return fn(name: str, punct: str): print(prefix, name, punct)
+mk := make_greeter
+mk(prefix="Hello")(punct="!", name="World")   # inner a=Hello; outer reordered -> Hello World !
+
 # Side-effecting args evaluate in SLOT order (declaration order), not source order.
 fn log(s: str) -> str:
     print("eval " + s)

@@ -582,6 +582,19 @@ pub fn resolve_keyword_calls_standalone(stmts: &[Stmt]) -> KeywordTable {
     resolve_keyword_calls(&graph)
 }
 
+/// The [`KeywordTable`] key span for a value call that carries keyword arguments. The AST call-node
+/// span is NOT unique across chained postfix calls: the parser gives every link of a `g(a=..)(b=..)`
+/// chain the SAME primary-expression span (`parse_postfix`'s `let span = e.span;`), so keying the
+/// table on it would alias two distinct keyword calls into one slot (the later insert wins and the
+/// wrong permutation is applied — an out-of-range index or silent mis-routing). The FIRST named-arg
+/// VALUE expression is, by contrast, a distinct source node per call, so its span uniquely identifies
+/// the call. Recording and BOTH backend lookups run this helper, so they agree on the key. Only used
+/// when `named` is non-empty (the sole record/lookup condition), so `first()` is always `Some`; the
+/// `call_span` fallback is unreachable defensive code.
+pub fn keyword_key_span(named: &[(String, Expr)], call_span: Span) -> Span {
+    named.first().map(|(_, v)| v.span).unwrap_or(call_span)
+}
+
 impl Checker {
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
@@ -4897,7 +4910,13 @@ impl Checker {
                         // here would duplicate the type errors `infer(e)` already reported, so we
                         // truncate any errors this re-inference adds and keep only the sendability
                         // diagnostics.
-                        if let ExprKind::Call { callee, args, .. } = &e.kind {
+                        if let ExprKind::Call {
+                            callee,
+                            args,
+                            named,
+                            ..
+                        } = &e.kind
+                        {
                             let checkpoint = self.errors.len();
                             let mut bad: Vec<(Span, String)> = Vec::new();
                             if let ExprKind::Field { obj, .. } = &callee.kind {
@@ -4911,7 +4930,11 @@ impl Checker {
                                     ));
                                 }
                             }
-                            for arg in args {
+                            // Every argument crossing the airlock must be sendable — positional AND
+                            // keyword (a value+keyword spawn, `spawn h(f=cb)`, lowers to the same
+                            // positional SpawnCall, so a non-sendable value smuggled in by LABEL must
+                            // be rejected exactly like the positional form).
+                            for arg in args.iter().chain(named.iter().map(|(_, v)| v)) {
                                 let aty = self.infer(arg);
                                 if !self.sendable(&aty) {
                                     bad.push((
@@ -9522,8 +9545,9 @@ impl Checker {
         // Record the permutation for the backends (only while harvesting; the error-gate discards it).
         if self.harvest_keywords {
             let perm: Vec<usize> = fill.iter().map(|f| f.expect("filled")).collect();
+            let key = keyword_key_span(named, span);
             self.keyword_calls
-                .insert((self.keyword_module_idx, span), perm);
+                .insert((self.keyword_module_idx, key), perm);
         }
     }
 

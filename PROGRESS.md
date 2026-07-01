@@ -35,6 +35,18 @@ checker. Positional value calls are untouched (the table is read only when `name
 hot-path cost, `benches/run.chz` unchanged). Three-engine byte-identical parity
 (`examples/keyword_value.chz` + a cross-module `keyword_value_xmod/`); grammar/`docs` updated
 (`<fnParam>` optional label, conformance green).
+  - **Fix (post-review):** two soundness holes in the above. (1) **Chained value keyword calls**
+    (currying: `g(a=…)(b=…)` where a value returns another value) aliased one `KeywordTable` slot —
+    the parser gives every link of a postfix chain the SAME call-node span (`parse_postfix`'s
+    `let span = e.span;`), so the later permutation overwrote the earlier and the compiler/interp
+    applied the wrong perm (out-of-range index → panic, or silent mis-route). The table is now keyed
+    by a per-call-unique span (`checker::keyword_key_span` = the first named-arg VALUE expr's span,
+    always present when recording), computed identically at the record site and all six backend
+    lookups. (2) The **spawn airlock** sendability gate iterated only positional `args`, so a
+    non-sendable value passed by LABEL to a spawned function value (`spawn h(f=cb)`, `spawn h(r=box)`)
+    crossed unchecked while the positional form was rejected — the gate now chains `named` too.
+    Regression tests: `golden_keyword_value_chz*` (chained curry line), `spawn_non_sendable_keyword_arg_rejected`,
+    `spawn_non_sendable_ref_keyword_arg_rejected`.
 
 **✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
 universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old

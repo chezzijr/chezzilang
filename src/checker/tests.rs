@@ -5746,6 +5746,36 @@ fn spawn_non_sendable_arg_rejected() {
 }
 
 #[test]
+fn spawn_non_sendable_keyword_arg_rejected() {
+    // The spawn airlock gate must reject a non-sendable value whether it crosses positionally OR by
+    // LABEL through a function VALUE. Regression guard: the gate iterated only positional `args`, so
+    // `spawn h(f=g)` smuggled a non-sendable closure across the airlock while the positional
+    // `spawn h(g)` was correctly rejected — a checker-accepts / runtime-diverges hole.
+    rejects(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(f=g)\nmain()\n",
+        "non-sendable value of type fn() -> int",
+    );
+    // The positional form of the SAME call is (and stays) rejected — parity of the two spellings.
+    rejects(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(g)\nmain()\n",
+        "non-sendable value of type fn() -> int",
+    );
+}
+
+#[test]
+fn spawn_non_sendable_ref_keyword_arg_rejected() {
+    // A `Ref[T]` (std.ref mutable box) is non-sendable; passing it by label to a spawned function
+    // value must be rejected, exactly like the positional form (else the task silently mutates a
+    // deep-cloned copy and the parent box is unchanged — the footgun the gate exists to prevent).
+    // Uses the graph path (`entry_rejects`) so the spawn gate is exercised through `check_graph`
+    // too, not only the single-module `check_src` path (checker-test-helper-key-divergence).
+    entry_rejects(
+        "import std.ref\nfn run(r: Ref[int]):\n    r.set(1)\nfn main():\n    h := run\n    b := Ref(0)\n    parallel:\n        spawn h(r=b)\nmain()\n",
+        "non-sendable value of type Ref[int]",
+    );
+}
+
+#[test]
 fn spawn_sendable_args_ok() {
     ok(
         "fn worker(id: int, prefix: str, out: Channel[str]):\n    out.send(\"{prefix}-{id}\")\nfn main():\n    ch := Channel[str]()\n    parallel:\n        spawn worker(1, \"t\", ch)\nmain()\n",

@@ -1388,7 +1388,10 @@ impl Interp {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(self.cur_module_idx, span))
+                .get(&(
+                    self.cur_module_idx,
+                    crate::checker::keyword_key_span(named, span),
+                ))
                 .cloned()
         {
             // Extracted to keep `eval_call`'s stack frame small on the hot positional-recursion path
@@ -2019,7 +2022,10 @@ impl Interp {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(self.cur_module_idx, call.span))
+                        .get(&(
+                            self.cur_module_idx,
+                            crate::checker::keyword_key_span(named, call.span),
+                        ))
                         .cloned()
                 {
                     // A deferred VALUE call with keyword arguments: reorder to positional by the
@@ -2292,7 +2298,10 @@ impl Interp {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(self.cur_module_idx, call.span))
+                        .get(&(
+                            self.cur_module_idx,
+                            crate::checker::keyword_key_span(named, call.span),
+                        ))
                         .cloned()
                 {
                     // A spawned VALUE call with keyword arguments: reorder to positional by the

@@ -1420,7 +1420,10 @@ impl Compiler {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(self.current_module_idx, call.span))
+                        .get(&(
+                            self.current_module_idx,
+                            crate::checker::keyword_key_span(named, call.span),
+                        ))
                         .cloned()
                 {
                     // A spawned VALUE call carrying keyword arguments: reorder to positional by the
@@ -3155,7 +3158,10 @@ impl Compiler {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(self.current_module_idx, call.span))
+                .get(&(
+                    self.current_module_idx,
+                    crate::checker::keyword_key_span(named, call.span),
+                ))
                 .cloned()
         {
             self.compile_expr(fc, callee)?;
@@ -3659,7 +3665,10 @@ impl Compiler {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(self.current_module_idx, span))
+                .get(&(
+                    self.current_module_idx,
+                    crate::checker::keyword_key_span(named, span),
+                ))
                 .cloned()
         {
             self.compile_expr(fc, callee)?;
