@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
-pub use ty::{FnLabels, KeywordTable};
+pub use ty::{FnLabels, KeywordKey, KeywordTable};
 use ty::{compatible, ref_display};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -588,11 +588,31 @@ pub fn resolve_keyword_calls_standalone(stmts: &[Stmt]) -> KeywordTable {
 /// table on it would alias two distinct keyword calls into one slot (the later insert wins and the
 /// wrong permutation is applied — an out-of-range index or silent mis-routing). The FIRST named-arg
 /// VALUE expression is, by contrast, a distinct source node per call, so its span uniquely identifies
-/// the call. Recording and BOTH backend lookups run this helper, so they agree on the key. Only used
-/// when `named` is non-empty (the sole record/lookup condition), so `first()` is always `Some`; the
-/// `call_span` fallback is unreachable defensive code.
+/// the call WITHIN one lexed source (a module, or ONE interpolation fragment). Recording and BOTH
+/// backend lookups run this helper, so they agree on the key. Only used when `named` is non-empty
+/// (the sole record/lookup condition), so `first()` is always `Some`; the `call_span` fallback is
+/// unreachable defensive code.
 pub fn keyword_key_span(named: &[(String, Expr)], call_span: Span) -> Span {
     named.first().map(|(_, v)| v.span).unwrap_or(call_span)
+}
+
+/// Build the full [`KeywordKey`] for a value+keyword call: `(module, fragment-context span, fragment
+/// ordinal, first-named-arg span)`. The checker's record site and BOTH backend lookup sites call this
+/// one helper so they can never disagree on the key. `frag_ctx`/`frag_ord` are the interpolation
+/// fragment discriminators (inert `Span::default()`/`0` outside interpolation); see [`KeywordKey`].
+pub fn keyword_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    named: &[(String, Expr)],
+    call_span: Span,
+) -> crate::checker::KeywordKey {
+    (
+        module_idx,
+        frag_ctx,
+        frag_ord,
+        keyword_key_span(named, call_span),
+    )
 }
 
 impl Checker {
@@ -1312,6 +1332,15 @@ struct Checker {
     /// `run_graph_pass`), so a recorded keyword-call permutation is keyed under the SAME index the
     /// backends derive. `0` for a lone `check` (single synthetic module).
     keyword_module_idx: usize,
+    /// The string-interpolation fragment CONTEXT for keyword-call keying: the whole-string span of the
+    /// interpolation currently being inferred (or `Span::default()` outside interpolation) paired with
+    /// [`Self::kw_frag_ord`], the fragment's 0-based index in that string. Because each `{…}` fragment
+    /// is re-lexed from a fresh source its sub-expression spans restart at `(1,1)`, so span alone
+    /// cannot tell two fragments apart; these two fields disambiguate them in the [`KeywordKey`]. Set
+    /// (save/restore for nesting) around each fragment in `check_interpolation`; the compiler and
+    /// interp maintain the identical pair at their own interpolation boundaries.
+    kw_frag_ctx: Span,
+    kw_frag_ord: usize,
     /// True only while resolving an `extern "lib":` fn's param/return signature. `owned_str` is a
     /// RETURN-ONLY C marshalling form that collapses to `str`; it is legal ONLY inside an extern
     /// signature. This flag licenses `resolve_type`'s `owned_str` arm there and rejects a bare
@@ -1495,6 +1524,8 @@ impl Checker {
             keyword_calls: KeywordTable::new(),
             harvest_keywords: false,
             keyword_module_idx: 0,
+            kw_frag_ctx: Span::default(),
+            kw_frag_ord: 0,
             in_extern_sig: false,
             struct_field_asts: HashMap::new(),
             struct_ctypes: HashMap::new(),
@@ -7028,16 +7059,28 @@ impl Checker {
     fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => {
+                // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment
+                // ordinal) so two fragments whose first named-arg value shares a fragment-relative
+                // column don't alias one table slot (each fragment is re-lexed from a fresh source).
+                // Save/restore for nested interpolations. The compiler/interp keep the identical pair.
+                let saved_ctx = self.kw_frag_ctx;
+                let saved_ord = self.kw_frag_ord;
+                let mut ord = 0usize;
                 for chunk in chunks {
                     if let crate::interpolation::Chunk::Expr(mut e, _spec) = chunk {
+                        self.kw_frag_ctx = span;
+                        self.kw_frag_ord = ord;
                         // Anchor the fragment root at the string literal so a nil-fragment error
                         // points at the literal, not the `(1,1)` fragment-relative fallback.
                         e.span = span;
                         // Discard the inferred type; we only want the side-effecting checks
                         // (name resolution, arity/type/method validation, nil ban).
                         let _ = self.infer_value(&e);
+                        ord += 1;
                     }
                 }
+                self.kw_frag_ctx = saved_ctx;
+                self.kw_frag_ord = saved_ord;
             }
             Err(e) => self.error(span, e.message),
         }
@@ -9545,9 +9588,14 @@ impl Checker {
         // Record the permutation for the backends (only while harvesting; the error-gate discards it).
         if self.harvest_keywords {
             let perm: Vec<usize> = fill.iter().map(|f| f.expect("filled")).collect();
-            let key = keyword_key_span(named, span);
-            self.keyword_calls
-                .insert((self.keyword_module_idx, key), perm);
+            let key = keyword_key(
+                self.keyword_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                named,
+                span,
+            );
+            self.keyword_calls.insert(key, perm);
         }
     }
 

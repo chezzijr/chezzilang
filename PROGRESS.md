@@ -20,7 +20,7 @@ from a user fn's / closure's param names and from an annotation's optional `IDEN
 wrapper makes the derived `Ty` `PartialEq` ignore them, and `compatible`/`assignable`/`unify`/`Display`/
 `sendable` all `..`-ignore them, so `fn(str)->nil` ≡ `fn(name:str)->nil` — **zero** regression to
 HOF/callback/protocol/subtyping and no Display/snapshot churn. Resolution is a checker-recorded
-**side table** (`KeywordTable = HashMap<(module idx, span), Vec<usize>>`) mirroring the `extern_sigs`
+**side table** (`KeywordTable = HashMap<KeywordKey, Vec<usize>>`, `KeywordKey = (module idx, fragment-ctx span, fragment ordinal, first-named-arg span)`) mirroring the `extern_sigs`
 precedent EXACTLY: `resolve_keyword_calls{,_standalone}` run the same deps-first pass and harvest a slot
 **permutation** over the combined `[positional ++ named]` arg list, populated in BOTH the single-module
 (`ok`/`check_src`) and multi-module (`check_graph`) paths; both backends read it in `compile_call` /
@@ -47,6 +47,17 @@ hot-path cost, `benches/run.chz` unchanged). Three-engine byte-identical parity
     crossed unchecked while the positional form was rejected — the gate now chains `named` too.
     Regression tests: `golden_keyword_value_chz*` (chained curry line), `spawn_non_sendable_keyword_arg_rejected`,
     `spawn_non_sendable_ref_keyword_arg_rejected`.
+  - **Fix (post-review #2):** the first-named-arg span above is unique only *within one lexed source*.
+    Every `{…}` **string-interpolation** fragment is re-lexed from a fresh source, so its sub-expression
+    spans restart at `(1,1)`; two value+keyword calls in different fragments whose first named-arg value
+    lands at the same fragment-relative column (`"{a(y=1, x=10)} {b(p=3, q=2)}"`) collided on one
+    `KeywordTable` slot and the earlier call was lowered with the WRONG permutation on all three engines.
+    The key gained two **fragment discriminators** — the whole-string span + the fragment's 0-based
+    ordinal — maintained identically by the checker (`check_interpolation`), compiler (`compile_str`),
+    and interp (`interpolate`) at the interpolation boundary (inert defaults outside interpolation, so
+    non-interpolation keying and the positional hot path are unchanged). `examples/keyword_value.chz`
+    grew a colliding-offset interpolation line; regression test
+    `keyword_value_interpolation_fragments_do_not_alias`.
 
 **✅ First-class universe builtin FUNCTIONS `print`/`ord`/`chr`/`panic` (2026-07-01).** These four
 universe functions are now **first-class values**: `defer print("World")` works as a bare call (the old

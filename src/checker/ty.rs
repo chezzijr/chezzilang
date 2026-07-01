@@ -8,14 +8,28 @@ use crate::lexer::Span;
 use std::collections::HashMap;
 use std::fmt;
 
+/// The [`KeywordTable`] key. `(graph module index, fragment-context span, fragment ordinal,
+/// first-named-arg span)`:
+/// * `module index` — module-scoped exactly like [`ExternTable`] so line:col collisions across
+///   modules can't alias.
+/// * `fragment-context span` + `fragment ordinal` — disambiguate string-interpolation fragments.
+///   Each `{…}` fragment is re-lexed from a fresh source, so its sub-expression spans restart at
+///   `(line 1, col 1)`; two keyword calls in different fragments whose first named-arg value lands at
+///   the same fragment-relative column would otherwise collide. The context is the whole-string span
+///   and the ordinal is the fragment's 0-based index in that string (both computed identically by the
+///   checker, compiler, and interp at the interpolation boundary). Outside interpolation both are the
+///   inert defaults (`Span::default()`, `0`).
+/// * `first-named-arg span` — see [`keyword_key_span`]; distinguishes chained postfix calls (which
+///   share the primary-expression span) and multiple keyword calls within one fragment.
+pub type KeywordKey = (usize, Span, usize, Span);
+
 /// Checker-resolved keyword-argument reordering for VALUE calls that carry labels (`g(name="Bob")`).
-/// Keyed by `(graph module index, call-expression span)` — module-scoped exactly like [`ExternTable`]
-/// so line:col collisions across modules can't alias. The value is the slot PERMUTATION: `perm[i]` is
-/// the index into the combined `[positional args ++ named-arg exprs]` list that fills parameter slot
-/// `i`. Both backends read it to lower a value+keyword call to a plain POSITIONAL `Op::Call` — the
-/// runtime ABI stays positional and UNCHANGED. Only consulted when a call's `named` list is non-empty
-/// (the positional hot path never touches it). Produced by `resolve_keyword_calls{,_standalone}`.
-pub type KeywordTable = HashMap<(usize, Span), Vec<usize>>;
+/// Keyed by [`KeywordKey`]. The value is the slot PERMUTATION: `perm[i]` is the index into the
+/// combined `[positional args ++ named-arg exprs]` list that fills parameter slot `i`. Both backends
+/// read it to lower a value+keyword call to a plain POSITIONAL `Op::Call` — the runtime ABI stays
+/// positional and UNCHANGED. Only consulted when a call's `named` list is non-empty (the positional
+/// hot path never touches it). Produced by `resolve_keyword_calls{,_standalone}`.
+pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type

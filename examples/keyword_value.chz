@@ -21,6 +21,17 @@ apply(fn(name: str): print(name))
 add := fn(a: int, b: int) -> int: a + b
 print(add(b=3, a=10))            # 13 — reordered through a closure value
 
+# Two value+keyword calls in ONE string interpolation whose first named-arg value sits at the
+# SAME fragment-relative column must NOT alias one keyword-table slot: every `{...}` fragment is
+# re-lexed from column 1, so a span-only key collides — the fragment context disambiguates them.
+fn subAB(x: int, y: int) -> int:
+    return x - y
+fn subPQ(p: int, q: int) -> int:
+    return p - q
+sA := subAB
+sP := subPQ
+print("{sA(y=1, x=10)} {sP(p=3, q=2)}")   # 9 1
+
 # Chained value keyword calls (currying): a function value RETURNS another function value, and each
 # link of the postfix chain carries its OWN keyword permutation. The two calls must not alias one
 # table slot even though the parser gives both the same call-node span.

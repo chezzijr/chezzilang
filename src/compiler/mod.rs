@@ -213,6 +213,13 @@ struct Compiler {
     /// in `compile_graph`/`compile_module_standalone` from the checker's `resolve_keyword_calls`;
     /// consumed by the value path of `compile_call` to emit a positional `Op::Call`.
     keyword_calls: crate::checker::KeywordTable,
+    /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
+    /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
+    /// fragment in `compile_str`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
+    /// key computed at lookup matches the one the checker recorded. Inert (`Span::default()`/`0`)
+    /// outside interpolation.
+    kw_frag_ctx: crate::lexer::Span,
+    kw_frag_ord: usize,
     /// One-way int→float widening — the element-coercion hint for the collection literal currently
     /// being compiled as a typed `let` value (`xs: List[float] = [..]`). Set transiently by
     /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
@@ -396,6 +403,8 @@ impl Compiler {
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
+            kw_frag_ctx: crate::lexer::Span::default(),
+            kw_frag_ord: 0,
             float_elem_hint: None,
         }
     }
@@ -1420,9 +1429,12 @@ impl Compiler {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(
+                        .get(&crate::checker::keyword_key(
                             self.current_module_idx,
-                            crate::checker::keyword_key_span(named, call.span),
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            named,
+                            call.span,
                         ))
                         .cloned()
                 {
@@ -3158,9 +3170,12 @@ impl Compiler {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(
+                .get(&crate::checker::keyword_key(
                     self.current_module_idx,
-                    crate::checker::keyword_key_span(named, call.span),
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    named,
+                    call.span,
                 ))
                 .cloned()
         {
@@ -3665,9 +3680,12 @@ impl Compiler {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(
+                .get(&crate::checker::keyword_key(
                     self.current_module_idx,
-                    crate::checker::keyword_key_span(named, span),
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    named,
+                    span,
                 ))
                 .cloned()
         {
@@ -3736,18 +3754,29 @@ impl Compiler {
             return Ok(());
         }
         let n = chunks.len();
+        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal) so
+        // the lookup matches the checker's record (each fragment re-lexes from a fresh source, so span
+        // alone can't tell two fragments apart). Save/restore for nested interpolations.
+        let saved_ctx = self.kw_frag_ctx;
+        let saved_ord = self.kw_frag_ord;
+        let mut ord = 0usize;
         for chunk in chunks {
             match chunk {
                 Chunk::Lit(s) => fc.emit(Op::ConstStr(s), span),
                 Chunk::Expr(e, spec) => {
+                    self.kw_frag_ctx = span;
+                    self.kw_frag_ord = ord;
                     self.compile_expr(fc, &e)?;
                     match spec {
                         None => fc.emit(Op::ToStr, span),
                         Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs)), span),
                     }
+                    ord += 1;
                 }
             }
         }
+        self.kw_frag_ctx = saved_ctx;
+        self.kw_frag_ord = saved_ord;
         fc.emit(Op::BuildStr(n), span);
         Ok(())
     }

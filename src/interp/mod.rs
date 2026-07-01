@@ -418,6 +418,13 @@ struct Interp {
     /// — the SAME table + key the VM consumes. `eval_call` consults it (only when `named` is non-empty)
     /// to reorder a value+keyword call to positional, byte-identical to the VM.
     keyword_calls: crate::checker::KeywordTable,
+    /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
+    /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
+    /// fragment in `interpolate`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
+    /// key computed at lookup matches the checker's record. Inert (`Span::default()`/`0`) outside
+    /// interpolation.
+    kw_frag_ctx: crate::lexer::Span,
+    kw_frag_ord: usize,
     /// User type names (struct / enum / type-alias) declared in ANY module, gathered before
     /// evaluation. Module-scoped types: a `from`-imported TYPE name carries no runtime value (types
     /// resolve through the program-global struct/variant tables by name), so `bind_import` skips a
@@ -544,6 +551,8 @@ impl Interp {
             executors: Vec::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
+            kw_frag_ctx: crate::lexer::Span::default(),
+            kw_frag_ord: 0,
             type_names: std::collections::HashSet::new(),
             type_keys: std::collections::HashMap::new(),
             module_idx_of: std::collections::HashMap::new(),
@@ -1248,6 +1257,13 @@ impl Interp {
     fn interpolate(&mut self, raw: &str, span: Span) -> Result<String, RuntimeError> {
         let mut out = String::new();
         let mut chars = raw.chars().peekable();
+        // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal) so
+        // the lookup matches the checker's record (each fragment re-lexes from a fresh source, so span
+        // alone can't tell two fragments apart). Save/restore for nested interpolations; `frag_ord`
+        // counts `{…}` fragments in source order, matching the checker/compiler's per-Expr-chunk count.
+        let saved_ctx = self.kw_frag_ctx;
+        let saved_ord = self.kw_frag_ord;
+        let mut frag_ord = 0usize;
         while let Some(c) = chars.next() {
             match c {
                 '{' if chars.peek() == Some(&'{') => {
@@ -1281,6 +1297,9 @@ impl Interp {
                     // compile time — the message string is identical.
                     let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
                     let expr = parse_expr_str(expr_src)?;
+                    self.kw_frag_ctx = span;
+                    self.kw_frag_ord = frag_ord;
+                    frag_ord += 1;
                     let value = self.eval(&expr)?;
                     match spec_src {
                         None => out.push_str(&self.stringify(&value, span, 0)?),
@@ -1331,6 +1350,8 @@ impl Interp {
                 _ => out.push(c),
             }
         }
+        self.kw_frag_ctx = saved_ctx;
+        self.kw_frag_ord = saved_ord;
         Ok(out)
     }
 
@@ -1388,9 +1409,12 @@ impl Interp {
         if !named.is_empty()
             && let Some(perm) = self
                 .keyword_calls
-                .get(&(
+                .get(&crate::checker::keyword_key(
                     self.cur_module_idx,
-                    crate::checker::keyword_key_span(named, span),
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    named,
+                    span,
                 ))
                 .cloned()
         {
@@ -2022,9 +2046,12 @@ impl Interp {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(
+                        .get(&crate::checker::keyword_key(
                             self.cur_module_idx,
-                            crate::checker::keyword_key_span(named, call.span),
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            named,
+                            call.span,
                         ))
                         .cloned()
                 {
@@ -2298,9 +2325,12 @@ impl Interp {
                 } else if !named.is_empty()
                     && let Some(perm) = self
                         .keyword_calls
-                        .get(&(
+                        .get(&crate::checker::keyword_key(
                             self.cur_module_idx,
-                            crate::checker::keyword_key_span(named, call.span),
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            named,
+                            call.span,
                         ))
                         .cloned()
                 {
@@ -9525,6 +9555,25 @@ b := Buf([10, 20, 30])
         assert_eq!(
             run_capture(source).expect("keyword_value.chz should run"),
             expected
+        );
+    }
+
+    /// Regression: two (or more) value+keyword function-value calls inside ONE string interpolation
+    /// whose first named-arg value lands at the same fragment-relative column must NOT alias a single
+    /// keyword-table slot. Each `{…}` fragment re-lexes from a fresh source, so its sub-expression
+    /// spans restart at `(1,1)`; keying the table on span alone collided two distinct calls and applied
+    /// the wrong permutation. The (string span, fragment ordinal) discriminators fix it. Covers the
+    /// colliding-offset case, multiple keyword calls within one fragment, and nested interpolation.
+    #[test]
+    fn keyword_value_interpolation_fragments_do_not_alias() {
+        let src = "fn sub2(x: int, y: int) -> int:\n    return x - y\n\
+                   s := sub2\n\
+                   print(\"{s(y=1, x=10)} {s(y=2, x=5)}\")\n\
+                   print(\"{s(y=1, x=10) + s(y=3, x=30)}\")\n\
+                   print(\"{s(y=1, x=10)}=[{s(y=100, x=1)}]\")\n";
+        assert_eq!(
+            run_capture(src).expect("interpolated value+keyword calls should run"),
+            "9 3\n36\n9=[-99]\n"
         );
     }
 
