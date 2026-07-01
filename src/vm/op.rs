@@ -106,6 +106,12 @@ pub enum Op {
         has_msg: bool,
     },
 
+    /// Push a first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) by name —
+    /// allocates an `Obj::Builtin` and pushes its handle. Emitted only for a VALUE-position use of
+    /// the name (`f := ord`, HOF arg, bare `defer print(...)`); direct calls stay on the specialized
+    /// `CallPrint`/`CallBuiltin` opcodes (intercepted in `compile_call` before the value fallthrough).
+    LoadBuiltin(String),
+
     // ----- variables -----
     GetLocal(usize),
     SetLocal(usize),

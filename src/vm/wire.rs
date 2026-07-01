@@ -110,6 +110,13 @@ pub enum WireValue {
     /// is cross-safe (`has_handle` leaves it `false` via the `_` arm) and works on the serial engine
     /// and the M:N snapshot fast path alike.
     Ptr(usize),
+    /// A first-class UNIVERSE builtin fn (`print`/`ord`/`chr`/`panic`) crossing the airlock **by
+    /// value** — it is pure code identified only by name (no `GcRef`, no captured heap state), so
+    /// `from_wire` allocates a fresh `Obj::Builtin` with the same name on the other side, meaningful
+    /// in any worker. Unlike a `Func`/`Closure` (a `Handle` into this heap), it genuinely crosses an
+    /// OS-thread boundary — cross-safe (`has_handle` leaves it `false` via the `_` arm), so a builtin
+    /// captured into a spawned task works on the serial AND the M:N engine alike.
+    Builtin(Box<str>),
     /// B3.6 — a closure carried across the airlock **by value**: its `proto` (which lives in the shared
     /// `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and its
     /// `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire time,

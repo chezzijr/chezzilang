@@ -3030,6 +3030,26 @@ impl Compiler {
             );
             return;
         }
+        // A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) used in VALUE position
+        // (`f := ord`, HOF arg, bare `defer print(...)`) — emit a dedicated `LoadBuiltin` that pushes
+        // an `Obj::Builtin` handle. DIRECT calls never reach here: `compile_call` intercepts `print`
+        // and `is_builtin(name)` before the generic value fallthrough, so `print(x)`/`ord(c)` keep
+        // their specialized `CallPrint`/`CallBuiltin` opcodes (no hot-path change).
+        //
+        // A USER BINDING SHADOWS THE BUILTIN. `is_reserved_name` bans only `fn print`/type/import-alias
+        // declarations — NOT local/param/loop/global bindings (`ord := 5`, `fn f(ord: int)`,
+        // `for chr in xs`), so those are legal. The checker's `infer_ident` resolves `lookup(name)`
+        // (locals/params/globals) BEFORE the first-class-builtin arm, so it types the binding; the
+        // runtime MUST match, or a shadowed name type-checks as the binding but prints `<builtin fn …>`.
+        // Emit `LoadBuiltin` ONLY when no local/capture/global binding owns the name.
+        if crate::checker::is_firstclass_builtin_fn(name)
+            && fc.resolve_local(name).is_none()
+            && !fc.captures(name)
+            && !self.globals.contains_key(name)
+        {
+            fc.emit(Op::LoadBuiltin(name.to_string()), span);
+            return;
+        }
         self.emit_load(fc, name, span);
     }
 

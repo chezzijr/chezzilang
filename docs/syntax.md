@@ -1560,8 +1560,24 @@ for path in paths:
 ```
 
 `defer` targets a **method call** or a call to a **first-class callable value** (a function or
-closure, or a name bound to one). Built-ins (`print`, `range`, …) and constructors aren't first-class
-values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`. `defer` composes with
+closure, or a name bound to one). The four **universe builtin functions** `print`, `ord`, `chr`, and
+`panic` are first-class values, so `defer print("done")` (etc.) works directly — and they can be
+bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
+constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
+are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
+Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
+defaults **`sep=" "`, `end="\n"`** — the variadic multi/zero-arg shapes AND the `sep=`/`end=` named
+arguments stay **direct-call-only** (`print(a, b, sep=",")`), because they need the specialized print
+opcode a bound value doesn't reach. The direct call keeps its full variadic surface. Because a
+deferred/spawned `print` runs its value form, passing `sep=`/`end=` there is a **type error**
+(`defer print(a, sep="-")` is rejected) rather than silently ignored. All four builtins
+are **sendable** — a value bound to one (`f := ord`) crosses the `spawn` airlock and runs in the
+spawned task, on both the serial and the OS-thread engine; likewise **`spawn print(...)` is accepted**
+directly, symmetric with `defer print(...)`. A **user binding shadows** one of these
+names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
+`for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
+only an unbound name resolves to the first-class builtin (and a same-named module global read *before*
+its definition line is a use-before-def error, just like any other global). `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's

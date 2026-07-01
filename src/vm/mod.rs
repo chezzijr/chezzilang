@@ -989,6 +989,15 @@ enum Lowered {
         home: Option<usize>,
         span: Span,
     },
+    /// `spawn f(args)` where `f` is a first-class builtin fn value (`Obj::Builtin`) — the callee is
+    /// pure code (no captures, no home), so it crosses by name and the worker re-allocs a fresh
+    /// `Obj::Builtin`, mirroring `Func`. Without this arm a builtin callee hit `prepare_worker`'s
+    /// reject `_` on the M:N engine only (serial/interp dispatch it directly) — a parity divergence.
+    Builtin {
+        name: Box<str>,
+        args: Vec<WireValue>,
+        span: Span,
+    },
     /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
     /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
     Method {
@@ -1005,6 +1014,7 @@ impl Lowered {
         match self {
             Lowered::Closure { span, .. }
             | Lowered::Func { span, .. }
+            | Lowered::Builtin { span, .. }
             | Lowered::Method { span, .. } => *span,
         }
     }
@@ -1091,6 +1101,9 @@ enum SnapValue {
         name: Box<str>,
         func: crate::native::NativeFn,
     },
+    /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
+    /// only the name; replayed as a fresh `Obj::Builtin`.
+    Builtin(Box<str>),
     /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
     /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
     Cffi(Arc<crate::native::cffi::Cffi>),
@@ -4103,6 +4116,10 @@ impl Vm {
                 argc,
             } => self.do_static_call(type_key, method, *argc, span)?,
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
+            Op::LoadBuiltin(name) => {
+                let h = self.heap.alloc(Obj::Builtin(name.as_str().into()));
+                self.push(Value::Obj(h));
+            }
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
             Op::Return => self.do_return(false)?,
@@ -5919,6 +5936,11 @@ impl Vm {
                     // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or
                     // `std.ffi.null()` twice), so the same-`GcRef` shortcut above is not enough.
                     (Obj::Ptr(a), Obj::Ptr(b)) => Ok(a == b),
+                    // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
+                    // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
+                    // `ha == hb` identity short-circuit above never fires; compare by name to match the
+                    // interp (derived `PartialEq` on `Value::Builtin`'s `Rc<str>`) — VM==interp parity.
+                    (Obj::Builtin(a), Obj::Builtin(b)) => Ok(a == b),
                     _ => Ok(false),
                 }
             }
@@ -6042,6 +6064,7 @@ impl Vm {
                         func: crate::native::NativeFn,
                         name: Box<str>,
                     },
+                    Builtin(Box<str>),
                     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
                     NotCallable,
                 }
@@ -6058,6 +6081,7 @@ impl Vm {
                         func: *func,
                         name: name.clone(),
                     },
+                    Obj::Builtin(name) => Callee::Builtin(name.clone()),
                     Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
                     _ => Callee::NotCallable,
                 };
@@ -6093,6 +6117,49 @@ impl Vm {
                         self.run_proto(proto, home, Some(h), args, true, false, span)
                     }
                     Callee::Native { func, name } => self.invoke_native(func, &name, args, span),
+                    // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
+                    // back into the SAME logic direct calls use. `print` replicates `do_print`'s
+                    // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
+                    // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
+                    // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
+                    Callee::Builtin(name) => match name.as_ref() {
+                        "print" => {
+                            // ROOT the args on the operand stack while stringifying. `args` was
+                            // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
+                            // `Stringable` `str` method runs user code that can `collect()` at a
+                            // safepoint and would sweep the LATER (still-unrendered) args — a
+                            // use-after-free. `do_print` guards this exact hazard by keeping the args
+                            // on the operand stack across the whole stringify loop; mirror it here:
+                            // push them back, render from the rooted slots, then truncate.
+                            let at = self.stack.len();
+                            for v in &args {
+                                self.push(*v);
+                            }
+                            let mut parts = Vec::with_capacity(args.len());
+                            for i in 0..args.len() {
+                                let v = self.stack[at + i];
+                                parts.push(self.stringify(v, span, 0)?);
+                            }
+                            self.stack.truncate(at);
+                            self.out.push_str(&parts.join(" "));
+                            self.out.push('\n');
+                            Ok(Value::Nil)
+                        }
+                        "ord" => self.builtin_ord(&args, span),
+                        "chr" => self.builtin_chr(&args, span),
+                        "panic" => {
+                            let message = match args.first() {
+                                Some(Value::Obj(h)) => match self.heap.get(*h) {
+                                    Obj::Str(s) => s.to_string(),
+                                    _ => self.type_name(args[0]).to_string(),
+                                },
+                                Some(other) => self.type_name(*other).to_string(),
+                                None => String::new(),
+                            };
+                            Err(self.err(message, span))
+                        }
+                        _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
+                    },
                     Callee::Cffi(cffi) => {
                         // Arity is checker-guaranteed, but guard defensively (a hand-built program
                         // could bypass the checker) so a wrong arg count never indexes out of bounds.
@@ -10289,6 +10356,12 @@ impl Vm {
                 // side, like `list`) — never a shared mutable view. `from_wire` rebuilds a new heap
                 // `bytearray`, so cross-thread mutation never aliases.
                 Obj::ByteArray(b) => WireValue::ByteArray(b.clone().into_boxed_slice()),
+                // A first-class builtin fn crosses the airlock BY VALUE (its name) — pure code, no
+                // `GcRef` and no captured heap state, so it genuinely crosses an OS-thread boundary
+                // (unlike a `Func`/`Closure` handle). `from_wire` re-allocs a fresh `Obj::Builtin`;
+                // builtins are name-compared, so that is observationally identical. Works on the M:N
+                // engine (this path) and the serial engine (`SnapValue::Builtin`) alike.
+                Obj::Builtin(name) => WireValue::Builtin(name.clone()),
                 // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
                 Obj::Func { .. }
                 | Obj::Closure { .. }
@@ -10437,6 +10510,8 @@ impl Vm {
             WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
             WireValue::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
+            // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
+            WireValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -10620,6 +10695,13 @@ impl Vm {
                             home: self.home_index(home),
                             span,
                         },
+                        // A first-class builtin fn value (`f := ord; spawn f(x)`) is pure code — cross
+                        // it by name; the worker re-allocs a fresh `Obj::Builtin`. Mirrors `Func`.
+                        Obj::Builtin(name) => Lowered::Builtin {
+                            name,
+                            args: wargs,
+                            span,
+                        },
                         _ => {
                             return Err(self.err(
                                 format!(
@@ -10701,6 +10783,11 @@ impl Vm {
             } => {
                 let home = worker.worker_home(home);
                 let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
+                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                (ReadyCall::Invoke { callee, args }, span)
+            }
+            Lowered::Builtin { name, args, span } => {
+                let callee = Value::Obj(worker.heap.alloc(Obj::Builtin(name)));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
@@ -10983,6 +11070,9 @@ impl Vm {
                 }
             },
             Obj::Native { name, func } => SnapValue::Native { name, func },
+            // A first-class builtin fn is pure code — SENDABLE. Carry the name; the worker re-allocs
+            // a fresh `Obj::Builtin` on replay (like `Native`, but with no fn pointer to share).
+            Obj::Builtin(name) => SnapValue::Builtin(name),
             // A Cffi shares its `Arc` to the worker (which shares the parent address space): the
             // worker re-allocs `Obj::Cffi` from the SAME Arc — no re-dlopen, no symbol re-resolution.
             Obj::Cffi(c) => SnapValue::Cffi(Arc::clone(&c)),
@@ -11188,6 +11278,8 @@ impl Vm {
                 name: name.clone(),
                 func: *func,
             })),
+            // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
+            SnapValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name.clone()))),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => Value::Obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
@@ -14400,6 +14492,7 @@ impl Vm {
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module { .. } => "module",
                 Obj::Native { .. } => "function",
+                Obj::Builtin(_) => "function",
                 Obj::Cffi(_) => "function",
                 Obj::Ptr(_) => "ptr",
                 Obj::Channel(_) => "Channel",
@@ -14532,6 +14625,7 @@ impl Vm {
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module { name, .. } => Ok(format!("<module {name}>")),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
+                Obj::Builtin(name) => Ok(format!("<builtin fn {name}>")),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
                 // A raw address is non-deterministic (differs per run/engine), so never render it —
                 // that would break two-engine parity if a `ptr` is printed. Only null vs live (a
@@ -14720,6 +14814,8 @@ impl Vm {
                     "<ptr>".to_string()
                 }
             }
+            // A wired first-class builtin fn renders like its heap counterpart (`<builtin fn name>`).
+            WireValue::Builtin(name) => format!("<builtin fn {name}>"),
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
@@ -14968,6 +15064,9 @@ impl Vm {
             }
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
+            }
+            Obj::Builtin(name) => {
+                let _ = write!(out, "<builtin fn {name}>");
             }
             Obj::Cffi(c) => {
                 let _ = write!(out, "<extern fn {}>", c.name());
@@ -23638,6 +23737,147 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         let vm_out = run_capture(src).expect("vm run");
         assert_eq!(vm_out, expected);
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
+    /// as a bare first-class call, plus value-position use (`f := ord`/`chr`, `p := panic` raising
+    /// through the value call path). Byte-identical on the cooperative VM, the M:N OS-thread engine,
+    /// the interpreter, and `.expected` — the parity guard across all engines.
+    #[test]
+    fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/defer_builtin_value.chz");
+        let expected = include_str!("../../examples/defer_builtin_value.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
+    /// value call path — NOT a returned value / NOT silent nil — byte-identical on VM + interp. If the
+    /// value path returned `Ok`, an uncaught `p(...)` would fall through instead of faulting.
+    #[test]
+    fn panic_as_value_uncaught_raises_both_engines() {
+        let src = "fn main():\n    p := panic\n    p(\"boom\")\nmain()\n";
+        let vm_err = run_capture(src).expect_err("vm: panic value must fault");
+        let it_err = crate::interp::run_capture(src).expect_err("interp: panic value must fault");
+        assert_eq!(vm_err.message, "boom");
+        assert_eq!(it_err.message, "boom");
+    }
+
+    /// `ord`/`chr` as VALUES (`f := ord`) called back yield the same result as a direct call, VM +
+    /// interp identical.
+    #[test]
+    fn ord_chr_as_value_both_engines() {
+        let src = "fn main():\n    f := ord\n    g := chr\n    print(f(\"a\"))\n    print(g(66))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "97\nB\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    }
+
+    /// Regression (bugs 1 & 3): a user binding named like a first-class builtin fn SHADOWS the builtin
+    /// in value position on BOTH engines — the compiler resolved `LoadBuiltin` before local/global
+    /// binding lookup (and the interp returned `Value::Builtin` before `env.get`), so a shadowed name
+    /// type-checked as the binding but printed `<builtin fn …>` at runtime. Param, global (`:=`), and
+    /// loop-var shadows must each resolve to the BINDING, byte-identical VM == interp.
+    #[test]
+    fn user_binding_shadows_firstclass_builtin_both_engines() {
+        // parameter shadow
+        let a = "fn f(ord: int):\n    print(ord)\nf(42)\n";
+        assert_eq!(run_capture(a).expect("vm"), "42\n");
+        assert_eq!(
+            run_capture(a).expect("vm"),
+            crate::interp::run_capture(a).expect("interp")
+        );
+        // top-level global (`:=`) shadow, read in value position
+        let b = "chr := \"hello\"\nx := chr\nprint(x)\n";
+        assert_eq!(run_capture(b).expect("vm"), "hello\n");
+        assert_eq!(
+            run_capture(b).expect("vm"),
+            crate::interp::run_capture(b).expect("interp")
+        );
+        // loop-variable shadow
+        let c = "for chr in [\"a\", \"b\"]:\n    print(chr)\n";
+        assert_eq!(run_capture(c).expect("vm"), "a\nb\n");
+        assert_eq!(
+            run_capture(c).expect("vm"),
+            crate::interp::run_capture(c).expect("interp")
+        );
+    }
+
+    /// Bug 2 / bug 4: two first-class builtin-fn VALUES compare by NAME, byte-identical VM == interp.
+    /// Each value-position use emits a fresh `Op::LoadBuiltin` → a distinct `Obj::Builtin` handle, so
+    /// the VM's `values_equal_guarded` (which short-circuits only on `ha == hb`) must have a dedicated
+    /// `(Obj::Builtin, Obj::Builtin)` name-compare arm; otherwise it falls to the `_ => Ok(false)`
+    /// catch-all and returns `false` while the interp (derived `PartialEq` on the name) returns
+    /// `true`. Covers bound values, the bare-name compare, a mismatch, and list-element recursion.
+    #[test]
+    fn builtin_value_equality_both_engines() {
+        let src = "fn main():\n    f := ord\n    g := ord\n    print(f == g)\n    print(ord == ord)\n    print(chr == ord)\n    print([print] == [print])\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "true\ntrue\nfalse\ntrue\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
+    /// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Typing them
+    /// as the dedicated `Ty::BuiltinFn` (sendable), not a plain `Ty::Func` (conservatively
+    /// non-sendable), removes the asymmetry where only `print` (once typed `Unknown`) could cross.
+    /// Byte-identical on the cooperative VM, the interp, and the M:N engine.
+    #[test]
+    fn builtin_value_sendable_across_airlock_both_engines() {
+        let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "97\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// A first-class builtin fn value spawned as a DIRECT CALL callee (`f := print; spawn f(x)`,
+    /// distinct from the `spawn:` block form above) must lower + run on all three engines. The
+    /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
+    /// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
+    /// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
+    /// checker-accepted program. Fixed by the `Lowered::Builtin` arm (cross by name, worker re-allocs).
+    #[test]
+    fn spawn_builtin_fn_value_as_call_callee_both_engines() {
+        let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "from-task\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
+    /// symmetric with `defer print(...)`. `print` lowers to `Op::LoadBuiltin` (value position) then
+    /// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the airlock by name on all three
+    /// engines. The checker gate accepts it (parity-perf-0 fix); runtime prints identically.
+    #[test]
+    fn spawn_bare_builtin_print_both_engines() {
+        let src = "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "hi\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// Value-form `print` (`f := print; f(x)`) keeps its (single) arg GC-ROOTED while stringifying —
+    /// a `Stringable` `str` method runs user code that can `collect()` at a safepoint and would sweep
+    /// the off-stack arg, a use-after-free. Under `gc_stress` (collect before every instruction) the
+    /// output must still be correct and match the non-stress run + the interp. (The value form is a
+    /// fixed 1-arg function; the direct call keeps the variadic/`sep=`/`end=` surface.)
+    #[test]
+    fn print_as_value_arg_rooted_under_gc_stress() {
+        let src = "struct Loud:\n    n: int\n    fn str(self) -> str:\n        return \"L{self.n}\"\n\
+                   fn main():\n    f := print\n    f(Loud(7))\nmain()\n";
+        let stressed = run_capture_stress(src);
+        assert_eq!(stressed, "L7\n");
+        assert_eq!(stressed, run_capture(src).expect("vm run"));
+        assert_eq!(
+            stressed,
+            crate::interp::run_capture(src).expect("interp run")
+        );
     }
 
     /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on

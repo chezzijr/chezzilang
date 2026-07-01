@@ -5288,12 +5288,13 @@ fn defer_non_call_rejected() {
 }
 
 #[test]
-fn defer_builtin_rejected() {
-    // Built-ins are not first-class values — they must be wrapped in a function.
-    rejects(
-        "fn w():\n    defer print(\"x\")\n",
-        "built-ins and constructors must be wrapped",
-    );
+fn defer_builtin_accepted() {
+    // The universe builtin FUNCTIONS print/ord/chr/panic are first-class values now — a bare
+    // `defer print(...)` (etc.) is accepted (no wrapping needed).
+    ok("fn w():\n    defer print(\"x\")\n");
+    ok("fn w():\n    defer ord(\"a\")\n");
+    ok("fn w():\n    defer chr(65)\n");
+    ok("fn w():\n    defer panic(\"boom\")\n");
 }
 
 #[test]
@@ -5302,6 +5303,85 @@ fn defer_constructor_rejected() {
         "struct P:\n    x: int\nfn w():\n    defer P(1)\n",
         "built-ins and constructors must be wrapped",
     );
+}
+
+#[test]
+fn defer_type_rejected() {
+    // A reserved TYPE/ctor builtin (not one of the first-class fns) is still NOT first-class in
+    // defer position — must be wrapped.
+    rejects(
+        "fn w():\n    defer int(1)\n",
+        "built-ins and constructors must be wrapped",
+    );
+}
+
+#[test]
+fn firstclass_builtin_fn_value_position() {
+    // The 4 universe fns type-check in value position (bound to a name, used as a HOF arg).
+    ok("fn w():\n    f := ord\n    print(f(\"a\"))\n");
+    ok("fn w():\n    p := panic\n    p(\"boom\")\n");
+}
+
+#[test]
+fn print_value_not_usable_as_bool_condition() {
+    // Bug 5: a `print` value in a bool-required position must be a TYPE ERROR (it is a function, not
+    // bool) — it must NOT be silently accepted. Typing `print` as `Ty::Unknown` (an earlier attempt
+    // at variadic value-form print) let `if p:` slip through the checker, and then the VM ran the
+    // then-branch (an `Obj::Builtin` is truthy) while the interp faulted `expected bool, found
+    // function` — a VM≠interp parity break. `print` now types as the dedicated `Ty::BuiltinFn`, which
+    // (like the other three) `expect_bool` rejects. `if print:` (the bare form) is rejected too.
+    rejects(
+        "fn main():\n    p := print\n    if p:\n        print(\"t\")\nmain()\n",
+        "must be bool",
+    );
+    rejects(
+        "fn main():\n    if print:\n        print(\"t\")\nmain()\n",
+        "must be bool",
+    );
+}
+
+#[test]
+fn print_value_form_is_fixed_arity() {
+    // The VALUE form of `print` (`p := print`) is a fixed 1-arg function, NOT variadic — the
+    // `sep=`/`end=` named args AND the variadic 0/many-arg shapes stay DIRECT-CALL-ONLY (they need
+    // the specialized `CallPrintSep`/`CallPrint` opcodes, unreachable through a bound value). The
+    // dedicated `Ty::BuiltinFn` carries `print`'s canonical 1-arg signature, so the direct call
+    // `print(a, b)` still works but `p("a", "b")` / `p()` on a bound value do not.
+    ok("fn w():\n    p := print\n    p(\"a\")\n");
+    ok("fn w():\n    print(\"a\", \"b\", \"c\")\n"); // direct call stays variadic
+    rejects("fn w():\n    p := print\n    p()\n", "argument");
+    rejects("fn w():\n    p := print\n    p(\"a\", \"b\")\n", "argument");
+}
+
+#[test]
+fn use_before_def_global_shadowing_builtin_rejected() {
+    // Bug 1: a top-level global named like a first-class builtin fn, READ BEFORE its definition line,
+    // must be a use-before-def error — EXACTLY like any other global (`x := y` before `y := 5` errors
+    // `unknown name 'y'`). It must NOT silently resolve to the builtin: otherwise the VM (whose
+    // `collect_globals` pre-scans every top-level `let` into a slot pre-initialised to `nil`) prints
+    // `nil`, while the interp (source-order env; the name isn't defined yet) returns `Value::Builtin`
+    // — a VM≠interp divergence on a program that (wrongly) type-checked. Suppress the first-class arm
+    // whenever the name is a declared module-level global; a genuine `f := print` (no such global)
+    // still resolves to the builtin.
+    rejects("x := chr\nchr := \"z\"\nprint(x)\n", "unknown name 'chr'");
+    // Sanity: the plain non-builtin case behaves identically (base semantics we mirror).
+    rejects("x := y\ny := 5\nprint(x)\n", "unknown name 'y'");
+}
+
+#[test]
+fn user_binding_shadows_firstclass_builtin_typechecks() {
+    // Regression (bugs 1 & 3): a user binding named like a first-class builtin fn is legal
+    // (`is_reserved_name` bans only `fn`/type/import-alias decls) and the checker types it as the
+    // BINDING, not the builtin. A param, a top-level `:=`, and a loop var each shadow.
+    ok("fn f(ord: int):\n    print(ord)\nf(42)\n");
+    ok("chr := \"hi\"\nx := chr\nprint(x)\n");
+    ok("for chr in [\"a\", \"b\"]:\n    print(chr)\n");
+}
+
+#[test]
+fn type_name_not_firstclass_value() {
+    // A reserved TYPE/ctor name is still NOT a first-class value (`f := List` fails).
+    rejects("fn w():\n    f := List\n", "List");
 }
 
 #[test]
@@ -5673,10 +5753,28 @@ fn spawn_sendable_args_ok() {
 }
 
 #[test]
-fn spawn_builtin_rejected_like_defer() {
+fn spawn_firstclass_builtin_accepted_like_defer() {
+    // The universe fns print/ord/chr/panic are first-class values that cross the airlock by name,
+    // so `spawn print(...)` is accepted — symmetric with `defer print(...)`. A non-first-class
+    // builtin/ctor still must be wrapped.
+    ok("fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n");
     rejects(
-        "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n",
+        "fn main():\n    parallel:\n        spawn int(1)\nmain()\n",
         "spawn requires a function or method call",
+    );
+}
+
+#[test]
+fn defer_spawn_builtin_named_args_rejected() {
+    // sep=/end= are direct-call-only (the specialized print opcode); a deferred/spawned print runs
+    // its value form and can't carry them, so they are rejected rather than silently dropped.
+    rejects(
+        "fn w():\n    defer print(\"a\", sep=\"-\")\n",
+        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a deferred one",
+    );
+    rejects(
+        "fn main():\n    parallel:\n        spawn print(\"a\", end=\"!\")\nmain()\n",
+        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a spawned one",
     );
 }
 

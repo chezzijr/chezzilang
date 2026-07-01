@@ -1,0 +1,26 @@
+# First-class universe builtin FUNCTIONS (print / ord / chr / panic) as values.
+# `defer print(...)` is a bare first-class call (no wrapping); the same names also work in
+# value position (bound to a name, called back). Two-engine parity guard.
+
+fn greet():
+    defer print("World")   # runs at frame exit, LIFO
+    print("Hello")
+
+fn main():
+    greet()
+
+    # value position: bind a builtin fn to a name and call it back (HOF-style)
+    f := ord
+    print(f("a"))          # 97
+    g := chr
+    print(g(66))           # B
+
+    # panic-as-value: `p := panic` must raise the recoverable error (not return nil)
+    p := panic
+    r := recover:
+        p("boom")
+    match r:
+        Ok(v): print("no panic")
+        Err(e): print("recovered: {e.message()}")
+
+main()

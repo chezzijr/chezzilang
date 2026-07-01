@@ -212,6 +212,12 @@ pub enum Value {
     Closure(Rc<Closure>),
     /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c).
     Native(NativeFnEntry),
+    /// A first-class UNIVERSE builtin FUNCTION used as a value (`print`/`ord`/`chr`/`panic`), carried
+    /// by name. Produced when one of these names is read in value position (`f := ord`, a HOF arg, a
+    /// bare `defer print(...)`); calling it routes back into the same builtin logic direct calls use.
+    /// SENDABLE (pure code, no captured state) — crosses the airlock by cloning the name `Rc`, like a
+    /// `str`. The VM twin is `Obj::Builtin`.
+    Builtin(Rc<str>),
     /// A dynamic C-ABI FFI function (`extern "lib":`). Shares the resolved library + symbol +
     /// signature behind an `Arc` (the same `Cffi` type the VM uses — one machinery, two engines).
     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
@@ -344,6 +350,7 @@ impl Value {
             Value::Func(_, _) => "function",
             Value::Closure(_) => "function",
             Value::Native(_) => "function",
+            Value::Builtin(_) => "function",
             Value::Cffi(_) => "function",
             Value::Ptr(_) => "ptr",
             Value::Module(_) => "module",
@@ -416,6 +423,7 @@ impl std::fmt::Display for Value {
             Value::Func(decl, _) => write!(f, "<fn {}>", decl.name),
             Value::Closure(_) => write!(f, "<closure>"),
             Value::Native(e) => write!(f, "<native fn {}>", e.name),
+            Value::Builtin(name) => write!(f, "<builtin fn {name}>"),
             Value::Cffi(c) => write!(f, "<extern fn {}>", c.name()),
             // A raw address is non-deterministic (differs per run/engine) — never render it (would
             // break two-engine parity if a `ptr` is printed). Only null vs live is observable.
