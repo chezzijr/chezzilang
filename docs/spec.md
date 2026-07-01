@@ -233,6 +233,14 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.
 
+**Malformed graphs fail with a clean diagnostic, never a host crash.** Import **cycles** (`A↔B`,
+self-import) are a clean error (Go-style), not lazy resolution. A pathological **acyclic** chain is
+likewise bounded: a transitive import chain deeper than **2000** modules is rejected with
+`import chain too deep (exceeds 2000)` attributed to the offending import, rather than recursing until
+the host stack overflows. The limit is a pathological-depth backstop far above any real project
+(diamond re-imports dedupe and do **not** count toward depth); tens/hundreds of modules are entirely
+unaffected.
+
 **One root governs the whole graph.** The root is found **once** — by walking up from the *entry*
 file (step 2) — and that single root resolves **every** import in the program (`a.b.c` → `<root>/a/b/c.chz`,
 step 4), no matter which module the `import` appears in. There are **no per-directory roots**: a

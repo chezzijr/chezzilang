@@ -16,6 +16,21 @@ use crate::{lexer, parser};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Maximum depth of a transitive import chain before the resolver gives up with a clean diagnostic
+/// instead of recursing further. The DFS `Builder::visit` recurses once per import *edge*; a
+/// pathological linear chain (~8-10k modules deep) otherwise overflows the host stack and aborts the
+/// process (SIGABRT). The limit MUST be safe on the *smallest* stack this recursion runs on — not
+/// just the 8MB main thread used by `check`/`run`, but the **~2MB default tokio worker** the LSP
+/// resolves on (`chezzi-lsp` → `editor::diagnostics` → `build_graph_with_entry_source`, no
+/// `thread_stack_size` override), **and** debug builds whose per-frame stack use is ~3-5x a release
+/// frame. Sizing for the worst case (2MB worker × ~5KB debug frame ≈ 400 frames, less the tower-lsp
+/// task future's own usage): 256 clears every build×path combo with margin (≈1.3MB debug-worst,
+/// ≈256KB release) while sitting far above any real project (tens/hundreds of modules — a diamond
+/// re-import dedupes via `visited` and does *not* count toward depth; a 256-deep *linear* import
+/// chain is not a real program). Cycles are caught separately; this backstops the
+/// acyclic-but-very-deep case only.
+const MAX_IMPORT_DEPTH: usize = 256;
+
 /// A module's stable identity: its canonicalized absolute path. De-dupes diamond imports and never
 /// aliases `std.io` with a same-named local file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -222,6 +237,7 @@ pub fn build_graph_with_entry_source(
         on_stack: Vec::new(),
         order: Vec::new(),
         entry_override,
+        max_depth: MAX_IMPORT_DEPTH,
     };
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
     let mut graph = ModuleGraph {
@@ -244,6 +260,10 @@ struct Builder {
     order: Vec<LoadedModule>,
     /// If set, `(entry_id, source)` — the entry module reads from this string instead of disk.
     entry_override: Option<(ModuleId, String)>,
+    /// Import-chain depth backstop (see [`MAX_IMPORT_DEPTH`]). Fielded so tests can inject a tiny
+    /// limit and exercise the guard with trivial recursion (the cargo test-harness worker thread
+    /// has a much smaller stack than the 8MB main thread — see `parser::MAX_DEPTH`).
+    max_depth: usize,
 }
 
 impl Builder {
@@ -269,6 +289,26 @@ impl Builder {
         // Already loaded (e.g. via the other arm of a diamond).
         if self.visited.contains_key(id) {
             return Ok(());
+        }
+        // Depth backstop: a pathological acyclic-but-very-deep chain would otherwise recurse until
+        // the host stack overflows and the process aborts (SIGABRT). Placed AFTER the cycle and
+        // visited checks so a cycle at the limit still reports as a cycle and a deduped diamond node
+        // returns early without tripping the guard — this bounds DEPTH (`on_stack.len()` = active
+        // ancestors), not breadth. Attributed to the offending import like the cycle/missing arms.
+        if self.on_stack.len() >= self.max_depth {
+            let importer: Vec<String> = self
+                .on_stack
+                .last()
+                .map(|(_, d)| d.clone())
+                .unwrap_or_default();
+            return Err(ResolveError {
+                message: prefix(
+                    &importer,
+                    format!("import chain too deep (exceeds {})", self.max_depth),
+                ),
+                span: import_span,
+                module: Some(dotted_label(dotted)),
+            });
         }
 
         // The dotted path of the module that contains the failing `import` statement (empty for an
@@ -796,5 +836,79 @@ mod tests {
         );
         // Entry is last and has no dotted name.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+    }
+
+    // 12. A pathological acyclic-but-very-deep import chain is a clean diagnostic, not a host
+    //     stack-overflow / SIGABRT. Tested at an injected tiny `max_depth` (8) over a short on-disk
+    //     chain so the guard fires with trivial recursion — the real 2000 constant can only be
+    //     exercised on the 8MB main thread (the test-harness worker stack is far smaller).
+    fn deep_chain_builder(root: PathBuf, max_depth: usize) -> Builder {
+        Builder {
+            project_root: root,
+            std_root: std_root(),
+            visited: HashMap::new(),
+            on_stack: Vec::new(),
+            order: Vec::new(),
+            entry_override: None,
+            max_depth,
+        }
+    }
+
+    #[test]
+    fn deep_chain_guarded_not_crash() {
+        let t = TmpDir::new();
+        // Linear chain m0 -> m1 -> ... -> m11 (12 modules deep, safe to recurse on any thread).
+        for k in 0..11 {
+            t.write(
+                &format!("m{k}.chz"),
+                &format!("import m{}\nfn f(): print(1)\n", k + 1),
+            );
+        }
+        let entry = t.write("m11.chz", "fn f(): print(1)\n");
+        let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
+        let mut b = deep_chain_builder(t.0.clone(), 8);
+        let err = b
+            .visit(&entry_id, &[], Span { line: 1, col: 1 })
+            .expect_err("a 12-deep chain must trip the depth-8 guard");
+        assert!(
+            err.message.contains("import chain too deep"),
+            "got: {}",
+            err.message
+        );
+        let _ = entry; // keep the temp file alive until here
+    }
+
+    // 12b. The depth-guard diagnostic is attributed to the offending import inside the importing
+    //      module (non-{1,1} span + "in module" prefix), matching cycle/missing-module attribution.
+    #[test]
+    fn deep_chain_error_attributes_importer() {
+        let t = TmpDir::new();
+        for k in 0..11 {
+            t.write(
+                &format!("m{k}.chz"),
+                &format!("import m{}\nfn f(): print(1)\n", k + 1),
+            );
+        }
+        t.write("m11.chz", "fn f(): print(1)\n");
+        let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
+        let mut b = deep_chain_builder(t.0.clone(), 8);
+        let err = b
+            .visit(&entry_id, &[], Span { line: 1, col: 1 })
+            .unwrap_err();
+        // The offending import lives inside a non-entry module, so it carries a module prefix and
+        // the span of the `import` statement (line 1 of that module), never the entry's synthetic {1,1}.
+        assert!(
+            err.message.contains("in module"),
+            "depth error must name the importing module, got: {}",
+            err.message
+        );
+        assert_eq!(
+            err.span.line, 1,
+            "span should be the failing import statement"
+        );
+        assert!(
+            err.module.is_some(),
+            "depth error should carry the target dotted label"
+        );
     }
 }

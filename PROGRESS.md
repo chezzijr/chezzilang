@@ -11,6 +11,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ Resolver — deep-import-chain host-crash backstop (pre-JIT audit, 2026-07-01).** A pathological
+*acyclic* linear import chain (~8-10k modules deep) recursed the resolver's DFS `Builder::visit`
+(`src/resolver/mod.rs`) with no depth limit → host **stack overflow / SIGABRT** (`check` exited 134;
+`run` printed `thread 'main' has overflowed its stack / fatal runtime error`). Import *cycles* were
+already caught cleanly; this closed the acyclic-but-very-deep hole. Added `const MAX_IMPORT_DEPTH =
+2000` (test-overridable via a `Builder.max_depth` field) guarding `visit` **after** the cycle+visited
+checks — so cycle detection and diamond dedup are unregressed, and only DEPTH (`on_stack.len()`) is
+bounded, not breadth. Exceeding it returns a clean `import chain too deep (exceeds 2000)` diagnostic
+attributed to the offending import (same shape as the cycle/missing-module arms). The checker's module
+walk (`run_graph_pass`) iterates the resolver's already-flattened `graph.modules` linearly — no
+independent recursion, so the single resolver guard covers both `check` and `run` (they funnel through
+`resolver::build_graph`). Verified end-to-end on the 8MB main thread: a generated 2100-deep chain now
+prints the clean diagnostic and exits 1 (no 134/SIGABRT) on both paths. TDD with an injected small
+limit (the test-harness worker stack is far smaller than main — a real 2000-deep test would overflow
+the *test* thread, per `parser::MAX_DEPTH`). Docs: `docs/spec.md` §Imports.
+
 **✅ Turbofish construction on the value-first concurrency boxes `Shared`/`RwShared`/`Atomic`
 (checker-only, 2026-06-30).** `Shared[int](0)` / `RwShared[Map[str, int]]({…})` / `Atomic[int](0)`
 now type-check; the turbofish is **optional** (value-first inference still works with no type arg) and
