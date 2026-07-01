@@ -19,33 +19,43 @@ four — `len` stays method-only (`xs.len()`), and **type / container / runtime 
 `str`, `List`, `Map`, `Channel`, `range`, …) plus user struct/enum ctors remain **non-first-class**
 (still wrapped, uniform with `f := Point`). A new dedicated runtime value variant carries them:
 `Obj::Builtin(Box<str>)` (VM) / `Value::Builtin(Rc<str>)` (interp) — pure-code, **SENDABLE** (crosses
-the spawn airlock by cloning the name; `SnapValue::Builtin`). Checker: `is_firstclass_builtin_fn`
-whitelist relaxes the `defer` gate + types `infer_ident` in value position — `ord`/`chr`/`panic` get a
-fixed `Ty::Func` (from `builtin_sig`, HOF-safe), while `print` (VARIADIC — `Ty::Func` can't express
-variadic arity) is typed `Unknown` so its value form accepts any arg count (`p()`, `p("a", "b")`), like
-the direct call. A **user binding shadows** these names in value position: `is_reserved_name` bans only
-`fn`/type/import-alias decls (NOT `ord := 5`, `fn f(ord: int)`, `for chr in xs`), so both runtimes match
-the checker by resolving locals/captures/globals BEFORE the first-class arm (compiler `compile_ident`
-guards `LoadBuiltin` on `resolve_local`/`captures`/`globals` misses; interp `eval` Ident tries `env.get`
-first). Compiler emits `Op::LoadBuiltin` **only** for unbound value-position uses — DIRECT calls
-(`print(x)`, `ord(c)`) are intercepted before the value fallthrough and keep their specialized
-`CallPrint`/`CallPrintSep`/`CallBuiltin` opcodes, so the hot path + benches are untouched (no bench run
-needed). VM/interp `invoke_value`/`call_value` route the value by name into the SAME logic direct calls
-use: `print` → space-join + trailing `\n` (value form is **default `sep=" "`/`end="\n"` only** —
-`sep=`/`end=` stay direct-call-only via `CallPrintSep`; args are kept **GC-rooted on the operand stack**
-across the stringify loop, mirroring `do_print`, so a `Stringable` `str` method that GCs can't sweep a
-later off-stack arg); `ord`/`chr` → `builtin_ord`/`builtin_chr`; `panic` → the recoverable `RuntimeError`
-(`Err`, never `Ok`) so defers still unwind through a `panic()` value. Two-engine (three-engine incl. M:N)
-parity is byte-identical. Golden `examples/defer_builtin_value.chz` (+ `.expected`) exercises all three
-behaviors on VM == `.expected` == interp == M:N; unit tests: rewrote `defer_builtin_rejected` →
-`defer_builtin_accepted`, kept `defer_constructor_rejected`, added `defer_type_rejected` /
-`type_name_not_firstclass_value` / `firstclass_builtin_fn_value_position` /
+the spawn airlock by cloning the name: cooperative VM via `SnapValue::Builtin`, M:N OS-thread engine via
+the by-value `WireValue::Builtin`). Checker: `is_firstclass_builtin_fn` whitelist relaxes the `defer`
+gate + types `infer_ident` in value position as a **dedicated `Ty::BuiltinFn { params, ret }`** (from
+`builtin_sig`) for ALL FOUR uniformly. `BuiltinFn` is distinct from `Ty::Func` so it is BOTH sendable
+(`sendable_rec => true` — a plain `Func` is conservatively non-sendable) AND, unlike `Ty::Unknown`,
+rejected by `expect_bool` (so `if print:` is a type error, not a VM-truthy/interp-fault divergence); it
+is HOF-compatible with a matching `fn(...)` param via `compatible`. Because `BuiltinFn` carries a fixed
+signature, the **value form of `print` is a fixed 1-arg call** — the variadic/`sep=`/`end=` surface
+stays direct-call-only (a bound value can't reach `CallPrintSep`). A **user binding shadows** these
+names in value position: `is_reserved_name` bans only `fn`/type/import-alias decls (NOT `ord := 5`,
+`fn f(ord: int)`, `for chr in xs`), so both runtimes match the checker by resolving
+locals/captures/globals BEFORE the first-class arm (compiler `compile_ident` guards `LoadBuiltin` on
+`resolve_local`/`captures`/`globals` misses; interp `eval` Ident tries `env.get` first); a same-named
+**module global read before its definition line** is a use-before-def error (checker suppresses the
+first-class arm when the name is in `module_global_lets`), matching a non-builtin `x := y` before `y`
+— this closes a VM(`nil` slot)/interp(`Value::Builtin`) divergence. Compiler emits `Op::LoadBuiltin`
+**only** for unbound value-position uses — DIRECT calls (`print(x)`, `ord(c)`) are intercepted before
+the value fallthrough and keep their specialized `CallPrint`/`CallPrintSep`/`CallBuiltin` opcodes, so
+the hot path + benches are untouched (no bench run needed). VM/interp `invoke_value`/`call_value` route
+the value by name into the SAME logic direct calls use: `print` → space-join + trailing `\n` (arg kept
+**GC-rooted on the operand stack** while stringifying, mirroring `do_print`); `ord`/`chr` →
+`builtin_ord`/`builtin_chr`; `panic` → the recoverable `RuntimeError` (`Err`, never `Ok`) so defers
+still unwind through a `panic()` value. Builtin-value **equality compares by name** on both engines (VM
+`values_equal_guarded` gained an `(Obj::Builtin, Obj::Builtin)` arm — each `LoadBuiltin` allocs a fresh
+handle, so identity was wrong; interp already name-compares via derived `PartialEq`). Two-engine
+(three-engine incl. M:N) parity is byte-identical. Golden `examples/defer_builtin_value.chz` (+
+`.expected`) exercises the behaviors on VM == `.expected` == interp == M:N; unit tests: rewrote
+`defer_builtin_rejected` → `defer_builtin_accepted`, kept `defer_constructor_rejected`, added
+`defer_type_rejected` / `type_name_not_firstclass_value` / `firstclass_builtin_fn_value_position` /
 `panic_as_value_uncaught_raises_both_engines` / `ord_chr_as_value_both_engines` + regression guards
-`print_as_value_is_variadic` / `user_binding_shadows_firstclass_builtin_typechecks` (checker),
-`user_binding_shadows_firstclass_builtin_both_engines` / `print_as_value_variadic_both_engines` /
-`print_as_value_args_rooted_under_gc_stress` (VM==interp). Docs: `docs/syntax.md` §`defer` (first-class
-list + value-form sep/end limit + variadic + shadowing). **What's next:** unchanged — M19 perf Tier-1
-(method-call IC, `run_until` trim, `Op::Call` specialization).
+`print_value_not_usable_as_bool_condition` / `print_value_form_is_fixed_arity` /
+`use_before_def_global_shadowing_builtin_rejected` / `user_binding_shadows_firstclass_builtin_typechecks`
+(checker), `builtin_value_equality_both_engines` / `builtin_value_sendable_across_airlock_both_engines` /
+`user_binding_shadows_firstclass_builtin_both_engines` / `print_as_value_arg_rooted_under_gc_stress`
+(VM==interp==M:N). Docs: `docs/syntax.md` §`defer` (first-class list + value-form 1-arg limit +
+sendable + shadowing + use-before-def). **What's next:** unchanged — M19 perf Tier-1 (method-call IC,
+`run_until` trim, `Op::Call` specialization).
 
 **✅ Resolver — deep-import-chain host-crash backstop (pre-JIT audit, 2026-07-01).** A pathological
 *acyclic* linear import chain (~8-10k modules deep) recursed the resolver's DFS `Builder::visit`

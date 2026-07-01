@@ -32,6 +32,19 @@ pub enum Ty {
         params: Vec<Ty>,
         ret: Box<Ty>,
     },
+    /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) used in value
+    /// position (`f := ord`, a HOF arg, a bare `defer print(...)`). DISTINCT from [`Ty::Func`] (a user
+    /// closure/free-fn value) so it can be BOTH sendable — pure code, it crosses the spawn airlock
+    /// (`Obj::Builtin`/`Value::Builtin`), whereas a plain `Func` is conservatively non-sendable — AND
+    /// still a genuine callable that (unlike `Ty::Unknown`) `expect_bool` rejects in a condition.
+    /// Carries the builtin's canonical signature (from `builtin_sig`) so it stays HOF-compatible with
+    /// a matching `fn(...)` param. These four builtins are monomorphic (no type params), so it never
+    /// carries a `Ty::Param` — generic substitution over it is a no-op. Never written by the user;
+    /// only produced by `infer_ident`.
+    BuiltinFn {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
     Tuple(Vec<Ty>),
     /// A struct type, with its generic type arguments (empty for a non-generic struct). E.g.
@@ -199,6 +212,31 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
                 && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
                 && compatible(r1, r2)
         }
+        // A first-class builtin-fn value is signature-compatible with a matching `fn(...)` param (so
+        // `apply(ord)` where `apply` wants `fn(str) -> int` type-checks) and with another builtin-fn
+        // of the same shape. Compared by arity + param/ret compatibility, exactly like `Func`.
+        (
+            Func {
+                params: p1,
+                ret: r1,
+            }
+            | BuiltinFn {
+                params: p1,
+                ret: r1,
+            },
+            Func {
+                params: p2,
+                ret: r2,
+            }
+            | BuiltinFn {
+                params: p2,
+                ret: r2,
+            },
+        ) => {
+            p1.len() == p2.len()
+                && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
+                && compatible(r1, r2)
+        }
         (Tuple(a), Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y))
         }
@@ -293,7 +331,7 @@ impl fmt::Display for Ty {
             }
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret } | Ty::BuiltinFn { params, ret } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {

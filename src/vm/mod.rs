@@ -5926,6 +5926,11 @@ impl Vm {
                     // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or
                     // `std.ffi.null()` twice), so the same-`GcRef` shortcut above is not enough.
                     (Obj::Ptr(a), Obj::Ptr(b)) => Ok(a == b),
+                    // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
+                    // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
+                    // `ha == hb` identity short-circuit above never fires; compare by name to match the
+                    // interp (derived `PartialEq` on `Value::Builtin`'s `Rc<str>`) — VM==interp parity.
+                    (Obj::Builtin(a), Obj::Builtin(b)) => Ok(a == b),
                     _ => Ok(false),
                 }
             }
@@ -10341,14 +10346,17 @@ impl Vm {
                 // side, like `list`) — never a shared mutable view. `from_wire` rebuilds a new heap
                 // `bytearray`, so cross-thread mutation never aliases.
                 Obj::ByteArray(b) => WireValue::ByteArray(b.clone().into_boxed_slice()),
+                // A first-class builtin fn crosses the airlock BY VALUE (its name) — pure code, no
+                // `GcRef` and no captured heap state, so it genuinely crosses an OS-thread boundary
+                // (unlike a `Func`/`Closure` handle). `from_wire` re-allocs a fresh `Obj::Builtin`;
+                // builtins are name-compared, so that is observationally identical. Works on the M:N
+                // engine (this path) and the serial engine (`SnapValue::Builtin`) alike.
+                Obj::Builtin(name) => WireValue::Builtin(name.clone()),
                 // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
                 Obj::Func { .. }
                 | Obj::Closure { .. }
                 | Obj::Module { .. }
                 | Obj::Native { .. }
-                // A first-class builtin fn crosses as the existing handle (same-heap channel send),
-                // exactly like `Native`; the spawn airlock takes the `SnapValue::Builtin` path.
-                | Obj::Builtin(_)
                 // A Cffi handle crosses as the existing handle — same shared heap (B3.0); under the
                 // M:N engine the worker shares the parent address space, so the symbol stays valid.
                 | Obj::Cffi(_) => WireValue::Handle(h),
@@ -10492,6 +10500,8 @@ impl Vm {
             WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
             WireValue::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
+            // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
+            WireValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
                 Value::Obj(self.heap.alloc(Obj::List(cloned)))
@@ -14782,6 +14792,8 @@ impl Vm {
                     "<ptr>".to_string()
                 }
             }
+            // A wired first-class builtin fn renders like its heap counterpart (`<builtin fn name>`).
+            WireValue::Builtin(name) => format!("<builtin fn {name}>"),
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
@@ -23771,27 +23783,46 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         );
     }
 
-    /// Regression (bug 2): `print` AS A VALUE is variadic like the direct call — zero, one, or many
-    /// args all work (value form always uses the defaults `sep=" "`/`end="\n"`). A rigid 1-arg Func
-    /// typing rejected `p()` / `p("a", "b")`. Byte-identical VM == interp.
+    /// Bug 2 / bug 4: two first-class builtin-fn VALUES compare by NAME, byte-identical VM == interp.
+    /// Each value-position use emits a fresh `Op::LoadBuiltin` → a distinct `Obj::Builtin` handle, so
+    /// the VM's `values_equal_guarded` (which short-circuits only on `ha == hb`) must have a dedicated
+    /// `(Obj::Builtin, Obj::Builtin)` name-compare arm; otherwise it falls to the `_ => Ok(false)`
+    /// catch-all and returns `false` while the interp (derived `PartialEq` on the name) returns
+    /// `true`. Covers bound values, the bare-name compare, a mismatch, and list-element recursion.
     #[test]
-    fn print_as_value_variadic_both_engines() {
-        let src = "fn main():\n    p := print\n    p()\n    p(\"a\")\n    p(\"a\", \"b\", \"c\")\nmain()\n";
+    fn builtin_value_equality_both_engines() {
+        let src = "fn main():\n    f := ord\n    g := ord\n    print(f == g)\n    print(ord == ord)\n    print(chr == ord)\n    print([print] == [print])\nmain()\n";
         let vm_out = run_capture(src).expect("vm run");
-        assert_eq!(vm_out, "\na\na b c\n");
+        assert_eq!(vm_out, "true\ntrue\nfalse\ntrue\n");
         assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
     }
 
-    /// Regression (bug 4): value-form `print` (`f := print; f(a, b)`) must keep its args GC-ROOTED
-    /// while stringifying — a `Stringable` `str` method runs user code that can `collect()` and would
-    /// sweep the later (off-stack) args, a use-after-free. Under `gc_stress` (collect before every
-    /// instruction) the output must still be correct and match the non-stress run + the interp.
+    /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
+    /// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Typing them
+    /// as the dedicated `Ty::BuiltinFn` (sendable), not a plain `Ty::Func` (conservatively
+    /// non-sendable), removes the asymmetry where only `print` (once typed `Unknown`) could cross.
+    /// Byte-identical on the cooperative VM, the interp, and the M:N engine.
     #[test]
-    fn print_as_value_args_rooted_under_gc_stress() {
+    fn builtin_value_sendable_across_airlock_both_engines() {
+        let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "97\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
+    /// Value-form `print` (`f := print; f(x)`) keeps its (single) arg GC-ROOTED while stringifying —
+    /// a `Stringable` `str` method runs user code that can `collect()` at a safepoint and would sweep
+    /// the off-stack arg, a use-after-free. Under `gc_stress` (collect before every instruction) the
+    /// output must still be correct and match the non-stress run + the interp. (The value form is a
+    /// fixed 1-arg function; the direct call keeps the variadic/`sep=`/`end=` surface.)
+    #[test]
+    fn print_as_value_arg_rooted_under_gc_stress() {
         let src = "struct Loud:\n    n: int\n    fn str(self) -> str:\n        return \"L{self.n}\"\n\
-                   fn main():\n    f := print\n    f(Loud(1), Loud(2), Loud(3))\nmain()\n";
+                   fn main():\n    f := print\n    f(Loud(7))\nmain()\n";
         let stressed = run_capture_stress(src);
-        assert_eq!(stressed, "L1 L2 L3\n");
+        assert_eq!(stressed, "L7\n");
         assert_eq!(stressed, run_capture(src).expect("vm run"));
         assert_eq!(
             stressed,

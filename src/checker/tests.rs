@@ -5323,14 +5323,49 @@ fn firstclass_builtin_fn_value_position() {
 }
 
 #[test]
-fn print_as_value_is_variadic() {
-    // Regression (bug 2): direct `print` is VARIADIC, so its value form must accept ANY arg count —
-    // zero, one, or many — not just exactly one. A rigid `fn(?) -> nil` Func typing wrongly rejected
-    // `p()` / `p("a", "b")` (labelled 'closure'). `print` value-position types as `Unknown` so the
-    // value-call path accepts every shape the direct call does.
-    ok("fn w():\n    p := print\n    p()\n");
+fn print_value_not_usable_as_bool_condition() {
+    // Bug 5: a `print` value in a bool-required position must be a TYPE ERROR (it is a function, not
+    // bool) — it must NOT be silently accepted. Typing `print` as `Ty::Unknown` (an earlier attempt
+    // at variadic value-form print) let `if p:` slip through the checker, and then the VM ran the
+    // then-branch (an `Obj::Builtin` is truthy) while the interp faulted `expected bool, found
+    // function` — a VM≠interp parity break. `print` now types as the dedicated `Ty::BuiltinFn`, which
+    // (like the other three) `expect_bool` rejects. `if print:` (the bare form) is rejected too.
+    rejects(
+        "fn main():\n    p := print\n    if p:\n        print(\"t\")\nmain()\n",
+        "must be bool",
+    );
+    rejects(
+        "fn main():\n    if print:\n        print(\"t\")\nmain()\n",
+        "must be bool",
+    );
+}
+
+#[test]
+fn print_value_form_is_fixed_arity() {
+    // The VALUE form of `print` (`p := print`) is a fixed 1-arg function, NOT variadic — the
+    // `sep=`/`end=` named args AND the variadic 0/many-arg shapes stay DIRECT-CALL-ONLY (they need
+    // the specialized `CallPrintSep`/`CallPrint` opcodes, unreachable through a bound value). The
+    // dedicated `Ty::BuiltinFn` carries `print`'s canonical 1-arg signature, so the direct call
+    // `print(a, b)` still works but `p("a", "b")` / `p()` on a bound value do not.
     ok("fn w():\n    p := print\n    p(\"a\")\n");
-    ok("fn w():\n    p := print\n    p(\"a\", \"b\", \"c\")\n");
+    ok("fn w():\n    print(\"a\", \"b\", \"c\")\n"); // direct call stays variadic
+    rejects("fn w():\n    p := print\n    p()\n", "argument");
+    rejects("fn w():\n    p := print\n    p(\"a\", \"b\")\n", "argument");
+}
+
+#[test]
+fn use_before_def_global_shadowing_builtin_rejected() {
+    // Bug 1: a top-level global named like a first-class builtin fn, READ BEFORE its definition line,
+    // must be a use-before-def error — EXACTLY like any other global (`x := y` before `y := 5` errors
+    // `unknown name 'y'`). It must NOT silently resolve to the builtin: otherwise the VM (whose
+    // `collect_globals` pre-scans every top-level `let` into a slot pre-initialised to `nil`) prints
+    // `nil`, while the interp (source-order env; the name isn't defined yet) returns `Value::Builtin`
+    // — a VM≠interp divergence on a program that (wrongly) type-checked. Suppress the first-class arm
+    // whenever the name is a declared module-level global; a genuine `f := print` (no such global)
+    // still resolves to the builtin.
+    rejects("x := chr\nchr := \"z\"\nprint(x)\n", "unknown name 'chr'");
+    // Sanity: the plain non-builtin case behaves identically (base semantics we mirror).
+    rejects("x := y\ny := 5\nprint(x)\n", "unknown name 'y'");
 }
 
 #[test]

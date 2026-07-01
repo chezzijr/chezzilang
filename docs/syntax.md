@@ -1565,13 +1565,16 @@ closure, or a name bound to one). The four **universe builtin functions** `print
 bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
 constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
-Note: the value form of `print` always uses the defaults **`sep=" "`, `end="\n"`** — the `sep=`/`end=`
-named arguments are available **only on the direct-call form** `print(a, b, sep=",")`, not on a
-`print` bound to a name. It is otherwise **variadic** like the direct call — `p := print` accepts any
-number of positional args (`p()`, `p("a")`, `p("a", "b")`). A **user binding shadows** one of these
+Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
+defaults **`sep=" "`, `end="\n"`** — the variadic multi/zero-arg shapes AND the `sep=`/`end=` named
+arguments stay **direct-call-only** (`print(a, b, sep=",")`), because they need the specialized print
+opcode a bound value doesn't reach. The direct call keeps its full variadic surface. All four builtins
+are **sendable** — a value bound to one (`f := ord`) crosses the `spawn` airlock and runs in the
+spawned task, on both the serial and the OS-thread engine. A **user binding shadows** one of these
 names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
 `for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
-only an unbound name resolves to the first-class builtin. `defer` composes with
+only an unbound name resolves to the first-class builtin (and a same-named module global read *before*
+its definition line is a use-before-def error, just like any other global). `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's

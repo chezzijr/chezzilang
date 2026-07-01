@@ -1103,6 +1103,13 @@ struct Checker {
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
     /// sidesteps a VM/interp divergence where the VM's counter slot IS the loop var).
     loop_vars: Vec<std::collections::HashSet<String>>,
+    /// Every name declared by a TOP-LEVEL `let`/`:=` in the module currently being checked. Used to
+    /// distinguish a genuine first-class builtin (`f := print`, no such global) from a same-named
+    /// module global read before its definition line (a use-before-def error, like any other global):
+    /// `infer_ident` suppresses the first-class-builtin arm when the name is in this set so the read
+    /// falls through to the same `unknown name` error, keeping the VM (pre-slotted `nil`) and the
+    /// interp (source-order env) from diverging. Rebuilt at the start of each `check_module`.
+    module_global_lets: std::collections::HashSet<String>,
     /// Per-scope set of names declared as `ref T` bindings/params (mirrors `scopes` index-for-index).
     /// A `ref T` and an explicit first-class `Ref[T]` are the same `Ty::Struct("Ref", _)` after
     /// lowering, so this is the ONLY way to tell them apart for transparency: a diagnostic about a
@@ -1377,6 +1384,7 @@ impl Checker {
             scopes: Vec::new(),
             ref_decls: Vec::new(),
             loop_vars: Vec::new(),
+            module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
@@ -1577,6 +1585,18 @@ impl Checker {
         imports: &[ResolvedImport],
     ) -> ModuleSig {
         self.push_scope();
+        // Record every top-level `let`/`:=` name in THIS module (rebuilt per module — `check_module`
+        // is called once per module, never nested). Lets `infer_ident` tell a genuine first-class
+        // builtin (`f := print`) from a same-named module global used before its definition line (a
+        // use-before-def error). Mirrors the compiler's `collect_globals` top-level `Let` sweep.
+        self.module_global_lets.clear();
+        for s in stmts {
+            if let StmtKind::Let { names, .. } = &s.kind {
+                for n in names {
+                    self.module_global_lets.insert(n.clone());
+                }
+            }
+        }
         // Module-scoped types: record THIS module's id and seed its locally-declared type names into
         // `bare_types` under their runtime key (bare unless disambiguated), so a bare annotation /
         // constructor resolves to the same key the layout is registered under. `bind_import` then adds
@@ -7282,24 +7302,27 @@ impl Checker {
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
-        // `defer print(...)`). Only the four first-class fns — type/ctor names fall through to the
-        // "unknown/not first-class" arms below (uniform with `f := Point`).
-        if is_firstclass_builtin_fn(name) {
-            // `print` is VARIADIC (any number of positional args; `sep=`/`end=` stay direct-call-only).
-            // `Ty::Func` can only express a FIXED arity, so a rigid `fn(?) -> nil` would reject the
-            // value form `p := print; p()` / `p("a", "b")` even though the direct call allows them.
-            // Type it as `Unknown` (the "callable with any shape" bottom the value-call path already
-            // accepts) so value-form `print` matches direct-call `print`'s arity flexibility. `ord`/
-            // `chr`/`panic` are genuinely fixed-arity → a proper `Ty::Func` (HOF-safe).
-            if name == "print" {
-                return Ty::Unknown;
-            }
-            if let Some(sig) = builtin_sig(name) {
-                return Ty::Func {
-                    params: sig.params,
-                    ret: Box::new(sig.ret),
-                };
-            }
+        // `defer print(...)`). Typed as the dedicated `Ty::BuiltinFn` from `builtin_sig` — a genuine
+        // callable that is sendable (crosses the spawn airlock) yet, unlike `Ty::Unknown`, is rejected
+        // by `expect_bool` (so `if print:` is a type error, not a VM/interp divergence). Only the four
+        // first-class fns; type/ctor names fall through to the "unknown/not first-class" arms below
+        // (uniform with `f := Point`).
+        //
+        // BUT a same-named MODULE-LEVEL global read here is NOT the builtin: `lookup` already resolved
+        // a binding that is in scope (the first arm above), so reaching here with a declared global
+        // name means it is used BEFORE its definition line — a use-before-def error, exactly like a
+        // non-builtin `x := y` before `y := …` (which errors `unknown name 'y'`). Suppress the
+        // first-class arm for such a name so it falls through to the same error, keeping the VM (whose
+        // `collect_globals` pre-slots every top-level `let` to `nil`) and the interp (source-order
+        // env → `Value::Builtin`) from diverging on a program that would otherwise wrongly type-check.
+        if is_firstclass_builtin_fn(name)
+            && !self.module_global_lets.contains(name)
+            && let Some(sig) = builtin_sig(name)
+        {
+            return Ty::BuiltinFn {
+                params: sig.params,
+                ret: Box::new(sig.ret),
+            };
         }
         if name == "None" {
             return Ty::option(Ty::Unknown);
@@ -9183,7 +9206,10 @@ impl Checker {
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
         match callee_ty {
-            Ty::Func { params, ret } => {
+            // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
+            // canonical signature, exactly like a closure/fn value. `print`'s value form is thus a
+            // fixed 1-arg call — the variadic / `sep=`/`end=` surface stays direct-call-only.
+            Ty::Func { params, ret } | Ty::BuiltinFn { params, ret } => {
                 // A closure/fn value coerces its float params at the prologue.
                 self.check_args_w("closure", &params, args, span);
                 *ret
@@ -12941,6 +12967,11 @@ impl Checker {
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
             Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_) => false,
+            // A first-class builtin fn value is pure code (no captured environment) — always
+            // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
+            // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable
+            // user `Func`. All four builtins (`print`/`ord`/`chr`/`panic`) are covered uniformly.
+            Ty::BuiltinFn { .. } => true,
             Ty::Struct(name, args) => {
                 // The *builtin* `Ref[T]` (std.ref) is the in-task box: copying it across a spawn
                 // would silently give each task its own box (a footgun), so it's non-sendable —
