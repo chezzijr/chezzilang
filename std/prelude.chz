@@ -94,3 +94,74 @@ native enum Option[T]:
 native enum Result[T, E]:
     Ok(T)
     Err(E)
+
+# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 15 are UNIVERSE protocols
+# (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
+# redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
+# SHAPE (method sigs + `+`-joined embeds) is file-backed here, as an ADDITIVE, DRIFT-GUARDED MIRROR: the
+# live runtime source stays the Rust `prebuilt_protocols` seed (installed at `Checker::new`, BEFORE any
+# module), and the checker asserts (`assert_native_protocol_shape_matches`, debug-only) that the parsed
+# shape BYTE-MATCHES the seed so the two can't silently drift. Everything that DECIDES conformance +
+# operator binding stays RUST-WIRED and is untouched: `satisfies` (int/float satisfy Add/Comparable/Neg
+# INTRINSICALLY with no method; a user struct satisfies structurally via its methods), `iter_elem`
+# (Iterator conformance), operator lowering (`+`→add, `<`→compare, `for`→Iterator, `[]`→Index,
+# `[:]`→Slice, `?`/interpolation/Map-keys), and `check_bounds`. The reserved-protocol hoist is
+# VALIDATE-AND-NO-OP in a stdlib module (never inserted into the protocol table), so these decls register
+# no user symbol — they are shape documentation the drift guard pins to the Rust seed.
+#
+# NOT mirrored here (stays Rust-only in `prebuilt_protocols`): `Iterable` — its `iter(self) -> Iterator[Elem]`
+# return type is a parameterized protocol in return position, which `resolve_type` rejects, so it cannot
+# be expressed as a plain `protocol` decl. (Every other reserved protocol's shape ports cleanly.)
+
+protocol Comparable:
+    fn compare(self, other: Self) -> int
+
+protocol Stringable:
+    fn str(self) -> str
+
+protocol Error:
+    fn message(self) -> str
+
+protocol Hashable:
+    fn hash(self) -> int
+
+protocol Add:
+    fn add(self, other: Self) -> Self
+
+protocol Sub:
+    fn sub(self, other: Self) -> Self
+
+protocol Mul:
+    fn mul(self, other: Self) -> Self
+
+protocol Div:
+    fn div(self, other: Self) -> Self
+
+protocol Mod:
+    fn mod(self, other: Self) -> Self
+
+protocol Neg:
+    fn neg(self) -> Self
+
+protocol Arithmetic:
+    Add + Sub + Mul + Div
+
+# `Iterator[Elem]` carries one type param (the element) so the generic-arity check treats `Iterator[T]`
+# uniformly, but its `next` sig is `-> Option[Self]` (Elem is arity-only, unused in the sig — matching the
+# Rust seed); real element recovery + conformance stay special-cased (`iter_elem`).
+protocol Iterator[Elem]:
+    fn next(self) -> Option[Self]
+
+protocol Index[K, V]:
+    fn index(self, k: K) -> V
+
+# `IndexSet` embeds no protocol but has TWO methods in ORDER (index before set_index — `methods` is an
+# ordered Vec, and the drift guard pins the order).
+protocol IndexSet[K, V]:
+    fn index(self, k: K) -> V
+    fn set_index(self, k: K, v: V) -> nil
+
+# Python-style slicing: three `int?` (Option[int]) components (start/end/step), each None when omitted;
+# both engines always pass all three explicitly. `R` is the slice result type, recovered at call sites.
+protocol Slice[R]:
+    fn slice(self, start: int?, end: int?, step: int?) -> R
