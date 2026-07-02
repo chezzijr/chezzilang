@@ -4478,6 +4478,34 @@ fn bare_struct_procresult_without_import_ok() {
     );
 }
 
+// PHASE-4b BUG: `harvest_native_module` resolves the regex fns' return types (which reference the
+// import-gated `Match`, e.g. `find -> Result[Option[Match]]`) via `resolve_type` while running in the
+// native-module arm WITHOUT `begin_module` — so `self.structs` is LEFTOVER from the previously-checked
+// module. If a sibling user module declared a generic `struct Match[T]` (overwriting the seeded
+// nparams-0 native Match), `resolve_type`'s struct arm fires a spurious `type 'Match' expects 1 type
+// argument(s), got 0`, falsely rejecting a valid program. The harvest must resolve `Match` against its
+// OWN native layout, immune to sibling-module / graph-order state (zero-observable-change contract).
+#[test]
+fn regex_harvest_immune_to_sibling_generic_match() {
+    let t = TmpDir::new();
+    // A user module legally declaring a generic `struct Match[T]` (it does NOT whole-module import
+    // std.regex, so the decl is allowed). Checked immediately before the std.regex native arm.
+    t.write("helper.chz", "struct Match[T]:\n    val: T\n");
+    let entry = t.write(
+        "main.chz",
+        "import helper\nimport std.regex\nfn main():\n    match regex.find(\"a\", \"a\"):\n        Ok(opt): print(\"ok\")\n        Err(e): print(e)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.is_empty(),
+        "regex harvest must be immune to a sibling `struct Match[T]`; got spurious errors: {errs:?}"
+    );
+}
+
 #[test]
 fn native_time_now_is_int_monotonic_is_float() {
     entry_ok(

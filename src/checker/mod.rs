@@ -1814,15 +1814,25 @@ impl Checker {
     /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/
     /// `sig.types`, origin FORCED [`StructOrigin::Builtin`] — load-bearing for `imported_builtin_types`
     /// → both engines' pure-type `bind_import` skip) and TRANSIENTLY inserts each name into
-    /// `self.struct_names` so pass 2's `resolve_type` resolves the bare type (the layout is already in
-    /// `self.structs` from `seed_stdlib_structs`, so `bare_key` yields the bare name — byte-identical to
-    /// the old hand-built `Ty::Struct("Match", vec![])`). Pass 2 harvests every `native fn` sig via the
-    /// native-decl dynamic convention (unannotated param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`).
-    /// The transient `struct_names` insertions are then REMOVED so IMPORT-GATING is preserved (a bare
-    /// unimported `m: Match` still errors). Runs OUTSIDE `begin_module` — it must leave no scope residue.
+    /// `self.struct_names` (so pass 2's `resolve_type` sees the bare type) AND transiently installs THIS
+    /// module's harvested layout into `self.structs` (save+restore). The latter is load-bearing: this arm
+    /// runs OUTSIDE `begin_module`, so `self.structs` is LEFTOVER from the previously-checked module — a
+    /// sibling user module may legally declare a generic `struct Match[T]` (Match is import-gated, not
+    /// reserved), overwriting the seeded nparams-0 native layout; without the transient install, pass 2's
+    /// `resolve_type` would key off that generic arity and spuriously reject with `type 'Match' expects 1
+    /// type argument(s), got 0`. With it, the name resolves against its own (nparams-0) shape — byte-
+    /// identical to the old hand-built `Ty::Struct("Match", vec![])` and immune to sibling-module /
+    /// graph-traversal-order state. Pass 2 harvests every `native fn` sig via the native-decl dynamic
+    /// convention (unannotated param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`). The transient
+    /// `struct_names` inserts and `self.structs` overwrites are then REVERTED so IMPORT-GATING is
+    /// preserved (a bare unimported `m: Match` still errors) and this arm leaves NO residue.
     fn harvest_native_module(&mut self, ast: &crate::ast::Module, sig: &mut ModuleSig) {
         // PASS 1 — native structs.
         let mut transient: Vec<String> = Vec::new();
+        // Saved `self.structs` / `self.bare_types` entries so PASS 1's transient overwrites leave NO
+        // residue.
+        let mut saved_structs: Vec<(String, Option<StructInfo>)> = Vec::new();
+        let mut saved_bare: Vec<(String, Option<String>)> = Vec::new();
         for s in &ast.stmts {
             if let StmtKind::NativeStruct {
                 name,
@@ -1838,17 +1848,33 @@ impl Checker {
                     .map(|f| (f.name.clone(), self.resolve_type(&f.ty, *span)))
                     .collect();
                 self.exit_type_params(saved);
-                sig.struct_defs.insert(
-                    name.clone(),
-                    StructInfo {
-                        type_params: type_params.clone(),
-                        fields: harvested_fields,
-                        methods: HashMap::new(),
-                        origin: StructOrigin::Builtin,
-                        doc: None,
-                    },
-                );
+                let info = StructInfo {
+                    type_params: type_params.clone(),
+                    fields: harvested_fields,
+                    methods: HashMap::new(),
+                    origin: StructOrigin::Builtin,
+                    doc: None,
+                };
+                sig.struct_defs.insert(name.clone(), info.clone());
                 sig.types.insert(name.clone());
+                // This harvest runs in the native-module arm WITHOUT `begin_module`, so `self.structs`
+                // holds LEFTOVER state from the previously-checked module. A sibling user module may
+                // legally declare a generic `struct Match[T]` (Match is import-gated, not reserved),
+                // overwriting the seeded nparams-0 native layout. PASS 2 below resolves this type's own
+                // name in the fns' return types (`find -> Result[Option[Match]]`) via `resolve_type`,
+                // whose struct arm keys on the layout's `type_params.len()` — so it would spuriously
+                // reject with `type 'Match' expects 1 type argument(s), got 0`. Transiently install THIS
+                // module's native layout under the BARE name AND point `bare_types[name]` at the bare
+                // name, so PASS 2's `resolve_type` (which looks the layout up via `bare_key`) resolves
+                // the name against its own (nparams-0) shape — immune to sibling-module / graph-order
+                // state. Both are restored after PASS 2 (this arm mutates no committed table — the sig
+                // is the source of truth). A sibling `struct Match[T]` disambiguates to a module-keyed
+                // `bare_types` entry, so the bare-name override is load-bearing, not just the layout.
+                saved_structs.push((name.clone(), self.structs.insert(name.clone(), info)));
+                saved_bare.push((
+                    name.clone(),
+                    self.bare_types.insert(name.clone(), name.clone()),
+                ));
                 // Make the native type's bare name resolvable while harvesting the fn sigs below (so a
                 // return type like `Result[Option[Match]]` resolves). Removed after pass 2.
                 if self.struct_names.insert(name.clone()) {
@@ -1878,6 +1904,29 @@ impl Checker {
         // Preserve import-gating: drop the transient bare-name visibility.
         for name in transient {
             self.struct_names.remove(&name);
+        }
+        // Restore `self.bare_types` to its pre-harvest state (paired with the layout restore below).
+        for (name, prev) in saved_bare {
+            match prev {
+                Some(key) => {
+                    self.bare_types.insert(name, key);
+                }
+                None => {
+                    self.bare_types.remove(&name);
+                }
+            }
+        }
+        // Restore `self.structs` to its pre-harvest state so this arm leaves no residue (the next
+        // module re-seeds via `begin_module` anyway; this keeps the harvest a pure sig computation).
+        for (name, prev) in saved_structs {
+            match prev {
+                Some(info) => {
+                    self.structs.insert(name, info);
+                }
+                None => {
+                    self.structs.remove(&name);
+                }
+            }
         }
     }
 
