@@ -1820,9 +1820,11 @@ impl Checker {
                 ffi_type_transient.push(tn.clone());
             }
         }
-        // PASS 1b — native METHODS (phase 4c). A `native fn` inside a `native struct` body declares a
-        // body-less method sig harvested into that type's method table, checked via the NORMAL method-
-        // resolution path (retiring the bespoke `socket_method_sig`/`listener_method_sig` arms). Runs
+        // PASS 1b — native METHODS (phase 4c; self added 4c-followup). A `native fn` inside a `native
+        // struct` body is an INSTANCE method declaring a leading bare `self` (mirroring user structs);
+        // `harvest_native_fn_sig(_, true)` STRIPS that `self` so the harvested method-table sig is
+        // byte-identical to the pre-`self` spelling, checked via the NORMAL method-resolution path
+        // (retiring the bespoke `socket_method_sig`/`listener_method_sig` arms). Runs
         // after PASS 1 so every native struct name is transiently visible (a method return type can
         // reference a sibling native struct — `Listener.accept -> Result[Socket]`). For a generic native
         // struct the type params are in scope while resolving its method sigs.
@@ -1838,7 +1840,7 @@ impl Checker {
                 let saved = self.enter_type_params(type_params);
                 let table: HashMap<String, FnSig> = methods
                     .iter()
-                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m)))
+                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
                     .collect();
                 self.exit_type_params(saved);
                 if let Some(info) = sig.struct_defs.get_mut(name) {
@@ -1850,7 +1852,7 @@ impl Checker {
         for s in &ast.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 sig.functions
-                    .insert(decl.name.clone(), self.harvest_native_fn_sig(decl));
+                    .insert(decl.name.clone(), self.harvest_native_fn_sig(decl, false));
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.
@@ -1895,10 +1897,18 @@ impl Checker {
     /// default is trailing, so a plain count is correct; the default EXPR is inert (desugar ignores
     /// `StmtKind::Native`, so it is never injected at a call site). Callers set any needed type-param
     /// scope (native-struct methods enter the struct's `type_params`).
-    fn harvest_native_fn_sig(&mut self, decl: &NativeDecl) -> FnSig {
+    ///
+    /// `skip_self` (true only for a native-struct INSTANCE method, PASS 1b) drops the leading bare
+    /// `self` receiver BEFORE the param→`Ty` map (so `self` is never typed as a dynamic `Ty::Unknown`)
+    /// AND before the optional-tail count — the resulting method-table sig (params/min_params/ret) is
+    /// byte-identical to the pre-`self` (phase-4c) spelling, the behavior-preserving invariant.
+    /// Module-level (free) native fns pass `skip_self=false` (the parser already forbids `self` there).
+    fn harvest_native_fn_sig(&mut self, decl: &NativeDecl, skip_self: bool) -> FnSig {
+        let skip = if skip_self { 1 } else { 0 };
         let params: Vec<Ty> = decl
             .params
             .iter()
+            .skip(skip)
             .map(|p| match &p.ty {
                 Some(t) => self.resolve_type(t, decl.span),
                 None => Ty::Unknown,
@@ -1908,7 +1918,12 @@ impl Checker {
             Some(t) => self.resolve_type(t, decl.span),
             None => Ty::Unknown,
         };
-        let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
+        let optional = decl
+            .params
+            .iter()
+            .skip(skip)
+            .filter(|p| p.default.is_some())
+            .count();
         if optional > 0 {
             FnSig::optional_tail(params, ret, optional)
         } else {
@@ -1924,8 +1939,9 @@ impl Checker {
     /// GENERIC handle's element types (`&[elem]` for `Shared[T]`/`RwShared[T]`/`Atomic[T]`; `&[]` for the
     /// non-generic `Socket`/`Listener`/`Executor`), substituted into the sig's `Ty::Param`s — the same
     /// per-type param subst the generic-struct machinery uses, so `Shared[int].set` expects `int`. The
-    /// method sigs carry NO `self` receiver (the `.chz` decls declare none), so `params` are the call
-    /// args directly — the arms pass them to `check_args_range` unchanged.
+    /// harvested method sigs carry NO `self` receiver (the `.chz` decls declare a leading bare `self`
+    /// that PASS 1b's `harvest_native_fn_sig(_, true)` STRIPS), so `params` are the call args directly —
+    /// the arms pass them to `check_args_range` unchanged.
     fn native_handle_method(&self, ty_name: &str, method: &str, targs: &[Ty]) -> Option<FnSig> {
         let info = self.structs.get(ty_name)?;
         let sig = info.methods.get(method)?;

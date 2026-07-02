@@ -24,25 +24,25 @@
 # only for a numeric `T` — a dispatch-time constraint the `Ty::Atomic` arm keeps as a residual gate.
 
 native struct Shared[T]:
-    native fn get() -> T
-    native fn set(v: T) -> nil
-    native fn update(f: fn(T) -> T) -> nil
+    native fn get(self) -> T
+    native fn set(self, v: T) -> nil
+    native fn update(self, f: fn(T) -> T) -> nil
 
 native struct RwShared[T]:
-    native fn get() -> T
-    native fn set(v: T) -> nil
-    native fn write(f: fn(T) -> T) -> nil
-    native fn read(f)
+    native fn get(self) -> T
+    native fn set(self, v: T) -> nil
+    native fn write(self, f: fn(T) -> T) -> nil
+    native fn read(self, f)
 
 native struct Atomic[T]:
-    native fn load() -> T
-    native fn store(v: T) -> nil
-    native fn exchange(v: T) -> T
-    native fn cas(expected: T, new: T) -> bool
-    native fn add(v: T) -> T
-    native fn sub(v: T) -> T
+    native fn load(self) -> T
+    native fn store(self, v: T) -> nil
+    native fn exchange(self, v: T) -> T
+    native fn cas(self, expected: T, new: T) -> bool
+    native fn add(self, v: T) -> T
+    native fn sub(self, v: T) -> T
 
 native struct Executor:
-    native fn submit(f) -> nil
-    native fn shutdown() -> nil
-    native fn shutdown_now() -> nil
+    native fn submit(self, f) -> nil
+    native fn shutdown(self) -> nil
+    native fn shutdown_now(self) -> nil

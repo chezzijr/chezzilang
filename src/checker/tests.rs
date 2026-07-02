@@ -5120,6 +5120,46 @@ fn concurrency_harvested_method_sigs_shape() {
     }
 }
 
+/// Phase 4c-followup — native instance methods declare a leading bare `self` (mirroring user structs)
+/// that harvest STRIPS: the harvested method-table sig must be byte-identical to the pre-`self`
+/// spelling (behavior-preserving). Anti-launder: the stripped `self` must NOT surface as a leading
+/// `Ty::Unknown` receiver param.
+#[test]
+fn native_method_harvest_strips_self() {
+    // net.Socket.read(self, n: int, timeout_ms: int = 0) — self stripped ⇒ params == [int, int].
+    let net = native_module_sig_via_graph("net");
+    let read = net
+        .struct_defs
+        .get("Socket")
+        .expect("Socket")
+        .methods
+        .get("read")
+        .expect("Socket.read");
+    assert_eq!(read.params, vec![Ty::Int, Ty::Int], "self must be stripped");
+    assert_eq!(
+        read.min_params, 1,
+        "optional-tail count unaffected by strip"
+    );
+    assert!(
+        !read.params.contains(&Ty::Unknown),
+        "stripped self must not surface as a Ty::Unknown receiver"
+    );
+    // concurrency.Shared.get(self) -> T — self stripped ⇒ zero params, ret is the box's Ty::Param.
+    let conc = native_module_sig_via_graph("concurrency");
+    let get = conc
+        .struct_defs
+        .get("Shared")
+        .expect("Shared")
+        .methods
+        .get("get")
+        .expect("Shared.get");
+    assert!(
+        get.params.is_empty(),
+        "self-only method harvests to zero params"
+    );
+    assert_eq!(get.ret, Ty::Param("T".into()), "Shared.get ret == T");
+}
+
 /// The harvested table substitutes `T` at each call site (net's capability extended to generics): a
 /// wrong-typed `set`/`store` is rejected against the SUBSTITUTED element type, not the raw `Ty::Param`.
 #[test]
@@ -5137,6 +5177,11 @@ fn concurrency_methods_resolve_via_harvested_table_with_subst() {
     entry_rejects(
         "import std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
         "no method 'add'",
+    );
+    // Shared[int].update(fn(x): x+1) — the leading `self` is stripped, so the update closure is the
+    // only arg the sig expects; it still type-checks after the 4c-followup strip.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x+1)\nmain()\n",
     );
 }
 

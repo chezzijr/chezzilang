@@ -335,7 +335,7 @@ impl Parser {
                 if self.peek_at(1) == &Token::Struct {
                     self.parse_native_struct()?
                 } else {
-                    let k = self.parse_native()?;
+                    let k = self.parse_native(false)?;
                     self.expect_stmt_end()?;
                     k
                 }
@@ -770,7 +770,7 @@ impl Parser {
     /// keyword after `native` into a [`NativeKind`]. `ctor` is a plain identifier (not a keyword), so
     /// it is matched via `expect_ident`. An UNANNOTATED param → dynamic (`Ty::Unknown` in the
     /// checker); a missing `-> ret` → native/never (`Ty::Unknown` return).
-    fn parse_native(&mut self) -> PResult<StmtKind> {
+    fn parse_native(&mut self, in_struct: bool) -> PResult<StmtKind> {
         let span = self.cur_span();
         self.expect(&Token::Native)?;
         let kind = if self.eat(&Token::Fn) {
@@ -795,6 +795,34 @@ impl Parser {
         // only (desugar's `collect_module_reg` ignores `StmtKind::Native`, so it is never injected
         // at a call site). The checker still rejects a `native` decl in a USER module outright.
         let params = self.parse_params(true)?;
+        // Phase 4c-followup — a `native fn` INSIDE a `native struct` body is an INSTANCE method and
+        // MUST declare a leading bare `self` (untyped), mirroring user struct methods; harvest strips
+        // it so the method-table sig is byte-identical to the pre-`self` spelling. A module-level
+        // `native fn`/`native ctor` is a free function and must NOT take `self`. `self` is a plain
+        // identifier, detected here by name — and it is valid ONLY as the first parameter.
+        let first_is_self = matches!(params.first(), Some(p) if p.name == "self");
+        if in_struct {
+            if kind == NativeKind::Fn && !first_is_self {
+                return Err(ParseError {
+                    message: "native instance method must declare `self` as its first parameter \
+                              (static native methods are not yet supported)"
+                        .to_string(),
+                    span: name_span,
+                });
+            }
+        } else if first_is_self {
+            return Err(ParseError {
+                message: "module-level `native fn` cannot take `self`".to_string(),
+                span: name_span,
+            });
+        }
+        // `self` is the receiver and is valid ONLY as the first parameter (mirror user struct rules).
+        if let Some(p) = params.iter().skip(1).find(|p| p.name == "self") {
+            return Err(ParseError {
+                message: "`self` is only valid as the first parameter".to_string(),
+                span: p.name_span,
+            });
+        }
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -833,7 +861,7 @@ impl Parser {
             // the native type's method table. A PLAIN `fn`/`test` (with a body) is still rejected: the
             // runtime dispatch stays native, so a native struct never carries a compiled method.
             if self.check(&Token::Native) {
-                let StmtKind::Native(decl) = self.parse_native()? else {
+                let StmtKind::Native(decl) = self.parse_native(true)? else {
                     return Err(self.err(
                         "native struct methods must be `native fn` declarations".to_string(),
                     ));
@@ -2868,15 +2896,17 @@ mod tests {
 
     #[test]
     fn native_struct_parses_native_methods() {
-        // Phase 4c — a `native fn` inside a native-struct body is harvested into `methods`; a
-        // trailing `= default` param lowers to an optional-tail marker (like a free native fn).
+        // Phase 4c-followup — a `native fn` inside a native-struct body is an INSTANCE method: it
+        // declares a leading bare `self` (mirroring user structs), harvested into `methods` with the
+        // `self` KEPT in the parsed decl (harvest strips it). A trailing `= default` param lowers to
+        // an optional-tail marker (like a free native fn).
         let StmtKind::NativeStruct {
             name,
             fields,
             methods,
             ..
         } = only(
-            "native struct Socket:\n    native fn read(n: int, timeout_ms: int = 0) -> Result[str]\n    native fn close()\n",
+            "native struct Socket:\n    native fn read(self, n: int, timeout_ms: int = 0) -> Result[str]\n    native fn close(self)\n",
         )
         else {
             panic!("expected StmtKind::NativeStruct");
@@ -2886,12 +2916,51 @@ mod tests {
         let mnames: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(mnames, ["read", "close"]);
         let read = &methods[0];
-        assert_eq!(read.params.len(), 2);
-        assert!(read.params[1].default.is_some(), "trailing default marker");
+        assert_eq!(read.params.len(), 3, "self kept in parsed decl");
+        assert_eq!(read.params[0].name, "self");
+        assert!(read.params[0].ty.is_none(), "self is untyped (bare)");
+        assert!(read.params[2].default.is_some(), "trailing default marker");
         assert!(read.ret.is_some());
         let close = &methods[1];
-        assert!(close.params.is_empty());
+        assert_eq!(close.params.len(), 1);
+        assert_eq!(close.params[0].name, "self");
         assert!(close.ret.is_none());
+    }
+
+    #[test]
+    fn native_struct_method_requires_self() {
+        // Phase 4c-followup — a self-less native instance method is now a reserved-static error.
+        let e = parse_err("native struct S:\n    native fn read(n: int)\n");
+        assert!(
+            e.message
+                .contains("must declare `self` as its first parameter"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_struct_method_rejects_self_nonfirst() {
+        // `self` is valid ONLY as the first parameter.
+        let e = parse_err("native struct S:\n    native fn f(self, a: int, self)\n");
+        assert!(
+            e.message
+                .contains("`self` is only valid as the first parameter"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn module_native_fn_rejects_self() {
+        // A module-level (free) `native fn` must NOT take `self`.
+        let e = parse_err("native fn g(self) -> int\n");
+        assert!(
+            e.message
+                .contains("module-level `native fn` cannot take `self`"),
+            "unexpected error: {}",
+            e.message
+        );
     }
 
     #[test]
