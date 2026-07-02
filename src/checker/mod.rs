@@ -117,7 +117,9 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "nil"
         // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
         // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`) and `range` (a reserved callable whose ctor a
-        // `struct range` would silently shadow).
+        // `struct range` would silently shadow). (List/Map/Set/range's `CallBuiltin` DISPATCH is
+        // table-sourced — the `Intrinsic::Ctor` PRELUDE rows; their generic TYPE-IDENTITY is HERE +
+        // in `resolve_type`/`infer_named_call`. See the `Intrinsic` doc.)
         || name == "List"
         || name == "Set"
         || name == "Map"
@@ -214,12 +216,16 @@ fn is_reserved_name(name: &str) -> bool {
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
 /// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
 /// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`; `Ctor` → likewise
-/// `Op::CallBuiltin` (phase 2a: the scalar-conversion constructors int/float/str/bytes/bytearray).
-/// The `Print`/`Builtin` kinds back FIRST-CLASS fn values; `Ctor` rows are NON-first-class (types are
-/// not first-class values — uniform with user struct ctors), so a `Ctor` row never emits a
-/// `LoadBuiltin`/`Ty::BuiltinFn`. Metadata only — runtime dispatch stays name-keyed and unchanged (the
-/// `NativeFn` host seam only accepts int/str/map args, which is exactly why `print` needs its own
-/// `Value::Builtin`/opcode path).
+/// `Op::CallBuiltin` — the phase-2a scalar-conversion constructors (int/float/str/bytes/bytearray) AND
+/// the phase-2b GENERIC / reserved-type container constructors (range/List/Map/Set). The
+/// `Print`/`Builtin` kinds back FIRST-CLASS fn values; `Ctor` rows are NON-first-class (types are not
+/// first-class values — uniform with user struct ctors), so a `Ctor` row never emits a
+/// `LoadBuiltin`/`Ty::BuiltinFn`. This table is the single source of truth for the `is_builtin` /
+/// `CallBuiltin` DISPATCH + name-set; a container ctor's generic TYPE-IDENTITY (`List[int]` →
+/// `Ty::List(Int)`, the Map hashable-key check, range arity) is NOT a flat `FnSig` and stays in
+/// `resolve_type`/`infer_named_call` (dispatch here, identity there). Metadata only — runtime dispatch
+/// stays name-keyed and unchanged (the `NativeFn` host seam only accepts int/str/map args, which is
+/// exactly why `print` needs its own `Value::Builtin`/opcode path).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Intrinsic {
     Print,
@@ -259,8 +265,13 @@ fn sig_print() -> FnSig {
 /// `first_class: false` (types are not first-class values), so they source their `CallBuiltin`
 /// dispatch metadata from this table but never emit a `LoadBuiltin`/`Ty::BuiltinFn`. Phase 3a moved
 /// their SIGNATURES (and `ord`/`chr`/`panic`'s) to `std/prelude.chz` `native` decls; this table now
-/// carries only metadata (name/intrinsic/first_class). The GENERIC / reserved-type container ctors
-/// (`List`/`Map`/`Set`/`range`) stay OUT — phase 2b (see PROGRESS.md "native-prelude table").
+/// carries only metadata (name/intrinsic/first_class). Phase 2b folded the GENERIC / reserved-type
+/// container ctors (`range`/`List`/`Map`/`Set`) in as `Intrinsic::Ctor` rows too — so their
+/// `is_builtin`/`CallBuiltin` DISPATCH + name-set flow through THIS one table — but they are NOT
+/// `.chz`-declared (they are generic; native ctor generic-decl support is a later, maybe-never
+/// concern), and their generic TYPE-IDENTITY stays in `resolve_type`/`infer_named_call`
+/// (`builtin_container_sig` supplies only a flat display/placeholder sig). See PROGRESS.md
+/// "native-prelude table".
 pub(crate) const PRELUDE: &[PreludeFn] = &[
     PreludeFn {
         name: "print",
@@ -309,9 +320,37 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
         intrinsic: Intrinsic::Ctor,
         first_class: false,
     },
+    // Phase 2b — the four GENERIC / reserved-type container CTORS. `first_class: false` (uniform with
+    // every Ctor row): `f := List` / `f := range` stay checker errors. The table is the DISPATCH
+    // single-source (`is_builtin`/`CallBuiltin`) + name-set; their generic TYPE-IDENTITY — turning
+    // `List[int]` into `Ty::List(Int)`, the Map hashable-key check, the range-arity/overload typing —
+    // is NOT a flat `FnSig` and stays in `resolve_type` (generic arms) + `infer_named_call` (ctor
+    // return typing); `builtin_container_sig` supplies only the FLAT DISPLAY/PLACEHOLDER sig used for
+    // hover/value-position. `range` is a Ctor row but NON-generic (`name_is_generic` false), so
+    // `range[int]()` still errors in `infer_named_call` — table membership is orthogonal to genericity.
+    PreludeFn {
+        name: "range",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+    },
+    PreludeFn {
+        name: "List",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+    },
+    PreludeFn {
+        name: "Map",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+    },
+    PreludeFn {
+        name: "Set",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+    },
 ];
 
-/// Look up a native-prelude row by name (linear scan over the four rows).
+/// Look up a native-prelude row by name (linear scan over the table's rows).
 pub(crate) fn prelude_fn(name: &str) -> Option<&'static PreludeFn> {
     PRELUDE.iter().find(|p| p.name == name)
 }
@@ -4290,6 +4329,10 @@ impl Checker {
             },
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args, head_span) => {
+                // TYPE-IDENTITY source for the generic container ctors: the `List`/`Map`/`Set` arms
+                // below turn `List[int]` into `Ty::List(Int)` etc. — NOT expressible as a flat `FnSig`,
+                // so it stays HERE. Their `CallBuiltin` DISPATCH + name-set is table-sourced (the
+                // `Intrinsic::Ctor` PRELUDE rows); `builtin_container_sig` = flat display/placeholder.
                 let resolved = match (n.as_str(), args.as_slice()) {
                     ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
                     ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
@@ -10330,6 +10373,10 @@ impl Checker {
             }
             return Some(Ty::Unknown);
         }
+        // The `range`/`List`/`Set`/`Map` arms below are the ctor-RETURN-TYPE / generic-inference source
+        // for the container ctors (arity/overload check, element-type inference) — NOT a flat `FnSig`,
+        // so it stays HERE. Their `CallBuiltin` DISPATCH is table-sourced (the `Intrinsic::Ctor` PRELUDE
+        // rows); `builtin_container_sig` supplies only the flat display/placeholder sig. See `Intrinsic`.
         match name {
             "print" => {
                 for a in args {
@@ -15632,10 +15679,13 @@ fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     Some(FnSig::plain(params, ret))
 }
 
-/// A DISPLAY-only signature for the STILL-SYNTHETIC free / constructor builtins (editor hover, v1):
-/// `print` (variadic — not expressible as a `native` decl) plus the GENERIC / reserved-type container
-/// & runtime ctors (`range`/`List`/`Map`/`Set`/`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/
-/// `Executor`, phase 2b — still hard-coded). The eight MIGRATED universe builtins
+/// A DISPLAY/PLACEHOLDER signature for the STILL-SYNTHETIC free / constructor builtins (editor hover,
+/// v1): `print` (variadic — not expressible as a `native` decl) plus the GENERIC / reserved-type
+/// container & runtime ctors (`range`/`List`/`Map`/`Set`/`Channel`/`Shared`/`RwShared`/`Atomic`/
+/// `timer`/`Executor`). This is the FLAT sig the container ctors keep here BECAUSE their real generic
+/// type-identity (`List[int]` → `Ty::List(Int)`, …) is NOT a flat `FnSig` and lives in
+/// `resolve_type`/`infer_named_call`; the `Intrinsic::Ctor` PRELUDE rows carry only their DISPATCH.
+/// The eight MIGRATED universe builtins
 /// (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`) are NOT here — their sigs now come
 /// from `std/prelude.chz` via [`Checker::builtin_sig`]. Unlike the `infer_named_call` arms — whose
 /// result is arg-dependent (overloads, variadics, named params, type-arg-driven element types) — this

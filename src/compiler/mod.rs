@@ -44,20 +44,21 @@ pub struct CompileError {
 #[cfg(test)]
 pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
 
-/// Names dispatched to `Op::CallBuiltin(name, argc)` (name-keyed to the VM's `do_builtin`). Two
-/// sources: the GENERIC / reserved-type container CONSTRUCTOR names (range/List/Map/Set — hard-coded
-/// until phase 2b), and the native-prelude table's `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) plus
-/// the phase-2a `Intrinsic::Ctor` scalar conversions (`int`/`float`/`str`/`bytes`/`bytearray`) — READ
-/// from the table so those whitelists live in exactly one place (drift-guarded by
-/// `prelude_table_is_single_source_of_truth`). `print` is `Intrinsic::Print`, NOT here — it keeps its
-/// own `CallPrint`/`CallPrintSep` opcodes. (`panic(msg)` → `CallBuiltin("panic", 1)`; the VM's
-/// `do_builtin` arm raises the recoverable `RuntimeError` instead of pushing a value.)
+/// Names dispatched to `Op::CallBuiltin(name, argc)` (name-keyed to the VM's `do_builtin`). A PURE
+/// READ of the native-prelude table: the `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) plus every
+/// `Intrinsic::Ctor` row — the phase-2a scalar conversions (`int`/`float`/`str`/`bytes`/`bytearray`)
+/// AND the phase-2b GENERIC / reserved-type container ctors (`range`/`List`/`Map`/`Set`). The table is
+/// the single source of truth for this whitelist (drift-guarded by
+/// `prelude_table_is_single_source_of_truth`); the container ctors' generic TYPE-IDENTITY still lives
+/// in the checker's `resolve_type`/`infer_named_call` (dispatch here, identity there). `print` is
+/// `Intrinsic::Print`, NOT here — it keeps its own `CallPrint`/`CallPrintSep` opcodes. (`panic(msg)` →
+/// `CallBuiltin("panic", 1)`; the VM's `do_builtin` arm raises the recoverable `RuntimeError` instead
+/// of pushing a value.)
 pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(name, "range" | "Set" | "List" | "Map")
-        || matches!(
-            crate::checker::prelude_fn(name).map(|p| p.intrinsic),
-            Some(crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor)
-        )
+    matches!(
+        crate::checker::prelude_fn(name).map(|p| p.intrinsic),
+        Some(crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor)
+    )
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -3607,10 +3608,11 @@ impl Compiler {
             }
             // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its
             // `intrinsic`. `Print` → the dedicated `CallPrint`/`CallPrintSep` opcodes; `Builtin`
-            // (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a) → `CallBuiltin`.
-            // This is byte-identical to the old `if name == "print"` + `is_builtin` arms — the GENERIC /
-            // reserved-type container ctor names (range/List/Map/Set) still fall through to the generic
-            // `is_builtin` arm below (phase 2b).
+            // (ord/chr/panic) and `Ctor` → `CallBuiltin` — the phase-2a scalar conversions
+            // (int/float/str/bytes/bytearray) AND the phase-2b GENERIC / reserved-type container ctors
+            // (range/List/Map/Set). This is byte-identical to the old `if name == "print"` +
+            // `is_builtin` arms; type-args are type-erased before the compiler, so `List[int]()`
+            // resolves to `Ident("List")` → the SAME `CallBuiltin`.
             if let Some(p) = crate::checker::prelude_fn(name) {
                 for a in args {
                     self.compile_expr(fc, a)?;
@@ -3646,6 +3648,10 @@ impl Compiler {
                 }
                 return Ok(());
             }
+            // DEFENSIVE / never-taken for a DIRECT call after phase 2b: every `is_builtin` name is now
+            // a PRELUDE `Builtin`/`Ctor` row, so the `prelude_fn` arm above already emitted its
+            // `CallBuiltin` and returned. Kept as a belt-and-suspenders fall-through (minimal diff) — if
+            // a future builtin lands in `is_builtin` without a table row it still lowers correctly.
             if is_builtin(name) {
                 for a in args {
                     self.compile_expr(fc, a)?;
@@ -4461,5 +4467,25 @@ mod capture_layout_tests {
                 "{name}(x) must lower to CallBuiltin(\"{name}\", 1); got {ops:?}"
             );
         }
+
+        // Phase 2b — the GENERIC / reserved-type container CTORS must STILL lower to the name-keyed
+        // CallBuiltin, byte-identical to their old hard-coded `is_builtin` arm (now table-driven via
+        // `Intrinsic::Ctor`). `range(5)`/`List()`/`Map()`/`Set()` each lower to `CallBuiltin(name, 1)`.
+        for name in ["range", "List", "Map", "Set"] {
+            let ops = all_ops(&compile(&format!("{name}([])\n")));
+            assert!(
+                ops.iter()
+                    .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == name)),
+                "{name}([]) must lower to CallBuiltin(\"{name}\", 1); got {ops:?}"
+            );
+        }
+        // A turbofished container ctor lowers to the IDENTICAL opcode — type args are type-erased
+        // before the compiler, so `List[int]()` == `List()` at the opcode level (zero args here).
+        let ops = all_ops(&compile("List[int]()\n"));
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::CallBuiltin(n, 0) if n == "List")),
+            "List[int]() must lower to CallBuiltin(\"List\", 0); got {ops:?}"
+        );
     }
 }

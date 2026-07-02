@@ -49,10 +49,10 @@ read them from the table via `Intrinsic::Builtin | Intrinsic::Ctor`. **NON-FIRST
 first-class value path (`is_firstclass_builtin_fn`, `Ty::BuiltinFn` arm, `LoadBuiltin`) gates on
 `.first_class == true`, so a `Ctor` row never leaks a first-class value — `f := int` / `defer str(...)`
 stay rejected on the identical fall-through path as `f := List`, with zero new guard code. The drift
-guard is extended (Ctor name-set == `{int,float,str,bytes,bytearray}`, no `Ctor` row is first-class,
-container names stay OUT) plus a `scalar_ctor_conversions_parity` two-engine test and the extended
-bytecode pin. **The GENERIC / reserved-type container ctors** (`List`/`Map`/`Set`/`range`) stay
-hard-coded → **phase 2b** (they are generic and/or carry reserved-type identity). **North-star:**
+guard is extended (Ctor name-set, no `Ctor` row is first-class) plus a `scalar_ctor_conversions_parity`
+two-engine test and the extended
+bytecode pin. **The GENERIC / reserved-type container ctors** (`List`/`Map`/`Set`/`range`) were folded
+in later → **phase 2b** (below), keeping their generic type-identity in `resolve_type`. **North-star:**
 realized in **phase 3a** below — the signatures moved to a real `.chz` prelude; only `print` (variadic)
 + `range` (arity overload) remain synthetic carve-outs. (The earlier ".chz prelude blocked on user-facing
 variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
@@ -81,14 +81,39 @@ callable user fn); direct calls to the eight names emit byte-identical `CallBuil
 `prelude_table_is_single_source_of_truth` is extended to cross-check the parsed `.chz` decl set/kinds vs
 the hollow table AND each parsed `FnSig` vs its historical shape; new `native_prelude.chz` three-engine
 golden + parser/checker/resolver tests. `grammar.bnf` gains `<nativeDecl>` (conformance green).
-**Roadmap (native-in-Chezzi track):** phase 2b = the remaining synthetic *function/ctor* carve-outs
-(`range` arity-overload + `List`/`Map`/`Set` generic container ctors) — kept hard-coded for now. **Phase
+**Roadmap (native-in-Chezzi track):** phase 2b (**done — see below**) folded the generic container
+ctors' DISPATCH into the table. **Phase
 4** = `native struct`/`native enum` stubs for the **Tier-2 native (Rust-backed) TYPES**
 (`Shared`/`RwShared`/`Atomic`/`Executor`, `regex.Match`, …) to replace the `native_module_sig` hand-tables
 with parsed `.chz` type decls (bodies still native). **Tier-1** (the `Ref` struct-modeled type) is already
 done (always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native —
 too deeply coupled to `match`/`?`/generator desugar to express as a plain `.chz` decl; this is a
 documented, deliberate carve-out, not a gap.
+
+**✅ NATIVE-PRELUDE TABLE — phase 2b (refactor-only, generic container ctors) (2026-07-02).** Folded the
+**four GENERIC / reserved-type container CONSTRUCTORS** (`range`/`List`/`Map`/`Set`) into the `PRELUDE`
+table as `Intrinsic::Ctor` rows with `first_class: false` — a mechanical mirror of phase 2a applied to
+the last synthetic-table carve-outs, completing the goal that **every universe builtin's `CallBuiltin`
+DISPATCH + name-set flows through the one table**. `compiler::is_builtin` + `interp::builtins::is_builtin`
+drop the hard-coded `matches!(name, "range"|"Set"|"List"|"Map")` and become **pure table reads** (the
+`prelude_fn` direct-call arm now emits their `CallBuiltin`, byte-identical to the old hard-coded arm —
+type-args are type-erased before the compiler, so `List[int]()` == `List()` at the opcode level). Unlike
+the scalars, these are **generic / carry reserved-type identity**, so — as the task required — they are
+**table-sourced for DISPATCH ONLY, deliberately NOT `.chz`-declared** (native ctor generic-decl support
+is a later, maybe-never concern): their generic **TYPE-IDENTITY** (`List[int]` → `Ty::List(Int)`, the Map
+hashable-key check, range arity/overload) is **NOT a flat `FnSig`** and stays in
+`resolve_type`/`infer_named_call`, with `builtin_container_sig` supplying only a flat display/placeholder
+sig. Cross-link comments pin the split (table = dispatch, `resolve_type` = generic identity) and the drift
+guard `prelude_table_is_single_source_of_truth` now **asserts it can't rot**: the table surface MINUS the
+four container ctors equals the eight `.chz` decls + `print`, and each container ctor is a non-first-class
+`Ctor` row that is NOT in the parsed `.chz` decl set. **ZERO observable change** — `range(5)`,
+`range(1,10,2)`, `List()`/`List[int]()`, `Map()`, `Set([1,1,2])`, generic inference (`xs := List[str]()`),
+reserved-type errors (a user `struct List` still rejected), value-position rejection (`f := List`/`f :=
+range` still checker errors), and `range[int]()` still errors (Ctor membership is orthogonal to
+`name_is_generic`) — all identical, identical bytecode. New `container_ctor_parity` two-engine test +
+`container_ctor_not_firstclass_value` checker test + extended bytecode pin; `vm::do_builtin`
+`builtin_range/list/map/set` dispatch **UNTOUCHED** (name-keyed). Container ctors are now table-sourced for
+dispatch **though not `.chz`-declared** (generics).
 
 **✅ `Ref` promoted to a RESERVED GLOBAL backing the `ref` keyword — import-free (2026-07-01).** The
 `ref T` binding modifier and the explicit `Ref[T]` box now work with **no `import std.ref`**. `Ref`
