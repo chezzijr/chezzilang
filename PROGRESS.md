@@ -85,8 +85,41 @@ byte-equal to the deleted for-loops + MEMBERS len==59 cross-check), `ffi_ptr_lic
 (per-name `import ptr`/`int32` license + no cross-module leak), the existing 10 `ffi_*` typecheck tests unchanged,
 and the 3-engine golden `golden_std_native_4c_chz_matches_expected_and_interp` (`examples/std_native_4c.chz`
 alloc/store/load round-trip, VM==interp==M:N — FFI is layout-dependent UB, so a real round-trip, not goldens alone).
-`grammar.bnf` unchanged (conformance green). **Remaining `native_module_sig` content after 4c/4d/4e/4f:** only
-`net` (methoded `Socket`/`Listener`) + `concurrency` (opcode type-licensing) — the residual method/opcode arms.
+`grammar.bnf` unchanged (conformance green). **Remaining `native_module_sig` content after 4c-ffi:** `net`
+(methoded `Socket`/`Listener`) + `concurrency` (opcode type-licensing) + `ffi`'s type-license tail — `net`
+migrated next (see phase 4c-net below).
+
+**✅ NATIVE-PRELUDE — phase 4c-net (native METHOD-binding capability built + `std.net` made file-backed:
+native TYPEs `Socket`/`Listener` WITH method tables + `connect`/`listen` declared in `std/net.chz`)
+(2026-07-02).** A genuine checker CAPABILITY build (not a mechanical batch): a `native fn` inside a
+`native struct` body is now a body-less **method** sig, harvested into that type's method table
+(`harvest_native_module` PASS 1b) and checked via the **normal method-resolution path** — retiring the
+bespoke `socket_method_sig`/`listener_method_sig` arms. `std.net` becomes a **real `.chz`**: `Socket`
+(`read`/`write`/`close`) + `Listener` (`accept`/`addr`/`close`) native structs + `connect`/`listen`
+free fns, all harvested. **CRITICAL additive subtlety:** `Socket`/`Listener` KEEP resolving to the
+RESERVED `Ty::Socket`/`Ty::Listener` (opaque VM handles — NOT a fresh `Ty::Struct`), so VM interception
+(`connect`/`listen`/`read`/`write`/`accept` stay VM-intercepted by name) + `connect`'s `Result[Socket]`
+return are UNCHANGED. The harvested method table is re-seeded (method-table only, NO bare licensing —
+`net_socket_seed`/`net_listener_seed` → `seed_stdlib_structs`, the `ref_seed` precedent) into
+`self.structs["Socket"]`/`["Listener"]`, and the `Ty::Socket`/`Ty::Listener` method arms look it up
+there. Bare-name annotation stays import-gated via `imported_net` + `resolve_type`'s reserved arm.
+**Gotcha fixed:** the native-module harvest branch never ran `begin_module`, so `current_module_is_stdlib`
+was stale-false → `resolve_type(Socket)` in `connect`'s return would error `unknown type 'Socket'`; set
+`c.current_module_is_stdlib=true` at the top of the native branch (every native module IS std;
+additive-safe). This RETIRES the hand-built `"std.net"` `native_module_sig` arm (default-empty now).
+`attach_native_module_metadata` port = **no-op for net** (no Socket/Listener method recovers a return
+type from a closure arg — all concrete plain/optional-tail). Runtime (VM/interp socket/listener dispatch,
+connect/listen interception, `bind_import` Socket/Listener skips) **UNTOUCHED**. **Three-engine
+byte-identical** (checker-only cut): `net_sig_from_file_not_native_module_sig` (provenance — arm gone,
+harvested Socket/Listener method sigs byte-exact to the retired bespoke arm), the D6c
+`socket_read/write/listener_accept_with_timeout_type_checks` + arity/type rejects (now resolve via the
+harvested table), `native_struct_parses_native_methods` (parser), `net_from_import_runs_both_engines`
+(extended: whole-module + from-import, method calls in a checked body — VM==interp), existing
+`examples/socket_timeout.chz` (--parallel golden) + `echo_server.chz`/`echo_server_spawn.chz` unchanged.
+`grammar.bnf` unchanged (native-decl grammar exists from 3a/4a; conformance green). **Roadmap:** after
+4c-ffi + 4c-net, `native_module_sig` retains only **concurrency** (opcode type-license) + **`ffi`'s
+residual type-license tail** (`ptr` + fixed-width `int8..uint64` — no runtime member). Concurrency is the
+last migration (opcode-backed generic types `Shared`/`RwShared`/`Atomic`/`Executor`).
 
 **✅ NATIVE-PRELUDE — phase 4f (`std.process` + `std.request` made file-backed: native TYPE + FNs
 declared in `std/process.chz` / `std/request.chz`) (2026-07-02).** Mechanical application of the proven
@@ -117,9 +150,10 @@ deleted arms; request's optional-tail min_params exact), `regex_sig_from_file_no
 — asserts both arms gone), `request_optional_timeout_arg_typechecks` (both arities check), `native_fn_allows_optional_trailing_default`
 (parser), `process_request_file_backed_three_engine_parity` + `pure_type_import_no_fault_both_engines`
 (VM==interp==M:N), existing `examples/process_polish.chz` + `sys.chz` goldens unchanged on both engines.
-**Roadmap:** after 4b/4c/4f, `native_module_sig` retains only **concurrency** (opcode type-license) and
-**net** (methoded `Socket`/`Listener`) — the residual method/opcode arms (ffi migrated in phase 4c-ffi).
-`grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a; conformance green).
+**Roadmap:** after 4b/4f/4c-ffi/4c-net, `native_module_sig` retains only **concurrency** (opcode
+type-license) and **`ffi`'s residual type-license tail** (`ptr` + fixed-width `int8..uint64`) — concurrency
+is the last migration. `grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a;
+conformance green).
 
 **✅ NATIVE-PRELUDE — phase 4e (4 pure-function native modules made file-backed:
 `std.encoding`/`std.crypto`/`std.uuid`/`std.time`) (2026-07-02).** REFACTOR-ONLY, **ZERO observable
@@ -172,8 +206,9 @@ tables + `native_consts` untouched), `math_is_file_backed_native` (resolver), an
 `golden_std_native_4d_chz_matches_expected_and_interp` (`examples/std_native_4d.chz`, VM==interp==M:N).
 `module_fn_docs_all_resolve` now builds the effective sig via the graph (the migrated fns are harvested).
 `native fn` in a user file still rejected; `grammar.bnf` unchanged (conformance green). **Remaining
-`native_module_sig` content after 4c/4d/4e/4f:** only `net` (methoded `Socket`/`Listener`) and
-`concurrency` (opcode type-licensing) — the residual method/opcode arms (ffi migrated in phase 4c-ffi).
+`native_module_sig` content after 4d/4e/4f/4c-ffi/4c-net:** only `concurrency` (opcode type-licensing)
+and `ffi`'s residual type-license tail (`ptr` + fixed-width `int8..uint64`) — concurrency is the last
+migration. (`net` migrated in 4c-net, `ffi` fns in 4c-ffi.)
 
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is
@@ -200,9 +235,10 @@ finalize, `native/regex.rs`) stay, **field-order drift-guarded** by `regex_chz_m
 VM==interp==M:N — locks the pure-type `bind_import` skip), existing regex goldens
 (`golden_regex_demo_via_run_file`) unchanged. `grammar.bnf` unchanged (native-decl grammar exists from 3a/4a;
 conformance green). **Roadmap:** `Response`/`ProcResult` are now DONE too (phase 4f — see the entry above).
-phase-4c = concurrency (`Shared`/`RwShared`/`Atomic`/`Executor`) file-backed with `native struct` + native
-**METHOD** binding (the first methoded native types) + net `Socket`/`Listener`; Tier-3
-(`Option`/`Result`/`Iterator`) INTENTIONALLY stays native.
+net `Socket`/`Listener` are DONE too (phase 4c-net — the first methoded native types, native METHOD
+binding built there). Remaining phase-4c = concurrency (`Shared`/`RwShared`/`Atomic`/`Executor`)
+file-backed with `native struct` + method binding; Tier-3 (`Option`/`Result`/`Iterator`) INTENTIONALLY
+stays native.
 
 **✅ NATIVE-PRELUDE — phase 4a (`native struct` syntax + companion-stub loader for file-less native
 modules) (2026-07-02) — companion stub RETIRED in phase 4b (above).** NEW LANGUAGE FEATURE (the **type-level** analog of phase-3a `native fn`/`native

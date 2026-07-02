@@ -2425,15 +2425,18 @@ native struct Match:              # regex.Match's SIGNATURE (fields-only)
 native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE MEMBER
 ```
 
-- **Fields-only** for a `native struct`: a `fn`/`test` method sig or a field `= default` inside the body
-  is a parse error. Bodyless native **method** sigs are a later follow-up (phase 4c, concurrency).
+- A `native struct` body may declare **fields** and/or bodyless **`native fn` methods** (phase 4c-net):
+  a `native fn` inside the body is harvested into the type's method table and checked via the normal
+  method-resolution path (this is how `std.net`'s `Socket`/`Listener` declare `read`/`write`/`accept`/
+  `close`). A **plain** `fn`/`test` method (with a body) or a field `= default` inside the body is still a
+  parse error — the runtime dispatch stays native, so a native struct never carries a *compiled* method.
 - **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
   error** (*native struct declarations are only allowed in standard-library modules*); nesting is a
   parse error.
-- **Native members of any file-backed std module** (phase 4b/4d): `native fn`/`native struct` are no longer
-  limited to the always-linked universe prelude (`std/prelude.chz`). A **normally-imported** file-backed
-  std module (`std/regex.chz`, plus phase-4d `std/math.chz` / `std/io.chz` / `std/os.chz` / `std/rand.chz`
-  / `std/fs.chz`) declares its native type + functions **in-module**; the checker
+- **Native members of any file-backed std module** (phase 4b/4d/4c-net): `native fn`/`native struct` are no
+  longer limited to the always-linked universe prelude (`std/prelude.chz`). A **normally-imported** file-backed
+  std module (`std/regex.chz`, phase-4d `std/math.chz` / `std/io.chz` / `std/os.chz` / `std/rand.chz`
+  / `std/fs.chz`, and phase-4c `std/net.chz`) declares its native type + functions **in-module**; the checker
   harvests them as the module's **signature source** (the type's field layout + the fns' signatures),
   while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
   import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` (or `math.sqrt`) are reached

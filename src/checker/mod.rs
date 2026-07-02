@@ -863,6 +863,15 @@ impl Checker {
         for (idx, lm) in graph.modules.iter().enumerate() {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
+                // A native std module is always stdlib. The file-backed harvest resolves its own decls'
+                // types — including std.net's RESERVED `Socket`/`Listener` return types (`connect ->
+                // Result[Socket]`, `accept -> Result[Socket]`), whose `resolve_type` reserved arm is
+                // gated on `net_licensed` → `current_module_is_stdlib`. The native branch never runs
+                // `begin_module` (which sets this for AST modules), so set it here or the harvest would
+                // error `unknown type 'Socket'`. Additive-safe: every native module IS std, and the
+                // other file-backed modules resolve their non-reserved types via the transient
+                // `struct_names` arm regardless of this flag.
+                c.current_module_is_stdlib = true;
                 let mut sig = native_module_sig(name);
                 // FILE-BACKED native modules (std.regex 4b; std.encoding/crypto/uuid/time 4e;
                 // std.process/std.request 4f; std.math/io/os/rand/fs 4d) harvest their whole callable
@@ -873,6 +882,14 @@ impl Checker {
                 // gate — lockstep by construction.
                 if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
+                }
+                // Phase 4c-net — cache std.net's harvested `Socket`/`Listener` method tables so
+                // `seed_stdlib_structs` can re-seed them (bare, method-table only) into `self.structs`
+                // for every subsequent module, letting `socket.read(...)`/`listener.accept(...)` resolve
+                // via the normal method path (the retired bespoke `socket_method_sig` arm's replacement).
+                if name == "std.net" {
+                    c.net_socket_seed = sig.struct_defs.get("Socket").cloned();
+                    c.net_listener_seed = sig.struct_defs.get("Listener").cloned();
                 }
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
                 // module constants like math.pi/e, numeric-poly fns like math.abs). Run for EVERY
@@ -916,34 +933,23 @@ impl Checker {
 /// per-engine value lowering. `std.math` params are `float` (the language has no implicit int→float,
 /// so callers pass floats); `pi`/`e` are float constants.
 fn native_module_sig(name: &str) -> ModuleSig {
+    // Only the residual opcode/type-license modules still have a hand-built arm (concurrency's ctor
+    // type names, time's `timer`, ffi's C-ABI type-license tail) — every one inserts ONLY `sig.types`,
+    // so there is no `func()`/`sig.functions` helper here anymore (all callable fns are file-backed and
+    // harvested from `std/<M>.chz`). See `is_file_backed_native` + `harvest_native_module`.
     let mut sig = ModuleSig::default();
-    let mut func = |n: &str, params: Vec<Ty>, ret: Ty| {
-        sig.functions
-            .insert(n.to_string(), FnSig::plain(params, ret));
-    };
     match name {
         // std.math / std.io / std.os / std.rand (phase 4d) and std.process (phase 4f) are FILE-BACKED:
         // their whole signatures are declared in `std/<M>.chz` and harvested via `harvest_native_module`
         // — NO hand-built arm here (this fn returns the default-empty sig for them). The checker-side
         // metadata native decls can't express (math's `pi`/`e` values + `abs`'s numeric polymorphism +
         // hover docs) is re-attached post-harvest by `attach_native_module_metadata`.
-        "std.net" => {
-            // D6 — minimal TCP surface. `connect`/`listen` take a `"host:port"` address; the sockets
-            // are non-blocking (a would-block op parks the fiber on the netpoller). The `connect`/
-            // `listen`/`read`/`write`/`accept` calls are intercepted in the VM (they allocate a
-            // `Socket`/`Listener` handle + register poller interest), not run as off-heap natives.
-            func("connect", vec![Ty::Str], Ty::result(Ty::Socket));
-            func("listen", vec![Ty::Str], Ty::result(Ty::Listener));
-            // The two TCP handle TYPE names live in `sig.types` so `import Socket from std.net`
-            // validates membership; the checker's `bind_import` records them into the per-module
-            // `imported_net` set, and `resolve_type` then accepts the bare `Socket`/`Listener`
-            // annotation only in a module that imported it (whole-module or per-name). They carry no
-            // runtime module-member value — a `Socket` value comes from `connect`/`listen` and the
-            // type resolves directly to `Ty::Socket` — so there are no extra `sig.functions`/`values`.
-            for tn in ["Socket", "Listener"] {
-                sig.types.insert(tn.to_string());
-            }
-        }
+        // std.net (phase 4c-net) is FILE-BACKED: its `connect`/`listen` free fns AND its `Socket`/
+        // `Listener` native structs (WITH harvested method tables — the native-method-binding
+        // capability) are declared in `std/net.chz` and harvested via `harvest_native_module` — NO
+        // hand-built arm here. The `Socket`/`Listener` TYPE names still resolve to the RESERVED
+        // `Ty::Socket`/`Ty::Listener` (opaque VM handles, import-gated via `imported_net`); the
+        // `connect`/`listen`/`read`/`write`/`accept` calls stay VM-intercepted at runtime by name.
         // std.fs (phase 4d) and std.encoding / std.crypto / std.uuid (phase 4e) are FILE-BACKED: their
         // whole signatures are declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via
         // `harvest_native_module` — NO hand-built arm here (this fn returns the default-empty sig for
@@ -1390,6 +1396,17 @@ struct Checker {
     /// linked into the graph, so this is single-sourced from the `.chz` rather than hand-built. `None`
     /// until harvested (and on the lone single-module `check` path, which has no graph).
     ref_seed: Option<StructInfo>,
+    /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /
+    /// `Listener` handles, captured from the file-backed `std/net.chz` harvest the first time std.net is
+    /// checked in the graph. `Socket`/`Listener` resolve to the RESERVED `Ty::Socket`/`Ty::Listener`
+    /// (opaque VM handles, NOT nominal structs), so — unlike Match/Response — their layout is not seeded
+    /// for field access; only the METHOD table is re-seeded (bare, into `self.structs["Socket"]` /
+    /// `["Listener"]`) by [`seed_stdlib_structs`] so `socket.read(...)` / `listener.accept(...)` resolve
+    /// via the normal method path in every module. Bare-name annotation stays import-gated by
+    /// `imported_net` + `resolve_type`'s reserved arm — the seed adds NO bare licensing. `None` until
+    /// std.net is harvested (and on the single-module `check` path, which has no graph).
+    net_socket_seed: Option<StructInfo>,
+    net_listener_seed: Option<StructInfo>,
     /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
     /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
     /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —
@@ -1508,6 +1525,8 @@ impl Checker {
             defer_floors: Vec::new(),
             current_module_is_stdlib: false,
             ref_seed: None,
+            net_socket_seed: None,
+            net_listener_seed: None,
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
@@ -1610,6 +1629,20 @@ impl Checker {
                 .entry("Ref".into())
                 .or_insert_with(|| "Ref".into());
         }
+        // Phase 4c-net — re-seed std.net's `Socket`/`Listener` METHOD tables (harvested from
+        // `std/net.chz`) under their bare names so `socket.read(...)`/`listener.accept(...)` resolve via
+        // the normal method path (the `Ty::Socket`/`Ty::Listener` method arms look the table up here).
+        // Unlike `Ref` above, NO `struct_names`/`bare_types` licensing is added: `Socket`/`Listener`
+        // resolve to the RESERVED `Ty::Socket`/`Ty::Listener` (opaque handles, not nominal structs) via
+        // `resolve_type`'s reserved arm, which stays import-gated by `imported_net`. The method table is
+        // reached only from a value whose `Ty` is already `Ty::Socket`/`Ty::Listener`, so a bare
+        // unimported annotation still errors while a licensed `socket.read(...)` still resolves.
+        if let Some(info) = self.net_socket_seed.clone() {
+            self.structs.insert("Socket".into(), info);
+        }
+        if let Some(info) = self.net_listener_seed.clone() {
+            self.structs.insert("Listener".into(), info);
+        }
     }
 
     /// Phase 4b — harvest a FILE-BACKED native std module's whole SIGNATURE from its parsed in-module
@@ -1659,6 +1692,9 @@ impl Checker {
                 let info = StructInfo {
                     type_params: type_params.clone(),
                     fields: harvested_fields,
+                    // Methods are harvested in PASS 1b below (after every native struct name is
+                    // transiently visible so a method return type can reference a sibling native
+                    // struct, e.g. `Listener.accept -> Result[Socket]`).
                     methods: HashMap::new(),
                     origin: StructOrigin::Builtin,
                     doc: None,
@@ -1708,33 +1744,37 @@ impl Checker {
                 ffi_type_transient.push(tn.clone());
             }
         }
+        // PASS 1b — native METHODS (phase 4c). A `native fn` inside a `native struct` body declares a
+        // body-less method sig harvested into that type's method table, checked via the NORMAL method-
+        // resolution path (retiring the bespoke `socket_method_sig`/`listener_method_sig` arms). Runs
+        // after PASS 1 so every native struct name is transiently visible (a method return type can
+        // reference a sibling native struct — `Listener.accept -> Result[Socket]`). For a generic native
+        // struct the type params are in scope while resolving its method sigs.
+        for s in &ast.stmts {
+            if let StmtKind::NativeStruct {
+                name,
+                type_params,
+                methods,
+                ..
+            } = &s.kind
+                && !methods.is_empty()
+            {
+                let saved = self.enter_type_params(type_params);
+                let table: HashMap<String, FnSig> = methods
+                    .iter()
+                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m)))
+                    .collect();
+                self.exit_type_params(saved);
+                if let Some(info) = sig.struct_defs.get_mut(name) {
+                    info.methods = table;
+                }
+            }
+        }
         // PASS 2 — native fns (module members, sig from the parsed decl; runtime value name-keyed).
         for s in &ast.stmts {
             if let StmtKind::Native(decl) = &s.kind {
-                let params: Vec<Ty> = decl
-                    .params
-                    .iter()
-                    .map(|p| match &p.ty {
-                        Some(t) => self.resolve_type(t, decl.span),
-                        None => Ty::Unknown,
-                    })
-                    .collect();
-                let ret = match &decl.ret {
-                    Some(t) => self.resolve_type(t, decl.span),
-                    None => Ty::Unknown,
-                };
-                // A trailing `= default` marker on a native-fn param lowers to an OPTIONAL tail
-                // (min_params = len - trailing-defaults), the file-backed spelling of std.request's
-                // `get`/`post`/`request` optional `timeout_ms`. `parse_params` already guarantees any
-                // default is trailing, so a plain count is correct. The default EXPR itself is inert
-                // (desugar ignores `StmtKind::Native`, so it is never injected at a call site).
-                let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
-                let fsig = if optional > 0 {
-                    FnSig::optional_tail(params, ret, optional)
-                } else {
-                    FnSig::plain(params, ret)
-                };
-                sig.functions.insert(decl.name.clone(), fsig);
+                sig.functions
+                    .insert(decl.name.clone(), self.harvest_native_fn_sig(decl));
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.
@@ -1769,6 +1809,48 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Lower one body-less `native fn`/`native ctor` (a free module member OR a native-struct method) to
+    /// its [`FnSig`], per the native-decl dynamic convention: an unannotated param → `Ty::Unknown`; no
+    /// `-> ret` → `Ty::Unknown` (a native-controlled return). A trailing `= default` marker lowers to an
+    /// OPTIONAL tail (`min_params = len - trailing-defaults`) — the file-backed spelling of the net
+    /// socket ops' optional `timeout_ms` (and std.request's `get`/`post`). `parse_params` guarantees any
+    /// default is trailing, so a plain count is correct; the default EXPR is inert (desugar ignores
+    /// `StmtKind::Native`, so it is never injected at a call site). Callers set any needed type-param
+    /// scope (native-struct methods enter the struct's `type_params`).
+    fn harvest_native_fn_sig(&mut self, decl: &NativeDecl) -> FnSig {
+        let params: Vec<Ty> = decl
+            .params
+            .iter()
+            .map(|p| match &p.ty {
+                Some(t) => self.resolve_type(t, decl.span),
+                None => Ty::Unknown,
+            })
+            .collect();
+        let ret = match &decl.ret {
+            Some(t) => self.resolve_type(t, decl.span),
+            None => Ty::Unknown,
+        };
+        let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
+        if optional > 0 {
+            FnSig::optional_tail(params, ret, optional)
+        } else {
+            FnSig::plain(params, ret)
+        }
+    }
+
+    /// Phase 4c-net — look up a method sig on a reserved native handle type (`Socket`/`Listener`) in the
+    /// harvested method table `seed_stdlib_structs` re-seeded into `self.structs[type]`. Replaces the
+    /// retired bespoke `socket_method_sig`/`listener_method_sig`; the sigs (params/min_params/ret) come
+    /// verbatim from `std/net.chz`. The method sigs carry NO `self` receiver (net.chz declares none), so
+    /// `params` are the call args directly — the `Ty::Socket`/`Ty::Listener` arms pass them to
+    /// `check_args_range` unchanged.
+    fn native_handle_method(&self, ty_name: &str, method: &str) -> Option<FnSig> {
+        self.structs
+            .get(ty_name)
+            .and_then(|info| info.methods.get(method))
+            .cloned()
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
@@ -1990,6 +2072,16 @@ impl Checker {
                 let is_std = path.first().map(String::as_str) == Some("std");
                 if let Some(sig) = self.module_sigs.get(&imp.target).cloned() {
                     for (sname, info) in &sig.struct_defs {
+                        // A RESERVED native handle (std.net's `Socket`/`Listener`) has a `sig.struct_defs`
+                        // entry only for its harvested METHOD table — it is NOT a constructible/nominal
+                        // struct (it resolves to the opaque `Ty::Socket`/`Ty::Listener` via
+                        // `resolve_type`'s reserved arm, and its method table is seeded independently by
+                        // `seed_stdlib_structs`). Skip it entirely here so a whole-module `import std.net`
+                        // does NOT make bare `Socket(...)` a constructor or `Socket` a nominal-struct
+                        // annotation (both must stay gated by the reserved arm / rejected as a ctor).
+                        if self.qualified_builtin_ty(sname, &[]).is_some() {
+                            continue;
+                        }
                         // Register the LAYOUT under the DECLARING module's runtime key (bare unless a
                         // genuine cross-module clash). Register BOTH colliding layouts (no first-wins),
                         // so a value of either — whose `Ty` carries the matching key — resolves its
@@ -9282,9 +9374,14 @@ impl Checker {
         {
             // `module.Struct(args)` — qualified struct constructor. `module` is a bound module name
             // whose sig declares struct `name`. Inject nothing: resolve the constructor through the
-            // sig's struct shape (mirrors `infer_named_call`'s struct path, with type args).
+            // sig's struct shape (mirrors `infer_named_call`'s struct path, with type args). A RESERVED
+            // native type (std.net's `Socket`/`Listener`) now also has a `sig.struct_defs` entry (for
+            // its harvested METHOD table), but it resolves to an opaque `Ty::Socket`/`Ty::Listener` and
+            // has NO from-nothing constructor — exclude it here so `net.Socket()` falls through to the
+            // "has no constructor" arm below (a value comes only from `connect`/`listen`/`accept`).
             if let ExprKind::Ident(mname) = &obj.kind
                 && !self.is_local_binding(mname)
+                && self.qualified_builtin_ty(name, &[]).is_none()
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.struct_defs.get(name)
@@ -11538,7 +11635,7 @@ impl Checker {
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return
             // their `Result`.
             Ty::Socket => {
-                if let Some(sig) = socket_method_sig(method) {
+                if let Some(sig) = self.native_handle_method("Socket", method) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
@@ -11548,7 +11645,7 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Listener => {
-                if let Some(sig) = listener_method_sig(method) {
+                if let Some(sig) = self.native_handle_method("Listener", method) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
@@ -15566,47 +15663,6 @@ fn atomic_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
-}
-
-/// D6 — built-in method signatures on `Socket` (std.net). `read(n)` returns up to `n` bytes as a
-/// `str` (empty on a clean EOF / peer close); `write(s)` returns the byte count written; both are
-/// `Result` (I/O can fail). `close()` releases the fd.
-fn socket_method_sig(method: &str) -> Option<FnSig> {
-    match method {
-        // D6c — `read`/`write` take an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no
-        // data / not writable within it). The required first param (byte count / payload) stays.
-        "read" => Some(FnSig::optional_tail(
-            vec![Ty::Int, Ty::Int],
-            Ty::result(Ty::Str),
-            1,
-        )),
-        "write" => Some(FnSig::optional_tail(
-            vec![Ty::Str, Ty::Int],
-            Ty::result(Ty::Int),
-            1,
-        )),
-        "close" => Some(FnSig::plain(vec![], Ty::Nil)),
-        _ => None,
-    }
-}
-
-/// D6 — built-in method signatures on `Listener` (std.net). `accept()` yields the next inbound
-/// connection as a `Socket` (`Result` — accept can fail); `close()` releases the fd.
-fn listener_method_sig(method: &str) -> Option<FnSig> {
-    match method {
-        // D6c — `accept` takes an OPTIONAL `timeout_ms: int` (`Err("timeout")` if no connection
-        // arrives within it).
-        "accept" => Some(FnSig::optional_tail(
-            vec![Ty::Int],
-            Ty::result(Ty::Socket),
-            1,
-        )),
-        // `addr()` reports the bound local address as `"host:port"` — lets a `listen(":0")` caller
-        // discover the OS-assigned port.
-        "addr" => Some(FnSig::plain(vec![], Ty::result(Ty::Str))),
-        "close" => Some(FnSig::plain(vec![], Ty::Nil)),
-        _ => None,
-    }
 }
 
 /// Built-in method signatures on `Executor` (C5 escape hatch). `submit` takes a detached, zero-arg

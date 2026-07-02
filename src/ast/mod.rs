@@ -204,12 +204,15 @@ pub enum StmtKind {
     /// analog of [`StmtKind::Native`] (prelude/std-only; rejected in user modules). Declares a native
     /// type's checker SIGNATURE (its field layout + type params) in Chezzi; the runtime layout + method
     /// dispatch stay native (name-keyed). The backends compile NOTHING for it (never a user struct).
-    /// Fields-only for now (phase 4a); bodyless native method sigs are a phase-4b follow-up.
+    /// Fields are body-less; `methods` (phase 4c) are body-less `native fn` sigs harvested into the
+    /// native type's method table (Socket/Listener's read/write/accept/close), checked via the normal
+    /// method-resolution path — never compiled.
     NativeStruct {
         name: String,
         name_span: Span,
         type_params: Vec<TypeParam>,
         fields: Vec<Field>,
+        methods: Vec<NativeDecl>,
         span: Span,
     },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`

@@ -391,9 +391,10 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
 /// distinction). `std.time` is file-backed for its 4 real fns but ALSO keeps a minimal
 /// `native_module_sig` arm for its opcode-backed `timer` type-license (no runtime member value).
 /// Phases: std.regex (4b); std.encoding/crypto/uuid/time (4e); std.process/request (4f);
-/// std.math/io/os/rand/fs (4d); std.ffi (4c). `std.ffi` is file-backed for its 59 real fns but ALSO
-/// keeps a minimal `native_module_sig` arm for its opcode/type-license names (`ptr` + the fixed-width
-/// int names — no runtime member value), like `std.time`'s `timer`.
+/// std.math/io/os/rand/fs (4d); std.ffi (4c-ffi) — file-backed for its 59 real fns but ALSO keeps a
+/// minimal `native_module_sig` arm for its opcode/type-license names (`ptr` + the fixed-width int
+/// names — no runtime member value), like `std.time`'s `timer`; std.net (4c-net — native structs WITH
+/// harvested method tables).
 pub fn is_file_backed_native(name: &str) -> bool {
     matches!(
         name,
@@ -410,6 +411,7 @@ pub fn is_file_backed_native(name: &str) -> bool {
             | "std.rand"
             | "std.fs"
             | "std.ffi"
+            | "std.net"
     )
 }
 
