@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE — phase 4c-followup (native instance methods now declare `self`, mirroring user
+structs) (2026-07-02).** A `native fn` inside a `native struct` body is an INSTANCE method and now MUST
+declare a leading bare `self` as its first parameter (`native fn read(self, n: int) -> Result[str]`,
+`native fn get(self) -> T`) — resolving the DX asymmetry where native methods omitted `self` yet were
+instance methods. **BEHAVIOR-PRESERVING:** the parser accepts `self` and harvest (`harvest_native_fn_sig(_,
+skip_self=true)` in PASS 1b) STRIPS it BEFORE the param→`Ty` map (so `self` is never a spurious dynamic
+`Ty::Unknown` receiver) AND before the optional-tail count — the resulting method-table `FnSig`
+(params/min_params/ret) is BYTE-IDENTICAL to the pre-`self` spelling, so checker resolution, runtime
+dispatch, and 3-engine parity are all unchanged (the existing `net_sig_from_file_not_native_module_sig` /
+`concurrency_harvested_method_sigs_shape` sig-guards pass with their SAME asserted params — the
+behavior-preserving proof). A self-less body `native fn` is now a parse error (`native instance method
+must declare 'self' as its first parameter`) — the self-less form is **RESERVED** for a future native
+STATIC method (not implemented — just the error). `self` is valid ONLY as the first param, and a
+module-level (free) `native fn` may NOT take `self` (`parse_native(in_struct: bool)` threads the rule).
+Updated `std/net.chz` (Socket/Listener, 6 methods) + `std/concurrency.chz` (Shared/RwShared/Atomic/
+Executor); `regex.Match`/`request.Response` are fields-only (no change). Parser+checker-only; `src/vm` +
+`src/interp` UNTOUCHED.
+
 **✅ NATIVE-PRELUDE — phase 4c-concurrency (`std.concurrency` made file-backed: the four GENERIC native
 types `Shared[T]`/`RwShared[T]`/`Atomic[T]`/`Executor` WITH method tables declared in
 `std/concurrency.chz`) (2026-07-02).** The **LAST** virtual native module — after it EVERY native std

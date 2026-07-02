@@ -2426,12 +2426,18 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
 ```
 
 - A `native struct` body may declare **fields** and/or bodyless **`native fn` methods** (phase 4c-net):
-  a `native fn` inside the body is harvested into the type's method table and checked via the normal
-  method-resolution path (this is how `std.net`'s `Socket`/`Listener` declare `read`/`write`/`accept`/
-  `close`). A **plain** `fn`/`test` method (with a body) or a field `= default` inside the body is still a
-  parse error — the runtime dispatch stays native, so a native struct never carries a *compiled* method.
+  a `native fn` inside the body is an **instance method** and — like a user-struct method — declares a
+  leading bare `self` as its first parameter (`native fn read(self, n: int) -> Result[str]`); it is
+  harvested into the type's method table (harvest **strips** the `self` receiver, so the recorded sig is
+  the call-arg shape) and checked via the normal method-resolution path (this is how `std.net`'s
+  `Socket`/`Listener` declare `read`/`write`/`accept`/`close`). A `native fn` inside the body **without**
+  a leading `self` is a parse error (`native instance method must declare 'self' as its first parameter`)
+  — the self-less form is **reserved** for a future native *static* method (not yet supported); a
+  module-level (free) `native fn` conversely may **not** take `self`. A **plain** `fn`/`test` method (with
+  a body) or a field `= default` inside the body is still a parse error — the runtime dispatch stays
+  native, so a native struct never carries a *compiled* method.
 - A `native struct` may be **generic** (`native struct Shared[T]:`, phase 4c-concurrency): its method
-  sigs may reference the type params (`native fn get() -> T`, `native fn set(v: T) -> nil`), and each
+  sigs may reference the type params (`native fn get(self) -> T`, `native fn set(self, v: T) -> nil`), and each
   call site **substitutes** the value's element type (`Shared[int].set` expects `int`) — the same subst
   the generic-struct machinery uses. This is how `std.concurrency` declares `Shared[T]`/`RwShared[T]`/
   `Atomic[T]` (and non-generic `Executor`). A method whose sig a plain harvested decl can't express (a

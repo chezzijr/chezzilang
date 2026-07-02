@@ -20,14 +20,14 @@
 # desugar never injects a native-fn default at a call site, so the supplied arg count stays truthful.
 
 native struct Socket:
-    native fn read(n: int, timeout_ms: int = 0) -> Result[str]
-    native fn write(data: str, timeout_ms: int = 0) -> Result[int]
-    native fn close() -> nil
+    native fn read(self, n: int, timeout_ms: int = 0) -> Result[str]
+    native fn write(self, data: str, timeout_ms: int = 0) -> Result[int]
+    native fn close(self) -> nil
 
 native struct Listener:
-    native fn accept(timeout_ms: int = 0) -> Result[Socket]
-    native fn addr() -> Result[str]
-    native fn close() -> nil
+    native fn accept(self, timeout_ms: int = 0) -> Result[Socket]
+    native fn addr(self) -> Result[str]
+    native fn close(self) -> nil
 
 native fn connect(addr: str) -> Result[Socket]
 native fn listen(addr: str) -> Result[Listener]

@@ -218,15 +218,24 @@
 <nativeHead>  ::= "FN" | "IDENT"
 
 # `native struct` — the TYPE-level analog of `native fn`/`native ctor` (phase 4a). A body-less
-# `native struct NAME[T…]:` declares a native type's checker SIGNATURE (its field layout) in Chezzi;
-# the runtime layout + method dispatch stay native (name-keyed). PRELUDE/STD-ONLY (the checker rejects
-# it in a user module) and TOP-LEVEL-only. Fields-only for now (a `fn`/`test` method sig or a field
-# `= default` inside the body is a parse error); bodyless native method sigs are a phase-4b follow-up.
-# Used in the companion stub `std/regex.stub.chz` (parsed to harvest regex.Match's signature).
-<nativeStructDecl> ::= "NATIVE" "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeFieldDecls> "DEDENT"
-                     | "NATIVE" "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeFieldDecls> "DEDENT"
-<nativeFieldDecls> ::= <nativeFieldDecl> | <nativeFieldDecl> <nativeFieldDecls>
+# `native struct NAME[T…]:` declares a native type's checker SIGNATURE (its field layout + method
+# table) in Chezzi; the runtime layout + method dispatch stay native (name-keyed). PRELUDE/STD-ONLY
+# (the checker rejects it in a user module) and TOP-LEVEL-only. The body is a sequence of members, each
+# a field (`IDENT COLON <type>`, no `= default` — a native layout carries no default) OR a bodyless
+# `native fn` INSTANCE method (phase 4c). A `native fn` method MUST declare a leading bare `self` as
+# its first parameter (mirroring a user-struct method; harvest strips it) — a self-less body `native
+# fn` is a parse error (the form is reserved for a future native static method). A plain `fn`/`test`
+# method (with a body) is a parse error. A method sig may reference the struct's type params
+# (`native fn get(self) -> T`), e.g. `std/concurrency.chz`'s `Shared[T]`.
+<nativeStructDecl> ::= "NATIVE" "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
+                     | "NATIVE" "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
+<nativeStructMembers> ::= <nativeStructMember> | <nativeStructMember> <nativeStructMembers>
+<nativeStructMember> ::= <nativeFieldDecl> | <nativeMethodDecl>
 <nativeFieldDecl>  ::= "IDENT" "COLON" <type> "NEWLINE"
+# A native instance method: `<params>` must begin with the bare receiver `self` (checker/parser rule,
+# not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
+<nativeMethodDecl> ::= "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
 # An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
 # may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).
