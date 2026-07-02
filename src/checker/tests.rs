@@ -5385,6 +5385,28 @@ fn type_name_not_firstclass_value() {
 }
 
 #[test]
+fn container_ctor_not_firstclass_value() {
+    // Phase 2b: folding the four container ctors (range/List/Map/Set) into the native-prelude table as
+    // `Intrinsic::Ctor` rows (`first_class: false`) must NOT make them first-class values — a
+    // value-position use stays REJECTED, on the same fall-through path as the scalar ctors (`f := int`)
+    // and user struct ctors (`f := Point`). The `first_class == false` gate keeps them off the
+    // `LoadBuiltin`/`Ty::BuiltinFn` arm.
+    rejects("fn w():\n    f := List\n", "List");
+    rejects("fn w():\n    f := Map\n", "Map");
+    rejects("fn w():\n    f := Set\n", "Set");
+    rejects("fn w():\n    f := range\n", "range");
+    // A container ctor in `defer` single-call position must still be wrapped (not first-class).
+    rejects(
+        "fn w():\n    defer List()\n",
+        "built-ins and constructors must be wrapped",
+    );
+    // Table membership is orthogonal to genericity: `range` is a Ctor row but NON-generic, so a
+    // turbofish (`range[int]()`) is still rejected — the error stays in `infer_named_call`, not the
+    // table. (List/Map/Set ARE generic and accept a turbofish; only `range` rejects it.)
+    rejects("x := range[int](5)\n", "takes no type arguments");
+}
+
+#[test]
 fn scalar_ctor_not_firstclass_value() {
     // Phase 2a: folding the five scalar-conversion ctors (int/float/str/bytes/bytearray) into the
     // native-prelude table as `Intrinsic::Ctor` rows must NOT make them first-class values — a
@@ -11120,6 +11142,9 @@ fn prelude_table_is_single_source_of_truth() {
         BTreeSet::from(["print", "ord", "chr", "panic"]),
         "the first-class PRELUDE rows must be exactly the four universe fns"
     );
+    // Phase 2b folded the four GENERIC / reserved-type container ctors (List/Map/Set/range) into the
+    // table as `Intrinsic::Ctor` rows for DISPATCH single-source; their generic TYPE-IDENTITY still
+    // lives in `resolve_type`/`infer_named_call` (not expressible as a flat `FnSig`).
     let ctors: BTreeSet<&str> = PRELUDE
         .iter()
         .filter(|p| p.intrinsic == Intrinsic::Ctor)
@@ -11127,14 +11152,33 @@ fn prelude_table_is_single_source_of_truth() {
         .collect();
     assert_eq!(
         ctors,
-        BTreeSet::from(["int", "float", "str", "bytes", "bytearray"]),
-        "the Ctor PRELUDE rows must be exactly the five scalar-conversion ctors"
+        BTreeSet::from([
+            "int",
+            "float",
+            "str",
+            "bytes",
+            "bytearray",
+            "List",
+            "Map",
+            "Set",
+            "range"
+        ]),
+        "the Ctor PRELUDE rows must be the five scalar-conversion ctors plus the four container ctors"
     );
-    // Container/reserved-type ctors stay OUT of the table (phase 2b).
+    // The four container/reserved-type ctors are now IN the table (phase 2b), each a NON-first-class
+    // `Intrinsic::Ctor` row (dispatch single-source; generic identity stays in resolve_type).
     for c in ["List", "Map", "Set", "range"] {
+        let p = prelude_fn(c).unwrap_or_else(|| {
+            panic!("'{c}' must be a PRELUDE row (container ctor folded in, 2b)")
+        });
+        assert_eq!(
+            p.intrinsic,
+            Intrinsic::Ctor,
+            "'{c}' must be an Intrinsic::Ctor row"
+        );
         assert!(
-            prelude_fn(c).is_none(),
-            "'{c}' must stay out of PRELUDE (container/reserved-type ctor = phase 2b)"
+            !p.first_class,
+            "container ctor '{c}' must be non-first-class"
         );
     }
 
@@ -11263,14 +11307,36 @@ fn prelude_table_is_single_source_of_truth() {
             }
         }
     }
-    // Whole prelude surface = {parsed 8} ∪ {print, synthetic}.
+    // The `.chz`-DECLARED surface = {parsed 8} ∪ {print, synthetic}. Phase 2b folded the four GENERIC
+    // container ctors into the table for DISPATCH single-source, but they are deliberately NOT `.chz`
+    // decls (they are generic — native ctor generic-decl support is a later, maybe-never concern), so
+    // they are the exact set by which the TABLE surface exceeds the `.chz`-declared surface. Asserting
+    // that split pins the design: table-sourced dispatch ⊋ native-declared, differing by exactly the
+    // four container ctors, and each is a NON-first-class Ctor row that is NOT parsed from `.chz`.
+    const CONTAINER_CTORS: [&str; 4] = ["List", "Map", "Set", "range"];
     let mut whole: BTreeSet<&str> = parsed_names.clone();
     whole.insert("print");
     let table_surface: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
+    let mut table_minus_containers = table_surface.clone();
+    for c in CONTAINER_CTORS {
+        table_minus_containers.remove(c);
+    }
     assert_eq!(
-        whole, table_surface,
-        "the PRELUDE metadata rows must equal the eight std/prelude.chz decls plus synthetic `print`"
+        whole, table_minus_containers,
+        "the PRELUDE table MINUS the four container ctors must equal the eight std/prelude.chz decls plus synthetic `print`"
     );
+    for c in CONTAINER_CTORS {
+        let p = prelude_fn(c).unwrap_or_else(|| panic!("'{c}' must be a PRELUDE row (2b)"));
+        assert_eq!(p.intrinsic, Intrinsic::Ctor, "'{c}' must be a Ctor row");
+        assert!(
+            !p.first_class,
+            "container ctor '{c}' must be non-first-class"
+        );
+        assert!(
+            !parsed_names.contains(c),
+            "container ctor '{c}' is table-sourced for DISPATCH, deliberately NOT a std/prelude.chz native decl (generic)"
+        );
+    }
     // Each parsed FnSig must equal its HISTORICAL hand-built shape (byte-identical migration). Read the
     // sigs through a prelude-seeded checker (same path production uses).
     let mut sc = Checker::new();

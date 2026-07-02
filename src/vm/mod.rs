@@ -27391,6 +27391,43 @@ main()
         assert_parity(src);
     }
 
+    /// Native-prelude phase 2b — the GENERIC / reserved-type container CTORS (range/List/Map/Set) are
+    /// now sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) for their `CallBuiltin`
+    /// DISPATCH, exactly as 2a did for the scalar ctors. Their generic type-identity resolution is
+    /// untouched, so every construction + generic-inference path must stay byte-identical on BOTH
+    /// engines (VM == interp): range overloads, empty/turbofished containers, dedup, iteration.
+    #[test]
+    fn container_ctor_parity() {
+        let src = r#"
+fn main():
+    print(range(5).len())
+    for i in range(1, 10, 2):
+        print(i)
+    xs := List[int]()
+    xs.push(10)
+    xs.push(20)
+    print(xs.len())
+    print(xs[0])
+    ss := List[str]()
+    ss.push("a")
+    print(ss[0])
+    ys := List()
+    print(ys.len())
+    m := Map()
+    m["k"] = 1
+    print(m["k"])
+    m2 := Map[str, int]()
+    print(m2.len())
+    s := Set([1, 1, 2, 3, 3])
+    print(s.len())
+    s2 := Set[int]()
+    print(s2.len())
+
+main()
+"#;
+        assert_parity(src);
+    }
+
     /// M19 SSO — string ops must stay byte-identical across both engines for strings that straddle
     /// the `ChzStr` inline/heap boundary (`INLINE_CAP` = 22 bytes), including multi-byte UTF-8.
     /// Exercises concat, split/join, indexing, iteration, `==`, `.chars()`, and string map keys.
