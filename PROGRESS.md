@@ -90,6 +90,21 @@ done (always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) IN
 too deeply coupled to `match`/`?`/generator desugar to express as a plain `.chz` decl; this is a
 documented, deliberate carve-out, not a gap.
 
+**✅ `modules.last() == entry` invariant hardened against always-injected prelude stubs (2026-07-02).**
+The resolver `build_graph_with_entry_source` always-injects `std/prelude.chz` then `std/ref.chz` BEFORE
+the entry DFS, so if the ENTRY file itself IS one of those stubs (`chezzi run std/prelude.chz`) its own
+visit is deduped by `visited` and the graph would end mid-list — `graph.entry != modules.last()` — and
+the positional-entry consumers (compiler `entry_idx = modules.len()-1`, both engines' `entry_home() =
+modules.last()`) would designate the WRONG module as entry (for test-fn discovery / manifest `:function`
+invocation). A localized guarded stable reorder in the resolver (right after `ModuleGraph` construction,
+before `desugar::run`) now moves the `graph.entry` module to the tail iff it isn't already last — a
+strict no-op for the normal case (entry is a user file, already last → zero behavior change), and stable
+for all other modules so deps still precede dependents. This **removes the phase-3a latent-contract
+follow-up** and **unblocks stacking more always-linked modules safely** in phase 4. Covered by resolver
+tests (`entry_is_prelude_stub_still_designated_last` + ref forward-guard) and a three-engine run-clean
+parity test (`entry_is_always_linked_stub_runs_clean_three_engine`: cooperative VM / `--parallel` /
+interp all Ok, empty stdout, byte-identical). Behavior-preserving; three-engine parity.
+
 **✅ `Ref` promoted to a RESERVED GLOBAL backing the `ref` keyword — import-free (2026-07-01).** The
 `ref T` binding modifier and the explicit `Ref[T]` box now work with **no `import std.ref`**. `Ref`
 joins `Result`/`Option`/`Iterator`/`Channel` in the reserved-global class (`is_reserved_type`) — the
