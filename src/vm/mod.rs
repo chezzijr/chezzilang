@@ -16078,6 +16078,39 @@ mod tests {
         assert_mc_parity(src, "body\ntask\ncleanup\n");
     }
 
+    /// Phase 4c-concurrency REGRESSION GUARD: the std.concurrency migration to a file-backed
+    /// std/concurrency.chz is CHECKER-ONLY — the ctors still lower to `Op::NewShared`/etc by name and
+    /// runtime dispatch is untouched. This drives all four primitives (Shared set/update, RwShared
+    /// write/read closure-recovery, Atomic add/cas, Executor submit/shutdown) PLUS a `parallel:` nursery
+    /// that increments a `Shared` counter, and asserts byte-identical output on all three engines
+    /// (cooperative VM, frozen interp, --parallel). Green before AND after the migration.
+    #[test]
+    fn concurrency_file_backed_three_engine() {
+        let src = "import std.concurrency\n\
+                   fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+                   fn job(id: int):\n    print(\"exec {id}\")\n\
+                   fn main():\n\
+                   \x20   s := Shared(0)\n\
+                   \x20   s.set(10)\n\
+                   \x20   parallel:\n        spawn bump(s)\n        spawn bump(s)\n        spawn bump(s)\n\
+                   \x20   print(s.get())\n\
+                   \x20   r := RwShared(5)\n\
+                   \x20   r.write(fn(x): x * 2)\n\
+                   \x20   print(r.read(fn(x): x + 1))\n\
+                   \x20   a := Atomic(0)\n\
+                   \x20   a.add(7)\n\
+                   \x20   print(a.load())\n\
+                   \x20   print(a.cas(7, 8))\n\
+                   \x20   print(a.load())\n\
+                   \x20   ex := Executor()\n\
+                   \x20   ex.submit(fn(): job(1))\n\
+                   \x20   ex.submit(fn(): job(2))\n\
+                   \x20   ex.shutdown()\n\
+                   \x20   print(\"done\")\n\
+                   main()\n";
+        assert_mc_parity(src, "13\n11\n7\ntrue\n8\nexec 1\nexec 2\ndone\n");
+    }
+
     /// M-C: a `?` early-return is a JOIN point — pending tasks run before the error propagates.
     #[test]
     fn implicit_nursery_try_joins_before_propagating() {

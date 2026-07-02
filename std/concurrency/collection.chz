@@ -22,6 +22,12 @@
 #
 # NOT PROVIDED: a concurrent queue is already `Channel[T]`; an atomic scalar is already `Atomic`.
 
+# Depend on std.concurrency explicitly (phase 4c-concurrency): though a stdlib module may use the bare
+# `RwShared` name license-free, this import makes the file-backed native module a graph DEPENDENCY, so
+# it is harvested (and its `RwShared` method table seeded) BEFORE this module is checked — regardless of
+# the entry program's import order. Without it, `r.read(...)`/`r.write(...)` here can fail to resolve.
+import std.concurrency
+
 # A private one-field mutable box (like `std.ref.Ref`, but local so there is no cross-module
 # constructor dependency). A struct is a shared reference, so a write closure that closes over a
 # `_Cell` and `set`s it persists the value to the caller — the trick that lets `get_or_insert` capture

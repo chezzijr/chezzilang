@@ -892,10 +892,25 @@ impl Checker {
                     c.net_listener_seed = sig.struct_defs.get("Listener").cloned();
                 }
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
-                // module constants like math.pi/e, numeric-poly fns like math.abs). Run for EVERY
-                // native module (idempotent for those it doesn't cover) so the doc/const/poly attach
-                // no longer lives in the deleted per-module arms.
+                // module constants like math.pi/e, numeric-poly fns like math.abs, std.concurrency's
+                // `RwShared.read`/`Executor.submit` closure-param sigs). Run for EVERY native module
+                // (idempotent for those it doesn't cover) so the doc/const/poly attach no longer lives
+                // in the deleted per-module arms.
                 attach_native_module_metadata(name, &mut sig);
+                // Phase 4c-concurrency — cache std.concurrency's harvested `Shared`/`RwShared`/`Atomic`/
+                // `Executor` method tables so `seed_stdlib_structs` can re-seed them (bare, method-table
+                // only) into `self.structs` for every subsequent module, letting `s.set(...)`/`a.cas(...)`
+                // resolve via the normal method path (the retired bespoke `shared_method_sig`/etc arms'
+                // replacement). Cached AFTER `attach_native_module_metadata` (unlike net's before-attach
+                // cache) because that step mutates `RwShared.read`/`Executor.submit`'s closure-param sigs
+                // — caching before would seed the pre-port (unannotated) tables.
+                if name == "std.concurrency" {
+                    for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
+                        if let Some(info) = sig.struct_defs.get(tn) {
+                            c.concurrency_seeds.insert(tn.to_string(), info.clone());
+                        }
+                    }
+                }
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
             }
@@ -954,18 +969,16 @@ fn native_module_sig(name: &str) -> ModuleSig {
         // whole signatures are declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via
         // `harvest_native_module` — NO hand-built arm here (this fn returns the default-empty sig for
         // them). See the caller's `is_file_backed_native` gate.
-        "std.concurrency" => {
-            // A type-licensing-only native module: NO functions/values/struct shapes — it exports
-            // ONLY the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
-            // `Executor`). They live in `sig.types` so `import Shared from std.concurrency` validates
-            // membership; the checker's `bind_import` records them into the per-module
-            // `imported_concurrency` set, and `resolve_type`/`infer_named_call` then accept the bare
-            // ctor/type name only in a module that imported it. The ctors carry no runtime value (they
-            // lower via the compiler's name→opcode dispatch), so there are no `sig.functions`/`values`.
-            for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
-                sig.types.insert(tn.to_string());
-            }
-        }
+        // std.concurrency (phase 4c-concurrency) is FILE-BACKED: its four GENERIC native structs
+        // (`Shared[T]`/`RwShared[T]`/`Atomic[T]`/`Executor`, WITH harvested method tables — the
+        // native-method-binding capability extended to generics) are declared in `std/concurrency.chz`
+        // and harvested via `harvest_native_module` — NO hand-built arm here (this fn returns the
+        // default-empty sig for it). This was the LAST virtual native module: its arm is DELETED
+        // ENTIRELY (unlike std.net which needed no residual either — the four TYPE names come from the
+        // file, not a type-license tail). The `Shared`/`RwShared`/`Atomic`/`Executor` names still
+        // resolve to the RESERVED `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (opaque VM
+        // handles, import-gated via `imported_concurrency`); the ctors stay lowered to
+        // `Op::NewShared`/etc by name, and the methods stay VM-intercepted at runtime.
         "std.time" => {
             // std.time is FILE-BACKED (phase 4e): its 4 callable fns (now/monotonic/sleep_ms/format) are
             // declared in `std/time.chz` and harvested via `harvest_native_module` on top of this sig.
@@ -1043,6 +1056,45 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
     if let Some((_, polys)) = MODULE_NUMERIC_POLY.iter().find(|(m, _)| *m == name) {
         for p in *polys {
             sig.numeric_poly.insert((*p).to_string());
+        }
+    }
+    // Phase 4c-concurrency — two method sigs a plain harvested sig CANNOT express, re-attached here.
+    // Both are closure params whose expressible constraint is arity + (for `read`) the box's element
+    // type, but whose RETURN must be `?` (any R) — a shape `std/concurrency.chz` declares as an
+    // UNANNOTATED param (`Ty::Unknown`) and this step retypes.
+    if name == "std.concurrency" {
+        // `RwShared[T].read(f)` — `read(fn(T) -> R) -> R` is R-polymorphic: the param is retyped to
+        // `fn(T) -> ?` (any closure return accepted; the real R is recovered at the call site by the
+        // `Ty::RwShared` dispatch arm). `T` is RwShared's own type param (kept as `Ty::Param` in the
+        // seeded table; the dispatch arm substitutes the concrete element type).
+        if let Some(rw) = sig.struct_defs.get_mut("RwShared") {
+            let t = rw
+                .type_params
+                .first()
+                .map(|tp| Ty::Param(tp.name.clone()))
+                .unwrap_or(Ty::Unknown);
+            if let Some(read) = rw.methods.get_mut("read")
+                && let Some(p0) = read.params.first_mut()
+            {
+                *p0 = Ty::Func {
+                    params: vec![t],
+                    ret: Box::new(Ty::Unknown),
+                    labels: FnLabels::default(),
+                };
+            }
+        }
+        // `Executor.submit(f)` — a detached zero-arg task closure whose return is discarded: the param
+        // is retyped to `fn() -> ?` so any-return closures are accepted while a wrong-ARITY closure is
+        // still rejected (Executor is non-generic — no `Ty::Param` involved).
+        if let Some(ex) = sig.struct_defs.get_mut("Executor")
+            && let Some(submit) = ex.methods.get_mut("submit")
+            && let Some(p0) = submit.params.first_mut()
+        {
+            *p0 = Ty::Func {
+                params: vec![],
+                ret: Box::new(Ty::Unknown),
+                labels: FnLabels::default(),
+            };
         }
     }
 }
@@ -1407,6 +1459,17 @@ struct Checker {
     /// std.net is harvested (and on the single-module `check` path, which has no graph).
     net_socket_seed: Option<StructInfo>,
     net_listener_seed: Option<StructInfo>,
+    /// Phase 4c-concurrency — the harvested `StructInfo` (method table) for each of std.concurrency's
+    /// four reserved GENERIC handles (`Shared`/`RwShared`/`Atomic`/`Executor`), keyed by bare name,
+    /// captured from the file-backed `std/concurrency.chz` harvest (AFTER `attach_native_module_metadata`
+    /// ran the closure-param metadata port for `RwShared.read`/`Executor.submit`) the first time
+    /// std.concurrency is checked in the graph. Like `net_socket_seed`, these resolve to the RESERVED
+    /// `Ty::Shared`/etc (opaque VM handles, NOT nominal structs) — only the METHOD table is re-seeded
+    /// (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `s.set(...)` / `a.cas(...)`
+    /// resolve via the normal method path in every module, with each generic method sig's `Ty::Param`
+    /// substituted with the value's element type at the call site. Bare-name annotation stays
+    /// import-gated by `imported_concurrency` + `resolve_type`'s reserved arm. Empty until harvested.
+    concurrency_seeds: HashMap<String, StructInfo>,
     /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
     /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
     /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —
@@ -1527,6 +1590,7 @@ impl Checker {
             ref_seed: None,
             net_socket_seed: None,
             net_listener_seed: None,
+            concurrency_seeds: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
@@ -1642,6 +1706,18 @@ impl Checker {
         }
         if let Some(info) = self.net_listener_seed.clone() {
             self.structs.insert("Listener".into(), info);
+        }
+        // Phase 4c-concurrency — re-seed std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`
+        // METHOD tables (harvested from `std/concurrency.chz`) under their bare names so `s.set(...)`/
+        // `r.read(...)`/`a.cas(...)`/`ex.submit(...)` resolve via the normal method path (the
+        // `Ty::Shared`/etc method arms look the table up here, substituting the box's element type for
+        // the sig's `Ty::Param`). Like `Socket`/`Listener` above — and UNLIKE `Ref` — NO
+        // `struct_names`/`bare_types` licensing is added: the four resolve to the RESERVED
+        // `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` via `resolve_type`'s reserved arm,
+        // which stays import-gated by `imported_concurrency`. The method table is reached only from a
+        // value whose `Ty` is already one of those, so a bare unimported annotation still errors.
+        for (name, info) in &self.concurrency_seeds {
+            self.structs.insert(name.clone(), info.clone());
         }
     }
 
@@ -1840,17 +1916,30 @@ impl Checker {
         }
     }
 
-    /// Phase 4c-net — look up a method sig on a reserved native handle type (`Socket`/`Listener`) in the
-    /// harvested method table `seed_stdlib_structs` re-seeded into `self.structs[type]`. Replaces the
-    /// retired bespoke `socket_method_sig`/`listener_method_sig`; the sigs (params/min_params/ret) come
-    /// verbatim from `std/net.chz`. The method sigs carry NO `self` receiver (net.chz declares none), so
-    /// `params` are the call args directly — the `Ty::Socket`/`Ty::Listener` arms pass them to
-    /// `check_args_range` unchanged.
-    fn native_handle_method(&self, ty_name: &str, method: &str) -> Option<FnSig> {
-        self.structs
-            .get(ty_name)
-            .and_then(|info| info.methods.get(method))
-            .cloned()
+    /// Phase 4c — look up a method sig on a reserved native handle type in the harvested method table
+    /// `seed_stdlib_structs` re-seeded into `self.structs[type]`. Replaces the retired bespoke
+    /// `socket_method_sig`/`listener_method_sig` (net, non-generic) AND `shared_method_sig`/
+    /// `rwshared_method_sig`/`atomic_method_sig`/`executor_method_sig` (concurrency); the sigs
+    /// (params/min_params/ret) come verbatim from the `.chz` `native fn` decls. `targs` are the reserved
+    /// GENERIC handle's element types (`&[elem]` for `Shared[T]`/`RwShared[T]`/`Atomic[T]`; `&[]` for the
+    /// non-generic `Socket`/`Listener`/`Executor`), substituted into the sig's `Ty::Param`s — the same
+    /// per-type param subst the generic-struct machinery uses, so `Shared[int].set` expects `int`. The
+    /// method sigs carry NO `self` receiver (the `.chz` decls declare none), so `params` are the call
+    /// args directly — the arms pass them to `check_args_range` unchanged.
+    fn native_handle_method(&self, ty_name: &str, method: &str, targs: &[Ty]) -> Option<FnSig> {
+        let info = self.structs.get(ty_name)?;
+        let sig = info.methods.get(method)?;
+        if targs.is_empty() || info.type_params.is_empty() {
+            // Non-generic handle (Socket/Listener/Executor), or no element type to substitute — the
+            // stored sig is already concrete (identity subst; behavior-preserving for net).
+            return Some(sig.clone());
+        }
+        let map = struct_param_map(info, targs);
+        Some(FnSig {
+            params: sig.params.iter().map(|p| subst(p, &map)).collect(),
+            ret: subst(&sig.ret, &map),
+            ..sig.clone()
+        })
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
@@ -4653,7 +4742,17 @@ impl Checker {
                     self.error(span, format!("module '{module}' has no type '{name}'"));
                     return Ty::Unknown;
                 };
-                if let Some(info) = sig.struct_defs.get(name) {
+                // A RESERVED native type (std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`,
+                // std.net's `Socket`/`Listener`) now ALSO has a `sig.struct_defs` entry — for its
+                // harvested METHOD table — but it is NOT a nominal struct: it must resolve to the opaque
+                // reserved `Ty::Shared`/etc via the `sig.types` → `qualified_builtin_ty` branch below,
+                // NOT `Ty::Struct(...)`. Skip the struct_defs arm for these so `concurrency.Shared[int]`
+                // (a qualified annotation / `type` alias / `newtype` body) keeps its reserved `Ty`
+                // (matching the bare-after-import path); otherwise it would mint a divergent
+                // `Ty::Struct("Shared", …)` that fails to unify with a `Shared(v)` ctor's `Ty::shared`.
+                if let Some(info) = sig.struct_defs.get(name)
+                    && self.qualified_builtin_ty(name, &[]).is_none()
+                {
                     if info.type_params.len() != resolved.len() {
                         self.error(
                             span,
@@ -11557,10 +11656,15 @@ impl Checker {
             }
             Ty::Shared(elem) => {
                 // `get()->T`, `set(T)->nil`, `update(fn(T)->T)->nil` — the same box API as `Ref[T]`,
-                // but reachable across tasks.
-                if let Some(sig) = shared_method_sig(method, elem) {
+                // but reachable across tasks. The sigs are harvested from `std/concurrency.chz` into the
+                // `Shared` method table (re-seeded by `seed_stdlib_structs`); the box's element type is
+                // substituted for the sig's `Ty::Param("T")` here.
+                let elem = (**elem).clone();
+                if let Some(sig) =
+                    self.native_handle_method("Shared", method, std::slice::from_ref(&elem))
+                {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -11570,14 +11674,17 @@ impl Checker {
             Ty::RwShared(elem) => {
                 // `get()->T`, `set(T)->nil`, `write(fn(T)->T)->nil` mirror `Shared`. `read` is the
                 // read-only twin: `read(fn(T)->R)->R` — R-polymorphic in the closure's return type.
-                // `rwshared_method_sig` types `read`'s param as `fn(T)->Unknown` (any closure return
-                // is accepted) and ret `Unknown`; here we recover R from the supplied closure so the
-                // call site sees the real return type (not `Unknown`).
-                if let Some(sig) = rwshared_method_sig(method, elem) {
+                // The harvested table (via `attach_native_module_metadata`) types `read`'s param as
+                // `fn(T)->Unknown` (any closure return is accepted) and ret `Unknown`; here we recover R
+                // from the supplied closure so the call site sees the real return type (not `Unknown`).
+                let elem = (**elem).clone();
+                if let Some(sig) =
+                    self.native_handle_method("RwShared", method, std::slice::from_ref(&elem))
+                {
                     // `read`'s sig ret is the placeholder `Unknown` (the real R is recovered below) —
                     // hover shows the declared `fn(fn(T) -> ?) -> ?` shape, which is the sig of record.
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     if method == "read" {
                         // R = the closure argument's actual return type (else `Unknown` on arity
                         // error). `check_args` already inferred the closure (emitting any body
@@ -11599,10 +11706,18 @@ impl Checker {
             }
             Ty::Atomic(elem) => {
                 // `load()->T`, `store(T)`, `exchange(T)->T`, `cas(T,T)->bool`; `add(T)->T`/`sub(T)->T`
-                // only when `T` is numeric (gated inside `atomic_method_sig`).
-                if let Some(sig) = atomic_method_sig(method, elem) {
+                // only when `T` is numeric. The sigs are harvested from `std/concurrency.chz`; the
+                // numeric gate on `add`/`sub` is a DISPATCH-TIME constraint a plain sig cannot express,
+                // so it stays a residual here — for a non-numeric element those two are gated out so the
+                // call reports "no method 'add'" (matching the retired `atomic_method_sig`).
+                let elem = (**elem).clone();
+                let numeric_gated = matches!(method, "add" | "sub") && !elem.is_numeric();
+                if !numeric_gated
+                    && let Some(sig) =
+                        self.native_handle_method("Atomic", method, std::slice::from_ref(&elem))
+                {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -11611,7 +11726,9 @@ impl Checker {
             }
             Ty::Executor => {
                 // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
-                if let Some(sig) = executor_method_sig(method) {
+                // Non-generic — no element type to substitute (`&[]`). `submit`'s param is typed
+                // `fn() -> ?` by `attach_native_module_metadata` so any-return closures are accepted.
+                if let Some(sig) = self.native_handle_method("Executor", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so its
                     // captures cross the airlock exactly like a `spawn` task's. Push a capture floor at
@@ -11620,10 +11737,10 @@ impl Checker {
                     // binding it reads is flagged by the `infer_ident` read gate (mirrors `spawn:`).
                     if method == "submit" {
                         self.capture_floors.push(self.scopes.len());
-                        self.check_args(method, &sig.params, args, span);
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         self.capture_floors.pop();
                     } else {
-                        self.check_args(method, &sig.params, args, span);
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     }
                     return sig.ret;
                 }
@@ -11635,7 +11752,7 @@ impl Checker {
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return
             // their `Result`.
             Ty::Socket => {
-                if let Some(sig) = self.native_handle_method("Socket", method) {
+                if let Some(sig) = self.native_handle_method("Socket", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
@@ -11645,7 +11762,7 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Listener => {
-                if let Some(sig) = self.native_handle_method("Listener", method) {
+                if let Some(sig) = self.native_handle_method("Listener", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
@@ -13078,7 +13195,10 @@ impl Checker {
         let Some(sig) = self.module_sigs.get(mid) else {
             return Ty::Unknown;
         };
-        if sig.struct_defs.contains_key(name) {
+        // A RESERVED native type (Shared/RwShared/Atomic/Executor/Socket/Listener) has a harvested
+        // `sig.struct_defs` METHOD-table entry but is NOT nominal — skip it here so it resolves to the
+        // reserved builtin `Ty` via the `sig.types` branch below (mirrors `resolve_type`'s guard).
+        if sig.struct_defs.contains_key(name) && self.qualified_builtin_ty(name, &[]).is_none() {
             Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
             Ty::Enum(self.type_key(mid, name), args.to_vec())
@@ -15595,94 +15715,13 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     Some(FnSig::plain(params, ret))
 }
 
-/// Built-in method signatures on `Shared[T]` (C3). `elem` is the box's element type. Mirrors the
-/// `Ref[T]` box API (`std/ref.chz`) — one `get`/`set`/`update` shape across both boxes.
-fn shared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "get" => (vec![], elem.clone()),
-        "set" => (vec![elem.clone()], Ty::Nil),
-        "update" => (
-            vec![Ty::Func {
-                params: vec![elem.clone()],
-                ret: Box::new(elem.clone()),
-                labels: crate::checker::FnLabels::default(),
-            }],
-            Ty::Nil,
-        ),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
-
-/// Built-in method signatures on `RwShared[T]` — the cross-task read-write box. `elem` is the box's
-/// element type. `get`/`set`/`write` mirror `Shared`'s `get`/`set`/`update` (a write-locked RMW).
-/// `read(f: fn(T) -> R) -> R` is R-polymorphic: its param is typed `fn(T) -> Unknown` (accepting any
-/// closure return) and its `ret` is `Unknown` here — the dispatch arm recovers the real `R` from the
-/// supplied closure (`Ty::RwShared` in `infer_method_call`), so the call site sees the true type.
-fn rwshared_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "get" => (vec![], elem.clone()),
-        "set" => (vec![elem.clone()], Ty::Nil),
-        "write" => (
-            vec![Ty::Func {
-                params: vec![elem.clone()],
-                ret: Box::new(elem.clone()),
-                labels: crate::checker::FnLabels::default(),
-            }],
-            Ty::Nil,
-        ),
-        // `read(fn(T) -> R) -> R` — the param's return is `Unknown` (any `R` is accepted), and the
-        // real `R` is recovered at the call site by the dispatch arm.
-        "read" => (
-            vec![Ty::Func {
-                params: vec![elem.clone()],
-                ret: Box::new(Ty::Unknown),
-                labels: crate::checker::FnLabels::default(),
-            }],
-            Ty::Unknown,
-        ),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
-
-/// Built-in method signatures on `Atomic[T]` — the cross-task atomic box. `elem` is the box's
-/// element type. `load`/`store`/`exchange`/`cas` work for any `T`; `add`/`sub` are arithmetic and
-/// exist **only when `T` is numeric** (`int`/`float`) — for any other `T` they return `None`, so the
-/// caller reports "no method 'add'".
-fn atomic_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "load" => (vec![], elem.clone()),
-        "store" => (vec![elem.clone()], Ty::Nil),
-        // swap in `x`, return the previous value.
-        "exchange" => (vec![elem.clone()], elem.clone()),
-        // compare-and-swap: if the box holds `expected`, replace with `new`; report whether it did.
-        "cas" => (vec![elem.clone(), elem.clone()], Ty::Bool),
-        // arithmetic RMW — numeric `T` only; returns the NEW value.
-        "add" | "sub" if elem.is_numeric() => (vec![elem.clone()], elem.clone()),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
-
-/// Built-in method signatures on `Executor` (C5 escape hatch). `submit` takes a detached, zero-arg
-/// task closure (its return value is discarded — `Unknown` ret accepts any `fn() -> _`).
-fn executor_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "submit" => (
-            vec![Ty::Func {
-                params: vec![],
-                ret: Box::new(Ty::Unknown),
-                labels: crate::checker::FnLabels::default(),
-            }],
-            Ty::Nil,
-        ),
-        "shutdown" => (vec![], Ty::Nil),
-        "shutdown_now" => (vec![], Ty::Nil),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
+// The bespoke `shared_method_sig` / `rwshared_method_sig` / `atomic_method_sig` / `executor_method_sig`
+// arms are RETIRED (phase 4c-concurrency): every one of their sigs is now declared as a body-less
+// `native fn` method inside a `native struct` in `std/concurrency.chz`, harvested into that type's
+// method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with the
+// box's element type substituted for `Ty::Param("T")`. The two constraints a plain sig cannot express
+// stay as thin residuals: `RwShared.read`'s closure return R is recovered in the `Ty::RwShared` arm,
+// and `Atomic.add`/`sub`'s numeric-`T` gate is a `!elem.is_numeric()` check in the `Ty::Atomic` arm.
 
 /// Built-in method signatures on `set[T]`. `elem` is the set's element type.
 /// Built-in method signatures on `bytearray` (the mutable byte buffer). Mirrors the VM's
