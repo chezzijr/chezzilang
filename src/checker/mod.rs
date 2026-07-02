@@ -979,66 +979,18 @@ fn native_module_sig(name: &str) -> ModuleSig {
         // get/post/request — with an OPTIONAL trailing `timeout_ms` — plus put/patch/delete/head) is
         // declared in `std/request.chz` and harvested via `harvest_native_module`. NO hand-built arm.
         "std.ffi" => {
-            // The C-ABI vocabulary that pairs with the opaque `ptr` handle type (`extern "lib":`).
-            // `null()` is the NULL sentinel; `is_null(p)` tests it. The `ptr` *type* is builtin.
-            func("null", vec![], Ty::Ptr);
-            func("is_null", vec![Ty::Ptr], Ty::Bool);
-            // Memory deref builtins — read/write the C-owned memory behind a `ptr` (load_*/store_*).
-            // Each LOAD has a base form `(ptr) -> T` and an `_at(ptr, int) -> T` byte-offset form;
-            // each STORE has `(ptr, V) -> nil` and `_at(ptr, int, V) -> nil`. Loads of every int
-            // width return `int`, float widths `float`, `bool`/`ptr`/`str` their kind; stores take a
-            // value of the matching kind and return `nil`. (See `src/native/ffi.rs` for the runtime;
-            // both engines reach these via the engine-neutral Host/NativeFn path — parity by
-            // construction.) A NULL base pointer is a recoverable runtime error, NOT a static one.
-            for (n, t) in [
-                ("load_int", Ty::Int),
-                ("load_int8", Ty::Int),
-                ("load_int16", Ty::Int),
-                ("load_int32", Ty::Int),
-                ("load_int64", Ty::Int),
-                ("load_uint8", Ty::Int),
-                ("load_uint16", Ty::Int),
-                ("load_uint32", Ty::Int),
-                ("load_uint64", Ty::Int),
-                ("load_float", Ty::Float),
-                ("load_float32", Ty::Float),
-                ("load_bool", Ty::Bool),
-                ("load_ptr", Ty::Ptr),
-                ("load_str", Ty::Str),
-            ] {
-                func(n, vec![Ty::Ptr], t.clone());
-                func(&format!("{n}_at"), vec![Ty::Ptr, Ty::Int], t);
-            }
-            for (n, v) in [
-                ("store_int", Ty::Int),
-                ("store_int8", Ty::Int),
-                ("store_int16", Ty::Int),
-                ("store_int32", Ty::Int),
-                ("store_int64", Ty::Int),
-                ("store_uint8", Ty::Int),
-                ("store_uint16", Ty::Int),
-                ("store_uint32", Ty::Int),
-                ("store_uint64", Ty::Int),
-                ("store_float", Ty::Float),
-                ("store_float32", Ty::Float),
-                ("store_bool", Ty::Bool),
-                ("store_ptr", Ty::Ptr),
-            ] {
-                func(n, vec![Ty::Ptr, v.clone()], Ty::Nil);
-                func(&format!("{n}_at"), vec![Ty::Ptr, Ty::Int, v], Ty::Nil);
-            }
-            // C-buffer alloc layer — libc malloc/calloc/free-backed raw buffers for C array/buffer
-            // APIs (qsort/bsearch/fread-into-buffer). `alloc`/`alloc_zeroed` take a byte count and
-            // return a raw `ptr`; `free` releases it (returns nil). The buffer is MANUALLY freed
-            // (never auto-freed) — the idiom is `defer ffi.free(p)`. A negative size or out-of-memory
-            // is a recoverable runtime error; `free(ffi.null())` is a no-op.
-            func("alloc", vec![Ty::Int], Ty::Ptr);
-            func("alloc_zeroed", vec![Ty::Int], Ty::Ptr);
-            func("free", vec![Ty::Ptr], Ty::Nil);
-            // `std.ffi` ALSO exports the eight fixed-width C-ABI integer TYPE names (Chezzi's first
-            // type imports). They live in `sig.types` so `import int32 from std.ffi` validates; the
-            // checker's `bind_import` records the import into `imported_ffi_types` and `resolve_type`
-            // then resolves the name to `Ty::Int` only in modules that imported it.
+            // std.ffi is FILE-BACKED (phase 4c): its 59 callable fns (`null`/`is_null`, the load_*/
+            // store_* families in base + `_at` forms, and `alloc`/`alloc_zeroed`/`free`) are declared
+            // in `std/ffi.chz` (bodyless `native fn`s) and harvested via `harvest_native_module` on top
+            // of this sig. This arm is retained ONLY for the type-license tail — the C-ABI type NAMES
+            // std.ffi exports, which carry NO runtime value and CANNOT be spelled as a `native fn` decl
+            // (there is no .chz syntax for a bare type-license name aliasing Ty::Int/Ty::Ptr). Mirrors
+            // the residual std.net/std.concurrency/std.time arms.
+            //
+            // The eight fixed-width C-ABI integer TYPE names (Chezzi's first type imports). They live in
+            // `sig.types` so `import int32 from std.ffi` validates; the checker's `bind_import` records
+            // the import into `imported_ffi_types` and `resolve_type` then resolves the name to `Ty::Int`
+            // only in modules that imported it.
             for tn in crate::native::ffi::TYPE_NAMES {
                 sig.types.insert((*tn).to_string());
             }
@@ -1046,6 +998,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // which routes a name through the ungated C-marshalling path `resolve_ctype_d`). Listing
             // it in `sig.types` lets `import ptr from std.ffi` validate; the checker licenses it into
             // `imported_ffi_types` (whole-module on `import std.ffi`, per-name on the from-import).
+            // NOTE: harvesting `native fn null() -> ptr` from std/ffi.chz needs `ptr` to resolve, but
+            // harvest runs WITHOUT `begin_module` (so `imported_ffi_types` is empty) — `harvest_native_module`
+            // transiently licenses the `ptr`/TYPE_NAMES names it finds in `sig.types` for the harvest,
+            // then restores, so this insert is load-bearing for the harvest too.
             sig.types.insert("ptr".to_string());
         }
         _ => {}
@@ -1734,6 +1690,24 @@ impl Checker {
                 }
             }
         }
+        // Transiently license the import-gated C-ABI TYPE names that std.ffi's `native fn` sigs
+        // reference (phase 4c). `native fn null() -> ptr` resolves its `ptr` return via `resolve_type`,
+        // whose `ptr` (and fixed-width `int8..uint64`) arms require the name to be in
+        // `self.imported_ffi_types`. This harvest runs WITHOUT `begin_module`, so that set is empty/stale
+        // and the resolve would spuriously error `unknown type 'ptr'`. Insert every `sig.types` name
+        // that is `ptr` or a fixed-width FFI name (the only names carrying such an alias — driven off the
+        // sig, so module-agnostic: no non-ffi module's sig carries them), tracking the NEWLY-inserted
+        // ones, and remove exactly those after PASS 2. The direct analog of the `struct_names` transient
+        // above — a pure sig computation that leaves no residue (so a later unrelated module still
+        // rejects a bare unimported `ptr`). See the `native_module_sig("std.ffi")` type-license tail.
+        let mut ffi_type_transient: Vec<String> = Vec::new();
+        for tn in &sig.types {
+            if (tn == "ptr" || crate::native::ffi::TYPE_NAMES.contains(&tn.as_str()))
+                && self.imported_ffi_types.insert(tn.clone())
+            {
+                ffi_type_transient.push(tn.clone());
+            }
+        }
         // PASS 2 — native fns (module members, sig from the parsed decl; runtime value name-keyed).
         for s in &ast.stmts {
             if let StmtKind::Native(decl) = &s.kind {
@@ -1766,6 +1740,11 @@ impl Checker {
         // Preserve import-gating: drop the transient bare-name visibility.
         for name in transient {
             self.struct_names.remove(&name);
+        }
+        // Drop the transient FFI type-license (phase 4c) — restore exactly the names this harvest
+        // inserted, so `ptr`/`int8..uint64` do NOT leak a license into a later unrelated module.
+        for name in ffi_type_transient {
+            self.imported_ffi_types.remove(&name);
         }
         // Restore `self.bare_types` to its pre-harvest state (paired with the layout restore below).
         for (name, prev) in saved_bare {
@@ -4018,6 +3997,18 @@ impl Checker {
         self.imported_net.contains(n) || self.current_module_is_stdlib
     }
 
+    /// True iff the std.ffi type-license NAME `n` (the opaque `ptr` handle or a fixed-width `int8..
+    /// uint64`) is usable in the current module: either this module imported it from `std.ffi`
+    /// (whole-module or per-name), or we're inside a privileged stdlib module (std/* may use them bare
+    /// — e.g. `std/ffi.chz` itself, whose bodyless `native fn` sigs are written in terms of `ptr`).
+    /// These ALSO stay reserved names; this gate is the SEPARATE "must import to USE" requirement,
+    /// mirroring `concurrency_licensed`/`net_licensed`/`time_licensed`. NOTE: during the native-module
+    /// harvest (`harvest_native_module`) `current_module_is_stdlib` is UNRELIABLE (harvest runs without
+    /// `begin_module`), so that path relies on the transient `imported_ffi_types` license instead.
+    fn ffi_type_licensed(&self, n: &str) -> bool {
+        self.imported_ffi_types.contains(n) || self.current_module_is_stdlib
+    }
+
     /// Map an opaque/native builtin TYPE name (one that lives ONLY in its owning std module's
     /// `sig.types` — reserved, so no user module can export it) to its builtin `Ty`, given already-
     /// resolved type args. This is the additive "make a Rust type reachable by qualified path"
@@ -4081,7 +4072,7 @@ impl Checker {
                     // transparent alias body (`ffi_alias_ok`). Since extern blocks use `ptr` pervasively,
                     // the hint points at the whole-module form. See `Ty::Ptr`.
                     "ptr" => {
-                        if self.imported_ffi_types.contains("ptr")
+                        if self.ffi_type_licensed("ptr")
                             || self
                                 .alias_resolving
                                 .last()
@@ -4218,7 +4209,7 @@ impl Checker {
                         // width name in ordinary code still needs the import — and crucially an alias
                         // whose module never imported the width does NOT launder it (the closed gate
                         // hole): only a licensed alias indirection bypasses the per-module requirement.
-                        if self.imported_ffi_types.contains(n)
+                        if self.ffi_type_licensed(n)
                             || self
                                 .alias_resolving
                                 .last()
