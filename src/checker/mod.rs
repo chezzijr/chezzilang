@@ -864,12 +864,13 @@ impl Checker {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
                 let mut sig = native_module_sig(name);
-                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase 4e)
-                // harvest their whole callable SIGNATURE from the real `std/<M>.chz` AST the resolver
-                // loaded — NOT hand-built in `native_module_sig`. For std.regex/encoding/crypto/uuid the
-                // arm is fully deleted (returns empty). std.time keeps a MINIMAL arm carrying only the
-                // `timer` opcode-license in `sig.types` (harvest then fills its 4 real fns on top). Same
-                // predicate as the resolver's `visit_native_file` gate — lockstep by construction.
+                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase 4e;
+                // std.process/std.request phase 4f) harvest their whole callable SIGNATURE from the real
+                // `std/<M>.chz` AST the resolver loaded — NOT hand-built in `native_module_sig`. For
+                // std.regex/encoding/crypto/uuid/process/request the arm is fully deleted (returns empty).
+                // std.time keeps a MINIMAL arm carrying only the `timer` opcode-license in `sig.types`
+                // (harvest then fills its 4 real fns on top). Same predicate as the resolver's
+                // `visit_native_file` gate — lockstep by construction.
                 if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
                 }
@@ -962,17 +963,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // closest void-ish result and lets statements (unreachable in practice) follow it.
             func("exit", vec![Ty::Int], Ty::Nil);
         }
-        "std.process" => {
-            func("cmd", vec![Ty::Str], Ty::result(Ty::Str));
-            // `ProcResult` is the synthetic struct seeded in `seed_stdlib_structs`.
-            let proc = || Ty::Struct("ProcResult".to_string(), vec![]);
-            func("run", vec![Ty::Str], Ty::result(proc()));
-            func(
-                "run_args",
-                vec![Ty::Str, Ty::list(Ty::Str)],
-                Ty::result(proc()),
-            );
-        }
+        // std.process is FILE-BACKED (phase 4f): its whole signature (the `native struct ProcResult` +
+        // cmd/run/run_args) is declared in `std/process.chz` and harvested via `harvest_native_module` —
+        // there is NO hand-built arm here (this fn returns the default-empty sig for it).
         "std.rand" => {
             // SplitMix64 PRNG scalars (std.rand). Generic collection helpers (shuffle/choice/sample)
             // live in the pure-Chezzi std.iter and call `int` — the native seam carries only scalars.
@@ -1045,17 +1038,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
         // std.regex is FILE-BACKED (phase 4b): its whole signature (the `native struct Match` + the 5
         // `native fn`s) is declared in `std/regex.chz` and harvested via `harvest_native_module` — there
         // is NO hand-built arm here (this fn returns the default-empty sig for it). See the caller.
-        "std.request" => {
-            // `Response` is the synthetic struct seeded in `seed_stdlib_structs`. `get`/`post`/
-            // `request` carry an OPTIONAL trailing `timeout_ms: int` and are installed AFTER the
-            // match (the `func` closure above can only build fixed-arity sigs); the verb wrappers
-            // below are plain fixed-arity.
-            let resp = || Ty::Struct("Response".to_string(), vec![]);
-            func("put", vec![Ty::Str, Ty::Str], Ty::result(resp()));
-            func("patch", vec![Ty::Str, Ty::Str], Ty::result(resp()));
-            func("delete", vec![Ty::Str], Ty::result(resp()));
-            func("head", vec![Ty::Str], Ty::result(resp()));
-        }
+        // std.request is FILE-BACKED (phase 4f): its whole signature (the `native struct Response` +
+        // get/post/request — with an OPTIONAL trailing `timeout_ms` — plus put/patch/delete/head) is
+        // declared in `std/request.chz` and harvested via `harvest_native_module`. NO hand-built arm.
         "std.ffi" => {
             // The C-ABI vocabulary that pairs with the opaque `ptr` handle type (`extern "lib":`).
             // `null()` is the NULL sentinel; `is_null(p)` tests it. The `ptr` *type* is builtin.
@@ -1128,78 +1113,13 @@ fn native_module_sig(name: &str) -> ModuleSig {
         }
         _ => {}
     }
-    // Post-match: make `std.request`'s `get`/`post`/`request` accept an OPTIONAL trailing
-    // `timeout_ms: int` (a positive value overrides the agent's default timeout caps for that call).
-    // Done here (not in the arm) because the `func` closure above borrows `sig.functions` for the
-    // whole match; once it is dropped we can install the optional-tail signatures directly.
-    if name == "std.request" {
-        let resp = || Ty::Struct("Response".to_string(), vec![]);
-        sig.functions.insert(
-            "get".into(),
-            FnSig::optional_tail(vec![Ty::Str, Ty::Int], Ty::result(resp()), 1),
-        );
-        sig.functions.insert(
-            "post".into(),
-            FnSig::optional_tail(vec![Ty::Str, Ty::Str, Ty::Int], Ty::result(resp()), 1),
-        );
-        sig.functions.insert(
-            "request".into(),
-            FnSig::optional_tail(
-                vec![
-                    Ty::Str,
-                    Ty::Str,
-                    Ty::Str,
-                    Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
-                    Ty::Int,
-                ],
-                Ty::result(resp()),
-                1,
-            ),
-        );
-    }
-    // Post-match: EXPORT the synthetic struct LAYOUT a native module returns (`Match`/`Response`/
-    // `ProcResult`) as a module-owned type. The SAME field lists `seed_stdlib_structs` keeps globally
-    // present for import-free field access live here too as the module's `struct_defs`/`types` so that
-    // importing the module (whole-module `import std.regex` → bare `Match`; `from std.regex import
-    // Match`; or qualified `regex.Match(...)`) is what licenses the bare type name. `type_params`/
-    // `methods` are empty (these are plain data carriers); `origin` is `Builtin`. Done here, after the
-    // `func` closure's borrow of `sig` is dropped, so we can write `sig.struct_defs`/`sig.types`.
-    let export_struct = |sig: &mut ModuleSig, sname: &str, fields: Vec<(&str, Ty)>| {
-        sig.struct_defs.insert(
-            sname.to_string(),
-            StructInfo {
-                type_params: Vec::new(),
-                fields: fields
-                    .into_iter()
-                    .map(|(n, t)| (n.to_string(), t))
-                    .collect(),
-                methods: HashMap::new(),
-                origin: StructOrigin::Builtin,
-                doc: None,
-            },
-        );
-        sig.types.insert(sname.to_string());
-    };
-    match name {
-        // std.regex's `Match` is PHASE-4b MIGRATED: it is a file-backed `native struct` in
-        // `std/regex.chz`, harvested via `harvest_native_module` at graph-check time — NOT hand-built
-        // here. (Response/ProcResult below stay hand-built until phase 4c.)
-        "std.request" => export_struct(
-            &mut sig,
-            "Response",
-            vec![
-                ("status", Ty::Int),
-                ("body", Ty::Str),
-                ("headers", Ty::map(Ty::Str, Ty::Str)),
-            ],
-        ),
-        "std.process" => export_struct(
-            &mut sig,
-            "ProcResult",
-            vec![("stdout", Ty::Str), ("stderr", Ty::Str), ("code", Ty::Int)],
-        ),
-        _ => {}
-    }
+    // Phase 4f — the synthetic native-module struct LAYOUTS (`Match`/`Response`/`ProcResult`) and the
+    // optional-tail request fns are NO LONGER hand-built here: all three modules (std.regex/std.process/
+    // std.request) are FILE-BACKED, and `harvest_native_module` reads the whole signature — the fields-
+    // only `native struct` (origin Builtin, exported into `sig.struct_defs`/`sig.types`) AND every
+    // `native fn` (with a trailing `= default` param lowering to an optional-tail FnSig) — from the
+    // parsed `.chz`. The remaining hand-built runtime layout copies (compiler `Compiler::new`, interp
+    // finalize, `native/*.rs`, seed_stdlib_structs) stay name-keyed + field-order drift-guarded.
     // Editor hover (Tier C): attach a concise one-line doc to each native module function that has an
     // authored blurb (`MODULE_FN_DOCS`). `FnSig.doc` is excluded from `fn_sig_eq`, so this is purely
     // informational — `record_method_hover` already forwards `sig.doc` at the `module.fn` hover site,
@@ -1872,8 +1792,18 @@ impl Checker {
                     Some(t) => self.resolve_type(t, decl.span),
                     None => Ty::Unknown,
                 };
-                sig.functions
-                    .insert(decl.name.clone(), FnSig::plain(params, ret));
+                // A trailing `= default` marker on a native-fn param lowers to an OPTIONAL tail
+                // (min_params = len - trailing-defaults), the file-backed spelling of std.request's
+                // `get`/`post`/`request` optional `timeout_ms`. `parse_params` already guarantees any
+                // default is trailing, so a plain count is correct. The default EXPR itself is inert
+                // (desugar ignores `StmtKind::Native`, so it is never injected at a call site).
+                let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
+                let fsig = if optional > 0 {
+                    FnSig::optional_tail(params, ret, optional)
+                } else {
+                    FnSig::plain(params, ret)
+                };
+                sig.functions.insert(decl.name.clone(), fsig);
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.

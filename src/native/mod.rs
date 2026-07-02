@@ -393,7 +393,13 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
 pub fn is_file_backed_native(name: &str) -> bool {
     matches!(
         name,
-        "std.regex" | "std.encoding" | "std.crypto" | "std.uuid" | "std.time"
+        "std.regex"
+            | "std.encoding"
+            | "std.crypto"
+            | "std.uuid"
+            | "std.time"
+            | "std.process"
+            | "std.request"
     )
 }
 

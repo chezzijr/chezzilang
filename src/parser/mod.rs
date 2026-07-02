@@ -789,7 +789,12 @@ impl Parser {
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
-        let params = self.parse_params(false)?;
+        // Phase 4f — accept a DEFAULTED trailing param (`timeout_ms: int = 0`), the file-backed
+        // spelling of std.request's optional-tail sig. The grammar already permits it (`<params>`
+        // in `<nativeDecl>` admits `IDENT COLON <type> ASSIGN <expr>`); the default is a marker
+        // only (desugar's `collect_module_reg` ignores `StmtKind::Native`, so it is never injected
+        // at a call site). The checker still rejects a `native` decl in a USER module outright.
+        let params = self.parse_params(true)?;
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -2754,6 +2759,25 @@ mod tests {
         assert_eq!(d.name, "panic");
         assert_eq!(d.kind, NativeKind::Fn);
         assert!(d.ret.is_none(), "no arrow → ret None (native/never)");
+    }
+
+    #[test]
+    fn native_fn_allows_optional_trailing_default() {
+        // Phase 4f — a `native fn` may carry a DEFAULTED trailing param (`timeout_ms: int = 0`),
+        // the file-backed spelling of std.request's optional-tail sig. The parser now accepts a
+        // default in a native decl (grammar already permits it); the `= 0` is a marker only.
+        let StmtKind::Native(d) =
+            only("native fn get(url: str, timeout_ms: int = 0) -> Result[Response]\n")
+        else {
+            panic!("expected StmtKind::Native");
+        };
+        assert_eq!(d.name, "get");
+        assert_eq!(d.params.len(), 2);
+        assert!(d.params[0].default.is_none(), "url has no default");
+        assert!(
+            d.params[1].default.is_some(),
+            "timeout_ms carries the `= 0` optional-tail marker"
+        );
     }
 
     #[test]

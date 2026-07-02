@@ -1,0 +1,34 @@
+# std.request — HTTP client, declared in Chezzi (phase 4f).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std/regex.chz). Its native TYPE (`Response`) +
+# functions are in scope ONLY after `import std.request` (bare `Response`) or a `from std.request
+# import …`. The resolver loads this real file (keeping the `native` marker), and the checker harvests
+# the `native struct` + `native fn` declarations below as the module's SIGNATURE source — retiring both
+# the hand-built `native_module_sig` request arm AND its `export_struct` Response arm.
+#
+# Every declaration is BODY-LESS: the runtime layout + implementations stay native (name-keyed in
+# `src/native/request.rs`, dispatched via `native_members("std.request")`). The backends compile
+# NOTHING for a `native fn`/`native struct` — the front-end reads ONLY the signature.
+#
+# `get`/`post`/`request` carry an OPTIONAL trailing `timeout_ms: int` (a positive value overrides the
+# agent's default timeout caps for that call). Spelled as a trailing `= 0` default: harvest lowers a
+# trailing-default param to an optional-tail FnSig (min_params = len - 1). The `= 0` is a MARKER only —
+# desugar never injects a native-fn default at a call site, so `arg_count()` stays truthful (the runtime
+# `read_timeout` keys on the supplied arg count). The verb wrappers (put/patch/delete/head) are plain.
+#
+# FIELD ORDER IS LOAD-BEARING: `Response`'s field order is positional across the remaining hand-built
+# runtime layout copies (compiler `Compiler::new`, interp finalize, `native/request.rs` response_ret,
+# and seed_stdlib_structs), drift-guarded by a checker test. Do not reorder without updating all copies.
+
+native struct Response:
+    status: int
+    body: str
+    headers: Map[str, str]
+
+native fn get(url: str, timeout_ms: int = 0) -> Result[Response]
+native fn post(url: str, body: str, timeout_ms: int = 0) -> Result[Response]
+native fn request(method: str, url: str, body: str, headers: Map[str, str], timeout_ms: int = 0) -> Result[Response]
+native fn put(url: str, body: str) -> Result[Response]
+native fn patch(url: str, body: str) -> Result[Response]
+native fn delete(url: str) -> Result[Response]
+native fn head(url: str) -> Result[Response]

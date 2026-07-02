@@ -393,12 +393,13 @@ impl Builder {
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
                 // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase
-                // 4e) declare their native TYPE + fns in a real `std/<M>.chz` (the checker harvests them
-                // as the sig source). Load that real AST while KEEPING the `native` marker so runtime
-                // member dispatch stays name-keyed via `native_members`. Fallible (like the always-linked
-                // prelude): a missing/unparseable file is a hard error. Other native modules stay virtual
-                // (empty AST). The two gates (here + the checker harvest gate) share `is_file_backed_native`
-                // so the file-source and the AST-source stay provably in lockstep.
+                // 4e; std.process/std.request phase 4f) declare their native TYPE + fns in a real
+                // `std/<M>.chz` (the checker harvests them as the sig source). Load that real AST
+                // while KEEPING the `native` marker so runtime member dispatch stays name-keyed via
+                // `native_members`. Fallible (like the always-linked prelude): a missing/unparseable
+                // file is a hard error. Other native modules stay virtual (empty AST). The two gates
+                // (here + the checker harvest gate) share `is_file_backed_native` so the file-source and
+                // the AST-source stay provably in lockstep.
                 if crate::native::is_file_backed_native(name) {
                     self.visit_native_file(&target, name, &path, span)?;
                 } else {

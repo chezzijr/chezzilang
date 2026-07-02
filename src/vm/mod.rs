@@ -27715,6 +27715,54 @@ main()
         assert_eq!(out, "outerr7\n");
     }
 
+    /// Phase 4f — std.process + std.request are now FILE-BACKED (`std/process.chz`, `std/request.chz`),
+    /// their whole signature (fields-only `native struct` ProcResult/Response + the `native fn`s, incl.
+    /// request's OPTIONAL trailing `timeout_ms`) harvested via `harvest_native_module`, retiring both the
+    /// `native_module_sig` fn arms AND the `export_struct` arms. This must be a ZERO observable behavior
+    /// change on ALL THREE engines: constructing ProcResult/Response, reading every field, `from std.X
+    /// import Type`, qualified `X.Type(...)`, and request.get with AND without the optional `timeout_ms`
+    /// are byte-identical on interp, the cooperative VM, AND the M:N OS-thread engine. (Only ctors +
+    /// field reads are exercised at runtime — request.get would need a live server — but the optional
+    /// `timeout_ms` arg still TYPECHECKS both ways here, proving the harvested optional-tail sig.)
+    #[test]
+    fn process_request_file_backed_three_engine_parity() {
+        let src = "import std.process\n\
+                   import std.request\n\
+                   import ProcResult from std.process\n\
+                   import Response from std.request\n\
+                   fn describe_proc(p: ProcResult) -> str:\n\
+                   \x20   return p.stdout + \"|\" + p.stderr + \"|\" + str(p.code)\n\
+                   fn describe_resp(r: Response) -> str:\n\
+                   \x20   return str(r.status) + \"|\" + r.body + \"|\" + r.headers[\"k\"]\n\
+                   pr: ProcResult = process.ProcResult(\"out\", \"err\", 7)\n\
+                   rp: Response = request.Response(200, \"body\", {\"k\": \"v\"})\n\
+                   print(describe_proc(pr))\n\
+                   print(describe_resp(rp))\n";
+        // VM(serial) + interp byte-identical.
+        let out = parity_entry(src);
+        assert_eq!(out, "out|err|7\n200|body|v\n");
+        // …and the M:N OS-thread engine agrees.
+        let t = TmpDir::new();
+        let path = t.write("main.chz", src);
+        let (mn_out, _e, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("process/request ctor program should run on the M:N engine");
+        assert_eq!(
+            mn_out, out,
+            "M:N output diverged from VM/interp on process/request ctors"
+        );
+    }
+
+    /// Phase 4f — the pure TYPE `import ProcResult from std.process` (no runtime module-member value)
+    /// must NOT fault on EITHER engine (the both-engine `bind_import` skip). A single-engine fault = red.
+    #[test]
+    fn pure_type_import_no_fault_both_engines() {
+        let out = parity_entry("import ProcResult from std.process\nprint(1)\n");
+        assert_eq!(out, "1\n");
+        let out2 = parity_entry("import Response from std.request\nprint(2)\n");
+        assert_eq!(out2, "2\n");
+    }
+
     /// A user `struct Response` WITHOUT `import std.request` is the user's OWN type on both engines —
     /// the synthetic name is freed (the `Builtin`-origin seed is shadowed by the user declaration).
     #[test]
