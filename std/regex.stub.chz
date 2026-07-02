@@ -1,0 +1,21 @@
+# std.regex — COMPANION STUB (phase 4a).
+#
+# std.regex is a FILE-LESS virtual module: the resolver injects an empty AST for it (there is no
+# std/regex.chz), and its function surface (is_match/find/find_all/replace_all/split) is hand-built in
+# the checker's `native_module_sig`. This companion stub is PARSE-ONLY: it is NOT added to the runnable
+# module graph (never resolved, never executed), it is embedded via `include_str!` and parsed solely to
+# harvest its `native struct` declarations into std.regex's ModuleSig (see
+# `Checker::harvest_native_struct_stub`).
+#
+# A `native struct` declares a native type's checker SIGNATURE (its field layout) in Chezzi; the
+# runtime layout + native return lowering (`native/regex.rs` match_to_ret) stay hand-built. Fields-only
+# for now (phase 4a); bodyless native method sigs are a phase-4b follow-up.
+#
+# FIELD ORDER IS LOAD-BEARING: it is positional across the remaining hand-built layout copies
+# (compiler `Compiler::new`, interp finalize, `native/regex.rs`), drift-guarded by a checker test.
+
+native struct Match:
+    text: str
+    start: int
+    end: int
+    groups: List[str]

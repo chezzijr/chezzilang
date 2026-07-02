@@ -37,7 +37,7 @@
 # latter feeds <stmts>, which a <block> uses) — so a nested extern is a parse error.
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
-<topLevelStmt>  ::= <stmt> | <externDecl> | <nativeDecl>
+<topLevelStmt>  ::= <stmt> | <externDecl> | <nativeDecl> | <nativeStructDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
@@ -216,6 +216,17 @@
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 <nativeHead>  ::= "FN" | "IDENT"
+
+# `native struct` — the TYPE-level analog of `native fn`/`native ctor` (phase 4a). A body-less
+# `native struct NAME[T…]:` declares a native type's checker SIGNATURE (its field layout) in Chezzi;
+# the runtime layout + method dispatch stay native (name-keyed). PRELUDE/STD-ONLY (the checker rejects
+# it in a user module) and TOP-LEVEL-only. Fields-only for now (a `fn`/`test` method sig or a field
+# `= default` inside the body is a parse error); bodyless native method sigs are a phase-4b follow-up.
+# Used in the companion stub `std/regex.stub.chz` (parsed to harvest regex.Match's signature).
+<nativeStructDecl> ::= "NATIVE" "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeFieldDecls> "DEDENT"
+                     | "NATIVE" "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeFieldDecls> "DEDENT"
+<nativeFieldDecls> ::= <nativeFieldDecl> | <nativeFieldDecl> <nativeFieldDecls>
+<nativeFieldDecl>  ::= "IDENT" "COLON" <type> "NEWLINE"
 
 # An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
 # may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).

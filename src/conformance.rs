@@ -306,6 +306,7 @@ fn parser_rules_match_fns() {
         ("externDecl", "parse_extern"),
         ("externFn", "parse_extern_fn"),
         ("nativeDecl", "parse_native"),
+        ("nativeStructDecl", "parse_native_struct"),
         ("typeAliasDecl", "parse_type_alias"),
         ("newtypeDecl", "parse_newtype"),
         ("typeParams", "parse_type_params"),

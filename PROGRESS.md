@@ -58,6 +58,38 @@ realized in **phase 3a** below — the signatures moved to a real `.chz` prelude
 variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
 `sep=`/`end=` variadic still can't be spelled in `.chz`, so it stays the sole synthetic function row.)
 
+**✅ NATIVE-PRELUDE — phase 4a (`native struct` syntax + companion-stub loader for file-less native
+modules) (2026-07-02).** NEW LANGUAGE FEATURE (the **type-level** analog of phase-3a `native fn`/`native
+ctor`): `native struct Name:` with an indented block of **body-less field decls** declares a native
+(Rust-backed) type's **checker signature** (field layout + type params) in Chezzi; the runtime layout +
+method dispatch stay **native** (name-keyed). **Fields-only** for this cut (a `fn`/`test` method sig or a
+field `= default` in the body is a parse error; bodyless native **method** sigs are phase-4b), **PRELUDE/
+STD-ONLY** (a `native struct` in a user `.chz` is a clear checker error — *native struct declarations are
+only allowed in standard-library modules*), TOP-LEVEL-only (parser; nesting reuses the existing depth>1
+`Token::Native` guard). **COMPANION-STUB LOADER** (the general mechanism for **file-less** native modules):
+`std.regex` is a *virtual* module — `resolver::visit_native` injects an empty AST, there is no
+`std/regex.chz`. Its `Match` type's signature now lives in a **parse-only companion stub
+`std/regex.stub.chz`** (embedded via `include_str!`), which is **never** added to the runnable module graph
+(not always-linked, not executed) — `Checker::harvest_native_struct_stub` parses it solely to harvest its
+`native struct` decls into `std.regex`'s `ModuleSig` (`struct_defs` + `types`), **replacing** the deleted
+hand-built `"std.regex" => export_struct("Match", …)` arm in `native_module_sig` (the regex FUNCTIONS
+`is_match`/`find`/`find_all`/`replace_all`/`split` STAY hand-built there; only `Match`'s StructInfo moved).
+The harvest **forces `origin=StructOrigin::Builtin`** (load-bearing: drives `imported_builtin_types` on
+import → both engines' name-keyed pure-type `bind_import` skip stays correct). Match stays **import-gated**
+(bare name licensed only by `import std.regex` / `import Match from std.regex`; `regex.Match(...)` qualified)
+— reuses the existing native-types additive pattern; **runtime layout + bytecode UNCHANGED** (the 5 hand-built
+layout copies — `seed_stdlib_structs`, `Compiler::new`, interp finalize, `native/regex.rs` — stay, drift-
+guarded by `match_stub_matches_handbuilt_layouts` until 4b unifies them). **ZERO observable change / three-
+engine byte-identical** (checker/parser/grammar-only cut): new `regex_match_stub_migration_three_engine_parity`
+(produce/field-read/`import Match from`/qualified, VM==interp==M:N), provenance + drift-guard + user-file-
+rejected checker tests, parser tests, `grammar.bnf` gains `<nativeStructDecl>` + accept-corpus
+`native_struct.chz` (conformance green). **Roadmap:** phase-4b = bodyless-**method**-sig→native binding
+(analogous to native fn's proven bodyless-sig binding) + migrate the remaining Tier-2 native types
+(`Shared`/`RwShared`/`Atomic`/`Executor`, `Response`/`ProcResult` + the rest of regex) fully out of
+`native_module_sig`, and unify the remaining hand-built `Match` layout copies onto the stub. `native enum`
+if ever needed. **Tier-1** (`Ref`) already done; **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY
+stays native (documented carve-out).
+
 **✅ NATIVE-PRELUDE — phase 3a (`native fn`/`native ctor` syntax + always-linked `std/prelude.chz`)
 (2026-07-02).** NEW LANGUAGE FEATURE (the north-star for FUNCTIONS made concrete): the internal analog of
 `extern "lib":` (FFI). `native fn NAME(params) -> ret` declares a **first-class** universe-function
@@ -81,12 +113,14 @@ callable user fn); direct calls to the eight names emit byte-identical `CallBuil
 `prelude_table_is_single_source_of_truth` is extended to cross-check the parsed `.chz` decl set/kinds vs
 the hollow table AND each parsed `FnSig` vs its historical shape; new `native_prelude.chz` three-engine
 golden + parser/checker/resolver tests. `grammar.bnf` gains `<nativeDecl>` (conformance green).
-**Roadmap (native-in-Chezzi track):** phase 2b (**done — see below**) folded the generic container
-ctors' DISPATCH into the table. **Phase
-4** = `native struct`/`native enum` stubs for the **Tier-2 native (Rust-backed) TYPES**
-(`Shared`/`RwShared`/`Atomic`/`Executor`, `regex.Match`, …) to replace the `native_module_sig` hand-tables
-with parsed `.chz` type decls (bodies still native). **Tier-1** (the `Ref` struct-modeled type) is already
-done (always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native —
+**Roadmap (native-in-Chezzi track):** phase 2b (**DONE** — see below) folded the generic container
+ctors' (`range`/`List`/`Map`/`Set`) DISPATCH into the table (type-identity stays in `resolve_type`).
+**Phase 4a** (**DONE** — see the phase-4a entry above) = `native struct` syntax + the companion-stub
+loader, with `regex.Match` migrated (fields-only). **Phase 4b** = bodyless native **method**-sig→native
+binding + migrate the remaining Tier-2 native (Rust-backed) TYPES (`Shared`/`RwShared`/`Atomic`/`Executor`,
+`Response`/`ProcResult` + the rest of regex) fully out of the `native_module_sig` hand-tables (bodies still
+native), plus `native enum` if needed. **Tier-1** (the `Ref` struct-modeled type) is already done
+(always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native —
 too deeply coupled to `match`/`?`/generator desugar to express as a plain `.chz` decl; this is a
 documented, deliberate carve-out, not a gap.
 

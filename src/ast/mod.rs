@@ -200,6 +200,18 @@ pub enum StmtKind {
     /// native decl (never a callable user fn). The checker reads it as the signature source for the
     /// eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`).
     Native(NativeDecl),
+    /// `native struct NAME:` with an indented block of body-less field declarations — the TYPE-level
+    /// analog of [`StmtKind::Native`] (prelude/std-only; rejected in user modules). Declares a native
+    /// type's checker SIGNATURE (its field layout + type params) in Chezzi; the runtime layout + method
+    /// dispatch stay native (name-keyed). The backends compile NOTHING for it (never a user struct).
+    /// Fields-only for now (phase 4a); bodyless native method sigs are a phase-4b follow-up.
+    NativeStruct {
+        name: String,
+        name_span: Span,
+        type_params: Vec<TypeParam>,
+        fields: Vec<Field>,
+        span: Span,
+    },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
     /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).

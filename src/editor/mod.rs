@@ -539,6 +539,15 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
                 overlay_type(ret, map);
             }
         }
+        StmtKind::NativeStruct { fields, .. } => {
+            // A `native struct` decl carries body-less field type annotations (prelude/std-only, so this
+            // rarely fires on a user buffer). Role the field names as properties + their types, like a
+            // real struct's fields; the overlay is a total function over `StmtKind`.
+            for f in fields {
+                overlay_mark(map, f.name_span, PROPERTY);
+                overlay_type(&f.ty, map);
+            }
+        }
         StmtKind::Assert { cond, msg } => {
             overlay_expr(cond, map);
             if let Some(m) = msg {

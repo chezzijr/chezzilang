@@ -4127,6 +4127,79 @@ fn native_regex_unknown_member_rejected() {
     );
 }
 
+// ===== Phase 4a: regex.Match SIGNATURE migrated from native_module_sig to a parsed `native struct`
+// companion stub (std/regex.stub.chz). PROVENANCE: native_module_sig no longer hand-builds Match;
+// the checker harvests it from the stub at graph-check time. Behavior is byte-identical. =====
+
+/// PROVENANCE — the `"std.regex" => export_struct("Match", …)` arm is DELETED from `native_module_sig`;
+/// Match's StructInfo now comes from parsing the companion stub. So `native_module_sig("std.regex")`
+/// exports the regex FUNCTIONS but NOT `Match`, while a full graph check that `import std.regex` still
+/// resolves `Match` (harvested into the module's ModuleSig at check time). The sibling native structs
+/// (Response/ProcResult) stay hand-built in `native_module_sig` (phase 4b migrates them).
+#[test]
+fn regex_match_sig_from_stub_not_native_module_sig() {
+    let sig = native_module_sig("std.regex");
+    assert!(
+        !sig.struct_defs.contains_key("Match"),
+        "Match must no longer be hand-built in native_module_sig (it is harvested from the stub)"
+    );
+    assert!(
+        !sig.types.contains("Match"),
+        "Match must not be in native_module_sig's `types` (harvested from the stub)"
+    );
+    // The regex FUNCTIONS stay hand-built in native_module_sig.
+    assert!(sig.functions.contains_key("find"));
+    assert!(sig.functions.contains_key("is_match"));
+    // The sibling native structs remain hand-built (not yet migrated).
+    assert!(
+        native_module_sig("std.request")
+            .struct_defs
+            .contains_key("Response")
+    );
+    assert!(
+        native_module_sig("std.process")
+            .struct_defs
+            .contains_key("ProcResult")
+    );
+    // A full graph check that imports std.regex still resolves regex.Match + typed fields.
+    entry_ok(
+        "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
+    );
+}
+
+/// DRIFT GUARD — the stub-harvested Match StructInfo (fields, in positional order) must byte-match the
+/// remaining hand-built layout copies (seed_stdlib_structs is the checker one; the compiler/interp/
+/// native runtime copies stay hand-built until phase 4b). Field ORDER is load-bearing (positional), so
+/// a silent drift here would trap at runtime on a field read. Assemble the expected layout once and
+/// compare both the harvest and seed_stdlib_structs against it.
+#[test]
+fn match_stub_matches_handbuilt_layouts() {
+    let expected: Vec<(String, Ty)> = vec![
+        ("text".into(), Ty::Str),
+        ("start".into(), Ty::Int),
+        ("end".into(), Ty::Int),
+        ("groups".into(), Ty::list(Ty::Str)),
+    ];
+    // The parse-only harvest.
+    let mut c = Checker::new();
+    let mut sig = ModuleSig::default();
+    c.harvest_native_struct_stub(&mut sig);
+    let harvested = sig
+        .struct_defs
+        .get("Match")
+        .expect("stub must harvest a `Match` struct");
+    assert_eq!(harvested.fields, expected, "harvested Match layout drifted");
+    assert!(harvested.type_params.is_empty());
+    assert!(harvested.methods.is_empty());
+    assert!(matches!(harvested.origin, StructOrigin::Builtin));
+    // seed_stdlib_structs's hand-built Match copy (globally-present layout) must agree.
+    let seeded = c.structs.get("Match").expect("Match must be seeded");
+    assert_eq!(
+        seeded.fields, expected,
+        "seeded Match layout drifted from stub"
+    );
+}
+
 // ===== M9: std.request (Response struct) =====
 
 #[test]
@@ -11374,6 +11447,20 @@ fn native_decl_in_user_file_rejected() {
     entry_rejects(
         "native ctor bar(x) -> int\n",
         "native fn/ctor declarations are only allowed in standard-library modules",
+    );
+}
+
+/// Phase 4a — a `native struct` decl is likewise PRELUDE/STD-ONLY: in a user (non-stdlib) module it is
+/// a clear checker error (a user can't declare a native type whose layout the runtime doesn't know).
+#[test]
+fn native_struct_in_user_file_rejected() {
+    rejects(
+        "native struct Foo:\n    a: int\n",
+        "native struct declarations are only allowed in standard-library modules",
+    );
+    entry_rejects(
+        "native struct Foo:\n    a: int\n",
+        "native struct declarations are only allowed in standard-library modules",
     );
 }
 
