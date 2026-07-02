@@ -328,18 +328,11 @@ impl Parser {
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
             Token::Extern => self.parse_extern()?,
-            Token::Native => {
-                // `native struct Name:` owns an indented block (like `struct`); the bodyless
-                // `native fn`/`native ctor` forms are line-terminated. Dispatch on the word after
-                // `native`.
-                if self.peek_at(1) == &Token::Struct {
-                    self.parse_native_struct()?
-                } else {
-                    let k = self.parse_native(false)?;
-                    self.expect_stmt_end()?;
-                    k
-                }
-            }
+            // Extracted into a `#[inline(never)]` helper so its several `StmtKind`-returning call slots
+            // (`parse_native_struct`/`parse_native_enum`/`parse_native`, ~280 B each in a debug build)
+            // do NOT enlarge THIS (`parse_stmt`) frame — `parse_stmt` recurses through nested blocks and
+            // already sits near the `MAX_DEPTH`-vs-stack edge (`deep_nesting_errors_not_crash`).
+            Token::Native => self.parse_native_decl()?,
             Token::Type => {
                 let k = self.parse_type_alias()?;
                 self.expect_stmt_end()?;
@@ -764,6 +757,23 @@ impl Parser {
         })
     }
 
+    /// Dispatch a top-level `native …` declaration: `native struct Name:` and `native enum Name:` own
+    /// an indented block (like `struct`/`enum`); the bodyless `native fn`/`native ctor` forms are
+    /// line-terminated. Dispatch on the word after `native`. `#[inline(never)]` keeps its
+    /// `StmtKind`-sized call slots out of the recursive [`parse_stmt`] frame (see the call site).
+    #[inline(never)]
+    fn parse_native_decl(&mut self) -> PResult<StmtKind> {
+        if self.peek_at(1) == &Token::Struct {
+            self.parse_native_struct()
+        } else if self.peek_at(1) == &Token::Enum {
+            self.parse_native_enum()
+        } else {
+            let k = self.parse_native(false)?;
+            self.expect_stmt_end()?;
+            Ok(k)
+        }
+    }
+
     /// A body-less `native fn NAME(params) -> ret` / `native ctor NAME(params) -> ret` declaration
     /// (prelude/std-only, top-level). Mirrors [`parse_extern_fn`] (bodyless, `parse_params(false)`,
     /// optional `-> ret`, NEWLINE-terminated by the caller) but discriminates on the `fn`/`ctor`
@@ -900,6 +910,86 @@ impl Parser {
             name_span,
             type_params,
             fields,
+            methods,
+            span,
+        })
+    }
+
+    /// `native enum NAME[T…]:` then an INDENT block of body-less variants (optionally followed by
+    /// body-less `native fn` methods) — the ENUM-level analog of [`parse_native_struct`]. Prelude/std-
+    /// only (the checker's hoist rejects it in a user module); a nested one is already rejected by the
+    /// depth>1 `Token::Native` guard in [`parse_stmt`]. Reuses [`parse_enum`]'s variant loop (an IDENT
+    /// with an optional `(typeList)` payload) and [`parse_native`]`(true)` for the self-declaring
+    /// methods; like `parse_enum`, variants must precede methods, and a plain `fn`/`test` (with a body)
+    /// is a parse error. Phase 5b: file-backs the reserved `Option`/`Result` variant shape.
+    ///
+    /// `#[inline(never)]` — like a cold decl-parsing helper, this must NOT be inlined into the mutually
+    /// recursive [`parse_stmt`] (its several `Vec` locals would enlarge every `parse_stmt` frame on the
+    /// nested-block recursion path, tightening the `MAX_DEPTH`-vs-stack margin the `deep_nesting_errors_not_crash`
+    /// guard test relies on). It is called at most once per top-level `native enum`, so out-of-lining is free.
+    #[inline(never)]
+    fn parse_native_enum(&mut self) -> PResult<StmtKind> {
+        let span = self.cur_span();
+        self.expect(&Token::Native)?;
+        self.expect(&Token::Enum)?;
+        let name_span = self.cur_span();
+        let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
+        self.open_block()?;
+        let mut variants = Vec::new();
+        let mut methods = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            // A body-less `native fn` inside the enum body is a METHOD sig, harvested into the enum's
+            // method table (leading bare `self`, which harvest strips). A PLAIN `fn`/`test` (with a
+            // body) is rejected: the runtime construction/dispatch stay native, so a native enum never
+            // carries a compiled method.
+            if self.check(&Token::Native) {
+                let StmtKind::Native(decl) = self.parse_native(true)? else {
+                    return Err(self
+                        .err("native enum methods must be `native fn` declarations".to_string()));
+                };
+                methods.push(decl);
+                self.skip_newlines();
+                continue;
+            }
+            if self.check(&Token::Fn) || self.check(&Token::Test) {
+                return Err(self.err(
+                    "native enum methods are not supported (declare variants or `native fn` sigs only)"
+                        .to_string(),
+                ));
+            }
+            // A variant after a method is a structuring error (mirror `parse_enum`).
+            if !methods.is_empty() {
+                return Err(self.err("enum variants must be declared before methods".to_string()));
+            }
+            let vname_span = self.cur_span();
+            let vname = self.expect_ident()?;
+            let mut payload = Vec::new();
+            if self.eat(&Token::LParen) {
+                if !self.check(&Token::RParen) {
+                    loop {
+                        payload.push(self.parse_type()?);
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Token::RParen)?;
+            }
+            variants.push(Variant {
+                name: vname,
+                name_span: vname_span,
+                payload,
+            });
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        Ok(StmtKind::NativeEnum {
+            name,
+            name_span,
+            type_params,
+            variants,
             methods,
             span,
         })
@@ -2970,6 +3060,131 @@ mod tests {
         assert!(
             e.message
                 .contains("native struct fields cannot have default values"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_parses_variants_and_generics() {
+        // Phase 5b — `native enum Name[T]:` with an indented block of body-less variants →
+        // StmtKind::NativeEnum. Mirrors `native_struct_parses_fields_only` but for the enum shape.
+        let StmtKind::NativeEnum {
+            name,
+            type_params,
+            variants,
+            methods,
+            ..
+        } = only("native enum Option[T]:\n    Some(T)\n    None\n")
+        else {
+            panic!("expected StmtKind::NativeEnum");
+        };
+        assert_eq!(name, "Option");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(type_params[0].name, "T");
+        let vnames: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(vnames, ["Some", "None"]);
+        assert_eq!(
+            variants[0].payload.len(),
+            1,
+            "Some carries one payload slot"
+        );
+        assert!(variants[1].payload.is_empty(), "None is nullary");
+        assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn native_enum_parses_two_type_params() {
+        // `native enum Result[T, E]:` — two type params, Err carries E.
+        let StmtKind::NativeEnum {
+            name,
+            type_params,
+            variants,
+            ..
+        } = only("native enum Result[T, E]:\n    Ok(T)\n    Err(E)\n")
+        else {
+            panic!("expected StmtKind::NativeEnum");
+        };
+        assert_eq!(name, "Result");
+        let pnames: Vec<&str> = type_params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(pnames, ["T", "E"]);
+        let vnames: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(vnames, ["Ok", "Err"]);
+        assert_eq!(variants[0].payload.len(), 1);
+        assert_eq!(variants[1].payload.len(), 1);
+    }
+
+    #[test]
+    fn native_enum_parses_self_methods() {
+        // Phase 5b — a `native fn` inside a native-enum body is an INSTANCE method: it declares a
+        // leading bare `self` (mirroring native structs), harvested into `methods` with `self` KEPT in
+        // the parsed decl (harvest strips it). Variants must precede methods.
+        let StmtKind::NativeEnum {
+            name,
+            variants,
+            methods,
+            ..
+        } = only(
+            "native enum Option[T]:\n    Some(T)\n    None\n    native fn is_some(self) -> bool\n",
+        )
+        else {
+            panic!("expected StmtKind::NativeEnum");
+        };
+        assert_eq!(name, "Option");
+        let vnames: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(vnames, ["Some", "None"]);
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "is_some");
+        assert_eq!(methods[0].params.len(), 1, "self kept in parsed decl");
+        assert_eq!(methods[0].params[0].name, "self");
+        assert!(methods[0].params[0].ty.is_none(), "self is untyped (bare)");
+    }
+
+    #[test]
+    fn native_enum_method_requires_self() {
+        // A self-less native instance method inside a native enum is rejected (reserved-static error),
+        // exactly like native structs.
+        let e = parse_err("native enum E[T]:\n    A(T)\n    native fn foo() -> int\n");
+        assert!(
+            e.message
+                .contains("must declare `self` as its first parameter"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_plain_method_rejected() {
+        // A PLAIN (non-native) method sig inside a native-enum body is a parse error; only bodyless
+        // `native fn` methods are admitted (harvested into the enum's method table).
+        let e = parse_err("native enum E[T]:\n    A(T)\n    fn m(self) -> int\n");
+        assert!(
+            e.message.contains("native enum methods"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_variant_after_method_rejected() {
+        // Variants must precede methods (mirror `parse_enum`).
+        let e = parse_err("native enum E[T]:\n    A(T)\n    native fn m(self) -> int\n    B\n");
+        assert!(
+            e.message
+                .contains("variants must be declared before methods"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_nested_rejected() {
+        // A `native enum` is TOP-LEVEL-only: nested inside a fn body it is a parse error (the depth>1
+        // `Token::Native` guard fires before dispatch).
+        let e = parse_err("fn f():\n    native enum X:\n        A\n");
+        assert!(
+            e.message
+                .contains("native declaration must be a top-level declaration"),
             "unexpected error: {}",
             e.message
         );

@@ -1,0 +1,8 @@
+ok 7
+err boom
+some 3
+none
+ok 110
+err index out of range
+some 11
+none

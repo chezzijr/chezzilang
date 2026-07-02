@@ -72,3 +72,25 @@ native struct Set[T: Hashable]:
     native fn union(self, other: Set[T]) -> Set[T]
     native fn intersection(self, other: Set[T]) -> Set[T]
     native fn difference(self, other: Set[T]) -> Set[T]
+
+# The two builtin generic ENUMS' variant SHAPE (phase 5b-native-enum). `Option`/`Result` are the most
+# deeply-wired builtin types — the `?` operator, top-level error propagation, exhaustive `match`, and
+# native construction (`Ok`/`Err`/`Some`/`None` from `NativeRet`) are all RESERVED and stay RUST-WIRED:
+# their identity is `Ty::Option`/`Ty::Result` (resolved in `resolve_type`, NOT a nominal enum), their
+# variant set is synthesized INLINE from that `Ty` shape (`variants_of`/`match_kind`), and construction
+# is native. Only the declarable VARIANT SHAPE is file-backed here, as an ADDITIVE, DRIFT-GUARDED
+# MIRROR: the checker harvests these decls (`harvest_native_enum_table`) and asserts the parsed variant
+# set BYTE-MATCHES the inline maps, so the `.chz` source-of-truth can never silently drift from the Rust
+# wiring — but nothing at runtime consults the harvested table. `Result` is spelled in its faithful
+# two-slot form `Result[T, E]` with `Err(E)` (`Ty::Result` always carries a T and an E); the surface
+# `Result[T]` → `E = Error`-protocol DEFAULT is injected by `resolve_type`, NOT encoded in the variant.
+# Neither carries any bespoke method (there is no `Ty::Option`/`Ty::Result` arm in method resolution), so
+# both bodies are variants-only.
+
+native enum Option[T]:
+    Some(T)
+    None
+
+native enum Result[T, E]:
+    Ok(T)
+    Err(E)

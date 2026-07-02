@@ -1,0 +1,66 @@
+# examples/native_enum_smoke.chz — phase 5b-native-enum ARTIFACT.
+#
+# The reserved Option/Result variant SHAPE is now file-backed (`native enum Option[T]` /
+# `native enum Result[T, E]` in std/prelude.chz), but the `?` operator, exhaustive `match`, top-level
+# error propagation, and Some/None/Ok/Err CONSTRUCTION all stay Rust-wired. This program exercises that
+# whole surface — construction, `?` on a Result-returning AND an Option-returning fn, and exhaustive
+# matches — so its byte-identical output across interp / --serial VM / M:N VM is the phase-5b
+# behavior-preservation gate.
+
+# A Result-returning fn (`int!` = Result[int, Error]); the Err path short-circuits its `?` caller.
+fn safe_at(xs: List[int], i: int) -> int!:
+    if i < 0 or i >= xs.len():
+        return Err("index out of range")
+    return Ok(xs[i])
+
+# `?` on a Result: propagates the Err to THIS fn's caller unchanged, else unwraps the Ok payload.
+fn safe_at_plus(xs: List[int], i: int) -> int!:
+    v := safe_at(xs, i)?
+    return Ok(v + 100)
+
+# An Option-returning fn (`int?` = Option[int]).
+fn first_even(xs: List[int]) -> int?:
+    for x in xs:
+        if x % 2 == 0:
+            return Some(x)
+    return None
+
+# `?` on an Option: propagates None, else unwraps the Some payload.
+fn first_even_plus_one(xs: List[int]) -> int?:
+    e := first_even(xs)?
+    return Some(e + 1)
+
+# Exhaustive match on a Result.
+fn describe_result(r: int!) -> str:
+    match r:
+        Ok(v):
+            return "ok {v}"
+        Err(e):
+            return "err {e.message()}"
+
+# Exhaustive match on an Option.
+fn describe_option(o: int?) -> str:
+    match o:
+        Some(v):
+            return "some {v}"
+        None:
+            return "none"
+
+fn main():
+    xs := [10, 15, 20]
+
+    # Construction: Ok / Err / Some / None.
+    print(describe_result(Ok(7)))
+    print(describe_result(Err("boom")))
+    print(describe_option(Some(3)))
+    print(describe_option(None))
+
+    # `?` on a Result — the Ok path unwraps, the Err path short-circuits.
+    print(describe_result(safe_at_plus(xs, 0)))     # ok 110
+    print(describe_result(safe_at_plus(xs, 9)))     # err index out of range
+
+    # `?` on an Option — the Some path unwraps, the None path short-circuits.
+    print(describe_option(first_even_plus_one(xs)))         # some 11
+    print(describe_option(first_even_plus_one([1, 3, 5])))  # none
+
+main()

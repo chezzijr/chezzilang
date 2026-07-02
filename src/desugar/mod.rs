@@ -1123,6 +1123,8 @@ impl Walker<'_> {
             | StmtKind::Native(_)
             // A `native struct` decl carries only body-less field type annotations — nothing to desugar.
             | StmtKind::NativeStruct { .. }
+            // A `native enum` decl carries only body-less variants/method sigs — nothing to desugar.
+            | StmtKind::NativeEnum { .. }
             | StmtKind::TypeAlias { .. } => {}
         }
         Ok(())

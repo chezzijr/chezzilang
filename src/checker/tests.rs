@@ -12542,6 +12542,66 @@ fn native_struct_in_user_file_rejected() {
     );
 }
 
+/// Phase 5b — a `native enum` decl is likewise PRELUDE/STD-ONLY: in a user (non-stdlib) module it is a
+/// clear checker error (a user can't declare a reserved builtin enum's variant shape). The ONLY native
+/// enums are `std/prelude.chz`'s `Option`/`Result`.
+#[test]
+fn native_enum_in_user_file_rejected() {
+    rejects(
+        "native enum Foo:\n    A\n    B\n",
+        "native enum declarations are only allowed in standard-library modules",
+    );
+    entry_rejects(
+        "native enum Foo:\n    A\n    B\n",
+        "native enum declarations are only allowed in standard-library modules",
+    );
+}
+
+/// Phase 5b BEHAVIOR-PRESERVING DRIFT GUARD: the reserved `Option`/`Result` variant SHAPE is now ALSO
+/// declared in `std/prelude.chz` as `native enum Option[T]` / `native enum Result[T, E]`, but their
+/// identity, `?` propagation, match exhaustiveness, and `Ok`/`Err`/`Some`/`None` construction stay
+/// 100% Rust-inline (`variants_of`/`match_kind`/`resolve_type`, untouched). This asserts the
+/// parsed+resolved variant set from the `.chz` decl BYTE-EQUALS the inline `variants_of` maps, so the
+/// two source-of-truth expressions can never drift. Compared with EXPLICIT `E` (the `Result`'s
+/// `Error`-protocol surface default is injected by `resolve_type`, NOT encoded in the variant), and
+/// asserts NO ported methods (Option/Result carry zero bespoke method arms).
+#[test]
+fn native_enum_option_result_shape_matches_inline() {
+    let path = crate::resolver::std_root().join("prelude.chz");
+    let src = std::fs::read_to_string(&path).expect("read std/prelude.chz");
+    let toks = crate::lexer::tokenize(&src).expect("tokenize prelude");
+    let module = crate::parser::parse(toks).expect("parse prelude");
+    let mut c = Checker::new();
+    c.current_module_is_stdlib = true;
+    // Option[T]: Some(T)/None — the harvested shape must equal variants_of(Ty::option(Param "T")).
+    let (opt_vmap, opt_methods) = c
+        .harvest_native_enum_table(&module, "Option")
+        .expect("native enum Option must be declared in std/prelude.chz");
+    assert!(opt_methods.is_empty(), "Option carries no ported methods");
+    let opt_inline = c
+        .variants_of(&Ty::option(Ty::Param("T".to_string())))
+        .expect("inline Option variants_of");
+    assert_eq!(
+        opt_vmap, opt_inline,
+        "native enum Option drifted from inline variants_of"
+    );
+    // Result[T, E]: Ok(T)/Err(E) — must equal variants_of(Ty::result_e(Param "T", Param "E")).
+    let (res_vmap, res_methods) = c
+        .harvest_native_enum_table(&module, "Result")
+        .expect("native enum Result must be declared in std/prelude.chz");
+    assert!(res_methods.is_empty(), "Result carries no ported methods");
+    let res_inline = c
+        .variants_of(&Ty::result_e(
+            Ty::Param("T".to_string()),
+            Ty::Param("E".to_string()),
+        ))
+        .expect("inline Result variants_of");
+    assert_eq!(
+        res_vmap, res_inline,
+        "native enum Result drifted from inline variants_of"
+    );
+}
+
 /// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.
 /// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::BuiltinFn`);
 /// `native ctor` (int/str/…) stays NON-first-class (value-position use is a checker error). This is
