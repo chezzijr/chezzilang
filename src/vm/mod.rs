@@ -20047,6 +20047,30 @@ main()
         assert_eq!(vo, io, "VM vs interp divergence");
     }
 
+    /// Entry-last backstop — when the ENTRY file IS an always-injected prelude stub
+    /// (`chezzi run std/prelude.chz` / `chezzi run std/ref.chz`), the resolver dedups the entry's own
+    /// visit and the entry-last reorder must restore `modules.last() == entry` so the positional-entry
+    /// consumers designate the right module. Both stubs are side-effect-free (no top-level output, no
+    /// test fns), so all three engines (cooperative VM, M:N `--parallel`, interp) must run clean with
+    /// empty stdout — byte-identical. Proves "runs clean, no panic" across all three engines.
+    #[test]
+    fn entry_is_always_linked_stub_runs_clean_three_engine() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for stub in ["prelude.chz", "ref.chz"] {
+            let entry = manifest.join("std").join(stub);
+            let cfg = crate::native::HostConfig::default;
+            let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
+            let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
+            let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+            assert!(vr.is_ok(), "cooperative VM faulted on {stub}: {vr:?}");
+            assert!(pr.is_ok(), "--parallel faulted on {stub}: {pr:?}");
+            assert!(ir.is_ok(), "interp faulted on {stub}: {ir:?}");
+            assert_eq!(vo, "", "cooperative VM stdout not empty on {stub}");
+            assert_eq!(vo, po, "VM vs --parallel divergence on {stub}");
+            assert_eq!(vo, io, "VM vs interp divergence on {stub}");
+        }
+    }
+
     /// Task 4 — `import std.concurrency` then construct + use ALL FOUR runtime concurrency ctors must
     /// RUN end-to-end byte-identically on the cooperative VM AND the interp (the deprecated parity
     /// oracle). Exercises the native EMPTY-members module-object alloc on both engines + the
