@@ -16078,6 +16078,21 @@ mod tests {
         assert_mc_parity(src, "body\ntask\ncleanup\n");
     }
 
+    /// Phase 5a-containers REGRESSION GUARD: the List/Map/Set method-surface migration to file-backed
+    /// `native struct` decls in std/prelude.chz is CHECKER-ONLY — the literals/ctors still lower to the
+    /// native build opcodes and runtime method dispatch is by name (untouched). This drives a
+    /// representative call of EVERY builtin List/Map/Set method (append/pop/contains/index_of/concat/
+    /// extend/sum/reverse + residual map/filter/fold/sort; Map has/get/keys/values/remove/merge/update/
+    /// len; Set add/has/remove/union/intersection/difference/len) and asserts byte-identical output on all
+    /// three engines (cooperative VM / frozen interp / `--parallel`). A diverged harvested sig or a
+    /// runtime regression would change this output.
+    #[test]
+    fn container_methods_3engine_parity() {
+        let src = include_str!("../../examples/container_methods.chz");
+        let expected = include_str!("../../examples/container_methods.expected");
+        assert_mc_parity(src, expected);
+    }
+
     /// Phase 4c-concurrency REGRESSION GUARD: the std.concurrency migration to a file-backed
     /// std/concurrency.chz is CHECKER-ONLY — the ctors still lower to `Op::NewShared`/etc by name and
     /// runtime dispatch is untouched. This drives all four primitives (Shared set/update, RwShared

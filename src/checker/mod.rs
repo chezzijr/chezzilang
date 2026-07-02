@@ -938,6 +938,24 @@ impl Checker {
             {
                 c.ref_seed = Some(info.clone());
             }
+            // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set` native-struct
+            // METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table only) into
+            // `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/`s.add(...)`
+            // resolve via the normal method path (the retired bespoke `list_method_sig`/`map_method_sig`/
+            // `set_method_sig` arms' replacement). Harvested here (NOT from `sig.struct_defs` — the prelude
+            // is a normal AST module whose `check_module` no-ops native structs) by resolving the decls
+            // over `lm.ast` while still in the prelude's stdlib module context (type params + `Hashable`
+            // in scope). The prelude is order[0] (always-linked, no deps), so this is populated before
+            // entry/all others — exactly like `ref_seed` above. The `List`/`Map`/`Set` names still resolve
+            // to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via `resolve_type`'s reserved arms; the
+            // ctors/literals stay compiler-wired.
+            if c.container_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
+                for tn in ["List", "Map", "Set"] {
+                    if let Some(info) = c.harvest_native_struct_table(&lm.ast, tn) {
+                        c.container_seeds.insert(tn.to_string(), info);
+                    }
+                }
+            }
             c.module_sigs.insert(lm.id.clone(), sig);
         }
     }
@@ -1470,6 +1488,18 @@ struct Checker {
     /// substituted with the value's element type at the call site. Bare-name annotation stays
     /// import-gated by `imported_concurrency` + `resolve_type`'s reserved arm. Empty until harvested.
     concurrency_seeds: HashMap<String, StructInfo>,
+    /// Phase 5a-containers — the harvested `StructInfo` (method table) for each of the three RESERVED
+    /// UNIVERSE container types (`List`/`Map`/`Set`), keyed by bare name, captured from the always-linked
+    /// `std/prelude.chz`'s `native struct` decls the first time the prelude module is checked in the graph
+    /// (order[0], before entry/all others — like `ref_seed`). Like `concurrency_seeds`, these resolve to
+    /// the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` (NOT nominal structs) — only the METHOD table is
+    /// re-seeded (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `xs.push(...)` /
+    /// `m.get(...)` / `s.add(...)` resolve via the normal method path, with each generic method sig's
+    /// `Ty::Param` substituted with the value's element/key/value type at the call site. The literal
+    /// syntax + turbofish ctor stay compiler-wired (`resolve_type`/`builtin_container_sig`). Unlike the
+    /// import-gated seeds, these are UNIVERSE (always in scope) — no licensing set gates them. Empty until
+    /// harvested.
+    container_seeds: HashMap<String, StructInfo>,
     /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
     /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
     /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —
@@ -1591,6 +1621,7 @@ impl Checker {
             net_socket_seed: None,
             net_listener_seed: None,
             concurrency_seeds: HashMap::new(),
+            container_seeds: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
@@ -1717,6 +1748,18 @@ impl Checker {
         // which stays import-gated by `imported_concurrency`. The method table is reached only from a
         // value whose `Ty` is already one of those, so a bare unimported annotation still errors.
         for (name, info) in &self.concurrency_seeds {
+            self.structs.insert(name.clone(), info.clone());
+        }
+        // Phase 5a-containers — re-seed the always-linked prelude's `List`/`Map`/`Set` METHOD tables
+        // (harvested from `std/prelude.chz`) under their bare names so `xs.push(...)`/`m.get(...)`/
+        // `s.add(...)` resolve via the normal method path (the `Ty::List`/`Ty::Map`/`Ty::Set` method arms
+        // look the table up here, substituting the value's element/key/value type for the sig's
+        // `Ty::Param`). Like `Socket`/`Shared` above — and UNLIKE `Ref` — NO `struct_names`/`bare_types`
+        // licensing is added: the three resolve to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via
+        // `resolve_type`'s reserved arms (universe types — always in scope). The `Builtin` origin means
+        // `unique_member_owner`'s owner scan skips them (no mis-pin). The method table is reached only
+        // from a value whose `Ty` is already a container, and the literal/ctor stay compiler-wired.
+        for (name, info) in &self.container_seeds {
             self.structs.insert(name.clone(), info.clone());
         }
     }
@@ -1929,6 +1972,47 @@ impl Checker {
         } else {
             FnSig::plain(params, ret)
         }
+    }
+
+    /// Phase 5a-containers — harvest the METHOD table of one `native struct` (by bare name) from a parsed
+    /// module AST into a `StructInfo`. Mirrors [`harvest_native_module`]'s PASS 1b, used for the always-
+    /// linked `std/prelude.chz`'s reserved UNIVERSE containers (`List`/`Map`/`Set`): their identity is the
+    /// reserved `Ty::List`/`Ty::Map`/`Ty::Set` (NOT a nominal struct), so `fields` are empty and only the
+    /// method table is kept. The leading bare `self` is STRIPPED by `harvest_native_fn_sig(_, true)`, so
+    /// the harvested sigs BYTE-MATCH the retired bespoke `list_method_sig`/`map_method_sig`/
+    /// `set_method_sig` arms. Type params (incl. `Map`/`Set`'s `Hashable`-bounded key/elem) are in scope
+    /// while resolving each method sig so the internal `Map[K, V]`/`List[T]`/`Set[T]` return types resolve
+    /// past the hashable gate. Returns `None` if the named native struct is not present in the AST.
+    fn harvest_native_struct_table(
+        &mut self,
+        ast: &crate::ast::Module,
+        name: &str,
+    ) -> Option<StructInfo> {
+        for s in &ast.stmts {
+            if let StmtKind::NativeStruct {
+                name: sn,
+                type_params,
+                methods,
+                ..
+            } = &s.kind
+                && sn == name
+            {
+                let saved = self.enter_type_params(type_params);
+                let table: HashMap<String, FnSig> = methods
+                    .iter()
+                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
+                    .collect();
+                self.exit_type_params(saved);
+                return Some(StructInfo {
+                    type_params: type_params.clone(),
+                    fields: Vec::new(),
+                    methods: table,
+                    origin: StructOrigin::Builtin,
+                    doc: None,
+                });
+            }
+        }
+        None
     }
 
     /// Phase 4c — look up a method sig on a reserved native handle type in the harvested method table
@@ -3675,6 +3759,18 @@ impl Checker {
         for s in &module.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 self.register_native_decl(decl);
+            }
+        }
+        // Phase 5a-containers — the single-module `check` path never builds a graph, so the graph-capture
+        // of the prelude's `List`/`Map`/`Set` method tables (into `container_seeds`, re-seeded by
+        // `seed_stdlib_structs`) never runs here. Harvest them straight into `self.structs` (the same
+        // consumption site) so `xs.push(...)`/`m.get(...)`/`s.add(...)` resolve on the graph-less path
+        // exactly as on the graph path — the precise mirror of how this helper backfills the native-fn
+        // sigs for the graph-less path. `begin_module` (which would re-clear+re-seed) is never called on
+        // this path, so a direct insert survives to `check_module`.
+        for tn in ["List", "Map", "Set"] {
+            if let Some(info) = self.harvest_native_struct_table(&module, tn) {
+                self.structs.insert(tn.to_string(), info);
             }
         }
     }
@@ -7856,7 +7952,14 @@ impl Checker {
                 labels: crate::checker::FnLabels::default(),
             });
         }
-        if let Some(info) = self.structs.get(&self.bare_key(name)) {
+        // A RESERVED builtin container/handle (`List`/`Map`/`Set`/`Channel`/`Shared`/…) now ALSO has a
+        // `self.structs` entry — for its harvested METHOD table — but it is NOT a nominal struct: its
+        // ctor callee must display the FLAT `builtin_container_sig` shape (`fn(?) -> List[?]`), NOT a
+        // struct-ctor sig synthesized from the (empty) field list. Skip the struct branch for these so
+        // they fall through to `builtin_sig` below (mirrors `resolve_type`'s reserved-type guard).
+        if builtin_container_sig(name).is_none()
+            && let Some(info) = self.structs.get(&self.bare_key(name))
+        {
             let params: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
             let targs: Vec<Ty> = info
                 .type_params
@@ -9249,10 +9352,16 @@ impl Checker {
         // `list`/`map`/`set`) is never a unique pin: it is shared across types AND would only pin a
         // weak `list[Unknown]`-style type (design §3 — "methods/fields shared by >1 type … never
         // pin"). Bail before collecting owners so such members fall through to the annotation rule.
-        if list_method_sig(member, &Ty::Unknown).is_some()
-            || map_method_sig(member, &Ty::Unknown, &Ty::Unknown).is_some()
-            || set_method_sig(member, &Ty::Unknown).is_some()
-        {
+        // Phase 5a-containers — the `List`/`Map`/`Set` method tables are harvested from
+        // `std/prelude.chz` and re-seeded into `self.structs` by `seed_stdlib_structs`; check them for
+        // membership (the retired `list_method_sig`/`map_method_sig`/`set_method_sig` arms' replacement).
+        // The harvested tables contain EXACTLY the flat methods those arms covered (`sum` included —
+        // `list_method_sig(m, Unknown)` returned `Some` for it), so the bail set is byte-identical.
+        if ["List", "Map", "Set"].iter().any(|ty| {
+            self.structs
+                .get(*ty)
+                .is_some_and(|info| info.methods.contains_key(member))
+        }) {
             return None;
         }
         // Collect every PINNABLE owner of `member`: user structs (by field or method) plus the
@@ -11583,20 +11692,30 @@ impl Checker {
                     );
                     return Ty::Nil;
                 }
-                if let Some(sig) = list_method_sig(method, elem) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                if method == "sum" {
+                // `sum` is harvested as `sum(self) -> T`, but a plain sig would wrongly accept a
+                // NON-numeric list — the retired `list_method_sig` gated `sum` on `elem.is_numeric() ||
+                // elem.is_unknown()`. Keep that DISPATCH-TIME gate as a residual (parallel to
+                // `Atomic.add`/`sub`): a non-numeric element reports the same diagnostic as before.
+                let elem = (**elem).clone();
+                if method == "sum" && !(elem.is_numeric() || elem.is_unknown()) {
+                    self.infer_all(args);
                     self.error(
                         span,
                         format!("sum() requires a numeric list, found List[{elem}]"),
                     );
-                } else {
-                    self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                    return Ty::Unknown;
                 }
+                // Every other method's sig is harvested from `std/prelude.chz`'s `native struct List[T]`
+                // (re-seeded by `seed_stdlib_structs`); the element type is substituted for `Ty::Param`.
+                if let Some(sig) =
+                    self.native_handle_method("List", method, std::slice::from_ref(&elem))
+                {
+                    self.record_method_hover(name_span, &sig);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown
             }
             // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
@@ -11638,9 +11757,13 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Map(k, v) => {
-                if let Some(sig) = map_method_sig(method, k, v) {
+                // The sigs are harvested from `std/prelude.chz`'s `native struct Map[K, V]` (re-seeded by
+                // `seed_stdlib_structs`); the key/value types are substituted for `Ty::Param("K")`/
+                // `Ty::Param("V")` here (DECLARATION order — `[k, v]`).
+                let targs = [(**k).clone(), (**v).clone()];
+                if let Some(sig) = self.native_handle_method("Map", method, &targs) {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -11648,9 +11771,14 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Set(elem) => {
-                if let Some(sig) = set_method_sig(method, elem) {
+                // The sigs are harvested from `std/prelude.chz`'s `native struct Set[T]` (re-seeded by
+                // `seed_stdlib_structs`); the element type is substituted for `Ty::Param("T")` here.
+                let elem = (**elem).clone();
+                if let Some(sig) =
+                    self.native_handle_method("Set", method, std::slice::from_ref(&elem))
+                {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -15660,53 +15788,19 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
     Some(FnSig::plain(params, ret))
 }
 
-/// Built-in method signatures on `list[T]` (M6). `elem` is the list's element type.
-fn list_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "len" => (vec![], Ty::Int),
-        "push" => (vec![elem.clone()], Ty::Nil),
-        "pop" => (vec![], Ty::option(elem.clone())),
-        "reverse" => (vec![], Ty::Nil),
-        "contains" => (vec![elem.clone()], Ty::Bool),
-        "index_of" => (vec![elem.clone()], Ty::Int),
-        // `concat` returns a NEW list (receiver + other); `extend` appends in place (returns nil).
-        "concat" => (vec![Ty::list(elem.clone())], Ty::list(elem.clone())),
-        "extend" => (vec![Ty::list(elem.clone())], Ty::Nil),
-        // `sum` is only valid on numeric lists; an unknown element type is tolerated
-        // (it flows from an empty/unannotated list). Non-numeric is rejected at the call site.
-        "sum" if elem.is_numeric() || elem.is_unknown() => (vec![], elem.clone()),
-        // `sort` mutates in place (returns nil); only orderable element types (int/float/str).
-        // Unknown is tolerated (empty/unannotated list). Non-orderable is rejected at the call site.
-        // `sort` is handled in `infer_method_call` (it needs `self.satisfies` to allow Comparable
-        // structs), so it never reaches this table.
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
+// The bespoke `list_method_sig` / `map_method_sig` / `set_method_sig` arms are RETIRED (phase
+// 5a-containers): every one of their FLAT sigs is now declared as a body-less `native fn` method inside a
+// `native struct List[T]` / `Map[K, V]` / `Set[T]` in `std/prelude.chz`, harvested into that reserved
+// type's method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with
+// the value's element/key/value type substituted for the sig's `Ty::Param`s. The literal syntax + turbofish
+// ctor stay compiler-wired (`resolve_type`/`builtin_container_sig`). The generic-recovery `List` methods a
+// plain sig cannot express stay RESIDUAL in the `Ty::List` arm (NOT declared in the prelude struct):
+// `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types) and `sort` (Comparable-gated),
+// plus `sum`'s numeric-element gate (a plain `sum(self) -> T` would wrongly accept a non-numeric list).
 
 /// Element types that have a total order for `sort()`: the scalar comparables.
 fn is_orderable(t: &Ty) -> bool {
     matches!(t, Ty::Int | Ty::Float | Ty::Str)
-}
-
-/// Built-in method signatures on `map[K, V]` (gap #5). `k`/`v` are the key / value types.
-fn map_method_sig(method: &str, k: &Ty, v: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "len" => (vec![], Ty::Int),
-        "has" => (vec![k.clone()], Ty::Bool),
-        "get" => (vec![k.clone()], Ty::option(v.clone())),
-        "keys" => (vec![], Ty::list(k.clone())),
-        "values" => (vec![], Ty::list(v.clone())),
-        "remove" => (vec![k.clone()], Ty::option(v.clone())),
-        // `merge` returns a NEW map (other wins on key clash); `update` writes into the receiver.
-        "merge" => (
-            vec![Ty::map(k.clone(), v.clone())],
-            Ty::map(k.clone(), v.clone()),
-        ),
-        "update" => (vec![Ty::map(k.clone(), v.clone())], Ty::Nil),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
 }
 
 /// Built-in method signatures on `Channel[T]` (C2). `elem` is the channel's element type.
@@ -15739,7 +15833,6 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
 // stay as thin residuals: `RwShared.read`'s closure return R is recovered in the `Ty::RwShared` arm,
 // and `Atomic.add`/`sub`'s numeric-`T` gate is a `!elem.is_numeric()` check in the `Ty::Atomic` arm.
 
-/// Built-in method signatures on `set[T]`. `elem` is the set's element type.
 /// Built-in method signatures on `bytearray` (the mutable byte buffer). Mirrors the VM's
 /// `core_method` ByteArray arm and the interp's `eval_bytearray_method` — keep all three in lockstep.
 /// `push(int)` appends one byte (0–255 validated at runtime); `pop() -> Option[int]` removes the last.
@@ -15763,19 +15856,6 @@ fn bytes_method_sig(method: &str) -> Option<FnSig> {
     let (params, ret) = match method {
         "decode" => (vec![], Ty::Str),
         "len" => (vec![], Ty::Int),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
-
-fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let set = Ty::set(elem.clone());
-    let (params, ret) = match method {
-        "len" => (vec![], Ty::Int),
-        "has" => (vec![elem.clone()], Ty::Bool),
-        "add" => (vec![elem.clone()], Ty::Nil),
-        "remove" => (vec![elem.clone()], Ty::Bool), // true if the element was present
-        "union" | "intersection" | "difference" => (vec![set.clone()], set),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))
