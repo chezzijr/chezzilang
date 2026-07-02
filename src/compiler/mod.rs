@@ -1172,6 +1172,9 @@ impl Compiler {
             | StmtKind::NewType { .. } // methods compiled in compile_module; ctor is a named call
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. } // bound at module init (see compile_module), like top-level fn
+            // A `native fn`/`native ctor` decl is a compile-time SIGNATURE source only — it gets no
+            // bytecode, no binding, and is never a callable user fn (dispatch stays name-keyed).
+            | StmtKind::Native(_)
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {

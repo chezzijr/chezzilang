@@ -309,7 +309,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 
 - **Builtins (no import):** `print`, `range`, casts (`int()`/`str()`/`float()`),
   `ord`/`chr`, `Set()`/`Set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
-  (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`).
+  (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`). The **universe builtins**
+  `ord`/`chr`/`panic` (first-class `native fn`) and `int`/`float`/`str`/`bytes`/`bytearray`
+  (non-first-class `native ctor`) now declare their **signatures in Chezzi**, in the always-linked
+  **`std/prelude.chz`** (see §"`native fn`/`native ctor`" in `syntax.md`) — the engine binds their bodies
+  by name. `print` (variadic) and `range` + the `List`/`Map`/`Set` container ctors stay engine-synthetic.
+  A `native fn`/`native ctor` decl is **prelude/std-only** (rejected in user code): an internal analog of
+  `extern`, with the same-scoped relaxation that an unannotated param / missing `-> ret` means the
+  dynamic/native type — Chezzi user code stays statically typed (no user-facing `any`/`never`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
   `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`

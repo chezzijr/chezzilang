@@ -11079,17 +11079,23 @@ fn newtype_operator_method_fails_generic_bound() {
 /// is the single source: `builtin_sig` is keyed off the same names.
 #[test]
 fn reserved_callables_all_have_builtin_sig() {
+    // `builtin_sig` is now a Checker METHOD (phase 3a): the eight migrated universe builtins source
+    // their sig from the always-linked std/prelude.chz, seeded here via `seed_native_prelude_sigs`
+    // (the single-module `check` path does the same). `print` + the container/runtime ctors stay
+    // hard-coded, so they resolve without the seed too.
+    let mut c = Checker::new();
+    c.seed_native_prelude_sigs();
     for name in RESERVED_CALLABLE {
         assert!(
-            builtin_sig(name).is_some(),
+            c.builtin_sig(name).is_some(),
             "reserved callable builtin '{name}' has no builtin_sig entry → it would lose editor hover"
         );
         // And the const slice IS the reserved-name set (refactor stayed behavior-identical).
         assert!(is_reserved_name(name), "'{name}' must be a reserved name");
     }
     // Sanity: a non-reserved name has no builtin sig (no accidental over-coverage).
-    assert!(builtin_sig("Ok").is_none());
-    assert!(builtin_sig("totally_not_a_builtin").is_none());
+    assert!(c.builtin_sig("Ok").is_none());
+    assert!(c.builtin_sig("totally_not_a_builtin").is_none());
 }
 
 /// Native-prelude phase 1 — DRIFT GUARD (the real payoff of this track). The synthetic `PRELUDE`
@@ -11149,10 +11155,13 @@ fn prelude_table_is_single_source_of_truth() {
 
     // (3) Every table row has a checker `builtin_sig` (drives editor hover + value-position typing).
     //     `first_class` is true IFF the row lowers to a first-class runtime value — Print|Builtin — and
-    //     is NEVER true for a Ctor (the hard invariant: no scalar ctor is first-class).
+    //     is NEVER true for a Ctor (the hard invariant: no scalar ctor is first-class). `builtin_sig`
+    //     is now a Checker METHOD sourcing the eight migrated sigs from std/prelude.chz (seeded here).
+    let mut chk = Checker::new();
+    chk.seed_native_prelude_sigs();
     for p in PRELUDE {
         assert!(
-            builtin_sig(p.name).is_some(),
+            chk.builtin_sig(p.name).is_some(),
             "PRELUDE row '{}' has no builtin_sig",
             p.name
         );
@@ -11199,6 +11208,120 @@ fn prelude_table_is_single_source_of_truth() {
             ),
         }
     }
+
+    // (5) PHASE 3a — the eight migrated universe builtins are now DECLARED in std/prelude.chz. Build a
+    //     real graph (which always-links std.prelude), read the prelude module's `native` decls, and
+    //     cross-check: the parsed native-decl NAME SET equals the eight migrated names; `native fn` ⇒
+    //     Builtin & first_class, `native ctor` ⇒ Ctor & !first_class (matching the hollow Rust table);
+    //     the union {parsed 8} ∪ {print} equals the whole first-class-or-ctor prelude surface; and each
+    //     parsed FnSig equals its HISTORICAL hand-built shape (behavior-preserving migration).
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", "print(\"hi\")\n");
+    let graph =
+        crate::resolver::build_graph(&entry).expect("resolve should always-link std.prelude");
+    let prelude = graph
+        .modules
+        .iter()
+        .find(|m| m.dotted == ["std", "prelude"])
+        .expect("std.prelude must be always-linked into the graph");
+    let mut parsed: Vec<(String, crate::ast::NativeKind)> = Vec::new();
+    for s in &prelude.ast.stmts {
+        if let StmtKind::Native(d) = &s.kind {
+            parsed.push((d.name.clone(), d.kind));
+        }
+    }
+    let parsed_names: BTreeSet<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        parsed_names,
+        BTreeSet::from([
+            "ord",
+            "chr",
+            "panic",
+            "int",
+            "float",
+            "str",
+            "bytes",
+            "bytearray"
+        ]),
+        "std/prelude.chz native decls must be exactly the eight migrated universe builtins"
+    );
+    // Metadata agreement: the parsed decl KIND must match the hollow Rust table's intrinsic/first_class.
+    for (name, kind) in &parsed {
+        let p = prelude_fn(name).unwrap_or_else(|| panic!("'{name}' missing from PRELUDE table"));
+        match kind {
+            crate::ast::NativeKind::Fn => {
+                assert_eq!(
+                    p.intrinsic,
+                    Intrinsic::Builtin,
+                    "'{name}': native fn ⇒ Builtin"
+                );
+                assert!(p.first_class, "'{name}': native fn ⇒ first_class");
+            }
+            crate::ast::NativeKind::Ctor => {
+                assert_eq!(p.intrinsic, Intrinsic::Ctor, "'{name}': native ctor ⇒ Ctor");
+                assert!(!p.first_class, "'{name}': native ctor ⇒ !first_class");
+            }
+        }
+    }
+    // Whole prelude surface = {parsed 8} ∪ {print, synthetic}.
+    let mut whole: BTreeSet<&str> = parsed_names.clone();
+    whole.insert("print");
+    let table_surface: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
+    assert_eq!(
+        whole, table_surface,
+        "the PRELUDE metadata rows must equal the eight std/prelude.chz decls plus synthetic `print`"
+    );
+    // Each parsed FnSig must equal its HISTORICAL hand-built shape (byte-identical migration). Read the
+    // sigs through a prelude-seeded checker (same path production uses).
+    let mut sc = Checker::new();
+    sc.seed_native_prelude_sigs();
+    let hist: &[(&str, Vec<Ty>, Ty)] = &[
+        ("ord", vec![Ty::Str], Ty::Int),
+        ("chr", vec![Ty::Int], Ty::Str),
+        ("panic", vec![Ty::Str], Ty::Unknown),
+        ("int", vec![Ty::Unknown], Ty::Int),
+        ("float", vec![Ty::Unknown], Ty::Float),
+        ("str", vec![Ty::Unknown], Ty::Str),
+        ("bytes", vec![Ty::Unknown], Ty::Bytes),
+        ("bytearray", vec![Ty::Unknown], Ty::ByteArray),
+    ];
+    for (name, params, ret) in hist {
+        let sig = sc
+            .builtin_sig(name)
+            .unwrap_or_else(|| panic!("'{name}' has no builtin_sig after prelude seed"));
+        assert_eq!(
+            &sig.params, params,
+            "'{name}' params drifted from historical sig"
+        );
+        assert_eq!(&sig.ret, ret, "'{name}' return drifted from historical sig");
+    }
+}
+
+/// Phase 3a — a `native fn`/`native ctor` decl is PRELUDE/STD-ONLY: in a user (non-stdlib) module it
+/// is a clear checker error (a user can't bind a name to a nonexistent intrinsic — a footgun guard).
+#[test]
+fn native_decl_in_user_file_rejected() {
+    rejects(
+        "native fn foo(x: int) -> int\n",
+        "native fn/ctor declarations are only allowed in standard-library modules",
+    );
+    entry_rejects(
+        "native ctor bar(x) -> int\n",
+        "native fn/ctor declarations are only allowed in standard-library modules",
+    );
+}
+
+/// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.
+/// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::BuiltinFn`);
+/// `native ctor` (int/str/…) stays NON-first-class (value-position use is a checker error). This is
+/// the graph path (prelude always-linked), complementing the single-module `ok()`-based tests.
+#[test]
+fn native_prelude_firstclassness_preserved_on_graph_path() {
+    entry_ok("fn w():\n    f := ord\n    print(f(\"a\"))\nw()\n");
+    entry_ok("fn w():\n    p := panic\n    p(\"boom\")\nw()\n");
+    // A `native ctor` (scalar constructor) is NOT first-class — value-position use is rejected
+    // (same fall-through path as `f := List`; the message names the offending `int`).
+    entry_rejects("fn w():\n    f := int\nw()\n", "int");
 }
 
 /// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST

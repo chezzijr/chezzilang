@@ -312,6 +312,12 @@ impl Parser {
         if matches!(self.peek(), Token::Extern) && self.depth > 1 {
             return Err(self.err("extern block must be a top-level declaration".to_string()));
         }
+        // A `native fn`/`native ctor` decl is likewise a TOP-LEVEL-only declaration (it declares a
+        // universe-builtin signature, bound natively). The checker further restricts it to
+        // prelude/std modules; a nested one is rejected here at parse time (same seam as `extern`).
+        if matches!(self.peek(), Token::Native) && self.depth > 1 {
+            return Err(self.err("native declaration must be a top-level declaration".to_string()));
+        }
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {
@@ -322,6 +328,11 @@ impl Parser {
             Token::Enum => self.parse_enum()?,
             Token::Protocol => self.parse_protocol()?,
             Token::Extern => self.parse_extern()?,
+            Token::Native => {
+                let k = self.parse_native()?;
+                self.expect_stmt_end()?;
+                k
+            }
             Token::Type => {
                 let k = self.parse_type_alias()?;
                 self.expect_stmt_end()?;
@@ -744,6 +755,48 @@ impl Parser {
             ret,
             span,
         })
+    }
+
+    /// A body-less `native fn NAME(params) -> ret` / `native ctor NAME(params) -> ret` declaration
+    /// (prelude/std-only, top-level). Mirrors [`parse_extern_fn`] (bodyless, `parse_params(false)`,
+    /// optional `-> ret`, NEWLINE-terminated by the caller) but discriminates on the `fn`/`ctor`
+    /// keyword after `native` into a [`NativeKind`]. `ctor` is a plain identifier (not a keyword), so
+    /// it is matched via `expect_ident`. An UNANNOTATED param → dynamic (`Ty::Unknown` in the
+    /// checker); a missing `-> ret` → native/never (`Ty::Unknown` return).
+    fn parse_native(&mut self) -> PResult<StmtKind> {
+        let span = self.cur_span();
+        self.expect(&Token::Native)?;
+        let kind = if self.eat(&Token::Fn) {
+            NativeKind::Fn
+        } else {
+            let word_span = self.cur_span();
+            let word = self.expect_ident()?;
+            if word != "ctor" {
+                return Err(ParseError {
+                    message: "expected 'fn' or 'ctor' after 'native'".to_string(),
+                    span: word_span,
+                });
+            }
+            NativeKind::Ctor
+        };
+        let name_span = self.cur_span();
+        let name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let params = self.parse_params(false)?;
+        self.expect(&Token::RParen)?;
+        let ret = if self.eat(&Token::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        Ok(StmtKind::Native(NativeDecl {
+            name,
+            name_span,
+            kind,
+            params,
+            ret,
+            span,
+        }))
     }
 
     /// `extern "lib":` then an INDENT block of body-less C function signatures. Mirrors
@@ -2610,6 +2663,62 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn native_fn_and_ctor_parse_to_stmtkind_native() {
+        // `native fn` → NativeKind::Fn, annotated param carries its type, `-> ret` present.
+        let StmtKind::Native(d) = only("native fn ord(c: str) -> int\n") else {
+            panic!("expected StmtKind::Native");
+        };
+        assert_eq!(d.name, "ord");
+        assert_eq!(d.kind, NativeKind::Fn);
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].name, "c");
+        assert!(d.params[0].ty.is_some());
+        assert!(d.ret.is_some());
+
+        // `native ctor` → NativeKind::Ctor; an UNANNOTATED param (`x`) has no type (dynamic).
+        let StmtKind::Native(d) = only("native ctor int(x) -> int\n") else {
+            panic!("expected StmtKind::Native");
+        };
+        assert_eq!(d.name, "int");
+        assert_eq!(d.kind, NativeKind::Ctor);
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].name, "x");
+        assert!(d.params[0].ty.is_none(), "unannotated param → ty None");
+        assert!(d.ret.is_some());
+
+        // A `native fn` with NO `-> ret` (like `panic`) parses with `ret == None`.
+        let StmtKind::Native(d) = only("native fn panic(msg: str)\n") else {
+            panic!("expected StmtKind::Native");
+        };
+        assert_eq!(d.name, "panic");
+        assert_eq!(d.kind, NativeKind::Fn);
+        assert!(d.ret.is_none(), "no arrow → ret None (native/never)");
+    }
+
+    #[test]
+    fn native_decl_nested_is_error() {
+        // A `native` decl is TOP-LEVEL-only: nested inside a fn body it is a parse error.
+        let e = parse_err("fn f():\n    native fn g()\n");
+        assert!(
+            e.message
+                .contains("native declaration must be a top-level declaration"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_bad_kind_word_is_error() {
+        // `native` must be followed by `fn` or `ctor`.
+        let e = parse_err("native thing foo()\n");
+        assert!(
+            e.message.contains("expected 'fn' or 'ctor' after 'native'"),
+            "unexpected error: {}",
+            e.message
+        );
     }
 
     #[test]

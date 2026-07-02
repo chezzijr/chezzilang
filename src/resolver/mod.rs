@@ -247,6 +247,17 @@ pub fn build_graph_with_entry_source(
     // so a program that already imports std.ref (or IS std.ref) doesn't double-read; the entry_override
     // id-match reuses the in-memory buffer. If std.ref can't be found this fails for ALL programs, which
     // is correct (a misconfigured std root should surface loudly, not silently).
+    // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
+    // `float`/`str`/`bytes`/`bytearray`, phase 3a) are declared here as `native fn`/`native ctor` decls
+    // and read by the checker as their signature source. Injected FIRST (before ref + the entry DFS) so
+    // it's checked before any module that might use those builtins in value position; import-free, so
+    // it lands at the front and the entry still ends LAST. Deduped by `visited` (a program that IS
+    // std.prelude doesn't double-read). If it can't be found this fails for ALL programs — correct (a
+    // misconfigured std root should surface loudly).
+    let prelude_path = ["std".to_string(), "prelude".to_string()];
+    let prelude_file = module_file(&prelude_path, &b.project_root, &b.std_root);
+    let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
+    b.visit(&prelude_id, &prelude_path, Span { line: 1, col: 1 })?;
     let ref_path = ["std".to_string(), "ref".to_string()];
     let ref_file = module_file(&ref_path, &b.project_root, &b.std_root);
     let ref_id = ModuleId(canonical_or_abs(&ref_file));
@@ -593,6 +604,29 @@ mod tests {
             a.modules.last().unwrap().ast.stmts.len(),
             b.modules.last().unwrap().ast.stmts.len()
         );
+    }
+
+    // 0c. std.prelude (phase 3a) is ALWAYS-LINKED into every graph — like std.ref — and the entry
+    // still lands LAST (both always-linked modules are import-free, so they precede the entry DFS).
+    #[test]
+    fn prelude_always_linked_and_entry_last() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "x = 1\n");
+        let graph = build_graph(&entry).expect("build");
+        assert!(
+            graph.modules.iter().any(|m| m.dotted == ["std", "prelude"]),
+            "std.prelude must be always-linked into the graph"
+        );
+        // Both always-linked helpers are present, and the entry is still the final module.
+        assert!(graph.modules.iter().any(|m| m.dotted == ["std", "ref"]));
+        assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+        // Dedup: a second build doesn't double-count the prelude.
+        let prelude_count = graph
+            .modules
+            .iter()
+            .filter(|m| m.dotted == ["std", "prelude"])
+            .count();
+        assert_eq!(prelude_count, 1, "std.prelude must appear exactly once");
     }
 
     // 1. find_root walks up to the chezzi.toml marker.

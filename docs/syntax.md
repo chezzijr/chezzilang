@@ -2377,6 +2377,36 @@ nullable `str?`
 returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-scalar structs by value** —
 **shipped**; **sync scalar callbacks** (`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
 
+## 12c. `native fn` / `native ctor` — universe-builtin signatures in Chezzi (prelude/std-only)
+
+The **internal** analog of `extern "lib":`. Where `extern` binds a C function, a `native` decl declares
+the **signature** of a built-in whose body is implemented natively (in the engine), name-keyed. This is
+how the **universe builtins** are declared: their signatures live in **`std/prelude.chz`** (always linked
+into every program, like `std/ref.chz`), not hidden in the compiler.
+
+```chezzi
+native fn ord(c: str) -> int      # first-class universe FUNCTION
+native fn panic(msg: str)         # no `-> ret` → native-controlled/never
+native ctor int(x) -> int         # non-first-class scalar CONSTRUCTOR; `x` unannotated → dynamic
+native ctor bytearray(x) -> bytearray
+```
+
+- **`native fn`** declares a **first-class** function intrinsic (bindable/passable — `f := ord`).
+  **`native ctor`** declares a **non-first-class** constructor (like `int`/`str`; a value-position use
+  `f := int` is a type error, uniform with `f := List`).
+- **Bodyless**, NEWLINE-terminated (like an `extern` sig). The engine binds the implementation by name;
+  a `native` decl compiles to **no** code and is never a callable user function.
+- **Dynamic-param convention** (scoped to `native` decls only — Chezzi user code stays statically typed,
+  there is **no** user-facing `any`/`never`): an **unannotated** param means "accepts anything"; a decl
+  with **no `-> ret`** means native-controlled/never (how `panic`'s divergent return is spelled).
+- **Prelude/std-only:** a `native fn`/`native ctor` in an ordinary user `.chz` is a **checker error**
+  (*native fn/ctor declarations are only allowed in standard-library modules*) — a footgun guard, so a
+  user can't bind a name to a nonexistent intrinsic. Top-level only (nesting is a parse error).
+
+The eight universe builtins `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`, `bytearray`
+(ctors) are declared this way in `std/prelude.chz`. `print` stays engine-synthetic (its `sep=`/`end=`
+variadic isn't expressible), and `range` + the `List`/`Map`/`Set` container ctors remain built-in for now.
+
 ## 13. Standard library (v1)
 
 > **The complete library reference — every global builtin, type method, runtime type, and `std.*`

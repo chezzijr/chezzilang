@@ -530,6 +530,15 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
                 }
             }
         }
+        StmtKind::Native(decl) => {
+            // A `native fn`/`native ctor` decl carries param/return type annotations to role (like an
+            // extern fn). It's prelude/std-only, so this rarely fires on a user buffer, but the overlay
+            // is a total function over `StmtKind`.
+            overlay_params(&decl.params, map);
+            if let Some(ret) = &decl.ret {
+                overlay_type(ret, map);
+            }
+        }
         StmtKind::Assert { cond, msg } => {
             overlay_expr(cond, map);
             if let Some(m) = msg {

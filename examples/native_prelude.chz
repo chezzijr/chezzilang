@@ -1,0 +1,39 @@
+# Phase 3a golden — the eight universe builtins now DECLARED in std/prelude.chz as `native fn`/`native
+# ctor` decls (ord/chr/panic/int/float/str/bytes/bytearray), plus synthetic `print`. Their signatures
+# moved out of the Rust PRELUDE table into the always-linked .chz prelude, but dispatch stays
+# name-keyed, so every result is byte-identical across the interpreter, the cooperative VM, and the
+# M:N OS-thread engine. This is the three-engine parity guard for the migration.
+
+fn main():
+    # native ctor int — string + float conversions (1-arg sig, sourced from std/prelude.chz)
+    print(int("5"))          # 5
+    print(int(3.9))          # 3  (truncates toward zero)
+
+    # native ctor float / str
+    print(float("2.5"))      # 2.5
+    print(str(42))           # 42
+    print(str(true))         # true
+
+    # native ctor bytes / bytearray — from a List[int]
+    b := bytes([65, 66])
+    print(b[0])              # 65
+    ba := bytearray([90])
+    print(ba[0])             # 90
+
+    # native fn ord / chr (round-trip)
+    print(ord("a"))          # 97
+    print(chr(66))           # B
+
+    # native fn panic — raised inside a recover: block, unwinds, is caught
+    r := recover:
+        panic("boom")
+    match r:
+        Ok(_): print("no panic")
+        Err(e): print("caught: {e}")
+
+    # print with sep= / end= (variadic — stays synthetic)
+    print("x", "y", "z", sep="-")     # x-y-z
+    print("no-newline", end="!")      # no-newline!
+    print("")                          # newline
+
+main()

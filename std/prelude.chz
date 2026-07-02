@@ -1,0 +1,28 @@
+# std.prelude — the universe builtins' SIGNATURES, declared in Chezzi (phase 3a).
+#
+# ALWAYS-LINKED into every program's module graph (like std.ref), but with UNIVERSE semantics: these
+# names are always in scope, NOT an importable module namespace. Each `native fn`/`native ctor` is a
+# body-less signature whose implementation is bound natively (name-keyed `do_builtin` in the VM /
+# `builtins::call` in the interp) — the front-end reads ONLY the signature; the backends compile no
+# bytecode for a native decl (it is never a callable user fn).
+#
+# DYNAMIC-PARAM CONVENTION (native-decl-scoped — Chezzi stays statically typed for user code, this
+# introduces NO user-facing `any`/`never`): an UNANNOTATED param means the dynamic "accepts anything"
+# type; a native decl with NO `-> ret` means native-controlled/never (both map to the internal `?`).
+#
+# `native fn`  => a FIRST-CLASS universe function (bindable, passable, `defer`-able as a bare call).
+# `native ctor` => a NON-first-class scalar/type constructor (value-position use is rejected, uniform
+#                  with `f := Point` / `f := List`).
+#
+# print: variadic (sep=/end=) — bound natively/synthetic. range + List/Map/Set: phase 2b (still
+# hard-coded).
+
+native fn ord(c: str) -> int
+native fn chr(n: int) -> str
+native fn panic(msg: str)
+
+native ctor int(x) -> int
+native ctor float(x) -> float
+native ctor str(x) -> str
+native ctor bytes(x) -> bytes
+native ctor bytearray(x) -> bytearray

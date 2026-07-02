@@ -52,10 +52,43 @@ stay rejected on the identical fall-through path as `f := List`, with zero new g
 guard is extended (Ctor name-set == `{int,float,str,bytes,bytearray}`, no `Ctor` row is first-class,
 container names stay OUT) plus a `scalar_ctor_conversions_parity` two-engine test and the extended
 bytecode pin. **The GENERIC / reserved-type container ctors** (`List`/`Map`/`Set`/`range`) stay
-hard-coded → **phase 2b** (they are generic and/or carry reserved-type identity). **North-star
-(deferred):** a real `.chz`-source prelude file is blocked on **user-facing variadics** (`fn f(*args)`, a
-separate milestone) — `print`'s `sep=`/`end=` variadic can't be expressed in `.chz` until then, so the
-synthetic Rust table is the mechanism for now.
+hard-coded → **phase 2b** (they are generic and/or carry reserved-type identity). **North-star:**
+realized in **phase 3a** below — the signatures moved to a real `.chz` prelude; only `print` (variadic)
++ `range` (arity overload) remain synthetic carve-outs. (The earlier ".chz prelude blocked on user-facing
+variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
+`sep=`/`end=` variadic still can't be spelled in `.chz`, so it stays the sole synthetic function row.)
+
+**✅ NATIVE-PRELUDE — phase 3a (`native fn`/`native ctor` syntax + always-linked `std/prelude.chz`)
+(2026-07-02).** NEW LANGUAGE FEATURE (the north-star for FUNCTIONS made concrete): the internal analog of
+`extern "lib":` (FFI). `native fn NAME(params) -> ret` declares a **first-class** universe-function
+intrinsic (⇒ `Intrinsic::Builtin`, `first_class=true`); `native ctor NAME(params) -> ret` a
+**non-first-class** scalar/type constructor intrinsic (⇒ `Intrinsic::Ctor`, `first_class=false`). Bodyless
+(like an `extern` sig, NEWLINE-terminated), **PRELUDE/STD-ONLY** (a `native` decl in a user `.chz` is a
+clear checker error — a user can't bind a name to a nonexistent intrinsic), TOP-LEVEL-only (parser). The
+**eight** universe builtins (`ord`/`chr`/`panic` fns; `int`/`float`/`str`/`bytes`/`bytearray` ctors) now
+declare their SIGNATURES in a real **`std/prelude.chz`** that the resolver **always-links** into every
+graph (same seam as `std/ref.chz`, injected before the entry DFS so the entry stays LAST; deduped). The
+signatures moved OUT of the Rust `make_sig`/`sig_*` fns into the parsed decls (harvested into the checker's
+`native_prelude_sigs`, read by `Checker::builtin_sig`); the **hollow** Rust `PRELUDE` table keeps only
+name→intrinsic→first_class METADATA (the backends `compiler::is_builtin`/`interp::builtins::is_builtin`
+have no graph access and read only that). `print` stays the **one** synthetic function row (variadic).
+**DYNAMIC-PARAM CONVENTION** (native-decl-scoped — introduces NO user-facing `any`/`never`): an
+UNANNOTATED param = the dynamic "accepts anything" type (`Ty::Unknown`); a decl with NO `-> ret` =
+native-controlled/never (`Ty::Unknown` return — how `panic` is spelled). **Backends UNCHANGED**: a `native`
+decl compiles to NO bytecode / NO binding (skipped like `StmtKind::Extern` in compiler + interp; never a
+callable user fn); direct calls to the eight names emit byte-identical `CallBuiltin`/`CallPrint` and
+`vm::do_builtin` dispatch stays name-keyed. **ZERO observable change** — the drift guard
+`prelude_table_is_single_source_of_truth` is extended to cross-check the parsed `.chz` decl set/kinds vs
+the hollow table AND each parsed `FnSig` vs its historical shape; new `native_prelude.chz` three-engine
+golden + parser/checker/resolver tests. `grammar.bnf` gains `<nativeDecl>` (conformance green).
+**Roadmap (native-in-Chezzi track):** phase 2b = the remaining synthetic *function/ctor* carve-outs
+(`range` arity-overload + `List`/`Map`/`Set` generic container ctors) — kept hard-coded for now. **Phase
+4** = `native struct`/`native enum` stubs for the **Tier-2 native (Rust-backed) TYPES**
+(`Shared`/`RwShared`/`Atomic`/`Executor`, `regex.Match`, …) to replace the `native_module_sig` hand-tables
+with parsed `.chz` type decls (bodies still native). **Tier-1** (the `Ref` struct-modeled type) is already
+done (always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native —
+too deeply coupled to `match`/`?`/generator desugar to express as a plain `.chz` decl; this is a
+documented, deliberate carve-out, not a gap.
 
 **✅ `Ref` promoted to a RESERVED GLOBAL backing the `ref` keyword — import-free (2026-07-01).** The
 `ref T` binding modifier and the explicit `Ref[T]` box now work with **no `import std.ref`**. `Ref`
