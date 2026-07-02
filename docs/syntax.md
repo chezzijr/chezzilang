@@ -2471,6 +2471,40 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   `native fn` decl can't express — `math.pi`/`e` module values, `math.abs`'s numeric polymorphism, and
   hover docs — is re-attached post-harvest.)
 
+## 12e. `native enum` — reserved builtin-enum variant shape in Chezzi (prelude/std-only)
+
+The **enum** analog of `native struct` (phase 5b). A body-less `native enum Name[T…]:` declares a
+**reserved** builtin enum's **variant shape** (variant names + payload types) in Chezzi. Like
+`native struct` it is **prelude/std-only** and **top-level only**, and it maps **ADDITIVELY onto an
+EXISTING reserved type** — it never mints a fresh nominal `Ty::Enum`. The only native enums are the two
+most deeply-wired builtins, declared in the always-linked universe prelude (`std/prelude.chz`):
+
+```chezzi
+native enum Option[T]:            # reserved Ty::Option — Some(T) / None
+    Some(T)
+    None
+
+native enum Result[T, E]:         # reserved Ty::Result — Ok(T) / Err(E)
+    Ok(T)
+    Err(E)
+```
+
+- The body is its **variants** (an identifier with an optional `(typeList)` payload — reusing the
+  ordinary `enum` variant grammar), optionally followed by bodyless **`native fn` methods** with a
+  leading bare `self` (harvested into the enum's method table like native-struct methods; variants must
+  precede methods, a self-less or plain-`fn` method is a parse error). `Option`/`Result` carry **no**
+  methods. Generics use the same `[T…]` params as an ordinary enum (a param may carry a bound).
+- **SHAPE-only, not the wiring.** The variant shape is file-backed as a **drift-guarded MIRROR**; the
+  `?` operator, exhaustive `match`, top-level error propagation, and `Ok`/`Err`/`Some`/`None`
+  **construction** all stay **Rust-wired** (the identity stays `Ty::Option`/`Ty::Result` via
+  `resolve_type`; the variant set is synthesized inline from that `Ty` shape). The checker harvests the
+  decl and asserts its variant set byte-matches the inline shape, so the `.chz` source-of-truth can
+  never silently drift from the Rust wiring. `Result` is spelled in its faithful two-slot form
+  `Result[T, E]` with `Err(E)`; the surface `Result[T]` → `E = Error`-protocol default is injected by
+  `resolve_type`, not encoded in the variant.
+- **Prelude/std-only:** a `native enum` in an ordinary user `.chz` is a **checker error** (*native enum
+  declarations are only allowed in standard-library modules*); nesting is a parse error.
+
 ## 13. Standard library (v1)
 
 > **The complete library reference — every global builtin, type method, runtime type, and `std.*`

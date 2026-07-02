@@ -307,6 +307,7 @@ fn parser_rules_match_fns() {
         ("externFn", "parse_extern_fn"),
         ("nativeDecl", "parse_native"),
         ("nativeStructDecl", "parse_native_struct"),
+        ("nativeEnumDecl", "parse_native_enum"),
         ("typeAliasDecl", "parse_type_alias"),
         ("newtypeDecl", "parse_newtype"),
         ("typeParams", "parse_type_params"),
@@ -342,6 +343,10 @@ fn parser_rules_match_fns() {
     // parser fns with no 1:1 grammar rule: the Pratt cascade + structural helpers + test helpers.
     let helper_fns: BTreeSet<&str> = [
         "parse_simple_stmt",
+        // `parse_native_decl` is the `native …` DISPATCH helper (out-of-lined so its StmtKind-sized
+        // call slots stay off the recursive `parse_stmt` frame); it routes to `parse_native` /
+        // `parse_native_struct` / `parse_native_enum`, each with its own grammar rule — it has none.
+        "parse_native_decl",
         "parse_pattern_impl",
         "parse_bp",
         "parse_unary",

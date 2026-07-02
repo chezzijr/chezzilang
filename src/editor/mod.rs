@@ -548,6 +548,24 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
                 overlay_type(&f.ty, map);
             }
         }
+        StmtKind::NativeEnum {
+            variants, methods, ..
+        } => {
+            // A `native enum` decl (Option/Result shape mirror, prelude/std-only) carries body-less
+            // variant payload types + body-less `native fn` method sigs. Role them like a real enum's
+            // variants + methods; the overlay is a total function over `StmtKind`.
+            for v in variants {
+                for t in &v.payload {
+                    overlay_type(t, map);
+                }
+            }
+            for m in methods {
+                overlay_params(&m.params, map);
+                if let Some(ret) = &m.ret {
+                    overlay_type(ret, map);
+                }
+            }
+        }
         StmtKind::Assert { cond, msg } => {
             overlay_expr(cond, map);
             if let Some(m) = msg {

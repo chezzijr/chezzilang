@@ -11,6 +11,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE — phase 5b-native-enum (the builtin `Option`/`Result` variant SHAPE made
+file-backed: `native enum Option[T]` (`Some(T)`/`None`) / `native enum Result[T, E]` (`Ok(T)`/`Err(E)`)
+declared in `std/prelude.chz`, mapped ADDITIVELY onto the reserved `Ty::Option`/`Ty::Result`)
+(2026-07-02).** Builds the ENUM analog of `native struct` — a new `native enum NAME[T…]:` decl form
+(parser `parse_native_enum` + `StmtKind::NativeEnum` + hoist reject in user modules; body-less variants
+via `parse_enum`'s variant loop, generics via `parse_type_params`, optional body-less `native fn`
+methods with a leading bare `self` harvested like native-struct methods, no-self = parse error) — and
+uses it to file-back the declarable variant SHAPE of the two most deeply-wired builtin enums.
+**PARTIAL PORT (the task's documented fallback outcome — logged): SHAPE moves, WIRING stays.** Unlike
+5a/4c (which retired a LIVE, consulted `*_method_sig` arm and rerouted resolution through the harvested
+table), Option/Result have (a) ZERO bespoke methods (no `Ty::Option`/`Ty::Result` arm in method
+resolution) and (b) NO variant-table consumer — their variant shape is synthesized INLINE from the `Ty`
+shape at ~8 Rust sites (`variants_of`, `match_kind`, the `Ok`/`Err`/`Some`/`None` name-guards +
+construction, `resolve_type` identity), none of which read `self.enums`. Rerouting those through a
+harvested table IS touching the `?`/match core the phase must keep byte-identical, so **nothing of the
+wiring moved**: `?` propagation (Result AND Option), match exhaustiveness, `Ok`/`Err`/`Some`/`None`
+construction (checker + `NativeRet` runtime), the `Result[T]`→`E = Error`-protocol surface default, and
+top-level error unwind ALL stay 100% Rust-inline and UNTOUCHED. **What the `.chz` decl buys:** a checked
+source-of-truth MIRROR of the variant shape, guarded against drift by `assert_native_enum_shape_matches`
+(a `harvest_native_enum_table` + `debug_assert_eq!` on the always-linked prelude — assert-only, no
+resolution effect, keeps the harvest helper production-live) and by the unit guard
+`native_enum_option_result_shape_matches_inline` (parsed+resolved variants byte-equal
+`variants_of(Ty::option/result_e(Param))`). The `NativeEnum` hoist arm CRITICALLY must NOT register into
+`self.enums`/`enum_names` (that would mint a colliding nominal `Ty::Enum` and silently break `?`/match) —
+it stays validate-and-no-op; identity stays 100% in `resolve_type`. **BEHAVIOR-PRESERVING / three-engine
+byte-identical:** `src/vm` + `src/interp` gain ONLY forced no-op AST match arms; `examples/native_enum_smoke.chz`
+(construction + `?` on a Result- and an Option-returning fn + exhaustive match) is asserted byte-identical
+on interp / --serial VM / M:N VM (`golden_native_enum_smoke_chz_matches_expected_and_interp`), and every
+pre-existing Option/Result/`?`/match/exhaustiveness test stays green UNCHANGED. New `nativeEnumDecl`
+production in `grammar.bnf` (conformance green, corpus `accept/native_enum.chz`). Parser+checker+docs only.
+`Iterator` (a protocol + reserved value type, NOT an enum) is untouched — deferred to phase 5c.
+
 **✅ NATIVE-PRELUDE — phase 5a-containers (the builtin `List`/`Map`/`Set` METHOD surface made
 file-backed: `native struct List[T]` / `Map[K, V]` / `Set[T]` declared in `std/prelude.chz`, harvested
 into method tables mapped ADDITIVELY onto the reserved `Ty::List`/`Ty::Map`/`Ty::Set`) (2026-07-02).**
@@ -327,8 +359,10 @@ VM==interp==M:N — locks the pure-type `bind_import` skip), existing regex gold
 conformance green). **Roadmap:** `Response`/`ProcResult` are now DONE too (phase 4f — see the entry above).
 net `Socket`/`Listener` are DONE too (phase 4c-net — the first methoded native types, native METHOD
 binding built there). Remaining phase-4c = concurrency (`Shared`/`RwShared`/`Atomic`/`Executor`)
-file-backed with `native struct` + method binding; Tier-3 (`Option`/`Result`/`Iterator`) INTENTIONALLY
-stays native.
+file-backed with `native struct` + method binding; of Tier-3, `Option`/`Result`'s variant SHAPE is now
+file-backed too (phase 5b — a drift-guarded MIRROR; the `?`/match/construction WIRING stays Rust-wired,
+see the entry above), and `Iterator` (a protocol + reserved value type, not an enum) stays native
+(deferred to phase 5c).
 
 **✅ NATIVE-PRELUDE — phase 4a (`native struct` syntax + companion-stub loader for file-less native
 modules) (2026-07-02) — companion stub RETIRED in phase 4b (above).** NEW LANGUAGE FEATURE (the **type-level** analog of phase-3a `native fn`/`native

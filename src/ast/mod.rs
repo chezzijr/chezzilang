@@ -215,6 +215,23 @@ pub enum StmtKind {
         methods: Vec<NativeDecl>,
         span: Span,
     },
+    /// `native enum NAME[T…]:` with an indented block of body-less variants — the ENUM analog of
+    /// [`StmtKind::NativeStruct`] (prelude/std-only; rejected in user modules). Declares a reserved
+    /// builtin enum's variant SHAPE (variant names + payload types) in Chezzi. Phase 5b: file-backs the
+    /// reserved `Option`/`Result` variant shape ADDITIVELY — the checker maps it onto the EXISTING
+    /// reserved `Ty::Option`/`Ty::Result` (never a fresh nominal enum), while `?`/match exhaustiveness/
+    /// `Ok`/`Err`/`Some`/`None` construction stay Rust-wired (the `.chz` decl is a drift-guarded shape
+    /// MIRROR). The backends compile NOTHING for it (never a user enum). Variants are body-less;
+    /// `methods` (if any) are body-less `native fn` sigs with a leading bare `self` (harvest strips it),
+    /// harvested into the enum's method table exactly like native-struct methods.
+    NativeEnum {
+        name: String,
+        name_span: Span,
+        type_params: Vec<TypeParam>,
+        variants: Vec<Variant>,
+        methods: Vec<NativeDecl>,
+        span: Span,
+    },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
     /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).

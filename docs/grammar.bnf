@@ -37,7 +37,7 @@
 # latter feeds <stmts>, which a <block> uses) — so a nested extern is a parse error.
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
-<topLevelStmt>  ::= <stmt> | <externDecl> | <nativeDecl> | <nativeStructDecl>
+<topLevelStmt>  ::= <stmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
@@ -241,6 +241,23 @@
 # not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
 <nativeMethodDecl> ::= "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                      | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+
+# `native enum` — the ENUM analog of `native struct` (phase 5b). A body-less `native enum NAME[T…]:`
+# declares a RESERVED builtin enum's variant SHAPE (variant names + payload types) in Chezzi; it maps
+# ADDITIVELY onto an EXISTING reserved type (`Ty::Option`/`Ty::Result`), never a fresh nominal enum, and
+# the `?` operator / exhaustive `match` / top-level error propagation / `Ok`/`Err`/`Some`/`None`
+# construction all stay Rust-wired (the decl is a drift-guarded shape MIRROR). PRELUDE/STD-ONLY (the
+# checker rejects it in a user module) and TOP-LEVEL-only. The body is its variants (`<variant>` — an
+# IDENT with an optional `(typeList)` payload), optionally followed by body-less `native fn` methods
+# (variants must precede methods, mirroring `<enumDecl>`); a plain `fn`/`test` method is a parse error.
+# A `native fn` method MUST declare a leading bare `self` as its first parameter (harvest strips it) — a
+# self-less body `native fn` is a parse error. The only native enums are `std/prelude.chz`'s `Option[T]`
+# (`Some(T)`/`None`) and `Result[T, E]` (`Ok(T)`/`Err(E)`). A type param may carry a bound via
+# `<typeParams>`.
+<nativeEnumDecl> ::= "NATIVE" "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
+                   | "NATIVE" "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
+<nativeEnumMembers> ::= <variants> | <variants> <nativeEnumMethods>
+<nativeEnumMethods> ::= <nativeMethodDecl> | <nativeMethodDecl> <nativeEnumMethods>
 
 # An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
 # may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).

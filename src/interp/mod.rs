@@ -5692,6 +5692,9 @@ impl Interp {
             // A `native struct` decl is a compile-time signature source only — no runtime binding; the
             // native type's layout + dispatch stay name-keyed.
             | StmtKind::NativeStruct { .. }
+            // A `native enum` decl (Option/Result shape mirror) is a compile-time signature source only —
+            // no runtime binding; construction/match of Some/None/Ok/Err stay name-keyed + Rust-wired.
+            | StmtKind::NativeEnum { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),

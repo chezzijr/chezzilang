@@ -41,6 +41,12 @@ pub struct ExternCSig {
 /// module's scope, collision-proof by construction. Produced by [`resolve_extern_signatures`].
 pub type ExternTable = HashMap<(usize, String), ExternCSig>;
 
+/// The harvested SHAPE of a `native enum` (phase 5b): its variant map (variant name → resolved payload
+/// types, with the enum's type params left as `Ty::Param`) plus any leading-`self`-stripped method
+/// table. Produced by [`Checker::harvest_native_enum_table`] purely as the drift-guard mirror for the
+/// reserved `Option`/`Result` shapes — never a runtime-consumed table.
+type NativeEnumShape = (HashMap<String, Vec<Ty>>, HashMap<String, FnSig>);
+
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
     /// Enum/Result/Option scrutinee — arms are variant patterns.
@@ -955,6 +961,17 @@ impl Checker {
                         c.container_seeds.insert(tn.to_string(), info);
                     }
                 }
+            }
+            // Phase 5b-native-enum — DRIFT GUARD (assert-only, resolution-inert). Option/Result's variant
+            // SHAPE is now ALSO declared in `std/prelude.chz` as `native enum Option[T]`/`Result[T, E]`,
+            // but their identity, `?` propagation, match exhaustiveness, and `Ok`/`Err`/`Some`/`None`
+            // construction stay 100% Rust-inline (`variants_of`/`match_kind`/`resolve_type`, untouched).
+            // The `.chz` decl is a checked source-of-truth MIRROR: assert the parsed+resolved variant set
+            // byte-equals the inline `variants_of` maps so the two can't drift. Runs on the always-linked
+            // prelude module; keeps `harvest_native_enum_table` production-live (no dead_code) AND is
+            // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
+            if lm.dotted == ["std", "prelude"] {
+                c.assert_native_enum_shape_matches(&lm.ast);
             }
             c.module_sigs.insert(lm.id.clone(), sig);
         }
@@ -2013,6 +2030,99 @@ impl Checker {
             }
         }
         None
+    }
+
+    /// Phase 5b-native-enum — harvest the VARIANT SHAPE (+ any leading-`self` methods) of one
+    /// `native enum` (by bare name) from a parsed module AST. The ENUM analog of
+    /// [`harvest_native_struct_table`], used for the always-linked `std/prelude.chz`'s reserved
+    /// `Option`/`Result`: their identity stays the reserved `Ty::Option`/`Ty::Result` (NOT a nominal
+    /// enum), and their `?`/match/construction wiring stays Rust-inline — so this harvest is a
+    /// DRIFT GUARD ONLY (the parsed variant set must byte-match the inline `variants_of` maps), never a
+    /// runtime-consumed table. Type params are in scope while resolving each variant payload so
+    /// `Some(T)`/`Ok(T)`/`Err(E)` resolve to `Ty::Param`. Returns `(variant_map, method_table)` — the
+    /// variant map keyed by variant name to its resolved payload types — or `None` if the named native
+    /// enum is absent. The leading bare `self` on any method is STRIPPED by
+    /// `harvest_native_fn_sig(_, true)`, exactly like native-struct methods.
+    fn harvest_native_enum_table(
+        &mut self,
+        ast: &crate::ast::Module,
+        name: &str,
+    ) -> Option<NativeEnumShape> {
+        for s in &ast.stmts {
+            if let StmtKind::NativeEnum {
+                name: en,
+                type_params,
+                variants,
+                methods,
+                ..
+            } = &s.kind
+                && en == name
+            {
+                let saved = self.enter_type_params(type_params);
+                let vmap: HashMap<String, Vec<Ty>> = variants
+                    .iter()
+                    .map(|v| {
+                        let payload = v
+                            .payload
+                            .iter()
+                            .map(|t| self.resolve_type(t, v.name_span))
+                            .collect();
+                        (v.name.clone(), payload)
+                    })
+                    .collect();
+                let mtable: HashMap<String, FnSig> = methods
+                    .iter()
+                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
+                    .collect();
+                self.exit_type_params(saved);
+                return Some((vmap, mtable));
+            }
+        }
+        None
+    }
+
+    /// Phase 5b-native-enum DRIFT GUARD — assert the `Option`/`Result` variant SHAPE declared in
+    /// `std/prelude.chz`'s `native enum` decls byte-matches the reserved-type shape synthesized INLINE
+    /// by [`variants_of`]. This is the behavior-preservation contract: the file-backed shape is an
+    /// ADDITIVE mirror, so a change to either the `.chz` decl or the inline map that makes them disagree
+    /// is a bug. Compared with EXPLICIT `E` (the `Result[T]` → `Error`-protocol surface default is
+    /// injected by `resolve_type`, not encoded in the variant), and asserts NO ported methods
+    /// (Option/Result carry zero bespoke method arms). Called only on the always-linked prelude module;
+    /// the body is guarded on `cfg!(debug_assertions)` so it is a NO-OP at runtime in release yet stays
+    /// COMPILED (so `harvest_native_enum_table` is never dead code).
+    fn assert_native_enum_shape_matches(&mut self, ast: &crate::ast::Module) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        if let Some((vmap, methods)) = self.harvest_native_enum_table(ast, "Option") {
+            debug_assert!(
+                methods.is_empty(),
+                "native enum Option must have no methods"
+            );
+            let inline = self
+                .variants_of(&Ty::option(Ty::Param("T".to_string())))
+                .expect("inline Option variants_of");
+            debug_assert_eq!(
+                vmap, inline,
+                "native enum Option in std/prelude.chz drifted from inline variants_of"
+            );
+        }
+        if let Some((vmap, methods)) = self.harvest_native_enum_table(ast, "Result") {
+            debug_assert!(
+                methods.is_empty(),
+                "native enum Result must have no methods"
+            );
+            let inline = self
+                .variants_of(&Ty::result_e(
+                    Ty::Param("T".to_string()),
+                    Ty::Param("E".to_string()),
+                ))
+                .expect("inline Result variants_of");
+            debug_assert_eq!(
+                vmap, inline,
+                "native enum Result in std/prelude.chz drifted from inline variants_of"
+            );
+        }
     }
 
     /// Phase 4c — look up a method sig on a reserved native handle type in the harvested method table
@@ -3685,6 +3795,23 @@ impl Checker {
                         );
                     }
                 }
+                StmtKind::NativeEnum { span, .. } => {
+                    // `native enum` is PRELUDE/STD-ONLY, the ENUM analog of `native struct` (a user
+                    // program can't declare a reserved builtin enum's variant shape). Reject it in a
+                    // non-stdlib module. In a stdlib module it is a NO-OP here: the ONLY native enums are
+                    // `std/prelude.chz`'s `Option`/`Result`, whose variant SHAPE is harvested as a
+                    // DRIFT-GUARD MIRROR (see `harvest_native_enum_table`) and whose identity stays the
+                    // reserved `Ty::Option`/`Ty::Result`. Crucially it must NOT register into
+                    // `self.enums`/`enum_names` — that would mint a colliding nominal `Ty::Enum` and
+                    // silently break `?`/match; type identity stays 100% in `resolve_type`.
+                    if !self.current_module_is_stdlib {
+                        self.error(
+                            *span,
+                            "native enum declarations are only allowed in standard-library modules"
+                                .to_string(),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -5324,12 +5451,13 @@ impl Checker {
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }
-            // Imports, extern blocks, and native (fn/ctor/struct) decls carry nothing to check in pass 2
-            // (native decls are fully validated + registered in `hoist`).
+            // Imports, extern blocks, and native (fn/ctor/struct/enum) decls carry nothing to check in
+            // pass 2 (native decls are fully validated + registered in `hoist`).
             StmtKind::Import(_)
             | StmtKind::Extern { .. }
             | StmtKind::Native(_)
-            | StmtKind::NativeStruct { .. } => {}
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. } => {}
             StmtKind::If {
                 branches,
                 else_block,

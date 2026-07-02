@@ -1179,6 +1179,9 @@ impl Compiler {
             // A `native struct` decl is likewise a compile-time SIGNATURE source only (checker-harvested
             // from a companion stub); its runtime layout stays native (name-keyed), so no bytecode.
             | StmtKind::NativeStruct { .. }
+            // A `native enum` decl (Option/Result shape mirror) is a compile-time SIGNATURE source only;
+            // construction/match stay native + Rust-wired, so it emits no bytecode.
+            | StmtKind::NativeEnum { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {

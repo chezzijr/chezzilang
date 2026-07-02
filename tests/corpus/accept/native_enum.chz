@@ -1,0 +1,4 @@
+# rule: nativeEnumDecl, variant
+native enum Option[T]:
+    Some(T)
+    None

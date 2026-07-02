@@ -22879,6 +22879,34 @@ main()";
         assert_eq!(mn_out, expected, "M:N output drifted on std_native_4c");
     }
 
+    /// Phase-5b file-backed native-enum golden: `examples/native_enum_smoke.chz` exercises the reserved
+    /// `Option`/`Result` surface whose variant SHAPE is now declared in `std/prelude.chz` as
+    /// `native enum Option[T]` / `native enum Result[T, E]` — Some/None/Ok/Err CONSTRUCTION, `?` on a
+    /// Result-returning AND an Option-returning fn, and exhaustive `match`. The port is SHAPE-ONLY (the
+    /// `?`/match/construction wiring stays Rust-inline), so output must be byte-identical on all three
+    /// engines: VM(serial), interp, and the M:N OS-thread engine. This is the phase-5b behavior-
+    /// preservation gate — any drift means the file-backed shape decoupled from the Rust wiring.
+    #[test]
+    fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/native_enum_smoke.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/native_enum_smoke.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("native_enum_smoke.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from native_enum_smoke.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("native_enum_smoke.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on native_enum_smoke");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("native_enum_smoke.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on native_enum_smoke");
+    }
+
     /// Qualified-type-as-static-method-receiver golden: `examples/qualified_static/main.chz` imports a
     /// sibling module and calls `counter.Counter.zero()` / `counter.Counter.of(42)` (struct statics)
     /// and `counter.Color.first()` (enum static) through a QUALIFIED type. These lower to the SAME
