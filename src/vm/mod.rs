@@ -20125,12 +20125,15 @@ main()
     /// value (the runtime resolves `Ty::Socket` directly; the ctor is `connect`/`listen`), so a
     /// from-import (`import Socket from std.net`) would fault `module 'std.net' has no member 'Socket'`
     /// WITHOUT the `bind_import` skip. This pins the skip on BOTH engines (single-engine fault = red)
-    /// plus a whole-module twin. The `use_sock` fn is checked though never called.
+    /// plus a whole-module twin. Phase 4c-net: the bodies now also call `Socket`/`Listener` METHODS
+    /// (`read`/`write`/`accept`/`close`) so the harvested method table (the retired bespoke arm's
+    /// replacement) is exercised at check time on both engines; the `use_*` fns are checked though never
+    /// called (no live I/O — the method resolution is a front-end concern, identical across engines).
     #[test]
     fn net_from_import_runs_both_engines() {
         for src in [
-            "import Socket from std.net\nfn use_sock(s: Socket) -> int:\n    return 1\nfn main():\n    print(1)\nmain()\n",
-            "import std.net\nfn use_sock(s: Socket) -> int:\n    return 1\nfn main():\n    print(1)\nmain()\n",
+            "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64)?\n    n := s.write(a)?\n    s.close()\n    return Ok(n)\nfn main():\n    print(1)\nmain()\n",
+            "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return Ok(n)\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return Ok(ad)\nfn main():\n    print(1)\nmain()\n",
         ] {
             let dir =
                 std::env::temp_dir().join(format!("chezzi_vm_net_from_{}", std::process::id()));

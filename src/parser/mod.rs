@@ -826,11 +826,25 @@ impl Parser {
         let type_params = self.parse_type_params()?;
         self.open_block()?;
         let mut fields = Vec::new();
+        let mut methods = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            // Phase 4c — a body-less `native fn` inside the struct body is a METHOD sig, harvested into
+            // the native type's method table. A PLAIN `fn`/`test` (with a body) is still rejected: the
+            // runtime dispatch stays native, so a native struct never carries a compiled method.
+            if self.check(&Token::Native) {
+                let StmtKind::Native(decl) = self.parse_native()? else {
+                    return Err(self.err(
+                        "native struct methods must be `native fn` declarations".to_string(),
+                    ));
+                };
+                methods.push(decl);
+                self.skip_newlines();
+                continue;
+            }
             if self.check(&Token::Fn) || self.check(&Token::Test) {
                 return Err(self.err(
-                    "native struct methods are not supported (phase 4b): declare fields only"
+                    "native struct methods are not supported (declare fields or `native fn` sigs only)"
                         .to_string(),
                 ));
             }
@@ -858,6 +872,7 @@ impl Parser {
             name_span,
             type_params,
             fields,
+            methods,
             span,
         })
     }
@@ -2839,7 +2854,9 @@ mod tests {
 
     #[test]
     fn native_struct_method_rejected() {
-        // Fields-only (phase 4a): a method sig inside a native-struct body is a parse error.
+        // Phase 4c — a PLAIN (non-native) method sig inside a native-struct body is still a parse
+        // error; only bodyless `native fn` methods are admitted (harvested into the type's method
+        // table).
         let e = parse_err("native struct M:\n    a: int\n    fn m(self) -> int\n");
         assert!(
             e.message
@@ -2847,6 +2864,34 @@ mod tests {
             "unexpected error: {}",
             e.message
         );
+    }
+
+    #[test]
+    fn native_struct_parses_native_methods() {
+        // Phase 4c — a `native fn` inside a native-struct body is harvested into `methods`; a
+        // trailing `= default` param lowers to an optional-tail marker (like a free native fn).
+        let StmtKind::NativeStruct {
+            name,
+            fields,
+            methods,
+            ..
+        } = only(
+            "native struct Socket:\n    native fn read(n: int, timeout_ms: int = 0) -> Result[str]\n    native fn close()\n",
+        )
+        else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(name, "Socket");
+        assert!(fields.is_empty());
+        let mnames: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(mnames, ["read", "close"]);
+        let read = &methods[0];
+        assert_eq!(read.params.len(), 2);
+        assert!(read.params[1].default.is_some(), "trailing default marker");
+        assert!(read.ret.is_some());
+        let close = &methods[1];
+        assert!(close.params.is_empty());
+        assert!(close.ret.is_none());
     }
 
     #[test]

@@ -905,21 +905,21 @@ mod tests {
         assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
-    // 8. A still-virtual native std module (std.net) is resolved without any .chz file, flagged
+    // 8. A still-virtual native std module (std.concurrency) is resolved without any .chz file, flagged
     // native, with an empty AST (its sig is hand-built in `native_module_sig`). (std.math/io/os/rand/fs
-    // 4d, encoding/crypto/uuid/time 4e, process/request 4f migrated to FILE-BACKED; net/ffi/concurrency
-    // stay virtual — the deferred 4c targets.)
+    // 4d, encoding/crypto/uuid/time 4e, process/request 4f, net 4c migrated to FILE-BACKED;
+    // ffi/concurrency stay virtual.)
     #[test]
     fn native_std_module_is_virtual() {
         let t = TmpDir::new();
-        let entry = t.write("main.chz", "import std.net\nfn main(): print(1)\n");
+        let entry = t.write("main.chz", "import std.concurrency\nfn main(): print(1)\n");
         let graph = build_graph(&entry).unwrap();
         let m = graph
             .modules
             .iter()
-            .find(|m| m.label() == "std.net")
-            .expect("std.net should be in the graph");
-        assert_eq!(m.native, Some("std.net"));
+            .find(|m| m.label() == "std.concurrency")
+            .expect("std.concurrency should be in the graph");
+        assert_eq!(m.native, Some("std.concurrency"));
         assert!(m.ast.stmts.is_empty());
         // Dependencies precede dependents: the native module loads before the entry.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);

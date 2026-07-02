@@ -1,0 +1,33 @@
+# std.net — minimal TCP client/server, declared in Chezzi (phase 4c-net).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std/regex.chz). Its native TYPES (`Socket`/`Listener`)
+# + functions are in scope ONLY after `import std.net` (bare `Socket`/`Listener`) or a `from std.net
+# import …`. The resolver loads this real file (keeping the `native` marker), and the checker harvests
+# the `native struct` + `native fn` declarations below as the module's SIGNATURE source — retiring the
+# hand-built `native_module_sig` net arm AND the bespoke `socket_method_sig`/`listener_method_sig`
+# method arms (their sigs now come from the `native fn` methods below, harvested into each type's method
+# table — the phase-4c native-method-binding capability).
+#
+# Every declaration is BODY-LESS: `Socket`/`Listener` stay the RESERVED opaque VM handles `Ty::Socket`/
+# `Ty::Listener` (NOT nominal structs — no field layout), and the `connect`/`listen`/`read`/`write`/
+# `accept`/`close` calls stay VM-intercepted at runtime by name (they allocate a handle + register
+# netpoller interest, parking the fiber on a would-block op). The backends compile NOTHING for a
+# `native fn`/`native struct` — the front-end reads ONLY the signature.
+#
+# `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no data /
+# not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a
+# trailing-default param to an optional-tail sig (min_params = len - 1). The `= 0` is a MARKER only —
+# desugar never injects a native-fn default at a call site, so the supplied arg count stays truthful.
+
+native struct Socket:
+    native fn read(n: int, timeout_ms: int = 0) -> Result[str]
+    native fn write(data: str, timeout_ms: int = 0) -> Result[int]
+    native fn close() -> nil
+
+native struct Listener:
+    native fn accept(timeout_ms: int = 0) -> Result[Socket]
+    native fn addr() -> Result[str]
+    native fn close() -> nil
+
+native fn connect(addr: str) -> Result[Socket]
+native fn listen(addr: str) -> Result[Listener]

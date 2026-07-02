@@ -4582,8 +4582,8 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
             "{m} numeric_poly must no longer be hand-built in native_module_sig"
         );
     }
-    // A sibling still-hand-built native module keeps its arm (concurrency/net/ffi — deferred 4c).
-    assert!(!native_module_sig("std.net").functions.is_empty());
+    // A sibling still-hand-built native module keeps its arm (std.ffi — not yet file-backed).
+    assert!(!native_module_sig("std.ffi").functions.is_empty());
 }
 
 /// The effective (graph-built) sigs for a representative fn of each migrated module must EXACTLY equal
@@ -4690,8 +4690,64 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(consts, vec!["pi", "e"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
-    // Still-virtual (hand-built) sibling — the deferred 4c targets net/ffi/concurrency.
-    assert!(!crate::native::is_file_backed_native("std.net"));
+    // std.net is now FILE-BACKED too (phase 4c-net); std.ffi/std.concurrency stay virtual.
+    assert!(crate::native::is_file_backed_native("std.net"));
+    assert!(!crate::native::is_file_backed_native("std.ffi"));
+    assert!(!crate::native::is_file_backed_native("std.concurrency"));
+}
+
+/// Phase 4c-net — std.net is FILE-BACKED: its `Socket`/`Listener` native structs carry a harvested
+/// METHOD table (the new native-method-binding capability) and its `connect`/`listen` free fns come
+/// from `std/net.chz`, NOT the retired hand-built `native_module_sig` arm.
+#[test]
+fn net_sig_from_file_not_native_module_sig() {
+    // The hand-built arm is retired — `native_module_sig("std.net")` exports NOTHING now.
+    let raw = native_module_sig("std.net");
+    assert!(
+        raw.functions.is_empty() && raw.types.is_empty(),
+        "std.net must no longer be hand-built in native_module_sig (harvested from std/net.chz)"
+    );
+    // The graph-built sig carries the free fns + both native types WITH their method tables.
+    let sig = native_module_sig_via_graph("net");
+    let connect = sig.functions.get("connect").expect("net.connect");
+    assert_eq!(connect.params, vec![Ty::Str]);
+    assert_eq!(connect.ret, Ty::result(Ty::Socket));
+    let listen = sig.functions.get("listen").expect("net.listen");
+    assert_eq!(listen.params, vec![Ty::Str]);
+    assert_eq!(listen.ret, Ty::result(Ty::Listener));
+    let socket = sig
+        .struct_defs
+        .get("Socket")
+        .expect("net.Socket struct_def");
+    let mut smeths: Vec<&str> = socket.methods.keys().map(String::as_str).collect();
+    smeths.sort();
+    assert_eq!(smeths, ["close", "read", "write"]);
+    // read/write are optional-tail (the trailing `timeout_ms`); close is nil.
+    let read = socket.methods.get("read").unwrap();
+    assert_eq!(read.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(read.ret, Ty::result(Ty::Str));
+    assert_eq!(read.min_params, 1);
+    let write = socket.methods.get("write").unwrap();
+    assert_eq!(write.params, vec![Ty::Str, Ty::Int]);
+    assert_eq!(write.ret, Ty::result(Ty::Int));
+    assert_eq!(write.min_params, 1);
+    let close = socket.methods.get("close").unwrap();
+    assert_eq!(close.params, Vec::<Ty>::new());
+    assert_eq!(close.ret, Ty::Nil);
+    let listener = sig
+        .struct_defs
+        .get("Listener")
+        .expect("net.Listener struct_def");
+    let mut lmeths: Vec<&str> = listener.methods.keys().map(String::as_str).collect();
+    lmeths.sort();
+    assert_eq!(lmeths, ["accept", "addr", "close"]);
+    let accept = listener.methods.get("accept").unwrap();
+    assert_eq!(accept.params, vec![Ty::Int]);
+    assert_eq!(accept.ret, Ty::result(Ty::Socket));
+    assert_eq!(accept.min_params, 0);
+    let addr = listener.methods.get("addr").unwrap();
+    assert_eq!(addr.params, Vec::<Ty>::new());
+    assert_eq!(addr.ret, Ty::result(Ty::Str));
 }
 
 // ===== M9: std.request (Response struct) =====
@@ -4920,8 +4976,7 @@ fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
         time.types.contains("timer"),
         "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
     );
-    // Sibling native modules that stay hand-built (concurrency/net/ffi — the deferred 4c targets).
-    assert!(!native_module_sig("std.net").functions.is_empty());
+    // A sibling native module that stays hand-built (std.ffi — not yet file-backed).
     assert!(!native_module_sig("std.ffi").functions.is_empty());
 }
 
@@ -7700,6 +7755,24 @@ fn net_type_with_import_ok() {
     entry_ok(
         "import Socket from std.net\nimport Listener from std.net\nfn f(s: Socket, l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
     );
+}
+
+#[test]
+fn net_handle_bare_construction_rejected_after_import() {
+    // Phase 4c-net regression — `Socket`/`Listener` now carry a `sig.struct_defs` entry (for their
+    // harvested METHOD tables), but they are NOT constructible nominal structs. A whole-module
+    // `import std.net` must NOT make bare `Socket(...)`/`Listener(...)` a from-nothing constructor
+    // (a value comes only from `connect`/`listen`/`accept`). Guarded because the import struct-defs
+    // loop otherwise seeds them into `struct_names`.
+    for name in ["Socket", "Listener"] {
+        let errs = check_entry(&format!(
+            "import std.net\nfn main():\n    x := {name}()\n    print(1)\nmain()\n"
+        ));
+        assert!(
+            !errs.is_empty(),
+            "bare {name}() construction must be rejected after import std.net, got no errors"
+        );
+    }
 }
 
 #[test]
@@ -12188,8 +12261,31 @@ fn builtin_method_slices_all_resolve() {
     chk(ATOMIC_METHODS, "ATOMIC_METHODS", &|m| {
         atomic_method_sig(m, &Ty::Int)
     });
-    chk(SOCKET_METHODS, "SOCKET_METHODS", &socket_method_sig);
-    chk(LISTENER_METHODS, "LISTENER_METHODS", &listener_method_sig);
+    // Phase 4c-net — Socket/Listener method sigs are now HARVESTED from std/net.chz into the type's
+    // method table (the bespoke socket_method_sig/listener_method_sig arms are retired). Resolve the
+    // hover slices against that harvested table via a graph check.
+    let net = native_module_sig_via_graph("net");
+    let net_methods = |ty: &str| -> std::collections::HashMap<String, FnSig> {
+        net.struct_defs
+            .get(ty)
+            .unwrap_or_else(|| panic!("net.{ty} struct_def"))
+            .methods
+            .clone()
+    };
+    let socket_methods = net_methods("Socket");
+    for m in SOCKET_METHODS {
+        assert!(
+            socket_methods.contains_key(*m),
+            "SOCKET_METHODS slice lists '{m}' but std/net.chz Socket has no such method (drift)"
+        );
+    }
+    let listener_methods = net_methods("Listener");
+    for m in LISTENER_METHODS {
+        assert!(
+            listener_methods.contains_key(*m),
+            "LISTENER_METHODS slice lists '{m}' but std/net.chz Listener has no such method (drift)"
+        );
+    }
     chk(EXECUTOR_METHODS, "EXECUTOR_METHODS", &executor_method_sig);
     chk(BYTES_METHODS, "BYTES_METHODS", &bytes_method_sig);
     chk(
