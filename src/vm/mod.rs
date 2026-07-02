@@ -27648,16 +27648,17 @@ main()
         assert_eq!(out, "yo3\n");
     }
 
-    /// Phase 4a — the regex.Match SIGNATURE now comes from a parsed `native struct` companion stub
-    /// (harvested into std.regex's ModuleSig), replacing the hand-built `native_module_sig` arm. This
-    /// must be a ZERO observable behavior change on ALL THREE engines: producing a `Match` (regex.find),
-    /// reading every field, `from std.regex import Match`, and qualified `regex.Match(...)` are byte-
-    /// identical on interp, the cooperative VM, AND the M:N OS-thread engine. This is the regression net
-    /// proving the native-seam pure-type `bind_import` skip still holds in both engines (`from std.regex
-    /// import Match` must NOT bind a runtime value / fault). The origin=Builtin force in
-    /// `harvest_native_struct_stub` is what keeps that skip correct.
+    /// Phase 4b — the whole regex SIGNATURE (the `native struct Match` + the 5 `native fn`s) now comes
+    /// from the file-backed `std/regex.chz` (harvested into std.regex's ModuleSig via
+    /// `harvest_native_module`), replacing BOTH the phase-4a companion stub and the hand-built
+    /// `native_module_sig` arm. This must be a ZERO observable behavior change on ALL THREE engines:
+    /// producing a `Match` (regex.find), reading every field, `from std.regex import Match`, and
+    /// qualified `regex.Match(...)` are byte-identical on interp, the cooperative VM, AND the M:N
+    /// OS-thread engine. This is the regression net proving the native-seam pure-type `bind_import` skip
+    /// still holds in both engines (`from std.regex import Match` must NOT bind a runtime value / fault).
+    /// The origin=Builtin force in `harvest_native_module` is what keeps that skip correct.
     #[test]
-    fn regex_match_stub_migration_three_engine_parity() {
+    fn regex_match_file_backed_three_engine_parity() {
         let src = "import std.regex\n\
                    import Match from std.regex\n\
                    fn describe(m: Match) -> str:\n\

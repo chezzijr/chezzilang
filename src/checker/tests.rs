@@ -4127,30 +4127,62 @@ fn native_regex_unknown_member_rejected() {
     );
 }
 
-// ===== Phase 4a: regex.Match SIGNATURE migrated from native_module_sig to a parsed `native struct`
-// companion stub (std/regex.stub.chz). PROVENANCE: native_module_sig no longer hand-builds Match;
-// the checker harvests it from the stub at graph-check time. Behavior is byte-identical. =====
+// ===== Phase 4b: std.regex is now a FILE-BACKED `std/regex.chz` whose `native struct Match` + 5
+// `native fn`s are declared in-module. Both the phase-4a companion stub (std/regex.stub.chz) and the
+// `native_module_sig` regex arm are RETIRED — the checker harvests the module's whole SIGNATURE (type +
+// fns) from the parsed in-module decls via `harvest_native_module`. Behavior is byte-identical. =====
 
-/// PROVENANCE — the `"std.regex" => export_struct("Match", …)` arm is DELETED from `native_module_sig`;
-/// Match's StructInfo now comes from parsing the companion stub. So `native_module_sig("std.regex")`
-/// exports the regex FUNCTIONS but NOT `Match`, while a full graph check that `import std.regex` still
-/// resolves `Match` (harvested into the module's ModuleSig at check time). The sibling native structs
-/// (Response/ProcResult) stay hand-built in `native_module_sig` (phase 4b migrates them).
+/// Parse the real `std/regex.chz` (the SIGNATURE source for phase 4b).
+#[cfg(test)]
+fn parse_regex_chz() -> crate::ast::Module {
+    let path = crate::resolver::std_root().join("regex.chz");
+    let src = std::fs::read_to_string(&path).expect("std/regex.chz must exist");
+    let toks = crate::lexer::tokenize(&src).expect("std/regex.chz must lex");
+    crate::parser::parse(toks).expect("std/regex.chz must parse")
+}
+
+/// The std.regex ModuleSig produced by a full graph check that `import std.regex`.
+#[cfg(test)]
+fn regex_module_sig_via_graph() -> ModuleSig {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", "import std.regex\nfn main(): print(1)\n");
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let mut c = Checker::new();
+    c.run_graph_pass(&graph, false);
+    assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
+    let regex_id = graph
+        .modules
+        .iter()
+        .find(|m| m.dotted == ["std", "regex"])
+        .expect("std.regex in graph")
+        .id
+        .clone();
+    c.module_sigs
+        .get(&regex_id)
+        .expect("std.regex ModuleSig")
+        .clone()
+}
+
+/// PROVENANCE — the `"std.regex" =>` arm is DELETED from `native_module_sig`; the whole regex signature
+/// (Match type + the 5 fns) now comes from parsing `std/regex.chz`. So `native_module_sig("std.regex")`
+/// exports NOTHING (empty functions, no Match), while a full graph check that `import std.regex` still
+/// resolves both the fns and `Match`. The sibling native modules (Response/ProcResult) stay hand-built.
 #[test]
-fn regex_match_sig_from_stub_not_native_module_sig() {
+fn regex_sig_from_file_not_native_module_sig() {
     let sig = native_module_sig("std.regex");
     assert!(
+        sig.functions.is_empty(),
+        "regex fns must no longer be hand-built in native_module_sig (harvested from std/regex.chz)"
+    );
+    assert!(
         !sig.struct_defs.contains_key("Match"),
-        "Match must no longer be hand-built in native_module_sig (it is harvested from the stub)"
+        "Match must no longer be hand-built in native_module_sig (harvested from std/regex.chz)"
     );
     assert!(
         !sig.types.contains("Match"),
-        "Match must not be in native_module_sig's `types` (harvested from the stub)"
+        "Match must not be in native_module_sig's `types` (harvested from std/regex.chz)"
     );
-    // The regex FUNCTIONS stay hand-built in native_module_sig.
-    assert!(sig.functions.contains_key("find"));
-    assert!(sig.functions.contains_key("is_match"));
-    // The sibling native structs remain hand-built (not yet migrated).
+    // The sibling native modules remain hand-built (phase 4c migrates them).
     assert!(
         native_module_sig("std.request")
             .struct_defs
@@ -4167,36 +4199,104 @@ fn regex_match_sig_from_stub_not_native_module_sig() {
     );
 }
 
-/// DRIFT GUARD — the stub-harvested Match StructInfo (fields, in positional order) must byte-match the
-/// remaining hand-built layout copies (seed_stdlib_structs is the checker one; the compiler/interp/
-/// native runtime copies stay hand-built until phase 4b). Field ORDER is load-bearing (positional), so
-/// a silent drift here would trap at runtime on a field read. Assemble the expected layout once and
-/// compare both the harvest and seed_stdlib_structs against it.
+/// The 5 regex fn FnSigs + the Match StructInfo in the module's ModuleSig must EXACTLY equal what
+/// `native_module_sig` used to hand-build — byte-identical provenance move from the deleted arm to the
+/// parsed `std/regex.chz`. (`params`/`ret` compared directly; labels/doc are surface-only.)
 #[test]
-fn match_stub_matches_handbuilt_layouts() {
+fn regex_fn_sigs_exact() {
+    let sig = regex_module_sig_via_graph();
+    let m = || Ty::Struct("Match".to_string(), vec![]);
+    let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
+        ("is_match", vec![Ty::Str, Ty::Str], Ty::result(Ty::Bool)),
+        ("find", vec![Ty::Str, Ty::Str], Ty::result(Ty::option(m()))),
+        (
+            "find_all",
+            vec![Ty::Str, Ty::Str],
+            Ty::result(Ty::list(m())),
+        ),
+        (
+            "replace_all",
+            vec![Ty::Str, Ty::Str, Ty::Str],
+            Ty::result(Ty::Str),
+        ),
+        (
+            "split",
+            vec![Ty::Str, Ty::Str],
+            Ty::result(Ty::list(Ty::Str)),
+        ),
+    ];
+    assert_eq!(
+        sig.functions.len(),
+        expected.len(),
+        "std.regex must export exactly the 5 regex fns"
+    );
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.regex ModuleSig missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+        assert_eq!(fs.min_params, params.len(), "fn '{name}' arity drifted");
+    }
+    // Match's StructInfo comes from the in-module `native struct`, origin Builtin (load-bearing for the
+    // both-engines pure-type `bind_import` skip).
+    let mi = sig
+        .struct_defs
+        .get("Match")
+        .expect("std.regex ModuleSig must export Match");
+    assert_eq!(
+        mi.fields,
+        vec![
+            ("text".to_string(), Ty::Str),
+            ("start".to_string(), Ty::Int),
+            ("end".to_string(), Ty::Int),
+            ("groups".to_string(), Ty::list(Ty::Str)),
+        ]
+    );
+    assert!(matches!(mi.origin, StructOrigin::Builtin));
+    assert!(sig.types.contains("Match"));
+}
+
+/// DRIFT GUARD — the file-harvested Match StructInfo (fields, in positional order) must byte-match the
+/// remaining hand-built layout copies. Field ORDER is load-bearing (positional across compiler
+/// `Compiler::new`, interp finalize, `native/regex.rs` match_to_ret, and seed_stdlib_structs), so a
+/// silent drift here would trap at runtime on a field read. Assemble the expected layout once and
+/// compare both the file harvest and seed_stdlib_structs against it.
+#[test]
+fn regex_chz_match_matches_handbuilt_layouts() {
     let expected: Vec<(String, Ty)> = vec![
         ("text".into(), Ty::Str),
         ("start".into(), Ty::Int),
         ("end".into(), Ty::Int),
         ("groups".into(), Ty::list(Ty::Str)),
     ];
-    // The parse-only harvest.
+    // The in-module `native struct` harvest (from the real std/regex.chz).
     let mut c = Checker::new();
     let mut sig = ModuleSig::default();
-    c.harvest_native_struct_stub(&mut sig);
+    let ast = parse_regex_chz();
+    c.harvest_native_module(&ast, &mut sig);
     let harvested = sig
         .struct_defs
         .get("Match")
-        .expect("stub must harvest a `Match` struct");
+        .expect("std/regex.chz must harvest a `Match` struct");
     assert_eq!(harvested.fields, expected, "harvested Match layout drifted");
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
+    // The harvest must ALSO have populated the 5 fn sigs (whole-module signature source).
+    assert_eq!(sig.functions.len(), 5, "std/regex.chz must harvest 5 fns");
     // seed_stdlib_structs's hand-built Match copy (globally-present layout) must agree.
     let seeded = c.structs.get("Match").expect("Match must be seeded");
     assert_eq!(
         seeded.fields, expected,
-        "seeded Match layout drifted from stub"
+        "seeded Match layout drifted from std/regex.chz"
+    );
+    // The harvest must NOT leak `Match` into module-scoped `struct_names` (import-gating preserved):
+    // the transient insert during fn-sig resolution is removed.
+    assert!(
+        !c.struct_names.contains("Match"),
+        "harvest_native_module must not leave Match bare-visible (import-gating leak)"
     );
 }
 
@@ -4375,6 +4475,34 @@ fn import_does_not_over_reject_distinct_struct_name() {
 fn bare_struct_procresult_without_import_ok() {
     entry_ok(
         "struct ProcResult:\n    x: int\nfn main():\n    r := ProcResult(5)\n    print(str(r.x))\nmain()\n",
+    );
+}
+
+// PHASE-4b BUG: `harvest_native_module` resolves the regex fns' return types (which reference the
+// import-gated `Match`, e.g. `find -> Result[Option[Match]]`) via `resolve_type` while running in the
+// native-module arm WITHOUT `begin_module` — so `self.structs` is LEFTOVER from the previously-checked
+// module. If a sibling user module declared a generic `struct Match[T]` (overwriting the seeded
+// nparams-0 native Match), `resolve_type`'s struct arm fires a spurious `type 'Match' expects 1 type
+// argument(s), got 0`, falsely rejecting a valid program. The harvest must resolve `Match` against its
+// OWN native layout, immune to sibling-module / graph-order state (zero-observable-change contract).
+#[test]
+fn regex_harvest_immune_to_sibling_generic_match() {
+    let t = TmpDir::new();
+    // A user module legally declaring a generic `struct Match[T]` (it does NOT whole-module import
+    // std.regex, so the decl is allowed). Checked immediately before the std.regex native arm.
+    t.write("helper.chz", "struct Match[T]:\n    val: T\n");
+    let entry = t.write(
+        "main.chz",
+        "import helper\nimport std.regex\nfn main():\n    match regex.find(\"a\", \"a\"):\n        Ok(opt): print(\"ok\")\n        Err(e): print(e)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.is_empty(),
+        "regex harvest must be immune to a sibling `struct Match[T]`; got spurious errors: {errs:?}"
     );
 }
 

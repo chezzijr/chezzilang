@@ -2409,31 +2409,36 @@ variadic isn't expressible), and `range` + the `List`/`Map`/`Set` container ctor
 
 ## 12d. `native struct` — native-type signatures in Chezzi (prelude/std-only)
 
-The **type-level** analog of `native fn`/`native ctor` (phase 4a). A body-less `native struct Name:`
+The **type-level** analog of `native fn`/`native ctor`. A body-less `native struct Name:`
 declares a native (Rust-backed) type's **checker signature** — its field layout — in Chezzi; the runtime
 layout + method dispatch stay **native** (name-keyed). Like `native fn`, it is **prelude/std-only** and
 **top-level only**.
 
 ```chezzi
-native struct Match:      # regex.Match's SIGNATURE (fields-only)
+# std/regex.chz — a file-backed, import-gated native module (phase 4b)
+native struct Match:              # regex.Match's SIGNATURE (fields-only)
     text: str
     start: int
     end: int
     groups: List[str]
+
+native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE MEMBER
 ```
 
-- **Fields-only** (phase 4a): a `fn`/`test` method sig or a field `= default` inside the body is a
-  parse error. Bodyless native **method** sigs are a phase-4b follow-up.
-- **Prelude/std-only:** a `native struct` in an ordinary user `.chz` is a **checker error** (*native
-  struct declarations are only allowed in standard-library modules*); nesting it is a parse error.
-- **Companion-stub convention** (file-less native modules): `std.regex` is a *virtual* module — the
-  resolver injects an empty AST, there is no `std/regex.chz`. Its `Match` type's signature is declared
-  in a **parse-only companion stub `std/regex.stub.chz`** (embedded via `include_str!`), which is
-  **never** added to the runnable module graph — the checker parses it solely to harvest its `native
-  struct` decls into `std.regex`'s module signature. The type stays **import-gated** exactly as before
-  (`import std.regex` / `import Match from std.regex` licenses the bare `Match`; `regex.Match(...)`
-  qualified); the migration is a **zero observable behavior change** (identical runtime + bytecode,
-  three-engine byte-identical).
+- **Fields-only** for a `native struct`: a `fn`/`test` method sig or a field `= default` inside the body
+  is a parse error. Bodyless native **method** sigs are a later follow-up (phase 4c, concurrency).
+- **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
+  error** (*native struct declarations are only allowed in standard-library modules*); nesting is a
+  parse error.
+- **Native members of any file-backed std module** (phase 4b): `native fn`/`native struct` are no longer
+  limited to the always-linked universe prelude (`std/prelude.chz`). A **normally-imported** file-backed
+  std module (e.g. `std/regex.chz`) declares its native type + functions **in-module**; the checker
+  harvests them as the module's **signature source** (the type's field layout + the fns' signatures),
+  while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
+  import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` are reached exactly as
+  before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`; `regex.find(...)`
+  qualified), the runtime + bytecode are unchanged, and it is **three-engine byte-identical**. It retired
+  the earlier file-less-`std.regex` companion-stub shortcut.
 
 ## 13. Standard library (v1)
 

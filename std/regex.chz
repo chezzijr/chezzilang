@@ -1,0 +1,28 @@
+# std.regex — regular expressions, declared in Chezzi (phase 4b).
+#
+# FILE-BACKED, IMPORT-GATED native module. Unlike the always-linked universe prelude (std/prelude.chz),
+# std.regex is a NORMAL importable module: its native type + functions are in scope ONLY after
+# `import std.regex` (bare `Match`/`find`) or a `from std.regex import …`. The resolver loads this real
+# file (keeping the `native` marker), and the checker harvests the `native struct` + `native fn`
+# declarations below as the module's SIGNATURE source — retiring both the phase-4a companion stub
+# (std/regex.stub.chz) and the hand-built `native_module_sig` regex arm.
+#
+# Every declaration is BODY-LESS: the runtime layout + implementations stay native (name-keyed in
+# `src/native/regex.rs`, dispatched via `native_members("std.regex")`). The backends compile NOTHING
+# for a `native fn`/`native struct` — the front-end reads ONLY the signature.
+#
+# FIELD ORDER IS LOAD-BEARING: `Match`'s field order is positional across the remaining hand-built
+# runtime layout copies (compiler `Compiler::new`, interp finalize, `native/regex.rs` match_to_ret),
+# drift-guarded by a checker test. Do not reorder without updating all four copies.
+
+native struct Match:
+    text: str
+    start: int
+    end: int
+    groups: List[str]
+
+native fn is_match(pat: str, s: str) -> Result[bool]
+native fn find(pat: str, s: str) -> Result[Option[Match]]
+native fn find_all(pat: str, s: str) -> Result[List[Match]]
+native fn replace_all(pat: str, s: str, repl: str) -> Result[str]
+native fn split(pat: str, s: str) -> Result[List[str]]
