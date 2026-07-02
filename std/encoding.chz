@@ -1,0 +1,25 @@
+# std.encoding — reversible text codecs, declared in Chezzi (phase 4e).
+#
+# FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz). Its functions are in scope
+# ONLY after `import std.encoding` (or a `from std.encoding import …`). The resolver loads this real file
+# (keeping the `native` marker), and the checker harvests the `native fn` declarations below as the
+# module's SIGNATURE source — retiring the hand-built `native_module_sig` encoding arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/encoding.rs`,
+# dispatched via `native_members("std.encoding")`). The backends compile NOTHING for a `native fn` — the
+# front-end reads ONLY the signature.
+#
+# Every fn takes a `str` (operating on its UTF-8 bytes) and returns `str` (encode) or `Result[str]`
+# (decode — malformed input or non-UTF-8 decoded bytes are a recoverable fault).
+
+native fn base64_encode(s: str) -> str
+native fn base64_encode_url(s: str) -> str
+native fn base64_decode(s: str) -> Result[str]
+native fn base64_decode_url(s: str) -> Result[str]
+native fn hex_encode(s: str) -> str
+native fn hex_decode(s: str) -> Result[str]
+native fn url_encode(s: str) -> str
+native fn url_decode(s: str) -> Result[str]
+# `query_encode(params) -> str` — build a `k=v&...` query string with sorted keys + both sides
+# percent-encoded (pure CPU, infallible).
+native fn query_encode(params: Map[str, str]) -> str

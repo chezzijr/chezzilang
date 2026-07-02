@@ -4362,33 +4362,11 @@ fn harvest_optional_tail_from_trailing_default() {
     assert_eq!(gs.min_params, 2, "no defaults → min_params == len");
 }
 
-/// The ModuleSig produced by a full graph check that imports `dotted` (e.g. `std.process`).
-#[cfg(test)]
-fn native_module_sig_via_graph(import: &str, dotted: &[&str]) -> ModuleSig {
-    let t = TmpDir::new();
-    let entry = t.write("main.chz", &format!("{import}\nfn main(): print(1)\n"));
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    let mut c = Checker::new();
-    c.run_graph_pass(&graph, false);
-    assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
-    let id = graph
-        .modules
-        .iter()
-        .find(|m| m.dotted == dotted)
-        .unwrap_or_else(|| panic!("{dotted:?} in graph"))
-        .id
-        .clone();
-    c.module_sigs
-        .get(&id)
-        .unwrap_or_else(|| panic!("{dotted:?} ModuleSig"))
-        .clone()
-}
-
 /// PROVENANCE + exact sigs — std.process's 3 fns + the `ProcResult` StructInfo come from the
 /// file-backed `std/process.chz` (harvested), byte-identical to the deleted hand-built arm.
 #[test]
 fn process_fn_sigs_exact() {
-    let sig = native_module_sig_via_graph("import std.process", &["std", "process"]);
+    let sig = native_module_sig_via_graph(&["std", "process"]);
     let proc = || Ty::Struct("ProcResult".to_string(), vec![]);
     let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
         ("cmd", vec![Ty::Str], Ty::result(Ty::Str), 1),
@@ -4430,7 +4408,7 @@ fn process_fn_sigs_exact() {
 /// `timeout_ms`) + the `Response` StructInfo come from the file-backed `std/request.chz`.
 #[test]
 fn request_fn_sigs_exact() {
-    let sig = native_module_sig_via_graph("import std.request", &["std", "request"]);
+    let sig = native_module_sig_via_graph(&["std", "request"]);
     let resp = || Ty::Struct("Response".to_string(), vec![]);
     // (name, params, ret, min_params). get/post/request are optional-tail (min = len-1).
     let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
@@ -4771,6 +4749,177 @@ fn regex_harvest_immune_to_sibling_generic_match() {
     assert!(
         errs.is_empty(),
         "regex harvest must be immune to a sibling `struct Match[T]`; got spurious errors: {errs:?}"
+    );
+}
+
+// ===== Phase 4e — std.encoding / std.crypto / std.uuid / std.time file-backed native modules =====
+
+/// The ModuleSig produced by a full graph check that `import std.<module>` (a file-backed native
+/// module whose sig is now harvested from `std/<module>.chz`, not `native_module_sig`).
+#[cfg(test)]
+fn native_module_sig_via_graph(module: &[&str]) -> ModuleSig {
+    let t = TmpDir::new();
+    let import = module.join(".");
+    let entry = t.write(
+        "main.chz",
+        &format!("import {import}\nfn main(): print(1)\n"),
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let mut c = Checker::new();
+    c.run_graph_pass(&graph, false);
+    assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
+    let id = graph
+        .modules
+        .iter()
+        .find(|m| m.dotted == module)
+        .unwrap_or_else(|| panic!("{import} in graph"))
+        .id
+        .clone();
+    c.module_sigs
+        .get(&id)
+        .unwrap_or_else(|| panic!("{import} ModuleSig"))
+        .clone()
+}
+
+/// PROVENANCE (phase 4e) — the encoding/crypto/uuid arms are DELETED from `native_module_sig`, and the
+/// time arm keeps ONLY the `timer` opcode-license (no `func()` calls). Their function sigs now come from
+/// parsing `std/<module>.chz` (harvested via `harvest_native_module`). So `native_module_sig` exports NO
+/// functions for these four, while `native_module_sig("std.time").types` still licenses `timer`.
+#[test]
+fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
+    for m in ["std.encoding", "std.crypto", "std.uuid", "std.time"] {
+        assert!(
+            native_module_sig(m).functions.is_empty(),
+            "{m} fns must no longer be hand-built in native_module_sig (harvested from std/*.chz)"
+        );
+    }
+    // std.time keeps its opcode-license for `timer` (NOT a native fn — no runtime value).
+    let time = native_module_sig("std.time");
+    assert!(
+        time.types.contains("timer"),
+        "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
+    );
+    // Sibling native modules stay hand-built (out of scope for phase 4e).
+    assert!(!native_module_sig("std.math").functions.is_empty());
+    assert!(!native_module_sig("std.fs").functions.is_empty());
+}
+
+/// EXACT SIGS — the harvested fn sigs must byte-match what `native_module_sig` used to hand-build.
+#[test]
+fn enc_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph(&["std", "encoding"]);
+    let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
+        ("base64_encode", vec![Ty::Str], Ty::Str),
+        ("base64_encode_url", vec![Ty::Str], Ty::Str),
+        ("base64_decode", vec![Ty::Str], Ty::result(Ty::Str)),
+        ("base64_decode_url", vec![Ty::Str], Ty::result(Ty::Str)),
+        ("hex_encode", vec![Ty::Str], Ty::Str),
+        ("hex_decode", vec![Ty::Str], Ty::result(Ty::Str)),
+        ("url_encode", vec![Ty::Str], Ty::Str),
+        ("url_decode", vec![Ty::Str], Ty::result(Ty::Str)),
+        (
+            "query_encode",
+            vec![Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
+            Ty::Str,
+        ),
+    ];
+    assert_eq!(sig.functions.len(), expected.len(), "std.encoding fn count");
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.encoding missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+        assert_eq!(fs.min_params, params.len(), "fn '{name}' arity drifted");
+    }
+}
+
+#[test]
+fn crypto_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph(&["std", "crypto"]);
+    let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
+        ("sha256", vec![Ty::Str], Ty::Str),
+        ("md5", vec![Ty::Str], Ty::Str),
+    ];
+    assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.crypto missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+    }
+}
+
+#[test]
+fn uuid_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph(&["std", "uuid"]);
+    let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
+        ("v4", vec![], Ty::Str),
+        ("uuid_seed", vec![Ty::Int], Ty::Nil),
+    ];
+    assert_eq!(sig.functions.len(), expected.len(), "std.uuid fn count");
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.uuid missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+    }
+}
+
+#[test]
+fn time_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph(&["std", "time"]);
+    let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
+        ("now", vec![], Ty::Int),
+        ("monotonic", vec![], Ty::Float),
+        ("sleep_ms", vec![Ty::Int], Ty::Nil),
+        ("format", vec![Ty::Int], Ty::Str),
+    ];
+    assert_eq!(
+        sig.functions.len(),
+        expected.len(),
+        "std.time must export exactly the 4 native fns (timer is NOT a native fn)"
+    );
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.time missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+    }
+    // `timer` stays licensed via sig.types (opcode-backed, NOT a native fn value).
+    assert!(
+        sig.types.contains("timer"),
+        "std.time module sig must still license `timer`"
+    );
+    assert!(
+        !sig.functions.contains_key("timer"),
+        "`timer` must NOT be a native fn (it has no runtime member value)"
+    );
+}
+
+/// The `timer` opcode-license survives the arm reduction — both the whole-module `import std.time` and
+/// the selective `import timer from std.time` forms still license the bare `timer(ms)` call.
+#[test]
+fn import_timer_from_std_time_still_licensed_both_forms() {
+    entry_ok("import std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
+    entry_ok("import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
+}
+
+/// A `native fn` decl in a USER (non-stdlib) .chz file is still a clear error — the file-backed std
+/// files take the native arm (bypassing check_module's guard), user files do not (phase-4e regression
+/// guard, complementing `native_decl_in_user_file_rejected`).
+#[test]
+fn phase4e_user_file_native_fn_still_rejected() {
+    entry_rejects(
+        "native fn sha256(s: str) -> str\nfn main():\n    print(1)\nmain()\n",
+        "native fn/ctor declarations are only allowed in standard-library modules",
     );
 }
 
