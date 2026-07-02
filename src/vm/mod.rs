@@ -22767,9 +22767,19 @@ main()";
     /// real `std/<M>.chz` files (bodyless `native fn` decls) instead of a hand-built `native_module_sig`
     /// arm. Dispatch is UNCHANGED (name-keyed `native_members`), so output must be byte-identical on all
     /// three engines: VM(serial), interp, and the M:N OS-thread engine. `rand` is seeded and `getcwd` is
-    /// matched (not printed), so the golden is deterministic (no VM-only escape hatch needed).
+    /// matched (not printed), so the sequence is deterministic — but ONLY while serialized against the
+    /// other rand tests: `std_native_4d.chz` does `rand.seed(1)` then `rand.int(0,100)` as two separate
+    /// native calls on the shared process-global RNG, so the seed→draw sequence must hold
+    /// `TEST_RNG_LOCK` across the whole run (like `golden_rand_via_run_file`) or the parallel harness
+    /// interleaves a sibling test's reseed between them and the draw drifts off `65`.
     #[test]
     fn golden_std_native_4d_chz_matches_expected_and_interp() {
+        // Serialize against the rand unit tests / rand goldens (shared process-global RNG); see
+        // TEST_RNG_LOCK. Hold it across the whole seed→draw run so the parallel harness cannot
+        // interleave another test's reseed between this program's rand.seed(1) and rand.int(0,100).
+        let _g = crate::native::rand::TEST_RNG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = base.join("examples/std_native_4d.chz");
         let expected =
