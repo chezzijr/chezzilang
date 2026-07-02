@@ -1,0 +1,5 @@
+# rule: nativeDecl
+native fn ord(c: str) -> int
+native fn panic(msg: str)
+native ctor int(x) -> int
+native ctor bytearray(x) -> bytearray

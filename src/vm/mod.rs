@@ -23802,6 +23802,20 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
         assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
     }
 
+    /// Phase 3a golden: `examples/native_prelude.chz` exercises the eight universe builtins now
+    /// DECLARED in std/prelude.chz (int/float/str/bytes/bytearray ctors, ord/chr fns, panic in a
+    /// recover:) plus synthetic `print` with sep=/end=. Byte-identical on the cooperative VM, the M:N
+    /// OS-thread engine, the interpreter, and `.expected` — the migration must change no output.
+    #[test]
+    fn golden_native_prelude_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/native_prelude.chz");
+        let expected = include_str!("../../examples/native_prelude.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, expected);
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(vm_out, run_capture_parallel(src).expect("mn run"));
+    }
+
     /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
     /// value call path — NOT a returned value / NOT silent nil — byte-identical on VM + interp. If the
     /// value path returned `Ok`, an uncaught `p(...)` would fall through instead of faulting.

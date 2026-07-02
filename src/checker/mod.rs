@@ -10,8 +10,8 @@ mod ty;
 
 use crate::ast::{
     AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
-    Import, LitPattern, MethodSig, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
-    TypeParam, UnaryOp, WaitArm, WaitTarget,
+    Import, LitPattern, MethodSig, NativeDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
+    Type, TypeParam, UnaryOp, WaitArm, WaitTarget,
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
@@ -227,52 +227,26 @@ pub(crate) enum Intrinsic {
     Ctor,
 }
 
-/// One row of the synthetic native-prelude table. This table is the SINGLE SOURCE OF TRUTH for the
-/// four first-class universe fns (`print`/`ord`/`chr`/`panic`) AND the five non-first-class
-/// scalar-conversion ctors (`int`/`float`/`str`/`bytes`/`bytearray`, phase 2a): the checker, compiler,
-/// and interp all READ it instead of each keeping its own hard-coded match arm (drift-guarded by
-/// `prelude_table_is_single_source_of_truth`). `make_sig` is a const-safe fn
-/// pointer — a `FnSig` holds `Vec`/`Box`, so it can't be a literal `const` field — and stays PRIVATE
-/// so the `pub(crate)` row never leaks the module-private `FnSig` type.
+/// One row of the (now HOLLOW) native-prelude METADATA table. Phase 3a split the concern: this table
+/// keeps only the name → intrinsic → first_class METADATA — the single source of truth read by the
+/// backends (`compiler::is_builtin`, `interp::builtins::is_builtin`, `is_firstclass_builtin_fn`), which
+/// have no module-graph access and need only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
+/// the eight migrated builtins moved OUT to the always-linked `std/prelude.chz` `native fn`/`native
+/// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]);
+/// only `print` (variadic — not expressible as a `native` decl) keeps a synthetic Rust signature. The
+/// two halves are reconciled by `prelude_table_is_single_source_of_truth` so the `.chz` decls stay
+/// authoritative.
 pub(crate) struct PreludeFn {
     pub(crate) name: &'static str,
     pub(crate) intrinsic: Intrinsic,
     pub(crate) first_class: bool,
-    make_sig: fn() -> FnSig,
 }
 
-// The four prelude signatures — exactly the shapes `builtin_sig` carried before the table landed.
-// Variadic + named args (`sep`/`end`) collapse to one `?` slot; `print` always returns `nil`.
+// `print` is the ONE remaining synthetic signature — variadic + named args (`sep`/`end`) collapse to
+// one `?` slot, `print` always returns `nil`; not expressible as a `native fn` decl, so it stays here
+// (all eight other prelude sigs now come from `std/prelude.chz`).
 fn sig_print() -> FnSig {
     FnSig::plain(vec![Ty::Unknown], Ty::Nil)
-}
-// `panic(msg)` is diverging (bottom-typed): renders `fn(str) -> ?`.
-fn sig_panic() -> FnSig {
-    FnSig::plain(vec![Ty::Str], Ty::Unknown)
-}
-fn sig_ord() -> FnSig {
-    FnSig::plain(vec![Ty::Str], Ty::Int)
-}
-fn sig_chr() -> FnSig {
-    FnSig::plain(vec![Ty::Int], Ty::Str)
-}
-// The five scalar-conversion CTORS (phase 2a). `int`/`float`/`str` accept ~anything → `?` arg, a
-// concrete scalar return; `bytes`/`bytearray` likewise take a `?` source. Exactly the shapes the
-// hard-coded `builtin_sig` arms carried before the table folded them in (drift-guarded).
-fn sig_int() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::Int)
-}
-fn sig_float() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::Float)
-}
-fn sig_str() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::Str)
-}
-fn sig_bytes() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::Bytes)
-}
-fn sig_bytearray() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::ByteArray)
 }
 
 /// The native prelude (phase 1). The four universe FUNCTIONS that are FIRST-CLASS values (bindable,
@@ -282,34 +256,31 @@ fn sig_bytearray() -> FnSig {
 /// (`Value::Builtin`/`Obj::Builtin`); direct calls still lower to their specialized opcodes, only
 /// value-position uses take the first-class path. The SCALAR-CONVERSION constructors
 /// (`int`/`float`/`str`/`bytes`/`bytearray`) landed in phase 2a as `Intrinsic::Ctor` rows —
-/// `first_class: false` (types are not first-class values), so they source their signature +
-/// `CallBuiltin` dispatch from the table but never emit a `LoadBuiltin`/`Ty::BuiltinFn`. The GENERIC /
-/// reserved-type container ctors (`List`/`Map`/`Set`/`range`) stay OUT — phase 2b (see PROGRESS.md
-/// "native-prelude table").
+/// `first_class: false` (types are not first-class values), so they source their `CallBuiltin`
+/// dispatch metadata from this table but never emit a `LoadBuiltin`/`Ty::BuiltinFn`. Phase 3a moved
+/// their SIGNATURES (and `ord`/`chr`/`panic`'s) to `std/prelude.chz` `native` decls; this table now
+/// carries only metadata (name/intrinsic/first_class). The GENERIC / reserved-type container ctors
+/// (`List`/`Map`/`Set`/`range`) stay OUT — phase 2b (see PROGRESS.md "native-prelude table").
 pub(crate) const PRELUDE: &[PreludeFn] = &[
     PreludeFn {
         name: "print",
         intrinsic: Intrinsic::Print,
         first_class: true,
-        make_sig: sig_print,
     },
     PreludeFn {
         name: "ord",
         intrinsic: Intrinsic::Builtin,
         first_class: true,
-        make_sig: sig_ord,
     },
     PreludeFn {
         name: "chr",
         intrinsic: Intrinsic::Builtin,
         first_class: true,
-        make_sig: sig_chr,
     },
     PreludeFn {
         name: "panic",
         intrinsic: Intrinsic::Builtin,
         first_class: true,
-        make_sig: sig_panic,
     },
     // Phase 2a — the five scalar-conversion CTORS. `first_class: false` (ALWAYS, for every Ctor row):
     // a value-position use (`f := int`) stays rejected, uniform with `f := Point` / `f := List`.
@@ -317,31 +288,26 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
         name: "int",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
-        make_sig: sig_int,
     },
     PreludeFn {
         name: "float",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
-        make_sig: sig_float,
     },
     PreludeFn {
         name: "str",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
-        make_sig: sig_str,
     },
     PreludeFn {
         name: "bytes",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
-        make_sig: sig_bytes,
     },
     PreludeFn {
         name: "bytearray",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
-        make_sig: sig_bytearray,
     },
 ];
 
@@ -571,6 +537,9 @@ struct EnumSigInfo {
 #[cfg(test)]
 pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
     let mut c = Checker::new();
+    // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed the
+    // eight migrated universe-builtin signatures from it directly (graph path hoists them normally).
+    c.seed_native_prelude_sigs();
     c.check_module(&module.stmts, None, &[]);
     if c.errors.is_empty() {
         Ok(())
@@ -1591,6 +1560,16 @@ struct Checker {
     /// linked into the graph, so this is single-sourced from the `.chz` rather than hand-built. `None`
     /// until harvested (and on the lone single-module `check` path, which has no graph).
     ref_seed: Option<StructInfo>,
+    /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
+    /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
+    /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —
+    /// the `.chz` decls are now the single source of truth for these signatures. `builtin_sig` reads
+    /// this registry (falling back to the still-hard-coded `print`/container arms). Populated once when
+    /// the prelude module is hoisted (it's always linked before the entry, so this is filled before any
+    /// user module's inference reads it). Empty on the lone single-module `check` path (no graph → no
+    /// prelude), where `builtin_sig` returns `None` for these names — the same as before this table for
+    /// hover-only queries; every real program goes through `check_graph` with the prelude linked.
+    native_prelude_sigs: HashMap<String, FnSig>,
     /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
     /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
     /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's
@@ -1699,6 +1678,7 @@ impl Checker {
             defer_floors: Vec::new(),
             current_module_is_stdlib: false,
             ref_seed: None,
+            native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),
@@ -3392,6 +3372,23 @@ impl Checker {
                         self.in_extern_sig = false;
                     }
                 }
+                StmtKind::Native(decl) => {
+                    // `native fn`/`native ctor` is PRELUDE/STD-ONLY (a user program can't bind a name to
+                    // a nonexistent intrinsic — a footgun). Reject it in a non-stdlib module; register
+                    // its signature into `native_prelude_sigs` (the single source of truth for the eight
+                    // migrated universe builtins) in a stdlib module. The name/first-classness metadata
+                    // still lives in the hollow Rust `PRELUDE` table (read by the backends, which have no
+                    // graph); this only moves the FnSig into the `.chz` decl (drift-guarded).
+                    if !self.current_module_is_stdlib {
+                        self.error(
+                            decl.span,
+                            "native fn/ctor declarations are only allowed in standard-library modules"
+                                .to_string(),
+                        );
+                    } else {
+                        self.register_native_decl(decl);
+                    }
+                }
                 _ => {}
             }
         }
@@ -3417,6 +3414,56 @@ impl Checker {
         // fields regardless of whether the struct was declared before or after the extern block.
         for (ty, name, span, allow_void) in &extern_marshal_checks {
             self.assert_marshallable(ty, name, *span, *allow_void);
+        }
+    }
+
+    /// Register one `native fn`/`native ctor` decl's signature into [`Checker::native_prelude_sigs`]
+    /// (the single source of truth for the eight migrated universe builtins). Shared by the `hoist`
+    /// pass (graph path) and [`seed_native_prelude_sigs`] (single-module `check` path). Applies the
+    /// native-decl dynamic convention: an UNANNOTATED param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`
+    /// return (native/never, how `panic` is spelled).
+    fn register_native_decl(&mut self, decl: &NativeDecl) {
+        let params: Vec<Ty> = decl
+            .params
+            .iter()
+            .map(|p| match &p.ty {
+                Some(t) => self.resolve_type(t, decl.span),
+                None => Ty::Unknown,
+            })
+            .collect();
+        let ret = match &decl.ret {
+            Some(t) => self.resolve_type(t, decl.span),
+            None => Ty::Unknown,
+        };
+        self.native_prelude_sigs
+            .insert(decl.name.clone(), FnSig::plain(params, ret));
+    }
+
+    /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
+    /// SINGLE-MODULE `check` path (test-only — the graph path hoists the prelude module directly, which
+    /// registers these during `hoist`). Without this, a single-module `check` (`ok()`/`check_src`) has
+    /// no prelude in scope, so `ord`/`panic` value-position typing + hover would silently regress.
+    /// Reads, parses, and registers only the file's `native` decls; the prelude imports nothing and its
+    /// param/return types are reserved primitives (`str`/`int`/`bytes`/…), so no module scope is needed.
+    #[cfg(test)]
+    fn seed_native_prelude_sigs(&mut self) {
+        if !self.native_prelude_sigs.is_empty() {
+            return;
+        }
+        let path = crate::resolver::std_root().join("prelude.chz");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(toks) = crate::lexer::tokenize(&src) else {
+            return;
+        };
+        let Ok(module) = crate::parser::parse(toks) else {
+            return;
+        };
+        for s in &module.stmts {
+            if let StmtKind::Native(decl) = &s.kind {
+                self.register_native_decl(decl);
+            }
         }
     }
 
@@ -4943,8 +4990,9 @@ impl Checker {
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }
-            // Imports and extern blocks carry nothing to check in pass 2.
-            StmtKind::Import(_) | StmtKind::Extern { .. } => {}
+            // Imports, extern blocks, and native decls carry nothing to check in pass 2 (native decls
+            // are fully validated + registered in `hoist`).
+            StmtKind::Import(_) | StmtKind::Extern { .. } | StmtKind::Native(_) => {}
             StmtKind::If {
                 branches,
                 else_block,
@@ -7492,6 +7540,19 @@ impl Checker {
         self.hover_record_at(name_span, &ty, HoverKind::Type, Some(doc));
     }
 
+    /// The DISPLAY-only signature for a reserved callable builtin, for editor hover + value-position
+    /// typing. The eight MIGRATED universe builtins (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/
+    /// `bytearray`) source their sig from `std/prelude.chz` via [`Checker::native_prelude_sigs`]; the
+    /// still-synthetic `print` + container/runtime ctors fall through to [`builtin_container_sig`].
+    /// Covers exactly [`RESERVED_CALLABLE`] (drift-guarded). Not used for direct-call typing (the
+    /// `infer_named_call` arms handle that) — only hover + the first-class value form.
+    fn builtin_sig(&self, name: &str) -> Option<FnSig> {
+        if let Some(sig) = self.native_prelude_sigs.get(name) {
+            return Some(sig.clone());
+        }
+        builtin_container_sig(name)
+    }
+
     /// Hover-record a LEAF expression (identifier / literal) or a field-name access. Non-leaf kinds
     /// (Binary/Index/Call/…) are skipped so hovering `a` in `a[0]` reports `a`'s type, not the element
     /// type — the parent never overwrites the child. The field-name access anchors on `name_span` (the
@@ -7588,7 +7649,7 @@ impl Checker {
         // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
         // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
         // be user-shadowed, so this never collides with the fn/struct tables above.
-        if let Some(sig) = builtin_sig(name) {
+        if let Some(sig) = self.builtin_sig(name) {
             return Some(Ty::Func {
                 params: sig.params,
                 ret: Box::new(sig.ret),
@@ -7682,7 +7743,7 @@ impl Checker {
         // env → `Value::Builtin`) from diverging on a program that would otherwise wrongly type-check.
         if is_firstclass_builtin_fn(name)
             && !self.module_global_lets.contains(name)
-            && let Some(sig) = builtin_sig(name)
+            && let Some(sig) = self.builtin_sig(name)
         {
             return Ty::BuiltinFn {
                 params: sig.params,
@@ -15571,21 +15632,20 @@ fn set_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     Some(FnSig::plain(params, ret))
 }
 
-/// A DISPLAY-only signature for a free / constructor builtin (editor hover, v1). Unlike the
-/// `infer_named_call` arms — whose result is arg-dependent (overloads, variadics, named params,
-/// type-arg-driven element types) — this returns ONE canonical positional shape per name, mirrored
-/// by hand from `docs/stdlib.md §1`. Polymorphic-input slots use `Ty::Unknown` (renders `?`); the
-/// precise concrete RETURN is the hover payload. NOT used for checking — only `callee_display_ty`
-/// reads it under the hover probe. Covers exactly [`RESERVED_CALLABLE`] (drift-guarded by a test);
-/// a future reserved builtin that forgets an entry here fails that test rather than silently losing
-/// hover. (`Ok`/`Err`/`Some` are not reserved and stay hover-`None`.)
-fn builtin_sig(name: &str) -> Option<FnSig> {
-    // The universe FUNCTIONS (print/ord/chr/panic) AND the scalar-conversion CTORS
-    // (int/float/str/bytes/bytearray, phase 2a) source their signature from the synthetic
-    // native-prelude table — the single source of truth (drift-guarded). The GENERIC / reserved-type
-    // container ctor names (range/List/Map/Set/Channel/…) stay here until phase 2b.
-    if let Some(p) = prelude_fn(name) {
-        return Some((p.make_sig)());
+/// A DISPLAY-only signature for the STILL-SYNTHETIC free / constructor builtins (editor hover, v1):
+/// `print` (variadic — not expressible as a `native` decl) plus the GENERIC / reserved-type container
+/// & runtime ctors (`range`/`List`/`Map`/`Set`/`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/
+/// `Executor`, phase 2b — still hard-coded). The eight MIGRATED universe builtins
+/// (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`) are NOT here — their sigs now come
+/// from `std/prelude.chz` via [`Checker::builtin_sig`]. Unlike the `infer_named_call` arms — whose
+/// result is arg-dependent (overloads, variadics, named params, type-arg-driven element types) — this
+/// returns ONE canonical positional shape per name, mirrored by hand from `docs/stdlib.md §1`.
+/// Polymorphic-input slots use `Ty::Unknown` (renders `?`); the precise concrete RETURN is the hover
+/// payload.
+fn builtin_container_sig(name: &str) -> Option<FnSig> {
+    // `print` is the ONE remaining synthetic universe FUNCTION (variadic + `sep=`/`end=`).
+    if name == "print" {
+        return Some(sig_print());
     }
     let (params, ret) = match name {
         // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the

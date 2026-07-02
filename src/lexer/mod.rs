@@ -55,6 +55,10 @@ pub enum Token {
     Yield,
     Import,
     Extern,
+    /// `native` — the prelude/std-only `native fn` / `native ctor` declaration keyword. Declares a
+    /// body-less universe-builtin SIGNATURE whose body is bound natively (name-keyed `do_builtin`).
+    /// A full keyword (corpus-safe: no `.chz` uses `native` as a bare identifier).
+    Native,
     From,
     As,
     /// `ref` — the by-reference binding modifier (`r: ref int = 0`, `fn f(x: ref int)`).
@@ -197,6 +201,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("yield", Token::Yield),
     ("import", Token::Import),
     ("extern", Token::Extern),
+    ("native", Token::Native),
     ("from", Token::From),
     ("as", Token::As),
     ("ref", Token::Ref),

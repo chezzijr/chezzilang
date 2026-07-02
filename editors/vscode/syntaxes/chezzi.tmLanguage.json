@@ -30,7 +30,7 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.chezzi", "match": "\\b(fn|return|if|else|for|while|in|break|continue|struct|enum|protocol|type|newtype|match|recover|defer|assert|test|spawn|parallel|wait|yield|import|extern|from|as|ref|and|or|not|true|false)\\b" }
+        { "name": "keyword.control.chezzi", "match": "\\b(fn|return|if|else|for|while|in|break|continue|struct|enum|protocol|type|newtype|match|recover|defer|assert|test|spawn|parallel|wait|yield|import|extern|native|from|as|ref|and|or|not|true|false)\\b" }
       ]
     },
     "operators": {

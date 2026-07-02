@@ -5686,6 +5686,9 @@ impl Interp {
             | StmtKind::NewType { .. }
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. } // bound by hoist_declarations, like top-level fn
+            // A `native fn`/`native ctor` decl is a compile-time signature source only — no runtime
+            // binding; dispatch of the migrated builtins stays name-keyed (`builtins::call`).
+            | StmtKind::Native(_)
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
@@ -9539,6 +9542,19 @@ b := Buf([10, 20, 30])
         let expected = include_str!("../../examples/defer_builtin_value.expected");
         assert_eq!(
             run_capture(source).expect("defer_builtin_value.chz should run"),
+            expected
+        );
+    }
+
+    /// Phase 3a golden: `examples/native_prelude.chz` — the eight universe builtins declared in
+    /// std/prelude.chz (int/float/str/bytes/bytearray/ord/chr/panic) + synthetic `print`. The
+    /// interpreter must match `.expected` byte-for-byte (VM + M:N parity asserted on the VM side).
+    #[test]
+    fn golden_native_prelude_chz() {
+        let source = include_str!("../../examples/native_prelude.chz");
+        let expected = include_str!("../../examples/native_prelude.expected");
+        assert_eq!(
+            run_capture(source).expect("native_prelude.chz should run"),
             expected
         );
     }

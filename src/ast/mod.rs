@@ -194,6 +194,12 @@ pub enum StmtKind {
     /// Each `fn` becomes a module-global callable dispatched at runtime via dlopen + libffi. v1
     /// marshals scalars only (int/float/bool/str→char*).
     Extern { lib: String, fns: Vec<ExternFn> },
+    /// `native fn NAME(params) -> ret` / `native ctor NAME(params) -> ret` — a body-less universe-
+    /// builtin SIGNATURE declared in Chezzi (prelude/std-only; rejected in user modules). The body is
+    /// bound natively (name-keyed `do_builtin`/`CallPrint`), so the backends compile NOTHING for a
+    /// native decl (never a callable user fn). The checker reads it as the signature source for the
+    /// eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`).
+    Native(NativeDecl),
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
     /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).
@@ -207,6 +213,31 @@ pub enum StmtKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternFn {
     pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<Type>,
+    pub span: Span,
+}
+
+/// Whether a [`NativeDecl`] is a first-class universe FUNCTION (`native fn`) or a non-first-class
+/// scalar/type CONSTRUCTOR (`native ctor`). Mirrors the checker's `Intrinsic::{Builtin, Ctor}` split:
+/// `Fn` ⇒ first-class (value-position use emits `LoadBuiltin`/`Ty::BuiltinFn`); `Ctor` ⇒ never
+/// first-class (uniform with a user struct ctor / `List` — value-position use is a checker error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeKind {
+    Fn,
+    Ctor,
+}
+
+/// A body-less `native fn`/`native ctor` declaration (prelude/std-only). Like an [`ExternFn`] but for
+/// an INTERNAL universe builtin: no library, and it carries the [`NativeKind`] first-class flag.
+/// DYNAMIC-PARAM CONVENTION (native-decl-scoped, no user-facing `any`): an UNANNOTATED param (`ty ==
+/// None`) means the dynamic "accepts anything" type (`Ty::Unknown`); a missing `-> ret` (`ret ==
+/// None`) means native-controlled/never (`Ty::Unknown` return, e.g. `panic`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub kind: NativeKind,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub span: Span,

@@ -37,7 +37,7 @@
 # latter feeds <stmts>, which a <block> uses) — so a nested extern is a parse error.
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
-<topLevelStmt>  ::= <stmt> | <externDecl>
+<topLevelStmt>  ::= <stmt> | <externDecl> | <nativeDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
@@ -203,6 +203,19 @@
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
               | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+
+# `native fn`/`native ctor` — a body-less universe-builtin SIGNATURE, PRELUDE/STD-ONLY (the checker
+# rejects it in a user module) and TOP-LEVEL-only. The body is bound natively (name-keyed dispatch);
+# the front-end reads only the signature. `native fn` is a first-class function intrinsic; `native
+# ctor` a non-first-class scalar/type constructor. `ctor` is a plain IDENT (not a keyword). An
+# UNANNOTATED param = dynamic ("accepts anything"); a missing `-> ret` = native-controlled/never.
+# The universe builtins ord/chr/panic/int/float/str/bytes/bytearray are declared this way in
+# std/prelude.chz. (`ctor` shows as IDENT below; the checker enforces the exact spelling.)
+<nativeDecl>  ::= "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+<nativeHead>  ::= "FN" | "IDENT"
 
 # An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
 # may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).

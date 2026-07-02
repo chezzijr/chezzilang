@@ -1119,6 +1119,8 @@ impl Walker<'_> {
             | StmtKind::Import(_)
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. }
+            // A `native fn`/`native ctor` decl is a body-less signature — no nested exprs/bindings.
+            | StmtKind::Native(_)
             | StmtKind::TypeAlias { .. } => {}
         }
         Ok(())
