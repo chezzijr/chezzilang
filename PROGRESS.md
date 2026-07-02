@@ -58,6 +58,36 @@ realized in **phase 3a** below — the signatures moved to a real `.chz` prelude
 variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
 `sep=`/`end=` variadic still can't be spelled in `.chz`, so it stays the sole synthetic function row.)
 
+**✅ NATIVE-PRELUDE — phase 4c-ffi (`std.ffi`'s 59 FUNCTION sigs made file-backed:
+`std/ffi.chz`) (2026-07-02).** REFACTOR-ONLY, **ZERO observable change / three-engine byte-identical** —
+the proven phase-4b/4d/4e/4f pattern applied to `std.ffi`. All **59** callable fns (`null`/`is_null`, the
+`load_*` family — 14 loads × {base, `_at`} — the `store_*` family — 13 stores × {base, `_at`} — and
+`alloc`/`alloc_zeroed`/`free`) are now bodyless `native fn` decls in a real **`std/ffi.chz`**, harvested by
+the checker via `harvest_native_module`; the resolver loads the file while **KEEPING the `native` marker**
+(runtime dispatch stays name-keyed via `native_members("std.ffi") => ffi::MEMBERS` — bytecode + `src/native/ffi.rs`
+UNCHANGED). `std.ffi` added to the shared `crate::native::is_file_backed_native` predicate. The migration is
+**PARTIAL BY DESIGN**: a `native fn` produces a `sig.functions` entry, but `std.ffi` ALSO exports **type-license-only**
+names — the opaque `ptr` handle + the eight fixed-width C-ABI integer names (`int8..uint64` in `ffi::TYPE_NAMES`)
+— which resolve to `Ty::Ptr`/`Ty::Int` via `resolve_type` gated on `imported_ffi_types` and have NO `.chz`
+decl syntax (no way to spell a bare type-license name aliasing a builtin scalar). So the `native_module_sig("std.ffi")`
+arm is **REDUCED to only that type-license tail** (the `TYPE_NAMES` loop + the `ptr` insert), mirroring the
+residual `std.net`/`std.concurrency`/`std.time` arms — full deletion is NOT achievable without inventing a new
+decl kind (out of scope). **Non-obvious blocker solved:** harvesting `native fn null() -> ptr` resolves `ptr`
+through `resolve_type`'s `ptr` arm, which requires `imported_ffi_types.contains("ptr")`, but harvest runs WITHOUT
+`begin_module` (that set is empty) → `harvest_native_module` now **transiently licenses** every `sig.types` name
+that is `ptr`/in `TYPE_NAMES` into `imported_ffi_types` before PASS 2 and **restores exactly those** after (the
+direct analog of the existing `struct_names` transient; driven off `sig.types` so module-agnostic; no leak — a
+sibling that never imported std.ffi still rejects bare `ptr`). Every store (26) + `free` spells an explicit
+`-> nil` (harvest maps a MISSING ret to `Ty::Unknown`, NOT `Ty::Nil` — the old arm returned `Ty::Nil`, so the
+explicit `-> nil` is correctness-critical to byte-match). Tests: `enc_crypto_uuid_time_sig_from_file_not_native_module_sig`
+(inverted for ffi — arm's fns gone, `ptr`+`TYPE_NAMES` license kept), `ffi_fn_sigs_exact` (all 59 harvested sigs
+byte-equal to the deleted for-loops + MEMBERS len==59 cross-check), `ffi_ptr_license_does_not_leak_past_harvest`
+(per-name `import ptr`/`int32` license + no cross-module leak), the existing 10 `ffi_*` typecheck tests unchanged,
+and the 3-engine golden `golden_std_native_4c_chz_matches_expected_and_interp` (`examples/std_native_4c.chz`
+alloc/store/load round-trip, VM==interp==M:N — FFI is layout-dependent UB, so a real round-trip, not goldens alone).
+`grammar.bnf` unchanged (conformance green). **Remaining `native_module_sig` content after 4c/4d/4e/4f:** only
+`net` (methoded `Socket`/`Listener`) + `concurrency` (opcode type-licensing) — the residual method/opcode arms.
+
 **✅ NATIVE-PRELUDE — phase 4f (`std.process` + `std.request` made file-backed: native TYPE + FNs
 declared in `std/process.chz` / `std/request.chz`) (2026-07-02).** Mechanical application of the proven
 phase-4b regex pattern to the two remaining fields-only native-struct modules. `std.process` and
@@ -87,9 +117,9 @@ deleted arms; request's optional-tail min_params exact), `regex_sig_from_file_no
 — asserts both arms gone), `request_optional_timeout_arg_typechecks` (both arities check), `native_fn_allows_optional_trailing_default`
 (parser), `process_request_file_backed_three_engine_parity` + `pure_type_import_no_fault_both_engines`
 (VM==interp==M:N), existing `examples/process_polish.chz` + `sys.chz` goldens unchanged on both engines.
-**Roadmap:** after 4b/4f, `native_module_sig` retains only **concurrency** (opcode type-license),
-**net** (methoded `Socket`/`Listener`), and **ffi** (extern) — the focused phase-4c targets (method/opcode
-binding). `grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a; conformance green).
+**Roadmap:** after 4b/4c/4f, `native_module_sig` retains only **concurrency** (opcode type-license) and
+**net** (methoded `Socket`/`Listener`) — the residual method/opcode arms (ffi migrated in phase 4c-ffi).
+`grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a; conformance green).
 
 **✅ NATIVE-PRELUDE — phase 4e (4 pure-function native modules made file-backed:
 `std.encoding`/`std.crypto`/`std.uuid`/`std.time`) (2026-07-02).** REFACTOR-ONLY, **ZERO observable
@@ -142,8 +172,8 @@ tables + `native_consts` untouched), `math_is_file_backed_native` (resolver), an
 `golden_std_native_4d_chz_matches_expected_and_interp` (`examples/std_native_4d.chz`, VM==interp==M:N).
 `module_fn_docs_all_resolve` now builds the effective sig via the graph (the migrated fns are harvested).
 `native fn` in a user file still rejected; `grammar.bnf` unchanged (conformance green). **Remaining
-`native_module_sig` content after 4d/4e/4f:** only `net` (methoded `Socket`/`Listener`), `ffi` (extern),
-and `concurrency` (opcode type-licensing) — the deferred focused phase-4c targets (method/opcode binding).
+`native_module_sig` content after 4c/4d/4e/4f:** only `net` (methoded `Socket`/`Listener`) and
+`concurrency` (opcode type-licensing) — the residual method/opcode arms (ffi migrated in phase 4c-ffi).
 
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is

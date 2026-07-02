@@ -907,8 +907,8 @@ mod tests {
 
     // 8. A still-virtual native std module (std.net) is resolved without any .chz file, flagged
     // native, with an empty AST (its sig is hand-built in `native_module_sig`). (std.math/io/os/rand/fs
-    // 4d, encoding/crypto/uuid/time 4e, process/request 4f migrated to FILE-BACKED; net/ffi/concurrency
-    // stay virtual — the deferred 4c targets.)
+    // 4d, encoding/crypto/uuid/time 4e, process/request 4f, ffi 4c migrated to FILE-BACKED; net/
+    // concurrency stay virtual — net is a methoded Socket/Listener surface, concurrency is opcode-backed.)
     #[test]
     fn native_std_module_is_virtual() {
         let t = TmpDir::new();

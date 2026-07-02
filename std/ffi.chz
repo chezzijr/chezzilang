@@ -1,0 +1,94 @@
+# std.ffi — the C-ABI vocabulary that pairs with the opaque `ptr` handle type, declared in Chezzi
+# (phase 4c).
+#
+# FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz, std/math.chz). Its functions
+# are in scope ONLY after `import std.ffi` (or a `from std.ffi import …`), qualified as `ffi.null()` etc.
+# The resolver loads this real file (keeping the `native` marker), and the checker harvests the
+# `native fn` declarations below as the module's SIGNATURE source — retiring the callable half of the
+# hand-built `native_module_sig` ffi arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/ffi.rs`,
+# dispatched via `native_members("std.ffi")`). The backends compile NOTHING for a `native fn` — the
+# front-end reads ONLY the signature. FFI is layout-dependent UB, so the sigs here are the checker's only
+# guard: a wrong param/ret would pass the type-checker but marshal wrong bytes at runtime.
+#
+# NOTE — the TYPE-license names std.ffi ALSO exports are DELIBERATELY NOT declared here. The opaque `ptr`
+# handle type and the eight fixed-width C-ABI integer names (int8..uint64) carry NO runtime value — they
+# license `import ptr from std.ffi` / `import int32 from std.ffi` and resolve (via `resolve_type`) to
+# `Ty::Ptr`/`Ty::Int` only in a module that imported them. There is no `.chz` syntax for a bare
+# type-license name aliasing a builtin scalar, so they stay in the minimal `native_module_sig("std.ffi")`
+# arm (`sig.types.insert`), mirroring std.net's `Socket`/`Listener` and std.time's `timer`.
+
+# --- the NULL sentinel + its test ---
+native fn null() -> ptr
+native fn is_null(p: ptr) -> bool
+
+# --- loads: read C-owned memory behind a `ptr`. Each has a base form `(ptr) -> T` and an
+#     `_at(ptr, off: int) -> T` byte-offset form. Every int width loads as `int`, float widths as
+#     `float`, and `bool`/`ptr`/`str` as their own kind. A NULL base is a recoverable runtime error.
+native fn load_int(p: ptr) -> int
+native fn load_int_at(p: ptr, off: int) -> int
+native fn load_int8(p: ptr) -> int
+native fn load_int8_at(p: ptr, off: int) -> int
+native fn load_int16(p: ptr) -> int
+native fn load_int16_at(p: ptr, off: int) -> int
+native fn load_int32(p: ptr) -> int
+native fn load_int32_at(p: ptr, off: int) -> int
+native fn load_int64(p: ptr) -> int
+native fn load_int64_at(p: ptr, off: int) -> int
+native fn load_uint8(p: ptr) -> int
+native fn load_uint8_at(p: ptr, off: int) -> int
+native fn load_uint16(p: ptr) -> int
+native fn load_uint16_at(p: ptr, off: int) -> int
+native fn load_uint32(p: ptr) -> int
+native fn load_uint32_at(p: ptr, off: int) -> int
+native fn load_uint64(p: ptr) -> int
+native fn load_uint64_at(p: ptr, off: int) -> int
+native fn load_float(p: ptr) -> float
+native fn load_float_at(p: ptr, off: int) -> float
+native fn load_float32(p: ptr) -> float
+native fn load_float32_at(p: ptr, off: int) -> float
+native fn load_bool(p: ptr) -> bool
+native fn load_bool_at(p: ptr, off: int) -> bool
+native fn load_ptr(p: ptr) -> ptr
+native fn load_ptr_at(p: ptr, off: int) -> ptr
+native fn load_str(p: ptr) -> str
+native fn load_str_at(p: ptr, off: int) -> str
+
+# --- stores: write C-owned memory behind a `ptr`. Each has a base form `(ptr, v) -> nil` and an
+#     `_at(ptr, off: int, v) -> nil` byte-offset form (the offset comes BEFORE the value). The value
+#     is of the matching kind; there is NO `str` store. `str` has no store counterpart.
+native fn store_int(p: ptr, v: int) -> nil
+native fn store_int_at(p: ptr, off: int, v: int) -> nil
+native fn store_int8(p: ptr, v: int) -> nil
+native fn store_int8_at(p: ptr, off: int, v: int) -> nil
+native fn store_int16(p: ptr, v: int) -> nil
+native fn store_int16_at(p: ptr, off: int, v: int) -> nil
+native fn store_int32(p: ptr, v: int) -> nil
+native fn store_int32_at(p: ptr, off: int, v: int) -> nil
+native fn store_int64(p: ptr, v: int) -> nil
+native fn store_int64_at(p: ptr, off: int, v: int) -> nil
+native fn store_uint8(p: ptr, v: int) -> nil
+native fn store_uint8_at(p: ptr, off: int, v: int) -> nil
+native fn store_uint16(p: ptr, v: int) -> nil
+native fn store_uint16_at(p: ptr, off: int, v: int) -> nil
+native fn store_uint32(p: ptr, v: int) -> nil
+native fn store_uint32_at(p: ptr, off: int, v: int) -> nil
+native fn store_uint64(p: ptr, v: int) -> nil
+native fn store_uint64_at(p: ptr, off: int, v: int) -> nil
+native fn store_float(p: ptr, v: float) -> nil
+native fn store_float_at(p: ptr, off: int, v: float) -> nil
+native fn store_float32(p: ptr, v: float) -> nil
+native fn store_float32_at(p: ptr, off: int, v: float) -> nil
+native fn store_bool(p: ptr, v: bool) -> nil
+native fn store_bool_at(p: ptr, off: int, v: bool) -> nil
+native fn store_ptr(p: ptr, v: ptr) -> nil
+native fn store_ptr_at(p: ptr, off: int, v: ptr) -> nil
+
+# --- C-buffer alloc layer — libc malloc/calloc/free-backed raw buffers for C array/buffer APIs
+#     (qsort/bsearch/fread-into-buffer). `alloc`/`alloc_zeroed` take a byte count and return a raw
+#     `ptr`; `free` releases it. The buffer is MANUALLY freed (never auto-freed) — `defer ffi.free(p)`.
+#     A negative size or OOM is a recoverable runtime error; `free(ffi.null())` is a no-op.
+native fn alloc(nbytes: int) -> ptr
+native fn alloc_zeroed(nbytes: int) -> ptr
+native fn free(p: ptr) -> nil

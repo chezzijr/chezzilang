@@ -4582,7 +4582,8 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
             "{m} numeric_poly must no longer be hand-built in native_module_sig"
         );
     }
-    // A sibling still-hand-built native module keeps its arm (concurrency/net/ffi — deferred 4c).
+    // A sibling still-hand-built native module keeps its arm (std.net — methoded Socket/Listener;
+    // std.concurrency is a pure opcode/type-license arm. std.ffi is FILE-BACKED now, phase 4c.)
     assert!(!native_module_sig("std.net").functions.is_empty());
 }
 
@@ -4690,8 +4691,10 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(consts, vec!["pi", "e"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
-    // Still-virtual (hand-built) sibling — the deferred 4c targets net/ffi/concurrency.
+    // Still-virtual (hand-built) sibling — std.net (methoded) + std.concurrency (opcode-backed).
+    // std.ffi is FILE-BACKED now (phase 4c).
     assert!(!crate::native::is_file_backed_native("std.net"));
+    assert!(crate::native::is_file_backed_native("std.ffi"));
 }
 
 // ===== M9: std.request (Response struct) =====
@@ -4920,9 +4923,28 @@ fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
         time.types.contains("timer"),
         "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
     );
-    // Sibling native modules that stay hand-built (concurrency/net/ffi — the deferred 4c targets).
+    // Sibling native module that stays hand-built (std.net — a methoded Socket/Listener surface).
     assert!(!native_module_sig("std.net").functions.is_empty());
-    assert!(!native_module_sig("std.ffi").functions.is_empty());
+    // std.ffi is FILE-BACKED now (phase 4c): its 59 fns are harvested from std/ffi.chz, so
+    // `native_module_sig("std.ffi")` exports NO functions. Its arm is REDUCED to only the type-license
+    // tail — the opaque `ptr` handle type + the eight fixed-width C-ABI integer names (int8..uint64) —
+    // which have no runtime value and cannot be spelled as a `native fn` decl (there is no .chz syntax
+    // for a bare type-license name aliasing Ty::Int/Ty::Ptr).
+    let ffi = native_module_sig("std.ffi");
+    assert!(
+        ffi.functions.is_empty(),
+        "std.ffi fns must be harvested from std/ffi.chz, not native_module_sig"
+    );
+    assert!(
+        ffi.types.contains("ptr"),
+        "std.ffi must keep `ptr` in its type-license set (opaque C-ABI handle, no runtime value)"
+    );
+    for tn in crate::native::ffi::TYPE_NAMES {
+        assert!(
+            ffi.types.contains(*tn),
+            "std.ffi must keep the fixed-width C-ABI type name `{tn}` in its type-license set"
+        );
+    }
 }
 
 /// EXACT SIGS — the harvested fn sigs must byte-match what `native_module_sig` used to hand-build.
@@ -4954,6 +4976,92 @@ fn enc_fn_sigs_exact() {
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
         assert_eq!(fs.min_params, params.len(), "fn '{name}' arity drifted");
     }
+}
+
+/// EXACT SIGS (phase 4c) — the 59 harvested std.ffi fn sigs must byte-match what the deleted
+/// `native_module_sig("std.ffi")` arm used to hand-build (the load_*/store_* for-loops, expanded here).
+/// Also asserts the type-license tail (`ptr` + the 8 fixed-width names) survives in `sig.types`.
+#[test]
+fn ffi_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph("ffi");
+    // Build the expected sigs the SAME way the old arm did, so this is a byte-for-byte provenance move.
+    let mut expected: Vec<(String, Vec<Ty>, Ty)> = vec![
+        ("null".to_string(), vec![], Ty::Ptr),
+        ("is_null".to_string(), vec![Ty::Ptr], Ty::Bool),
+    ];
+    for (n, t) in [
+        ("load_int", Ty::Int),
+        ("load_int8", Ty::Int),
+        ("load_int16", Ty::Int),
+        ("load_int32", Ty::Int),
+        ("load_int64", Ty::Int),
+        ("load_uint8", Ty::Int),
+        ("load_uint16", Ty::Int),
+        ("load_uint32", Ty::Int),
+        ("load_uint64", Ty::Int),
+        ("load_float", Ty::Float),
+        ("load_float32", Ty::Float),
+        ("load_bool", Ty::Bool),
+        ("load_ptr", Ty::Ptr),
+        ("load_str", Ty::Str),
+    ] {
+        expected.push((n.to_string(), vec![Ty::Ptr], t.clone()));
+        expected.push((format!("{n}_at"), vec![Ty::Ptr, Ty::Int], t));
+    }
+    for (n, v) in [
+        ("store_int", Ty::Int),
+        ("store_int8", Ty::Int),
+        ("store_int16", Ty::Int),
+        ("store_int32", Ty::Int),
+        ("store_int64", Ty::Int),
+        ("store_uint8", Ty::Int),
+        ("store_uint16", Ty::Int),
+        ("store_uint32", Ty::Int),
+        ("store_uint64", Ty::Int),
+        ("store_float", Ty::Float),
+        ("store_float32", Ty::Float),
+        ("store_bool", Ty::Bool),
+        ("store_ptr", Ty::Ptr),
+    ] {
+        expected.push((n.to_string(), vec![Ty::Ptr, v.clone()], Ty::Nil));
+        expected.push((format!("{n}_at"), vec![Ty::Ptr, Ty::Int, v], Ty::Nil));
+    }
+    expected.push(("alloc".to_string(), vec![Ty::Int], Ty::Ptr));
+    expected.push(("alloc_zeroed".to_string(), vec![Ty::Int], Ty::Ptr));
+    expected.push(("free".to_string(), vec![Ty::Ptr], Ty::Nil));
+
+    assert_eq!(expected.len(), 59, "expected exactly 59 std.ffi fns");
+    assert_eq!(
+        sig.functions.len(),
+        59,
+        "std.ffi must harvest exactly 59 native fns from std/ffi.chz"
+    );
+    for (name, params, ret) in &expected {
+        let fs = sig
+            .functions
+            .get(name)
+            .unwrap_or_else(|| panic!("std.ffi missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+        assert_eq!(fs.min_params, params.len(), "fn '{name}' arity drifted");
+    }
+    // The type-license tail is UNCHANGED by the migration: `ptr` + the 8 fixed-width names survive.
+    assert!(
+        sig.types.contains("ptr"),
+        "std.ffi must keep `ptr` licensed"
+    );
+    for tn in crate::native::ffi::TYPE_NAMES {
+        assert!(
+            sig.types.contains(*tn),
+            "std.ffi must keep the fixed-width type name `{tn}` licensed"
+        );
+    }
+    // The runtime member table cross-checks the harvested surface 1:1.
+    assert_eq!(
+        crate::native::native_members("std.ffi").len(),
+        59,
+        "std.ffi runtime MEMBERS must stay 59 (dispatch untouched)"
+    );
 }
 
 #[test]
@@ -8201,6 +8309,41 @@ fn ptr_annotation_requires_ffi_import() {
     rejects(
         "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n",
         "import std.ffi",
+    );
+}
+
+/// Phase 4c leak-guard — harvesting std/ffi.chz transiently licenses `ptr`/`int8..uint64` into
+/// `imported_ffi_types` (so `native fn null() -> ptr` resolves without `begin_module`). That transient
+/// MUST be restored, or the license leaks into a sibling module that never imported std.ffi. A
+/// per-name import (`import ptr from std.ffi`) must still license bare `ptr`, and a sibling that does
+/// NOT import it must still reject bare `ptr` — even in the SAME graph where another module harvested it.
+#[test]
+fn ffi_ptr_license_does_not_leak_past_harvest() {
+    // Per-name imports of the type-license names license the bare annotations.
+    entry_ok(
+        "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n\nh: ptr = tmpfile()\nprint(1)\n",
+    );
+    entry_ok("import int32 from std.ffi\ntype W = int32\nprint(1)\n");
+    // A multi-module graph where a HELPER imports std.ffi (triggering the harvest + transient license)
+    // and the ENTRY does NOT — the entry's bare `ptr` must still be rejected (no cross-module leak).
+    let t = TmpDir::new();
+    t.write(
+        "helper.chz",
+        "import std.ffi\nfn get() -> ptr:\n    return ffi.null()\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import helper\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n\nfn main():\n    print(1)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'ptr'")),
+        "the entry never imported std.ffi, so bare `ptr` must reject despite the helper's harvest; got: {errs:?}"
     );
 }
 

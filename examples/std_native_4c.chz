@@ -1,0 +1,29 @@
+# Phase 4c three-engine parity golden: the file-backed std.ffi C-buffer surface
+# (alloc / alloc_zeroed / store_int64_at / load_int64_at / store_int32_at / load_int32_at /
+# is_null / null / free). Every value is deterministic — pointer ADDRESSES are never printed, only
+# the round-tripped payload — so interp, the serial VM, and the M:N OS-thread engine must produce
+# byte-identical stdout. The signatures now come from std/ffi.chz (bodyless `native fn` decls);
+# dispatch is unchanged (name-keyed `native_members("std.ffi")`), so all three engines agree.
+import std.ffi
+
+fn main():
+    # A raw 32-byte C buffer; store four int64 slots and read them back (round-trip).
+    buf := ffi.alloc(32)
+    ffi.store_int64_at(buf, 0, 10)
+    ffi.store_int64_at(buf, 8, 20)
+    ffi.store_int64_at(buf, 16, -30)
+    ffi.store_int64_at(buf, 24, 40)
+    total := ffi.load_int64_at(buf, 0) + ffi.load_int64_at(buf, 8) + ffi.load_int64_at(buf, 16) + ffi.load_int64_at(buf, 24)
+    print("sum={total}")
+    # int32 round-trip in a zeroed buffer: unwritten slots read back 0.
+    z := ffi.alloc_zeroed(16)
+    ffi.store_int32_at(z, 4, 777)
+    print("i32={ffi.load_int32_at(z, 4)}")
+    print("zero={ffi.load_int32_at(z, 8)}")
+    # null / is_null sentinel checks.
+    print("nullbuf={ffi.is_null(buf)}")
+    print("nullnull={ffi.is_null(ffi.null())}")
+    ffi.free(buf)
+    ffi.free(z)
+
+main()
