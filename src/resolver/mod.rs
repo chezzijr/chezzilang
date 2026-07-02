@@ -397,7 +397,7 @@ impl Builder {
                 // while KEEPING the `native` marker so runtime member dispatch stays name-keyed via
                 // `native_members`. Fallible (like the always-linked prelude): a missing/unparseable
                 // std/regex.chz is a hard error. Other native modules stay virtual (empty AST).
-                if name == "std.regex" {
+                if matches!(name, "std.regex" | "std.process" | "std.request") {
                     self.visit_native_file(&target, name, &path, span)?;
                 } else {
                     self.visit_native(&target, name);

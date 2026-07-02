@@ -4182,17 +4182,29 @@ fn regex_sig_from_file_not_native_module_sig() {
         !sig.types.contains("Match"),
         "Match must not be in native_module_sig's `types` (harvested from std/regex.chz)"
     );
-    // The sibling native modules remain hand-built (phase 4c migrates them).
+    // Phase 4f — the sibling native modules std.request/std.process are ALSO file-backed now: their
+    // `native_module_sig` arms (fns) AND `export_struct` arms (Response/ProcResult) are RETIRED, so
+    // `native_module_sig` exports NOTHING for them (the whole sig comes from the parsed .chz).
+    let req = native_module_sig("std.request");
     assert!(
-        native_module_sig("std.request")
-            .struct_defs
-            .contains_key("Response")
+        req.functions.is_empty(),
+        "std.request fns must be harvested from std/request.chz, not native_module_sig"
     );
     assert!(
-        native_module_sig("std.process")
-            .struct_defs
-            .contains_key("ProcResult")
+        !req.struct_defs.contains_key("Response"),
+        "Response must be harvested from std/request.chz, not native_module_sig"
     );
+    assert!(!req.types.contains("Response"));
+    let proc = native_module_sig("std.process");
+    assert!(
+        proc.functions.is_empty(),
+        "std.process fns must be harvested from std/process.chz, not native_module_sig"
+    );
+    assert!(
+        !proc.struct_defs.contains_key("ProcResult"),
+        "ProcResult must be harvested from std/process.chz, not native_module_sig"
+    );
+    assert!(!proc.types.contains("ProcResult"));
     // A full graph check that imports std.regex still resolves regex.Match + typed fields.
     entry_ok(
         "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
@@ -4297,6 +4309,262 @@ fn regex_chz_match_matches_handbuilt_layouts() {
     assert!(
         !c.struct_names.contains("Match"),
         "harvest_native_module must not leave Match bare-visible (import-gating leak)"
+    );
+}
+
+// ===== Phase 4f: std.process / std.request are FILE-BACKED (`std/process.chz`, `std/request.chz`)
+// whose fields-only `native struct` (ProcResult / Response) + `native fn`s are declared in-module and
+// harvested via `harvest_native_module`, retiring BOTH their `native_module_sig` fn arms AND their
+// `export_struct` type arms. The one subtlety over regex: get/post/request carry an OPTIONAL trailing
+// `timeout_ms: int = 0`, which harvest lowers to `FnSig::optional_tail` from the trailing default. =====
+
+/// Parse a native-module source string into an AST (the SIGNATURE source for a file-backed module).
+#[cfg(test)]
+fn parse_native_src(src: &str) -> crate::ast::Module {
+    let toks = crate::lexer::tokenize(src).expect("native module src must lex");
+    crate::parser::parse(toks).expect("native module src must parse")
+}
+
+/// Parse the real `std/process.chz` (the phase-4f SIGNATURE source).
+#[cfg(test)]
+fn parse_process_chz() -> crate::ast::Module {
+    let path = crate::resolver::std_root().join("process.chz");
+    let src = std::fs::read_to_string(&path).expect("std/process.chz must exist");
+    parse_native_src(&src)
+}
+
+/// Parse the real `std/request.chz` (the phase-4f SIGNATURE source).
+#[cfg(test)]
+fn parse_request_chz() -> crate::ast::Module {
+    let path = crate::resolver::std_root().join("request.chz");
+    let src = std::fs::read_to_string(&path).expect("std/request.chz must exist");
+    parse_native_src(&src)
+}
+
+/// HARVEST — a `native fn` whose trailing param carries a `= default` marker lowers to an
+/// optional-tail FnSig (min_params = len - trailing-defaults). Byte-identical to the deleted
+/// hand-built `FnSig::optional_tail(...)` install for std.request's get/post/request.
+#[test]
+fn harvest_optional_tail_from_trailing_default() {
+    let ast = parse_native_src("native fn f(a: str, b: int = 0) -> Result[bool]\n");
+    let mut c = Checker::new();
+    let mut sig = ModuleSig::default();
+    c.harvest_native_module(&ast, &mut sig);
+    let fs = sig.functions.get("f").expect("harvest must export fn f");
+    assert_eq!(fs.params, vec![Ty::Str, Ty::Int], "params drifted");
+    assert_eq!(fs.min_params, 1, "trailing default → min_params = len-1");
+    assert_eq!(fs.params.len(), 2);
+    // A fn with NO defaults stays plain (min_params == len).
+    let ast2 = parse_native_src("native fn g(a: str, b: int) -> Result[bool]\n");
+    let mut sig2 = ModuleSig::default();
+    c.harvest_native_module(&ast2, &mut sig2);
+    let gs = sig2.functions.get("g").unwrap();
+    assert_eq!(gs.min_params, 2, "no defaults → min_params == len");
+}
+
+/// The ModuleSig produced by a full graph check that imports `dotted` (e.g. `std.process`).
+#[cfg(test)]
+fn native_module_sig_via_graph(import: &str, dotted: &[&str]) -> ModuleSig {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", &format!("{import}\nfn main(): print(1)\n"));
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let mut c = Checker::new();
+    c.run_graph_pass(&graph, false);
+    assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
+    let id = graph
+        .modules
+        .iter()
+        .find(|m| m.dotted == dotted)
+        .unwrap_or_else(|| panic!("{dotted:?} in graph"))
+        .id
+        .clone();
+    c.module_sigs
+        .get(&id)
+        .unwrap_or_else(|| panic!("{dotted:?} ModuleSig"))
+        .clone()
+}
+
+/// PROVENANCE + exact sigs — std.process's 3 fns + the `ProcResult` StructInfo come from the
+/// file-backed `std/process.chz` (harvested), byte-identical to the deleted hand-built arm.
+#[test]
+fn process_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph("import std.process", &["std", "process"]);
+    let proc = || Ty::Struct("ProcResult".to_string(), vec![]);
+    let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
+        ("cmd", vec![Ty::Str], Ty::result(Ty::Str), 1),
+        ("run", vec![Ty::Str], Ty::result(proc()), 1),
+        (
+            "run_args",
+            vec![Ty::Str, Ty::list(Ty::Str)],
+            Ty::result(proc()),
+            2,
+        ),
+    ];
+    assert_eq!(sig.functions.len(), expected.len(), "std.process fn count");
+    for (name, params, ret, minp) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.process missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+        assert_eq!(fs.min_params, *minp, "fn '{name}' arity drifted");
+    }
+    let mi = sig
+        .struct_defs
+        .get("ProcResult")
+        .expect("std.process must export ProcResult");
+    assert_eq!(
+        mi.fields,
+        vec![
+            ("stdout".to_string(), Ty::Str),
+            ("stderr".to_string(), Ty::Str),
+            ("code".to_string(), Ty::Int),
+        ]
+    );
+    assert!(matches!(mi.origin, StructOrigin::Builtin));
+    assert!(sig.types.contains("ProcResult"));
+}
+
+/// PROVENANCE + exact sigs — std.request's 7 fns (incl. get/post/request's OPTIONAL trailing
+/// `timeout_ms`) + the `Response` StructInfo come from the file-backed `std/request.chz`.
+#[test]
+fn request_fn_sigs_exact() {
+    let sig = native_module_sig_via_graph("import std.request", &["std", "request"]);
+    let resp = || Ty::Struct("Response".to_string(), vec![]);
+    // (name, params, ret, min_params). get/post/request are optional-tail (min = len-1).
+    let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
+        ("get", vec![Ty::Str, Ty::Int], Ty::result(resp()), 1),
+        (
+            "post",
+            vec![Ty::Str, Ty::Str, Ty::Int],
+            Ty::result(resp()),
+            2,
+        ),
+        (
+            "request",
+            vec![
+                Ty::Str,
+                Ty::Str,
+                Ty::Str,
+                Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+                Ty::Int,
+            ],
+            Ty::result(resp()),
+            4,
+        ),
+        ("put", vec![Ty::Str, Ty::Str], Ty::result(resp()), 2),
+        ("patch", vec![Ty::Str, Ty::Str], Ty::result(resp()), 2),
+        ("delete", vec![Ty::Str], Ty::result(resp()), 1),
+        ("head", vec![Ty::Str], Ty::result(resp()), 1),
+    ];
+    assert_eq!(sig.functions.len(), expected.len(), "std.request fn count");
+    for (name, params, ret, minp) in &expected {
+        let fs = sig
+            .functions
+            .get(*name)
+            .unwrap_or_else(|| panic!("std.request missing fn '{name}'"));
+        assert_eq!(&fs.params, params, "fn '{name}' params drifted");
+        assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
+        assert_eq!(fs.min_params, *minp, "fn '{name}' arity drifted");
+    }
+    let ri = sig
+        .struct_defs
+        .get("Response")
+        .expect("std.request must export Response");
+    assert_eq!(
+        ri.fields,
+        vec![
+            ("status".to_string(), Ty::Int),
+            ("body".to_string(), Ty::Str),
+            (
+                "headers".to_string(),
+                Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))
+            ),
+        ]
+    );
+    assert!(matches!(ri.origin, StructOrigin::Builtin));
+    assert!(sig.types.contains("Response"));
+}
+
+/// Phase 4f — request.get/post/request accept the OPTIONAL trailing `timeout_ms` BOTH ways (the
+/// harvested optional-tail sig, min_params = len-1). Byte-identical to the deleted hand-built
+/// `FnSig::optional_tail(...)` install.
+#[test]
+fn request_optional_timeout_arg_typechecks() {
+    // With and without the trailing timeout_ms — both must check.
+    entry_ok(
+        "import std.request\nfn main():\n    a := request.get(\"http://x\")\n    b := request.get(\"http://x\", 500)\n    c := request.post(\"http://x\", \"b\")\n    d := request.post(\"http://x\", \"b\", 500)\n    e := request.request(\"GET\", \"http://x\", \"\", {\"h\": \"v\"})\n    f := request.request(\"GET\", \"http://x\", \"\", {\"h\": \"v\"}, 500)\n    print(\"ok\")\n",
+    );
+    // Too many args is still rejected (arity ceiling = params.len()).
+    entry_rejects(
+        "import std.request\nfn main():\n    x := request.get(\"http://x\", 1, 2)\n    print(\"x\")\n",
+        "get",
+    );
+}
+
+/// DRIFT GUARD — the file-harvested `ProcResult` StructInfo (fields, positional order) must byte-match
+/// the remaining hand-built layout copies (seed_stdlib_structs + the runtime copies). A silent reorder
+/// would trap at runtime on a field read.
+#[test]
+fn procresult_chz_matches_handbuilt_layouts() {
+    let expected: Vec<(String, Ty)> = vec![
+        ("stdout".into(), Ty::Str),
+        ("stderr".into(), Ty::Str),
+        ("code".into(), Ty::Int),
+    ];
+    let mut c = Checker::new();
+    let mut sig = ModuleSig::default();
+    let ast = parse_process_chz();
+    c.harvest_native_module(&ast, &mut sig);
+    let harvested = sig
+        .struct_defs
+        .get("ProcResult")
+        .expect("std/process.chz must harvest a `ProcResult` struct");
+    assert_eq!(harvested.fields, expected, "harvested ProcResult drifted");
+    assert!(harvested.type_params.is_empty());
+    assert!(harvested.methods.is_empty());
+    assert!(matches!(harvested.origin, StructOrigin::Builtin));
+    assert_eq!(sig.functions.len(), 3, "std/process.chz must harvest 3 fns");
+    // seed_stdlib_structs's copy must agree.
+    let seeded = c.structs.get("ProcResult").expect("ProcResult seeded");
+    assert_eq!(seeded.fields, expected, "seeded ProcResult drifted");
+    // Import-gating preserved: no bare-name leak.
+    assert!(
+        !c.struct_names.contains("ProcResult"),
+        "harvest must not leave ProcResult bare-visible"
+    );
+}
+
+/// DRIFT GUARD — the file-harvested `Response` StructInfo must byte-match the hand-built copies.
+#[test]
+fn response_chz_matches_handbuilt_layouts() {
+    let expected: Vec<(String, Ty)> = vec![
+        ("status".into(), Ty::Int),
+        ("body".into(), Ty::Str),
+        (
+            "headers".into(),
+            Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+        ),
+    ];
+    let mut c = Checker::new();
+    let mut sig = ModuleSig::default();
+    let ast = parse_request_chz();
+    c.harvest_native_module(&ast, &mut sig);
+    let harvested = sig
+        .struct_defs
+        .get("Response")
+        .expect("std/request.chz must harvest a `Response` struct");
+    assert_eq!(harvested.fields, expected, "harvested Response drifted");
+    assert!(harvested.type_params.is_empty());
+    assert!(harvested.methods.is_empty());
+    assert!(matches!(harvested.origin, StructOrigin::Builtin));
+    assert_eq!(sig.functions.len(), 7, "std/request.chz must harvest 7 fns");
+    let seeded = c.structs.get("Response").expect("Response seeded");
+    assert_eq!(seeded.fields, expected, "seeded Response drifted");
+    assert!(
+        !c.struct_names.contains("Response"),
+        "harvest must not leave Response bare-visible"
     );
 }
 
@@ -11574,6 +11842,14 @@ fn native_decl_in_user_file_rejected() {
     );
     entry_rejects(
         "native ctor bar(x) -> int\n",
+        "native fn/ctor declarations are only allowed in standard-library modules",
+    );
+    // Phase 4f — flipping parse_native to parse_params(true) makes a DEFAULTED native-fn param PARSE
+    // in a user file too; the checker's stdlib-only hoist rejection must still fire (the default never
+    // matters — the decl itself is rejected). Guards against the parser-strictness relaxation
+    // weakening the user-file guard.
+    rejects(
+        "native fn baz(x: int = 0) -> int\n",
         "native fn/ctor declarations are only allowed in standard-library modules",
     );
 }

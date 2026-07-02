@@ -58,6 +58,39 @@ realized in **phase 3a** below — the signatures moved to a real `.chz` prelude
 variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
 `sep=`/`end=` variadic still can't be spelled in `.chz`, so it stays the sole synthetic function row.)
 
+**✅ NATIVE-PRELUDE — phase 4f (`std.process` + `std.request` made file-backed: native TYPE + FNs
+declared in `std/process.chz` / `std/request.chz`) (2026-07-02).** Mechanical application of the proven
+phase-4b regex pattern to the two remaining fields-only native-struct modules. `std.process` and
+`std.request` are no longer *file-less virtual* modules — each is now a **real `.chz`** whose fields-only
+`native struct` (`ProcResult` [stdout, stderr, code] / `Response` [status, body, headers]) + `native fn`s
+(process: `cmd`/`run`/`run_args`; request: `get`/`post`/`request`/`put`/`patch`/`delete`/`head`) are declared
+**in-module** and harvested by the checker via `harvest_native_module`. The resolver loads the real files
+while **keeping the `native` marker** (runtime member dispatch stays name-keyed via `native_members`;
+bytecode UNCHANGED). This RETIRES BOTH the hand-built `"std.process"`/`"std.request"` **fn arms** AND their
+`export_struct` **type arms** in `native_module_sig` (which now returns default-empty for both), plus the
+post-match optional-tail install block. The **one subtlety over regex** — request's `get`/`post`/`request`
+carry an OPTIONAL trailing `timeout_ms` — is spelled as a **trailing `= 0` default** in the `.chz`; harvest
+PASS 2 counts trailing `default.is_some()` params and lowers to `FnSig::optional_tail` (min_params = len-1),
+byte-identical to the deleted hand-built install. To admit that spelling, `parse_native` now calls
+`parse_params(true)` (the grammar already permitted a param default in `<nativeDecl>`; the parser was merely
+stricter — flipping it brings the parser INTO conformance, no `grammar.bnf` edit, conformance green). The
+default EXPR is a **marker only** — desugar's `collect_module_reg` ignores `StmtKind::Native`, so it is never
+injected at a call site (`arg_count()` stays truthful). `native fn`/`native struct` in a USER file is still a
+clear checker error (stdlib-only hoist rejection fires before any default). The remaining hand-built runtime
+layout copies (compiler `Compiler::new`, interp finalize, `native/process.rs`+`native/request.rs`,
+`seed_stdlib_structs`) stay, **field-order drift-guarded** by `procresult_chz_matches_handbuilt_layouts` +
+`response_chz_matches_handbuilt_layouts`. Import-gating (`ProcResult`/`Response` bare names licensed only by
+importing their module) + the both-engine pure-type `bind_import` skip preserved by construction (harvest
+forces origin=Builtin). **ZERO observable change / three-engine byte-identical** (checker/resolver-only cut):
+`process_fn_sigs_exact` + `request_fn_sigs_exact` (sigs + StructInfo now come from the files, byte-equal to the
+deleted arms; request's optional-tail min_params exact), `regex_sig_from_file_not_native_module_sig` (inverted
+— asserts both arms gone), `request_optional_timeout_arg_typechecks` (both arities check), `native_fn_allows_optional_trailing_default`
+(parser), `process_request_file_backed_three_engine_parity` + `pure_type_import_no_fault_both_engines`
+(VM==interp==M:N), existing `examples/process_polish.chz` + `sys.chz` goldens unchanged on both engines.
+**Roadmap:** after 4b/4f, `native_module_sig` retains only **concurrency** (opcode type-license),
+**net** (methoded `Socket`/`Listener`), and **ffi** (extern) — the focused phase-4c targets (method/opcode
+binding). `grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a; conformance green).
+
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is
 no longer a *file-less virtual* module — it is now a **real `std/regex.chz`** whose `native struct Match`
@@ -82,9 +115,10 @@ finalize, `native/regex.rs`) stay, **field-order drift-guarded** by `regex_chz_m
 (resolver), `regex_match_file_backed_three_engine_parity` (produce/field-read/`import Match from`/qualified,
 VM==interp==M:N — locks the pure-type `bind_import` skip), existing regex goldens
 (`golden_regex_demo_via_run_file`) unchanged. `grammar.bnf` unchanged (native-decl grammar exists from 3a/4a;
-conformance green). **Roadmap:** phase-4c = concurrency (`Shared`/`RwShared`/`Atomic`/`Executor`) file-backed
-with `native struct` + native **METHOD** binding (the first methoded native types), then the rest of
-`native_module_sig` (`Response`/`ProcResult`); Tier-3 (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native.
+conformance green). **Roadmap:** `Response`/`ProcResult` are now DONE too (phase 4f — see the entry above).
+phase-4c = concurrency (`Shared`/`RwShared`/`Atomic`/`Executor`) file-backed with `native struct` + native
+**METHOD** binding (the first methoded native types) + net `Socket`/`Listener`; Tier-3
+(`Option`/`Result`/`Iterator`) INTENTIONALLY stays native.
 
 **✅ NATIVE-PRELUDE — phase 4a (`native struct` syntax + companion-stub loader for file-less native
 modules) (2026-07-02) — companion stub RETIRED in phase 4b (above).** NEW LANGUAGE FEATURE (the **type-level** analog of phase-3a `native fn`/`native
@@ -146,10 +180,12 @@ ctors' (`range`/`List`/`Map`/`Set`) DISPATCH into the table (type-identity stays
 **Phase 4a** (**DONE**) = `native struct` syntax + the companion-stub
 loader, with `regex.Match` migrated (fields-only). **Phase 4b** (**DONE** — see the phase-4b entry above) =
 `std.regex` made **file-backed** (`std/regex.chz`), native TYPE + FNs declared in-module, companion stub +
-`native_module_sig` regex arm RETIRED. **Phase 4c** = bodyless native **method**-sig→native binding + migrate
-the remaining Tier-2 native (Rust-backed) TYPES (`Shared`/`RwShared`/`Atomic`/`Executor`,
-`Response`/`ProcResult`) fully out of the `native_module_sig` hand-tables (bodies still
-native), plus `native enum` if needed. **Tier-1** (the `Ref` struct-modeled type) is already done
+`native_module_sig` regex arm RETIRED. **Phase 4f** (**DONE** — see the phase-4f entry above) =
+`std.process` + `std.request` made file-backed (`ProcResult`/`Response` + their fns), both `native_module_sig`
+fn arms AND `export_struct` arms RETIRED; request's optional `timeout_ms` spelled as a trailing `= 0` default.
+**Phase 4c** = bodyless native **method**-sig→native binding + migrate the remaining Tier-2 native
+(Rust-backed) TYPES (`Shared`/`RwShared`/`Atomic`/`Executor`, net `Socket`/`Listener`) fully out of the
+`native_module_sig` hand-tables (bodies still native), plus `native enum` if needed. **Tier-1** (the `Ref` struct-modeled type) is already done
 (always-linked `std/ref.chz`). **Tier-3** (`Option`/`Result`/`Iterator`) INTENTIONALLY stays native —
 too deeply coupled to `match`/`?`/generator desugar to express as a plain `.chz` decl; this is a
 documented, deliberate carve-out, not a gap.
