@@ -294,4 +294,60 @@ mod tests {
         };
         assert!((0..5).contains(&i));
     }
+
+    /// Reproduces the missing-`TEST_RNG_LOCK` flake in the phase-4d golden
+    /// (`vm::tests::golden_std_native_4d_chz_matches_expected_and_interp`): its
+    /// `examples/std_native_4d.chz` does `rand.seed(1)` then `rand.int(0,100)` as TWO separate native
+    /// calls on the shared process-global RNG, expecting `65`. The per-call state mutex makes each
+    /// call atomic but NOT the seed→draw SEQUENCE, so a sibling rand test reseeding between them
+    /// corrupts the draw. Holding `TEST_RNG_LOCK` across the whole sequence (as every other rand test
+    /// does) is what serializes it. A background reseeder — modelling any concurrently-scheduled rand
+    /// test, which also holds `TEST_RNG_LOCK` — hammers the global; while we hold the lock it is
+    /// excluded and the draw stays the golden's deterministic `65`. Drop the guard below and the
+    /// reseeder slips between our `seed(1)` and `int(0,100)` → the draw drifts off `65` (the flake).
+    #[test]
+    fn seed_then_int_sequence_is_atomic_only_under_rng_lock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // THE guard: hold TEST_RNG_LOCK across the entire seed→draw sequence. Removing this line
+        // reproduces the golden's flake (the reseeder interleaves; the assertion below fails).
+        let _g = TEST_RNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        // A sibling rand test: it also takes TEST_RNG_LOCK, so while we hold it this thread is
+        // excluded (serialized) — that exclusion is exactly what keeps our draw deterministic. It
+        // reads `stop` WITHOUT the lock (so it can observe the stop signal even while we hold the
+        // lock) and only takes the lock for the reseed itself.
+        let reseeder = std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                let _g = TEST_RNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let mut h = host(vec![9999]);
+                seed(&mut h).unwrap();
+                drop(_g);
+                std::thread::yield_now();
+            }
+        });
+
+        for _ in 0..2000 {
+            reseed(1);
+            let v = match int(&mut host(vec![0, 100])).unwrap() {
+                NativeRet::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            };
+            assert_eq!(
+                v, 65,
+                "seed(1);int(0,100) drifted off 65 — the seed→draw sequence was not serialized on \
+                 TEST_RNG_LOCK (the phase-4d golden's flake)"
+            );
+        }
+
+        // Signal stop and RELEASE the lock BEFORE joining: the reseeder blocks on TEST_RNG_LOCK
+        // while we hold it, so it can only reach its next `stop` check (and exit) once we drop the
+        // guard — joining while still holding it would deadlock.
+        stop.store(true, Ordering::Relaxed);
+        drop(_g);
+        reseeder.join().unwrap();
+    }
 }

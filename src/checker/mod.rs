@@ -864,16 +864,21 @@ impl Checker {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
                 let mut sig = native_module_sig(name);
-                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase 4e;
-                // std.process/std.request phase 4f) harvest their whole callable SIGNATURE from the real
-                // `std/<M>.chz` AST the resolver loaded — NOT hand-built in `native_module_sig`. For
-                // std.regex/encoding/crypto/uuid/process/request the arm is fully deleted (returns empty).
-                // std.time keeps a MINIMAL arm carrying only the `timer` opcode-license in `sig.types`
-                // (harvest then fills its 4 real fns on top). Same predicate as the resolver's
-                // `visit_native_file` gate — lockstep by construction.
+                // FILE-BACKED native modules (std.regex 4b; std.encoding/crypto/uuid/time 4e;
+                // std.process/std.request 4f; std.math/io/os/rand/fs 4d) harvest their whole callable
+                // SIGNATURE from the real `std/<M>.chz` AST the resolver loaded — NOT hand-built in
+                // `native_module_sig`. For most the arm is fully deleted (returns empty). std.time keeps
+                // a MINIMAL arm carrying only the `timer` opcode-license in `sig.types` (harvest then
+                // fills its 4 real fns on top). Same predicate as the resolver's `visit_native_file`
+                // gate — lockstep by construction.
                 if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
                 }
+                // Re-attach the checker-side metadata that native decls can't express (hover docs,
+                // module constants like math.pi/e, numeric-poly fns like math.abs). Run for EVERY
+                // native module (idempotent for those it doesn't cover) so the doc/const/poly attach
+                // no longer lives in the deleted per-module arms.
+                attach_native_module_metadata(name, &mut sig);
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
             }
@@ -917,63 +922,11 @@ fn native_module_sig(name: &str) -> ModuleSig {
             .insert(n.to_string(), FnSig::plain(params, ret));
     };
     match name {
-        "std.math" => {
-            // `abs` is numeric-polymorphic (int args → int, float args → float); the `FnSig` here
-            // only fixes its arity — `infer_numeric_poly` does the real typing. (`min`/`max` moved
-            // to `std.cmp` as generic `[T: Comparable]` functions, M7-G3.)
-            func("abs", vec![Ty::Float], Ty::Float);
-            sig.numeric_poly.insert("abs".into());
-            func("floor", vec![Ty::Float], Ty::Float);
-            func("ceil", vec![Ty::Float], Ty::Float);
-            func("round", vec![Ty::Float], Ty::Float);
-            func("pow", vec![Ty::Float, Ty::Float], Ty::Float);
-            func("sqrt", vec![Ty::Float], Ty::Float);
-            // Trig / exp / log intrinsics (additive): plain `float -> float`, out-of-domain → NaN.
-            func("sin", vec![Ty::Float], Ty::Float);
-            func("cos", vec![Ty::Float], Ty::Float);
-            func("tan", vec![Ty::Float], Ty::Float);
-            func("asin", vec![Ty::Float], Ty::Float);
-            func("acos", vec![Ty::Float], Ty::Float);
-            func("atan", vec![Ty::Float], Ty::Float);
-            func("atan2", vec![Ty::Float, Ty::Float], Ty::Float);
-            func("exp", vec![Ty::Float], Ty::Float);
-            func("ln", vec![Ty::Float], Ty::Float);
-            func("log2", vec![Ty::Float], Ty::Float);
-            func("log10", vec![Ty::Float], Ty::Float);
-            func("log", vec![Ty::Float, Ty::Float], Ty::Float);
-            // Float predicates (IEEE-754 classification): `float -> bool`.
-            func("is_nan", vec![Ty::Float], Ty::Bool);
-            func("is_inf", vec![Ty::Float], Ty::Bool);
-            func("is_finite", vec![Ty::Float], Ty::Bool);
-            sig.values.insert("pi".into(), Ty::Float);
-            sig.values.insert("e".into(), Ty::Float);
-        }
-        "std.io" => {
-            func("print", vec![Ty::Str], Ty::Nil);
-            func("eprint", vec![Ty::Str], Ty::Nil);
-            func("read_line", vec![], Ty::option(Ty::Str));
-            func("read_file", vec![Ty::Str], Ty::result(Ty::Str));
-            func("write_file", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
-        }
-        "std.os" => {
-            func("args", vec![], Ty::list(Ty::Str));
-            func("env", vec![Ty::Str], Ty::option(Ty::Str));
-            func("getcwd", vec![], Ty::result(Ty::Str));
-            // `exit(code)` never returns, but the checker has no `never` type; `nil` is the
-            // closest void-ish result and lets statements (unreachable in practice) follow it.
-            func("exit", vec![Ty::Int], Ty::Nil);
-        }
-        // std.process is FILE-BACKED (phase 4f): its whole signature (the `native struct ProcResult` +
-        // cmd/run/run_args) is declared in `std/process.chz` and harvested via `harvest_native_module` —
-        // there is NO hand-built arm here (this fn returns the default-empty sig for it).
-        "std.rand" => {
-            // SplitMix64 PRNG scalars (std.rand). Generic collection helpers (shuffle/choice/sample)
-            // live in the pure-Chezzi std.iter and call `int` — the native seam carries only scalars.
-            func("seed", vec![Ty::Int], Ty::Nil);
-            func("float", vec![], Ty::Float);
-            func("int", vec![Ty::Int, Ty::Int], Ty::Int);
-            func("bool", vec![], Ty::Bool);
-        }
+        // std.math / std.io / std.os / std.rand (phase 4d) and std.process (phase 4f) are FILE-BACKED:
+        // their whole signatures are declared in `std/<M>.chz` and harvested via `harvest_native_module`
+        // — NO hand-built arm here (this fn returns the default-empty sig for them). The checker-side
+        // metadata native decls can't express (math's `pi`/`e` values + `abs`'s numeric polymorphism +
+        // hover docs) is re-attached post-harvest by `attach_native_module_metadata`.
         "std.net" => {
             // D6 — minimal TCP surface. `connect`/`listen` take a `"host:port"` address; the sockets
             // are non-blocking (a would-block op parks the fiber on the netpoller). The `connect`/
@@ -991,26 +944,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
                 sig.types.insert(tn.to_string());
             }
         }
-        "std.fs" => {
-            func("list_dir", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
-            func("exists", vec![Ty::Str], Ty::Bool);
-            func("is_file", vec![Ty::Str], Ty::Bool);
-            func("is_dir", vec![Ty::Str], Ty::Bool);
-            func("size", vec![Ty::Str], Ty::result(Ty::Int));
-            func("glob", vec![Ty::Str], Ty::result(Ty::list(Ty::Str)));
-            // Mutations (M8+) — all `Result[nil]`. `mkdir` is recursive (mkdir -p); `remove_dir` is
-            // non-recursive (faults on a non-empty dir); `append` creates-if-absent + never truncates.
-            func("mkdir", vec![Ty::Str], Ty::result(Ty::Nil));
-            func("remove_file", vec![Ty::Str], Ty::result(Ty::Nil));
-            func("remove_dir", vec![Ty::Str], Ty::result(Ty::Nil));
-            func("rename", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
-            func("copy", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
-            func("append", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
-        }
-        // std.encoding / std.crypto / std.uuid are FILE-BACKED (phase 4e): their whole signature is
-        // declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via `harvest_native_module` —
-        // there is NO hand-built arm here (this fn returns the default-empty sig for them). See the
-        // caller's `is_file_backed_native` gate.
+        // std.fs (phase 4d) and std.encoding / std.crypto / std.uuid (phase 4e) are FILE-BACKED: their
+        // whole signatures are declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via
+        // `harvest_native_module` — NO hand-built arm here (this fn returns the default-empty sig for
+        // them). See the caller's `is_file_backed_native` gate.
         "std.concurrency" => {
             // A type-licensing-only native module: NO functions/values/struct shapes — it exports
             // ONLY the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
@@ -1113,17 +1050,24 @@ fn native_module_sig(name: &str) -> ModuleSig {
         }
         _ => {}
     }
-    // Phase 4f — the synthetic native-module struct LAYOUTS (`Match`/`Response`/`ProcResult`) and the
-    // optional-tail request fns are NO LONGER hand-built here: all three modules (std.regex/std.process/
-    // std.request) are FILE-BACKED, and `harvest_native_module` reads the whole signature — the fields-
-    // only `native struct` (origin Builtin, exported into `sig.struct_defs`/`sig.types`) AND every
-    // `native fn` (with a trailing `= default` param lowering to an optional-tail FnSig) — from the
-    // parsed `.chz`. The remaining hand-built runtime layout copies (compiler `Compiler::new`, interp
-    // finalize, `native/*.rs`, seed_stdlib_structs) stay name-keyed + field-order drift-guarded.
-    // Editor hover (Tier C): attach a concise one-line doc to each native module function that has an
-    // authored blurb (`MODULE_FN_DOCS`). `FnSig.doc` is excluded from `fn_sig_eq`, so this is purely
-    // informational — `record_method_hover` already forwards `sig.doc` at the `module.fn` hover site,
-    // so no extra threading is needed. Drift-guarded by `module_fn_docs_all_resolve`.
+    sig
+}
+
+/// Re-attach the checker-side metadata a `native fn` decl CANNOT express, on top of a native module's
+/// `ModuleSig` (whether hand-built by `native_module_sig` or harvested from a file-backed `std/M.chz`).
+/// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). Three pieces:
+///   (a) editor hover docs (`MODULE_FN_DOCS`) — a concise one-line blurb on each authored fn's `FnSig.doc`
+///       (excluded from `fn_sig_eq`, so purely informational; `record_method_hover` forwards it at the
+///       `module.fn` hover site). Drift-guarded by `module_fn_docs_all_resolve`.
+///   (b) module CONSTANT values (`math.pi`/`e`) — read from `native::native_consts` (the runtime table,
+///       reused so there is no hardcoded pi/e here) and exposed as `float` module values.
+///   (c) numeric-POLYMORPHIC fns (`math.abs`: int→int / float→float) — the `FnSig` fixes only arity;
+///       `infer_numeric_poly` does the real typing. Listed in the `MODULE_NUMERIC_POLY` side-table.
+/// Moved out of the (now-deleted) per-module `native_module_sig` arms so the file-backed migration
+/// (phase 4d) keeps hover/const/poly byte-identical. The synthetic struct LAYOUTS (Match/Response/
+/// ProcResult) + request's optional-tail fns are NOT here either — they are file-backed (4b/4f) and
+/// harvested from the parsed `.chz` by `harvest_native_module`.
+fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
     if let Some((_, docs)) = MODULE_FN_DOCS.iter().find(|(m, _)| *m == name) {
         for (fname, doc) in *docs {
             if let Some(f) = sig.functions.get_mut(*fname) {
@@ -1131,8 +1075,21 @@ fn native_module_sig(name: &str) -> ModuleSig {
             }
         }
     }
-    sig
+    for (cname, _) in crate::native::native_consts(name) {
+        sig.values.insert((*cname).to_string(), Ty::Float);
+    }
+    if let Some((_, polys)) = MODULE_NUMERIC_POLY.iter().find(|(m, _)| *m == name) {
+        for p in *polys {
+            sig.numeric_poly.insert((*p).to_string());
+        }
+    }
 }
+
+/// Numeric-polymorphic native module fns (int args → int, float args → float), keyed by module. The
+/// `FnSig` in the module's `.chz` fixes only arity (`abs(x: float) -> float`); `infer_numeric_poly`
+/// does the real per-call typing when the fn is in its module's `numeric_poly` set. Parallels
+/// `MODULE_FN_DOCS`; applied by `attach_native_module_metadata`. (Was inline in the deleted math arm.)
+const MODULE_NUMERIC_POLY: &[(&str, &[&str])] = &[("std.math", &["abs"])];
 
 /// Editor hover (Tier C): concise one-line `(module, [(fn, doc)])` blurbs for native stdlib module
 /// functions, paraphrased from `docs/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`

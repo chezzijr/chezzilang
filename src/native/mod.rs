@@ -390,6 +390,8 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
 /// name-keyed via `native_members` for these exactly as for the virtual ones (this is a front-end-only
 /// distinction). `std.time` is file-backed for its 4 real fns but ALSO keeps a minimal
 /// `native_module_sig` arm for its opcode-backed `timer` type-license (no runtime member value).
+/// Phases: std.regex (4b); std.encoding/crypto/uuid/time (4e); std.process/request (4f);
+/// std.math/io/os/rand/fs (4d).
 pub fn is_file_backed_native(name: &str) -> bool {
     matches!(
         name,
@@ -400,6 +402,11 @@ pub fn is_file_backed_native(name: &str) -> bool {
             | "std.time"
             | "std.process"
             | "std.request"
+            | "std.math"
+            | "std.io"
+            | "std.os"
+            | "std.rand"
+            | "std.fs"
     )
 }
 

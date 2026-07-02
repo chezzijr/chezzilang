@@ -1,0 +1,27 @@
+# Phase 4d three-engine parity golden: the five file-backed native modules
+# (std.math / std.io / std.os / std.rand / std.fs). Every value is deterministic
+# (rand is seeded; getcwd is matched, not printed) so interp, the serial VM, and
+# the M:N OS-thread engine must produce byte-identical stdout.
+import std.math
+import std.io
+import std.os
+import std.rand
+import std.fs
+
+fn main():
+    # math: plain float ops, a float constant, and abs's int->int numeric polymorphism.
+    io.print("sqrt16=" + str(math.sqrt(16.0)))
+    io.print("floor97=" + str(math.floor(9.7)))
+    io.print("floorpi=" + str(math.floor(math.pi)))
+    io.print("absneg=" + str(math.abs(-3)))
+    # os: getcwd is Result[str] — match (don't print the nondeterministic path).
+    match os.getcwd():
+        Ok(_): io.print("cwd=ok")
+        Err(_): io.print("cwd=err")
+    # rand: seeded, so the scalar draw is deterministic across engines.
+    rand.seed(1)
+    io.print("rand=" + str(rand.int(0, 100)))
+    # fs: the current directory always exists.
+    io.print("exists=" + str(fs.exists(".")))
+
+main()

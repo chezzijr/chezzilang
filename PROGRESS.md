@@ -119,6 +119,32 @@ and AST-source stay provably in lockstep. Import-gating preserved; none of the 4
 existing goldens (`golden_encoding_crypto_via_run_file`/`golden_uuid_via_run_file`/`golden_timer_chz_matches_expected_and_interp`)
 unchanged. `grammar.bnf` unchanged (native-decl grammar exists from 3a; conformance green).
 
+**✅ NATIVE-PRELUDE — phase 4d (five pure-function native modules made file-backed: `std.math` /
+`std.io` / `std.os` / `std.rand` / `std.fs`) (2026-07-02).** REFACTOR-ONLY (no new capability — the
+proven phase-4b regex pattern applied to pure-function modules): each of the five is now a **real
+`std/<M>.chz`** whose members are bodyless `native fn` decls reproducing the EXACT prior sig, instead of
+a *file-less virtual* module with a hand-built `native_module_sig` arm. The resolver's import loop loads
+each real file (via the new shared authority **`crate::native::is_file_backed_native`** — now covering
+`{regex, math, io, os, rand, fs}` — swapped in for the `name == "std.regex"` special-case at
+`resolver/mod.rs`), **KEEPING the `native` marker** so runtime member dispatch stays name-keyed via
+`native_members("std.M")` — **bytecode + dispatch UNCHANGED**. The checker graph loop harvests any
+`is_file_backed_native` module via the existing `harvest_native_module`, then runs the new
+**`attach_native_module_metadata(name, &mut sig)`** on EVERY native module to re-attach the three pieces
+a `native fn` decl can't express: (a) hover docs (`MODULE_FN_DOCS`, moved out of the deleted arm tail),
+(b) module CONSTANT values `math.pi`/`e` (enumerated from `native::native_consts`, no hardcode), and
+(c) numeric-poly fns `math.abs` (int→int/float→float) via the new `MODULE_NUMERIC_POLY` side-table
+(parallel to `MODULE_FN_DOCS`). The five `native_module_sig` arms are **DELETED** (the fn returns
+default-empty for them). **ZERO observable change / three-engine byte-identical** (checker/resolver-only
+cut): `math_io_os_rand_fs_sig_from_file_not_native_module_sig` (arms gone),
+`math_io_os_rand_fs_representative_sigs_exact` (fn sigs + pi/e values + abs poly byte-equal to the deleted
+arms), `math_io_os_fn_hover_doc_preserved`, `math_io_os_rand_fs_runtime_tables_unchanged` (dispatch
+tables + `native_consts` untouched), `math_is_file_backed_native` (resolver), and the 3-engine golden
+`golden_std_native_4d_chz_matches_expected_and_interp` (`examples/std_native_4d.chz`, VM==interp==M:N).
+`module_fn_docs_all_resolve` now builds the effective sig via the graph (the migrated fns are harvested).
+`native fn` in a user file still rejected; `grammar.bnf` unchanged (conformance green). **Remaining
+`native_module_sig` content after 4d/4e/4f:** only `net` (methoded `Socket`/`Listener`), `ffi` (extern),
+and `concurrency` (opcode type-licensing) — the deferred focused phase-4c targets (method/opcode binding).
+
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is
 no longer a *file-less virtual* module — it is now a **real `std/regex.chz`** whose `native struct Match`

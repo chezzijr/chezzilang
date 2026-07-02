@@ -2430,15 +2430,19 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
 - **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
   error** (*native struct declarations are only allowed in standard-library modules*); nesting is a
   parse error.
-- **Native members of any file-backed std module** (phase 4b): `native fn`/`native struct` are no longer
+- **Native members of any file-backed std module** (phase 4b/4d): `native fn`/`native struct` are no longer
   limited to the always-linked universe prelude (`std/prelude.chz`). A **normally-imported** file-backed
-  std module (e.g. `std/regex.chz`) declares its native type + functions **in-module**; the checker
+  std module (`std/regex.chz`, plus phase-4d `std/math.chz` / `std/io.chz` / `std/os.chz` / `std/rand.chz`
+  / `std/fs.chz`) declares its native type + functions **in-module**; the checker
   harvests them as the module's **signature source** (the type's field layout + the fns' signatures),
   while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
-  import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` are reached exactly as
-  before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`; `regex.find(...)`
-  qualified), the runtime + bytecode are unchanged, and it is **three-engine byte-identical**. It retired
-  the earlier file-less-`std.regex` companion-stub shortcut.
+  import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` (or `math.sqrt`) are reached
+  exactly as before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`;
+  `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **three-engine
+  byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
+  hand-built `native_module_sig` arms for the five pure-function modules. (Checker-side metadata a
+  `native fn` decl can't express — `math.pi`/`e` module values, `math.abs`'s numeric polymorphism, and
+  hover docs — is re-attached post-harvest.)
 
 ## 13. Standard library (v1)
 

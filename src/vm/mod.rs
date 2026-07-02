@@ -22762,6 +22762,43 @@ main()";
         assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
     }
 
+    /// Phase-4d file-backed native-module golden: `examples/std_native_4d.chz` exercises the five
+    /// migrated pure-function modules (`std.math`/`io`/`os`/`rand`/`fs`) whose signatures now come from
+    /// real `std/<M>.chz` files (bodyless `native fn` decls) instead of a hand-built `native_module_sig`
+    /// arm. Dispatch is UNCHANGED (name-keyed `native_members`), so output must be byte-identical on all
+    /// three engines: VM(serial), interp, and the M:N OS-thread engine. `rand` is seeded and `getcwd` is
+    /// matched (not printed), so the sequence is deterministic — but ONLY while serialized against the
+    /// other rand tests: `std_native_4d.chz` does `rand.seed(1)` then `rand.int(0,100)` as two separate
+    /// native calls on the shared process-global RNG, so the seed→draw sequence must hold
+    /// `TEST_RNG_LOCK` across the whole run (like `golden_rand_via_run_file`) or the parallel harness
+    /// interleaves a sibling test's reseed between them and the draw drifts off `65`.
+    #[test]
+    fn golden_std_native_4d_chz_matches_expected_and_interp() {
+        // Serialize against the rand unit tests / rand goldens (shared process-global RNG); see
+        // TEST_RNG_LOCK. Hold it across the whole seed→draw run so the parallel harness cannot
+        // interleave another test's reseed between this program's rand.seed(1) and rand.int(0,100).
+        let _g = crate::native::rand::TEST_RNG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/std_native_4d.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/std_native_4d.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("std_native_4d.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from std_native_4d.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("std_native_4d.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on std_native_4d");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("std_native_4d.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on std_native_4d");
+    }
+
     /// Qualified-type-as-static-method-receiver golden: `examples/qualified_static/main.chz` imports a
     /// sibling module and calls `counter.Counter.zero()` / `counter.Counter.of(42)` (struct statics)
     /// and `counter.Color.first()` (enum static) through a QUALIFIED type. These lower to the SAME

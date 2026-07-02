@@ -1,0 +1,18 @@
+# std.rand — SplitMix64 pseudo-random scalars, declared in Chezzi (phase 4d).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
+# `import std.rand` (or a `from std.rand import …`) or qualified as `rand.int`. The resolver loads this
+# real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
+# module's SIGNATURE source — retiring the hand-built `native_module_sig` rand arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/rand.rs`,
+# dispatched via `native_members("std.rand")`). The backends compile NOTHING for a `native fn`. The
+# native seam carries only scalars; generic collection helpers (shuffle/choice/sample) live in the
+# pure-Chezzi std.iter and call `int`.
+#
+# `float`/`int`/`bool` reuse reserved scalar/ctor names as FUNCTION names — legal for module members.
+
+native fn seed(seed: int) -> nil
+native fn float() -> float
+native fn int(lo: int, hi: int) -> int
+native fn bool() -> bool
