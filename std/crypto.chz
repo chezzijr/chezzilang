@@ -1,0 +1,13 @@
+# std.crypto — hand-rolled digests, declared in Chezzi (phase 4e).
+#
+# FILE-BACKED, IMPORT-GATED native module (same pattern as std/regex.chz). Its functions are in scope
+# ONLY after `import std.crypto` (or a `from std.crypto import …`). The resolver loads this real file
+# (keeping the `native` marker), and the checker harvests the `native fn` declarations below as the
+# module's SIGNATURE source — retiring the hand-built `native_module_sig` crypto arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/crypto.rs`,
+# dispatched via `native_members("std.crypto")`). Each fn hashes the str's UTF-8 bytes → lowercase-hex
+# `str` (infallible).
+
+native fn sha256(s: str) -> str
+native fn md5(s: str) -> str

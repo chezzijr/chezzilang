@@ -382,6 +382,21 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
     }
 }
 
+/// Whether a native std module is FILE-BACKED (its whole signature is declared in a real `std/<M>.chz`
+/// with bodyless `native fn`/`native struct` decls, harvested by the checker) rather than hand-built in
+/// `native_module_sig`. The resolver loads the real file (`visit_native_file`) and the checker harvests
+/// its decls (`harvest_native_module`) — both gates MUST agree, so they share this one predicate to keep
+/// the sig-source (file) and AST-source (file) provably in lockstep. Runtime member dispatch stays
+/// name-keyed via `native_members` for these exactly as for the virtual ones (this is a front-end-only
+/// distinction). `std.time` is file-backed for its 4 real fns but ALSO keeps a minimal
+/// `native_module_sig` arm for its opcode-backed `timer` type-license (no runtime member value).
+pub fn is_file_backed_native(name: &str) -> bool {
+    matches!(
+        name,
+        "std.regex" | "std.encoding" | "std.crypto" | "std.uuid" | "std.time"
+    )
+}
+
 /// The callable members of a native module, as `(name, fn)`. Single source of truth shared by both
 /// engines (only the per-engine lowering and the checker's static signatures differ). Empty for an
 /// unknown name.

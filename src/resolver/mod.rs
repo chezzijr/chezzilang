@@ -392,12 +392,14 @@ impl Builder {
             // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
-                // std.regex (phase 4b) is FILE-BACKED: its native TYPE + fns are declared in a real
-                // `std/regex.chz` (the checker harvests them as the sig source). Load that real AST
-                // while KEEPING the `native` marker so runtime member dispatch stays name-keyed via
-                // `native_members`. Fallible (like the always-linked prelude): a missing/unparseable
-                // std/regex.chz is a hard error. Other native modules stay virtual (empty AST).
-                if name == "std.regex" {
+                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase
+                // 4e) declare their native TYPE + fns in a real `std/<M>.chz` (the checker harvests them
+                // as the sig source). Load that real AST while KEEPING the `native` marker so runtime
+                // member dispatch stays name-keyed via `native_members`. Fallible (like the always-linked
+                // prelude): a missing/unparseable file is a hard error. Other native modules stay virtual
+                // (empty AST). The two gates (here + the checker harvest gate) share `is_file_backed_native`
+                // so the file-source and the AST-source stay provably in lockstep.
+                if crate::native::is_file_backed_native(name) {
                     self.visit_native_file(&target, name, &path, span)?;
                 } else {
                     self.visit_native(&target, name);
@@ -956,6 +958,50 @@ mod tests {
         );
         // Entry-last invariant holds.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+    }
+
+    // Phase 4e — std.encoding/crypto/uuid/time are FILE-BACKED like std.regex: the resolver KEEPS the
+    // `native` marker (runtime dispatch stays name-keyed via `native_members`) but loads the REAL
+    // `std/<M>.chz` AST, whose bodyless `native fn` decls are the checker's sig source.
+    #[test]
+    fn enc_crypto_uuid_time_are_file_backed_with_native_marker() {
+        for (imp, label, a_fn) in [
+            ("std.encoding", "std.encoding", "base64_encode"),
+            ("std.crypto", "std.crypto", "sha256"),
+            ("std.uuid", "std.uuid", "v4"),
+            ("std.time", "std.time", "now"),
+        ] {
+            let t = TmpDir::new();
+            let entry = t.write("main.chz", &format!("import {imp}\nfn main(): print(1)\n"));
+            let graph = build_graph(&entry).unwrap();
+            let m = graph
+                .modules
+                .iter()
+                .find(|m| m.label() == label)
+                .unwrap_or_else(|| panic!("{label} should be in the graph"));
+            assert_eq!(m.native, Some(label));
+            assert!(
+                !m.ast.stmts.is_empty(),
+                "{label} must load the real std/*.chz AST (native fns)"
+            );
+            assert!(
+                m.ast
+                    .stmts
+                    .iter()
+                    .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == a_fn)),
+                "{label} AST must carry the `native fn {a_fn}` decl"
+            );
+            // std.time's file must NOT declare `timer` as a native fn (it's opcode-backed; the license
+            // lives in the native_module_sig arm's sig.types, not as a bound runtime member).
+            if label == "std.time" {
+                assert!(
+                    !m.ast.stmts.iter().any(
+                        |s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == "timer")
+                    ),
+                    "std.time.chz must NOT declare `native fn timer` (opcode-backed, no runtime value)"
+                );
+            }
+        }
     }
 
     // 9. find_root_from_dir starts AT the given dir (cwd) and walks up to the chezzi.toml marker.
