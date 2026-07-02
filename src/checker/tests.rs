@@ -12602,6 +12602,73 @@ fn native_enum_option_result_shape_matches_inline() {
     );
 }
 
+/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: the 15 SHAPE-portable reserved protocols are now
+/// ALSO declared in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
+/// runtime source (conformance / operator lowering / `check_bounds` untouched). This asserts each
+/// file-backed protocol's harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS
+/// the Rust seed, so the two source expressions can never silently drift. `Iterable` is NOT mirrored (its
+/// `iter(self) -> Iterator[Elem]` return type — a parameterized protocol in return position — is rejected
+/// by `resolve_type`), so it is deliberately absent from the `.chz` decls and from this list; it stays
+/// Rust-only in `prebuilt_protocols`.
+#[test]
+fn native_protocol_shapes_match_prebuilt_seed() {
+    let path = crate::resolver::std_root().join("prelude.chz");
+    let src = std::fs::read_to_string(&path).expect("read std/prelude.chz");
+    let toks = crate::lexer::tokenize(&src).expect("tokenize prelude");
+    let module = crate::parser::parse(toks).expect("parse prelude");
+    let mut c = Checker::new();
+    c.current_module_is_stdlib = true;
+    let seed = prebuilt_protocols();
+    for name in [
+        "Comparable",
+        "Stringable",
+        "Error",
+        "Hashable",
+        "Add",
+        "Sub",
+        "Mul",
+        "Div",
+        "Mod",
+        "Neg",
+        "Arithmetic",
+        "Iterator",
+        "Index",
+        "IndexSet",
+        "Slice",
+    ] {
+        let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
+            panic!("reserved protocol '{name}' must be declared in std/prelude.chz")
+        });
+        let want = seed.get(name).expect("reserved protocol in prebuilt seed");
+        assert_eq!(
+            got.type_params, want.type_params,
+            "protocol '{name}' type_params drift"
+        );
+        assert_eq!(got.embeds, want.embeds, "protocol '{name}' embeds drift");
+        assert_eq!(
+            got.methods.len(),
+            want.methods.len(),
+            "protocol '{name}' method count drift"
+        );
+        for ((gn, gs), (wn, ws)) in got.methods.iter().zip(&want.methods) {
+            assert_eq!(gn, wn, "protocol '{name}' method name/order drift");
+            assert!(
+                fn_sig_eq(gs, ws),
+                "protocol '{name}' method '{gn}' sig drift"
+            );
+        }
+    }
+    // Iterable stays Rust-only: it is present in the seed but has NO `.chz` mirror.
+    assert!(
+        seed.contains_key("Iterable"),
+        "Iterable stays in the Rust prebuilt seed"
+    );
+    assert!(
+        c.harvest_protocol_shape(&module, "Iterable").is_none(),
+        "Iterable must NOT be declared in std/prelude.chz (unportable return type)"
+    );
+}
+
 /// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.
 /// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::BuiltinFn`);
 /// `native ctor` (int/str/…) stays NON-first-class (value-position use is a checker error). This is

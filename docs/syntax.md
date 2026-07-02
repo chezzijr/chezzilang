@@ -896,7 +896,7 @@ satisfies a protocol by *having* the methods — there is no `implements` declar
 a signature refers to the conforming type.
 
 ```chezzi
-protocol Comparable:                 # this one is PREBUILT — shown for illustration
+protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
     fn compare(self, other: Self) -> int
 
 struct Point:
@@ -952,7 +952,7 @@ legal diamond — so `Arithmetic + Add` is fine), with *differing* signatures it
 embed is an error.
 
 ```chezzi
-protocol Arithmetic:        # builtin — shown for reference
+protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz
     Add + Sub + Mul + Div
 
 protocol VectorSpace:       # embeds two protocols and adds its own requirement
@@ -2025,10 +2025,17 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 15
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 16
   prebuilt PROTOCOL names (`Comparable`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
-  `Neg`/`Arithmetic`/`Iterable`/`Index`/`IndexSet`/`Slice`) are reserved the same way — usable as a
-  bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name.
+  `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`) are reserved the same way — usable
+  as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
+  `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
+  is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
+  the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
+  with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
+  BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
+  (`Iterable` is the one shape kept Rust-only — its `iter(self) -> Iterator[Elem]` return type can't be
+  written as a plain `protocol` decl.)
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on

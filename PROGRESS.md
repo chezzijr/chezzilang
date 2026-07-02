@@ -11,6 +11,39 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE — phase 5c-protocols (the 15 SHAPE-portable builtin/reserved PROTOCOLS declared in
+`std/prelude.chz` as plain `protocol` decls, a drift-guarded ADDITIVE mirror of the Rust seed)
+(2026-07-03).** The reserved structural protocols' SHAPE (method sigs + `+`-joined embeds) moves into
+`std/prelude.chz` — `Comparable`/`Stringable`/`Error`/`Hashable`, the operator protocols `Add`/`Sub`/`Mul`/
+`Div`/`Mod`/`Neg`, the `Arithmetic` bundle (`: Add + Sub + Mul + Div`), `Iterator[Elem]`
+(`next(self) -> Option[Self]`; Elem arity-only), and `Index[K,V]`/`IndexSet[K,V]`/`Slice[R]` — using the
+EXISTING `protocol` decl syntax (no new grammar). **DRIFT-GUARDED PARTIAL PORT (the phase-5b precedent —
+SHAPE moves, WIRING stays; the task's documented fallback, logged):** `prebuilt_protocols()` STAYS the live
+runtime source (seeded at `Checker::new`, before any module); the `.chz` decls are NEVER inserted into the
+protocol table — `hoist_protocol`'s reserved arm is now VALIDATE-AND-NO-OP in a stdlib module (early return,
+no insert, no error), keeping the user-module `reserved (builtin)` rejection unchanged. Everything that
+DECIDES conformance + operator binding stays 100% Rust-wired and UNTOUCHED: `satisfies` (int/float satisfy
+`Add`/`Comparable`/`Neg` INTRINSICALLY with no method; a user struct satisfies structurally via its methods),
+`iter_elem`/`iterable_elem` (Iterator/Iterable conformance), `recover_index_args`, operator lowering
+(`+`→add, `<`→compare, `for`→Iterator, `[]`→Index, `[:]`→Slice, `?`/interpolation/Map-keys), `check_bounds`,
+`is_reserved_protocol`, and BOTH engines (`src/vm`/`src/interp` are UNTOUCHED — checker-only, decl-shape-only,
+so 3-engine parity holds by construction). **What the `.chz` decls buy:** a checked source-of-truth MIRROR
+of each protocol shape, pinned to the Rust seed by `assert_native_protocol_shape_matches` (a debug-only
+always-on `harvest_protocol_shape` + `debug_assert_eq!`/`fn_sig_eq` on the always-linked prelude — assert-only,
+resolution-inert, keeps the harvest helper production-live) and by the unit guard
+`native_protocol_shapes_match_prebuilt_seed` (harvested `type_params`/`embeds`/ordered method sigs
+byte-equal `prebuilt_protocols()`). **STAYED RUST-ONLY (logged, the 5b Iterator-deferral precedent):**
+`Iterable` — its `iter(self) -> Iterator[Elem]` return type is a parameterized protocol in return position,
+which `resolve_type` rejects, so it CANNOT be written as a plain `protocol` decl; it keeps its Rust seed with
+no `.chz` mirror (the drift guard asserts it is absent from the prelude and present in the seed). **COUNT:**
+16 reserved protocols total; 15 mirrored + `Iterable` Rust-only. **BEHAVIOR-PRESERVING / three-engine
+byte-identical:** `examples/protocols_5c.chz` (int/float intrinsic arithmetic, a user 4-op struct under
+`+ - * /` AND through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator`
+struct in a `for`, builtin Index/Slice, a user IndexSet struct) is asserted byte-identical on interp /
+--serial VM / M:N VM (`protocols_5c_3engine_parity` via `assert_mc_parity`), and every pre-existing
+protocol/bound/operator-overload/generic-constraint/Iterator test stays green UNCHANGED. `grammar.bnf`
+needs NO change (plain `protocol` already in the grammar; conformance green). Checker+prelude+docs only.
+
 **✅ NATIVE-PRELUDE — phase 5b-native-enum (the builtin `Option`/`Result` variant SHAPE made
 file-backed: `native enum Option[T]` (`Some(T)`/`None`) / `native enum Result[T, E]` (`Ok(T)`/`Err(E)`)
 declared in `std/prelude.chz`, mapped ADDITIVELY onto the reserved `Ty::Option`/`Ty::Result`)
@@ -41,7 +74,8 @@ byte-identical:** `src/vm` + `src/interp` gain ONLY forced no-op AST match arms;
 on interp / --serial VM / M:N VM (`golden_native_enum_smoke_chz_matches_expected_and_interp`), and every
 pre-existing Option/Result/`?`/match/exhaustiveness test stays green UNCHANGED. New `nativeEnumDecl`
 production in `grammar.bnf` (conformance green, corpus `accept/native_enum.chz`). Parser+checker+docs only.
-`Iterator` (a protocol + reserved value type, NOT an enum) is untouched — deferred to phase 5c.
+`Iterator` (a protocol, NOT an enum) is untouched here — its protocol SHAPE is file-backed in phase 5c
+(see above); conformance stays `iter_elem`-special.
 
 **✅ NATIVE-PRELUDE — phase 5a-containers (the builtin `List`/`Map`/`Set` METHOD surface made
 file-backed: `native struct List[T]` / `Map[K, V]` / `Set[T]` declared in `std/prelude.chz`, harvested

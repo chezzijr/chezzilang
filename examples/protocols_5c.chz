@@ -1,0 +1,90 @@
+# Phase 5c-protocols — behavior-preservation exercise for the reserved/builtin protocols whose SHAPE is
+# now file-backed in std/prelude.chz. Conformance + operator binding stay Rust-wired, so this program
+# must produce byte-identical output on all three engines (interp, --serial VM, default M:N VM).
+#
+# Covers: int/float INTRINSIC Add (no method); a user 4-op struct under + - * / AND through
+# `[T: Arithmetic]`; `[T: Comparable]` max over a Comparable struct; a user Iterator struct driven by
+# `for`; builtin indexing/slicing (Index/Slice); a user IndexSet struct via `[]` get + set.
+
+# --- A 4-operator + Comparable + Stringable struct ---------------------------------------------------
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+    fn sub(self, o: Vec2) -> Vec2:
+        return Vec2(self.x - o.x, self.y - o.y)
+    fn mul(self, o: Vec2) -> Vec2:
+        return Vec2(self.x * o.x, self.y * o.y)
+    fn div(self, o: Vec2) -> Vec2:
+        return Vec2(self.x / o.x, self.y / o.y)
+    fn compare(self, o: Vec2) -> int:
+        return (self.x * self.x + self.y * self.y) - (o.x * o.x + o.y * o.y)
+    fn str(self) -> str:
+        return "({self.x}, {self.y})"
+
+# Bounded by the builtin `Arithmetic` bundle (= Add + Sub + Mul + Div) — works on ints AND Vec2.
+fn combine[T: Arithmetic](a: T, b: T) -> T:
+    return (a + b) * (a - b) / b
+
+# Bounded by builtin `Comparable` — works on ints AND any struct with `compare`.
+fn maxOf[T: Comparable](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+# --- A user Iterator struct ---------------------------------------------------------------------------
+struct Squares:
+    n: int
+    limit: int
+    fn next(self) -> Option[int]:
+        if self.n >= self.limit:
+            return None
+        v := self.n * self.n
+        self.n = self.n + 1
+        return Some(v)
+
+# --- A user IndexSet struct (index + set_index) -------------------------------------------------------
+struct Grid:
+    cells: List[int]
+    fn index(self, i: int) -> int:
+        return self.cells[i]
+    fn set_index(self, i: int, v: int) -> nil:
+        self.cells[i] = v
+
+fn main():
+    # int intrinsic Add + Arithmetic bound
+    print(combine(10, 3))          # (13) * (7) / 3 = 30
+    # float intrinsic arithmetic
+    print(2.5 + 1.5)               # 4
+    # user struct through + - * / and the Arithmetic bound
+    a := Vec2(4, 9)
+    b := Vec2(2, 3)
+    print(a + b)                   # (6, 12)
+    print(a - b)                   # (2, 6)
+    print(a * b)                   # (8, 27)
+    print(a / b)                   # (2, 3)
+    print(combine(a, b))           # ((6,12)*(2,6))/(2,3) = (6, 24)
+
+    # Comparable: intrinsic on int, structural on Vec2
+    print(maxOf(7, 4))             # 7
+    print(maxOf(a, b))             # (4, 9)
+
+    # user Iterator driven by `for`
+    print("squares:")
+    for s in Squares(0, 5):
+        print(s)                   # 0 1 4 9 16
+
+    # builtin Index + Slice on a list
+    xs := [10, 20, 30, 40, 50]
+    print(xs[2])                   # 30
+    print(xs[1:4])                 # [20, 30, 40]
+    print(xs[::2])                 # [10, 30, 50]
+
+    # user IndexSet: `[]` get + set
+    g := Grid([1, 2, 3])
+    g[1] = 99
+    print(g[0])                    # 1
+    print(g[1])                    # 99
+
+main()

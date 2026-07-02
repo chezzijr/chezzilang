@@ -972,6 +972,15 @@ impl Checker {
             // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
             if lm.dotted == ["std", "prelude"] {
                 c.assert_native_enum_shape_matches(&lm.ast);
+                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). The 15 SHAPE-portable
+                // reserved protocols (Comparable/Stringable/Error/Hashable, the operator protocols, the
+                // `Arithmetic` bundle, `Iterator`, `Index`/`IndexSet`/`Slice`) are now ALSO declared in
+                // `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
+                // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
+                // parsed+resolved shape byte-equals the Rust seed so the two can't drift. Keeps
+                // `harvest_protocol_shape` production-live (no dead_code) AND is assert-only (no effect on
+                // resolution/output), so behavior + 3-engine parity are unchanged.
+                c.assert_native_protocol_shape_matches(&lm.ast);
             }
             c.module_sigs.insert(lm.id.clone(), sig);
         }
@@ -2122,6 +2131,128 @@ impl Checker {
                 vmap, inline,
                 "native enum Result in std/prelude.chz drifted from inline variants_of"
             );
+        }
+    }
+
+    /// Phase 5c-protocols — harvest the SHAPE of a reserved protocol declared in `std/prelude.chz` as a
+    /// plain `protocol` decl (its `type_params`, `embeds`, and method `FnSig`s), WITHOUT inserting it
+    /// into `self.protocols` or emitting any error. Mirrors [`harvest_native_enum_table`] but for a
+    /// `StmtKind::Protocol`, replicating the exact `Self` + own-type-param scope [`hoist_protocol`] uses
+    /// to resolve the method sigs (`self` → `Ty::Unknown`, `Self`/own params → `Ty::Param`). Used ONLY by
+    /// the always-on debug DRIFT GUARD [`assert_native_protocol_shape_matches`] to prove the file-backed
+    /// SHAPE byte-matches the live Rust seed [`prebuilt_protocols`] (which stays the runtime source — the
+    /// `.chz` decl is an ADDITIVE mirror, never registered). Returns `None` if `name` isn't declared in `ast`.
+    fn harvest_protocol_shape(
+        &mut self,
+        ast: &crate::ast::Module,
+        name: &str,
+    ) -> Option<ProtocolInfo> {
+        for s in &ast.stmts {
+            if let StmtKind::Protocol {
+                name: pn,
+                type_params,
+                methods,
+                embeds,
+                ..
+            } = &s.kind
+                && pn == name
+            {
+                // Same scope hoist_protocol builds: swap in a clean map with only `Self` + the
+                // protocol's own type params visible, resolve, then restore.
+                let mut saved = self.type_params.clone();
+                std::mem::swap(&mut self.type_params, &mut saved);
+                self.type_params.insert("Self".to_string(), Vec::new());
+                for tp in type_params {
+                    self.type_params.insert(tp.name.clone(), tp.bounds.clone());
+                }
+                let sigs: Vec<(String, FnSig)> = methods
+                    .iter()
+                    .map(|m| {
+                        let params = m
+                            .params
+                            .iter()
+                            .map(|p| match &p.ty {
+                                Some(t) => self.resolve_type(t, s.span),
+                                None => Ty::Unknown, // leading bare `self`
+                            })
+                            .collect();
+                        let ret = m
+                            .ret
+                            .as_ref()
+                            .map(|t| self.resolve_type(t, s.span))
+                            .unwrap_or(Ty::Nil);
+                        (m.name.clone(), FnSig::plain(params, ret))
+                    })
+                    .collect();
+                self.type_params = saved;
+                return Some(ProtocolInfo {
+                    type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    methods: sigs,
+                    embeds: embeds.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    /// Phase 5c-protocols DRIFT GUARD — assert each reserved protocol's SHAPE declared in
+    /// `std/prelude.chz` (as a plain `protocol` decl) byte-matches the live Rust seed
+    /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
+    /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
+    /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
+    /// the two source expressions from silently drifting. The 15 SHAPE-portable protocols are mirrored;
+    /// `Iterable` is NOT (its `iter(self) -> Iterator[Elem]` return type — a parameterized protocol in
+    /// return position — is rejected by `resolve_type`, so it has no `.chz` decl and stays Rust-only).
+    /// Called only on the always-linked prelude module; the body is `cfg!(debug_assertions)`-guarded so
+    /// it is a NO-OP in release yet stays COMPILED (so `harvest_protocol_shape` is never dead code).
+    fn assert_native_protocol_shape_matches(&mut self, ast: &crate::ast::Module) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let seed = prebuilt_protocols();
+        for name in [
+            "Comparable",
+            "Stringable",
+            "Error",
+            "Hashable",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Mod",
+            "Neg",
+            "Arithmetic",
+            "Iterator",
+            "Index",
+            "IndexSet",
+            "Slice",
+        ] {
+            let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
+                panic!("reserved protocol '{name}' missing from std/prelude.chz")
+            });
+            let want = seed
+                .get(name)
+                .unwrap_or_else(|| panic!("reserved protocol '{name}' missing from prebuilt seed"));
+            debug_assert_eq!(
+                got.type_params, want.type_params,
+                "protocol '{name}' type_params drifted from prebuilt_protocols"
+            );
+            debug_assert_eq!(
+                got.embeds, want.embeds,
+                "protocol '{name}' embeds drifted from prebuilt_protocols"
+            );
+            debug_assert_eq!(
+                got.methods.len(),
+                want.methods.len(),
+                "protocol '{name}' method count drifted from prebuilt_protocols"
+            );
+            for ((gn, gs), (wn, ws)) in got.methods.iter().zip(&want.methods) {
+                debug_assert_eq!(gn, wn, "protocol '{name}' method name/order drifted");
+                debug_assert!(
+                    fn_sig_eq(gs, ws),
+                    "protocol '{name}' method '{gn}' sig drifted from prebuilt_protocols"
+                );
+            }
         }
     }
 
@@ -12907,7 +13038,15 @@ impl Checker {
         span: Span,
     ) {
         if is_reserved_protocol(name) {
-            self.error(span, format!("protocol '{name}' is reserved (builtin)"));
+            // Phase 5c-protocols — a reserved protocol's SHAPE is now ALSO declared in `std/prelude.chz`
+            // as a plain `protocol` decl (a drift-guarded ADDITIVE mirror; see
+            // `assert_native_protocol_shape_matches`). In a stdlib module that decl is VALIDATE-AND-NO-OP:
+            // do NOT insert (the live source stays `prebuilt_protocols`, seeded at `Checker::new`) and do
+            // NOT error — mirroring the `native struct`/`native enum` stdlib arms. In a USER module the
+            // reserved name stays rejected (a user can't redeclare a builtin protocol).
+            if !self.current_module_is_stdlib {
+                self.error(span, format!("protocol '{name}' is reserved (builtin)"));
+            }
             return;
         }
         if self.protocols.contains_key(name) {

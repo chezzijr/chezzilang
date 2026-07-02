@@ -16093,6 +16093,20 @@ mod tests {
         assert_mc_parity(src, expected);
     }
 
+    /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: the 15 reserved-protocol SHAPES are now file-backed
+    /// in std/prelude.chz, but conformance (`satisfies`/`iter_elem`) + operator binding stay Rust-wired
+    /// and untouched. This drives int/float INTRINSIC arithmetic, a user 4-op struct under `+ - * /` AND
+    /// through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator` struct
+    /// in a `for`, builtin Index/Slice, and a user IndexSet struct (`[]` get + set) — asserting
+    /// byte-identical output on all three engines (cooperative VM / frozen interp / `--parallel`). A
+    /// diverged protocol shape or a conformance/operator regression would change this output.
+    #[test]
+    fn protocols_5c_3engine_parity() {
+        let src = include_str!("../../examples/protocols_5c.chz");
+        let expected = include_str!("../../examples/protocols_5c.expected");
+        assert_mc_parity(src, expected);
+    }
+
     /// Phase 4c-concurrency REGRESSION GUARD: the std.concurrency migration to a file-backed
     /// std/concurrency.chz is CHECKER-ONLY — the ctors still lower to `Op::NewShared`/etc by name and
     /// runtime dispatch is untouched. This drives all four primitives (Shared set/update, RwShared
