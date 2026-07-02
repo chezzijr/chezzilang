@@ -26,3 +26,49 @@ native ctor float(x) -> float
 native ctor str(x) -> str
 native ctor bytes(x) -> bytes
 native ctor bytearray(x) -> bytearray
+
+# The three builtin container types' METHOD surface (phase 5a-containers). List/Map/Set are RESERVED
+# UNIVERSE types (`Ty::List`/`Ty::Map`/`Ty::Set` — always in scope, not import-gated), and their LITERAL
+# syntax (`[...]`/`{k:v}`/`{1,2}`) + turbofish ctor (`List[int]()`) stay COMPILER-WIRED (the type-arg-
+# driven element identity is not a flat `FnSig`, so it lives in `resolve_type`/`builtin_container_sig`,
+# NOT here). Only the METHOD tables are file-backed: each body-less `native fn` (leading bare `self`, which
+# the harvest STRIPS) supplies the exact sig the retired bespoke `list_method_sig`/`map_method_sig`/
+# `set_method_sig` arms carried. The checker harvests these into each reserved type's method table (seeded
+# by `seed_stdlib_structs` into `self.structs`) and routes `Ty::List`/`Ty::Map`/`Ty::Set` method
+# resolution through them (behavior-preserving; the sigs BYTE-MATCH the retired arms).
+#
+# The generic-recovery methods a flat sig cannot express stay RESIDUAL in the checker's Ty::List arm (NOT
+# declared here): `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types) and `sort`
+# (Comparable-gated), plus the numeric gate on `sum` (a plain `sum(self) -> T` would wrongly accept a
+# non-numeric list, so the arm keeps a `!elem.is_numeric()` residual). `Map`/`Set`'s key/element type
+# params carry a `Hashable` bound so the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
+
+native struct List[T]:
+    native fn len(self) -> int
+    native fn push(self, v: T) -> nil
+    native fn pop(self) -> Option[T]
+    native fn reverse(self) -> nil
+    native fn contains(self, v: T) -> bool
+    native fn index_of(self, v: T) -> int
+    native fn concat(self, other: List[T]) -> List[T]
+    native fn extend(self, other: List[T]) -> nil
+    native fn sum(self) -> T
+
+native struct Map[K: Hashable, V]:
+    native fn len(self) -> int
+    native fn has(self, k: K) -> bool
+    native fn get(self, k: K) -> Option[V]
+    native fn keys(self) -> List[K]
+    native fn values(self) -> List[V]
+    native fn remove(self, k: K) -> Option[V]
+    native fn merge(self, other: Map[K, V]) -> Map[K, V]
+    native fn update(self, other: Map[K, V]) -> nil
+
+native struct Set[T: Hashable]:
+    native fn len(self) -> int
+    native fn has(self, v: T) -> bool
+    native fn add(self, v: T) -> nil
+    native fn remove(self, v: T) -> bool
+    native fn union(self, other: Set[T]) -> Set[T]
+    native fn intersection(self, other: Set[T]) -> Set[T]
+    native fn difference(self, other: Set[T]) -> Set[T]

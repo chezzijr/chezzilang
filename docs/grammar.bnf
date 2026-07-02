@@ -226,7 +226,12 @@
 # its first parameter (mirroring a user-struct method; harvest strips it) — a self-less body `native
 # fn` is a parse error (the form is reserved for a future native static method). A plain `fn`/`test`
 # method (with a body) is a parse error. A method sig may reference the struct's type params
-# (`native fn get(self) -> T`), e.g. `std/concurrency.chz`'s `Shared[T]`.
+# (`native fn get(self) -> T`), e.g. `std/concurrency.chz`'s `Shared[T]`. A `native struct` maps
+# ADDITIVELY onto an EXISTING reserved type (its method table only, never a fresh nominal struct): the
+# import-gated opaque handles (`Shared`/`Socket`/…) AND the always-in-scope UNIVERSE containers
+# (`std/prelude.chz`'s `List[T]`/`Map[K: Hashable, V]`/`Set[T: Hashable]`, phase 5a) keep resolving to
+# `Ty::List`/`Ty::Map`/`Ty::Set`/etc — literal syntax + turbofish ctor stay compiler-wired. A type param
+# may carry a bound (`Map[K: Hashable, V]`) via `<typeParams>`.
 <nativeStructDecl> ::= "NATIVE" "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
                      | "NATIVE" "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
 <nativeStructMembers> ::= <nativeStructMember> | <nativeStructMember> <nativeStructMembers>

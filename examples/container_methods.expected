@@ -1,0 +1,36 @@
+4
+true
+false
+2
+-1
+popped 4
+3
+[3, 2, 1, 7, 8]
+3
+5
+10
+4.0
+[10, 20, 30]
+[2, 4]
+10
+[1, 2, 3]
+2
+true
+false
+b=2
+z absent
+[a, b]
+[1, 2]
+{a: 1, b: 2, c: 3}
+2
+{a: 1, b: 20, d: 4}
+removed 1
+2
+4
+true
+false
+true
+false
+6
+2
+2

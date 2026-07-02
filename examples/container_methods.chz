@@ -1,0 +1,70 @@
+# examples/container_methods.chz — a representative call of EVERY builtin List/Map/Set method, driving
+# the phase-5a-containers port (the method surface is file-backed in std/prelude.chz as `native struct`
+# decls mapped to the reserved Ty::List/Ty::Map/Ty::Set; ctors/literals stay compiler-wired). Output is
+# deterministic on all three engines (insertion-ordered maps/sets).
+
+fn main():
+    # --- List: len / push / pop / reverse / contains / index_of / concat / extend / sum ---
+    xs := [1, 2, 3]
+    xs.push(4)
+    print(xs.len())                  # 4
+    print(xs.contains(3))            # true
+    print(xs.contains(9))            # false
+    print(xs.index_of(3))           # 2
+    print(xs.index_of(9))           # -1
+    match xs.pop():
+        Some(v): print("popped {v}")  # popped 4
+        None: print("empty")
+    xs.reverse()
+    print(xs[0])                     # 3
+    print(xs.concat([7, 8]))         # [3, 2, 1, 7, 8]
+    print(xs.len())                  # 3  (concat is non-mutating)
+    xs.extend([5, 6])
+    print(xs.len())                  # 5  (extend mutates)
+    print([1, 2, 3, 4].sum())        # 10
+    print([1.0, 2.5, 0.5].sum())     # 4.0
+    # List residual (bespoke) higher-order + sort methods:
+    print([1, 2, 3].map(fn(n: int) -> int: n * 10))   # [10, 20, 30]
+    print([1, 2, 3, 4].filter(fn(n: int) -> bool: n % 2 == 0))  # [2, 4]
+    print([1, 2, 3, 4].fold(0, fn(a: int, n: int) -> int: a + n))  # 10
+    ss := [3, 1, 2]
+    ss.sort()
+    print(ss)                        # [1, 2, 3]
+
+    # --- Map: len / has / get / keys / values / remove / merge / update ---
+    m := {"a": 1, "b": 2}
+    print(m.len())                   # 2
+    print(m.has("a"))                # true
+    print(m.has("z"))                # false
+    match m.get("b"):
+        Some(v): print("b={v}")       # b=2
+        None: print("b absent")
+    match m.get("z"):
+        Some(v): print("z={v}")
+        None: print("z absent")       # z absent
+    print(m.keys())                  # [a, b]
+    print(m.values())                # [1, 2]
+    print(m.merge({"c": 3}))         # {a: 1, b: 2, c: 3}
+    print(m.len())                   # 2  (merge is non-mutating)
+    m.update({"b": 20, "d": 4})
+    print(m)                         # {a: 1, b: 20, d: 4}
+    match m.remove("a"):
+        Some(v): print("removed {v}")  # removed 1
+        None: print("nothing")
+    print(m.len())                   # 2
+
+    # --- Set: len / has / add / remove / union / intersection / difference ---
+    s := {1, 2, 3}
+    s.add(4)
+    print(s.len())                   # 4
+    print(s.has(2))                  # true
+    print(s.has(9))                  # false
+    print(s.remove(4))               # true
+    print(s.remove(4))               # false
+    a := {1, 2, 3, 4}
+    b := {3, 4, 5, 6}
+    print(a.union(b).len())          # 6
+    print(a.intersection(b).len())   # 2
+    print(a.difference(b).len())     # 2
+
+main()

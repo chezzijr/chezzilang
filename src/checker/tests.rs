@@ -4175,6 +4175,29 @@ fn regex_module_sig_via_graph() -> ModuleSig {
     native_module_sig_via_graph("regex")
 }
 
+/// Phase 5a-containers — a `Checker` after a trivial graph check, with the always-linked prelude's
+/// `List`/`Map`/`Set` method tables (harvested into `container_seeds`) re-seeded into `self.structs`.
+/// Lets a test drive `native_handle_method("List"/"Map"/"Set", …)` exactly as the `Ty::List`/`Ty::Map`/
+/// `Ty::Set` dispatch arms do.
+#[cfg(test)]
+fn prelude_container_checker() -> Checker {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", "fn main(): print(1)\n");
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let mut c = Checker::new();
+    c.run_graph_pass(&graph, false);
+    assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
+    assert!(
+        c.container_seeds.contains_key("List")
+            && c.container_seeds.contains_key("Map")
+            && c.container_seeds.contains_key("Set"),
+        "prelude List/Map/Set container seeds must be harvested"
+    );
+    // container_seeds is populated; re-seed it into self.structs for the method-table lookup.
+    c.seed_stdlib_structs();
+    c
+}
+
 /// PROVENANCE — the `"std.regex" =>` arm is DELETED from `native_module_sig`; the whole regex signature
 /// (Match type + the 5 fns) now comes from parsing `std/regex.chz`. So `native_module_sig("std.regex")`
 /// exports NOTHING (empty functions, no Match), while a full graph check that `import std.regex` still
@@ -12532,6 +12555,108 @@ fn native_prelude_firstclassness_preserved_on_graph_path() {
     entry_rejects("fn w():\n    f := int\nw()\n", "int");
 }
 
+/// Phase 5a-containers BEHAVIOR-PRESERVING GUARD: every `List`/`Map`/`Set` method sig harvested from
+/// `std/prelude.chz`'s `native struct` decls (looked up via `native_handle_method` with the value's
+/// element/key/value type substituted) must BYTE-MATCH the sig the retired bespoke `list_method_sig`/
+/// `map_method_sig`/`set_method_sig` arms produced. `Map` uses distinct `Int`/`Str` for K/V so a K↔V
+/// swap in the declaration order would be caught. A mismatch here is a behavior change (the whole port
+/// is behavior-preserving), so this pins the ported surface exactly.
+#[test]
+fn container_method_sigs_byte_match() {
+    let c = prelude_container_checker();
+    // Assert one method's harvested+substituted sig equals the hand-written expected (params/ret/
+    // min_params) — the retired-arm shape. `Map` uses distinct `Int`/`Str` for K/V so a K↔V swap in the
+    // declaration order would be caught.
+    let chk = |ty: &str, method: &str, targs: &[Ty], exp_params: Vec<Ty>, exp_ret: Ty| {
+        let sig = c
+            .native_handle_method(ty, method, targs)
+            .unwrap_or_else(|| panic!("{ty}.{method} must resolve via the harvested table"));
+        assert_eq!(sig.params, exp_params, "{ty}.{method} params");
+        assert_eq!(sig.ret, exp_ret, "{ty}.{method} ret");
+        assert_eq!(
+            sig.min_params,
+            exp_params.len(),
+            "{ty}.{method} min_params (all required)"
+        );
+    };
+    let li = || Ty::list(Ty::Int);
+    let int = || vec![Ty::Int];
+    let kv = || vec![Ty::Int, Ty::Str]; // Map targs: K=Int, V=Str.
+    // List[Int] — the 9 flat methods (map/filter/fold/sort/sort_by/sort_by_key stay residual).
+    chk("List", "len", &int(), vec![], Ty::Int);
+    chk("List", "push", &int(), vec![Ty::Int], Ty::Nil);
+    chk("List", "pop", &int(), vec![], Ty::option(Ty::Int));
+    chk("List", "reverse", &int(), vec![], Ty::Nil);
+    chk("List", "contains", &int(), vec![Ty::Int], Ty::Bool);
+    chk("List", "index_of", &int(), vec![Ty::Int], Ty::Int);
+    chk("List", "concat", &int(), vec![li()], li());
+    chk("List", "extend", &int(), vec![li()], Ty::Nil);
+    chk("List", "sum", &int(), vec![], Ty::Int);
+    // Map[Int, Str] — K=Int, V=Str (distinct so the K/V order is pinned).
+    chk("Map", "len", &kv(), vec![], Ty::Int);
+    chk("Map", "has", &kv(), vec![Ty::Int], Ty::Bool);
+    chk("Map", "get", &kv(), vec![Ty::Int], Ty::option(Ty::Str));
+    chk("Map", "keys", &kv(), vec![], Ty::list(Ty::Int));
+    chk("Map", "values", &kv(), vec![], Ty::list(Ty::Str));
+    chk("Map", "remove", &kv(), vec![Ty::Int], Ty::option(Ty::Str));
+    chk(
+        "Map",
+        "merge",
+        &kv(),
+        vec![Ty::map(Ty::Int, Ty::Str)],
+        Ty::map(Ty::Int, Ty::Str),
+    );
+    chk(
+        "Map",
+        "update",
+        &kv(),
+        vec![Ty::map(Ty::Int, Ty::Str)],
+        Ty::Nil,
+    );
+    // Set[Int] — the 7 flat methods.
+    chk("Set", "len", &int(), vec![], Ty::Int);
+    chk("Set", "has", &int(), vec![Ty::Int], Ty::Bool);
+    chk("Set", "add", &int(), vec![Ty::Int], Ty::Nil);
+    chk("Set", "remove", &int(), vec![Ty::Int], Ty::Bool);
+    chk(
+        "Set",
+        "union",
+        &int(),
+        vec![Ty::set(Ty::Int)],
+        Ty::set(Ty::Int),
+    );
+    chk(
+        "Set",
+        "intersection",
+        &int(),
+        vec![Ty::set(Ty::Int)],
+        Ty::set(Ty::Int),
+    );
+    chk(
+        "Set",
+        "difference",
+        &int(),
+        vec![Ty::set(Ty::Int)],
+        Ty::set(Ty::Int),
+    );
+    // Residual methods are INTENTIONALLY not in the harvested List table (they stay bespoke in the
+    // Ty::List arm). A leak would silently change `unique_member_owner`'s pinning set.
+    for m in [
+        "map",
+        "filter",
+        "fold",
+        "sort",
+        "sort_by",
+        "sort_by_key",
+        "get",
+    ] {
+        assert!(
+            c.native_handle_method("List", m, &[Ty::Int]).is_none(),
+            "List.{m} must NOT be in the harvested table (stays residual/bespoke)"
+        );
+    }
+}
+
 /// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST
 /// resolve to `Some` from its owning `*_method_sig` lookup — so the per-type "methods: …" line
 /// `builtin_type_doc` renders can only list methods that provably EXIST. An out-of-date slice (a
@@ -12550,13 +12675,26 @@ fn builtin_method_slices_all_resolve() {
         }
     };
     chk(STR_METHODS, "STR_METHODS", &str_method_sig);
-    chk(LIST_METHODS, "LIST_METHODS", &|m| {
-        list_method_sig(m, &Ty::Int)
-    });
-    chk(MAP_METHODS, "MAP_METHODS", &|m| {
-        map_method_sig(m, &Ty::Int, &Ty::Int)
-    });
-    chk(SET_METHODS, "SET_METHODS", &|m| set_method_sig(m, &Ty::Int));
+    // Phase 5a-containers — List/Map/Set method sigs are now HARVESTED from std/prelude.chz into each
+    // reserved type's method table (the bespoke list_/map_/set_method_sig arms are retired). Resolve the
+    // hover slices against those seeded tables.
+    let cc = prelude_container_checker();
+    let chk_container = |ty: &str, slice: &[&str]| {
+        let methods = &cc
+            .structs
+            .get(ty)
+            .unwrap_or_else(|| panic!("seeded {ty} struct"))
+            .methods;
+        for m in slice {
+            assert!(
+                methods.contains_key(*m),
+                "{ty} hover slice lists '{m}' but the harvested std/prelude.chz {ty} has no such method (drift)"
+            );
+        }
+    };
+    chk_container("List", LIST_METHODS);
+    chk_container("Map", MAP_METHODS);
+    chk_container("Set", SET_METHODS);
     chk(CHANNEL_METHODS, "CHANNEL_METHODS", &|m| {
         channel_method_sig(m, &Ty::Int)
     });

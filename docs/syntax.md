@@ -2443,6 +2443,16 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   `Atomic[T]` (and non-generic `Executor`). A method whose sig a plain harvested decl can't express (a
   return recovered from a closure argument's return type, `RwShared.read`; a discard-return `submit`) is
   declared with an **unannotated** closure param and re-typed post-harvest (checker-side metadata).
+- A `native struct` maps its method table **ADDITIVELY onto an EXISTING reserved type** — it never mints
+  a fresh nominal `Ty::Struct`. Besides the import-gated opaque handles above, the always-linked universe
+  prelude (`std/prelude.chz`, phase 5a-containers) declares `native struct List[T]` / `Map[K: Hashable, V]`
+  / `Set[T: Hashable]`: their method sigs (`push`/`pop`/`get`/`keys`/`union`/…) are harvested onto the
+  RESERVED `Ty::List`/`Ty::Map`/`Ty::Set`, but the **literal syntax** (`[…]`/`{k:v}`/`{1,2}`) and the
+  **turbofish ctor** (`List[int]()`) stay compiler-wired (their type-arg-driven element identity is not a
+  flat sig). A few `List` methods a flat sig can't express — the higher-order `map`/`filter`/`fold`/
+  `sort_by`/`sort_by_key` and `sort` (Comparable-gated), plus `sum`'s numeric-element gate — stay bespoke
+  in the checker rather than declared in the prelude struct. A type param may carry a bound
+  (`Map[K: Hashable, V]`), letting the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
 - **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
   error** (*native struct declarations are only allowed in standard-library modules*); nesting is a
   parse error.

@@ -11,6 +11,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE — phase 5a-containers (the builtin `List`/`Map`/`Set` METHOD surface made
+file-backed: `native struct List[T]` / `Map[K, V]` / `Set[T]` declared in `std/prelude.chz`, harvested
+into method tables mapped ADDITIVELY onto the reserved `Ty::List`/`Ty::Map`/`Ty::Set`) (2026-07-02).**
+The three builtin containers' METHOD sigs move out of the bespoke Rust `list_method_sig`/`map_method_sig`/
+`set_method_sig` arms into body-less `native fn` methods (leading bare `self`, stripped by the harvest) on
+`native struct` decls in the always-linked `std/prelude.chz` — the exact phase-4c-concurrency generic
+native-struct + harvest pattern, now applied to the RESERVED UNIVERSE containers. **BEHAVIOR-PRESERVING:**
+each harvested `FnSig` BYTE-MATCHES the retired arm (guarded by `container_method_sigs_byte_match`
+enumerating all 24 flat methods with concrete K/V subst), and output is byte-identical on all three engines
+(guarded by `examples/container_methods.chz` + `container_methods_3engine_parity`). **CRITICAL additive
+subtlety (as concurrency/net):** `List`/`Map`/`Set` KEEP resolving to the reserved `Ty::List`/`Ty::Map`/
+`Ty::Set` — the harvest attaches ONLY the method table (never a fresh `Ty::Struct`); the LITERAL syntax
+(`[...]`/`{k:v}`/`{1,2}`) + the turbofish ctor (`List[int]()`, `builtin_container_sig`) + `resolve_type`'s
+element-type arms stay 100% COMPILER-WIRED and UNCHANGED, and **runtime (`src/vm`/`src/interp`) is
+UNTOUCHED** (method dispatch stays by name). Seeding follows the `ref_seed`/`concurrency_seeds` precedent:
+the prelude's `List`/`Map`/`Set` tables are captured into a new `container_seeds` field when the prelude
+module (graph order[0], always-linked) is checked, and `seed_stdlib_structs` re-seeds them bare (method-
+table only — NO `struct_names`/`bare_types` licensing needed, they're UNIVERSE) into `self.structs`; the
+cfg(test) single-module `check` path harvests them straight in via `seed_native_prelude_sigs`. The
+`Ty::List`/`Ty::Map`/`Ty::Set` dispatch arms route through `native_handle_method` with the value's
+element/key/value type substituted for `Ty::Param`. **Generic-recovery `List` methods a flat sig can't
+express stay RESIDUAL (intentionally NOT declared in the prelude struct, logged):** `map`/`filter`/`fold`/
+`sort_by`/`sort_by_key` (closure-driven result types + custom `infer_list_hof` diagnostics) and `sort`
+(Comparable-gated via `self.satisfies` + custom error) stay bespoke in the `Ty::List` arm; and `sum`
+harvests to `sum(self) -> T` but keeps a `!elem.is_numeric()` residual gate (a plain sig would wrongly
+accept a non-numeric list). `Map`/`Set`'s key/element type param carries a `Hashable` bound so the internal
+`Map[K, V]`/`Set[T]` return types resolve past the hashable gate at harvest. The bespoke
+`list_method_sig`/`map_method_sig`/`set_method_sig` fns are DELETED; `unique_member_owner`'s bail set now
+checks the harvested tables' `methods.contains_key` (byte-identical to the retired arms' 9/8/7 flat
+methods) and the `builtin_method_slices_all_resolve` hover drift-guard resolves the slices against the
+seeded tables. Parser+checker-only. ~1283 checker tests + 3-engine parity green.
+
 **✅ NATIVE-PRELUDE — phase 4c-followup (native instance methods now declare `self`, mirroring user
 structs) (2026-07-02).** A `native fn` inside a `native struct` body is an INSTANCE method and now MUST
 declare a leading bare `self` as its first parameter (`native fn read(self, n: int) -> Result[str]`,
