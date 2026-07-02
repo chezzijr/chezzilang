@@ -824,7 +824,13 @@ impl Checker {
         for (idx, lm) in graph.modules.iter().enumerate() {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
-                c.module_sigs.insert(lm.id.clone(), native_module_sig(name));
+                let mut sig = native_module_sig(name);
+                // std.regex is a FILE-LESS virtual module: its `Match` type's SIGNATURE is harvested
+                // from a PARSE-ONLY companion stub (phase 4a), not hand-built in `native_module_sig`.
+                if name == "std.regex" {
+                    c.harvest_native_struct_stub(&mut sig);
+                }
+                c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
             }
             let label = if lm.id == graph.entry {
@@ -1177,16 +1183,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
         sig.types.insert(sname.to_string());
     };
     match name {
-        "std.regex" => export_struct(
-            &mut sig,
-            "Match",
-            vec![
-                ("text", Ty::Str),
-                ("start", Ty::Int),
-                ("end", Ty::Int),
-                ("groups", Ty::list(Ty::Str)),
-            ],
-        ),
+        // std.regex's `Match` is PHASE-4a MIGRATED: its StructInfo is harvested from the parse-only
+        // companion stub (`std/regex.stub.chz`) in `harvest_native_struct_stub` at graph-check time,
+        // NOT hand-built here. (Response/ProcResult below stay hand-built until phase 4b.)
         "std.request" => export_struct(
             &mut sig,
             "Response",
@@ -1779,6 +1778,59 @@ impl Checker {
             self.bare_types
                 .entry("Ref".into())
                 .or_insert_with(|| "Ref".into());
+        }
+    }
+
+    /// Phase 4a — COMPANION-STUB loader for file-less native modules. `std.regex` is a virtual module
+    /// (the resolver injects an empty AST — there is no `std/regex.chz`), so its `Match` type's SIGNATURE
+    /// is declared in a PARSE-ONLY companion stub (`std/regex.stub.chz`, embedded via `include_str!`).
+    /// The stub is NEVER added to the runnable module graph (not always-linked, not executed); it is
+    /// parsed solely to harvest its `native struct` declarations into the module's [`ModuleSig`]
+    /// (`struct_defs` + `types`), REPLACING what `native_module_sig` used to hand-build for `Match`. The
+    /// regex FUNCTIONS stay hand-built in `native_module_sig`; only `Match`'s StructInfo comes from here.
+    ///
+    /// `origin` is FORCED to [`StructOrigin::Builtin`] (load-bearing): it drives `imported_builtin_types`
+    /// on import → both engines' name-keyed pure-type `bind_import` skip stays correct (a `from
+    /// std.regex import Match` must NOT bind a runtime module-member value). The parse-only path never
+    /// sets `current_module_is_stdlib`, so the normal origin-from-flag rule can't apply — hence the force.
+    fn harvest_native_struct_stub(&mut self, sig: &mut ModuleSig) {
+        const STUB: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/std/regex.stub.chz"));
+        let Ok(toks) = crate::lexer::tokenize(STUB) else {
+            return;
+        };
+        let Ok(module) = crate::parser::parse(toks) else {
+            return;
+        };
+        for s in &module.stmts {
+            if let StmtKind::NativeStruct {
+                name,
+                type_params,
+                fields,
+                span,
+                ..
+            } = &s.kind
+            {
+                // Type params are in scope across the field signatures (so a future generic native
+                // struct's `T`-typed field resolves to `Ty::Param`). Match has none — this is a no-op
+                // for it, but keeps the harvest correct for phase-4b generic native types.
+                let saved = self.enter_type_params(type_params);
+                let harvested_fields: Vec<(String, Ty)> = fields
+                    .iter()
+                    .map(|f| (f.name.clone(), self.resolve_type(&f.ty, *span)))
+                    .collect();
+                self.exit_type_params(saved);
+                sig.struct_defs.insert(
+                    name.clone(),
+                    StructInfo {
+                        type_params: type_params.clone(),
+                        fields: harvested_fields,
+                        methods: HashMap::new(),
+                        origin: StructOrigin::Builtin,
+                        doc: None,
+                    },
+                );
+                sig.types.insert(name.clone());
+            }
         }
     }
 
@@ -3389,6 +3441,21 @@ impl Checker {
                         self.register_native_decl(decl);
                     }
                 }
+                StmtKind::NativeStruct { span, .. } => {
+                    // `native struct` is PRELUDE/STD-ONLY, the type-level analog of `native fn`/`native
+                    // ctor` (a user program can't declare a native type whose layout the runtime doesn't
+                    // know). Reject it in a non-stdlib module. In a stdlib module it is a no-op here: the
+                    // ONLY native struct is regex.Match, whose SIGNATURE is harvested from a companion
+                    // stub in `harvest_native_struct_stub` (the stub is never a graph module, so this
+                    // arm is reached only by user files → the guard always fires there).
+                    if !self.current_module_is_stdlib {
+                        self.error(
+                            *span,
+                            "native struct declarations are only allowed in standard-library modules"
+                                .to_string(),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -4990,9 +5057,12 @@ impl Checker {
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }
-            // Imports, extern blocks, and native decls carry nothing to check in pass 2 (native decls
-            // are fully validated + registered in `hoist`).
-            StmtKind::Import(_) | StmtKind::Extern { .. } | StmtKind::Native(_) => {}
+            // Imports, extern blocks, and native (fn/ctor/struct) decls carry nothing to check in pass 2
+            // (native decls are fully validated + registered in `hoist`).
+            StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. } => {}
             StmtKind::If {
                 branches,
                 else_block,

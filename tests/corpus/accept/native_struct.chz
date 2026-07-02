@@ -1,0 +1,6 @@
+# rule: nativeStructDecl
+native struct Match:
+    text: str
+    start: int
+    end: int
+    groups: List[str]

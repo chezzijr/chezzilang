@@ -1121,6 +1121,8 @@ impl Walker<'_> {
             | StmtKind::Extern { .. }
             // A `native fn`/`native ctor` decl is a body-less signature — no nested exprs/bindings.
             | StmtKind::Native(_)
+            // A `native struct` decl carries only body-less field type annotations — nothing to desugar.
+            | StmtKind::NativeStruct { .. }
             | StmtKind::TypeAlias { .. } => {}
         }
         Ok(())

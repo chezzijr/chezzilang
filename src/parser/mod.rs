@@ -329,9 +329,16 @@ impl Parser {
             Token::Protocol => self.parse_protocol()?,
             Token::Extern => self.parse_extern()?,
             Token::Native => {
-                let k = self.parse_native()?;
-                self.expect_stmt_end()?;
-                k
+                // `native struct Name:` owns an indented block (like `struct`); the bodyless
+                // `native fn`/`native ctor` forms are line-terminated. Dispatch on the word after
+                // `native`.
+                if self.peek_at(1) == &Token::Struct {
+                    self.parse_native_struct()?
+                } else {
+                    let k = self.parse_native()?;
+                    self.expect_stmt_end()?;
+                    k
+                }
             }
             Token::Type => {
                 let k = self.parse_type_alias()?;
@@ -797,6 +804,57 @@ impl Parser {
             ret,
             span,
         }))
+    }
+
+    /// `native struct NAME[T…]:` then an INDENT block of body-less field declarations — the TYPE-level
+    /// analog of [`parse_native`] (`native fn`/`native ctor`). Prelude/std-only (the checker's hoist
+    /// rejects it in a user module); a nested one is already rejected by the depth>1 `Token::Native`
+    /// guard in [`parse_stmt`]. Fields-only for phase 4a: a method sig (`fn`/`test`) or a field
+    /// `= default` inside the body is a parse error (bodyless native method sigs are a phase-4b
+    /// follow-up). Mirrors [`parse_struct`]'s field loop but with no methods/defaults.
+    fn parse_native_struct(&mut self) -> PResult<StmtKind> {
+        let span = self.cur_span();
+        self.expect(&Token::Native)?;
+        self.expect(&Token::Struct)?;
+        let name_span = self.cur_span();
+        let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
+        self.open_block()?;
+        let mut fields = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            if self.check(&Token::Fn) || self.check(&Token::Test) {
+                return Err(self.err(
+                    "native struct methods are not supported (phase 4b): declare fields only"
+                        .to_string(),
+                ));
+            }
+            let fname_span = self.cur_span();
+            let fname = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let ty = self.parse_type()?;
+            if self.check(&Token::Assign) {
+                return Err(self.err(
+                    "native struct fields cannot have default values (the layout is native)"
+                        .to_string(),
+                ));
+            }
+            fields.push(Field {
+                name: fname,
+                name_span: fname_span,
+                ty,
+                default: None,
+            });
+            self.skip_newlines();
+        }
+        self.expect(&Token::Dedent)?;
+        Ok(StmtKind::NativeStruct {
+            name,
+            name_span,
+            type_params,
+            fields,
+            span,
+        })
     }
 
     /// `extern "lib":` then an INDENT block of body-less C function signatures. Mirrors
@@ -2716,6 +2774,64 @@ mod tests {
         let e = parse_err("native thing foo()\n");
         assert!(
             e.message.contains("expected 'fn' or 'ctor' after 'native'"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_struct_parses_fields_only() {
+        // `native struct Name:` with an indented block of body-less field decls → StmtKind::NativeStruct.
+        let StmtKind::NativeStruct {
+            name,
+            type_params,
+            fields,
+            ..
+        } = only(
+            "native struct Match:\n    text: str\n    start: int\n    end: int\n    groups: List[str]\n",
+        )
+        else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(name, "Match");
+        assert!(type_params.is_empty());
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["text", "start", "end", "groups"]);
+        assert!(fields.iter().all(|f| f.default.is_none()));
+    }
+
+    #[test]
+    fn native_struct_nested_rejected() {
+        // A `native struct` is TOP-LEVEL-only: nested inside a fn body it is a parse error (the depth>1
+        // `Token::Native` guard fires before dispatch).
+        let e = parse_err("fn f():\n    native struct X:\n        a: int\n");
+        assert!(
+            e.message
+                .contains("native declaration must be a top-level declaration"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_struct_method_rejected() {
+        // Fields-only (phase 4a): a method sig inside a native-struct body is a parse error.
+        let e = parse_err("native struct M:\n    a: int\n    fn m(self) -> int\n");
+        assert!(
+            e.message
+                .contains("native struct methods are not supported"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_struct_field_default_rejected() {
+        // A native struct field carries no default (the layout is native).
+        let e = parse_err("native struct M:\n    a: int = 0\n");
+        assert!(
+            e.message
+                .contains("native struct fields cannot have default values"),
             "unexpected error: {}",
             e.message
         );

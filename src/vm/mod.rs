@@ -27587,6 +27587,43 @@ main()
         assert_eq!(out, "yo3\n");
     }
 
+    /// Phase 4a — the regex.Match SIGNATURE now comes from a parsed `native struct` companion stub
+    /// (harvested into std.regex's ModuleSig), replacing the hand-built `native_module_sig` arm. This
+    /// must be a ZERO observable behavior change on ALL THREE engines: producing a `Match` (regex.find),
+    /// reading every field, `from std.regex import Match`, and qualified `regex.Match(...)` are byte-
+    /// identical on interp, the cooperative VM, AND the M:N OS-thread engine. This is the regression net
+    /// proving the native-seam pure-type `bind_import` skip still holds in both engines (`from std.regex
+    /// import Match` must NOT bind a runtime value / fault). The origin=Builtin force in
+    /// `harvest_native_struct_stub` is what keeps that skip correct.
+    #[test]
+    fn regex_match_stub_migration_three_engine_parity() {
+        let src = "import std.regex\n\
+                   import Match from std.regex\n\
+                   fn describe(m: Match) -> str:\n\
+                   \x20   return m.text + \"@\" + str(m.start) + \"-\" + str(m.end) + \":\" + \",\".join(m.groups)\n\
+                   lit: Match = regex.Match(\"lit\", 9, 12, [\"g\"])\n\
+                   print(describe(lit))\n\
+                   match regex.find(\"[0-9]+\", \"a12b\"):\n\
+                   \x20   Ok(opt):\n\
+                   \x20       match opt:\n\
+                   \x20           Some(m): print(describe(m))\n\
+                   \x20           None: print(\"none\")\n\
+                   \x20   Err(e): print(e)\n";
+        // VM(serial) + interp byte-identical (the standard two-engine parity gate).
+        let out = parity_entry(src);
+        assert_eq!(out, "lit@9-12:g\n12@1-3:\n");
+        // …and the M:N OS-thread engine agrees (needs the graph path — write a file, drive run_file_*).
+        let t = TmpDir::new();
+        let path = t.write("main.chz", src);
+        let (mn_out, _e, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("regex Match stub program should run on the M:N engine");
+        assert_eq!(
+            mn_out, out,
+            "M:N output diverged from VM/interp on regex Match stub"
+        );
+    }
+
     /// from-import `Response` (the `import Name from module` selective form).
     #[test]
     fn synthetic_struct_from_import_ctor_parity() {

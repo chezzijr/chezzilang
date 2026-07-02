@@ -2407,6 +2407,34 @@ The eight universe builtins `ord`, `chr`, `panic` (fns) and `int`, `float`, `str
 (ctors) are declared this way in `std/prelude.chz`. `print` stays engine-synthetic (its `sep=`/`end=`
 variadic isn't expressible), and `range` + the `List`/`Map`/`Set` container ctors remain built-in for now.
 
+## 12d. `native struct` — native-type signatures in Chezzi (prelude/std-only)
+
+The **type-level** analog of `native fn`/`native ctor` (phase 4a). A body-less `native struct Name:`
+declares a native (Rust-backed) type's **checker signature** — its field layout — in Chezzi; the runtime
+layout + method dispatch stay **native** (name-keyed). Like `native fn`, it is **prelude/std-only** and
+**top-level only**.
+
+```chezzi
+native struct Match:      # regex.Match's SIGNATURE (fields-only)
+    text: str
+    start: int
+    end: int
+    groups: List[str]
+```
+
+- **Fields-only** (phase 4a): a `fn`/`test` method sig or a field `= default` inside the body is a
+  parse error. Bodyless native **method** sigs are a phase-4b follow-up.
+- **Prelude/std-only:** a `native struct` in an ordinary user `.chz` is a **checker error** (*native
+  struct declarations are only allowed in standard-library modules*); nesting it is a parse error.
+- **Companion-stub convention** (file-less native modules): `std.regex` is a *virtual* module — the
+  resolver injects an empty AST, there is no `std/regex.chz`. Its `Match` type's signature is declared
+  in a **parse-only companion stub `std/regex.stub.chz`** (embedded via `include_str!`), which is
+  **never** added to the runnable module graph — the checker parses it solely to harvest its `native
+  struct` decls into `std.regex`'s module signature. The type stays **import-gated** exactly as before
+  (`import std.regex` / `import Match from std.regex` licenses the bare `Match`; `regex.Match(...)`
+  qualified); the migration is a **zero observable behavior change** (identical runtime + bytecode,
+  three-engine byte-identical).
+
 ## 13. Standard library (v1)
 
 > **The complete library reference — every global builtin, type method, runtime type, and `std.*`

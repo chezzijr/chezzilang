@@ -1175,6 +1175,9 @@ impl Compiler {
             // A `native fn`/`native ctor` decl is a compile-time SIGNATURE source only — it gets no
             // bytecode, no binding, and is never a callable user fn (dispatch stays name-keyed).
             | StmtKind::Native(_)
+            // A `native struct` decl is likewise a compile-time SIGNATURE source only (checker-harvested
+            // from a companion stub); its runtime layout stays native (name-keyed), so no bytecode.
+            | StmtKind::NativeStruct { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {

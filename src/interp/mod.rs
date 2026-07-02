@@ -5689,6 +5689,9 @@ impl Interp {
             // A `native fn`/`native ctor` decl is a compile-time signature source only — no runtime
             // binding; dispatch of the migrated builtins stays name-keyed (`builtins::call`).
             | StmtKind::Native(_)
+            // A `native struct` decl is a compile-time signature source only — no runtime binding; the
+            // native type's layout + dispatch stay name-keyed.
+            | StmtKind::NativeStruct { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::Import(_) => Ok(Flow::Normal),
             StmtKind::Match { scrutinee, arms } => self.exec_match(scrutinee, arms),
