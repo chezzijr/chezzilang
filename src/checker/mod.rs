@@ -864,10 +864,12 @@ impl Checker {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
                 let mut sig = native_module_sig(name);
-                // std.regex is a FILE-LESS virtual module: its `Match` type's SIGNATURE is harvested
-                // from a PARSE-ONLY companion stub (phase 4a), not hand-built in `native_module_sig`.
+                // std.regex is FILE-BACKED (phase 4b): its whole SIGNATURE (the `native struct Match`
+                // + the 5 `native fn`s) is harvested from the real `std/regex.chz` AST the resolver
+                // loaded — NOT hand-built in `native_module_sig` (which returns empty for it). This
+                // retired both the phase-4a companion stub and the `native_module_sig` regex arm.
                 if name == "std.regex" {
-                    c.harvest_native_struct_stub(&mut sig);
+                    c.harvest_native_module(&lm.ast, &mut sig);
                 }
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
@@ -1065,27 +1067,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `sig.functions` and bind a (nonexistent) runtime value that faults at runtime.
             sig.types.insert("timer".to_string());
         }
-        "std.regex" => {
-            // `Match` is the synthetic struct seeded in `seed_stdlib_structs`.
-            let m = || Ty::Struct("Match".to_string(), vec![]);
-            func("is_match", vec![Ty::Str, Ty::Str], Ty::result(Ty::Bool));
-            func("find", vec![Ty::Str, Ty::Str], Ty::result(Ty::option(m())));
-            func(
-                "find_all",
-                vec![Ty::Str, Ty::Str],
-                Ty::result(Ty::list(m())),
-            );
-            func(
-                "replace_all",
-                vec![Ty::Str, Ty::Str, Ty::Str],
-                Ty::result(Ty::Str),
-            );
-            func(
-                "split",
-                vec![Ty::Str, Ty::Str],
-                Ty::result(Ty::list(Ty::Str)),
-            );
-        }
+        // std.regex is FILE-BACKED (phase 4b): its whole signature (the `native struct Match` + the 5
+        // `native fn`s) is declared in `std/regex.chz` and harvested via `harvest_native_module` — there
+        // is NO hand-built arm here (this fn returns the default-empty sig for it). See the caller.
         "std.request" => {
             // `Response` is the synthetic struct seeded in `seed_stdlib_structs`. `get`/`post`/
             // `request` carry an OPTIONAL trailing `timeout_ms: int` and are installed AFTER the
@@ -1222,9 +1206,9 @@ fn native_module_sig(name: &str) -> ModuleSig {
         sig.types.insert(sname.to_string());
     };
     match name {
-        // std.regex's `Match` is PHASE-4a MIGRATED: its StructInfo is harvested from the parse-only
-        // companion stub (`std/regex.stub.chz`) in `harvest_native_struct_stub` at graph-check time,
-        // NOT hand-built here. (Response/ProcResult below stay hand-built until phase 4b.)
+        // std.regex's `Match` is PHASE-4b MIGRATED: it is a file-backed `native struct` in
+        // `std/regex.chz`, harvested via `harvest_native_module` at graph-check time — NOT hand-built
+        // here. (Response/ProcResult below stay hand-built until phase 4c.)
         "std.request" => export_struct(
             &mut sig,
             "Response",
@@ -1820,27 +1804,26 @@ impl Checker {
         }
     }
 
-    /// Phase 4a — COMPANION-STUB loader for file-less native modules. `std.regex` is a virtual module
-    /// (the resolver injects an empty AST — there is no `std/regex.chz`), so its `Match` type's SIGNATURE
-    /// is declared in a PARSE-ONLY companion stub (`std/regex.stub.chz`, embedded via `include_str!`).
-    /// The stub is NEVER added to the runnable module graph (not always-linked, not executed); it is
-    /// parsed solely to harvest its `native struct` declarations into the module's [`ModuleSig`]
-    /// (`struct_defs` + `types`), REPLACING what `native_module_sig` used to hand-build for `Match`. The
-    /// regex FUNCTIONS stay hand-built in `native_module_sig`; only `Match`'s StructInfo comes from here.
+    /// Phase 4b — harvest a FILE-BACKED native std module's whole SIGNATURE from its parsed in-module
+    /// `native struct` / `native fn` decls into its [`ModuleSig`], REPLACING both the retired phase-4a
+    /// companion stub and the hand-built `native_module_sig` regex arm. Used only for
+    /// `std.regex` today (the resolver loads its real `std/regex.chz` while keeping the `native` marker;
+    /// runtime member VALUES stay name-keyed via `native_members` — this supplies only the checker sig).
     ///
-    /// `origin` is FORCED to [`StructOrigin::Builtin`] (load-bearing): it drives `imported_builtin_types`
-    /// on import → both engines' name-keyed pure-type `bind_import` skip stays correct (a `from
-    /// std.regex import Match` must NOT bind a runtime module-member value). The parse-only path never
-    /// sets `current_module_is_stdlib`, so the normal origin-from-flag rule can't apply — hence the force.
-    fn harvest_native_struct_stub(&mut self, sig: &mut ModuleSig) {
-        const STUB: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/std/regex.stub.chz"));
-        let Ok(toks) = crate::lexer::tokenize(STUB) else {
-            return;
-        };
-        let Ok(module) = crate::parser::parse(toks) else {
-            return;
-        };
-        for s in &module.stmts {
+    /// Two passes so a `native fn`'s return type can reference the module's own `native struct` (regex's
+    /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/
+    /// `sig.types`, origin FORCED [`StructOrigin::Builtin`] — load-bearing for `imported_builtin_types`
+    /// → both engines' pure-type `bind_import` skip) and TRANSIENTLY inserts each name into
+    /// `self.struct_names` so pass 2's `resolve_type` resolves the bare type (the layout is already in
+    /// `self.structs` from `seed_stdlib_structs`, so `bare_key` yields the bare name — byte-identical to
+    /// the old hand-built `Ty::Struct("Match", vec![])`). Pass 2 harvests every `native fn` sig via the
+    /// native-decl dynamic convention (unannotated param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`).
+    /// The transient `struct_names` insertions are then REMOVED so IMPORT-GATING is preserved (a bare
+    /// unimported `m: Match` still errors). Runs OUTSIDE `begin_module` — it must leave no scope residue.
+    fn harvest_native_module(&mut self, ast: &crate::ast::Module, sig: &mut ModuleSig) {
+        // PASS 1 — native structs.
+        let mut transient: Vec<String> = Vec::new();
+        for s in &ast.stmts {
             if let StmtKind::NativeStruct {
                 name,
                 type_params,
@@ -1849,9 +1832,6 @@ impl Checker {
                 ..
             } = &s.kind
             {
-                // Type params are in scope across the field signatures (so a future generic native
-                // struct's `T`-typed field resolves to `Ty::Param`). Match has none — this is a no-op
-                // for it, but keeps the harvest correct for phase-4b generic native types.
                 let saved = self.enter_type_params(type_params);
                 let harvested_fields: Vec<(String, Ty)> = fields
                     .iter()
@@ -1869,7 +1849,35 @@ impl Checker {
                     },
                 );
                 sig.types.insert(name.clone());
+                // Make the native type's bare name resolvable while harvesting the fn sigs below (so a
+                // return type like `Result[Option[Match]]` resolves). Removed after pass 2.
+                if self.struct_names.insert(name.clone()) {
+                    transient.push(name.clone());
+                }
             }
+        }
+        // PASS 2 — native fns (module members, sig from the parsed decl; runtime value name-keyed).
+        for s in &ast.stmts {
+            if let StmtKind::Native(decl) = &s.kind {
+                let params: Vec<Ty> = decl
+                    .params
+                    .iter()
+                    .map(|p| match &p.ty {
+                        Some(t) => self.resolve_type(t, decl.span),
+                        None => Ty::Unknown,
+                    })
+                    .collect();
+                let ret = match &decl.ret {
+                    Some(t) => self.resolve_type(t, decl.span),
+                    None => Ty::Unknown,
+                };
+                sig.functions
+                    .insert(decl.name.clone(), FnSig::plain(params, ret));
+            }
+        }
+        // Preserve import-gating: drop the transient bare-name visibility.
+        for name in transient {
+            self.struct_names.remove(&name);
         }
     }
 
@@ -2937,6 +2945,16 @@ impl Checker {
                     }
                     self.enum_names.insert(name.clone());
                 }
+                // A file-backed native std module (`std/regex.chz`) checked STANDALONE as the ENTRY
+                // (`chezzi check std/regex.chz` / editor/LSP) goes through this normal module path
+                // (native:None), unlike the import path (native:Some → `harvest_native_module`). Register
+                // the `native struct`'s bare name so a later same-file `native fn` return type that
+                // references it (e.g. `find -> Result[Option[Match]]`) resolves — its layout is already
+                // seeded in `self.structs` by `seed_stdlib_structs`. Stdlib-only (a user-file `native
+                // struct` is rejected downstream in the hoist pass); the import path never reaches here.
+                StmtKind::NativeStruct { name, .. } if self.current_module_is_stdlib => {
+                    self.struct_names.insert(name.clone());
+                }
                 StmtKind::NewType { name, .. } => {
                     if matches!(
                         name.as_str(),
@@ -3484,9 +3502,10 @@ impl Checker {
                     // `native struct` is PRELUDE/STD-ONLY, the type-level analog of `native fn`/`native
                     // ctor` (a user program can't declare a native type whose layout the runtime doesn't
                     // know). Reject it in a non-stdlib module. In a stdlib module it is a no-op here: the
-                    // ONLY native struct is regex.Match, whose SIGNATURE is harvested from a companion
-                    // stub in `harvest_native_struct_stub` (the stub is never a graph module, so this
-                    // arm is reached only by user files → the guard always fires there).
+                    // ONLY native struct is regex.Match (in the file-backed `std/regex.chz`), whose
+                    // SIGNATURE is harvested via `harvest_native_module` off the native-module arm — this
+                    // hoist arm is reached only by non-native modules, so a native struct here is a user
+                    // file → the guard always fires there.
                     if !self.current_module_is_stdlib {
                         self.error(
                             *span,

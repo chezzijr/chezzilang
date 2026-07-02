@@ -392,7 +392,16 @@ impl Builder {
             // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
-                self.visit_native(&target, name);
+                // std.regex (phase 4b) is FILE-BACKED: its native TYPE + fns are declared in a real
+                // `std/regex.chz` (the checker harvests them as the sig source). Load that real AST
+                // while KEEPING the `native` marker so runtime member dispatch stays name-keyed via
+                // `native_members`. Fallible (like the always-linked prelude): a missing/unparseable
+                // std/regex.chz is a hard error. Other native modules stay virtual (empty AST).
+                if name == "std.regex" {
+                    self.visit_native_file(&target, name, &path, span)?;
+                } else {
+                    self.visit_native(&target, name);
+                }
                 resolved.push(ResolvedImport {
                     target,
                     import,
@@ -458,6 +467,48 @@ impl Builder {
             imports: Vec::new(),
             native: Some(name),
         });
+    }
+
+    /// Emit a FILE-BACKED native std module (phase 4b: `std.regex`). Like [`visit_native`] it carries
+    /// the `native` marker (so the engines dispatch its members name-keyed via `native_members`) and a
+    /// synthetic `<native:…>` id, but its AST is the REAL `.chz` file under `std_root` (its `native
+    /// struct`/`native fn` decls are the checker's SIGNATURE source), not an injected empty module. The
+    /// file declares only bodyless native members and imports nothing, so its imports are empty and it
+    /// never runs top-level. Fallible: a missing/unparseable file is a hard error (like the prelude).
+    fn visit_native_file(
+        &mut self,
+        id: &ModuleId,
+        name: &'static str,
+        path: &[String],
+        import_span: Span,
+    ) -> Result<(), ResolveError> {
+        if self.visited.contains_key(id) {
+            return Ok(());
+        }
+        let dotted: Vec<String> = name.split('.').map(str::to_string).collect();
+        let file = module_file(path, &self.project_root, &self.std_root);
+        let source = std::fs::read_to_string(&file).map_err(|_| ResolveError {
+            message: prefix(
+                &dotted,
+                format!(
+                    "cannot find native module file '{}' (looked for {})",
+                    dotted_label(&dotted),
+                    file.display()
+                ),
+            ),
+            span: import_span,
+            module: Some(dotted_label(&dotted)),
+        })?;
+        let ast = self.parse(&source, &dotted)?;
+        self.visited.insert(id.clone(), ());
+        self.order.push(LoadedModule {
+            id: id.clone(),
+            dotted,
+            ast,
+            imports: Vec::new(),
+            native: Some(name),
+        });
+        Ok(())
     }
 
     /// Lex + parse a module's source, wrapping failures with the module label (since `Span`
@@ -865,6 +916,45 @@ mod tests {
         assert_eq!(m.native, Some("std.math"));
         assert!(m.ast.stmts.is_empty());
         // Dependencies precede dependents: the native module loads before the entry.
+        assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+    }
+
+    // 8b. std.regex (phase 4b) is FILE-BACKED: it keeps the `native` marker (runtime dispatch stays
+    // name-keyed via `native_members`) but the resolver loads the REAL `std/regex.chz` AST — the
+    // `native struct Match` + `native fn` decls are present (the checker harvests them as the sig
+    // source, retiring the companion stub + the native_module_sig regex arm). Entry-last invariant holds.
+    #[test]
+    fn std_regex_is_file_backed_with_native_marker() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "import std.regex\nfn main(): print(1)\n");
+        let graph = build_graph(&entry).unwrap();
+        let m = graph
+            .modules
+            .iter()
+            .find(|m| m.label() == "std.regex")
+            .expect("std.regex should be in the graph");
+        // The native marker is KEPT (unlike a normal user module) so runtime member dispatch stays
+        // name-keyed, but the AST is the REAL file (non-empty), unlike the virtual std.math above.
+        assert_eq!(m.native, Some("std.regex"));
+        assert!(
+            !m.ast.stmts.is_empty(),
+            "std.regex must load the real std/regex.chz AST (native struct + native fns)"
+        );
+        assert!(
+            m.ast.stmts.iter().any(|s| matches!(
+                &s.kind,
+                crate::ast::StmtKind::NativeStruct { name, .. } if name == "Match"
+            )),
+            "std.regex AST must carry `native struct Match`"
+        );
+        assert!(
+            m.ast
+                .stmts
+                .iter()
+                .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == "find")),
+            "std.regex AST must carry the `native fn find` decl"
+        );
+        // Entry-last invariant holds.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 
