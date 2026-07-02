@@ -905,12 +905,13 @@ mod tests {
         assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
-    // 8. A still-virtual native std module (std.concurrency) is resolved without any .chz file, flagged
-    // native, with an empty AST (its sig is hand-built in `native_module_sig`). (std.math/io/os/rand/fs
-    // 4d, encoding/crypto/uuid/time 4e, process/request 4f, ffi 4c-ffi, net 4c-net migrated to
-    // FILE-BACKED; only concurrency stays virtual — opcode-backed type-licensing.)
+    // 8. std.concurrency (phase 4c-concurrency) is FILE-BACKED: it keeps the `native` marker (runtime
+    // dispatch stays name-keyed / opcode-backed) but the resolver loads the REAL `std/concurrency.chz`
+    // AST — its four `native struct` decls (Shared/RwShared/Atomic/Executor, WITH harvested method
+    // tables) are present, unlike a virtual native module's empty AST. This was the LAST virtual native
+    // std module; after its migration EVERY native std module is file-backed.
     #[test]
-    fn native_std_module_is_virtual() {
+    fn native_std_module_is_file_backed() {
         let t = TmpDir::new();
         let entry = t.write("main.chz", "import std.concurrency\nfn main(): print(1)\n");
         let graph = build_graph(&entry).unwrap();
@@ -919,8 +920,20 @@ mod tests {
             .iter()
             .find(|m| m.label() == "std.concurrency")
             .expect("std.concurrency should be in the graph");
+        // The native marker is KEPT (runtime member dispatch stays name-keyed / opcode-backed), but the
+        // AST is the REAL file (non-empty), unlike the old virtual std.concurrency.
         assert_eq!(m.native, Some("std.concurrency"));
-        assert!(m.ast.stmts.is_empty());
+        assert!(
+            !m.ast.stmts.is_empty(),
+            "std.concurrency must load the real std/concurrency.chz AST (native structs)"
+        );
+        assert!(
+            m.ast.stmts.iter().any(|s| matches!(
+                &s.kind,
+                crate::ast::StmtKind::NativeStruct { name, .. } if name == "Shared"
+            )),
+            "std.concurrency AST must carry `native struct Shared`"
+        );
         // Dependencies precede dependents: the native module loads before the entry.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }

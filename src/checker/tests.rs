@@ -4582,9 +4582,12 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
             "{m} numeric_poly must no longer be hand-built in native_module_sig"
         );
     }
-    // native_module_sig is still the home for the residual opcode/type-license modules — std.concurrency
-    // (opcode-backed) keeps its type names there. (std.net + std.ffi are FILE-BACKED now, phase 4c.)
-    assert!(!native_module_sig("std.concurrency").types.is_empty());
+    // native_module_sig is still the home for the residual type-license modules — std.ffi keeps its
+    // opaque `ptr` handle + fixed-width C-ABI integer names there (no runtime value, no .chz syntax for
+    // a bare type-license alias). std.concurrency is FILE-BACKED now (phase 4c-concurrency): its arm is
+    // DELETED entirely, so `native_module_sig("std.concurrency").types` is EMPTY.
+    assert!(!native_module_sig("std.ffi").types.is_empty());
+    assert!(native_module_sig("std.concurrency").types.is_empty());
 }
 
 /// The effective (graph-built) sigs for a representative fn of each migrated module must EXACTLY equal
@@ -4691,10 +4694,12 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(consts, vec!["pi", "e"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
-    // std.net (4c-net) + std.ffi (4c-ffi) are FILE-BACKED now; only std.concurrency stays virtual.
+    // std.net (4c-net) + std.ffi (4c-ffi) + std.concurrency (4c-concurrency) are FILE-BACKED now —
+    // std.concurrency was the LAST virtual native std module, so EVERY native std module is now file-
+    // backed (there is no virtual one left to assert `!is_file_backed_native` against).
     assert!(crate::native::is_file_backed_native("std.net"));
     assert!(crate::native::is_file_backed_native("std.ffi"));
-    assert!(!crate::native::is_file_backed_native("std.concurrency"));
+    assert!(crate::native::is_file_backed_native("std.concurrency"));
 }
 
 /// Phase 4c-net — std.net is FILE-BACKED: its `Socket`/`Listener` native structs carry a harvested
@@ -4977,10 +4982,10 @@ fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
         time.types.contains("timer"),
         "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
     );
-    // std.net is FILE-BACKED now (phase 4c-net): its arm is retired entirely (asserted in
-    // net_sig_from_file_not_native_module_sig). std.concurrency stays hand-built as a pure
-    // opcode/type-license arm — native_module_sig is still its home.
-    assert!(!native_module_sig("std.concurrency").types.is_empty());
+    // std.net + std.concurrency are FILE-BACKED now (phase 4c): their arms are retired entirely
+    // (asserted in net_sig_from_file_not_native_module_sig / concurrency_sig_from_file_not_native_module_sig).
+    // std.ffi keeps a residual type-license arm — native_module_sig is still its home.
+    assert!(!native_module_sig("std.ffi").types.is_empty());
     // std.ffi is FILE-BACKED now (phase 4c-ffi): its 59 fns are harvested from std/ffi.chz, so
     // `native_module_sig("std.ffi")` exports NO functions. Its arm is REDUCED to only the type-license
     // tail — the opaque `ptr` handle type + the eight fixed-width C-ABI integer names (int8..uint64) —
@@ -5032,6 +5037,120 @@ fn enc_fn_sigs_exact() {
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
         assert_eq!(fs.min_params, params.len(), "fn '{name}' arity drifted");
     }
+}
+
+// ===== phase 4c-concurrency: std.concurrency is FILE-BACKED (native struct decls in std/concurrency.chz)
+
+/// PROVENANCE — the `"std.concurrency"` arm is DELETED from `native_module_sig`; the whole signature
+/// (the four `Shared`/`RwShared`/`Atomic`/`Executor` native structs WITH their harvested method tables)
+/// now comes from parsing `std/concurrency.chz`. So `native_module_sig("std.concurrency")` exports
+/// NOTHING (empty types + struct_defs), while a full graph check that `import std.concurrency` resolves
+/// all four types and their methods. This was the LAST virtual native module — after it,
+/// `native_module_sig` retains only the ffi (ptr/width) + time (timer) type-license tails.
+#[test]
+fn concurrency_sig_from_file_not_native_module_sig() {
+    let raw = native_module_sig("std.concurrency");
+    assert!(
+        raw.types.is_empty(),
+        "std.concurrency type names must no longer be hand-built in native_module_sig (harvested from std/concurrency.chz), got: {:?}",
+        raw.types
+    );
+    assert!(
+        raw.struct_defs.is_empty(),
+        "std.concurrency struct_defs must no longer be hand-built in native_module_sig"
+    );
+    // A full graph check harvests the four native structs with their method tables.
+    let sig = native_module_sig_via_graph("concurrency");
+    let expected: &[(&str, &[&str])] = &[
+        ("Shared", &["get", "set", "update"]),
+        ("RwShared", &["get", "set", "write", "read"]),
+        (
+            "Atomic",
+            &["load", "store", "exchange", "cas", "add", "sub"],
+        ),
+        ("Executor", &["submit", "shutdown", "shutdown_now"]),
+    ];
+    for (tname, methods) in expected {
+        let info = sig
+            .struct_defs
+            .get(*tname)
+            .unwrap_or_else(|| panic!("std.concurrency must harvest native struct '{tname}'"));
+        for m in *methods {
+            assert!(
+                info.methods.contains_key(*m),
+                "std.concurrency '{tname}' must harvest method '{m}', got: {:?}",
+                info.methods.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// METADATA PORT (phase 4c-concurrency) — two method sigs a plain harvested sig cannot express are
+/// re-attached in `attach_native_module_metadata`: `RwShared.read`'s closure param becomes `fn(T) -> ?`
+/// (any return; R recovered at the call site) and `Executor.submit`'s becomes `fn() -> ?` (any return,
+/// zero-arity). The GENERIC `Shared[T]`/`RwShared[T]`/`Atomic[T]` method sigs carry `Ty::Param("T")` so
+/// they substitute at each call site (the net-style native-method-binding capability extended to generics).
+#[test]
+fn concurrency_harvested_method_sigs_shape() {
+    let sig = native_module_sig_via_graph("concurrency");
+    // Shared[T].set(v: T) -> nil — the param is the box's type param, unsubstituted in the table.
+    let shared = sig.struct_defs.get("Shared").expect("Shared");
+    let set = shared.methods.get("set").expect("Shared.set");
+    assert_eq!(set.params, vec![Ty::Param("T".into())], "Shared.set param");
+    assert_eq!(set.ret, Ty::Nil, "Shared.set ret");
+    // RwShared.read(f) — metadata retyped the closure param to fn(T) -> ? (any return).
+    let rw = sig.struct_defs.get("RwShared").expect("RwShared");
+    let read = rw.methods.get("read").expect("RwShared.read");
+    match read.params.first() {
+        Some(Ty::Func { params, ret, .. }) => {
+            assert_eq!(params, &vec![Ty::Param("T".into())], "read closure param");
+            assert_eq!(**ret, Ty::Unknown, "read closure return must be ? (any R)");
+        }
+        other => panic!("RwShared.read param 0 must be fn(T) -> ?, got: {other:?}"),
+    }
+    // Executor.submit(f) — metadata retyped the closure param to fn() -> ? (zero-arity, any return).
+    let ex = sig.struct_defs.get("Executor").expect("Executor");
+    let submit = ex.methods.get("submit").expect("Executor.submit");
+    match submit.params.first() {
+        Some(Ty::Func { params, ret, .. }) => {
+            assert!(params.is_empty(), "submit closure must be zero-arity");
+            assert_eq!(**ret, Ty::Unknown, "submit closure return must be ? (any)");
+        }
+        other => panic!("Executor.submit param 0 must be fn() -> ?, got: {other:?}"),
+    }
+}
+
+/// The harvested table substitutes `T` at each call site (net's capability extended to generics): a
+/// wrong-typed `set`/`store` is rejected against the SUBSTITUTED element type, not the raw `Ty::Param`.
+#[test]
+fn concurrency_methods_resolve_via_harvested_table_with_subst() {
+    // Shared[int].set("x") — the param `T` substitutes to `int`, so a str arg is rejected.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "expected int",
+    );
+    // Shared[str].get() composes as a str (T substitutes to str).
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    print(s.get() + \"!\")\nmain()\n",
+    );
+    // Atomic add/sub numeric gate residual survives the harvest (str box has no `add`).
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
+        "no method 'add'",
+    );
+}
+
+/// Executor.submit accepts a closure with ANY return type (its result is discarded) but STILL rejects a
+/// wrong-arity closure — the metadata port types the param `fn() -> ?`, so a 1-arg closure is an error.
+#[test]
+fn executor_submit_accepts_any_return_rejects_arity() {
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(): 42)\n    ex.shutdown()\nmain()\n",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(x): x)\nmain()\n",
+        "argument 1 of 'submit'",
+    );
 }
 
 /// EXACT SIGS (phase 4c) — the 59 harvested std.ffi fn sigs must byte-match what the deleted
@@ -12396,41 +12515,35 @@ fn builtin_method_slices_all_resolve() {
     chk(CHANNEL_METHODS, "CHANNEL_METHODS", &|m| {
         channel_method_sig(m, &Ty::Int)
     });
-    chk(SHARED_METHODS, "SHARED_METHODS", &|m| {
-        shared_method_sig(m, &Ty::Int)
-    });
-    chk(RWSHARED_METHODS, "RWSHARED_METHODS", &|m| {
-        rwshared_method_sig(m, &Ty::Int)
-    });
-    chk(ATOMIC_METHODS, "ATOMIC_METHODS", &|m| {
-        atomic_method_sig(m, &Ty::Int)
-    });
-    // Phase 4c-net — Socket/Listener method sigs are now HARVESTED from std/net.chz into the type's
-    // method table (the bespoke socket_method_sig/listener_method_sig arms are retired). Resolve the
-    // hover slices against that harvested table via a graph check.
-    let net = native_module_sig_via_graph("net");
-    let net_methods = |ty: &str| -> std::collections::HashMap<String, FnSig> {
-        net.struct_defs
+    // Phase 4c-net / 4c-concurrency — Socket/Listener (net) and Shared/RwShared/Atomic/Executor
+    // (concurrency) method sigs are now HARVESTED from std/net.chz / std/concurrency.chz into each
+    // type's method table (the bespoke socket_/listener_/shared_/rwshared_/atomic_/executor_method_sig
+    // arms are retired). Resolve the hover slices against those harvested tables via a graph check.
+    let harvested = |sig: &ModuleSig, ty: &str| -> std::collections::HashMap<String, FnSig> {
+        sig.struct_defs
             .get(ty)
-            .unwrap_or_else(|| panic!("net.{ty} struct_def"))
+            .unwrap_or_else(|| panic!("harvested {ty} struct_def"))
             .methods
             .clone()
     };
-    let socket_methods = net_methods("Socket");
-    for m in SOCKET_METHODS {
-        assert!(
-            socket_methods.contains_key(*m),
-            "SOCKET_METHODS slice lists '{m}' but std/net.chz Socket has no such method (drift)"
-        );
-    }
-    let listener_methods = net_methods("Listener");
-    for m in LISTENER_METHODS {
-        assert!(
-            listener_methods.contains_key(*m),
-            "LISTENER_METHODS slice lists '{m}' but std/net.chz Listener has no such method (drift)"
-        );
-    }
-    chk(EXECUTOR_METHODS, "EXECUTOR_METHODS", &executor_method_sig);
+    let chk_harvested = |methods: &std::collections::HashMap<String, FnSig>,
+                         slice: &[&str],
+                         ty: &str| {
+        for m in slice {
+            assert!(
+                methods.contains_key(*m),
+                "{ty} hover slice lists '{m}' but the harvested std/*.chz {ty} has no such method (drift)"
+            );
+        }
+    };
+    let net = native_module_sig_via_graph("net");
+    chk_harvested(&harvested(&net, "Socket"), SOCKET_METHODS, "Socket");
+    chk_harvested(&harvested(&net, "Listener"), LISTENER_METHODS, "Listener");
+    let conc = native_module_sig_via_graph("concurrency");
+    chk_harvested(&harvested(&conc, "Shared"), SHARED_METHODS, "Shared");
+    chk_harvested(&harvested(&conc, "RwShared"), RWSHARED_METHODS, "RwShared");
+    chk_harvested(&harvested(&conc, "Atomic"), ATOMIC_METHODS, "Atomic");
+    chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
     chk(BYTES_METHODS, "BYTES_METHODS", &bytes_method_sig);
     chk(
         BYTEARRAY_METHODS,

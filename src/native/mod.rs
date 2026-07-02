@@ -370,11 +370,13 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "encoding" => Some("std.encoding"),
             "crypto" => Some("std.crypto"),
             "uuid" => Some("std.uuid"),
-            // `std.concurrency` is a file-less native module: it has NO callable members — it only
-            // LICENSES the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
-            // `Executor`) so they require `import std.concurrency` to use (the ctors are resolved by
-            // the compiler's name→opcode dispatch, not a bound module member). Only the len-2 path is
-            // native; `import std.concurrency.collection` (len-3) falls through to load the real file.
+            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): it has NO
+            // callable members — it only declares the four runtime concurrency TYPE/ctor names
+            // (`Shared`/`RwShared`/`Atomic`/`Executor`) as `native struct`s in `std/concurrency.chz`,
+            // harvested for their sigs + method tables (the ctors still lower via the compiler's
+            // name→opcode dispatch, not a bound module member). Only the len-2 path is the native module
+            // (loads `std/concurrency.chz`); `import std.concurrency.collection` (len-3) falls through
+            // to load `std/concurrency/collection.chz` as a real (non-native) file.
             "concurrency" => Some("std.concurrency"),
             _ => None,
         },
@@ -394,7 +396,10 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
 /// std.math/io/os/rand/fs (4d); std.ffi (4c-ffi) — file-backed for its 59 real fns but ALSO keeps a
 /// minimal `native_module_sig` arm for its opcode/type-license names (`ptr` + the fixed-width int
 /// names — no runtime member value), like `std.time`'s `timer`; std.net (4c-net — native structs WITH
-/// harvested method tables).
+/// harvested method tables); std.concurrency (4c-concurrency — the four GENERIC native structs
+/// Shared/RwShared/Atomic/Executor WITH harvested method tables, the LAST migration: after it every
+/// native std module is file-backed, and its arm is DELETED entirely — no opcode/type-license residual
+/// remains in `native_module_sig` for it since the four type names are harvested from the file).
 pub fn is_file_backed_native(name: &str) -> bool {
     matches!(
         name,
@@ -412,6 +417,7 @@ pub fn is_file_backed_native(name: &str) -> bool {
             | "std.fs"
             | "std.ffi"
             | "std.net"
+            | "std.concurrency"
     )
 }
 

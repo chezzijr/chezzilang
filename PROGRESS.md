@@ -11,6 +11,46 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ NATIVE-PRELUDE — phase 4c-concurrency (`std.concurrency` made file-backed: the four GENERIC native
+types `Shared[T]`/`RwShared[T]`/`Atomic[T]`/`Executor` WITH method tables declared in
+`std/concurrency.chz`) (2026-07-02).** The **LAST** virtual native module — after it EVERY native std
+module is file-backed, and `native_module_sig` retains only the **`ffi`** (`ptr` + fixed-width names) +
+**`time`** (`timer`) opcode/type-license tails (the `concurrency` arm is **DELETED ENTIRELY**, no
+residual). This EXTENDS the 4c-net native-method-binding capability from non-generic native structs
+(`Socket`/`Listener`) to **GENERIC** ones: a `native fn` in a `native struct Shared[T]` body harvests a
+method sig carrying `Ty::Param("T")`, and at each call site `native_handle_method(ty, method, &[elem])`
+**substitutes** the box's element type (`Shared[int].set` expects `int`) — the same per-type param subst
+the generic-struct machinery uses. **CRITICAL additive subtlety (as net):** `Shared`/`RwShared`/`Atomic`/
+`Executor` KEEP resolving to the RESERVED `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (opaque
+VM handles — NOT fresh `Ty::Struct`); the `.chz` `native struct` feeds the checker ONLY the type + method
+sigs, the ctors STILL lower to `Op::NewShared`/etc **by name** and every method stays VM-intercepted —
+**runtime UNTOUCHED**. The harvested tables are cached into `concurrency_seeds` (AFTER
+`attach_native_module_metadata`, unlike net's before, because the metadata step mutates the read/submit
+sigs) and re-seeded bare into `self.structs` by `seed_stdlib_structs` (method-table only — NO
+`struct_names`/`bare_types` licensing, so the bare name stays import-gated by `imported_concurrency`).
+**Two sigs a plain harvest can't express, ported as metadata** in `attach_native_module_metadata`:
+`RwShared.read(f)` — declared UNANNOTATED, retyped to `fn(T) -> ?` (any R; the real R is recovered from
+the closure at the `Ty::RwShared` dispatch arm); `Executor.submit(f)` — declared UNANNOTATED, retyped to
+`fn() -> ?` (any return, zero-arity). **One dispatch-time residual:** `Atomic.add`/`sub` exist only for a
+numeric `T` — a `!elem.is_numeric()` gate kept in the `Ty::Atomic` arm. The bespoke
+`shared_method_sig`/`rwshared_method_sig`/`atomic_method_sig`/`executor_method_sig` fns are DELETED.
+**Qualified-path fix (new vs net):** the harvested `sig.struct_defs` entry made `concurrency.Shared[int]`
+(a qualified annotation / `type`-alias / `newtype` body) resolve as a nominal `Ty::Struct` — both
+`resolve_type` and `resolve_qualified_ro` now skip a reserved native type (`qualified_builtin_ty` is
+`Some`) so it keeps its reserved `Ty` (matching the bare-after-import path). **Stdlib consumers:**
+`std/concurrency/collection.chz` (RwShared) + `std/cancel.chz` (Shared) now explicitly `import
+std.concurrency` — the file-backed native module must be a graph DEPENDENCY so its method table is
+harvested/seeded before those modules are checked, regardless of the entry program's import order
+(behavior-preserving: the bare names were already stdlib-licensed). Tests:
+`concurrency_sig_from_file_not_native_module_sig` (arm gone, four types harvested with method names),
+`concurrency_harvested_method_sigs_shape` (metadata port: read=`fn(T)->?`, submit=`fn()->?`),
+`concurrency_methods_resolve_via_harvested_table_with_subst` + `executor_submit_accepts_any_return_rejects_arity`,
+`native_std_module_is_file_backed` (resolver — converted from `native_std_module_is_virtual`, no virtual
+module remains), the VM 3-engine regression guard `concurrency_file_backed_three_engine`, and the sibling
+provenance asserts retargeted to `std.ffi`'s residual type-license tail. Full suite green (3174 lib + all
+integration), clippy clean, `grammar.bnf`/conformance unchanged. 3-engine CLI parity re-verified on
+`examples/{shared,rwshared,atomic,executor,parallel_shared,native_qualified}.chz` (default==serial==expected).
+
 **✅ NATIVE-PRELUDE TABLE — phase 1 (refactor-only, pure functions) (2026-07-01).** A single synthetic
 Rust `const PRELUDE: &[PreludeFn]` in `src/checker/mod.rs` is now the **SINGLE SOURCE OF TRUTH** for the
 four first-class universe FUNCTIONS (`print`/`ord`/`chr`/`panic`), replacing the scattered hard-coded
@@ -116,10 +156,10 @@ harvested Socket/Listener method sigs byte-exact to the retired bespoke arm), th
 harvested table), `native_struct_parses_native_methods` (parser), `net_from_import_runs_both_engines`
 (extended: whole-module + from-import, method calls in a checked body — VM==interp), existing
 `examples/socket_timeout.chz` (--parallel golden) + `echo_server.chz`/`echo_server_spawn.chz` unchanged.
-`grammar.bnf` unchanged (native-decl grammar exists from 3a/4a; conformance green). **Roadmap:** after
-4c-ffi + 4c-net, `native_module_sig` retains only **concurrency** (opcode type-license) + **`ffi`'s
-residual type-license tail** (`ptr` + fixed-width `int8..uint64` — no runtime member). Concurrency is the
-last migration (opcode-backed generic types `Shared`/`RwShared`/`Atomic`/`Executor`).
+`grammar.bnf` unchanged (native-decl grammar exists from 3a/4a; conformance green). **Roadmap (DONE):**
+after 4c-ffi + 4c-net + **4c-concurrency** (the last migration — generic types `Shared`/`RwShared`/
+`Atomic`/`Executor`, see the top block), `native_module_sig` retains only **`ffi`'s residual type-license
+tail** (`ptr` + fixed-width `int8..uint64`) + **`time`'s `timer`** opcode-license — no runtime member.
 
 **✅ NATIVE-PRELUDE — phase 4f (`std.process` + `std.request` made file-backed: native TYPE + FNs
 declared in `std/process.chz` / `std/request.chz`) (2026-07-02).** Mechanical application of the proven
@@ -150,9 +190,9 @@ deleted arms; request's optional-tail min_params exact), `regex_sig_from_file_no
 — asserts both arms gone), `request_optional_timeout_arg_typechecks` (both arities check), `native_fn_allows_optional_trailing_default`
 (parser), `process_request_file_backed_three_engine_parity` + `pure_type_import_no_fault_both_engines`
 (VM==interp==M:N), existing `examples/process_polish.chz` + `sys.chz` goldens unchanged on both engines.
-**Roadmap:** after 4b/4f/4c-ffi/4c-net, `native_module_sig` retains only **concurrency** (opcode
-type-license) and **`ffi`'s residual type-license tail** (`ptr` + fixed-width `int8..uint64`) — concurrency
-is the last migration. `grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a;
+**Roadmap (DONE):** after 4b/4f/4c-ffi/4c-net + **4c-concurrency** (the last migration), `native_module_sig`
+retains only **`ffi`'s residual type-license tail** (`ptr` + fixed-width `int8..uint64`) + **`time`'s
+`timer`** opcode-license. `grammar.bnf` unchanged (native-decl grammar + param defaults exist from 3a/4a;
 conformance green).
 
 **✅ NATIVE-PRELUDE — phase 4e (4 pure-function native modules made file-backed:
@@ -206,9 +246,9 @@ tables + `native_consts` untouched), `math_is_file_backed_native` (resolver), an
 `golden_std_native_4d_chz_matches_expected_and_interp` (`examples/std_native_4d.chz`, VM==interp==M:N).
 `module_fn_docs_all_resolve` now builds the effective sig via the graph (the migrated fns are harvested).
 `native fn` in a user file still rejected; `grammar.bnf` unchanged (conformance green). **Remaining
-`native_module_sig` content after 4d/4e/4f/4c-ffi/4c-net:** only `concurrency` (opcode type-licensing)
-and `ffi`'s residual type-license tail (`ptr` + fixed-width `int8..uint64`) — concurrency is the last
-migration. (`net` migrated in 4c-net, `ffi` fns in 4c-ffi.)
+`native_module_sig` content after 4d/4e/4f/4c-ffi/4c-net + 4c-concurrency (the last migration):** only
+`ffi`'s residual type-license tail (`ptr` + fixed-width `int8..uint64`) + `time`'s `timer` opcode-license.
+(`net` migrated in 4c-net, `ffi` fns in 4c-ffi, `concurrency`'s four generic types in 4c-concurrency.)
 
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is

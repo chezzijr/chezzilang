@@ -20,6 +20,11 @@
 # which cross as live cores (exactly like the flat token's `flag`). Deadlines inherit TIGHTEST-WINS:
 # a child clamps to the soonest absolute deadline of itself and its ancestors. See docs/concurrency.md §6e.
 import std.time
+# Depend on std.concurrency explicitly (phase 4c-concurrency): the `Shared` name is usable license-free
+# in a stdlib module, but this import makes the file-backed native module a graph DEPENDENCY, so it is
+# harvested (and its `Shared` method table seeded) BEFORE this module is checked — regardless of the
+# entry program's import order. Without it, `self.flag.get()`/`.set()`/`.update()` can fail to resolve.
+import std.concurrency
 
 struct Token:
     flag: Shared[bool]     # manual-cancel bit (sendable, owner-serialized)

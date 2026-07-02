@@ -1,0 +1,48 @@
+# std.concurrency — the cross-task box + executor primitives, declared in Chezzi (phase 4c-concurrency).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std/net.chz). Its native TYPES (`Shared`/`RwShared`/
+# `Atomic`/`Executor`) are in scope ONLY after `import std.concurrency` (bare `Shared`/`RwShared`/
+# `Atomic`/`Executor`) or a `from std.concurrency import …`. The resolver loads this real file (keeping
+# the `native` marker), and the checker harvests the `native struct` declarations below as the module's
+# SIGNATURE source — retiring the hand-built `native_module_sig` concurrency arm AND the bespoke
+# `shared_method_sig`/`rwshared_method_sig`/`atomic_method_sig`/`executor_method_sig` method arms (their
+# sigs now come from the `native fn` methods below, harvested into each type's method table — the
+# phase-4c native-method-binding capability, EXTENDED here to GENERIC native structs).
+#
+# Every declaration is BODY-LESS: `Shared`/`RwShared`/`Atomic`/`Executor` stay the RESERVED opaque VM
+# handles `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (NOT nominal structs — no field
+# layout), and the ctors STILL lower to `Op::NewShared`/`NewRwShared`/`NewAtomic`/`NewExecutor` by NAME
+# via the compiler's name→opcode dispatch (NOT off-heap host natives). The method calls stay VM-
+# intercepted at runtime by name. The backends compile NOTHING for a `native fn`/`native struct` — the
+# front-end reads ONLY the signature.
+#
+# TWO method sigs a plain harvested sig cannot express (ported as post-harvest metadata in the checker's
+# `attach_native_module_metadata`): `RwShared.read(f)` recovers its return type R from the closure
+# argument's return type (`read(fn(T) -> R) -> R`), so `f` is declared UNANNOTATED and the metadata step
+# retypes it to `fn(T) -> ?` (any return); `Executor.submit(f)` accepts any zero-arg closure regardless
+# of its return, so `f` is declared UNANNOTATED and retyped to `fn() -> ?`. `Atomic.add`/`sub` exist
+# only for a numeric `T` — a dispatch-time constraint the `Ty::Atomic` arm keeps as a residual gate.
+
+native struct Shared[T]:
+    native fn get() -> T
+    native fn set(v: T) -> nil
+    native fn update(f: fn(T) -> T) -> nil
+
+native struct RwShared[T]:
+    native fn get() -> T
+    native fn set(v: T) -> nil
+    native fn write(f: fn(T) -> T) -> nil
+    native fn read(f)
+
+native struct Atomic[T]:
+    native fn load() -> T
+    native fn store(v: T) -> nil
+    native fn exchange(v: T) -> T
+    native fn cas(expected: T, new: T) -> bool
+    native fn add(v: T) -> T
+    native fn sub(v: T) -> T
+
+native struct Executor:
+    native fn submit(f) -> nil
+    native fn shutdown() -> nil
+    native fn shutdown_now() -> nil
