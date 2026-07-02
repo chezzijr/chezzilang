@@ -1,0 +1,25 @@
+# std.fs — filesystem operations, declared in Chezzi (phase 4d).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
+# `import std.fs` (or a `from std.fs import …`) or qualified as `fs.exists`. The resolver loads this
+# real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
+# module's SIGNATURE source — retiring the hand-built `native_module_sig` fs arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/fs.rs`,
+# dispatched via `native_members("std.fs")`). The backends compile NOTHING for a `native fn`.
+#
+# Mutations are all `Result[nil]`. `mkdir` is recursive (mkdir -p); `remove_dir` is non-recursive
+# (faults on a non-empty dir); `append` creates-if-absent + never truncates.
+
+native fn list_dir(path: str) -> Result[List[str]]
+native fn exists(path: str) -> bool
+native fn is_file(path: str) -> bool
+native fn is_dir(path: str) -> bool
+native fn size(path: str) -> Result[int]
+native fn glob(pattern: str) -> Result[List[str]]
+native fn mkdir(path: str) -> Result[nil]
+native fn remove_file(path: str) -> Result[nil]
+native fn remove_dir(path: str) -> Result[nil]
+native fn rename(src: str, dst: str) -> Result[nil]
+native fn copy(src: str, dst: str) -> Result[nil]
+native fn append(path: str, text: str) -> Result[nil]

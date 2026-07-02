@@ -382,6 +382,19 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
     }
 }
 
+/// The FILE-BACKED native std modules: their signatures live in a real `std/<M>.chz` (bodyless
+/// `native fn`/`native struct` decls, harvested by the checker), NOT the hand-built `native_module_sig`
+/// arm. The resolver loads the real file (keeping the `native` marker so runtime member VALUES stay
+/// name-keyed via `native_members`); every other native module stays virtual (empty injected AST +
+/// hand-built sig). Single authority so the resolver and checker never drift on which modules are
+/// file-backed. Started with std.regex (phase 4b); std.math/io/os/rand/fs joined in phase 4d.
+pub fn is_file_backed_native(name: &str) -> bool {
+    matches!(
+        name,
+        "std.regex" | "std.math" | "std.io" | "std.os" | "std.rand" | "std.fs"
+    )
+}
+
 /// The callable members of a native module, as `(name, fn)`. Single source of truth shared by both
 /// engines (only the per-engine lowering and the checker's static signatures differ). Empty for an
 /// unknown name.

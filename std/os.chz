@@ -1,0 +1,17 @@
+# std.os — operating-system interface, declared in Chezzi (phase 4d).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std.regex). Functions are in scope ONLY after
+# `import std.os` (or a `from std.os import …`) or qualified as `os.getcwd`. The resolver loads this
+# real file (keeping the `native` marker); the checker harvests the `native fn` decls below as the
+# module's SIGNATURE source — retiring the hand-built `native_module_sig` os arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/os.rs`,
+# dispatched via `native_members("std.os")`). The backends compile NOTHING for a `native fn`.
+#
+# `exit(code)` never returns, but the checker has no `never` type; `nil` is the closest void-ish
+# result and lets (unreachable) statements follow it.
+
+native fn args() -> List[str]
+native fn env(key: str) -> Option[str]
+native fn getcwd() -> Result[str]
+native fn exit(code: int) -> nil

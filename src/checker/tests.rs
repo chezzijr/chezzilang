@@ -4141,26 +4141,38 @@ fn parse_regex_chz() -> crate::ast::Module {
     crate::parser::parse(toks).expect("std/regex.chz must parse")
 }
 
-/// The std.regex ModuleSig produced by a full graph check that `import std.regex`.
+/// The effective ModuleSig of native module `std.<module>` produced by a full graph check that
+/// `import std.<module>` — i.e. the sig the CLI actually uses (harvested-from-file for a file-backed
+/// module + `attach_native_module_metadata`), NOT the raw `native_module_sig` table. `module` is the
+/// bare submodule name, e.g. "math" / "io" / "regex".
 #[cfg(test)]
-fn regex_module_sig_via_graph() -> ModuleSig {
+fn native_module_sig_via_graph(module: &str) -> ModuleSig {
     let t = TmpDir::new();
-    let entry = t.write("main.chz", "import std.regex\nfn main(): print(1)\n");
+    let entry = t.write(
+        "main.chz",
+        &format!("import std.{module}\nfn main(): print(1)\n"),
+    );
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
     let mut c = Checker::new();
     c.run_graph_pass(&graph, false);
     assert!(c.errors.is_empty(), "graph check errored: {:?}", c.errors);
-    let regex_id = graph
+    let id = graph
         .modules
         .iter()
-        .find(|m| m.dotted == ["std", "regex"])
-        .expect("std.regex in graph")
+        .find(|m| m.dotted == ["std", module])
+        .unwrap_or_else(|| panic!("std.{module} in graph"))
         .id
         .clone();
     c.module_sigs
-        .get(&regex_id)
-        .expect("std.regex ModuleSig")
+        .get(&id)
+        .unwrap_or_else(|| panic!("std.{module} ModuleSig"))
         .clone()
+}
+
+/// The std.regex ModuleSig produced by a full graph check that `import std.regex`.
+#[cfg(test)]
+fn regex_module_sig_via_graph() -> ModuleSig {
+    native_module_sig_via_graph("regex")
 }
 
 /// PROVENANCE — the `"std.regex" =>` arm is DELETED from `native_module_sig`; the whole regex signature
@@ -4298,6 +4310,141 @@ fn regex_chz_match_matches_handbuilt_layouts() {
         !c.struct_names.contains("Match"),
         "harvest_native_module must not leave Match bare-visible (import-gating leak)"
     );
+}
+
+// ===== phase 4d: std.math/io/os/rand/fs are FILE-BACKED (native fn decls in std/<M>.chz) =====
+
+/// PROVENANCE — the `"std.math"` / `"std.io"` / `"std.os"` / `"std.rand"` / `"std.fs"` arms are DELETED
+/// from `native_module_sig`; each module's whole function signature now comes from parsing its real
+/// `std/<M>.chz`. So `native_module_sig("std.<M>")` exports NO functions/values, while a full graph
+/// check that `import std.<M>` still resolves every fn (and math's pi/e values). A sibling native
+/// module that stays hand-built (std.encoding) is unaffected.
+#[test]
+fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
+    for m in ["std.math", "std.io", "std.os", "std.rand", "std.fs"] {
+        let sig = native_module_sig(m);
+        assert!(
+            sig.functions.is_empty(),
+            "{m} fns must no longer be hand-built in native_module_sig (harvested from std/<M>.chz)"
+        );
+        assert!(
+            sig.values.is_empty(),
+            "{m} values must no longer be hand-built in native_module_sig"
+        );
+        assert!(
+            sig.numeric_poly.is_empty(),
+            "{m} numeric_poly must no longer be hand-built in native_module_sig"
+        );
+    }
+    // A sibling still-hand-built native module keeps its arm (retired in a parallel batch).
+    assert!(!native_module_sig("std.encoding").functions.is_empty());
+}
+
+/// The effective (graph-built) sigs for a representative fn of each migrated module must EXACTLY equal
+/// what the deleted arm used to hand-build — byte-identical provenance move from arm → parsed .chz.
+#[test]
+fn math_io_os_rand_fs_representative_sigs_exact() {
+    // (module, fn, params, ret)
+    let math = native_module_sig_via_graph("math");
+    let sqrt = math.functions.get("sqrt").expect("math.sqrt");
+    assert_eq!(sqrt.params, vec![Ty::Float]);
+    assert_eq!(sqrt.ret, Ty::Float);
+    let pow = math.functions.get("pow").expect("math.pow");
+    assert_eq!(pow.params, vec![Ty::Float, Ty::Float]);
+    assert_eq!(pow.ret, Ty::Float);
+    let is_nan = math.functions.get("is_nan").expect("math.is_nan");
+    assert_eq!(is_nan.ret, Ty::Bool);
+    // math.pi / math.e are float module VALUES (not fns) — reattached from native_consts.
+    assert_eq!(math.values.get("pi"), Some(&Ty::Float));
+    assert_eq!(math.values.get("e"), Some(&Ty::Float));
+    // math.abs is numeric-polymorphic — reattached from MODULE_NUMERIC_POLY.
+    assert!(math.numeric_poly.contains("abs"));
+    assert_eq!(
+        math.functions.len(),
+        21,
+        "std.math must export exactly 21 fns"
+    );
+
+    let io = native_module_sig_via_graph("io");
+    let print = io.functions.get("print").expect("io.print");
+    assert_eq!(print.params, vec![Ty::Str]);
+    assert_eq!(print.ret, Ty::Nil, "io.print must return nil, not Unknown");
+    let write_file = io.functions.get("write_file").expect("io.write_file");
+    assert_eq!(write_file.params, vec![Ty::Str, Ty::Str]);
+    assert_eq!(write_file.ret, Ty::result(Ty::Nil));
+    assert_eq!(
+        io.functions.get("read_line").unwrap().ret,
+        Ty::option(Ty::Str)
+    );
+    assert_eq!(io.functions.len(), 5);
+
+    let os = native_module_sig_via_graph("os");
+    assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
+    assert_eq!(os.functions.get("args").unwrap().ret, Ty::list(Ty::Str));
+    assert_eq!(os.functions.get("env").unwrap().ret, Ty::option(Ty::Str));
+    let exit = os.functions.get("exit").expect("os.exit");
+    assert_eq!(exit.params, vec![Ty::Int]);
+    assert_eq!(exit.ret, Ty::Nil);
+    assert_eq!(os.functions.len(), 4);
+
+    let rand = native_module_sig_via_graph("rand");
+    let ri = rand.functions.get("int").expect("rand.int");
+    assert_eq!(ri.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(ri.ret, Ty::Int);
+    assert_eq!(rand.functions.get("float").unwrap().ret, Ty::Float);
+    assert_eq!(rand.functions.get("bool").unwrap().ret, Ty::Bool);
+    assert_eq!(rand.functions.get("seed").unwrap().ret, Ty::Nil);
+    assert_eq!(rand.functions.len(), 4);
+
+    let fs = native_module_sig_via_graph("fs");
+    let list_dir = fs.functions.get("list_dir").expect("fs.list_dir");
+    assert_eq!(list_dir.params, vec![Ty::Str]);
+    assert_eq!(list_dir.ret, Ty::result(Ty::list(Ty::Str)));
+    assert_eq!(fs.functions.get("exists").unwrap().ret, Ty::Bool);
+    assert_eq!(fs.functions.get("size").unwrap().ret, Ty::result(Ty::Int));
+    assert_eq!(fs.functions.get("mkdir").unwrap().ret, Ty::result(Ty::Nil));
+    assert_eq!(fs.functions.len(), 12);
+}
+
+/// Hover doc preserved after migration: math.sqrt (and an io/os fn) still carry the authored blurb via
+/// `attach_native_module_metadata`, even though math/io/os fns are now harvested (absent from the raw
+/// `native_module_sig`).
+#[test]
+fn math_io_os_fn_hover_doc_preserved() {
+    let math = native_module_sig_via_graph("math");
+    assert_eq!(
+        math.functions.get("sqrt").unwrap().doc.as_deref(),
+        Some("square root (NaN for a negative argument)")
+    );
+    let io = native_module_sig_via_graph("io");
+    assert_eq!(
+        io.functions.get("print").unwrap().doc.as_deref(),
+        Some("write a line to stdout (with a trailing newline)")
+    );
+    let os = native_module_sig_via_graph("os");
+    assert_eq!(
+        os.functions.get("getcwd").unwrap().doc.as_deref(),
+        Some("the current working directory (Result)")
+    );
+}
+
+/// Runtime dispatch is UNTOUCHED by the refactor: the native member/const tables still carry the same
+/// impls, name-keyed. (The `native fn` decl only feeds the front-end signature.)
+#[test]
+fn math_io_os_rand_fs_runtime_tables_unchanged() {
+    assert_eq!(crate::native::native_members("std.math").len(), 21);
+    assert_eq!(crate::native::native_members("std.io").len(), 5);
+    assert_eq!(crate::native::native_members("std.os").len(), 4);
+    assert_eq!(crate::native::native_members("std.rand").len(), 4);
+    assert_eq!(crate::native::native_members("std.fs").len(), 12);
+    let consts: Vec<&str> = crate::native::native_consts("std.math")
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(consts, vec!["pi", "e"]);
+    assert!(crate::native::is_file_backed_native("std.math"));
+    assert!(crate::native::is_file_backed_native("std.regex"));
+    assert!(!crate::native::is_file_backed_native("std.encoding"));
 }
 
 // ===== M9: std.request (Response struct) =====
@@ -11659,11 +11806,19 @@ fn builtin_method_slices_all_resolve() {
 #[test]
 fn module_fn_docs_all_resolve() {
     for (module, docs) in MODULE_FN_DOCS {
-        let sig = native_module_sig(module);
-        for (fname, _doc) in *docs {
-            assert!(
-                sig.functions.contains_key(*fname),
-                "{module} doc slice lists fn '{fname}' but native_module_sig has no such function"
+        // Build the EFFECTIVE sig via the graph: math/io/os are file-backed (phase 4d), so their fns
+        // are harvested from `std/<M>.chz` and the docs are re-attached by `attach_native_module_metadata`
+        // — `native_module_sig(module)` alone would be empty for them.
+        let bare = module.strip_prefix("std.").unwrap_or(module);
+        let sig = native_module_sig_via_graph(bare);
+        for (fname, doc) in *docs {
+            let f = sig.functions.get(*fname).unwrap_or_else(|| {
+                panic!("{module} doc slice lists fn '{fname}' but the module has no such function")
+            });
+            assert_eq!(
+                f.doc.as_deref(),
+                Some(*doc),
+                "{module}.{fname} hover doc not attached after phase-4d migration"
             );
         }
     }

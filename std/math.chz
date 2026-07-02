@@ -1,0 +1,38 @@
+# std.math — floating-point math, declared in Chezzi (phase 4d).
+#
+# FILE-BACKED, IMPORT-GATED native module (like std.regex). Its functions are in scope ONLY after
+# `import std.math` (bare `sqrt` needs a `from std.math import sqrt`) or qualified as `math.sqrt`.
+# The resolver loads this real file (keeping the `native` marker); the checker harvests the
+# `native fn` decls below as the module's SIGNATURE source — retiring the hand-built
+# `native_module_sig` math arm.
+#
+# Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/math.rs`,
+# dispatched via `native_members("std.math")`). The backends compile NOTHING for a `native fn` — the
+# front-end reads ONLY the signature.
+#
+# The language has no implicit int→float, so params are `float` (callers pass floats). Two pieces of
+# checker-side metadata are NOT expressible as native decls and are re-attached post-harvest
+# (attach_native_module_metadata): the module constants `pi`/`e` (float values, `math.pi`) via
+# native_consts, and `abs`'s numeric polymorphism (int→int / float→float) via MODULE_NUMERIC_POLY.
+
+native fn abs(x: float) -> float
+native fn floor(x: float) -> float
+native fn ceil(x: float) -> float
+native fn round(x: float) -> float
+native fn pow(base: float, exp: float) -> float
+native fn sqrt(x: float) -> float
+native fn sin(x: float) -> float
+native fn cos(x: float) -> float
+native fn tan(x: float) -> float
+native fn asin(x: float) -> float
+native fn acos(x: float) -> float
+native fn atan(x: float) -> float
+native fn atan2(y: float, x: float) -> float
+native fn exp(x: float) -> float
+native fn ln(x: float) -> float
+native fn log2(x: float) -> float
+native fn log10(x: float) -> float
+native fn log(value: float, base: float) -> float
+native fn is_nan(x: float) -> bool
+native fn is_inf(x: float) -> bool
+native fn is_finite(x: float) -> bool

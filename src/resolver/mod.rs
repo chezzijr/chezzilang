@@ -392,12 +392,13 @@ impl Builder {
             // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
-                // std.regex (phase 4b) is FILE-BACKED: its native TYPE + fns are declared in a real
-                // `std/regex.chz` (the checker harvests them as the sig source). Load that real AST
-                // while KEEPING the `native` marker so runtime member dispatch stays name-keyed via
-                // `native_members`. Fallible (like the always-linked prelude): a missing/unparseable
-                // std/regex.chz is a hard error. Other native modules stay virtual (empty AST).
-                if name == "std.regex" {
+                // The FILE-BACKED native modules (phase 4b std.regex; phase 4d std.math/io/os/rand/fs)
+                // declare their native TYPE + fns in a real `std/<M>.chz` (the checker harvests them as
+                // the sig source). Load that real AST while KEEPING the `native` marker so runtime member
+                // dispatch stays name-keyed via `native_members`. Fallible (like the always-linked
+                // prelude): a missing/unparseable file is a hard error. Every other native module stays
+                // virtual (empty AST). `is_file_backed_native` is the single shared authority.
+                if crate::native::is_file_backed_native(name) {
                     self.visit_native_file(&target, name, &path, span)?;
                 } else {
                     self.visit_native(&target, name);
@@ -902,9 +903,30 @@ mod tests {
         assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
-    // 8. A native std module (std.math) is virtual: resolved without any .chz file, flagged native.
+    // 8. A still-virtual native std module (std.encoding) is resolved without any .chz file, flagged
+    // native, with an empty AST (its sig is hand-built in `native_module_sig`). (std.math/io/os/rand/fs
+    // migrated to FILE-BACKED in phase 4d — see `math_is_file_backed_native` below.)
     #[test]
     fn native_std_module_is_virtual() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "import std.encoding\nfn main(): print(1)\n");
+        let graph = build_graph(&entry).unwrap();
+        let m = graph
+            .modules
+            .iter()
+            .find(|m| m.label() == "std.encoding")
+            .expect("std.encoding should be in the graph");
+        assert_eq!(m.native, Some("std.encoding"));
+        assert!(m.ast.stmts.is_empty());
+        // Dependencies precede dependents: the native module loads before the entry.
+        assert_eq!(graph.modules.last().unwrap().id, graph.entry);
+    }
+
+    // 8a. Phase 4d: std.math (and io/os/rand/fs) are FILE-BACKED like std.regex — the `native` marker is
+    // KEPT (runtime dispatch stays name-keyed) but the resolver loads the REAL `std/math.chz` AST, whose
+    // bodyless `native fn` decls the checker harvests as the sig source (retiring the math arm).
+    #[test]
+    fn math_is_file_backed_native() {
         let t = TmpDir::new();
         let entry = t.write("main.chz", "import std.math\nfn main(): print(1)\n");
         let graph = build_graph(&entry).unwrap();
@@ -914,8 +936,13 @@ mod tests {
             .find(|m| m.label() == "std.math")
             .expect("std.math should be in the graph");
         assert_eq!(m.native, Some("std.math"));
-        assert!(m.ast.stmts.is_empty());
-        // Dependencies precede dependents: the native module loads before the entry.
+        assert!(
+            m.ast
+                .stmts
+                .iter()
+                .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == "sqrt")),
+            "std.math must load the real std/math.chz AST (native fn sqrt)"
+        );
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 
