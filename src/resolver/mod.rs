@@ -905,20 +905,21 @@ mod tests {
         assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
-    // 8. A still-virtual native std module (std.encoding) is resolved without any .chz file, flagged
+    // 8. A still-virtual native std module (std.net) is resolved without any .chz file, flagged
     // native, with an empty AST (its sig is hand-built in `native_module_sig`). (std.math/io/os/rand/fs
-    // migrated to FILE-BACKED in phase 4d — see `math_is_file_backed_native` below.)
+    // 4d, encoding/crypto/uuid/time 4e, process/request 4f migrated to FILE-BACKED; net/ffi/concurrency
+    // stay virtual — the deferred 4c targets.)
     #[test]
     fn native_std_module_is_virtual() {
         let t = TmpDir::new();
-        let entry = t.write("main.chz", "import std.encoding\nfn main(): print(1)\n");
+        let entry = t.write("main.chz", "import std.net\nfn main(): print(1)\n");
         let graph = build_graph(&entry).unwrap();
         let m = graph
             .modules
             .iter()
-            .find(|m| m.label() == "std.encoding")
-            .expect("std.encoding should be in the graph");
-        assert_eq!(m.native, Some("std.encoding"));
+            .find(|m| m.label() == "std.net")
+            .expect("std.net should be in the graph");
+        assert_eq!(m.native, Some("std.net"));
         assert!(m.ast.stmts.is_empty());
         // Dependencies precede dependents: the native module loads before the entry.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);

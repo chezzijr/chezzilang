@@ -4690,7 +4690,8 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(consts, vec!["pi", "e"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
-    assert!(!crate::native::is_file_backed_native("std.encoding"));
+    // Still-virtual (hand-built) sibling — the deferred 4c targets net/ffi/concurrency.
+    assert!(!crate::native::is_file_backed_native("std.net"));
 }
 
 // ===== M9: std.request (Response struct) =====
