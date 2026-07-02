@@ -58,6 +58,34 @@ realized in **phase 3a** below — the signatures moved to a real `.chz` prelude
 variadics" framing is **superseded**: a `native`-decl signature needs no `*args` syntax — only `print`'s
 `sep=`/`end=` variadic still can't be spelled in `.chz`, so it stays the sole synthetic function row.)
 
+**✅ NATIVE-PRELUDE — phase 4e (4 pure-function native modules made file-backed:
+`std.encoding`/`std.crypto`/`std.uuid`/`std.time`) (2026-07-02).** REFACTOR-ONLY, **ZERO observable
+behavior change / three-engine byte-identical** — a mechanical replay of the proven phase-4b regex
+pattern onto four **pure-function** modules (no methoded types). Each now ships a **real
+`std/<M>.chz`** whose current members are declared in-module as bodyless `native fn`s
+(encoding: the 8 str↔str/`Result[str]` codecs + `query_encode(params: Map[str,str]) -> str`;
+crypto: `sha256`/`md5`; uuid: `v4()`/`uuid_seed(n) -> nil`; time: `now`/`monotonic`/`sleep_ms(ms) ->
+nil`/`format`). The resolver loads the real file (`visit_native_file`, fallible like the prelude) while
+KEEPING the `native` marker, so **all runtime member dispatch stays name-keyed via
+`native_members("std.M")` — bytecode + dispatch UNCHANGED**; the checker harvests each file's `native fn`
+sigs via the existing `harvest_native_module`. This **RETIRED** the hand-built `std.encoding`/`std.crypto`/
+`std.uuid` arms in `native_module_sig` (deleted — default-empty now) and reduced the `std.time` arm to
+its **one load-bearing line**: `sig.types.insert("timer")`. `timer` is the sole subtlety — an
+**opcode-backed builtin** (NOT a callable native member: no runtime value, lowers via the compiler's
+name→opcode dispatch), so it is DELIBERATELY *not* declared as a `native fn` (that would bind a
+nonexistent runtime value and fault); its import-license (`import timer from std.time` / `import std.time`
++ bare `timer(ms)`) is preserved by that minimal arm, harvest then filling the 4 real time fns on top.
+The two file-backed gates (resolver `visit_native_file` + checker harvest) now share one predicate
+**`crate::native::is_file_backed_native(name)`** ({regex,encoding,crypto,uuid,time}) so the file-source
+and AST-source stay provably in lockstep. Import-gating preserved; none of the 4 are in `MODULE_FN_DOCS`
+(`module_fn_docs_all_resolve` unaffected). Tests: `enc_crypto_uuid_time_sig_from_file_not_native_module_sig`
+(provenance — arms gone, timer license kept), `enc_fn_sigs_exact`/`crypto_fn_sigs_exact`/`uuid_fn_sigs_exact`/
+`time_fn_sigs_exact` (sigs byte-equal to the deleted arms; `-> nil` fidelity for sleep_ms/uuid_seed +
+`Map[str,str]` for query_encode), `import_timer_from_std_time_still_licensed_both_forms`,
+`golden_timer_selective_import_three_engine` (VM==interp==M:N), `phase4e_user_file_native_fn_still_rejected`,
+existing goldens (`golden_encoding_crypto_via_run_file`/`golden_uuid_via_run_file`/`golden_timer_chz_matches_expected_and_interp`)
+unchanged. `grammar.bnf` unchanged (native-decl grammar exists from 3a; conformance green).
+
 **✅ NATIVE-PRELUDE — phase 4b (regex module made file-backed: native TYPE + FNs declared in
 `std/regex.chz`) (2026-07-02).** NEW CAPABILITY (import-gated native **module members**): `std.regex` is
 no longer a *file-less virtual* module — it is now a **real `std/regex.chz`** whose `native struct Match`

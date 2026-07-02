@@ -864,11 +864,13 @@ impl Checker {
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
                 let mut sig = native_module_sig(name);
-                // std.regex is FILE-BACKED (phase 4b): its whole SIGNATURE (the `native struct Match`
-                // + the 5 `native fn`s) is harvested from the real `std/regex.chz` AST the resolver
-                // loaded — NOT hand-built in `native_module_sig` (which returns empty for it). This
-                // retired both the phase-4a companion stub and the `native_module_sig` regex arm.
-                if name == "std.regex" {
+                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase 4e)
+                // harvest their whole callable SIGNATURE from the real `std/<M>.chz` AST the resolver
+                // loaded — NOT hand-built in `native_module_sig`. For std.regex/encoding/crypto/uuid the
+                // arm is fully deleted (returns empty). std.time keeps a MINIMAL arm carrying only the
+                // `timer` opcode-license in `sig.types` (harvest then fills its 4 real fns on top). Same
+                // predicate as the resolver's `visit_native_file` gate — lockstep by construction.
+                if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
                 }
                 c.module_sigs.insert(lm.id.clone(), sig);
@@ -1012,36 +1014,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
             func("copy", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
             func("append", vec![Ty::Str, Ty::Str], Ty::result(Ty::Nil));
         }
-        "std.encoding" => {
-            // Reversible text codecs. Every fn takes a `str` (operating on its UTF-8 bytes) and
-            // returns `str` (encode) or `Result[str]` (decode — malformed input or non-UTF-8
-            // decoded bytes are a recoverable fault). See `src/native/encoding.rs`.
-            func("base64_encode", vec![Ty::Str], Ty::Str);
-            func("base64_encode_url", vec![Ty::Str], Ty::Str);
-            func("base64_decode", vec![Ty::Str], Ty::result(Ty::Str));
-            func("base64_decode_url", vec![Ty::Str], Ty::result(Ty::Str));
-            func("hex_encode", vec![Ty::Str], Ty::Str);
-            func("hex_decode", vec![Ty::Str], Ty::result(Ty::Str));
-            func("url_encode", vec![Ty::Str], Ty::Str);
-            func("url_decode", vec![Ty::Str], Ty::result(Ty::Str));
-            // `query_encode(params: map[str,str]) -> str` — build a `k=v&...` query string with
-            // sorted keys + both sides percent-encoded (pure CPU, infallible).
-            func(
-                "query_encode",
-                vec![Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
-                Ty::Str,
-            );
-        }
-        "std.crypto" => {
-            // Hand-rolled digests: hash the str's UTF-8 bytes → lowercase-hex `str` (infallible).
-            func("sha256", vec![Ty::Str], Ty::Str);
-            func("md5", vec![Ty::Str], Ty::Str);
-        }
-        "std.uuid" => {
-            // `v4()` → random UUID str; `uuid_seed(n)` → deterministic reseed (golden runs).
-            func("v4", vec![], Ty::Str);
-            func("uuid_seed", vec![Ty::Int], Ty::Nil);
-        }
+        // std.encoding / std.crypto / std.uuid are FILE-BACKED (phase 4e): their whole signature is
+        // declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via `harvest_native_module` —
+        // there is NO hand-built arm here (this fn returns the default-empty sig for them). See the
+        // caller's `is_file_backed_native` gate.
         "std.concurrency" => {
             // A type-licensing-only native module: NO functions/values/struct shapes — it exports
             // ONLY the four runtime concurrency TYPE/ctor names (`Shared`/`RwShared`/`Atomic`/
@@ -1055,16 +1031,15 @@ fn native_module_sig(name: &str) -> ModuleSig {
             }
         }
         "std.time" => {
-            func("now", vec![], Ty::Int);
-            func("monotonic", vec![], Ty::Float);
-            func("sleep_ms", vec![Ty::Int], Ty::Nil);
-            func("format", vec![Ty::Int], Ty::Str);
-            // `timer` is an opcode-backed builtin (NOT a callable native member): it carries NO runtime
-            // value — it lowers via the compiler's name→opcode dispatch. It lives in `sig.types` ONLY so
-            // `import timer from std.time` validates membership and the checker's `bind_import` records
-            // it into the per-module `imported_time` set; `infer_named_call` then accepts the bare
-            // `timer(ms)` call only in a module that imported it. NOT a `func()` — that would add it to
-            // `sig.functions` and bind a (nonexistent) runtime value that faults at runtime.
+            // std.time is FILE-BACKED (phase 4e): its 4 callable fns (now/monotonic/sleep_ms/format) are
+            // declared in `std/time.chz` and harvested via `harvest_native_module` on top of this sig.
+            // This arm is retained ONLY for `timer` — an opcode-backed builtin (NOT a callable native
+            // member): it carries NO runtime value — it lowers via the compiler's name→opcode dispatch.
+            // It lives in `sig.types` ONLY so `import timer from std.time` validates membership and the
+            // checker's `bind_import` records it into the per-module `imported_time` set; `infer_named_call`
+            // then accepts the bare `timer(ms)` call only in a module that imported it. NOT a `native fn` /
+            // `func()` — that would add it to `sig.functions` and bind a (nonexistent) runtime value that
+            // faults at runtime.
             sig.types.insert("timer".to_string());
         }
         // std.regex is FILE-BACKED (phase 4b): its whole signature (the `native struct Match` + the 5

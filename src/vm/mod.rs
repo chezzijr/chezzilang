@@ -23661,6 +23661,18 @@ main()";
         assert_eq!(run_capture_parallel(src).expect("parallel"), expected);
     }
 
+    /// Phase 4e — the selective `import timer from std.time` form still licenses the bare `timer(ms)`
+    /// call (opcode-backed, kept via the minimal std.time `native_module_sig` arm) after std.time went
+    /// file-backed. Byte-identical on the VM, the interpreter, and the M:N `--parallel` engine.
+    #[test]
+    fn golden_timer_selective_import_three_engine() {
+        let src = "import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n";
+        let vm_out = run_capture(src).expect("vm run");
+        assert_eq!(vm_out, "true\n");
+        assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+        assert_eq!(run_capture_parallel(src).expect("parallel"), "true\n");
+    }
+
     /// `timer(ms)` under `--parallel`: a spawned fiber recv-blocks on the timeout channel, PARKS, and
     /// is woken by the background timer `send` at the deadline — not a false deadlock (the pending
     /// timer is accounted as `inflight`, vetoing the predicate while the lone fiber waits). Proves the
