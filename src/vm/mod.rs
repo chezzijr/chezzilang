@@ -1142,6 +1142,9 @@ enum SnapValue {
 /// scans these in task order: `Done`/`Exit` flush their buffered output; the lowest-index `Exit` or
 /// `Fault` propagates (an `Exit` hard-halts the parent, a `Fault` unwinds normally so an outer
 /// `recover:` can catch it); `Cancelled` is swallowed (a sibling-abort, its partial output dropped).
+/// The terminal (lowest-index propagating) `Fault` ALSO flushes its buffered output at its task-order
+/// slot — matching the cooperative/interp oracle, which writes a faulting task's partial output before
+/// the fault propagates. Higher-index racy faults and `Cancelled` still drop (no deterministic slot).
 #[derive(Debug)]
 enum TaskOutcome {
     /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
@@ -1154,8 +1157,14 @@ enum TaskOutcome {
         out: String,
         stderr: String,
     },
-    /// Faulted (runtime error or caught panic). The lowest-index fault propagates out of the join.
-    Fault(RuntimeError),
+    /// Faulted (runtime error or caught panic). The lowest-index fault propagates out of the join; its
+    /// buffered output is flushed at its task-order slot (a Rust-panic-to-fault path may carry empty
+    /// buffers — the shell buffer is not safely reachable there).
+    Fault {
+        err: RuntimeError,
+        out: String,
+        stderr: String,
+    },
 }
 
 /// B3.3-threads — the per-task outcome slots a `--parallel` nursery collects (task order; `None`
@@ -2472,7 +2481,11 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    self.slots[f.task_index] = Some(TaskOutcome::Fault(err.clone()));
+                    self.slots[f.task_index] = Some(TaskOutcome::Fault {
+                        err: err.clone(),
+                        out: String::new(),
+                        stderr: String::new(),
+                    });
                     self.scopes[f.scope_id].done += 1;
                 }
             }
@@ -2592,7 +2605,11 @@ impl ReadyWorker {
             match res {
                 Err(e) => {
                     self.worker.trip_cancel();
-                    TaskOutcome::Fault(e)
+                    TaskOutcome::Fault {
+                        err: e,
+                        out: std::mem::take(&mut self.worker.out),
+                        stderr: std::mem::take(&mut self.worker.stderr),
+                    }
                 }
                 Ok(ret) => {
                     // Re-stamp with the task's real span: a returned non-sendable value (a
@@ -2608,7 +2625,11 @@ impl ReadyWorker {
                         }),
                         Err(e) => {
                             self.worker.trip_cancel();
-                            TaskOutcome::Fault(e)
+                            TaskOutcome::Fault {
+                                err: e,
+                                out: std::mem::take(&mut self.worker.out),
+                                stderr: std::mem::take(&mut self.worker.stderr),
+                            }
                         }
                     }
                 }
@@ -9829,8 +9850,10 @@ impl Vm {
                 // this worker). The poller re-enqueues it via `complete_offload` on OS readiness.
                 Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
                 Disp::Finish(outcome) => {
-                    let aborts =
-                        matches!(outcome, TaskOutcome::Fault(_) | TaskOutcome::Exit { .. });
+                    let aborts = matches!(
+                        outcome,
+                        TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
+                    );
                     sched.finish(task_index, scope_id, outcome);
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
@@ -9950,7 +9973,13 @@ impl Vm {
                 Disp::Finish(self.classify_mn_outcome(res))
             }
         }))
-        .unwrap_or_else(|p| Disp::Finish(TaskOutcome::Fault(panic_to_fault(p, span))));
+        .unwrap_or_else(|p| {
+            Disp::Finish(TaskOutcome::Fault {
+                err: panic_to_fault(p, span),
+                out: String::new(),
+                stderr: String::new(),
+            })
+        });
         self.swap_ctx(&mut fiber.ctx);
         disp
     }
@@ -9974,7 +10003,11 @@ impl Vm {
             match res {
                 Err(e) => {
                     self.trip_cancel();
-                    TaskOutcome::Fault(e)
+                    TaskOutcome::Fault {
+                        err: e,
+                        out: std::mem::take(&mut self.out),
+                        stderr: std::mem::take(&mut self.stderr),
+                    }
                 }
                 Ok(()) => TaskOutcome::Done(WorkerResult {
                     value: WireValue::Nil,
@@ -10016,7 +10049,11 @@ impl Vm {
                 // Drop runs LAST (declared first), so the slot is committed before the counter bumps.
                 let _signal = DoneSignal(done);
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
-                    .unwrap_or_else(|p| TaskOutcome::Fault(panic_to_fault(p, span)));
+                    .unwrap_or_else(|p| TaskOutcome::Fault {
+                        err: panic_to_fault(p, span),
+                        out: String::new(),
+                        stderr: String::new(),
+                    });
                 results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
             }));
         }
@@ -10026,7 +10063,11 @@ impl Vm {
         if let Some((i, rw)) = first {
             let span = rw.span;
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
-                .unwrap_or_else(|p| TaskOutcome::Fault(panic_to_fault(p, span)));
+                .unwrap_or_else(|p| TaskOutcome::Fault {
+                    err: panic_to_fault(p, span),
+                    out: String::new(),
+                    stderr: String::new(),
+                });
             results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
         }
         // 4a. Wait for the farmed tasks (n-1) to finish (the `DoneSignal` guard guarantees the counter
@@ -10040,9 +10081,10 @@ impl Vm {
             }
         }
         // 4b. Flush worker output in task order (decision F) and select the terminal outcome.
-        //     `Done`/`Exit` output is flushed; `Fault`/`Cancelled` output is dropped (a faulting
-        //     worker's partial output never had a deterministic position; a cancelled worker's work
-        //     is incomplete). The fault-free goldens only ever hit `Done`, so they stay byte-identical.
+        //     `Done`/`Exit` output is flushed; the terminal (lowest-index propagating) `Fault` flushes
+        //     its buffered output at its slot too (oracle parity — a faulting task's partial output is
+        //     emitted before the fault unwinds); higher-index racy `Fault`s + `Cancelled` still drop
+        //     (no deterministic slot). The fault-free goldens only ever hit `Done`, so byte-identical.
         //
         //     Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit`
         //     wins over any `Fault` regardless of index — otherwise a recoverable sibling fault at a
@@ -10062,12 +10104,15 @@ impl Vm {
     /// result, flushing output and applying `Exit`-over-`Fault` precedence. Shared by the legacy pool
     /// engine ([`run_workers_on_pool`]) and the M:N engine ([`run_mn_nursery`]).
     ///
-    /// `Done`/`Exit` output is flushed in task order (decision F); `Fault`/`Cancelled` output is
-    /// dropped (a faulting worker's partial output had no deterministic position; a cancelled worker's
-    /// work is incomplete). The fault-free goldens only ever hit `Done`, so they stay byte-identical.
-    /// Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index `Exit` wins over any
-    /// `Fault` regardless of index — otherwise a lower-index recoverable fault could demote a child's
-    /// `os.exit` to a catchable error. Within a kind, the lowest index wins (scan order + `is_none()`).
+    /// `Done`/`Exit` output is flushed in task order (decision F). The terminal (lowest-index
+    /// propagating) `Fault` ALSO flushes its buffered output at its slot — matching the cooperative/
+    /// interp oracle, which writes a faulting task's partial output before the fault unwinds. Higher-
+    /// index racy `Fault`s and `Cancelled` still drop (no deterministic slot — the work is incomplete /
+    /// ran past the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
+    /// byte-identical. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
+    /// `Exit` wins over any `Fault` regardless of index — otherwise a lower-index recoverable fault
+    /// could demote a child's `os.exit` to a catchable error. Within a kind, the lowest index wins
+    /// (scan order + `is_none()`).
     fn reduce_task_slots(&mut self, slots: Vec<Option<TaskOutcome>>) -> Result<(), RuntimeError> {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<RuntimeError> = None;
@@ -10084,9 +10129,28 @@ impl Vm {
                         first_exit = Some(code);
                     }
                 }
-                TaskOutcome::Fault(e) => {
+                TaskOutcome::Fault { err, out, stderr } => {
+                    // The terminal (lowest-index propagating) fault flushes its buffered output at its
+                    // task-order slot — after lower-index Done/Exit, before the fault propagates —
+                    // so a faulting task's partial output is no longer silently dropped. Higher-index
+                    // racy faults still drop (they ran concurrently past the terminal fault's cancel;
+                    // no deterministic slot position).
+                    //
+                    // RESIDUAL RACE (intentionally not chased here): this matches the cooperative/interp
+                    // oracle byte-for-byte only when the faulting task is the nursery's SOLE
+                    // output-producer. With additional output-producing siblings the M:N result can
+                    // still diverge from serial's strict stop-at-first-fault order — a sibling that
+                    // reaches `Done` before the faulter's cancel-trip keeps its output (serial would
+                    // never have run it), and whether a lower-index sibling ends `Fault` vs `Cancelled`
+                    // (which selects the propagating fault) is itself a scheduler race. The
+                    // buffer-and-flush-per-task model cannot reconcile concurrency with serial's
+                    // sequential stop-at-fault, so multi-task-with-fault output ordering is a separate,
+                    // pre-existing nondeterminism, not asserted as parity (see the single-task test
+                    // `parallel_faulting_task_flushes_partial_output_3engine`).
                     if first_fault.is_none() {
-                        first_fault = Some(e);
+                        self.out.push_str(&out);
+                        self.stderr.push_str(&stderr);
+                        first_fault = Some(err);
                     }
                 }
                 TaskOutcome::Cancelled => {}
@@ -16078,6 +16142,35 @@ mod tests {
         assert_mc_parity(src, "body\ntask\ncleanup\n");
     }
 
+    /// Fault-output-flush parity: a spawned task that FAULTS (panic propagating to the nursery join)
+    /// must preserve the stdout it buffered BEFORE the fault, at its task-order slot, on the default
+    /// M:N engine — matching the cooperative/interp oracle. Pre-fix the M:N engine dropped the
+    /// task's partial output (the `Fault` outcome carried no buffered output); it now flushes the
+    /// terminal (lowest-index propagating) fault's buffer before the fault propagates to the outer
+    /// `recover:`.
+    ///
+    /// The nursery here has EXACTLY ONE task, deliberately. That is the only configuration in which
+    /// fault-output is DETERMINISTIC across engines: serial runs tasks in spawn order and stops at
+    /// the first fault, but the M:N engine runs siblings concurrently and buffers/flushes per-task —
+    /// so as soon as a nursery has a second output-producing sibling, whether that sibling reaches
+    /// `Done` (output kept) or observes the faulter's cancel-trip first and becomes `Cancelled`
+    /// (output dropped) is a genuine scheduler race the buffer-and-flush model cannot reconcile with
+    /// serial's strict stop-at-first-fault order. So a multi-task-with-fault case is intentionally
+    /// NOT asserted as parity (it would flake); see the residual-race note in `reduce_task_slots`.
+    #[test]
+    fn parallel_faulting_task_flushes_partial_output_3engine() {
+        let src = "fn bad():\n    print(\"SOLO-PARTIAL\")\n    panic(\"boom\")\n\
+                   fn main():\n\
+                   \x20   r := recover:\n\
+                   \x20       parallel:\n\
+                   \x20           spawn bad()\n\
+                   \x20   match r:\n\
+                   \x20       Ok(v): print(\"ok\")\n\
+                   \x20       Err(e): print(\"caught {e.message()}\")\n\
+                   main()\n";
+        assert_mc_parity(src, "SOLO-PARTIAL\ncaught boom\n");
+    }
+
     /// Phase 5a-containers REGRESSION GUARD: the List/Map/Set method-surface migration to file-backed
     /// `native struct` decls in std/prelude.chz is CHECKER-ONLY — the literals/ctors still lower to the
     /// native build opcodes and runtime method dispatch is by name (untouched). This drives a
@@ -20985,7 +21078,9 @@ main()
         let slots = sched.take_slots();
         assert_eq!(slots.len(), 2);
         for s in slots {
-            assert!(matches!(s, Some(TaskOutcome::Fault(e)) if e.message == DEADLOCK_MSG));
+            assert!(
+                matches!(s, Some(TaskOutcome::Fault { err, .. }) if err.message == DEADLOCK_MSG)
+            );
         }
     }
 
