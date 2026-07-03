@@ -9489,6 +9489,20 @@ b := Buf([10, 20, 30])
         assert_eq!(run_capture(source).expect("hello.chz should run"), expected);
     }
 
+    /// Conditional-methods golden: a struct/enum/newtype method carrying a `where` on the ENCLOSING
+    /// type's own param (`fn top(self) -> T where T: Comparable`). It is a CHECKER-only bound — it
+    /// lowers to nothing — so a satisfying instance runs exactly like an ordinary method. The interp
+    /// output must match the checked-in `.expected` (and the VM, via the twin test).
+    #[test]
+    fn golden_conditional_method_chz() {
+        let source = include_str!("../../examples/conditional_method.chz");
+        let expected = include_str!("../../examples/conditional_method.expected");
+        assert_eq!(
+            run_capture(source).expect("conditional_method.chz should run"),
+            expected
+        );
+    }
+
     /// M22 golden: operator protocols (`div`/`mod`/`neg`), protocol embedding, and the `Arithmetic`
     /// bundle. The interp output must match the checked-in `.expected` (and the VM, via the twin test).
     #[test]

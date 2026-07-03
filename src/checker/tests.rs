@@ -1562,6 +1562,181 @@ f(true)
     assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
 }
 
+// ----- conditional methods: `where` on a user struct/enum/newtype method's RECEIVER type param -----
+
+#[test]
+fn conditional_method_where_receiver_param_accepted() {
+    // A method may `where`-bound the ENCLOSING struct's own type param `T` (not the method's own
+    // `[U]`). This is ACCEPTED (no "unknown type parameter") — it is a conditional method.
+    ok("\
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:
+        return self.val
+b := Box(5)
+x := b.top()
+");
+}
+
+#[test]
+fn conditional_method_accepts_comparable_receiver() {
+    // int satisfies Comparable → the conditional method is callable.
+    ok("\
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:
+        return self.val
+b := Box(5)
+print(b.top())
+");
+}
+
+#[test]
+fn conditional_method_rejects_non_comparable_receiver() {
+    // A `Box` of a plain (non-Comparable) struct → the conditional method's receiver bound fails
+    // at the CALL site with the standard bound-satisfaction diagnostic.
+    rejects(
+        "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:
+        return self.val
+b := Box(Q(1))
+x := b.top()
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_method_enum_where_receiver_param() {
+    // Enum receiver-param conditional method: accept on a Comparable payload, reject on a
+    // non-Comparable one.
+    ok("\
+enum Opt[T]:
+    Some(T)
+    None
+    fn peek(self) -> int where T: Comparable:
+        return 1
+o := Opt.Some(5)
+x := o.peek()
+");
+    rejects(
+        "\
+struct Q:
+    n: int
+enum Opt[T]:
+    Some(T)
+    None
+    fn peek(self) -> int where T: Comparable:
+        return 1
+o := Opt.Some(Q(1))
+x := o.peek()
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_method_newtype_where_receiver_enforced() {
+    // A generic newtype method may carry a receiver-param `where` too — `fn_sig` is shared, so it
+    // must be ENFORCED at the newtype arm (else accept-without-enforce soundness hole).
+    ok("\
+newtype Stack[T] = List[T]:
+    fn top(self) -> int where T: Comparable:
+        return 1
+s := Stack([5])
+x := s.top()
+");
+    rejects(
+        "\
+struct Q:
+    n: int
+newtype Stack[T] = List[T]:
+    fn top(self) -> int where T: Comparable:
+        return 1
+s := Stack([Q(1)])
+x := s.top()
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_method_own_u_param_where_still_merges() {
+    // REGRESSION: a method with its OWN `[U]` and `where U: Comparable` still merges into the
+    // method's generic-param bounds and enforces via the generic-method path (unchanged by the
+    // receiver-bound diversion).
+    ok("\
+struct Box[T]:
+    val: T
+    fn cmp[U](self, other: U) -> int where U: Comparable:
+        return 1
+b := Box(5)
+x := b.cmp(3)
+");
+    rejects(
+        "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn cmp[U](self, other: U) -> int where U: Comparable:
+        return 1
+b := Box(5)
+x := b.cmp(Q(1))
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_method_unknown_receiver_arg_defers() {
+    // CRITICAL characterization: enforce_bounds DEFERS on a receiver type-arg that is still
+    // `Unknown` — exactly like `[].sort()` (`satisfies_args_d` returns Ok for `Ty::Unknown`, "don't
+    // cascade"). `Box([])` leaves T un-pinnable here (calling `.top()` on the empty-constructed
+    // receiver freezes its elem as Unknown — a PRE-EXISTING scope-wide-pin limitation, reproducible
+    // with a NO-`where` `top`). The invariant is that the conditional bound adds NO spurious
+    // "does not satisfy" — a genuinely-never-pinned receiver fails only at the pre-existing
+    // "cannot infer element type" binding error, NOT a bound error.
+    let src = "\
+struct Box[T]:
+    val: List[T]
+    fn top(self) -> List[T] where T: Comparable:
+        return self.val
+b := Box([])
+x := b.top()
+";
+    let errs = check_src(src);
+    assert!(
+        !errs.iter().any(|e| e.message.contains("does not satisfy")),
+        "conditional bound must DEFER on an Unknown receiver arg (no spurious reject), got: {errs:?}"
+    );
+    // Documents the observed pre-existing behavior (independent of the where-clause).
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer element type")),
+        "expected the pre-existing never-pinned binding error, got: {errs:?}"
+    );
+}
+
+#[test]
+fn conditional_method_pinned_receiver_arg_ok() {
+    // Companion: when the receiver's type arg IS pinned to a Comparable concrete type (via a typed
+    // field annotation), the conditional method is callable — the defer path does not over-reject a
+    // resolved-but-late arg.
+    ok("\
+struct Box[T]:
+    val: List[T]
+    fn top(self) -> List[T] where T: Comparable:
+        return self.val
+b: Box[int] = Box([])
+x := b.top()
+");
+}
+
 // ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
 
 #[test]

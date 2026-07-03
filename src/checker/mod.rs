@@ -4225,10 +4225,16 @@ impl Checker {
         }
         // Fold any `where T: Bound` clauses into the matching declared type parameter's bounds, so the
         // existing generic-call bound-enforcement path (`infer_generic_call` → `enforce_bounds`) handles
-        // them with zero new machinery. A where entry naming no declared `[T]` param is an error — a
-        // user METHOD cannot `where`-bound the RECEIVER struct's own param (it lives in
-        // `self.type_params`, not `decl.type_params`); that shape is out of scope and reported here.
+        // them with zero new machinery. A where entry naming the method's OWN `[U]` merges as above.
+        // A where entry naming the ENCLOSING struct/enum/newtype's own type param (in `self.type_params`,
+        // not `decl.type_params`) is a CONDITIONAL METHOD: it constrains the RECEIVER's concrete type
+        // arg, callable only when that arg satisfies the bound (mirrors native `List[T].sort`'s
+        // `where T: Comparable`). Recorded on `receiver_bounds` → carried on the returned `FnSig`'s
+        // `where_bounds`, enforced at the method-call dispatch arms (struct/enum/newtype) against the
+        // receiver's substitution — exactly like the native `Ty::List` arm. A where entry naming NEITHER
+        // an own param NOR a receiver param is still an error (e.g. a free fn's `where Q:`).
         let mut merged = decl.type_params.clone();
+        let mut receiver_bounds: Vec<TypeParam> = Vec::new();
         for w in &decl.where_bounds {
             match merged.iter_mut().find(|tp| tp.name == w.name) {
                 // Dedup: a bound repeated across `[T: X]` and `where T: X` must not double the
@@ -4244,6 +4250,10 @@ impl Checker {
                         }
                     }
                 }
+                // Not one of the method's own `[U]` params. If it names the enclosing type's param
+                // (present in `self.type_params` while a method sig is built inside a generic type),
+                // record it as a receiver-bound; otherwise it is genuinely unknown → error.
+                None if self.type_params.contains_key(&w.name) => receiver_bounds.push(w.clone()),
                 None => self.error(
                     span,
                     format!("unknown type parameter '{}' in where-clause", w.name),
@@ -4252,6 +4262,11 @@ impl Checker {
         }
         let saved = self.enter_type_params(&merged);
         for tp in &merged {
+            self.check_bounds(&tp.bounds, &tp.name, span);
+        }
+        // Validate a conditional method's receiver-bound protocol names too (the enclosing type's
+        // param is already in scope via the hoist's `enter_type_params`).
+        for tp in &receiver_bounds {
             self.check_bounds(&tp.bounds, &tp.name, span);
         }
         let params: Vec<Ty> = decl
@@ -4312,9 +4327,12 @@ impl Checker {
             params,
             ret,
             type_params: merged,
-            // User-fn where bounds are already merged into `type_params` above; leave this empty so
-            // enforcement flows through the ordinary generic-call path (native sigs use it directly).
-            where_bounds: Vec::new(),
+            // A method's OWN `[U]` where-bounds are merged into `type_params` above (enforced via the
+            // ordinary generic-call path). `where_bounds` carries only CONDITIONAL-METHOD receiver
+            // bounds — a `where` naming the enclosing type's param — enforced at the struct/enum/newtype
+            // method-call dispatch arms against the receiver's concrete type arg (mirrors native sigs,
+            // e.g. `List[T].sort`'s `where T: Comparable`). Empty for a free fn or a plain method.
+            where_bounds: receiver_bounds,
             is_static,
             doc: decl.doc.clone(),
         }
@@ -11758,10 +11776,17 @@ impl Checker {
                             sig.type_params.clone(),
                             sig.is_static,
                             sig.doc.clone(),
+                            sig.where_bounds.clone(),
+                            map,
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static, mdoc)) = resolved {
+                if let Some((params, ret, mtps, is_static, mdoc, where_bounds, rmap)) = resolved {
+                    // Conditional method: enforce any receiver-param `where` bound against the
+                    // receiver's concrete type arg (`{T -> concrete}`), before any static/generic
+                    // sub-branch so it fires for every method form. No-op when `where_bounds` empty.
+                    // Mirrors the native `Ty::List` `where T: Comparable` enforcement.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
@@ -11863,10 +11888,17 @@ impl Checker {
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
+                            sig.where_bounds.clone(),
+                            map,
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static)) = resolved {
+                if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
+                    // Conditional method: enforce any receiver-param `where` bound against the
+                    // newtype's concrete type arg (mirrors the struct arm). `fn_sig` is shared, so a
+                    // newtype method can carry a receiver-bound too — enforce it here to avoid an
+                    // accept-without-enforce soundness hole. No-op when `where_bounds` empty.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // Static methods on a newtype are DEFERRED (v1 covers struct + enum only). A
                     // no-self newtype method is still classified static, so reject the instance call
                     // with the static-method diagnostic (it is not reachable as `Type.method` yet —
@@ -11921,10 +11953,15 @@ impl Checker {
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
+                            sig.where_bounds.clone(),
+                            map,
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static)) = resolved {
+                if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
+                    // Conditional method: enforce any receiver-param `where` bound against the enum's
+                    // concrete type arg (mirrors the struct arm). No-op when `where_bounds` empty.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
                     // value with a pointer at the right form (mirrors the struct arm).
                     if is_static {

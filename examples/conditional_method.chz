@@ -1,0 +1,37 @@
+# Conditional methods (M21) — a `where` on a method's clause may name the ENCLOSING type's own
+# type parameter, making the method callable only when that param satisfies the bound (Rust's
+# `impl<T: Ord> Box<T>`). Checker-only: it lowers to NOTHING, so a satisfying instance runs exactly
+# like an ordinary method on every engine.
+
+# A generic box whose `top()` is conditional on `T: Comparable`.
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:
+        return self.val
+
+# A generic enum whose `peek()` is conditional on `T: Comparable`.
+enum Opt[T]:
+    Some(T)
+    None
+    fn peek(self) -> int where T: Comparable:
+        return 1
+
+# A generic newtype whose `first()` is conditional on `T: Comparable`.
+newtype Stack[T] = List[T]:
+    fn first(self) -> T where T: Comparable:
+        return List(self)[0]
+
+fn main():
+    b := Box(5)
+    print(b.top())              # 5
+
+    bs := Box("hi")
+    print(bs.top())             # hi
+
+    o := Opt.Some(42)
+    print(o.peek())             # 1
+
+    s := Stack([10, 20, 30])
+    print(s.first())            # 10
+
+main()

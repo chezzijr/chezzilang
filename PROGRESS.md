@@ -11,6 +11,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ LANGUAGE — conditional methods: `where` on a user struct/enum/newtype method's RECEIVER type
+param (2026-07-03).** Closes the consistency gap left by the `where`-clause entry below: a user *method*
+may now `where`-bound the ENCLOSING type's own type parameter (`struct Box[T]: fn top(self) -> T where
+T: Comparable`), making the method callable only when the receiver's concrete type argument satisfies
+the bound — Rust's `impl<T: Ord> Box<T>` conditional methods, and parity with native `List[T].sort`/`sum`.
+**Mechanism (checker-only, additive):** `fn_sig`'s `where`-merge loop, when a `where` entry names
+neither the method's own `[U]` nor an unknown param but IS the enclosing type's param (present in
+`self.type_params`), records it on `receiver_bounds` → carried on the returned `FnSig.where_bounds`
+(the SAME field the native harvest uses) instead of erroring; the struct/enum/newtype method-call
+dispatch arms then call `enforce_bounds(&sig.where_bounds, {structParam_i → concreteArg_i}, span)` —
+byte-for-byte like the native `Ty::List` arm's `{T → elem}`. A `where` naming NEITHER an own nor a
+receiver param still errors "unknown type parameter"; a method's OWN `[U]` `where` still merges as
+before. Newtype is included for soundness (shared `fn_sig` accepts receiver-bounds for newtype methods
+too → enforce at all three arms, no accept-without-enforce hole). **Unknown/late-usage:** reuses
+`enforce_bounds` verbatim — `satisfies_args_d` returns Ok for `Ty::Unknown` ("don't cascade"), so a
+still-unpinned receiver arg DEFERS (never a spurious "does not satisfy"); a genuinely never-pinned
+binding still fails at the pre-existing "cannot infer element type" error. **Three-engine byte-identical:**
+`where` lowers to NOTHING — `src/interp`/`src/vm` get ONLY additive golden tests; `examples/conditional_
+method.chz` (Box/Opt/Stack conditional methods invoked+printed) asserted byte-identical on interp /
+--serial VM / M:N VM (`golden_conditional_method_chz` + `..._matches_expected_and_interp`). No grammar
+change (`where` already grammatical on methods — `cargo test conformance` green). checker + docs +
+two additive golden tests only.
+
 **✅ LANGUAGE — `where`-clause generic bounds + file-backed List `sort`/`sum` port (2026-07-03).** Adds
 `where T: Bound, …` as an alternative spelling of generic bounds after a fn/native-fn signature
 (`fn max[T](a: T, b: T) -> T where T: Comparable`), then USES it to finish the phase-5a container port:
@@ -25,9 +48,9 @@ alone is too broad; a struct with a structural `add` still errors at CHECK time)
 bounds into the matching `[T]` type param (unknown-param = clear error; body-check enters the merged params so
 a `where`-bounded op like `<` works in the body), so the existing `infer_generic_call`→`enforce_bounds` path
 handles call sites with ZERO new machinery; for NATIVE methods `harvest_native_fn_sig` carries `where_bounds`
-onto the sig and the `Ty::List` arm calls `enforce_bounds(&sig.where_bounds, {T->elem})`. A user METHOD
-where-bounding the receiver struct's OWN param is out of scope (rejected as unknown-param — put the bound on
-the `struct`). **BEHAVIOR-PRESERVING / three-engine byte-identical:** `where` lowers to NOTHING at runtime —
+onto the sig and the `Ty::List` arm calls `enforce_bounds(&sig.where_bounds, {T->elem})`. (A user METHOD
+where-bounding the receiver struct's OWN param — the "conditional method" shape — was subsequently
+SHIPPED; see the conditional-methods entry above.) **BEHAVIOR-PRESERVING / three-engine byte-identical:** `where` lowers to NOTHING at runtime —
 `src/interp` is UNTOUCHED and `src/vm` gets only a golden test; `examples/where_sort_sum.chz` (sort int/float/
 struct-with-`compare`, sum int/float) is asserted byte-identical on interp / --serial VM / M:N VM
 (`golden_where_sort_sum_chz_matches_expected_and_interp`). `docs/grammar.bnf` gains `<whereClause>`/`<whereList>`

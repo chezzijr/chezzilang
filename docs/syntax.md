@@ -906,9 +906,28 @@ fn combine[A, B](a: A, b: B) where A: Add + Mul, B: Comparable:   # multi-entry,
     ...
 ```
 
-A `where` entry naming a type parameter that isn't declared in `[…]` is an error. (A user *method*
-may not `where`-bound the receiver struct's own type parameter — put that bound on the `struct`
-declaration.)
+A `where` entry naming a type parameter that isn't declared in `[…]` **and** isn't the enclosing
+type's own parameter is an error.
+
+**Conditional methods.** A `where` on a *method* may name the **enclosing struct/enum/newtype's own
+type parameter** (not the method's `[U]`): the method is then callable only when the receiver's
+concrete type argument satisfies the bound — Rust's `impl<T: Ord> Box<T> { fn top(…) }`. It mirrors
+the built-in `List[T].sort` / `sum` (each a `where T: …` on `T` = the list's element). This is a
+**checker-only** bound — it lowers to nothing at runtime — so a satisfying instance runs exactly like
+an ordinary method on every engine.
+
+```chezzi
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:   # conditional on the RECEIVER's own T
+        return self.val
+
+b := Box(5); print(b.top())          # 5   — int is Comparable
+
+import std.net
+fn f(s: net.Socket):
+    bad := Box(s); bad.top()         # ERROR at check time: Socket does not satisfy Comparable
+```
 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
@@ -1925,8 +1944,9 @@ with `compare`), stable, in place.
 > binding's element type from the whole scope, then checks each use against it. So `a := []; a.sort();
 > a.push(1)` type-checks (`a` is `List[int]`: the later `push` pins it, and the earlier `sort` is
 > checked against that pinned `int`). This is what makes **bound-checked methods** compose with
-> refinement: `sort`'s `where T: Comparable` and `sum`'s `where T: Add` enforce against the *resolved*
-> element type, never a transient `Unknown`. A genuinely never-pinned empty still fails at the binding
+> refinement: `sort`'s `where T: Comparable` and `sum`'s `where T: Add` — and a user **conditional
+> method**'s `where` on the receiver type param — enforce against the *resolved* element/type
+> argument, never a transient `Unknown`. A genuinely never-pinned empty still fails at the binding
 > with `cannot infer element type of empty collection` (above) — not with a spurious `does not satisfy
 > Comparable`/`Add`.
 

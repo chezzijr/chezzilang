@@ -22833,6 +22833,27 @@ main()";
     /// NOTHING at runtime (checker-only), so the three engines — VM(serial), interp, and the M:N
     /// OS-thread engine — must agree byte-for-byte with `.expected`.
     #[test]
+    fn golden_conditional_method_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/conditional_method.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/conditional_method.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("conditional_method.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from conditional_method.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("conditional_method.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on conditional_method");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("conditional_method.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on conditional_method");
+    }
+
+    #[test]
     fn golden_where_sort_sum_chz_matches_expected_and_interp() {
         let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = base.join("examples/where_sort_sum.chz");
