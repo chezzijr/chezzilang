@@ -45,7 +45,21 @@ synthetic signature (2026-07-03).** One coherent feature in two phases.
   policy recorded in `docs/future.md §3.14` (parameterized targets like `cast[List[int]]` unsound until
   runtime type tags exist). cFFI stays fixed-arity (`Any` does not feed the C vararg ABI — `docs/ffi-and-
   packaging.md §5`).
-- **Known v1 tradeoffs:** a heterogeneous variadic arg (`f(1, "x")` into `...xs: int`) surfaces as a
+- **Heterogeneous args into `...xs: Any` (and `List[Any]`) — supported (the honest top-type element).**
+  `fn describe(...xs: Any)` called `describe(1, "a", true)` collapses to a `List[Any]` and type-checks
+  clean: every value vacuously satisfies the empty `Any` protocol. The synthesized variadic `List`
+  literal (and any annotated `xs: List[Any] = [1, "a", true]`) is now checked **expected-type-directed** —
+  the declared `List[E]` element type is driven onto each element (`Checker::infer_list` takes the
+  `expected_hint`; when every element is assignable to `E` it types as `List[E]`, bypassing bottom-up
+  sibling unification). Falls back to the bottom-up "list elements differ" diagnostic + int→float literal
+  widening when `E` is NOT satisfied-by-all (so `List[int] = [1, "a"]` still errors). Golden:
+  `examples/variadic.chz` (`describe(1,"a",true)` → `3`, `zs: List[Any] = [1,"a",true]` → `3`), byte-
+  identical on interp / --serial / default. Tests: checker `variadic_any_accepts_heterogeneous`,
+  `list_any_annotation_accepts_heterogeneous`, `list_int_annotation_still_rejects_heterogeneous`.
+  (Adversarial-review fix: the earlier collapse synthesized a bare `List` literal that the checker
+  inferred bottom-up, rejecting heterogeneous `Any` args — the exact opposite of `Any`'s purpose.)
+- **Known v1 tradeoffs:** a heterogeneous variadic arg into a NON-top element slot (`f(1, "x")` into
+  `...xs: int`) surfaces as a
   `List`-literal element-type error, not a precise per-arg message (still a compile error). A variadic fn
   used as a VALUE takes the collapsed `List[T]` slot (`g([1,2,3])` works, `g(1,2,3)` does not) — mirrors
   `print`'s fixed value form. A variadic CALL used as a parameter/field **default**

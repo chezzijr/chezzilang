@@ -1972,7 +1972,12 @@ with `compare`), stable, in place.
 > `.insert`/`.extend`, or `m[k]=v` — **pins** the element/key/value type, and later ops are checked
 > against that pinned type. So `out := []; out.push(1)` is `List[int]` and a later `out.push("s")` is a
 > type error (it would read as `List[int]`). A **heterogeneous / protocol** collection therefore needs
-> an explicit annotation — `shapes: List[Shape] = []` — which is also clearer to readers.
+> an explicit annotation — `shapes: List[Shape] = [circle, square]` (or `shapes: List[Any] = [1, "a",
+> true]` for the top type). The annotation is **expected-type-directed**: the declared element type is
+> driven onto each element, so a literal whose elements have differing concrete types is accepted as long
+> as **every** element is assignable to the declared element type (each satisfies the protocol / `Any`);
+> only when some element does *not* fit the declared type does the usual `list elements differ` error
+> fire. (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
 > of empty collection; add a type annotation`. Annotate it (`b: List[int] = []`, `m: Map[str,int] = {}`,

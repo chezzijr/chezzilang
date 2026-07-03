@@ -27,6 +27,12 @@ fn labeled(prefix: str, ...xs: int, sep: str = ", ") -> str:
 fn kind(v: Any) -> str:
     return "got a value"
 
+# A variadic typed with the `Any` top type accepts HETEROGENEOUS arguments (the honest element
+# type): the surplus positionals collapse to a `List[Any]`, whose every element vacuously satisfies
+# the empty `Any` protocol. `.len()` reports how many were passed.
+fn describe(...xs: Any) -> int:
+    return xs.len()
+
 fn main():
     print(sum_all(1, 2, 3))          # 6
     print(sum_all())                 # 0 — zero variadic args
@@ -37,6 +43,9 @@ fn main():
     b: Any = "hello"
     print(kind(a))                   # got a value
     print(kind(b))                   # got a value
+    print(describe(1, "a", true))    # 3 — heterogeneous variadic into `...xs: Any`
+    zs: List[Any] = [1, "a", true]   # heterogeneous list literal into a `List[Any]` slot
+    print(zs.len())                  # 3
     # `print` is now a variadic `native fn print(...args: Any, sep, end)` decl.
     print(1, "a", true, sep="-", end="!\n")   # 1-a-true!
     print()                                    # blank line

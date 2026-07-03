@@ -14213,6 +14213,50 @@ fn variadic_element_type_enforced() {
     );
 }
 
+/// A variadic typed with the `Any` top type accepts HETEROGENEOUS arguments — the flagship reason
+/// `Any` is the "honest element type". `f(1, "a", true)` collapses to a `List[Any]` whose every
+/// element vacuously satisfies the empty `Any` protocol, so the synthesized list literal must be
+/// checked against the declared `List[Any]` slot (expected-type-directed), NOT unified bottom-up.
+/// (Regression: it previously failed with "list elements differ: int vs str".)
+#[test]
+fn variadic_any_accepts_heterogeneous() {
+    let errs = check_desugared(
+        "fn describe(...xs: Any) -> int:\n    return xs.len()\n\nfn main():\n    n := describe(1, \"a\", true)\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// The same expected-type-directed rescue for an EXPLICIT `List[Any]` annotation binding a
+/// heterogeneous list literal (the non-variadic surface of the same fix).
+#[test]
+fn list_any_annotation_accepts_heterogeneous() {
+    let errs =
+        check_desugared("fn main():\n    xs: List[Any] = [1, \"a\", true]\n    n := xs.len()\n");
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// The same expected-type-directed path generalizes beyond `Any`: a `List[Shape]` annotation accepts
+/// a literal of DIFFERING concrete types when each satisfies the declared protocol element type
+/// (sound — each element is genuinely assignable to `Shape`).
+#[test]
+fn list_protocol_annotation_accepts_mixed_concrete() {
+    let errs = check_desugared(
+        "protocol Shape:\n    fn area(self) -> int\n\nstruct Circle:\n    r: int\n    fn area(self) -> int:\n        return self.r\n\nstruct Square:\n    s: int\n    fn area(self) -> int:\n        return self.s\n\nfn main():\n    shapes: List[Shape] = [Circle(r=2), Square(s=3)]\n    n := shapes.len()\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// A heterogeneous literal into a NON-top concrete element slot (`List[int]`) still errors — the
+/// expected-type path only rescues when EVERY element is assignable to the declared element type.
+#[test]
+fn list_int_annotation_still_rejects_heterogeneous() {
+    let errs = check_desugared("fn main():\n    xs: List[int] = [1, \"a\"]\n");
+    assert!(
+        !errs.is_empty(),
+        "expected a type error for str into List[int]"
+    );
+}
+
 // ===== print ported to a variadic `native fn` decl =====
 
 #[test]

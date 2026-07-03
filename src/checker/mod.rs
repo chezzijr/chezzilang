@@ -8087,7 +8087,14 @@ impl Checker {
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
-            ExprKind::List(items) => self.infer_list(items),
+            ExprKind::List(items) => {
+                // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
+                // arg, a return position — or the synthesized variadic list). `take()` so the
+                // hint drives THIS literal's element type and never leaks into a nested element
+                // call. `None` keeps the ordinary bottom-up inference.
+                let hint = self.expected_hint.take();
+                self.infer_list(items, hint.as_ref())
+            }
             ExprKind::Tuple(items) => {
                 Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
             }
@@ -8543,7 +8550,40 @@ impl Checker {
         Ty::Unknown
     }
 
-    fn infer_list(&mut self, items: &[Expr]) -> Ty {
+    fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
+        // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
+        // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
+        // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
+        // unifying siblings bottom-up. A heterogeneous literal whose every element is assignable to
+        // `E` then types as `List[E]`: the element-homogeneity rule is bypassed because the declared
+        // element type already sanctions the mix. This is what makes the `Any` top type the honest
+        // variadic element type — `fn f(...xs: Any)` called `f(1, "a", true)` (and the equivalent
+        // `xs: List[Any] = [1, "a", true]`) collapse to a `List[Any]` and check clean, since every
+        // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
+        // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
+        // (int→float) widening for a genuinely mistyped literal.
+        if let Some(Ty::List(e)) = expected
+            && !e.is_unknown()
+            && !items.is_empty()
+        {
+            let tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
+            if tys.iter().all(|t| t.is_unknown() || self.assignable(e, t)) {
+                return Ty::list((**e).clone());
+            }
+            // Not all elements fit `E` — re-run the homogeneity check over the ALREADY-inferred
+            // element types (no re-inference) so the usual diagnostics fire against the literal.
+            let mut elem = Ty::Unknown;
+            for (t, item) in tys.iter().zip(items) {
+                if elem.is_unknown() {
+                    elem = t.clone();
+                } else if numeric_mix(&elem, t) {
+                    elem = Ty::Float;
+                } else if !t.is_unknown() && !compatible(&elem, t) {
+                    self.error(item.span, format!("list elements differ: {elem} vs {t}"));
+                }
+            }
+            return Ty::list(elem);
+        }
         let mut elem = Ty::Unknown;
         for item in items {
             let t = self.infer_value(item);
