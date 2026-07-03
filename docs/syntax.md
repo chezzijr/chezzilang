@@ -1919,6 +1919,16 @@ with `compare`), stable, in place.
 > uncaught sliver is a differently-typed push done as a *side effect* inside sibling **if-EXPRESSION /
 > match-EXPRESSION** value-arms (value-arms refine independently so branch value inference stays
 > correct; rare, since a value-arm is a single expression and the mutating ops are statements).
+>
+> Because the pin is **scope-wide** (not source-order forward), a **non-pinning** use of the binding
+> that appears *before* the pinning op still sees the resolved element type — the checker resolves the
+> binding's element type from the whole scope, then checks each use against it. So `a := []; a.sort();
+> a.push(1)` type-checks (`a` is `List[int]`: the later `push` pins it, and the earlier `sort` is
+> checked against that pinned `int`). This is what makes **bound-checked methods** compose with
+> refinement: `sort`'s `where T: Comparable` and `sum`'s `where T: Add` enforce against the *resolved*
+> element type, never a transient `Unknown`. A genuinely never-pinned empty still fails at the binding
+> with `cannot infer element type of empty collection` (above) — not with a spurious `does not satisfy
+> Comparable`/`Add`.
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
