@@ -244,10 +244,12 @@ pub(crate) enum Intrinsic {
 /// backends (`compiler::is_builtin`, `interp::builtins::is_builtin`, `is_firstclass_builtin_fn`), which
 /// have no module-graph access and need only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
 /// the eight migrated builtins moved OUT to the always-linked `std/prelude.chz` `native fn`/`native
-/// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]);
-/// only `print` (variadic — not expressible as a `native` decl) keeps a synthetic Rust signature. The
-/// two halves are reconciled by `prelude_table_is_single_source_of_truth` so the `.chz` decls stay
-/// authoritative.
+/// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]).
+/// `print` is now file-backed too — a variadic `native fn print(...args: Any, sep, end)` decl in
+/// `std/prelude.chz` (no synthetic Rust signature remains); only its fixed 1-arg VALUE form
+/// (`p := print`) is still synthesized in `infer_ident`, since the specialized `CallPrint` opcodes
+/// are unreachable through a bound value. The two halves are reconciled by
+/// `prelude_table_is_single_source_of_truth` so the `.chz` decls stay authoritative.
 pub(crate) struct PreludeFn {
     pub(crate) name: &'static str,
     pub(crate) intrinsic: Intrinsic,
@@ -16244,9 +16246,10 @@ fn bytes_method_sig(method: &str) -> Option<FnSig> {
 }
 
 /// A DISPLAY/PLACEHOLDER signature for the STILL-SYNTHETIC free / constructor builtins (editor hover,
-/// v1): `print` (variadic — not expressible as a `native` decl) plus the GENERIC / reserved-type
-/// container & runtime ctors (`range`/`List`/`Map`/`Set`/`Channel`/`Shared`/`RwShared`/`Atomic`/
-/// `timer`/`Executor`). This is the FLAT sig the container ctors keep here BECAUSE their real generic
+/// v1): the GENERIC / reserved-type container & runtime ctors
+/// (`range`/`List`/`Map`/`Set`/`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). (`print` is
+/// no longer here — it is now the file-backed variadic `native fn print(...)` decl, so its sig flows
+/// through `builtin_sig` BEFORE this fallback.) This is the FLAT sig the container ctors keep here BECAUSE their real generic
 /// type-identity (`List[int]` → `Ty::List(Int)`, …) is NOT a flat `FnSig` and lives in
 /// `resolve_type`/`infer_named_call`; the `Intrinsic::Ctor` PRELUDE rows carry only their DISPATCH.
 /// The eight MIGRATED universe builtins

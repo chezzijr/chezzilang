@@ -8193,6 +8193,25 @@ mod tests {
     }
 
     #[test]
+    fn variadic_method_name_collision_runs_byte_identical() {
+        // A variadic method call whose name collides with a differently-shaped method on another
+        // struct must collapse its surplus positionals and RUN identically on both engines. Before
+        // the fix the surplus positionals reached the runtime uncollapsed (arity fault).
+        for src in [
+            // positional variadic, receiver is a let-bound local
+            "struct A:\n    fn m(self, ...xs: int) -> int:\n        return xs.len()\n\nstruct B:\n    fn m(self, x: int) -> int:\n        return x\n\nfn main():\n    a := A()\n    print(a.m(1, 2, 3))\n    print(a.m())\n\nmain()\n",
+            // typed-param receiver
+            "struct A:\n    fn m(self, ...xs: int) -> int:\n        return xs.len()\n\nstruct B:\n    fn m(self, a: int, b: int) -> int:\n        return a + b\n\nfn use_a(x: A) -> int:\n    return x.m(1, 2, 3, 4)\n\nfn main():\n    print(use_a(A()))\n\nmain()\n",
+            // keyword-only post-variadic tail
+            "struct A:\n    fn m(self, ...xs: int, flag: bool) -> int:\n        if flag:\n            return xs.len()\n        return -1\n\nstruct B:\n    fn m(self, x: int) -> int:\n        return x\n\nfn main():\n    a := A()\n    print(a.m(1, 2, flag=true))\n\nmain()\n",
+        ] {
+            let vm_out = crate::vm::run_capture(src).expect("vm run");
+            let interp_out = run_capture(src).expect("interp run");
+            assert_eq!(vm_out, interp_out, "stdout parity for {src:?}");
+        }
+    }
+
+    #[test]
     fn interp_assert_false_default_message() {
         // Bare `assert false` keeps the exact legacy text — byte-identical to the VM.
         let err = run_capture("assert false\n").unwrap_err();

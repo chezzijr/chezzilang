@@ -782,6 +782,35 @@ impl Walker<'_> {
         }
     }
 
+    /// If `ty` names a struct known to this module (a bare `Type::Named` or a `Type::Generic` head
+    /// that resolves to a declared struct), return that struct name — so a typed parameter (`x: A`)
+    /// records its receiver struct type just like a `x := A()` let binding. Mirrors the struct check
+    /// in [`Self::struct_value_ty`].
+    fn annot_struct_ty(&self, ty: &Type) -> Option<String> {
+        let name = match ty {
+            Type::Named { name, .. } => name,
+            Type::Generic(name, ..) => name,
+            _ => return None,
+        };
+        self.ctx
+            .regs
+            .get(self.ctx.own_id)
+            .filter(|r| r.structs.contains_key(name))
+            .map(|_| name.clone())
+    }
+
+    /// Bind a function/method parameter into the current scope, additionally recording its receiver
+    /// struct type when the annotation names a known struct — so a typed-parameter receiver
+    /// (`fn f(x: A): x.m(...)`) resolves through [`Self::receiver_struct_ty`] like a let-bound local.
+    fn bind_param(&mut self, p: &Param) {
+        self.bind(&p.name);
+        if let Some(ty) = &p.ty
+            && let Some(sname) = self.annot_struct_ty(ty)
+        {
+            self.bind_local_struct(&p.name, &sname);
+        }
+    }
+
     /// The `is_ref` flags of a local fn-value `name` (innermost binding wins, shadowing-aware).
     fn local_fn_flags(&self, name: &str) -> Option<&Vec<bool>> {
         for (vars, fns) in self.scopes.iter().zip(self.local_fn.iter()).rev() {
@@ -989,7 +1018,7 @@ impl Walker<'_> {
                 // Nested/top-level function body: params are a fresh scope.
                 self.push_scope();
                 for p in &decl.params {
-                    self.bind(&p.name);
+                    self.bind_param(p);
                     if p.is_ref && self.lower_refs {
                         self.bind_ref(&p.name);
                     }
@@ -1015,7 +1044,7 @@ impl Walker<'_> {
                     }
                     self.push_scope();
                     for p in &m.params {
-                        self.bind(&p.name);
+                        self.bind_param(p);
                         if p.is_ref && self.lower_refs {
                             self.bind_ref(&p.name);
                         }
@@ -1112,7 +1141,7 @@ impl Walker<'_> {
                     }
                     self.push_scope();
                     for p in &m.params {
-                        self.bind(&p.name);
+                        self.bind_param(p);
                         if p.is_ref && self.lower_refs {
                             self.bind_ref(&p.name);
                         }
@@ -1522,20 +1551,27 @@ impl Walker<'_> {
         // can't be injected into a fn-field call.
         let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
             (None, ExprKind::Field { obj, name, .. }) if !self.ctx.fn_fields.contains(name) => {
-                if is_builtin_method(name) {
-                    // The method name collides with a builtin (`add`, `map`, `push`, …). The receiver
-                    // might be a genuine builtin value (List/Set/Map/str) whose shape we cannot see in
-                    // this pre-type pass, so we resolve ONLY when the receiver's struct type is
-                    // statically knowable AND that exact struct defines the method (then it's a user
-                    // method — full named/default support). Anything else (builtin receiver, or an
-                    // unknowable receiver) stays None: NO name-keyed fallback that could mis-bind a
-                    // builtin call.
-                    self.receiver_struct_ty(obj).and_then(|sname| {
-                        self.ctx
-                            .methods_by_struct
-                            .get(&(sname, name.clone()))
-                            .cloned()
-                    })
+                // Receiver-aware FIRST: when the receiver's struct type is statically knowable
+                // (a typed local/param, an inline ctor call, or a struct-returning fn — see
+                // `receiver_struct_ty`), bind `m` against THAT exact struct's spec. This is the ONLY
+                // path that resolves a call when several structs define `m` with DIFFERENT parameter
+                // lists (a variadic method next to a fixed-arity sibling, or two variadics differing
+                // only in the variadic param's NAME): the name-keyed `methods` table below bails on
+                // any disagreement, so without this a valid variadic method call would reach the
+                // checker uncollapsed and be rejected against its single `List[T]` slot.
+                let recv_spec = self.receiver_struct_ty(obj).and_then(|sname| {
+                    self.ctx
+                        .methods_by_struct
+                        .get(&(sname, name.clone()))
+                        .cloned()
+                });
+                if recv_spec.is_some() {
+                    recv_spec
+                } else if is_builtin_method(name) {
+                    // A builtin-named method (`add`, `map`, `push`, …) with an unknowable receiver:
+                    // the receiver might be a genuine builtin value (List/Set/Map/str), so there is
+                    // NO name-keyed fallback that could mis-bind a builtin call.
+                    None
                 } else {
                     match self.ctx.methods.get(name.as_str()) {
                         Some(cands) if !cands.is_empty() => {
@@ -2147,12 +2183,26 @@ mod tests {
 
     #[test]
     fn ambiguous_method_named_errors() {
-        // Two structs define `set` with different params; a named call can't be bound unambiguously.
+        // Two structs define `set` with different params; a named call on an UNRESOLVABLE receiver
+        // (an unannotated closure param — no static struct type) can't be bound unambiguously.
+        // (A named call on a KNOWN receiver — `a := A(0); a.set(x=1)` — now resolves receiver-aware
+        // to A.set; see `ambiguous_method_named_resolves_on_known_receiver`.)
         assert!(desugar_err(
-            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\na := A(0)\nr := a.set(x=1)\n",
+            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\ng := fn(a): a.set(x=1)\n",
         )
         .message
         .contains("multiple structs"));
+    }
+
+    #[test]
+    fn ambiguous_method_named_resolves_on_known_receiver() {
+        // With a statically-known receiver (`a := A(0)`), a named call to a name-colliding method
+        // binds receiver-aware to the RIGHT struct's spec — no "multiple structs" error (mirrors
+        // `builtin_named_method_known_receiver_normalized`, now extended to plain method names).
+        let s = desugar_ok(
+            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\na := A(0)\nr := a.set(x=1)\n",
+        );
+        assert_eq!(method_call_arg_ints(&s), vec![1]);
     }
 
     #[test]

@@ -52,7 +52,21 @@ synthetic signature (2026-07-03).** One coherent feature in two phases.
   (`fn g(x: int = sum_all(1,2,3))`) is **not** collapsed and so is a **compile error** (the desugar
   collapse runs on pass 1 only for idempotency; a default is spliced after pass 1) — it fails identically
   on both engines (a compile error, NOT a parity divergence). Wrap the default in a fixed-arity helper.
-  Narrow enough to defer; a robust fix needs a per-call "already collapsed" marker. **Lexer surface changed (`...` token):** editor TextMate grammar regenerated
+  Narrow enough to defer; a robust fix needs a per-call "already collapsed" marker.
+- **Fix (adversarial-review follow-up):** a variadic METHOD call (`recv.m(a,b,c)`) is now collapsed even
+  when another struct/enum defines a method of the SAME name with a DIFFERENT param list (a fixed-arity
+  sibling, or two variadics differing only in the variadic param's NAME). The desugar method-spec
+  resolution is now **receiver-aware first**: when the receiver's struct type is statically knowable
+  (a let-bound local, an inline ctor, a struct-returning fn, or now a **typed parameter** `x: A`), it
+  binds `m` against THAT struct's exact spec (incl. its variadic index) before the name-keyed all-agree
+  table — so the surplus positionals collapse instead of reaching the checker uncollapsed and being
+  rejected against the single `List[T]` slot. Typed params are registered in desugar's `local_struct`
+  (`bind_param`), so a keyword-only post-variadic tail on a name-colliding method (`a.m(1,2,flag=true)`)
+  also resolves rather than emitting the unsatisfiable "pass arguments positionally" error. A named call
+  on a KNOWN receiver now resolves receiver-aware too (previously errored "multiple structs"); an
+  UNRESOLVABLE receiver (unannotated closure param) still errors clearly. Regression tests: checker
+  `variadic_method_*`, interp two-engine `variadic_method_name_collision_runs_byte_identical`,
+  desugar `ambiguous_method_named_*`. **Lexer surface changed (`...` token):** editor TextMate grammar regenerated
   (`UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage`); **manual follow-up:** reinstall
   `chezzi-lsp` so editors stop serving stale highlighting. Docs updated: `spec.md` (variadic NON-GOAL
   overturned for arguments; variadic generics stay a non-goal), `syntax.md`, `stdlib.md`, `grammar.bnf`

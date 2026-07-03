@@ -14252,3 +14252,48 @@ fn variadic_call_as_param_default_is_compile_error() {
         "a variadic call as a param default is a known-limit compile error"
     );
 }
+
+// ===== variadic METHODS under same-name collisions across structs (regression) =====
+
+/// A variadic method call `recv.m(a,b,c)` must collapse the surplus positionals even when ANOTHER
+/// struct defines `m` with a different (non-variadic) param list. The receiver's struct type is
+/// knowable pre-type (`a := A()`), so desugar resolves the exact variadic spec and collapses.
+#[test]
+fn variadic_method_positional_with_name_collision() {
+    let errs = check_desugared(
+        "struct A:\n    fn m(self, ...xs: int) -> int:\n        return xs.len()\n\nstruct B:\n    fn m(self, x: int) -> int:\n        return x\n\nfn main():\n    a := A()\n    print(a.m(1, 2, 3))\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// Same collision, but the receiver is a TYPED PARAMETER (`x: A`) rather than a let-bound local —
+/// the desugar pass must still resolve the receiver's struct type to collapse the variadic call.
+#[test]
+fn variadic_method_typed_param_receiver_with_collision() {
+    let errs = check_desugared(
+        "struct A:\n    fn m(self, ...xs: int) -> int:\n        return xs.len()\n\nstruct B:\n    fn m(self, a: int, b: int) -> int:\n        return a + b\n\nfn use_a(x: A) -> int:\n    return x.m(1, 2, 3)\n\nfn main():\n    print(use_a(A()))\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// Two BOTH-variadic methods that differ only in the variadic param's NAME (`...xs` vs `...ys`) —
+/// the name-keyed method table sees a disagreement, but the receiver-aware resolution picks the
+/// right sibling and collapses.
+#[test]
+fn variadic_method_both_variadic_differ_by_param_name() {
+    let errs = check_desugared(
+        "struct A:\n    fn m(self, ...xs: int) -> int:\n        return xs.len()\n\nstruct B:\n    fn m(self, ...ys: int) -> int:\n        return ys.len() * 2\n\nfn main():\n    a := A()\n    print(a.m(1, 2, 3))\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// A keyword-only post-variadic param on a name-colliding method: `a.m(1, 2, flag=true)` fills the
+/// variadic positionally and the keyword-only slot by name. Previously the collision guard emitted
+/// an unsatisfiable "pass arguments positionally" error for a keyword-ONLY parameter.
+#[test]
+fn variadic_method_keyword_only_with_collision() {
+    let errs = check_desugared(
+        "struct A:\n    fn m(self, ...xs: int, flag: bool) -> int:\n        if flag:\n            return xs.len()\n        return 0\n\nstruct B:\n    fn m(self, x: int) -> int:\n        return x\n\nfn main():\n    a := A()\n    print(a.m(1, 2, flag=true))\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
