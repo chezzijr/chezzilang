@@ -1,0 +1,3 @@
+# rule: passStmt
+# expect: reserved keyword
+pass := 5

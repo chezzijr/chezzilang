@@ -372,6 +372,22 @@ impl Parser {
                 self.expect_stmt_end()?;
                 StmtKind::Continue
             }
+            Token::Pass => {
+                // `pass` is a reserved keyword; the likely misuse is trying to use it as a name
+                // (`pass := 5`, `pass = 5`, `pass: int`). Give a targeted message for those forms;
+                // otherwise it's a no-op statement.
+                if matches!(
+                    self.peek_at(1),
+                    Token::Walrus | Token::Assign | Token::Colon
+                ) {
+                    return Err(self.err(
+                        "'pass' is a reserved keyword and cannot be used as a name".to_string(),
+                    ));
+                }
+                self.advance();
+                self.expect_stmt_end()?;
+                StmtKind::Pass
+            }
             Token::Import => {
                 let k = StmtKind::Import(self.parse_import()?);
                 self.expect_stmt_end()?;
@@ -742,6 +758,29 @@ impl Parser {
         let mut methods = Vec::new();
         let mut embeds = Vec::new();
         self.skip_newlines();
+        // A sole `pass` line = an empty protocol body (zero methods, zero embeds): an accept-all top
+        // type (structural ⇒ satisfied by every type, like Go's `any`). `pass` must be the ONLY line:
+        // a following method/embed OR a second `pass` is a parse error (modeled as the body being
+        // exactly `pass NEWLINE DEDENT`).
+        if self.check(&Token::Pass) {
+            self.advance();
+            self.expect_stmt_end()?;
+            self.skip_newlines();
+            if !self.check(&Token::Dedent) {
+                return Err(
+                    self.err("`pass` must be the only line in an empty protocol body".to_string())
+                );
+            }
+            self.expect(&Token::Dedent)?;
+            return Ok(StmtKind::Protocol {
+                name,
+                name_span,
+                type_params,
+                methods,
+                embeds,
+                doc,
+            });
+        }
         // A protocol body line is EITHER an `fn` signature OR an embed line (M22). An embed line is
         // one-or-more protocol refs joined by `+` (`Add + Sub`, `Iterator[T]`) — order-free, may
         // interleave with `fn` sigs. The two are unambiguous: an `fn` line starts with `FN`, an embed
@@ -1163,6 +1202,27 @@ impl Parser {
         let mut methods = Vec::new();
         let mut seen_default = false;
         self.skip_newlines();
+        // A sole `pass` line = an empty struct body (zero fields, zero methods): the ctor `S()` takes
+        // no args. `pass` must be the ONLY line — a following field/method OR a second `pass` errors.
+        if self.check(&Token::Pass) {
+            self.advance();
+            self.expect_stmt_end()?;
+            self.skip_newlines();
+            if !self.check(&Token::Dedent) {
+                return Err(
+                    self.err("`pass` must be the only line in an empty struct body".to_string())
+                );
+            }
+            self.expect(&Token::Dedent)?;
+            return Ok(StmtKind::Struct {
+                name,
+                name_span,
+                type_params,
+                fields,
+                methods,
+                doc,
+            });
+        }
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             if self.check(&Token::Fn) {
                 // Methods accept default params (like free fns); the desugar pass fills omitted args
@@ -1238,6 +1298,14 @@ impl Parser {
         let mut methods = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            if self.check(&Token::Pass) {
+                // An empty enum (uninhabited type) is deliberately unsupported: an enum needs at
+                // least one variant. Reject `pass` here with a clear message (unlike struct/protocol,
+                // where a sole `pass` is a valid empty body).
+                return Err(self.err(
+                    "empty enums are not supported; an enum needs at least one variant".to_string(),
+                ));
+            }
             if self.check(&Token::Fn) {
                 // Methods accept default params (like free fns / struct methods); the desugar pass
                 // fills omitted args / reorders named args at method call sites by method name.
@@ -2936,6 +3004,70 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn pass_parses_as_noop_stmt() {
+        assert_eq!(only("pass\n"), StmtKind::Pass);
+        // inside a fn body
+        let StmtKind::Fn(d) = only("fn f():\n    pass\n") else {
+            panic!("expected fn");
+        };
+        assert_eq!(d.body.len(), 1);
+        assert_eq!(d.body[0].kind, StmtKind::Pass);
+    }
+
+    #[test]
+    fn pass_reserved_as_name_rejected() {
+        // walrus / assign / annotation forms get the targeted keyword message
+        assert!(
+            parse_err("pass := 5\n")
+                .to_string()
+                .contains("reserved keyword")
+        );
+        // name positions get the standard "expected identifier" (by-construction, like `ref`)
+        parse_err("fn pass():\n    return\n");
+        parse_err("fn f(pass: int):\n    return\n");
+        parse_err("struct S:\n    pass: int\n");
+        parse_err("import m as pass\n");
+    }
+
+    #[test]
+    fn empty_protocol_via_pass() {
+        let StmtKind::Protocol {
+            methods, embeds, ..
+        } = only("protocol Foo:\n    pass\n")
+        else {
+            panic!("expected protocol");
+        };
+        assert!(methods.is_empty());
+        assert!(embeds.is_empty());
+        // pass + a method, and pass pass, both reject
+        parse_err("protocol Foo:\n    pass\n    fn m(self)\n");
+        parse_err("protocol Foo:\n    pass\n    pass\n");
+    }
+
+    #[test]
+    fn empty_struct_via_pass() {
+        let StmtKind::Struct {
+            fields, methods, ..
+        } = only("struct S:\n    pass\n")
+        else {
+            panic!("expected struct");
+        };
+        assert!(fields.is_empty());
+        assert!(methods.is_empty());
+        parse_err("struct S:\n    pass\n    x: int\n");
+        parse_err("struct S:\n    pass\n    pass\n");
+    }
+
+    #[test]
+    fn empty_enum_via_pass_rejected() {
+        let e = parse_err("enum E:\n    pass\n");
+        assert!(
+            e.to_string().contains("at least one variant") || e.to_string().contains("empty enum"),
+            "unexpected message: {e}"
+        );
     }
 
     #[test]

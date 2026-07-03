@@ -1,0 +1,3 @@
+# rule: structDecl, structBody
+struct S:
+    pass

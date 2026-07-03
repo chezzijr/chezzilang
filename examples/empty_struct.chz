@@ -1,0 +1,26 @@
+# An empty struct (`struct S:\n    pass`) has zero fields: the constructor `S()` takes no args. It
+# prints as `S()`, two instances compare equal (structural equality over zero fields), and it is
+# usable as a Set element / Map key (a zero-field struct is intrinsically Hashable).
+struct S:
+    pass
+
+struct T:
+    pass
+
+fn main():
+    a := S()
+    b := S()
+    # Zero-field structural equality: two `S()` are equal.
+    print(a == b)
+    # Display: an empty struct prints with no fields.
+    print(a)
+    # Distinct empty-struct types are not equal (type tag differs despite equal hash).
+    print(a == T())
+    # Usable as a Set element — two `S()` dedup to one.
+    seen: Set[S] = {a, b}
+    print(seen.len())
+    # Usable as a Map key.
+    m: Map[S, int] = {a: 1}
+    print(m[b])
+
+main()

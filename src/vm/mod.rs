@@ -5580,6 +5580,13 @@ impl Vm {
             .get(name.as_ref())
             .cloned()
             .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
+        // A ZERO-FIELD struct with no `hash` method hashes to a constant (0): it has no state, so
+        // there is nothing to hash. `==`'s type-tag guard keeps distinct empty-struct types unequal
+        // despite the shared hash. Mirrors the checker's zero-field `Hashable` intrinsic and the
+        // interpreter's identical constant (two-engine parity).
+        if def.fields.is_empty() && !def.methods.contains_key("hash") {
+            return Ok(0);
+        }
         let proto = *def.methods.get("hash").ok_or_else(|| {
             self.err(
                 format!(
@@ -16126,7 +16133,7 @@ mod tests {
         assert_mc_parity(src, expected);
     }
 
-    /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: all 16 reserved-protocol SHAPES are now file-backed
+    /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: all 17 reserved-protocol SHAPES are now file-backed
     /// in std/prelude.chz, but conformance (`satisfies`/`iter_elem`) + operator binding stay Rust-wired
     /// and untouched. This drives int/float INTRINSIC arithmetic, a user 4-op struct under `+ - * /` AND
     /// through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator` struct
@@ -22811,6 +22818,56 @@ main()";
     fn golden_hello_chz_matches_expected() {
         let expected = include_str!("../../examples/hello.expected");
         assert_eq!(run(include_str!("../../examples/hello.chz")), expected);
+    }
+
+    /// `pass` no-op-statement golden: a lone-`pass` fn body (== a `return`-only body: runs, falls off
+    /// the end → nil) plus `pass` as a no-op inside `if`/`for`/`while`. `pass` compiles to no bytecode,
+    /// so VM and interp are byte-identical.
+    #[test]
+    fn golden_pass_noop_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/pass_noop.chz");
+        let expected = include_str!("../../examples/pass_noop.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from pass_noop.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on pass_noop");
+    }
+
+    /// Empty-protocol golden: `protocol Foo:\n    pass` is an accept-all top type (structural over
+    /// zero methods ⇒ every type satisfies it), byte-identical to the reserved `Any` — accepts
+    /// int/str/bool/struct params and types a heterogeneous `List[Foo]`. Erased at runtime, so VM ==
+    /// interp.
+    #[test]
+    fn golden_empty_protocol_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/empty_protocol.chz");
+        let expected = include_str!("../../examples/empty_protocol.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from empty_protocol.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on empty_protocol");
+    }
+
+    /// Empty-struct golden: `struct S:\n    pass` has zero fields — `S()` constructs, prints `S()`,
+    /// two `S()` compare equal, a distinct empty struct `T()` is not equal, and `S` is usable as a Set
+    /// element / Map key (zero-field structs are intrinsically Hashable, both engines returning the
+    /// same constant hash). VM == interp.
+    #[test]
+    fn golden_empty_struct_chz_matches_expected_and_interp() {
+        let src = include_str!("../../examples/empty_struct.chz");
+        let expected = include_str!("../../examples/empty_struct.expected");
+        let vm_out = run_capture(src).expect("vm run");
+        let interp_out = crate::interp::run_capture(src).expect("interp run");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from empty_struct.expected"
+        );
+        assert_eq!(vm_out, interp_out, "vm/interp divergence on empty_struct");
     }
 
     /// Container-constructor golden: `examples/container_ctor.chz` exercises `List[T]()` / `Map[K,V]()`

@@ -1,0 +1,29 @@
+# `pass` — a no-op statement. A function whose body is a lone `pass` behaves exactly like a
+# `return`-only body: it runs, falls off the end, and returns nil.
+fn empty_pass():
+    pass
+
+fn empty_return():
+    return
+
+fn main():
+    # A lone-`pass` body runs and falls off the end (returns nil), exactly like a lone-`return` body.
+    empty_pass()
+    empty_return()
+    print("both ran")
+    # `pass` as a no-op inside control-flow bodies.
+    if true:
+        pass
+    else:
+        print("unreachable")
+    print("after if")
+    for i in 0..3:
+        pass
+    print("after for")
+    x := 0
+    while x < 2:
+        x += 1
+        pass
+    print(x)
+
+main()

@@ -1,0 +1,5 @@
+# rule: structBody
+# expect: only line in an empty struct body
+struct S:
+    pass
+    x: int

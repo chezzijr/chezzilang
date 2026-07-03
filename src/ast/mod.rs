@@ -188,6 +188,11 @@ pub enum StmtKind {
     Break,
     /// `continue` — skip to the next iteration of the innermost enclosing loop.
     Continue,
+    /// `pass` — a no-op statement. Does nothing; compiles to no bytecode. A function whose body is a
+    /// lone `pass` behaves exactly like a `return`-only body (falls off the end → nil). Valid in every
+    /// statement-block position (fn/method body, if/elif/else, for/while, statement-match arm,
+    /// concurrency block bodies). Carries only its `Span` (via `Stmt`).
+    Pass,
     /// An `import …` statement.
     Import(Import),
     /// `extern "lib":` — a block of body-less C function signatures bound to a shared library.

@@ -1,0 +1,31 @@
+# An empty protocol (`protocol Foo:\n    pass`) is an accept-all TOP TYPE: structural satisfaction
+# over zero methods ⇒ every type satisfies it, exactly like the reserved `Any`. This makes a user
+# empty protocol behave byte-identically to `Any`.
+protocol Foo:
+    pass
+
+struct Point:
+    x: int
+    y: int
+
+fn takes_foo(v: Foo) -> str:
+    return "ok"
+
+fn takes_any(v: Any) -> str:
+    return "ok"
+
+fn main():
+    # An empty protocol accepts scalars and structs alike.
+    print(takes_foo(1))
+    print(takes_foo("a"))
+    print(takes_foo(true))
+    print(takes_foo(Point(1, 2)))
+    # Heterogeneous list typed by an empty protocol type-checks and runs.
+    xs: List[Foo] = [1, "a", true]
+    print(xs.len())
+    # `Any` gives the identical accept-all behaviour.
+    print(takes_any(1))
+    ys: List[Any] = [1, "a", true]
+    print(ys.len())
+
+main()

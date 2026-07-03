@@ -42,6 +42,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::In => "IN",
         Token::Break => "BREAK",
         Token::Continue => "CONTINUE",
+        Token::Pass => "PASS",
         Token::Struct => "STRUCT",
         Token::Enum => "ENUM",
         Token::Protocol => "PROTOCOL",

@@ -1,0 +1,12 @@
+# rule: passStmt
+fn f():
+    pass
+
+fn main():
+    f()
+    if true:
+        pass
+    for i in 0..3:
+        pass
+    while false:
+        pass

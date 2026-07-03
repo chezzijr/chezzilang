@@ -984,8 +984,8 @@ impl Checker {
             // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
             if lm.dotted == ["std", "prelude"] {
                 c.assert_native_enum_shape_matches(&lm.ast);
-                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 16 reserved
-                // protocols (Comparable/Stringable/Error/Hashable, the operator protocols, the
+                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 17 reserved
+                // protocols (`Any`, Comparable/Stringable/Error/Hashable, the operator protocols, the
                 // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`) are now ALSO declared in
                 // `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
                 // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
@@ -2230,7 +2230,7 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. All 16 reserved protocols are mirrored;
+    /// the two source expressions from silently drifting. All 17 reserved protocols are mirrored;
     /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
     /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
     /// byte-matches too. Called only on the always-linked prelude module; the body is
@@ -2242,6 +2242,9 @@ impl Checker {
         }
         let seed = prebuilt_protocols();
         for name in [
+            // `Any` — the empty (zero-method, zero-embed) accept-all top type. Now expressible in
+            // Chezzi as `protocol Any:\n    pass`, so it is mirrored + drift-guarded like the rest.
+            "Any",
             "Comparable",
             "Stringable",
             "Error",
@@ -5954,6 +5957,8 @@ impl Checker {
                     self.error(span, "continue outside loop");
                 }
             }
+            // `pass` — a no-op statement; nothing to check.
+            StmtKind::Pass => {}
             StmtKind::Expr(e) => {
                 self.infer(e);
             }
@@ -13919,6 +13924,17 @@ impl Checker {
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
             return Ok(());
         }
+        // A ZERO-FIELD struct is intrinsically `Hashable`: it has no state to hash, so both engines
+        // return a constant hash for it (with `==`'s type-tag guard keeping distinct empty-struct
+        // types unequal despite the hash collision). This lets `struct S: pass` be used as a Set
+        // element / Map key without an explicit `hash(self)` method. A struct WITH fields still falls
+        // through to the structural check (needs `hash(self) -> int`).
+        if protocol == "Hashable"
+            && let Ty::Struct(name, _) = ty
+            && self.structs.get(name).is_some_and(|d| d.fields.is_empty())
+        {
+            return Ok(());
+        }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
         if protocol == "Error" && matches!(ty, Ty::Str) {
             return Ok(());
@@ -15495,9 +15511,12 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         // `Any` — the TOP type: an EMPTY structural protocol (zero embeds, zero methods) so EVERY
         // type satisfies it (scalars included — see the empty-protocol short-circuit in
-        // `satisfies_args_d`). Used as the honest element type of a variadic display slot
-        // (`print(...args: Any)`); NOT dynamic typing — it reuses the protocol-as-value-type machinery
-        // and carries no methods, so a value typed `Any` can only be passed around / displayed.
+        // `satisfies_args_d`). This stays the RUNTIME source of truth; since empty protocols are now
+        // expressible (`protocol Any:\n    pass`), it is ALSO mirrored + drift-guarded in
+        // `std/prelude.chz` like the other reserved protocols. A user empty protocol behaves
+        // identically (the accept-all behaviour is not special-cased on the name "Any"). Used as the
+        // honest element type of a variadic display slot (`print(...args: Any)`); NOT dynamic typing —
+        // a value typed `Any` carries no methods, so it can only be passed around / displayed.
         "Any".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),

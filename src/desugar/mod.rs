@@ -1154,6 +1154,7 @@ impl Walker<'_> {
             StmtKind::Return(None)
             | StmtKind::Break
             | StmtKind::Continue
+            | StmtKind::Pass
             | StmtKind::Import(_)
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. }

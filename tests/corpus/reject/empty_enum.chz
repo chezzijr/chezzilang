@@ -1,0 +1,4 @@
+# rule: enumDecl
+# expect: at least one variant
+enum E:
+    pass

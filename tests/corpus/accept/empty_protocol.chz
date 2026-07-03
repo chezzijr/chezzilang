@@ -1,0 +1,3 @@
+# rule: protocolDecl, protoBody
+protocol Foo:
+    pass

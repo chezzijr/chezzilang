@@ -12,12 +12,12 @@ fn main():
         i += 1
 
     total := 0
-    pass := 0
-    while pass < 2000:
+    round := 0
+    while round < 2000:
         ys := xs.map(fn(x: int) -> int: x + 1)
         evens := ys.filter(fn(x: int) -> bool: x % 2 == 0)
         total += evens.fold(0, fn(acc: int, x: int) -> int: acc + x)
-        pass += 1
+        round += 1
     print(total)
 
 main()

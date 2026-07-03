@@ -44,7 +44,7 @@
 <compoundStmt> ::= <fnDecl> | <testFnDecl> | <structDecl> | <enumDecl> | <newtypeDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <importStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <importStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
@@ -99,6 +99,10 @@
 # checker (context-sensitive), not the grammar.
 <breakStmt>    ::= "BREAK" "NEWLINE"
 <continueStmt> ::= "CONTINUE" "NEWLINE"
+# `pass` is a no-op statement (an empty fn/method/control-flow body; an alternative to a bare `return`).
+# As the SOLE line of a `struct`/`protocol` body it is instead an empty-body marker (see <structDecl> /
+# <protocolDecl>); in an `enum` body it is a parse error (an enum needs at least one variant).
+<passStmt>     ::= "PASS" "NEWLINE"
 
 <importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
@@ -182,8 +186,12 @@
 <boundList>     ::= <bound> | <bound> "PLUS" <boundList>
 <bound>         ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
 
-<structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
-                  | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structMembers> "DEDENT"
+<structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
+                  | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
+# The body is either one-or-more members OR a SOLE `pass` line = an empty struct (zero fields, zero
+# methods; the ctor `S()` takes no args). Encoding `pass` as a whole-body alternative (not folded into
+# <structMember>) is what makes `pass`+member and `pass pass` both parse errors, matching the parser.
+<structBody>    ::= <structMembers> | "PASS" "NEWLINE"
 <structMembers> ::= <structMember> | <structMember> <structMembers>
 <structMember>  ::= <field> | <fnDecl> | <testFnDecl>
 # A field may carry a constant-literal default (`port: int = 8080`), used to fill omitted args in a
@@ -200,7 +208,11 @@
 # (`[X: Container[int]]`). An embed ref reuses <boundList>/<bound>.
 <protocolDecl> ::= "PROTOCOL" "IDENT" "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
                  | "PROTOCOL" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
-<protoBody>    ::= <protoLine> | <protoLine> <protoBody>
+# A SOLE `pass` line = an empty protocol (zero methods, zero embeds): an accept-all TOP type
+# (structural ⇒ every type satisfies it, like the reserved `Any`). As with <structBody>, `pass` is a
+# whole-body alternative so `pass`+member and `pass pass` are parse errors, matching the parser.
+<protoBody>    ::= <protoLines> | "PASS" "NEWLINE"
+<protoLines>   ::= <protoLine> | <protoLine> <protoLines>
 <protoLine>    ::= <fnSig> | <embedLine>
 <embedLine>    ::= <boundList> "NEWLINE"
 <fnSig>        ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"

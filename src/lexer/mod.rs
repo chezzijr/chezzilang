@@ -39,6 +39,10 @@ pub enum Token {
     In,
     Break,
     Continue,
+    /// `pass` — a no-op statement (empty fn/method/control-flow body; alternative to `return`) and
+    /// the sole-line empty-body marker for `protocol`/`struct` declarations. A real reserved keyword
+    /// (never an identifier), so it can't be used as a name by construction.
+    Pass,
     Struct,
     Enum,
     Protocol,
@@ -191,6 +195,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("in", Token::In),
     ("break", Token::Break),
     ("continue", Token::Continue),
+    ("pass", Token::Pass),
     ("struct", Token::Struct),
     ("enum", Token::Enum),
     ("protocol", Token::Protocol),
@@ -2436,6 +2441,14 @@ mod tests {
     }
 
     #[test]
+    fn lexes_pass_keyword() {
+        assert_eq!(keyword("pass"), Some(Token::Pass));
+        assert_eq!(kinds("pass"), vec![Token::Pass, Token::Newline, Token::Eof]);
+        // `pass` is a keyword, never an identifier.
+        assert!(!matches!(kinds("pass").first(), Some(Token::Ident(_))));
+    }
+
+    #[test]
     fn lexes_newtype_keyword() {
         assert_eq!(keyword("newtype"), Some(Token::NewType));
         assert_eq!(
@@ -2460,10 +2473,10 @@ mod tests {
         assert_eq!(keyword("notakw"), None);
         // The table must cover the full keyword surface the lexer recognizes.
         for w in [
-            "fn", "return", "if", "else", "for", "while", "in", "break", "continue", "struct",
-            "enum", "protocol", "type", "newtype", "match", "recover", "defer", "assert", "test",
-            "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "ref", "and",
-            "or", "not", "true", "false",
+            "fn", "return", "if", "else", "for", "while", "in", "break", "continue", "pass",
+            "struct", "enum", "protocol", "type", "newtype", "match", "recover", "defer", "assert",
+            "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "ref",
+            "and", "or", "not", "true", "false",
         ] {
             assert!(
                 KEYWORDS.iter().any(|(k, _)| *k == w),

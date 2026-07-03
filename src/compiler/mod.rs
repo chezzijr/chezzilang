@@ -1236,6 +1236,8 @@ impl Compiler {
                 }
                 Ok(())
             }
+            // `pass` — a no-op statement; emits no bytecode.
+            StmtKind::Pass => Ok(()),
             StmtKind::Assert { cond, msg } => {
                 // Lazy message evaluation, byte-identical to the interpreter (which evaluates `msg`
                 // only on failure): compile `cond`, and only on the false path compile `msg` then

@@ -92,7 +92,10 @@ call. Used as a first-class **value**, a variadic fn takes the collapsed `List[T
 spread through a value — the same fixed-value-form rule as `print`). Variadic GENERICS (`Foo[T...]`)
 remain a **non-goal** — generics are always fixed-arity. The **`Any`** top type (an empty structural
 protocol satisfied by every type, scalars included) is the honest element type of a universal display
-slot (`print(...args: Any)`); it is not dynamic typing (it carries no methods). A checked downcast off
+slot (`print(...args: Any)`); it is not dynamic typing (it carries no methods). Empty protocols are a
+**general** accept-all top type now that they are expressible (`protocol Name:` with a lone `pass`
+body — see the `pass` keyword below): `Any` is defined that way in the prelude and any user empty
+protocol behaves identically (the accept-all behaviour is structural, not keyed on the name `Any`). A checked downcast off
 `Any` — `cast[T](val: Any) -> Option[T]` — is a **deferred** companion (design + runtime-erasure policy
 in `docs/future.md`; parameterized targets like `cast[List[int]]` stay unsound until runtime type tags
 exist). Default + named
@@ -216,6 +219,19 @@ fn main():
 
 main()                                 # no auto-entry — `main` is a normal fn you call yourself
 ```
+
+**`pass` — the no-op keyword.** `pass` is a reserved keyword that does nothing. As a **statement** it
+is a no-op valid in any statement position (empty fn/method body, `if`/`for`/`while` body, statement
+`match` arm, concurrency block) — a lone-`pass` body is identical to a lone `return` (runs, falls off
+the end, returns `nil`). It is statement-only, so it is not valid in a closure or an expression-match
+arm (a no-op closure is `fn(): nil`). As the **sole line** of a `protocol` or `struct` body it is an
+empty-body marker: `protocol Name:` + `pass` is a zero-method **accept-all top type** (structural ⇒
+satisfied by every type — this is how `Any` itself is defined, and any user empty protocol behaves
+identically), and `struct Name:` + `pass` is a **zero-field struct** whose ctor `Name()` takes no args
+(it prints as `Name()`, structural-equals another `Name()`, and is intrinsically `Hashable` so it can
+key a `Set`/`Map`; it still heap-allocates like every Chezzi value — no zero-size trick). An **empty
+enum** is *not* supported (`pass` in an enum body is rejected — an enum needs ≥1 variant). Because it
+is a real keyword, `pass` cannot be used as a name.
 
 **Multi-line literals.** Inside `[]`, `{}`, and `()` the lexer suppresses layout (newlines /
 indentation), so collection literals, call arguments, and parameter lists may span lines. A single

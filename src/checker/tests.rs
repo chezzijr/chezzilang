@@ -12602,6 +12602,46 @@ fn error_is_reserved_protocol() {
     rejects("protocol Error:\n    fn message(self) -> str\n", "reserved");
 }
 
+/// A user cannot REDECLARE the reserved `Any` protocol — even with the new empty-body `pass` form.
+/// The prelude mirror is exempt (validate-and-no-op stdlib hoist); a user module's is rejected.
+#[test]
+fn user_redeclare_of_any_rejected() {
+    rejects("protocol Any:\n    pass\n", "reserved");
+}
+
+/// GENERALIZATION GUARD: a USER empty protocol (`protocol Foo:\n    pass`) is an accept-all top type
+/// byte-identical to the reserved `Any` — accepts scalars + structs as a param and types a
+/// heterogeneous list. The accept-all behaviour is NOT special-cased on the literal name "Any".
+#[test]
+fn empty_protocol_accepts_all_like_any() {
+    ok("protocol Foo:\n    pass\n\
+        struct P:\n    x: int\n\
+        fn takes_foo(v: Foo) -> int:\n    return 1\n\
+        fn takes_any(v: Any) -> int:\n    return 1\n\
+        fn main():\n\
+        \x20   takes_foo(1)\n\
+        \x20   takes_foo(\"a\")\n\
+        \x20   takes_foo(true)\n\
+        \x20   takes_foo(P(1))\n\
+        \x20   takes_any(1)\n\
+        \x20   xs: List[Foo] = [1, \"a\", true]\n\
+        \x20   ys: List[Any] = [1, \"a\", true]\n\
+        \x20   print(xs.len() + ys.len())\n\
+        main()\n");
+}
+
+/// A zero-field struct (`struct S:\n    pass`) is intrinsically `Hashable`: usable as a Set element
+/// and a Map key with no explicit `hash(self)` method.
+#[test]
+fn empty_struct_is_hashable() {
+    ok("struct S:\n    pass\n\
+        fn main():\n\
+        \x20   seen: Set[S] = {S(), S()}\n\
+        \x20   m: Map[S, int] = {S(): 1}\n\
+        \x20   print(seen.len() + m.len())\n\
+        main()\n");
+}
+
 /// Div/Mod/Neg are reserved protocol names.
 #[test]
 fn div_mod_neg_are_reserved_protocols() {
@@ -13118,7 +13158,7 @@ fn native_enum_option_result_shape_matches_inline() {
     );
 }
 
-/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 16 reserved protocols are now ALSO declared
+/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 17 reserved protocols are now ALSO declared
 /// in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live runtime source
 /// (conformance / operator lowering / `check_bounds` untouched). This asserts each file-backed protocol's
 /// harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS the Rust seed, so the two

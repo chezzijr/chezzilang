@@ -3629,6 +3629,12 @@ impl Interp {
                 message: format!("unknown struct type '{name}'"),
                 span,
             })?;
+        // A ZERO-FIELD struct with no `hash` method hashes to a constant (0) — no state to hash;
+        // byte-identical to the VM path (two-engine parity). `==`'s type-tag guard keeps distinct
+        // empty-struct types unequal despite the shared hash.
+        if def.fields.is_empty() && !def.methods.contains_key("hash") {
+            return Ok(0);
+        }
         let decl = def
             .methods
             .get("hash")
@@ -5721,6 +5727,8 @@ impl Interp {
             StmtKind::Wait { arms, else_block } => self.exec_wait(arms, else_block.as_deref(), stmt.span),
             StmtKind::Break => Ok(Flow::Break),
             StmtKind::Continue => Ok(Flow::Continue),
+            // `pass` — a no-op statement; does nothing (parity with the VM emitting no bytecode).
+            StmtKind::Pass => Ok(Flow::Normal),
             StmtKind::If {
                 branches,
                 else_block,

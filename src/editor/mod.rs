@@ -504,7 +504,11 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
             }
         }
         StmtKind::Return(Some(e)) | StmtKind::Yield(e) | StmtKind::Expr(e) => overlay_expr(e, map),
-        StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::Import(_) => {}
+        StmtKind::Return(None)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Pass
+        | StmtKind::Import(_) => {}
         StmtKind::Defer(DeferTarget::Call(e)) => overlay_expr(e, map),
         StmtKind::Defer(DeferTarget::Block(b)) => overlay_block(b, map),
         StmtKind::Parallel { body } => overlay_block(body, map),

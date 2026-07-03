@@ -11,11 +11,44 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ LANGUAGE — the `pass` keyword: no-op statement + empty protocol/struct bodies, and `Any` wired
+into the prelude (2026-07-04).** `pass` is now a REAL reserved keyword (`Token::Pass` in the lexer
+KEYWORDS table — reserved-as-a-name BY CONSTRUCTION, `expect_ident` rejects it like `ref`/`fn`), NOT
+the discarded parser hack (which string-matched the identifier "pass" only in protocol bodies and
+collided with `pass`-as-variable + `protocol pass:`). Three roles off the single token:
+- **No-op statement (`StmtKind::Pass`):** modeled on `Break`/`Continue` — parse arm, checker no-op arm,
+  compiler emits NOTHING, interp returns `Flow::Normal`, desugar/editor no-op arms. Valid in every
+  statement-block position (fn/method body, if/elif/else, for/while, statement-match arm, concurrency
+  blocks). A lone-`pass` fn body == a lone-`return` body (falls off end → nil). Statement-only (not
+  valid in a closure / expression-match arm — those are single-expression positions; a no-op closure
+  is `fn(): nil`). Two-engine byte-identical (compiles to no bytecode).
+- **Empty protocol body:** `protocol Foo:` + a SOLE `pass` line = zero methods/embeds → an accept-all
+  TOP type (structural ⇒ every type satisfies it). REUSES the existing empty-protocol short-circuit in
+  `satisfies_args_d`; NO satisfaction change. A user empty protocol behaves byte-identically to `Any`
+  (the accept-all is not keyed on the name — generalization guard test asserts Foo == Any behavior).
+- **Empty struct body:** `struct S:` + a SOLE `pass` line = zero fields; `S()` ctor takes no args,
+  prints `S()`, structural-equals another `S()`, and is intrinsically `Hashable` (usable as Set/Map
+  key). New: a checker `satisfies_args_d` zero-field-struct `Hashable` intrinsic + a VM+interp
+  `struct_hash` constant-0 path for a zero-field struct with no `hash` method (parity; `==`'s type-tag
+  guard keeps distinct empty-struct types unequal despite the shared hash).
+- `pass` is the SOLE-line marker only: `pass`+member and `pass pass` are parse errors (modeled as the
+  body being exactly `pass NEWLINE DEDENT`, in both the hand parser and grammar.bnf `<structBody>`/
+  `<protoBody>`). Empty ENUM is OUT — `pass` in an enum body is a clear parse error.
+- **`Any` wired into the prelude:** `protocol Any:` + `pass` added to `std/prelude.chz` (17 reserved
+  protocols now mirrored, was 16) + `Any` added to the `assert_native_protocol_shape_matches` drift
+  list. `prebuilt_protocols()` stays the Rust source of truth; the prelude is the additive
+  drift-guarded mirror. A USER redeclare of `Any` stays rejected (`is_reserved_protocol`); the prelude
+  is exempt via the validate-and-no-op stdlib hoist. Empty protocols are NO LONGER "unparseable".
+- Docs (same commit): docs/syntax.md `pass` section + Any update; docs/spec.md `pass` keyword + empty
+  structs note; docs/grammar.bnf `PASS` terminal + `<passStmt>`/`<structBody>`/`<protoBody>`; corpus
+  accept/reject files; 3 two-engine goldens (`examples/pass_noop`/`empty_protocol`/`empty_struct`);
+  regenerated the editor TextMate grammar (pass now highlights as a keyword).
+
 **✅ LANGUAGE — variadic parameters (`...xs: T`) + the `Any` top type, and `print` ported off its last
 synthetic signature (2026-07-03).** One coherent feature in two phases.
 - **`Any` top type:** an EMPTY structural protocol (zero methods) so EVERY type satisfies it — scalars
-  included. Seeded in `prebuilt_protocols()` + added to `is_reserved_protocol` (not file-backed: an empty
-  protocol body is unparseable). The one real fix: `satisfies_args_d` now short-circuits `Ok` for any
+  included. Seeded in `prebuilt_protocols()` + added to `is_reserved_protocol` (now ALSO prelude-mirrored
+  + drift-guarded — the `pass` keyword made empty protocol bodies expressible; see the entry above). The one real fix: `satisfies_args_d` now short-circuits `Ok` for any
   zero-embed/zero-method protocol right after the `Ty::Unknown` guard, so an empty protocol is a genuine
   top type for *every* `Ty` (before, only structs passed it — scalars fell through to `_ => Err`). NOTE:
   this generalizes to ANY user-declared empty protocol (correct semantics of an empty structural

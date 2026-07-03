@@ -585,7 +585,10 @@ is the honest element type of a universal slot such as `print(...args: Any)`, an
 binding or parameter (`x: Any = 42`, `fn log(v: Any) -> nil`). It is **not** dynamic typing: an `Any`
 value carries no methods, so you can pass it around and display it but not call methods on it (a
 downcast `cast[T]` is a documented future addition — see `docs/future.md`). `Any` is a reserved
-protocol name (a program may not redeclare it).
+protocol name (a program may not redeclare it). `Any` is now **expressible** as an ordinary empty
+protocol — it is defined in the prelude as `protocol Any:` with a lone `pass` body — and **any**
+user empty protocol behaves identically to it (see [`pass`](#the-pass-keyword) below): an empty
+protocol is a general accept-all top type, not a special case keyed on the name `Any`.
 
 **Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
 first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
@@ -736,6 +739,51 @@ while cond:
 
 # `break` exits the innermost loop; `continue` skips to the next iteration.
 ```
+
+### The `pass` keyword
+
+`pass` is a reserved keyword with two roles.
+
+**(1) A no-op statement.** `pass` does nothing. It is valid anywhere a statement is — a fn/method
+body, an `if`/`else` branch, a `for`/`while` body, a statement `match` arm, or a concurrency block —
+and is the idiomatic way to write an empty body. A function whose body is a lone `pass` runs, falls
+off the end, and returns `nil` — exactly like a lone `return`:
+
+```chezzi
+fn todo():
+    pass                # empty body; returns nil (same as `return`)
+
+for x in xs:
+    pass                # a deliberately-empty loop body
+```
+
+`pass` is a **statement**, not an expression, so it is not valid where a single expression is
+expected — a closure (`fn(): …`) or an expression-position `match` arm. A no-op closure is `fn(): nil`.
+
+**(2) An empty-body marker for `protocol` and `struct`.** Protocol and struct bodies hold
+*declarations* (method signatures / fields), not statements, so a **sole** `pass` line there means
+"empty body":
+
+```chezzi
+protocol Top:          # zero methods → an accept-all top type (like `Any`)
+    pass
+
+struct Unit:           # zero fields → `Unit()` takes no args
+    pass
+```
+
+An empty **protocol** is a general accept-all top type: with no methods, structural satisfaction is
+vacuous, so **every** type satisfies it. This is exactly how the reserved `Any` (see §5) is
+defined, and any user empty protocol behaves identically (`fn f(x: Top)` accepts an `int`, a `str`, a
+struct…; `xs: List[Top] = [1, "a", true]` type-checks). An empty **struct** has zero fields: `Unit()`
+constructs it, it prints as `Unit()`, two `Unit()` compare equal, and it is usable as a `Set` element
+or `Map` key (a zero-field struct is intrinsically `Hashable`). It still heap-allocates like any
+Chezzi value (no Go zero-size optimization). `pass` must be the **only** line of such a body — `pass`
+mixed with a field/method, or a repeated `pass`, is a parse error. An **empty enum** is *not*
+supported: `pass` in an enum body is rejected (an enum needs at least one variant).
+
+Because `pass` is a real keyword it cannot be used as a name (variable, parameter, field, function,
+type, module alias) — `pass := 5` is an error.
 
 ## 6b. Indexing & slicing  (M15)
 
@@ -2150,8 +2198,9 @@ fn fetch_all(urls: List[str]):
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
-  (All 16 are file-backed, `Iterable` included — its `iter(self) -> Iterator[Elem]` return type resolves
-  to the same `Iterator[T]` value type the Rust seed uses, so its shape mirrors cleanly like the rest.)
+  (All 17 are file-backed, `Any` and `Iterable` included — `Any` is `protocol Any:` + `pass` (empty), and
+  `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
+  Rust seed uses, so their shapes mirror cleanly like the rest.)
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
