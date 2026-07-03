@@ -13924,14 +13924,22 @@ impl Checker {
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
             return Ok(());
         }
-        // A ZERO-FIELD struct is intrinsically `Hashable`: it has no state to hash, so both engines
-        // return a constant hash for it (with `==`'s type-tag guard keeping distinct empty-struct
-        // types unequal despite the hash collision). This lets `struct S: pass` be used as a Set
-        // element / Map key without an explicit `hash(self)` method. A struct WITH fields still falls
-        // through to the structural check (needs `hash(self) -> int`).
+        // A ZERO-FIELD struct WITHOUT an explicit `hash(self)` method is intrinsically `Hashable`: it
+        // has no state to hash, so both engines return a constant hash for it (with `==`'s type-tag
+        // guard keeping distinct empty-struct types unequal despite the hash collision). This lets
+        // `struct S: pass` be used as a Set element / Map key without an explicit `hash(self)` method.
+        // The `!methods.contains_key("hash")` clause MUST mirror the runtime `struct_hash` guard
+        // (src/vm/mod.rs, src/interp/mod.rs): the runtime only substitutes the constant-0 hash when the
+        // struct has NO `hash` method — a zero-field struct that DOES define `hash` gets its method
+        // dispatched. So a zero-field struct WITH a `hash` method must fall through to the structural
+        // check (which validates `hash(self) -> int`), or a mis-typed `hash` (wrong return / arity)
+        // would pass the checker and fault at runtime (check-ok/run-diverge).
         if protocol == "Hashable"
             && let Ty::Struct(name, _) = ty
-            && self.structs.get(name).is_some_and(|d| d.fields.is_empty())
+            && self
+                .structs
+                .get(name)
+                .is_some_and(|d| d.fields.is_empty() && !d.methods.contains_key("hash"))
         {
             return Ok(());
         }

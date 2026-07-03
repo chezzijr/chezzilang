@@ -12642,6 +12642,44 @@ fn empty_struct_is_hashable() {
         main()\n");
 }
 
+/// A zero-field struct that DEFINES a `hash` method must fall through to the STRUCTURAL Hashable
+/// check — the zero-field intrinsic only fires when there is NO `hash` method (mirrors the runtime
+/// `struct_hash` guard `fields.is_empty() && !methods.contains_key("hash")`). A mis-typed `hash`
+/// (wrong return type) must be REJECTED at check time, not accepted then faulted at runtime
+/// (`hash() must return int, got str`). Regression for the check-ok/run-diverge soundness hole.
+#[test]
+fn empty_struct_with_mistyped_hash_rejected() {
+    rejects(
+        "struct S:\n    fn hash(self) -> str:\n        return \"x\"\n\
+        fn main():\n\
+        \x20   m: Map[S, int] = {S(): 1}\n\
+        \x20   print(m.len())\n\
+        main()\n",
+        "Hashable",
+    );
+    // Arity variant: an extra param makes the `hash` method un-dispatchable by `struct_hash`
+    // (runtime `hash() must return int, got nil`); must be a check-time reject too.
+    rejects(
+        "struct S:\n    fn hash(self, k: int) -> int:\n        return k\n\
+        fn main():\n\
+        \x20   seen: Set[S] = {S()}\n\
+        \x20   print(seen.len())\n\
+        main()\n",
+        "Hashable",
+    );
+}
+
+/// A zero-field struct WITH a correctly-typed `hash(self) -> int` method stays Hashable (the
+/// structural check passes) — the intrinsic fix must not reject a valid explicit hash.
+#[test]
+fn empty_struct_with_valid_hash_ok() {
+    ok("struct S:\n    fn hash(self) -> int:\n        return 42\n\
+        fn main():\n\
+        \x20   seen: Set[S] = {S()}\n\
+        \x20   print(seen.len())\n\
+        main()\n");
+}
+
 /// Div/Mod/Neg are reserved protocol names.
 #[test]
 fn div_mod_neg_are_reserved_protocols() {
