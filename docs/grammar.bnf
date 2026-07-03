@@ -132,7 +132,9 @@
 # does not fire). An inline NON-expr statement (`fn a(): x = 5`, `fn a(): return e`) is not an
 # implicit return. A declaration with no "ARROW" infers its type and is exempt from the fall-off check.
 # A function may carry generic type parameters after its name: `fn max[T: Comparable](…)`. The
-# optional bound names a protocol the instantiating type must structurally satisfy.
+# optional bound names a protocol the instantiating type must structurally satisfy. A generic fn may
+# ALSO carry a `where T: Bound, …` clause after the return type (an alternative spelling of the same
+# bounds, merged into the matching type parameter by the checker) — see <whereClause>.
 <fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <block>
@@ -141,6 +143,16 @@
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <block>
            | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <block>
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" <whereClause> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <whereClause> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <whereClause> <block>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> <block>
+
+# A `where T: Bound, U: Add + Mul, …` clause: a comma-separated list of `IDENT (: bound (+ bound)*)`
+# entries (each the shape of one <typeParam>), reusing <boundList>. Attaches after a fn/native-fn
+# signature; the checker merges each entry's bounds into the matching declared type parameter.
+<whereClause> ::= "WHERE" <whereList>
+<whereList>   ::= <typeParam> | <typeParam> "COMMA" <whereList>
 # A `test` modifier before `fn` marks a test (`chezzi test` discovers it). A free `test fn` is an
 # independent test (no params, returns nothing); a `test fn name(self)` in a struct is a suite test.
 # The no-params/only-self + returns-nothing shape is enforced by the checker, not the grammar.
@@ -215,6 +227,8 @@
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
 <nativeHead>  ::= "FN" | "IDENT"
 
 # `native struct` — the TYPE-level analog of `native fn`/`native ctor` (phase 4a). A body-less
@@ -241,6 +255,7 @@
 # not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
 <nativeMethodDecl> ::= "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                      | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
 
 # `native enum` — the ENUM analog of `native struct` (phase 5b). A body-less `native enum NAME[T…]:`
 # declares a RESERVED builtin enum's variant SHAPE (variant names + payload types) in Chezzi; it maps

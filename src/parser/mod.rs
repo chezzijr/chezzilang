@@ -605,6 +605,9 @@ impl Parser {
         } else {
             None
         };
+        // Optional `where T: Bound, …` clause after the return type (before the body colon). The
+        // checker merges these bounds into the matching `type_params` entry.
+        let where_bounds = self.parse_where_bounds()?;
         // The body opens with a `:`; an INLINE body (`: <stmt>` on the same line) has a non-`Newline`
         // token immediately after that colon (an indented block is `Colon Newline Indent …`). `peek`
         // is the body `Colon` here, so `peek_at(1)` is the token right after it.
@@ -621,6 +624,7 @@ impl Parser {
             name,
             name_span,
             type_params,
+            where_bounds,
             params,
             ret,
             body,
@@ -661,6 +665,37 @@ impl Parser {
                 }
             }
             self.expect(&Token::RBracket)?;
+        }
+        Ok(params)
+    }
+
+    /// Optional `where T: Bound, U: Add + Mul, …` clause after a fn/native-fn signature. Returns an
+    /// empty vec when there's no `where`. Each entry is `IDENT (: bound (+ bound)*)`, comma-separated
+    /// (no surrounding brackets) — the same per-entry shape as one `parse_type_params` entry, reusing
+    /// [`parse_bound`]. Purely a bound-list: the checker (`fn_sig`) merges each entry's bounds into the
+    /// matching declared type parameter, so a where entry is meaningful only for a `[T]`-declared param.
+    fn parse_where_bounds(&mut self) -> PResult<Vec<TypeParam>> {
+        let mut params = Vec::new();
+        if self.eat(&Token::Where) {
+            loop {
+                let name_span = self.cur_span();
+                let name = self.expect_ident()?;
+                let mut bounds = Vec::new();
+                if self.eat(&Token::Colon) {
+                    bounds.push(self.parse_bound()?);
+                    while self.eat(&Token::Plus) {
+                        bounds.push(self.parse_bound()?);
+                    }
+                }
+                params.push(TypeParam {
+                    name,
+                    name_span,
+                    bounds,
+                });
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
         }
         Ok(params)
     }
@@ -839,12 +874,17 @@ impl Parser {
         } else {
             None
         };
+        // Optional `where T: Bound` clause — a native METHOD sig (`native fn sort(self) -> nil where
+        // T: Comparable`) whose bounds name the enclosing native struct's type param, enforced at each
+        // call site by the checker's List/Map/Set method-dispatch arm.
+        let where_bounds = self.parse_where_bounds()?;
         Ok(StmtKind::Native(NativeDecl {
             name,
             name_span,
             kind,
             params,
             ret,
+            where_bounds,
             span,
         }))
     }
@@ -2892,6 +2932,53 @@ mod tests {
         assert_eq!(d.name, "panic");
         assert_eq!(d.kind, NativeKind::Fn);
         assert!(d.ret.is_none(), "no arrow → ret None (native/never)");
+    }
+
+    #[test]
+    fn fn_where_clause_parses_into_where_bounds() {
+        // A `where` clause after the return type folds its bounds into `FnDecl.where_bounds`
+        // (kept SEPARATE from `type_params` at parse time; the checker merges them).
+        let StmtKind::Fn(d) = only("fn f[T]() -> int where T: Comparable: 0\n") else {
+            panic!("expected StmtKind::Fn");
+        };
+        assert_eq!(d.where_bounds.len(), 1);
+        assert_eq!(d.where_bounds[0].name, "T");
+        assert_eq!(d.where_bounds[0].bounds.len(), 1);
+        assert_eq!(d.where_bounds[0].bounds[0].name, "Comparable");
+
+        // A plain fn has an empty `where_bounds`.
+        let StmtKind::Fn(d) = only("fn g[T]():\n    return 0\n") else {
+            panic!("expected StmtKind::Fn");
+        };
+        assert!(d.where_bounds.is_empty());
+
+        // A `where` clause with NO `-> ret` (the `where` sits directly after `)`), block body.
+        let StmtKind::Fn(d) = only("fn h[T]() where T: Comparable:\n    return 0\n") else {
+            panic!("expected StmtKind::Fn");
+        };
+        assert_eq!(d.where_bounds.len(), 1);
+        assert_eq!(d.where_bounds[0].name, "T");
+
+        // Multi-entry + multi-bound where clause parses (comma-separated, `+`-joined bounds).
+        let StmtKind::Fn(d) = only("fn k[A, B]() where A: Add + Mul, B: Comparable: 0\n") else {
+            panic!("expected StmtKind::Fn");
+        };
+        assert_eq!(d.where_bounds.len(), 2);
+        assert_eq!(d.where_bounds[0].name, "A");
+        assert_eq!(d.where_bounds[0].bounds.len(), 2);
+        assert_eq!(d.where_bounds[1].name, "B");
+
+        // A `native fn` method sig inside a `native struct` carries `where_bounds` too.
+        let StmtKind::NativeStruct { methods, .. } =
+            only("native struct L[T]:\n    native fn sort(self) -> nil where T: Comparable\n")
+        else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "sort");
+        assert_eq!(methods[0].where_bounds.len(), 1);
+        assert_eq!(methods[0].where_bounds[0].name, "T");
+        assert_eq!(methods[0].where_bounds[0].bounds[0].name, "Comparable");
     }
 
     #[test]

@@ -70,6 +70,11 @@ pub enum Token {
     Not,
     True,
     False,
+    /// `where` — the generic-bound clause keyword (`fn f[T]() where T: Comparable`). A full keyword
+    /// (corpus-safe: no `.chz` uses `where` as a bare identifier). Introduces a comma-separated list
+    /// of `IDENT (: bound (+ bound)*)` entries after a fn/native-fn signature; the checker merges
+    /// each entry's bounds into the matching type parameter (see `parse_where_bounds`).
+    Where,
 
     // --- operators ---
     Plus,             // +
@@ -210,6 +215,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("not", Token::Not),
     ("true", Token::True),
     ("false", Token::False),
+    ("where", Token::Where),
 ];
 
 /// Every operator + delimiter token variant, paired (implicitly, via [`Token::lexeme`]) with its

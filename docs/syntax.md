@@ -891,6 +891,25 @@ print(max(3, 7))                     # 7   (int is Comparable)
 print(max("apple", "banana"))        # banana
 ```
 
+A bound may equivalently be written in a **`where` clause** after the return type — an alternative
+spelling of the same bounds, useful to keep a long parameter list readable. Each `where` entry names
+a declared type parameter and lists its protocols (`+`-joined, comma-separated across entries); the
+checker merges them into the matching `[T]` parameter, so the two forms are interchangeable:
+
+```chezzi
+fn max[T](a: T, b: T) -> T where T: Comparable:   # same as `fn max[T: Comparable](a, b)`
+    if a < b:
+        return b
+    return a
+
+fn combine[A, B](a: A, b: B) where A: Add + Mul, B: Comparable:   # multi-entry, multi-bound
+    ...
+```
+
+A `where` entry naming a type parameter that isn't declared in `[…]` is an error. (A user *method*
+may not `where`-bound the receiver struct's own type parameter — put that bound on the `struct`
+declaration.)
+
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.
@@ -2457,8 +2476,10 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   RESERVED `Ty::List`/`Ty::Map`/`Ty::Set`, but the **literal syntax** (`[…]`/`{k:v}`/`{1,2}`) and the
   **turbofish ctor** (`List[int]()`) stay compiler-wired (their type-arg-driven element identity is not a
   flat sig). A few `List` methods a flat sig can't express — the higher-order `map`/`filter`/`fold`/
-  `sort_by`/`sort_by_key` and `sort` (Comparable-gated), plus `sum`'s numeric-element gate — stay bespoke
-  in the checker rather than declared in the prelude struct. A type param may carry a bound
+  `sort_by`/`sort_by_key` (closure-driven result types) — stay bespoke in the checker rather than declared
+  in the prelude struct. (`sort` IS file-backed as `native fn sort(self) -> nil where T: Comparable`; `sum`
+  is `native fn sum(self) -> T where T: Add` but keeps a residual numeric check-gate — its true requirement
+  is Monoid, so `where T: Add` alone is too broad.) A type param may carry a bound
   (`Map[K: Hashable, V]`), letting the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
 - **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
   error** (*native struct declarations are only allowed in standard-library modules*); nesting is a

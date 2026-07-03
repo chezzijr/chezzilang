@@ -11,6 +11,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ LANGUAGE — `where`-clause generic bounds + file-backed List `sort`/`sum` port (2026-07-03).** Adds
+`where T: Bound, …` as an alternative spelling of generic bounds after a fn/native-fn signature
+(`fn max[T](a: T, b: T) -> T where T: Comparable`), then USES it to finish the phase-5a container port:
+`sort` is now fully file-backed as `native fn sort(self) -> nil where T: Comparable` in `std/prelude.chz`
+and its bespoke Comparable arm in the `Ty::List` method-dispatch is DELETED (Comparable's satisfaction set
+exactly matches runtime sort capability — fully sound); `sum` gains a `where T: Add` annotation (documentation
+of a necessary bound) while its residual `!elem.is_numeric()` check-gate SURVIVES (Option B — sum's true
+requirement is MONOID = Add + zero for the empty-list case, both runtimes numeric-only, so `where T: Add`
+alone is too broad; a struct with a structural `add` still errors at CHECK time). **Mechanism:** new
+`Token::Where` (KEYWORDS, corpus-safe) + `parse_where_bounds()` (reuses `parse_bound`) attaching an additive
+`where_bounds: Vec<TypeParam>` to `FnDecl`/`NativeDecl`; for USER fns `fn_sig` MERGES each `where` entry's
+bounds into the matching `[T]` type param (unknown-param = clear error; body-check enters the merged params so
+a `where`-bounded op like `<` works in the body), so the existing `infer_generic_call`→`enforce_bounds` path
+handles call sites with ZERO new machinery; for NATIVE methods `harvest_native_fn_sig` carries `where_bounds`
+onto the sig and the `Ty::List` arm calls `enforce_bounds(&sig.where_bounds, {T->elem})`. A user METHOD
+where-bounding the receiver struct's OWN param is out of scope (rejected as unknown-param — put the bound on
+the `struct`). **BEHAVIOR-PRESERVING / three-engine byte-identical:** `where` lowers to NOTHING at runtime —
+`src/interp` is UNTOUCHED and `src/vm` gets only a golden test; `examples/where_sort_sum.chz` (sort int/float/
+struct-with-`compare`, sum int/float) is asserted byte-identical on interp / --serial VM / M:N VM
+(`golden_where_sort_sum_chz_matches_expected_and_interp`). `docs/grammar.bnf` gains `<whereClause>`/`<whereList>`
+(WHERE terminal + `parse_where_bounds` mapped in conformance; `tests/corpus/accept/where_clause.chz`). The
+sort-arm-DELETED changes two existing tests' expected message from the bespoke `sort() requires …` to the
+standard `does not satisfy Comparable` bound diagnostic. Lexer+parser+ast+checker+prelude+grammar+docs; both
+engines untouched.
+
 **✅ NATIVE-PRELUDE — phase 5c-protocols (the 15 SHAPE-portable builtin/reserved PROTOCOLS declared in
 `std/prelude.chz` as plain `protocol` decls, a drift-guarded ADDITIVE mirror of the Rust seed)
 (2026-07-03).** The reserved structural protocols' SHAPE (method sigs + `+`-joined embeds) moves into
@@ -99,10 +124,11 @@ cfg(test) single-module `check` path harvests them straight in via `seed_native_
 `Ty::List`/`Ty::Map`/`Ty::Set` dispatch arms route through `native_handle_method` with the value's
 element/key/value type substituted for `Ty::Param`. **Generic-recovery `List` methods a flat sig can't
 express stay RESIDUAL (intentionally NOT declared in the prelude struct, logged):** `map`/`filter`/`fold`/
-`sort_by`/`sort_by_key` (closure-driven result types + custom `infer_list_hof` diagnostics) and `sort`
-(Comparable-gated via `self.satisfies` + custom error) stay bespoke in the `Ty::List` arm; and `sum`
-harvests to `sum(self) -> T` but keeps a `!elem.is_numeric()` residual gate (a plain sig would wrongly
-accept a non-numeric list). `Map`/`Set`'s key/element type param carries a `Hashable` bound so the internal
+`sort_by`/`sort_by_key` (closure-driven result types + custom `infer_list_hof` diagnostics) stay bespoke in
+the `Ty::List` arm. (UPDATE 2026-07-03: `sort` is now file-backed via `where T: Comparable` — the bespoke
+Comparable arm was DELETED once `where`-clause bounds landed; and `sum` gained a `where T: Add` annotation
+but KEEPS its `!elem.is_numeric()` residual gate — sum's true requirement is Monoid, `where T: Add` alone is
+too broad, so the numeric gate survives, see the "where-clause generic bounds" entry above.) `Map`/`Set`'s key/element type param carries a `Hashable` bound so the internal
 `Map[K, V]`/`Set[T]` return types resolve past the hashable gate at harvest. The bespoke
 `list_method_sig`/`map_method_sig`/`set_method_sig` fns are DELETED; `unique_member_owner`'s bail set now
 checks the harvested tables' `methods.contains_key` (byte-identical to the retired arms' 9/8/7 flat

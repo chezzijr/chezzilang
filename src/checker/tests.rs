@@ -1493,7 +1493,9 @@ struct P:
 xs := [P(2), P(1)]
 xs.sort()
 ";
-    rejects(src, "sort() requires a list of Comparable");
+    // `sort` is now file-backed as `where T: Comparable`; a non-Comparable element fails via the
+    // standard bound-satisfaction diagnostic (retired the bespoke `sort() requires …` text).
+    rejects(src, "does not satisfy Comparable");
 }
 
 #[test]
@@ -1504,6 +1506,91 @@ fn sort_on_primitive_list_still_ok() {
 #[test]
 fn sort_with_args_rejected() {
     rejects("xs := [3, 1]\nxs.sort(5)\n", "expects 0 argument(s)");
+}
+
+// ----- user free-fn `where` clause enforcement (merged into type_params) -----
+
+#[test]
+fn user_fn_where_bound_enforced_at_call_site() {
+    // `where T: Comparable` merges into the `[T]` param's bounds; a non-Comparable arg is rejected.
+    let src = "\
+struct Q:
+    n: int
+fn needs_cmp[T](x: T) where T: Comparable:
+    y := x
+q := Q(1)
+needs_cmp(q)
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn user_fn_where_bound_accepts_comparable_arg() {
+    ok("fn needs_cmp[T](x: T) where T: Comparable:\n    y := x\nneeds_cmp(5)\n");
+}
+
+#[test]
+fn user_fn_where_bound_used_inside_body() {
+    // A `where`-bounded param may use the bounded operation in the body (`<` needs Comparable) —
+    // proves the merge feeds the in-scope bound set, not just call-site enforcement.
+    ok(
+        "fn pick[T](a: T, b: T) -> T where T: Comparable:\n    if a < b:\n        return b\n    return a\nx := pick(1, 2)\n",
+    );
+}
+
+#[test]
+fn user_fn_where_names_unknown_param_rejected() {
+    rejects(
+        "fn bad[T]() where Q: Comparable:\n    y := 1\n",
+        "unknown type parameter 'Q' in where-clause",
+    );
+}
+
+#[test]
+fn user_fn_where_bound_duplicating_decl_bound_reports_once() {
+    // A bound named in BOTH `[T: Comparable]` and `where T: Comparable` must be deduped on merge —
+    // a failing call emits the diagnostic exactly ONCE, not once per duplicated bound.
+    let src = "\
+fn f[T: Comparable](x: T) -> int where T: Comparable:
+    return 1
+f(true)
+";
+    let n = check_src(src)
+        .iter()
+        .filter(|e| e.message.contains("does not satisfy Comparable"))
+        .count();
+    assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
+}
+
+// ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
+
+#[test]
+fn sort_where_clause_returns_nil() {
+    // The file-backed `native fn sort(self) -> nil where T: Comparable` resolves to a nil return —
+    // using it as a value is rejected exactly like before (regression guard on the ported sig).
+    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (nil)");
+}
+
+#[test]
+fn sort_where_clause_non_comparable_reports_satisfies_diagnostic() {
+    // A non-Comparable element list now fails via the `where T: Comparable` bound-enforcement path,
+    // so the message is the standard `does not satisfy Comparable` diagnostic (not the retired
+    // bespoke `sort() requires …` text).
+    let src = "\
+struct Q:
+    n: int
+xs := [Q(2), Q(1)]
+xs.sort()
+";
+    rejects(src, "does not satisfy Comparable");
+}
+
+#[test]
+fn sort_where_clause_bool_list_rejected() {
+    rejects(
+        "xs := [true, false]\nxs.sort()\n",
+        "does not satisfy Comparable",
+    );
 }
 
 // ===== 2. unknown type =====
@@ -2651,7 +2738,11 @@ fn list_sort_returns_nil_rejected_as_value() {
 
 #[test]
 fn list_sort_non_orderable_rejected() {
-    rejects("xs := [true, false]\nxs.sort()\n", "sort() requires");
+    // `where T: Comparable` bound-enforcement diagnostic (bool is not Comparable).
+    rejects(
+        "xs := [true, false]\nxs.sort()\n",
+        "does not satisfy Comparable",
+    );
 }
 
 // ===== golden: the touchstone program must type-check clean =====
@@ -2979,6 +3070,24 @@ fn list_sum_float_is_float() {
 #[test]
 fn list_sum_non_numeric_rejected() {
     rejects("xs := [\"a\"]\ns := xs.sum()\n", "numeric");
+}
+
+#[test]
+fn list_sum_struct_with_add_still_rejected_at_check() {
+    // SOUNDNESS (Option B): `sum` is documented `where T: Add`, but its true requirement is MONOID
+    // (Add + a zero/identity for the empty list) and both runtimes are numeric-only. A user struct
+    // with a structural `add(self, o) -> Self` SATISFIES the `Add` protocol, so `where T: Add` alone
+    // would wrongly admit it — the residual numeric check-time gate must STILL reject it (never
+    // check-ok/run-error). This pins that the gate survives alongside the `where T: Add` annotation.
+    let src = "\
+struct M:
+    n: int
+    fn add(self, o: M) -> M:
+        return M(self.n + o.n)
+xs := [M(1), M(2)]
+s := xs.sum()
+";
+    rejects(src, "numeric");
 }
 
 #[test]
@@ -12719,6 +12828,27 @@ fn container_method_sigs_byte_match() {
     chk("List", "concat", &int(), vec![li()], li());
     chk("List", "extend", &int(), vec![li()], Ty::Nil);
     chk("List", "sum", &int(), vec![], Ty::Int);
+    // `sort` is now file-backed (`native fn sort(self) -> nil where T: Comparable`): it resolves via
+    // the harvested table with a nil return, and carries a `where T: Comparable` bound (enforced at
+    // the call site by the Ty::List arm's `enforce_bounds`).
+    chk("List", "sort", &int(), vec![], Ty::Nil);
+    let sort_sig = c.native_handle_method("List", "sort", &int()).unwrap();
+    assert_eq!(
+        sort_sig.where_bounds.len(),
+        1,
+        "List.sort carries one where bound"
+    );
+    assert_eq!(sort_sig.where_bounds[0].name, "T");
+    assert_eq!(sort_sig.where_bounds[0].bounds[0].name, "Comparable");
+    // `sum` gains a `where T: Add` annotation (documentation; the numeric check-gate is the real
+    // enforcement — see `list_sum_struct_with_add_still_rejected_at_check`).
+    let sum_sig = c.native_handle_method("List", "sum", &int()).unwrap();
+    assert_eq!(
+        sum_sig.where_bounds.len(),
+        1,
+        "List.sum carries one where bound"
+    );
+    assert_eq!(sum_sig.where_bounds[0].bounds[0].name, "Add");
     // Map[Int, Str] — K=Int, V=Str (distinct so the K/V order is pinned).
     chk("Map", "len", &kv(), vec![], Ty::Int);
     chk("Map", "has", &kv(), vec![Ty::Int], Ty::Bool);
@@ -12768,15 +12898,7 @@ fn container_method_sigs_byte_match() {
     );
     // Residual methods are INTENTIONALLY not in the harvested List table (they stay bespoke in the
     // Ty::List arm). A leak would silently change `unique_member_owner`'s pinning set.
-    for m in [
-        "map",
-        "filter",
-        "fold",
-        "sort",
-        "sort_by",
-        "sort_by_key",
-        "get",
-    ] {
+    for m in ["map", "filter", "fold", "sort_by", "sort_by_key", "get"] {
         assert!(
             c.native_handle_method("List", m, &[Ty::Int]).is_none(),
             "List.{m} must NOT be in the harvested table (stays residual/bespoke)"

@@ -38,10 +38,13 @@ native ctor bytearray(x) -> bytearray
 # resolution through them (behavior-preserving; the sigs BYTE-MATCH the retired arms).
 #
 # The generic-recovery methods a flat sig cannot express stay RESIDUAL in the checker's Ty::List arm (NOT
-# declared here): `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types) and `sort`
-# (Comparable-gated), plus the numeric gate on `sum` (a plain `sum(self) -> T` would wrongly accept a
-# non-numeric list, so the arm keeps a `!elem.is_numeric()` residual). `Map`/`Set`'s key/element type
-# params carry a `Hashable` bound so the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
+# declared here): `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types). `sort` is
+# now file-backed via `where T: Comparable` (a generic bound enforced at each call site by the Ty::List
+# arm's `enforce_bounds` — the retired bespoke Comparable arm). `sum` carries `where T: Add` as
+# documentation, but its true requirement is MONOID (Add + zero) and both runtimes are numeric-only, so a
+# residual `!elem.is_numeric()` gate survives in the arm (a struct with a structural `add` still errors at
+# CHECK time). `Map`/`Set`'s key/element type params carry a `Hashable` bound so the internal
+# `Map[K, V]`/`Set[T]` return types resolve at harvest.
 
 native struct List[T]:
     native fn len(self) -> int
@@ -52,7 +55,8 @@ native struct List[T]:
     native fn index_of(self, v: T) -> int
     native fn concat(self, other: List[T]) -> List[T]
     native fn extend(self, other: List[T]) -> nil
-    native fn sum(self) -> T
+    native fn sort(self) -> nil where T: Comparable
+    native fn sum(self) -> T where T: Add
 
 native struct Map[K: Hashable, V]:
     native fn len(self) -> int

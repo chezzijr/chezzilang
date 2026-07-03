@@ -22827,6 +22827,32 @@ main()";
         assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
     }
 
+    /// `where`-clause generic bounds golden: `examples/where_sort_sum.chz` exercises the file-backed
+    /// List `sort` (`native fn sort(self) -> nil where T: Comparable`) on int/float/struct-with-
+    /// `compare` lists and `sum` (`where T: Add`) on int/float lists. A `where` clause lowers to
+    /// NOTHING at runtime (checker-only), so the three engines — VM(serial), interp, and the M:N
+    /// OS-thread engine — must agree byte-for-byte with `.expected`.
+    #[test]
+    fn golden_where_sort_sum_chz_matches_expected_and_interp() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = base.join("examples/where_sort_sum.chz");
+        let expected =
+            std::fs::read_to_string(base.join("examples/where_sort_sum.expected")).unwrap();
+        let (vm_out, _e1, vm_res, _) = run_file(&path);
+        vm_res.expect("where_sort_sum.chz should run on the VM");
+        assert_eq!(
+            vm_out, expected,
+            "vm output drifted from where_sort_sum.expected"
+        );
+        let (ip_out, _e2, ip_res, _) = crate::interp::run_file(&path);
+        ip_res.expect("where_sort_sum.chz should run on the interp");
+        assert_eq!(vm_out, ip_out, "vm/interp divergence on where_sort_sum");
+        let (mn_out, _e3, mn_res, _) =
+            run_file_parallel(&path, crate::native::HostConfig::default());
+        mn_res.expect("where_sort_sum.chz should run on the M:N engine");
+        assert_eq!(mn_out, expected, "M:N output drifted on where_sort_sum");
+    }
+
     /// Phase-4d file-backed native-module golden: `examples/std_native_4d.chz` exercises the five
     /// migrated pure-function modules (`std.math`/`io`/`os`/`rand`/`fs`) whose signatures now come from
     /// real `std/<M>.chz` files (bodyless `native fn` decls) instead of a hand-built `native_module_sig`

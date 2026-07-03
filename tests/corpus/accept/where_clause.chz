@@ -1,0 +1,8 @@
+# rule: fnDecl, typeParams, whereClause, whereList, boundList, bound
+fn pick[T](a: T, b: T) -> T where T: Comparable:
+    if a < b:
+        return b
+    return a
+
+fn both[A, B](a: A, b: B) where A: Add + Mul, B: Comparable:
+    x := a

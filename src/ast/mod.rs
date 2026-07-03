@@ -272,6 +272,10 @@ pub struct NativeDecl {
     pub kind: NativeKind,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
+    /// `where T: Comparable` bounds declared after the signature (empty when absent). For a native
+    /// METHOD sig they name the enclosing `native struct`'s type param and are enforced at each call
+    /// site (e.g. `List.sort`'s `where T: Comparable`); parity-neutral (the engines never read it).
+    pub where_bounds: Vec<TypeParam>,
     pub span: Span,
 }
 
@@ -364,6 +368,11 @@ pub struct FnDecl {
     pub name_span: Span,
     /// Generic type parameters: `fn max[T: Comparable](…)`. Empty for non-generic fns/methods.
     pub type_params: Vec<TypeParam>,
+    /// `where T: Comparable` bounds declared after the signature (empty when absent). Kept SEPARATE
+    /// from `type_params` by the parser; the checker (`fn_sig`) merges each entry's bounds into the
+    /// matching-named `type_params` entry, so the existing generic-call bound machinery enforces them.
+    /// A where entry naming no declared type parameter is a checker error. Runtime-inert (parity-neutral).
+    pub where_bounds: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<Type>, // None ⇒ returns nothing
     pub body: Block,

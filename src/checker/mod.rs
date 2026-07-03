@@ -407,6 +407,12 @@ struct FnSig {
     labels: Vec<Option<String>>,
     ret: Ty,
     type_params: Vec<TypeParam>,
+    /// `where T: Bound` clauses (empty for the common case). For a NATIVE method sig they name the
+    /// enclosing native struct's type param and are enforced at each call site by the container
+    /// method-dispatch arm (`enforce_bounds`); for a USER fn they are already MERGED into
+    /// `type_params` by `fn_sig`, so this stays empty there. Excluded from `fn_sig_eq` (bound
+    /// documentation, not type identity) — see the note there.
+    where_bounds: Vec<TypeParam>,
     /// D6c — the minimum number of arguments this signature accepts; `params.len()` for an ordinary
     /// fixed-arity signature (set by [`FnSig::plain`]), but smaller when trailing params are optional
     /// (the net socket ops' optional `timeout_ms`). [`Checker::check_args`] accepts any arg count in
@@ -432,6 +438,7 @@ impl FnSig {
             params,
             ret,
             type_params: Vec::new(),
+            where_bounds: Vec::new(),
             min_params,
             is_static: false,
             doc: None,
@@ -447,6 +454,7 @@ impl FnSig {
             params,
             ret,
             type_params: Vec::new(),
+            where_bounds: Vec::new(),
             min_params,
             is_static: false,
             doc: None,
@@ -1993,11 +2001,16 @@ impl Checker {
             .skip(skip)
             .filter(|p| p.default.is_some())
             .count();
-        if optional > 0 {
+        let mut sig = if optional > 0 {
             FnSig::optional_tail(params, ret, optional)
         } else {
             FnSig::plain(params, ret)
-        }
+        };
+        // Carry the `where T: Bound` clause onto the harvested sig — for a native METHOD (e.g.
+        // `List.sort`'s `where T: Comparable`) it is enforced at each call site by the container
+        // method-dispatch arm (the `T` names the enclosing native struct's type param, in scope here).
+        sig.where_bounds = decl.where_bounds.clone();
+        sig
     }
 
     /// Phase 5a-containers — harvest the METHOD table of one `native struct` (by bare name) from a parsed
@@ -4208,8 +4221,35 @@ impl Checker {
                 );
             }
         }
-        let saved = self.enter_type_params(&decl.type_params);
-        for tp in &decl.type_params {
+        // Fold any `where T: Bound` clauses into the matching declared type parameter's bounds, so the
+        // existing generic-call bound-enforcement path (`infer_generic_call` → `enforce_bounds`) handles
+        // them with zero new machinery. A where entry naming no declared `[T]` param is an error — a
+        // user METHOD cannot `where`-bound the RECEIVER struct's own param (it lives in
+        // `self.type_params`, not `decl.type_params`); that shape is out of scope and reported here.
+        let mut merged = decl.type_params.clone();
+        for w in &decl.where_bounds {
+            match merged.iter_mut().find(|tp| tp.name == w.name) {
+                // Dedup: a bound repeated across `[T: X]` and `where T: X` must not double the
+                // enforcement (else a failing call emits the identical "does not satisfy X" twice).
+                Some(tp) => {
+                    for b in &w.bounds {
+                        if !tp
+                            .bounds
+                            .iter()
+                            .any(|e| e.name == b.name && e.args == b.args)
+                        {
+                            tp.bounds.push(b.clone());
+                        }
+                    }
+                }
+                None => self.error(
+                    span,
+                    format!("unknown type parameter '{}' in where-clause", w.name),
+                ),
+            }
+        }
+        let saved = self.enter_type_params(&merged);
+        for tp in &merged {
             self.check_bounds(&tp.bounds, &tp.name, span);
         }
         let params: Vec<Ty> = decl
@@ -4269,7 +4309,10 @@ impl Checker {
             labels,
             params,
             ret,
-            type_params: decl.type_params.clone(),
+            type_params: merged,
+            // User-fn where bounds are already merged into `type_params` above; leave this empty so
+            // enforcement flows through the ordinary generic-call path (native sigs use it directly).
+            where_bounds: Vec::new(),
             is_static,
             doc: decl.doc.clone(),
         }
@@ -6439,7 +6482,11 @@ impl Checker {
     }
 
     fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
-        let saved_tps = self.enter_type_params(&decl.type_params);
+        // Enter the sig's type params (NOT `decl.type_params`): `fn_sig` folds any `where T: Bound`
+        // clause into them, so the body sees a `where`-bounded param as satisfying its bound (e.g. a
+        // `where T: Comparable` param may use `<` in the body). Same names as `decl.type_params`
+        // (the merge only adds bounds), so the reserved/shadow checks in `fn_sig` still cover them.
+        let saved_tps = self.enter_type_params(&sig.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
         // A generator (`is_generator`, i.e. its body contains `yield`) must declare `-> Iterator[T]`.
         // Recover `T` as the per-yield element type; a wrong/missing return type is an error here.
@@ -11932,29 +11979,14 @@ impl Checker {
                     let elem = (**elem).clone();
                     return self.infer_list_hof(method, &elem, args, span);
                 }
-                // `sort()` works on any list whose element is Comparable: the scalar orderables
-                // (int/float/str) OR a struct that satisfies the `Comparable` protocol. The runtime
-                // dispatches the struct case to each element's `compare`. Handled here (not in the
-                // fixed `list_method_sig` table) because it needs `self.satisfies`.
-                if method == "sort" {
-                    self.check_arity("sort", 0, args, span);
-                    let elem = (**elem).clone();
-                    if is_orderable(&elem)
-                        || elem.is_unknown()
-                        || self.satisfies(&elem, "Comparable").is_ok()
-                    {
-                        return Ty::Nil;
-                    }
-                    self.error(
-                        span,
-                        format!("sort() requires a list of Comparable values (int, float, str, or a struct with a `compare` method), found List[{elem}]"),
-                    );
-                    return Ty::Nil;
-                }
-                // `sum` is harvested as `sum(self) -> T`, but a plain sig would wrongly accept a
-                // NON-numeric list — the retired `list_method_sig` gated `sum` on `elem.is_numeric() ||
-                // elem.is_unknown()`. Keep that DISPATCH-TIME gate as a residual (parallel to
-                // `Atomic.add`/`sub`): a non-numeric element reports the same diagnostic as before.
+                // `sum` is harvested from `std/prelude.chz` as `sum(self) -> T where T: Add`, but the
+                // `where T: Add` bound alone is SEMIGROUP (structural `add`) and thus too broad: a plain
+                // Add-satisfying struct has no zero/identity for the EMPTY-list case, and both runtimes
+                // are numeric-only (`vm/mod.rs` do_builtin sum / `interp/builtins.rs` sum). So `sum`'s
+                // true requirement is MONOID (Add + zero), which is not a declarable protocol here; we
+                // keep this DISPATCH-TIME numeric gate as the residual that enforces it (a struct with a
+                // structural `add` still reports the numeric diagnostic, NOT check-ok/run-error). The
+                // `where T: Add` in the decl is documentation of the necessary-but-insufficient bound.
                 let elem = (**elem).clone();
                 if method == "sum" && !(elem.is_numeric() || elem.is_unknown()) {
                     self.infer_all(args);
@@ -11966,11 +11998,21 @@ impl Checker {
                 }
                 // Every other method's sig is harvested from `std/prelude.chz`'s `native struct List[T]`
                 // (re-seeded by `seed_stdlib_structs`); the element type is substituted for `Ty::Param`.
+                // `sort`'s `where T: Comparable` bound (harvested onto the sig's `where_bounds`) is
+                // enforced here via `enforce_bounds` with the `T -> elem` substitution — the file-backed
+                // replacement for the retired bespoke Comparable arm (int/float/str intrinsically, a
+                // struct via its `compare` method; `Ty::Unknown` tolerated). This is the ONLY List method
+                // carrying a where-clause today, so the enforcement is a no-op for every other method.
                 if let Some(sig) =
                     self.native_handle_method("List", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    self.enforce_bounds(
+                        &sig.where_bounds,
+                        &HashMap::from([("T".to_string(), elem.clone())]),
+                        span,
+                    );
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -14082,6 +14124,7 @@ impl Checker {
                 params: subst_params,
                 ret: subst(&msig.ret, &pmap),
                 type_params: Vec::new(),
+                where_bounds: Vec::new(),
                 min_params,
                 is_static: false,
                 doc: None,
@@ -15995,7 +16038,7 @@ const STR_METHODS: &[&str] = &[
     "encode",
 ];
 const LIST_METHODS: &[&str] = &[
-    "len", "push", "pop", "reverse", "contains", "index_of", "concat", "extend", "sum",
+    "len", "push", "pop", "reverse", "contains", "index_of", "concat", "extend", "sort", "sum",
 ];
 const MAP_METHODS: &[&str] = &[
     "len", "has", "get", "keys", "values", "remove", "merge", "update",
