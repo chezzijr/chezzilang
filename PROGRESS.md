@@ -19,12 +19,18 @@ the bound — Rust's `impl<T: Ord> Box<T>` conditional methods, and parity with 
 **Mechanism (checker-only, additive):** `fn_sig`'s `where`-merge loop, when a `where` entry names
 neither the method's own `[U]` nor an unknown param but IS the enclosing type's param (present in
 `self.type_params`), records it on `receiver_bounds` → carried on the returned `FnSig.where_bounds`
-(the SAME field the native harvest uses) instead of erroring; the struct/enum/newtype method-call
-dispatch arms then call `enforce_bounds(&sig.where_bounds, {structParam_i → concreteArg_i}, span)` —
-byte-for-byte like the native `Ty::List` arm's `{T → elem}`. A `where` naming NEITHER an own nor a
-receiver param still errors "unknown type parameter"; a method's OWN `[U]` `where` still merges as
-before. Newtype is included for soundness (shared `fn_sig` accepts receiver-bounds for newtype methods
-too → enforce at all three arms, no accept-without-enforce hole). **Unknown/late-usage:** reuses
+(the SAME field the native harvest uses) instead of erroring; the struct/enum/newtype INSTANCE
+method-call dispatch arms then call `enforce_bounds(&sig.where_bounds, {structParam_i → concreteArg_i},
+span)` — byte-for-byte like the native `Ty::List` arm's `{T → elem}`. The instance enforcement fires
+AFTER the `is_static` rejection (a static method wrongly called on a value yields ONLY the single
+static-method diagnostic, no spurious bound error). A no-`self` (static) method carries a receiver
+`where` too, so `infer_static_call` (the `Type.method(…)` path) ALSO enforces `sig.where_bounds`
+against the inferred enclosing-param substitution — a conditional factory `Box.of(q)` rejects a
+non-satisfying `q` at check time (closes the static accept-without-enforce hole). A `where` naming
+NEITHER an own nor a receiver param still errors "unknown type parameter"; a method's OWN `[U]`
+`where` still merges as before. Newtype is included for soundness (shared `fn_sig` accepts
+receiver-bounds for newtype methods too → enforce at all three instance arms, no accept-without-enforce
+hole). **Unknown/late-usage:** reuses
 `enforce_bounds` verbatim — `satisfies_args_d` returns Ok for `Ty::Unknown` ("don't cascade"), so a
 still-unpinned receiver arg DEFERS (never a spurious "does not satisfy"); a genuinely never-pinned
 binding still fails at the pre-existing "cannot infer element type" error. **Three-engine byte-identical:**

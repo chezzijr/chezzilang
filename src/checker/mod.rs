@@ -10698,6 +10698,14 @@ impl Checker {
         }
         self.enforce_bounds(&tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &sub, span);
+        // Conditional method: a STATIC method may carry a receiver-param `where` bound (naming the
+        // enclosing type's own param) too — `fn_sig` is shared and records it regardless of `self`.
+        // Enforce it against the enclosing param's inferred concrete type here (the sub map already
+        // holds `{T -> concrete}`), mirroring the instance-method dispatch arms. Without this a
+        // conditional factory `Box.of(Q(1))` (Q non-Comparable) would be silently accepted. No-op
+        // when `where_bounds` is empty. (The non-generic fast path above cannot carry receiver
+        // bounds: `where_bounds` non-empty ⟹ the enclosing type has params ⟹ `tps` non-empty.)
+        self.enforce_bounds(&sig.where_bounds, &sub, span);
         // Any param still un-inferred — no turbofish and not bound by an argument, e.g.
         // `Box.empty() -> Box[T]` or a method `[U]` unbindable from args — degrades to the refinable
         // `Ty::Unknown`; a free `Ty::Param` must never leak into the value's type (mirrors the ctor's
@@ -11782,11 +11790,6 @@ impl Checker {
                     })
                 });
                 if let Some((params, ret, mtps, is_static, mdoc, where_bounds, rmap)) = resolved {
-                    // Conditional method: enforce any receiver-param `where` bound against the
-                    // receiver's concrete type arg (`{T -> concrete}`), before any static/generic
-                    // sub-branch so it fires for every method form. No-op when `where_bounds` empty.
-                    // Mirrors the native `Ty::List` `where T: Comparable` enforcement.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
@@ -11798,6 +11801,13 @@ impl Checker {
                         );
                         return ret;
                     }
+                    // Conditional method: enforce any receiver-param `where` bound against the
+                    // receiver's concrete type arg (`{T -> concrete}`). Placed AFTER the is_static
+                    // rejection so a static-method-called-on-a-value yields only the single
+                    // static-method diagnostic (not a spurious bound error); a static method's own
+                    // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
+                    // No-op when `where_bounds` empty. Mirrors the native `Ty::List` enforcement.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // A generic method introduces its own type params `[U]` (beyond the struct's
                     // `[T]`, already substituted above). Infer them from the call arguments —
                     // mirrors the free generic-fn path (`infer_generic_call`).
@@ -11894,11 +11904,6 @@ impl Checker {
                     })
                 });
                 if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
-                    // Conditional method: enforce any receiver-param `where` bound against the
-                    // newtype's concrete type arg (mirrors the struct arm). `fn_sig` is shared, so a
-                    // newtype method can carry a receiver-bound too — enforce it here to avoid an
-                    // accept-without-enforce soundness hole. No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // Static methods on a newtype are DEFERRED (v1 covers struct + enum only). A
                     // no-self newtype method is still classified static, so reject the instance call
                     // with the static-method diagnostic (it is not reachable as `Type.method` yet —
@@ -11911,6 +11916,13 @@ impl Checker {
                         );
                         return ret;
                     }
+                    // Conditional method: enforce any receiver-param `where` bound against the
+                    // newtype's concrete type arg (mirrors the struct arm). `fn_sig` is shared, so a
+                    // newtype method can carry a receiver-bound too — enforce it here to avoid an
+                    // accept-without-enforce soundness hole for INSTANCE newtype methods. Placed
+                    // after the is_static rejection so a static-on-value call stays single-diagnostic.
+                    // No-op when `where_bounds` empty.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &obj_ty, type_args, args, span,
@@ -11959,9 +11971,6 @@ impl Checker {
                     })
                 });
                 if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
-                    // Conditional method: enforce any receiver-param `where` bound against the enum's
-                    // concrete type arg (mirrors the struct arm). No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
                     // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
                     // value with a pointer at the right form (mirrors the struct arm).
                     if is_static {
@@ -11973,6 +11982,12 @@ impl Checker {
                         );
                         return ret;
                     }
+                    // Conditional method: enforce any receiver-param `where` bound against the enum's
+                    // concrete type arg (mirrors the struct arm). Placed after the is_static rejection
+                    // so a static-on-value call stays single-diagnostic; a static enum method's own
+                    // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
+                    // No-op when `where_bounds` empty.
+                    self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &obj_ty, type_args, args, span,

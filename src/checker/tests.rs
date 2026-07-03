@@ -1737,6 +1737,89 @@ x := b.top()
 ");
 }
 
+#[test]
+fn conditional_static_method_rejects_non_comparable() {
+    // A STATIC method (no `self`) may carry a receiver-param `where` too — `fn_sig` is shared and
+    // cannot tell a static from an instance method. It MUST be enforced on the static-dispatch path
+    // (`infer_static_call`), else a conditional factory silently accepts a non-satisfying type arg.
+    ok("\
+struct Box[T]:
+    val: T
+    fn of(x: T) -> Box[T] where T: Comparable:
+        return Box(x)
+b := Box.of(5)
+");
+    rejects(
+        "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn of(x: T) -> Box[T] where T: Comparable:
+        return Box(x)
+b := Box.of(Q(1))
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_static_enum_method_rejects_non_comparable() {
+    // Mirror for an enum static factory reached as `Enum.method(...)`.
+    ok("\
+enum Opt[T]:
+    Some(T)
+    None
+    fn build(x: T) -> Opt[T] where T: Comparable:
+        return Opt.Some(x)
+o := Opt.build(5)
+");
+    rejects(
+        "\
+struct Q:
+    n: int
+enum Opt[T]:
+    Some(T)
+    None
+    fn build(x: T) -> Opt[T] where T: Comparable:
+        return Opt.Some(x)
+o := Opt.build(Q(1))
+",
+        "does not satisfy Comparable",
+    );
+}
+
+#[test]
+fn conditional_static_method_on_value_single_diagnostic() {
+    // A static method that carries a receiver `where`-bound, wrongly called on a VALUE, must emit
+    // ONLY the static-method diagnostic — NOT also a spurious "does not satisfy" from the receiver
+    // bound (the enforcement must fire AFTER the `is_static` rejection, not before).
+    let src = "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn mk(x: T) -> T where T: Comparable:
+        return x
+b := Box(Q(1))
+y := b.mk(Q(1))
+";
+    let errs = check_src(src);
+    let bound = errs
+        .iter()
+        .filter(|e| e.message.contains("does not satisfy"))
+        .count();
+    assert_eq!(
+        bound, 0,
+        "no spurious bound error on a static-on-value call, got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("is a static method")),
+        "expected the static-method diagnostic, got: {errs:?}"
+    );
+}
+
 // ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
 
 #[test]

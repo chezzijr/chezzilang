@@ -929,6 +929,11 @@ fn f(s: net.Socket):
     bad := Box(s); bad.top()         # ERROR at check time: Socket does not satisfy Comparable
 ```
 
+The receiver-param bound is enforced wherever the concrete type argument becomes known — on an
+instance call (`b.top()`) **and** on a static factory reached as `Type.method(…)` (a no-`self`
+method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`'s type isn't
+`Comparable`).
+
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.
