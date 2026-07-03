@@ -210,7 +210,10 @@ smuggle a parent `GcRef`). (d) Method tasks lower to `Lowered::Method` dispatche
 `prepare_worker`s each task, farms `tasks[1..]` to the bounded pool (`src/vm/pool.rs` — one process-wide
 `OnceLock<Pool>` of `vm::worker_count()` threads — `--threads=N` / `CHEZZI_THREADS`, else
 `available_parallelism()`), runs `tasks[0]` inline (decision B), then flushes
-output in **task order** (decision F) and propagates the lowest-index fault. `run_task_isolated` split into
+output in **task order** (decision F) and propagates the lowest-index fault (whose own buffered output is
+flushed at its slot before it propagates so it is not dropped; higher-index racy faults + `Cancelled`
+still drop — byte-for-byte oracle parity only when the faulter is the nursery's sole output-producer,
+else a residual pre-existing race, see Decision F in `concurrency-tier-d.md`). `run_task_isolated` split into
 `prepare_worker` (parent-heap) + `ReadyWorker::run` (thread-side; `Vm` is `Send`); blocking `recv` waits on
 `ChannelCore.cv`; `Shared.update` takes a per-core `update_lock` **only under `--parallel`** so concurrent
 RMWs can't lose each other. **Deferred here:** no cancellation (first fault joins-then-reports), no deadlock
