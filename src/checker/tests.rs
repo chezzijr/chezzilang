@@ -1611,6 +1611,60 @@ x := b.top()
 }
 
 #[test]
+fn conditional_method_operator_dispatch_enforces_receiver_bound() {
+    // SOUNDNESS regression: a conditional method that IMPLEMENTS an operator protocol's method
+    // (`compare` ⇒ Comparable) makes the type STRUCTURALLY satisfy that protocol — but only when the
+    // receiver's `where T: Comparable` holds. Operator syntax (`a < b`) resolves the method through
+    // `satisfies` (NOT the explicit-call path), so the bound must be enforced INSIDE satisfies or the
+    // operator bypasses it (check-ok / run-diverge). `Box[Q]` (Q not Comparable) must reject `<`.
+    let prog = |val: &str, op: &str| {
+        format!(
+            "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Box[T]) -> int where T: Comparable:
+        if self.val < other.val:
+            return -1
+        return 0
+a := Box({val})
+b := Box({val})
+{op}
+"
+        )
+    };
+    // int IS Comparable → Box[int] is conditionally Comparable → `<` is allowed.
+    ok(&prog("1", "print(a < b)"));
+    // Q is NOT Comparable → Box[Q] must NOT satisfy Comparable → `<` is rejected at CHECK time.
+    rejects(&prog("Q(1)", "print(a < b)"), "cannot compare");
+}
+
+#[test]
+fn conditional_method_as_generic_bound_arg_enforces() {
+    // SOUNDNESS regression (the other structural-satisfies path): passing `Box[Q]` where a
+    // `[U: Comparable]` bound is expected must reject — `satisfies(Box[Q], Comparable)` has to see
+    // the receiver `where` fail. `Box[int]` is accepted.
+    let prog = |val: &str| {
+        format!(
+            "\
+struct Q:
+    n: int
+struct Box[T]:
+    val: T
+    fn compare(self, other: Box[T]) -> int where T: Comparable:
+        return 0
+fn need_cmp[U: Comparable](x: U) -> U:
+    return x
+y := need_cmp(Box({val}))
+"
+        )
+    };
+    ok(&prog("1"));
+    rejects(&prog("Q(1)"), "does not satisfy Comparable");
+}
+
+#[test]
 fn conditional_method_enum_where_receiver_param() {
     // Enum receiver-param conditional method: accept on a Comparable payload, reject on a
     // non-Comparable one.

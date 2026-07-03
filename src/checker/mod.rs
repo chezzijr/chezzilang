@@ -14243,7 +14243,34 @@ impl Checker {
                 }
             });
             match actual_owned.as_ref() {
-                Some(actual) if method_matches(msig, actual, ty) => {}
+                Some(actual) if method_matches(msig, actual, ty) => {
+                    // Conditional conformance: a method whose `where` bounds the RECEIVER's own type
+                    // param (e.g. `compare(self, o: Box[T]) -> int where T: Comparable` on `Box[T]`)
+                    // only makes the type satisfy `protocol` when that bound HOLDS for this concrete
+                    // instantiation. Enforce it structurally here — so EVERY satisfies-based consumer
+                    // (operator dispatch, generic bounds, protocol-typed params, `for`) is sound, not
+                    // just explicit `.method()` calls (which enforce at the call site). `tymap` maps the
+                    // receiver param (`T`) to the concrete arg; `Ty::Unknown` args defer (satisfies_args
+                    // returns `Ok` on Unknown), matching `List.sort`'s late-inference behaviour.
+                    // Recursion terminates by structural descent (each level checks a smaller type arg).
+                    // Pre-conditional-methods code has no `where_bounds` on any method, so this loop is a
+                    // no-op there — zero effect on existing structural conformance.
+                    for wb in &actual.where_bounds {
+                        let Some(concrete) = tymap.get(&wb.name) else {
+                            continue;
+                        };
+                        for bound in &wb.bounds {
+                            let bargs: Vec<Ty> =
+                                bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                            if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
+                                return Err(format!(
+                                    "type {ty} does not satisfy {protocol} (method '{mname}' requires {}: {})",
+                                    concrete, bound.name
+                                ));
+                            }
+                        }
+                    }
+                }
                 Some(_) => {
                     return Err(format!(
                         "type {ty} does not satisfy {protocol} (method '{mname}' has the wrong signature)"

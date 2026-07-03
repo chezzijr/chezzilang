@@ -942,6 +942,15 @@ instance call (`b.top()`) **and** on a static factory reached as `Type.method(�
 method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`'s type isn't
 `Comparable`).
 
+**Conditional conformance.** When the conditional method *is* a protocol's required method — e.g. a
+`compare(self, other: Self) -> int where T: Comparable` makes `Box[T]` *structurally* satisfy
+`Comparable` — the receiver bound makes that conformance **conditional**: `Box[int]` satisfies
+`Comparable` (so `Box(1) < Box(2)` and passing a `Box[int]` to a `[U: Comparable]` generic are both
+fine), but `Box[Tag]` (with `Tag` not `Comparable`) does **not** — the `<`, and the bound-check, are
+rejected at compile time. The bound is honoured *everywhere* conformance is queried — operator
+dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not just at an explicit
+`.compare()` call, so there is no path by which a `Box[Tag]` slips through as `Comparable`.
+
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.

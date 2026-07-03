@@ -39,14 +39,26 @@ method.chz` (Box/Opt/Stack conditional methods invoked+printed, plus a `max2` wh
 bound) asserted byte-identical on interp / --serial VM / M:N VM (`golden_conditional_method_chz` +
 `..._matches_expected_and_interp`). No grammar change (`where` already grammatical on methods —
 `cargo test conformance` green). checker + docs + additive golden tests only.
-**Two follow-up fixes (adversarial review):** (1) the conditional method BODY may now use the bounded
+**Three follow-up fixes (adversarial review):** (1) the conditional method BODY may now use the bounded
 op — `check_fn_body` merges `sig.where_bounds` onto the in-scope ENCLOSING param for the body's
 duration (was recorded call-site-only, so `self.val < other` errored `cannot compare T and T`),
 restoring symmetry with the free-fn `where` path (test `conditional_method_body_uses_receiver_bound`
 + enum mirror). (2) `fn_sig` DEDUPs the receiver-bound against the enclosing param's DECLARED bounds
 (`struct Box[T: Comparable]` + `where T: Comparable`), so the static-dispatch path — which enforces
 both `tps` and `sig.where_bounds` — no longer emits the identical "does not satisfy" twice (test
-`conditional_static_method_redundant_decl_bound_reports_once`).
+`conditional_static_method_redundant_decl_bound_reports_once`). (3) **SOUNDNESS — conditional
+CONFORMANCE.** A conditional method that *is* a protocol's required method (e.g. `compare` ⇒
+`Comparable`) makes the type STRUCTURALLY satisfy that protocol; enforcing the receiver `where` only
+at explicit method-call dispatch left every `satisfies`-based consumer (operator dispatch `<`/`+`,
+generic bounds `[U: Comparable]`, protocol-typed params) BYPASSING it — `Box[Tag] < Box[Tag]`
+check-passed then ran into `Tag has no compare` (check-ok/run-diverge). Fixed at the source:
+`satisfies_methods` now, after `method_matches`, verifies each candidate method's `where_bounds` hold
+under the querying type's `{structParam → concreteArg}` map (`self.satisfies_args`, so `Ty::Unknown`
+defers exactly like the call-site path). Conditional conformance is now honoured EVERYWHERE — `Box[int]`
+is `Comparable`, `Box[Tag]` is not — closing the operator/bound/param bypass (tests
+`conditional_method_operator_dispatch_enforces_receiver_bound`,
+`conditional_method_as_generic_bound_arg_enforces`). Low blast radius: pre-conditional-methods code has
+no method `where_bounds`, so the new check is a no-op for all existing structural conformance.
 
 **✅ LANGUAGE — `where`-clause generic bounds + file-backed List `sort`/`sum` port (2026-07-03).** Adds
 `where T: Bound, …` as an alternative spelling of generic bounds after a fn/native-fn signature
