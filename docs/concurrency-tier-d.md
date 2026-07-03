@@ -308,9 +308,13 @@ Channel is a cross-nursery wakeup (handlers reach clients via sockets, which wor
   the VM==interp sequential-subset parity suite every phase.
 - **Decision F** — output flushed in task order on join; deterministic transcript despite concurrent
   execution. All fault-free goldens stay byte-identical. The terminal (lowest-index propagating) fault
-  ALSO flushes its buffered output at its task-order slot (oracle parity — the cooperative/interp engine
-  emits a faulting task's partial output before the fault unwinds); higher-index racy faults and
-  `Cancelled` still drop (no deterministic slot position).
+  ALSO flushes its buffered output at its task-order slot so a faulting task's partial output is not
+  dropped; higher-index racy faults and `Cancelled` still drop (no deterministic slot position). This
+  reaches byte-for-byte oracle parity **only when the faulting task is the nursery's sole
+  output-producer** — with additional output-producing siblings the M:N transcript can still diverge
+  from serial's strict stop-at-first-fault order (a sibling reaching `Done` before the cancel-trip
+  keeps output serial never produced; `Fault`-vs-`Cancelled` classification is itself a race), a
+  pre-existing nondeterminism the buffer-and-flush model cannot reconcile and does not assert.
 - **Decision C** — `os.exit` hard-halts, wins over sibling fault, uncatchable by an outer `recover:`.
 - **Share-nothing** — every fiber owns its heap; no value crosses a heap boundary except via
   `WireValue` copy (`Channel.send` / `spawn` args) or `Arc`'d cores (`Channel` / `Shared` /
