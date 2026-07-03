@@ -1,0 +1,45 @@
+# Golden: variadic parameters (`...xs: T`) + the `Any` top type. A variadic call collapses its
+# surplus trailing positionals into a fresh `List[T]` in the desugar pass, so the call is an ordinary
+# positional call to both engines — byte-identical on interp, the cooperative VM (--serial), and the
+# M:N engine (default / --parallel). `Any` is an empty structural protocol satisfied by every type
+# (scalars included), used here as a universal parameter slot.
+# Run with: chezzi run examples/variadic.chz   (also --serial / --parallel — byte-identical)
+
+fn sum_all(...xs: int) -> int:
+    total := 0
+    for x in xs:
+        total = total + x
+    return total
+
+# pre-variadic positional + variadic + keyword-only default.
+fn labeled(prefix: str, ...xs: int, sep: str = ", ") -> str:
+    parts := ""
+    first := true
+    for x in xs:
+        if first:
+            parts = parts + str(x)
+            first = false
+        else:
+            parts = parts + sep + str(x)
+    return prefix + parts
+
+# `Any` accepts a value of any type.
+fn kind(v: Any) -> str:
+    return "got a value"
+
+fn main():
+    print(sum_all(1, 2, 3))          # 6
+    print(sum_all())                 # 0 — zero variadic args
+    print(sum_all(10))               # 10
+    print(labeled("nums: ", 1, 2, 3))          # nums: 1, 2, 3
+    print(labeled("dash: ", 4, 5, 6, sep="-")) # dash: 4-5-6
+    a: Any = 42
+    b: Any = "hello"
+    print(kind(a))                   # got a value
+    print(kind(b))                   # got a value
+    # `print` is now a variadic `native fn print(...args: Any, sep, end)` decl.
+    print(1, "a", true, sep="-", end="!\n")   # 1-a-true!
+    print()                                    # blank line
+    print("x", "y", "z", sep=", ")             # x, y, z
+
+main()

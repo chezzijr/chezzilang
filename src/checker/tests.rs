@@ -12932,6 +12932,7 @@ fn prelude_table_is_single_source_of_truth() {
     assert_eq!(
         parsed_names,
         BTreeSet::from([
+            "print", // ported to a variadic `native fn print(...args: Any, sep, end)` decl
             "ord",
             "chr",
             "panic",
@@ -12941,18 +12942,22 @@ fn prelude_table_is_single_source_of_truth() {
             "bytes",
             "bytearray"
         ]),
-        "std/prelude.chz native decls must be exactly the eight migrated universe builtins"
+        "std/prelude.chz native decls must be the eight migrated universe builtins plus ported `print`"
     );
     // Metadata agreement: the parsed decl KIND must match the hollow Rust table's intrinsic/first_class.
     for (name, kind) in &parsed {
         let p = prelude_fn(name).unwrap_or_else(|| panic!("'{name}' missing from PRELUDE table"));
         match kind {
             crate::ast::NativeKind::Fn => {
-                assert_eq!(
-                    p.intrinsic,
-                    Intrinsic::Builtin,
-                    "'{name}': native fn ⇒ Builtin"
-                );
+                // `print` is a first-class native fn whose intrinsic is the specialized `Print`
+                // (it lowers to `CallPrint`/`CallPrintSep`, not the generic `Builtin` dispatch); every
+                // other native fn (`ord`/`chr`/`panic`) is `Builtin`.
+                let want = if *name == "print" {
+                    Intrinsic::Print
+                } else {
+                    Intrinsic::Builtin
+                };
+                assert_eq!(p.intrinsic, want, "'{name}': native fn intrinsic");
                 assert!(p.first_class, "'{name}': native fn ⇒ first_class");
             }
             crate::ast::NativeKind::Ctor => {
@@ -14117,4 +14122,133 @@ fn kw_value_scope_cut_defaults() {
 #[test]
 fn kw_value_builtin_rejects_keywords() {
     rejects("p := ord\np(x=\"a\")\n", "takes no keyword arguments");
+}
+
+// ===== Variadic parameters + `Any` top type (M-variadic) =====
+
+/// `Any` is an empty structural protocol → every type (scalars included) satisfies it.
+#[test]
+fn any_top_type_accepts_scalars() {
+    ok("fn w():\n    x: Any = 1\n    y: Any = \"s\"\n    z: Any = true\n    f: Any = 1.5\n");
+}
+
+/// `Any` as a param type accepts an int and a struct value.
+#[test]
+fn any_param_accepts_anything() {
+    entry_ok(
+        "struct P:\n    x: int\n\nfn g(v: Any) -> nil:\n    return\n\nfn main():\n    g(1)\n    g(P(x=1))\n    g(\"hi\")\n",
+    );
+}
+
+/// A user cannot redeclare the reserved `Any` protocol.
+#[test]
+fn any_is_reserved() {
+    rejects("protocol Any:\n    fn foo(self) -> int\n", "reserved");
+}
+
+/// A direct `satisfies` unit check: every scalar satisfies the empty `Any` protocol.
+#[test]
+fn any_satisfied_by_all_scalars_unit() {
+    let c = Checker::new();
+    for ty in [Ty::Int, Ty::Float, Ty::Bool, Ty::Str, Ty::Nil] {
+        assert!(
+            c.satisfies_args(&ty, "Any", &[]).is_ok(),
+            "{ty} should satisfy Any"
+        );
+    }
+}
+
+/// `fn_sig` collapses a variadic param to a `List[T]` slot and records its index.
+#[test]
+fn fn_sig_variadic_collapses_to_list() {
+    let module =
+        parser::parse(lexer::tokenize("fn f(...xs: int) -> int:\n    return 0\n").unwrap())
+            .unwrap();
+    let StmtKind::Fn(decl) = &module.stmts[0].kind else {
+        panic!("expected fn");
+    };
+    let mut c = Checker::new();
+    let sig = c.fn_sig(decl, Span::default());
+    assert_eq!(sig.params, vec![Ty::List(Box::new(Ty::Int))]);
+    assert_eq!(sig.variadic, Some(0));
+}
+
+/// `fn_sig` keeps pre-variadic + post-variadic (keyword-only) slots around the collapsed list.
+#[test]
+fn fn_sig_variadic_middle_slot() {
+    let module = parser::parse(
+        lexer::tokenize("fn f(a: str, ...xs: int, flag: bool = false) -> int:\n    return 0\n")
+            .unwrap(),
+    )
+    .unwrap();
+    let StmtKind::Fn(decl) = &module.stmts[0].kind else {
+        panic!("expected fn");
+    };
+    let mut c = Checker::new();
+    let sig = c.fn_sig(decl, Span::default());
+    assert_eq!(
+        sig.params,
+        vec![Ty::Str, Ty::List(Box::new(Ty::Int)), Ty::Bool]
+    );
+    assert_eq!(sig.variadic, Some(1));
+}
+
+/// A variadic user fn collapses its call to a `List[T]` slot and type-checks end-to-end (desugared).
+#[test]
+fn variadic_call_typechecks_desugared() {
+    let errs = check_desugared(
+        "fn sum_all(...xs: int) -> int:\n    total := 0\n    for x in xs:\n        total = total + x\n    return total\n\nfn main():\n    a := sum_all(1, 2, 3)\n    b := sum_all()\n",
+    );
+    assert!(errs.is_empty(), "expected clean, got: {errs:?}");
+}
+
+/// A heterogeneous variadic arg (`bool` into `...xs: int`) is a compile error (via the collapsed
+/// `List` literal's element-type check).
+#[test]
+fn variadic_element_type_enforced() {
+    let errs = check_desugared("fn f(...xs: int):\n    return\n\nfn main():\n    f(1, true)\n");
+    assert!(
+        !errs.is_empty(),
+        "expected a type error for bool into ...xs: int"
+    );
+}
+
+// ===== print ported to a variadic `native fn` decl =====
+
+#[test]
+fn print_zero_args_ok() {
+    ok("fn w():\n    print()\n");
+}
+
+#[test]
+fn print_variadic_with_sep_end_ok() {
+    ok("fn w():\n    print(1, \"a\", true, sep=\"-\", end=\"!\")\n");
+}
+
+#[test]
+fn print_sep_non_str_rejects() {
+    rejects("fn w():\n    print(1, sep=5)\n", "str");
+}
+
+#[test]
+fn print_builtin_sig_present_after_port() {
+    // print retains a builtin_sig (hover) after retiring the synthetic sig_print.
+    let mut c = Checker::new();
+    c.seed_native_prelude_sigs();
+    assert!(c.builtin_sig("print").is_some());
+}
+
+/// KNOWN v1 LIMIT (pinned): a variadic call used as a parameter DEFAULT is not collapsed (the desugar
+/// collapse runs on pass 1 only; a default is spliced after pass 1), so it is a compile error — the
+/// same on both engines, not a parity divergence. Documented in PROGRESS.md; wrap in a fixed-arity
+/// helper. This test locks the behavior so a future collapse-idempotency fix updates it deliberately.
+#[test]
+fn variadic_call_as_param_default_is_compile_error() {
+    let errs = check_desugared(
+        "fn sum_all(...xs: int) -> int:\n    return 0\n\nfn g(x: int = sum_all(1, 2, 3)) -> int:\n    return x\n\nfn main():\n    print(g())\n",
+    );
+    assert!(
+        !errs.is_empty(),
+        "a variadic call as a param default is a known-limit compile error"
+    );
 }

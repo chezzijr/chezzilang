@@ -18,7 +18,7 @@ Conventions used below:
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `print` | `print(...args, sep=" ", end="\n") -> nil` | Write each argument (any type) to stdout. Variadic. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. |
+| `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> nil` | Write each argument (any type) to stdout. Variadic — declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. The **value form** (`p := print`) is a fixed 1-arg call (see `syntax.md`). |
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |

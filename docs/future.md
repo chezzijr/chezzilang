@@ -163,6 +163,31 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     The two rejected attempts live unmerged as branches `auto-task/protocol-static-req` /
     `…-v2` (main is clean); discardable. Revisit only with a design-first pass + appetite for the sugar.
 
+14. **`cast[T](val: Any) -> Option[T]` — a checked downcast off the `Any` top type — ⏸️ DEFERRED
+    (DESIGN ONLY, no code).** The `Any` top type + variadics shipped (see `docs/syntax.md`); `Any`
+    lets a value of any type into a universal slot, but there is currently **no way back out** — you can
+    hold and display an `Any` but not recover its concrete type. The companion is a **checked downcast**:
+    ```chezzi
+    cast[int](x)          # -> Option[int]: Some(n) if x is really an int, else None
+    match cast[Point](v):
+        Some(p): print(p.x)
+        None:    print("not a Point")
+    ```
+    Returning `Option[T]` (not a raw `T`) makes it fit `?` / `match` and keeps it total (no faulting
+    downcast). **Why deferred — the runtime ERASES generics, so `cast` can only *honestly* witness what
+    a runtime `Value` still carries:**
+    - `Value` is `Int`/`Float`/`Bool`/`Nil`/`Obj` (`src/vm/value.rs`) — scalars and `str` witness fine.
+    - `Obj::List(Vec<Value>)` (`src/vm/heap.rs`) carries **no element type**; `Obj::Struct{name,…}`
+      carries only the **name**. So `cast` can witness a *bare container KIND* (is-it-a-list) and a
+      *named struct/enum BY NAME*, but **not** a parameterized target.
+    - Therefore `cast[List[int]]`, `cast[Map[str,int]]`, `cast[Box[int]]`, … are **unsound and must be
+      REJECTED** at the checker: `List[int]` and `List[str]` are the same runtime shape, and an empty
+      list is ambiguous for *any* element type. Only `cast[Scalar]`, `cast[str]`, `cast[List]`-kind, and
+      `cast[NamedStructOrEnum]` (by name) are honest.
+    Lifting the parameterized-target restriction needs **runtime type tags** on heap objects (element
+    types on lists/maps, type args on structs) — its own milestone (also a prerequisite for reflection).
+    Record this so a future `cast` implementation starts from the erasure contract, not a surprise.
+
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.
 

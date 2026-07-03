@@ -166,8 +166,13 @@
 <params> ::= <param> | <param> "COMMA" | <param> "COMMA" <params>
 # A `ref T` param (`fn f(x: ref int)`) — the by-reference binding modifier, lowered to a `Ref[T]`
 # box. The optional `REF` sits between the `COLON` and the <type>, the same as a typed-let.
+# A leading `...` marks a VARIADIC param (`fn f(...xs: T)`) — it collects surplus trailing positional
+# args into a `List[T]`; everything after it is keyword-only. Parser-level rules the permissive grammar
+# does not model: at most one variadic, it must carry an element type, it may not carry a default, and
+# it is legal only where defaults are (free fns / methods / native decls — not closures / extern).
 <param>  ::= "IDENT" | "IDENT" "COLON" <type> | "IDENT" "COLON" "REF" <type>
            | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
+           | "DOTDOTDOT" "IDENT" "COLON" <type>
 
 # Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`, or a
 # parameterized bound `[S: Iterator[T]]` (only `Iterator` gives its type args meaning).

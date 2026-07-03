@@ -33,6 +33,10 @@ struct PSpec {
     /// True for a `ref T` parameter — the call-arg lowering passes the box (alias) instead of
     /// auto-dereferencing to a `.get()` copy. See [`Walker::walk_expr`]'s `Call` arm.
     is_ref: bool,
+    /// True for a variadic parameter (`...xs: T`). `normalize_call` sweeps all surplus trailing
+    /// positional args into a synthesized `List` literal at this slot; everything after it is
+    /// keyword-only. At most one per spec. Struct fields are never variadic.
+    is_variadic: bool,
 }
 
 /// Built-in / core methods on `str`/`list`/`map`/`set` (kept in sync with the checker's
@@ -297,6 +301,7 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
                     name: p.name.clone(),
                     default: p.default.clone(),
                     is_ref: p.is_ref,
+                    is_variadic: p.is_variadic,
                 })
                 .collect();
             map.entry(method.name.clone()).or_default().push(spec);
@@ -330,6 +335,7 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
                             name: p.name.clone(),
                             default: p.default.clone(),
                             is_ref: p.is_ref,
+                            is_variadic: p.is_variadic,
                         })
                         .collect();
                     let key = (name.clone(), method.name.clone());
@@ -378,6 +384,7 @@ fn collect_methods_by_struct_into_standalone(
                     name: p.name.clone(),
                     default: p.default.clone(),
                     is_ref: p.is_ref,
+                    is_variadic: p.is_variadic,
                 })
                 .collect();
             map.insert((name.clone(), method.name.clone()), spec);
@@ -602,6 +609,7 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                             name: p.name.clone(),
                             default: p.default.clone(),
                             is_ref: p.is_ref,
+                            is_variadic: p.is_variadic,
                         })
                         .collect(),
                 );
@@ -615,6 +623,7 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                             name: f.name.clone(),
                             default: f.default.clone(),
                             is_ref: false,
+                            is_variadic: false,
                         })
                         .collect(),
                 );
@@ -1619,6 +1628,86 @@ impl Walker<'_> {
             return Ok(());
         };
 
+        // A VARIADIC callable (`fn f(pre..., ...xs: T, kwonly...)`) collapses the surplus trailing
+        // positionals into a synthesized `List` literal at the variadic slot, and binds the
+        // keyword-only tail (everything after the variadic) from named args / defaults. After this the
+        // call is an ordinary fully-positional call, so the checker AND both engines need zero
+        // variadic-specific logic (parity by construction). This must run BEFORE the fixed-arity gates
+        // below (a `f(1,2,3)` into a single `List` slot is "too many" by those rules).
+        // Collapse on the FIRST pass only (like `ref` lowering): after pass 1 the call is already in
+        // final collapsed form (`args = [pre..., List, kwonly...]`, `named` empty), so re-running it on
+        // pass 2 would wrap the synthesized `List` in another `List`. On pass 2 the collapsed call falls
+        // through to the fixed-arity gate below, which is a no-op for it.
+        if self.lower_refs
+            && let Some(v) = params.iter().position(|p| p.is_variadic)
+        {
+            let ExprKind::Call { args, named, .. } = &mut expr.kind else {
+                return Ok(());
+            };
+            let mut positional: Vec<Option<Expr>> =
+                std::mem::take(args).into_iter().map(Some).collect();
+            let named_list = std::mem::take(named);
+            let mut out: Vec<Expr> = Vec::with_capacity(params.len());
+            // Pre-variadic slots (indices 0..v): one positional each, else its default, else error.
+            for (i, pspec) in params.iter().enumerate().take(v) {
+                let supplied = positional.get_mut(i).and_then(Option::take);
+                match supplied {
+                    Some(e) => out.push(e),
+                    None => match &pspec.default {
+                        Some(d) => out.push(d.clone()),
+                        None => {
+                            return Err(err(
+                                span,
+                                format!("missing required argument '{}'", pspec.name),
+                            ));
+                        }
+                    },
+                }
+            }
+            // The variadic slot sweeps EVERY remaining positional (index >= v) into a `List` literal —
+            // so a positional can never land in a keyword-only slot.
+            let elems: Vec<Expr> = positional.into_iter().skip(v).flatten().collect();
+            out.push(Expr {
+                kind: ExprKind::List(elems),
+                span,
+            });
+            // Keyword-only tail (indices v+1..): named args may name ONLY these slots. Naming the
+            // variadic itself or a pre-variadic slot is an error (they are positional).
+            let mut kw: HashMap<String, Expr> = HashMap::new();
+            for (n, e) in named_list {
+                match params.iter().position(|p| p.name == n) {
+                    None => return Err(err(span, format!("unknown named argument '{n}'"))),
+                    Some(idx) if idx <= v => {
+                        return Err(err(
+                            span,
+                            format!(
+                                "argument '{n}' is positional (it is at or before the variadic parameter) and cannot be passed by name"
+                            ),
+                        ));
+                    }
+                    Some(_) => {
+                        if kw.insert(n.clone(), e).is_some() {
+                            return Err(err(span, format!("duplicate named argument '{n}'")));
+                        }
+                    }
+                }
+            }
+            for pspec in params.iter().skip(v + 1) {
+                if let Some(e) = kw.remove(&pspec.name) {
+                    out.push(e);
+                } else if let Some(d) = &pspec.default {
+                    out.push(d.clone());
+                } else {
+                    return Err(err(
+                        span,
+                        format!("missing required keyword argument '{}'", pspec.name),
+                    ));
+                }
+            }
+            *args = out;
+            return Ok(());
+        }
+
         // Decide whether this call needs rewriting. Plain positional calls whose arity is wrong (too
         // many, or too few without defaults to fill) are left untouched so the type checker reports
         // its usual arity error. We only rewrite when there are named args, or when every omitted
@@ -2610,5 +2699,114 @@ mod tests {
             "expected the by-value->ref error, got: {:?}",
             e.message
         );
+    }
+
+    // ===== variadic collapse =====
+
+    /// Pull the last call's positional args as an ExprKind slice.
+    fn last_call_args(stmts: &[Stmt]) -> Vec<ExprKind> {
+        let last = stmts.last().expect("a statement");
+        let expr = match &last.kind {
+            StmtKind::Let { value, .. } => value,
+            StmtKind::Expr(e) => e,
+            other => panic!("expected let/expr, got {other:?}"),
+        };
+        let ExprKind::Call { args, named, .. } = &expr.kind else {
+            panic!("expected a Call, got {:?}", expr.kind)
+        };
+        assert!(
+            named.is_empty(),
+            "named must be cleared after variadic collapse"
+        );
+        args.iter().map(|a| a.kind.clone()).collect()
+    }
+
+    fn list_ints(k: &ExprKind) -> Vec<i64> {
+        let ExprKind::List(es) = k else {
+            panic!("expected a List literal, got {k:?}");
+        };
+        es.iter()
+            .map(|e| match e.kind {
+                ExprKind::Int(n) => n,
+                ref o => panic!("expected int, got {o:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn variadic_sweeps_positionals_into_list() {
+        let s = desugar_ok("fn f(...xs: int):\n    return\nr := f(1, 2, 3)\n");
+        let args = last_call_args(&s);
+        assert_eq!(args.len(), 1);
+        assert_eq!(list_ints(&args[0]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn variadic_zero_args_is_empty_list() {
+        let s = desugar_ok("fn f(...xs: int):\n    return\nr := f()\n");
+        let args = last_call_args(&s);
+        assert_eq!(args.len(), 1);
+        assert_eq!(list_ints(&args[0]), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn variadic_keyword_only_tail_bound_by_name() {
+        let s = desugar_ok("fn g(...xs: int, flag: bool):\n    return\nr := g(1, flag=true)\n");
+        let args = last_call_args(&s);
+        assert_eq!(args.len(), 2);
+        assert_eq!(list_ints(&args[0]), vec![1]);
+        assert!(matches!(args[1], ExprKind::Bool(true)));
+    }
+
+    #[test]
+    fn variadic_missing_required_keyword_errors() {
+        let e = desugar_err("fn g(...xs: int, flag: bool):\n    return\nr := g(1)\n");
+        assert!(
+            e.message
+                .contains("missing required keyword argument 'flag'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn variadic_stray_positional_swept_not_placed_in_kwonly() {
+        // `true` is swept into xs (a positional can never occupy the keyword-only slot); flag then
+        // has no value → missing required keyword arg.
+        let e = desugar_err("fn g(...xs: int, flag: bool):\n    return\nr := g(1, 2, true)\n");
+        assert!(
+            e.message
+                .contains("missing required keyword argument 'flag'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn variadic_naming_the_variadic_errors() {
+        let e = desugar_err("fn f(...xs: int):\n    return\nr := f(xs=1)\n");
+        assert!(
+            e.message.contains("positional") && e.message.contains("xs"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn variadic_keyword_only_default_filled() {
+        let s = desugar_ok("fn g(...xs: int, flag: bool = false):\n    return\nr := g(1, 2)\n");
+        let args = last_call_args(&s);
+        assert_eq!(args.len(), 2);
+        assert_eq!(list_ints(&args[0]), vec![1, 2]);
+        assert!(matches!(args[1], ExprKind::Bool(false)));
+    }
+
+    #[test]
+    fn variadic_with_leading_positional() {
+        let s = desugar_ok("fn f(a: str, ...xs: int):\n    return\nr := f(\"h\", 1, 2)\n");
+        let args = last_call_args(&s);
+        assert_eq!(args.len(), 2);
+        assert!(matches!(args[0], ExprKind::Str(ref s) if s == "h"));
+        assert_eq!(list_ints(&args[1]), vec![1, 2]);
     }
 }

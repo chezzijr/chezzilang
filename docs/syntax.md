@@ -545,7 +545,47 @@ defaults are rejected.)
 Built-ins take no named arguments, with **one** exception: **`print`** accepts `sep=` (default `" "`,
 joins the positional args) and `end=` (default `"\n"`, appended after) — both `str` (see `docs/stdlib.md`).
 So `print("a", end="")` writes `a` with no trailing newline, and `print("a","b", sep="-", end="!")`
-writes `a-b!`. Any other named argument on a built-in is an error.
+writes `a-b!`. Any other named argument on a built-in is an error. `print`'s signature is the
+file-backed variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil`.
+
+**Variadic parameters (`...name: T`).** A parameter written `...xs: T` is **variadic**: it collects
+the surplus trailing positional arguments into a fresh `List[T]` (Go/Swift `T...` style).
+
+```chezzi
+fn sum_all(...xs: int) -> int:
+    total := 0
+    for x in xs:                 # `xs` is a `List[int]`
+        total = total + x
+    return total
+
+sum_all(1, 2, 3)                 # 6
+sum_all()                        # 0  — zero args → empty list
+```
+
+Rules: **at most one** variadic per signature; it must carry an element type (`...xs: T`, never bare
+`...xs`); it may **not** carry a default. Everything **after** a variadic is **keyword-only** — the
+variadic eats all trailing positionals, so a following parameter can only be supplied by name. A
+post-variadic parameter *with* a default is an optional keyword arg; *without* a default it is a
+**required keyword arg**:
+
+```chezzi
+fn labeled(prefix: str, ...xs: int, sep: str = ", ") -> str: ...
+labeled("nums: ", 1, 2, 3)             # sep defaults to ", "
+labeled("dash: ", 4, 5, 6, sep="-")    # keyword-only `sep`
+```
+
+Variadics are allowed on free functions, methods, and `native fn` decls — **not** on closures or
+`extern` (C) functions (the C ABI needs fixed per-arg types; see `docs/ffi-and-packaging.md §5`). Used
+as a first-class **value**, a variadic fn takes the collapsed `List[T]` slot (`g := sum_all; g([1,2,3])`
+works, `g(1,2,3)` does not) — the same fixed-value-form rule as `print`.
+
+**`Any` (the top type).** `Any` is an **empty structural protocol** — zero required methods, so **every**
+type satisfies it (scalars `int`/`float`/`bool`/`str` and `nil` included, not just structs/enums). It
+is the honest element type of a universal slot such as `print(...args: Any)`, and can annotate any
+binding or parameter (`x: Any = 42`, `fn log(v: Any) -> nil`). It is **not** dynamic typing: an `Any`
+value carries no methods, so you can pass it around and display it but not call methods on it (a
+downcast `cast[T]` is a documented future addition — see `docs/future.md`). `Any` is a reserved
+protocol name (a program may not redeclare it).
 
 **Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
 first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
@@ -2481,9 +2521,12 @@ native ctor bytearray(x) -> bytearray
   (*native fn/ctor declarations are only allowed in standard-library modules*) — a footgun guard, so a
   user can't bind a name to a nonexistent intrinsic. Top-level only (nesting is a parse error).
 
-The eight universe builtins `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`, `bytearray`
-(ctors) are declared this way in `std/prelude.chz`. `print` stays engine-synthetic (its `sep=`/`end=`
-variadic isn't expressible), and `range` + the `List`/`Map`/`Set` container ctors remain built-in for now.
+The universe builtins `print`, `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`,
+`bytearray` (ctors) are declared this way in `std/prelude.chz`. `print` is now expressible as the
+variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil` (its lowering
+still uses the specialized print opcodes — the decl is the checker-only signature authority), retiring
+the last engine-synthetic signature. `range` + the `List`/`Map`/`Set` container ctors remain built-in
+for now (their type-arg-driven generic identity is not a flat signature).
 
 ## 12d. `native struct` — native-type signatures in Chezzi (prelude/std-only)
 

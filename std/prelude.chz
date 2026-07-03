@@ -14,9 +14,14 @@
 # `native ctor` => a NON-first-class scalar/type constructor (value-position use is rejected, uniform
 #                  with `f := Point` / `f := List`).
 #
-# print: variadic (sep=/end=) — bound natively/synthetic. range + List/Map/Set: phase 2b (still
-# hard-coded).
+# print: variadic display fn — `...args: Any` (the `Any` top type accepts every value); the
+# keyword-only `sep`/`end` follow the variadic. Its lowering stays on the specialized
+# `CallPrint`/`CallPrintSep` opcodes (a direct `print(...)` call), so this decl is the checker-only
+# SIGNATURE authority (retired the last synthetic Rust sig). The VALUE form (`p := print`) is a fixed
+# 1-arg function (the specialized opcodes are unreachable through a bound value). range + List/Map/Set:
+# phase 2b (still hard-coded).
 
+native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil
 native fn ord(c: str) -> int
 native fn chr(n: int) -> str
 native fn panic(msg: str)

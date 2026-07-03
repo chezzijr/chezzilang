@@ -450,6 +450,12 @@ pub struct Param {
     /// lowers to a `Ref[T]` box. The caller must pass a `ref`-bound argument (alias) — see the
     /// coercion table in the checker. Both engines see only lowered forms and ignore this flag.
     pub is_ref: bool,
+    /// True for a variadic parameter (`fn f(...args: T)`) — collects surplus trailing positional
+    /// arguments into a fresh `List[T]`. At most one per signature; must carry an element type
+    /// annotation; may not carry a default. Everything after it is keyword-only. The desugar pass
+    /// collapses the surplus positionals into a `List` literal, so the function still compiles to a
+    /// single `List[T]` param slot and both engines ignore this flag (like `is_ref`).
+    pub is_variadic: bool,
 }
 
 /// A struct field: `name: Type`, optionally with a default (`name: Type = expr`). A defaulted field

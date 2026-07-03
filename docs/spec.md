@@ -82,9 +82,21 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 structural `protocol`s, like Rust/Go (see *Locked decisions*). (**`yield`/generators** were once
 listed here as a non-goal; they have since shipped as a complete VM-only coroutine runtime — see
 below.)
-**Variadics** — neither variadic arguments (`fn log(*args)`) nor variadic generics (`Foo[T...]`):
-pass an explicit `list`, and generics are always fixed-arity. Default + named arguments cover the
-ergonomic cases variadics usually serve. Named arguments also work through a first-class **function
+**Variadics** — variadic ARGUMENTS **shipped** (`fn f(...xs: T)`, Go/Swift `T...` style): a variadic
+param collects the surplus trailing positional args into a `List[T]`, so it is honest sugar over
+"pass an explicit `list`". At most one variadic per signature; it must carry an element type and may
+not carry a default; everything after it is **keyword-only** (a defaulted post-variadic param is an
+optional keyword arg, a defaultless one is required-by-keyword — like Python's `*args`). The collapse
+happens in the desugar pass (a synthesized `List` literal), so both engines see an ordinary positional
+call. Used as a first-class **value**, a variadic fn takes the collapsed `List[T]` slot (no per-arg
+spread through a value — the same fixed-value-form rule as `print`). Variadic GENERICS (`Foo[T...]`)
+remain a **non-goal** — generics are always fixed-arity. The **`Any`** top type (an empty structural
+protocol satisfied by every type, scalars included) is the honest element type of a universal display
+slot (`print(...args: Any)`); it is not dynamic typing (it carries no methods). A checked downcast off
+`Any` — `cast[T](val: Any) -> Option[T]` — is a **deferred** companion (design + runtime-erasure policy
+in `docs/future.md`; parameterized targets like `cast[List[int]]` stay unsound until runtime type tags
+exist). Default + named
+arguments still cover most ergonomic cases. Named arguments also work through a first-class **function
 value** (Swift-style labels: a `fn(...)` type carries its parameter labels, so `g := greet;
 g(name="Bob")` and a `fn(name: str)->nil` HOF parameter both accept keywords). Labels are
 **surface-only** (SE-0111) — `fn(str)->nil` ≡ `fn(name:str)->nil`, so no impact on HOF/callback/protocol

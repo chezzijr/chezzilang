@@ -179,9 +179,11 @@ Recorded so a revisit starts from a plan, not a blank page:
 
 **Why it's low priority:** the genuinely-variadic-required surface is tiny — `printf`/`scanf` (Chezzi
 has its own formatting + `print`, so you'd rarely call C's), and most "variadic" syscall wrappers have
-fixed-arity-per-call-site or array siblings (`execv`, `vprintf`). And **Chezzi has no variadic surface
-at all** (no `f(*args)` spread, no variadic params) — true varargs FFI would mean inventing a *language*
-feature first, not just an FFI addition.
+fixed-arity-per-call-site or array siblings (`execv`, `vprintf`). Chezzi now **has** a variadic
+*parameter* surface (`fn f(...xs: T)`), but it collapses to a `List[T]` — it deliberately does **not**
+feed the C vararg ABI, which needs concrete per-arg C types (an `int` vs a `double` picks a different
+register class), not a homogeneous Chezzi list of one element type. Nor is there call-site spread
+(`f(*args)`). So true varargs FFI still needs new machinery, not just this parameter feature.
 
 **Workaround that needs nothing new:** declare a **concrete fixed-arity** extern signature for the exact
 call form you need (`open` 2-arg vs a separate 3-arg binding). *Caveat:* on x86-64 SysV, calling a

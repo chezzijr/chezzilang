@@ -254,13 +254,6 @@ pub(crate) struct PreludeFn {
     pub(crate) first_class: bool,
 }
 
-// `print` is the ONE remaining synthetic signature — variadic + named args (`sep`/`end`) collapse to
-// one `?` slot, `print` always returns `nil`; not expressible as a `native fn` decl, so it stays here
-// (all eight other prelude sigs now come from `std/prelude.chz`).
-fn sig_print() -> FnSig {
-    FnSig::plain(vec![Ty::Unknown], Ty::Nil)
-}
-
 /// The native prelude (phase 1). The four universe FUNCTIONS that are FIRST-CLASS values (bindable,
 /// passable, `defer`-able as a bare call) — unlike type/container/runtime constructors
 /// (`int`/`List`/`Channel`/…) and user struct/enum ctors, which stay non-first-class and must be
@@ -371,7 +364,8 @@ pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
 fn is_reserved_protocol(name: &str) -> bool {
     matches!(
         name,
-        "Comparable"
+        "Any"
+            | "Comparable"
             | "Stringable"
             | "Hashable"
             | "Error"
@@ -427,6 +421,12 @@ struct FnSig {
     /// native/synthetic sigs). Purely informational — surfaced on LSP hover, never affects checking
     /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
     doc: Option<String>,
+    /// `Some(i)` iff parameter `i` is variadic (`fn f(...xs: T)`) — its slot type is the collapsed
+    /// `List[T]`, and everything after index `i` is keyword-only. Surface-only: the desugar pass
+    /// collapses surplus positionals into a `List` literal before checking, so this drives arity /
+    /// keyword-only enforcement in desugar. Excluded from `fn_sig_eq` (not type identity). `None` for
+    /// every ordinary signature.
+    variadic: Option<usize>,
 }
 
 impl FnSig {
@@ -442,6 +442,7 @@ impl FnSig {
             min_params,
             is_static: false,
             doc: None,
+            variadic: None,
         }
     }
 
@@ -458,6 +459,7 @@ impl FnSig {
             min_params,
             is_static: false,
             doc: None,
+            variadic: None,
         }
     }
 }
@@ -1992,6 +1994,8 @@ impl Checker {
             .iter()
             .skip(skip)
             .map(|p| match &p.ty {
+                // A variadic `...xs: T` collapses to the slot type `List[T]` (same as user `fn_sig`).
+                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, decl.span))),
                 Some(t) => self.resolve_type(t, decl.span),
                 None => Ty::Unknown,
             })
@@ -2001,6 +2005,7 @@ impl Checker {
             None => Ty::Unknown,
         };
         self.exit_type_params(saved_tps);
+        let variadic = decl.params.iter().skip(skip).position(|p| p.is_variadic);
         let optional = decl
             .params
             .iter()
@@ -2019,6 +2024,7 @@ impl Checker {
         // A native method's OWN `[U]` params land on the sig so it routes through the generic-method
         // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
         sig.type_params = decl.type_params.clone();
+        sig.variadic = variadic;
         sig
     }
 
@@ -4005,6 +4011,9 @@ impl Checker {
             .params
             .iter()
             .map(|p| match &p.ty {
+                // A variadic `...args: T` collapses to the slot type `List[T]` (mirrors `fn_sig` /
+                // `harvest_native_fn_sig`), so `print`'s harvested sig reads as `fn(List[Any], str, str)`.
+                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, decl.span))),
                 Some(t) => self.resolve_type(t, decl.span),
                 None => Ty::Unknown,
             })
@@ -4013,8 +4022,15 @@ impl Checker {
             Some(t) => self.resolve_type(t, decl.span),
             None => Ty::Unknown,
         };
-        self.native_prelude_sigs
-            .insert(decl.name.clone(), FnSig::plain(params, ret));
+        // A defaulted trailing param (`sep`/`end`) is optional; count how many so `min_params` is right.
+        let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
+        let mut sig = if optional > 0 {
+            FnSig::optional_tail(params, ret, optional)
+        } else {
+            FnSig::plain(params, ret)
+        };
+        sig.variadic = decl.params.iter().position(|p| p.is_variadic);
+        self.native_prelude_sigs.insert(decl.name.clone(), sig);
     }
 
     /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
@@ -4317,6 +4333,10 @@ impl Checker {
                         span,
                     )
                 }
+                // A variadic param `...xs: T` collapses to the slot type `List[T]` — the desugar pass
+                // sweeps the surplus positionals into a `List[T]` literal, so the checker sees an
+                // ordinary `List[T]` argument for this slot.
+                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, span))),
                 Some(t) => self.resolve_type(t, span),
                 None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
                 None => {
@@ -4370,6 +4390,7 @@ impl Checker {
             where_bounds: receiver_bounds,
             is_static,
             doc: decl.doc.clone(),
+            variadic: decl.params.iter().position(|p| p.is_variadic),
         }
     }
 
@@ -8464,6 +8485,18 @@ impl Checker {
         // first-class arm for such a name so it falls through to the same error, keeping the VM (whose
         // `collect_globals` pre-slots every top-level `let` to `nil`) and the interp (source-order
         // env → `Value::Builtin`) from diverging on a program that would otherwise wrongly type-check.
+        // `print`'s VALUE form is a FIXED 1-arg function, NOT its variadic call signature: the
+        // variadic + `sep=`/`end=` shapes need the specialized `CallPrint`/`CallPrintSep` opcodes,
+        // which are unreachable through a bound value (`p := print`). So force the canonical 1-arg
+        // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
+        // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
+        // fixed). Suppressed for a use-before-def module global, exactly like the general arm below.
+        if name == "print" && !self.module_global_lets.contains(name) {
+            return Ty::BuiltinFn {
+                params: vec![Ty::Unknown],
+                ret: Box::new(Ty::Nil),
+            };
+        }
         if is_firstclass_builtin_fn(name)
             && !self.module_global_lets.contains(name)
             && let Some(sig) = self.builtin_sig(name)
@@ -13810,6 +13843,14 @@ impl Checker {
         if let Ty::Unknown = ty {
             return Ok(()); // don't cascade
         }
+        // An EMPTY structural protocol (zero embeds AND zero methods — e.g. the `Any` top type) is
+        // satisfied by EVERY type, scalars included. Without this short-circuit a zero-method/zero-embed
+        // protocol would fall past every intrinsic arm to the `_ => Err` at the bottom for Int/Float/
+        // Bool/Str/Nil (structs pass via the vacuous `satisfies_methods` over zero methods, but scalars
+        // have no structural arm). This makes any empty protocol a genuine top type for every `Ty`.
+        if pinfo.embeds.is_empty() && pinfo.methods.is_empty() {
+            return Ok(());
+        }
         // M22 — embedded (super-)protocols: a type satisfies `protocol` iff it satisfies every embed
         // (transitively) AND has every OWN method below. A PURE bundle (`Arithmetic` = embeds only,
         // no own methods) short-circuits once its embeds pass — this is what lets int/float/struct
@@ -14057,6 +14098,7 @@ impl Checker {
                 min_params,
                 is_static: false,
                 doc: None,
+                variadic: None,
             };
             let msig = &want;
             // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
@@ -15409,6 +15451,19 @@ fn fn_sig_eq(a: &FnSig, b: &FnSig) -> bool {
 fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     let mut m = HashMap::new();
     m.insert(
+        // `Any` — the TOP type: an EMPTY structural protocol (zero embeds, zero methods) so EVERY
+        // type satisfies it (scalars included — see the empty-protocol short-circuit in
+        // `satisfies_args_d`). Used as the honest element type of a variadic display slot
+        // (`print(...args: Any)`); NOT dynamic typing — it reuses the protocol-as-value-type machinery
+        // and carries no methods, so a value typed `Any` can only be passed around / displayed.
+        "Any".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: Vec::new(),
+            methods: Vec::new(),
+        },
+    );
+    m.insert(
         "Comparable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
@@ -16202,10 +16257,10 @@ fn bytes_method_sig(method: &str) -> Option<FnSig> {
 /// Polymorphic-input slots use `Ty::Unknown` (renders `?`); the precise concrete RETURN is the hover
 /// payload.
 fn builtin_container_sig(name: &str) -> Option<FnSig> {
-    // `print` is the ONE remaining synthetic universe FUNCTION (variadic + `sep=`/`end=`).
-    if name == "print" {
-        return Some(sig_print());
-    }
+    // `print`'s signature is now the file-backed variadic `native fn print(...)` decl in
+    // `std/prelude.chz` (harvested into `native_prelude_sigs`, read by `builtin_sig` BEFORE this
+    // fallback) — the last synthetic Rust sig, retired. Only the generic container/runtime ctors, whose
+    // type-arg-driven identity is not a flat `FnSig`, remain here.
     let (params, ret) = match name {
         // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the
         // canonical `range(end)`.

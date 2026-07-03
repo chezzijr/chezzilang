@@ -11,6 +11,53 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ LANGUAGE — variadic parameters (`...xs: T`) + the `Any` top type, and `print` ported off its last
+synthetic signature (2026-07-03).** One coherent feature in two phases.
+- **`Any` top type:** an EMPTY structural protocol (zero methods) so EVERY type satisfies it — scalars
+  included. Seeded in `prebuilt_protocols()` + added to `is_reserved_protocol` (not file-backed: an empty
+  protocol body is unparseable). The one real fix: `satisfies_args_d` now short-circuits `Ok` for any
+  zero-embed/zero-method protocol right after the `Ty::Unknown` guard, so an empty protocol is a genuine
+  top type for *every* `Ty` (before, only structs passed it — scalars fell through to `_ => Err`). NOTE:
+  this generalizes to ANY user-declared empty protocol (correct semantics of an empty structural
+  interface, additive). Not dynamic typing — an `Any` value carries no methods.
+- **Variadic params:** `...name: T` collapses to a `List[T]` slot (Go/Swift `T...`). New `Token::DotDotDot`
+  (lexer emits on a third `.`); `ast::Param.is_variadic` (runtime-inert like `is_ref`); `parse_params`
+  gates it on `allow_defaults` (free fns / methods / native decls yes; closures / extern / protocol sigs
+  no) and enforces ≤1 variadic, element-type-required, no-default. `FnSig.variadic: Option<usize>` +
+  `fn_sig`/`harvest_native_fn_sig`/`register_native_decl` wrap the slot in `List[T]`. **Mechanism (the
+  deliberate refinement over "compiler lowering + interp mirror"): the surplus positionals are collapsed
+  into a synthesized `List` literal in the DESUGAR pass (`normalize_call`)** — the parity-by-construction
+  seam — so the compiler AND interp need ZERO changes and VM==interp is automatic. Everything after the
+  variadic is keyword-only (post-variadic param with a default = optional kw arg, without = required kw
+  arg); a positional can never land in a keyword-only slot (all trailing positionals are swept). Collapse
+  runs on desugar pass 1 only (idempotency — pass 2 would double-wrap). `PSpec.is_variadic` threaded
+  through every spec builder. `examples/variadic.chz` golden asserted byte-identical on interp / --serial
+  VM / M:N VM.
+- **`print` port:** now declared `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil`
+  in `std/prelude.chz` (harvested into `native_prelude_sigs`), retiring `sig_print()` + the
+  `builtin_container_sig` print special-case — the LAST synthetic Rust signature. Lowering is UNCHANGED:
+  a direct `print(...)` still compiles to `Op::CallPrint`/`CallPrintSep` byte-identically (the file-backed
+  decl is checker-only name/sig authority). The VALUE form (`p := print`) stays a FIXED 1-arg
+  `Ty::BuiltinFn` via an `infer_ident` special-case (the specialized opcodes are unreachable through a
+  bound value — a design-sanctioned split, not a gap); the existing `print` value-form / `defer` / `spawn`
+  tests stay green.
+- **Deferred (docs only):** `cast[T](val: Any) -> Option[T]` checked downcast — design + runtime-erasure
+  policy recorded in `docs/future.md §3.14` (parameterized targets like `cast[List[int]]` unsound until
+  runtime type tags exist). cFFI stays fixed-arity (`Any` does not feed the C vararg ABI — `docs/ffi-and-
+  packaging.md §5`).
+- **Known v1 tradeoffs:** a heterogeneous variadic arg (`f(1, "x")` into `...xs: int`) surfaces as a
+  `List`-literal element-type error, not a precise per-arg message (still a compile error). A variadic fn
+  used as a VALUE takes the collapsed `List[T]` slot (`g([1,2,3])` works, `g(1,2,3)` does not) — mirrors
+  `print`'s fixed value form. A variadic CALL used as a parameter/field **default**
+  (`fn g(x: int = sum_all(1,2,3))`) is **not** collapsed and so is a **compile error** (the desugar
+  collapse runs on pass 1 only for idempotency; a default is spliced after pass 1) — it fails identically
+  on both engines (a compile error, NOT a parity divergence). Wrap the default in a fixed-arity helper.
+  Narrow enough to defer; a robust fix needs a per-call "already collapsed" marker. **Lexer surface changed (`...` token):** editor TextMate grammar regenerated
+  (`UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage`); **manual follow-up:** reinstall
+  `chezzi-lsp` so editors stop serving stale highlighting. Docs updated: `spec.md` (variadic NON-GOAL
+  overturned for arguments; variadic generics stay a non-goal), `syntax.md`, `stdlib.md`, `grammar.bnf`
+  (`<param>` variadic alt), `ffi-and-packaging.md §5`, `future.md`.
+
 **✅ LANGUAGE — conditional methods: `where` on a user struct/enum/newtype method's RECEIVER type
 param (2026-07-03).** Closes the consistency gap left by the `where`-clause entry below: a user *method*
 may now `where`-bound the ENCLOSING type's own type parameter (`struct Box[T]: fn top(self) -> T where

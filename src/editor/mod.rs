@@ -1479,10 +1479,12 @@ mod tests {
 
     #[test]
     fn hover_builtin_callee_print() {
-        // A free builtin callee (`print`) now reports a DISPLAY signature (v1: signature-only).
-        // Polymorphic/variadic args collapse to `?`; the precise return (`nil`) is the payload.
+        // `print` is now the file-backed variadic decl `native fn print(...args: Any, sep, end)`, so
+        // hover reflects that harvested signature: the collapsed variadic slot `List[Any]` plus the
+        // keyword-only `sep`/`end` (both `str`), returning `nil`. (More informative than the old
+        // synthetic `fn(?) -> nil`.)
         let h = hov("print(\"hi\")\n", 0, 0).expect("hover on builtin print callee");
-        assert_eq!(h.display, "fn(?) -> nil");
+        assert_eq!(h.display, "fn(List[Any], str, str) -> nil");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 

@@ -113,16 +113,17 @@ pub enum Token {
     Shr,              // >> (right shift)
 
     // --- delimiters ---
-    LParen,   // (
-    RParen,   // )
-    LBracket, // [
-    RBracket, // ]
-    LBrace,   // {  (map literal)
-    RBrace,   // }
-    Comma,    // ,
-    Colon,    // :
-    Dot,      // .
-    DotDot,   // ..  (range, e.g. 0..10)
+    LParen,    // (
+    RParen,    // )
+    LBracket,  // [
+    RBracket,  // ]
+    LBrace,    // {  (map literal)
+    RBrace,    // }
+    Comma,     // ,
+    Colon,     // :
+    Dot,       // .
+    DotDot,    // ..  (range, e.g. 0..10)
+    DotDotDot, // ... (variadic param marker, e.g. `...args: T`)
 
     // --- layout (the interesting part) ---
     Newline, // end of a logical line
@@ -273,6 +274,7 @@ pub const PUNCTUATION: &[Token] = &[
     Token::Colon,
     Token::Dot,
     Token::DotDot,
+    Token::DotDotDot,
 ];
 
 impl Token {
@@ -338,6 +340,7 @@ impl Token {
             Colon => ":",
             Dot => ".",
             DotDot => "..",
+            DotDotDot => "...",
             _ => return None,
         })
     }
@@ -750,7 +753,11 @@ impl Lexer {
                 ',' => Token::Comma,
                 '.' => {
                     if self.match_char('.') {
-                        Token::DotDot
+                        if self.match_char('.') {
+                            Token::DotDotDot
+                        } else {
+                            Token::DotDot
+                        }
                     } else {
                         Token::Dot
                     }
@@ -1391,6 +1398,42 @@ mod tests {
     #[test]
     fn single_plus() {
         assert_eq!(kinds("+"), vec![Token::Plus, Token::Newline, Token::Eof]);
+    }
+
+    #[test]
+    fn variadic_ellipsis_token() {
+        // `...` is a single DotDotDot token (variadic param marker).
+        assert_eq!(
+            kinds("...xs"),
+            vec![
+                Token::DotDotDot,
+                Token::Ident("xs".into()),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        // `..` (range) still lexes as DotDot with no regression.
+        assert_eq!(
+            kinds("0..10"),
+            vec![
+                Token::Int(0),
+                Token::DotDot,
+                Token::Int(10),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        // A single `.` between idents is still Dot.
+        assert_eq!(
+            kinds("a.b"),
+            vec![
+                Token::Ident("a".into()),
+                Token::Dot,
+                Token::Ident("b".into()),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
     }
 
     #[test]

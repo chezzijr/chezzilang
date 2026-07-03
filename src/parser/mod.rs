@@ -1067,9 +1067,29 @@ impl Parser {
     fn parse_params(&mut self, allow_defaults: bool) -> PResult<Vec<Param>> {
         let mut params = Vec::new();
         let mut seen_default = false;
+        let mut seen_variadic = false;
         if !self.check(&Token::RParen) {
             loop {
                 let name_span = self.cur_span();
+                // A leading `...` marks a variadic parameter (`fn f(...args: T)`). It collects the
+                // surplus trailing positional args into a `List[T]`; everything after it is
+                // keyword-only. At most one per signature; it must carry an element type and may not
+                // carry a default. Variadics are allowed only where defaults are (free fns, methods,
+                // native decls) — closures / extern / protocol sigs reject them (fixed-arity).
+                let is_variadic = self.eat(&Token::DotDotDot);
+                if is_variadic {
+                    if !allow_defaults {
+                        return Err(
+                            self.err("variadic parameters are not supported here".to_string())
+                        );
+                    }
+                    if seen_variadic {
+                        return Err(
+                            self.err("at most one variadic parameter is allowed".to_string())
+                        );
+                    }
+                    seen_variadic = true;
+                }
                 let name = self.expect_ident()?;
                 // A `ref` modifier is legal only directly after the `:` of a param annotation
                 // (`x: ref int`). `parse_type` never consumes `ref`, so it is a parse error in any
@@ -1081,10 +1101,20 @@ impl Parser {
                 } else {
                     None
                 };
+                if is_variadic && ty.is_none() {
+                    return Err(self.err(format!(
+                        "variadic parameter '{name}' must declare an element type (`...{name}: T`)"
+                    )));
+                }
                 let default = if self.eat(&Token::Assign) {
                     if !allow_defaults {
                         return Err(
                             self.err("default arguments are not supported here".to_string())
+                        );
+                    }
+                    if is_variadic {
+                        return Err(
+                            self.err(format!("variadic parameter '{name}' cannot have a default"))
                         );
                     }
                     // Any expression is allowed as a default; the desugar pass rejects one that
@@ -1097,7 +1127,7 @@ impl Parser {
                 };
                 if default.is_some() {
                     seen_default = true;
-                } else if seen_default {
+                } else if seen_default && !seen_variadic {
                     return Err(self.err(format!(
                         "required parameter '{name}' cannot follow a default parameter"
                     )));
@@ -1108,6 +1138,7 @@ impl Parser {
                     ty,
                     default,
                     is_ref,
+                    is_variadic,
                 });
                 if !self.eat(&Token::Comma) {
                     break;
@@ -2905,6 +2936,51 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn variadic_param_parses() {
+        let StmtKind::Fn(d) = only("fn f(...xs: int):\n    return\n") else {
+            panic!("expected fn");
+        };
+        assert_eq!(d.params.len(), 1);
+        assert_eq!(d.params[0].name, "xs");
+        assert!(d.params[0].is_variadic);
+    }
+
+    #[test]
+    fn variadic_param_native_and_keyword_only_tail() {
+        // native decl may be variadic; a post-variadic param is legal (keyword-only).
+        let StmtKind::Native(d) = only("native fn print(...args: int, sep: str = \" \") -> nil\n")
+        else {
+            panic!("expected native");
+        };
+        assert!(d.params[0].is_variadic);
+        assert!(!d.params[1].is_variadic);
+    }
+
+    #[test]
+    fn variadic_rejects_second_variadic() {
+        let e = parse_err("fn f(...a: int, ...b: int):\n    return\n");
+        assert!(e.to_string().contains("variadic"), "got: {e}");
+    }
+
+    #[test]
+    fn variadic_rejects_default() {
+        let e = parse_err("fn f(...a: int = []):\n    return\n");
+        assert!(e.to_string().contains("variadic"), "got: {e}");
+    }
+
+    #[test]
+    fn variadic_requires_element_type() {
+        let e = parse_err("fn f(...a):\n    return\n");
+        assert!(e.to_string().contains("variadic"), "got: {e}");
+    }
+
+    #[test]
+    fn variadic_rejected_in_closure() {
+        let e = parse_err("g := fn(...x: int): x\n");
+        assert!(e.to_string().contains("variadic"), "got: {e}");
     }
 
     #[test]
