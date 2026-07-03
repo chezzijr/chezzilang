@@ -12711,14 +12711,13 @@ fn native_enum_option_result_shape_matches_inline() {
     );
 }
 
-/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: the 15 SHAPE-portable reserved protocols are now
-/// ALSO declared in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
-/// runtime source (conformance / operator lowering / `check_bounds` untouched). This asserts each
-/// file-backed protocol's harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS
-/// the Rust seed, so the two source expressions can never silently drift. `Iterable` is NOT mirrored (its
-/// `iter(self) -> Iterator[Elem]` return type — a parameterized protocol in return position — is rejected
-/// by `resolve_type`), so it is deliberately absent from the `.chz` decls and from this list; it stays
-/// Rust-only in `prebuilt_protocols`.
+/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 16 reserved protocols are now ALSO declared
+/// in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live runtime source
+/// (conformance / operator lowering / `check_bounds` untouched). This asserts each file-backed protocol's
+/// harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS the Rust seed, so the two
+/// source expressions can never silently drift. `Iterable` completes the set: its `iter(self) ->
+/// Iterator[Elem]` return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
+/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the other 15.
 #[test]
 fn native_protocol_shapes_match_prebuilt_seed() {
     let path = crate::resolver::std_root().join("prelude.chz");
@@ -12741,6 +12740,7 @@ fn native_protocol_shapes_match_prebuilt_seed() {
         "Neg",
         "Arithmetic",
         "Iterator",
+        "Iterable",
         "Index",
         "IndexSet",
         "Slice",
@@ -12767,15 +12767,6 @@ fn native_protocol_shapes_match_prebuilt_seed() {
             );
         }
     }
-    // Iterable stays Rust-only: it is present in the seed but has NO `.chz` mirror.
-    assert!(
-        seed.contains_key("Iterable"),
-        "Iterable stays in the Rust prebuilt seed"
-    );
-    assert!(
-        c.harvest_protocol_shape(&module, "Iterable").is_none(),
-        "Iterable must NOT be declared in std/prelude.chz (unportable return type)"
-    );
 }
 
 /// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.

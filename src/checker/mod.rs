@@ -980,9 +980,9 @@ impl Checker {
             // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
             if lm.dotted == ["std", "prelude"] {
                 c.assert_native_enum_shape_matches(&lm.ast);
-                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). The 15 SHAPE-portable
-                // reserved protocols (Comparable/Stringable/Error/Hashable, the operator protocols, the
-                // `Arithmetic` bundle, `Iterator`, `Index`/`IndexSet`/`Slice`) are now ALSO declared in
+                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 16 reserved
+                // protocols (Comparable/Stringable/Error/Hashable, the operator protocols, the
+                // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`) are now ALSO declared in
                 // `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
                 // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
                 // parsed+resolved shape byte-equals the Rust seed so the two can't drift. Keeps
@@ -2213,11 +2213,12 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. The 15 SHAPE-portable protocols are mirrored;
-    /// `Iterable` is NOT (its `iter(self) -> Iterator[Elem]` return type — a parameterized protocol in
-    /// return position — is rejected by `resolve_type`, so it has no `.chz` decl and stays Rust-only).
-    /// Called only on the always-linked prelude module; the body is `cfg!(debug_assertions)`-guarded so
-    /// it is a NO-OP in release yet stays COMPILED (so `harvest_protocol_shape` is never dead code).
+    /// the two source expressions from silently drifting. All 16 reserved protocols are mirrored;
+    /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
+    /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
+    /// byte-matches too. Called only on the always-linked prelude module; the body is
+    /// `cfg!(debug_assertions)`-guarded so it is a NO-OP in release yet stays COMPILED (so
+    /// `harvest_protocol_shape` is never dead code).
     fn assert_native_protocol_shape_matches(&mut self, ast: &crate::ast::Module) {
         if !cfg!(debug_assertions) {
             return;
@@ -2236,6 +2237,7 @@ impl Checker {
             "Neg",
             "Arithmetic",
             "Iterator",
+            "Iterable",
             "Index",
             "IndexSet",
             "Slice",

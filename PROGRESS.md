@@ -36,12 +36,18 @@ sort-arm-DELETED changes two existing tests' expected message from the bespoke `
 standard `does not satisfy Comparable` bound diagnostic. Lexer+parser+ast+checker+prelude+grammar+docs; both
 engines untouched.
 
-**✅ NATIVE-PRELUDE — phase 5c-protocols (the 15 SHAPE-portable builtin/reserved PROTOCOLS declared in
+**✅ NATIVE-PRELUDE — phase 5c-protocols COMPLETE (all 16 builtin/reserved PROTOCOLS declared in
 `std/prelude.chz` as plain `protocol` decls, a drift-guarded ADDITIVE mirror of the Rust seed)
-(2026-07-03).** The reserved structural protocols' SHAPE (method sigs + `+`-joined embeds) moves into
+(2026-07-03).** `Iterable[Elem]` (`iter(self) -> Iterator[Elem]`) lands as the 16th and last file-backed
+protocol, closing the 5c port — its return type resolves via `resolve_type`'s dedicated `Iterator[T]`
+value arm to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the
+other 15 (the earlier "parameterized-protocol-return rejected by `resolve_type`" claim was inaccurate; no
+resolve fix was needed — the seam already yields the seed shape). The reserved structural protocols' SHAPE
+(method sigs + `+`-joined embeds) lives in
 `std/prelude.chz` — `Comparable`/`Stringable`/`Error`/`Hashable`, the operator protocols `Add`/`Sub`/`Mul`/
 `Div`/`Mod`/`Neg`, the `Arithmetic` bundle (`: Add + Sub + Mul + Div`), `Iterator[Elem]`
-(`next(self) -> Option[Self]`; Elem arity-only), and `Index[K,V]`/`IndexSet[K,V]`/`Slice[R]` — using the
+(`next(self) -> Option[Self]`; Elem arity-only), `Iterable[Elem]` (`iter(self) -> Iterator[Elem]`), and
+`Index[K,V]`/`IndexSet[K,V]`/`Slice[R]` — using the
 EXISTING `protocol` decl syntax (no new grammar). **DRIFT-GUARDED PARTIAL PORT (the phase-5b precedent —
 SHAPE moves, WIRING stays; the task's documented fallback, logged):** `prebuilt_protocols()` STAYS the live
 runtime source (seeded at `Checker::new`, before any module); the `.chz` decls are NEVER inserted into the
@@ -57,11 +63,10 @@ of each protocol shape, pinned to the Rust seed by `assert_native_protocol_shape
 always-on `harvest_protocol_shape` + `debug_assert_eq!`/`fn_sig_eq` on the always-linked prelude — assert-only,
 resolution-inert, keeps the harvest helper production-live) and by the unit guard
 `native_protocol_shapes_match_prebuilt_seed` (harvested `type_params`/`embeds`/ordered method sigs
-byte-equal `prebuilt_protocols()`). **STAYED RUST-ONLY (logged, the 5b Iterator-deferral precedent):**
-`Iterable` — its `iter(self) -> Iterator[Elem]` return type is a parameterized protocol in return position,
-which `resolve_type` rejects, so it CANNOT be written as a plain `protocol` decl; it keeps its Rust seed with
-no `.chz` mirror (the drift guard asserts it is absent from the prelude and present in the seed). **COUNT:**
-16 reserved protocols total; 15 mirrored + `Iterable` Rust-only. **BEHAVIOR-PRESERVING / three-engine
+byte-equal `prebuilt_protocols()`). **COUNT:** 16 reserved protocols total; ALL 16 now file-backed +
+drift-guarded (Iterable no longer the exception). Runtime `Iterable` satisfaction (`iterable_elem`/
+`iter_elem`, for-loop lowering, `infer_method_call`'s `Iterable.iter` element recovery) is UNTOUCHED — the
+`.chz` decl is validate-and-no-op at hoist, never inserted into the protocol table. **BEHAVIOR-PRESERVING / three-engine
 byte-identical:** `examples/protocols_5c.chz` (int/float intrinsic arithmetic, a user 4-op struct under
 `+ - * /` AND through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator`
 struct in a `for`, builtin Index/Slice, a user IndexSet struct) is asserted byte-identical on interp /

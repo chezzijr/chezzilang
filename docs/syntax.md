@@ -2053,8 +2053,8 @@ fn fetch_all(urls: List[str]):
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
-  (`Iterable` is the one shape kept Rust-only — its `iter(self) -> Iterator[Elem]` return type can't be
-  written as a plain `protocol` decl.)
+  (All 16 are file-backed, `Iterable` included — its `iter(self) -> Iterator[Elem]` return type resolves
+  to the same `Iterator[T]` value type the Rust seed uses, so its shape mirrors cleanly like the rest.)
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on

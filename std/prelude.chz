@@ -99,7 +99,7 @@ native enum Result[T, E]:
     Ok(T)
     Err(E)
 
-# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 15 are UNIVERSE protocols
+# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 16 are UNIVERSE protocols
 # (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
 # redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
 # SHAPE (method sigs + `+`-joined embeds) is file-backed here, as an ADDITIVE, DRIFT-GUARDED MIRROR: the
@@ -113,9 +113,9 @@ native enum Result[T, E]:
 # VALIDATE-AND-NO-OP in a stdlib module (never inserted into the protocol table), so these decls register
 # no user symbol — they are shape documentation the drift guard pins to the Rust seed.
 #
-# NOT mirrored here (stays Rust-only in `prebuilt_protocols`): `Iterable` — its `iter(self) -> Iterator[Elem]`
-# return type is a parameterized protocol in return position, which `resolve_type` rejects, so it cannot
-# be expressed as a plain `protocol` decl. (Every other reserved protocol's shape ports cleanly.)
+# All 16 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
+# return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
+# `Ty::Struct("Iterator",[Elem])` the seed uses, so the shape ports cleanly like every other one.
 
 protocol Comparable:
     fn compare(self, other: Self) -> int
@@ -155,6 +155,15 @@ protocol Arithmetic:
 # Rust seed); real element recovery + conformance stay special-cased (`iter_elem`).
 protocol Iterator[Elem]:
     fn next(self) -> Option[Self]
+
+# `Iterable[Elem]` — "can produce a fresh cursor" — its `iter(self) -> Iterator[Elem]` returns the
+# reserved `Iterator[T]` value type (`Ty::Struct("Iterator",[Elem])`), which `resolve_type` accepts
+# in return position (the dedicated `Iterator[T]` value arm), so the SHAPE ports cleanly. Conformance
+# stays special-cased (`satisfies_args`: built-in collections + any `Iterator[T]` intrinsically — every
+# Iterator IS Iterable via `iter() == self` — plus a user struct with a structural `iter`), and the
+# bound's `[Elem]` recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` case).
+protocol Iterable[Elem]:
+    fn iter(self) -> Iterator[Elem]
 
 protocol Index[K, V]:
     fn index(self, k: K) -> V

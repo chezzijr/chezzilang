@@ -16093,7 +16093,7 @@ mod tests {
         assert_mc_parity(src, expected);
     }
 
-    /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: the 15 reserved-protocol SHAPES are now file-backed
+    /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: all 16 reserved-protocol SHAPES are now file-backed
     /// in std/prelude.chz, but conformance (`satisfies`/`iter_elem`) + operator binding stay Rust-wired
     /// and untouched. This drives int/float INTRINSIC arithmetic, a user 4-op struct under `+ - * /` AND
     /// through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator` struct
