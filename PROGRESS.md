@@ -35,10 +35,18 @@ hole). **Unknown/late-usage:** reuses
 still-unpinned receiver arg DEFERS (never a spurious "does not satisfy"); a genuinely never-pinned
 binding still fails at the pre-existing "cannot infer element type" error. **Three-engine byte-identical:**
 `where` lowers to NOTHING — `src/interp`/`src/vm` get ONLY additive golden tests; `examples/conditional_
-method.chz` (Box/Opt/Stack conditional methods invoked+printed) asserted byte-identical on interp /
---serial VM / M:N VM (`golden_conditional_method_chz` + `..._matches_expected_and_interp`). No grammar
-change (`where` already grammatical on methods — `cargo test conformance` green). checker + docs +
-two additive golden tests only.
+method.chz` (Box/Opt/Stack conditional methods invoked+printed, plus a `max2` whose body USES the
+bound) asserted byte-identical on interp / --serial VM / M:N VM (`golden_conditional_method_chz` +
+`..._matches_expected_and_interp`). No grammar change (`where` already grammatical on methods —
+`cargo test conformance` green). checker + docs + additive golden tests only.
+**Two follow-up fixes (adversarial review):** (1) the conditional method BODY may now use the bounded
+op — `check_fn_body` merges `sig.where_bounds` onto the in-scope ENCLOSING param for the body's
+duration (was recorded call-site-only, so `self.val < other` errored `cannot compare T and T`),
+restoring symmetry with the free-fn `where` path (test `conditional_method_body_uses_receiver_bound`
++ enum mirror). (2) `fn_sig` DEDUPs the receiver-bound against the enclosing param's DECLARED bounds
+(`struct Box[T: Comparable]` + `where T: Comparable`), so the static-dispatch path — which enforces
+both `tps` and `sig.where_bounds` — no longer emits the identical "does not satisfy" twice (test
+`conditional_static_method_redundant_decl_bound_reports_once`).
 
 **✅ LANGUAGE — `where`-clause generic bounds + file-backed List `sort`/`sum` port (2026-07-03).** Adds
 `where T: Bound, …` as an alternative spelling of generic bounds after a fn/native-fn signature

@@ -922,13 +922,21 @@ struct Box[T]:
     fn top(self) -> T where T: Comparable:   # conditional on the RECEIVER's own T
         return self.val
 
+    fn max2(self, other: T) -> T where T: Comparable:
+        if self.val < other:                 # the body MAY use the bounded op (`<` needs Comparable)
+            return other
+        return self.val
+
 b := Box(5); print(b.top())          # 5   — int is Comparable
+print(b.max2(9))                     # 9
 
 import std.net
 fn f(s: net.Socket):
     bad := Box(s); bad.top()         # ERROR at check time: Socket does not satisfy Comparable
 ```
 
+Just like a free fn's `where`, the method **body** may use the bounded operation (`<` above needs
+`Comparable`) — the receiver bound is in scope on the enclosing type parameter for the whole body.
 The receiver-param bound is enforced wherever the concrete type argument becomes known — on an
 instance call (`b.top()`) **and** on a static factory reached as `Type.method(…)` (a no-`self`
 method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`'s type isn't

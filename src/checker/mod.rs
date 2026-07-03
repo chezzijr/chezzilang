@@ -4253,7 +4253,33 @@ impl Checker {
                 // Not one of the method's own `[U]` params. If it names the enclosing type's param
                 // (present in `self.type_params` while a method sig is built inside a generic type),
                 // record it as a receiver-bound; otherwise it is genuinely unknown → error.
-                None if self.type_params.contains_key(&w.name) => receiver_bounds.push(w.clone()),
+                None if self.type_params.contains_key(&w.name) => {
+                    // DEDUP against the enclosing param's DECLARED bounds (`struct Box[T: Bound]`):
+                    // the static-dispatch path (`infer_static_call`) enforces BOTH the enclosing
+                    // param's bounds (`tps`) AND the method's receiver `where_bounds`, so a bound
+                    // named in both would fire the identical "does not satisfy" diagnostic twice.
+                    // Keep only the bounds the enclosing param does NOT already declare (the
+                    // still-in-scope enclosing param is entered by the type's hoist). If nothing is
+                    // novel, record no receiver-bound at all (the declared bound already covers it).
+                    let declared = self.type_params.get(&w.name).cloned().unwrap_or_default();
+                    let novel: Vec<Bound> = w
+                        .bounds
+                        .iter()
+                        .filter(|b| {
+                            !declared
+                                .iter()
+                                .any(|e| e.name == b.name && e.args == b.args)
+                        })
+                        .cloned()
+                        .collect();
+                    if !novel.is_empty() {
+                        receiver_bounds.push(TypeParam {
+                            name: w.name.clone(),
+                            name_span: w.name_span,
+                            bounds: novel,
+                        });
+                    }
+                }
                 None => self.error(
                     span,
                     format!("unknown type parameter '{}' in where-clause", w.name),
@@ -6507,6 +6533,24 @@ impl Checker {
         // `where T: Comparable` param may use `<` in the body). Same names as `decl.type_params`
         // (the merge only adds bounds), so the reserved/shadow checks in `fn_sig` still cover them.
         let saved_tps = self.enter_type_params(&sig.type_params);
+        // CONDITIONAL METHOD: a receiver `where T: Bound` (`T` the ENCLOSING type's param, carried on
+        // `sig.where_bounds`) constrains the receiver at call sites — but the method's BODY may also
+        // use the bounded operation (e.g. `<` needs `Comparable`), exactly as a free fn's `where`
+        // does (which merges into `type_params`, so the body sees the bound). The enclosing param is
+        // already in scope here (entered by the type's decl hoist with its BARE bounds); merge the
+        // receiver bounds onto it for the duration of this body so `self.val < other` type-checks.
+        // `exit_type_params(saved_tps)` restores the bare enclosing param afterward. No-op for a free
+        // fn or a plain method (`where_bounds` empty). Dedup so a bound already declared on the
+        // enclosing param is not doubled (harmless for bound-checking, but keeps the set clean).
+        for tp in &sig.where_bounds {
+            if let Some(bounds) = self.type_params.get_mut(&tp.name) {
+                for b in &tp.bounds {
+                    if !bounds.iter().any(|e| e.name == b.name && e.args == b.args) {
+                        bounds.push(b.clone());
+                    }
+                }
+            }
+        }
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
         // A generator (`is_generator`, i.e. its body contains `yield`) must declare `-> Iterator[T]`.
         // Recover `T` as the per-yield element type; a wrong/missing return type is an error here.

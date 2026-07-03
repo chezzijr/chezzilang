@@ -9,6 +9,14 @@ struct Box[T]:
     fn top(self) -> T where T: Comparable:
         return self.val
 
+    # A conditional method whose BODY actually USES the receiver bound (`<` needs Comparable) —
+    # the motivating case (Rust's `impl<T: Ord> Box<T> { fn max ... }`). The `where T: Comparable`
+    # puts the bound in scope on the enclosing `T` for the body, so `self.val < other` type-checks.
+    fn max2(self, other: T) -> T where T: Comparable:
+        if self.val < other:
+            return other
+        return self.val
+
 # A generic enum whose `peek()` is conditional on `T: Comparable`.
 enum Opt[T]:
     Some(T)
@@ -27,6 +35,9 @@ fn main():
 
     bs := Box("hi")
     print(bs.top())             # hi
+
+    print(b.max2(9))            # 9  (5 < 9)
+    print(Box("ab").max2("yz")) # yz ("ab" < "yz")
 
     o := Opt.Some(42)
     print(o.peek())             # 1

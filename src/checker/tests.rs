@@ -1820,6 +1820,66 @@ y := b.mk(Q(1))
     );
 }
 
+#[test]
+fn conditional_method_body_uses_receiver_bound() {
+    // BUG-2 REGRESSION: a conditional method whose BODY uses the receiver bound (`<` needs
+    // Comparable) must type-check — the receiver `where T: Comparable` puts the bound in scope on
+    // the ENCLOSING param during the body check, exactly as a free fn's `where` does (symmetry with
+    // `user_fn_where_bound_used_inside_body`). Before the fix the body errored `cannot compare
+    // T and T` because the receiver bound was recorded on `sig.where_bounds` (call-site only) and
+    // never merged into the in-scope enclosing param `T`.
+    ok("\
+struct Box[T]:
+    val: T
+    fn max2(self, other: T) -> T where T: Comparable:
+        if self.val < other:
+            return other
+        return self.val
+b := Box(5)
+x := b.max2(3)
+");
+}
+
+#[test]
+fn conditional_enum_method_body_uses_receiver_bound() {
+    // BUG-2 mirror for an enum conditional method (check_fn_body is shared across struct/enum/
+    // newtype, so the single fix covers all three).
+    ok("\
+enum Wrap[T]:
+    V(T)
+    fn bigger(self, a: T, b: T) -> T where T: Comparable:
+        if a < b:
+            return b
+        return a
+w := Wrap.V(5)
+x := w.bigger(1, 2)
+");
+}
+
+#[test]
+fn conditional_static_method_redundant_decl_bound_reports_once() {
+    // BUG-1 REGRESSION: when the enclosing type already declares `[T: Comparable]` AND the static
+    // method repeats `where T: Comparable`, the static-dispatch path (`infer_static_call`) must not
+    // enforce the bound TWICE — once via the struct decl bound (`tps`) and once via the receiver
+    // where-bound (`sig.where_bounds`). The failing factory call must emit the diagnostic exactly
+    // ONCE. Fixed by deduping the receiver-bound against the enclosing param's declared bounds in
+    // `fn_sig`.
+    let src = "\
+struct Q:
+    n: int
+struct Box[T: Comparable]:
+    val: T
+    fn of(x: T) -> Box[T] where T: Comparable:
+        return Box(x)
+b := Box.of(Q(1))
+";
+    let n = check_src(src)
+        .iter()
+        .filter(|e| e.message.contains("does not satisfy Comparable"))
+        .count();
+    assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
+}
+
 // ----- file-backed `sort` via `where T: Comparable` (port off the bespoke arm) -----
 
 #[test]
