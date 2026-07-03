@@ -13551,6 +13551,28 @@ fn list_fold_init_typed_result() {
     );
 }
 
+// Phase 6 — CONFIRMED-BUG regression (adversarial review): the closure-return loop-back's
+// still-unbound degrade must be CONDITIONAL. A method type param that appears ONLY in the return
+// position and in NO parameter (`fn make[U](self) -> U`) is genuinely un-inferable — no argument can
+// bind it. It must stay a leaked `Ty::Param` (rejected on assignment to a concrete type), NOT degrade
+// to `Unknown` (which `assignable` treats as universally assignable, silently masking the
+// un-inferable-ness and letting a wrong static type escape onto the value). This is the exact base
+// behavior an unconditional degrade regressed.
+const RETURN_ONLY_PARAM_DEFS: &str =
+    "struct Box[T]:\n    v: T\n    fn make[U](self) -> U:\n        return self.make()\n";
+
+#[test]
+fn return_only_method_type_param_stays_uninferable_rejected() {
+    // `U` appears ONLY in `-> U`, in no parameter → un-inferable → assigning the result to a concrete
+    // type must be REJECTED (naming the un-inferable `U`). An unconditional degrade wrongly accepted.
+    entry_rejects(
+        &format!(
+            "{RETURN_ONLY_PARAM_DEFS}fn main():\n    b := Box(1)\n    z: str = b.make()\n    print(z)\n"
+        ),
+        "cannot assign U to variable of type str",
+    );
+}
+
 #[test]
 fn rwshared_read_len_ok() {
     entry_ok(

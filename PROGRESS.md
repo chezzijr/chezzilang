@@ -188,7 +188,13 @@ its concrete body-return), `check_generic_arg` now RETURNS the refined actual ty
 `infer_generic_method` feeds those refined types into a SECOND `unify` pass, filling ONLY params still free
 after pass 1 (safe because `unify` is only-bind-unbound + ignore-Unknown → every already-resolved generic
 call is a strict no-op), then re-enforces bounds on the newly-bound params and degrades any still-free
-param to `Unknown`. Recovers a return-position param from an unannotated closure body generally (not
+param to `Unknown` **only when it appears in a PARAMETER position** (recoverable-in-principle but the
+argument's type was itself `Unknown` — the empty-collection case `[].map(...)` → `List[?]`). A param
+appearing ONLY in the return position and in NO parameter (`fn make[U](self) -> U`) is genuinely
+un-inferable and is deliberately LEFT as a leaked `Ty::Param`, so assigning the result to a concrete type
+is REJECTED (soundness: a wrong static type must not silently escape onto the value — an unconditional
+degrade to `Unknown`, which `assignable` treats as universally assignable, would mask it). Recovers a
+return-position param from an unannotated closure body generally (not
 map-special): `Box(3).apply(fn(x): x+1)` on `fn apply[U](self, f: fn(T) -> U) -> U` also yields `int`.
 Diagnostics are the uniform general-path wording (retired the bespoke "predicate"/"map expects…"/
 "sort_by_key key type must be Comparable" strings). `sort` stays file-backed via `where T: Comparable`;

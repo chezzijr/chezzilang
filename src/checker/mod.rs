@@ -14710,11 +14710,29 @@ impl Checker {
             .cloned()
             .collect();
         self.enforce_bounds(&newly_bound, &mmap, span);
-        // Degrade any STILL-unbound method type param to `Unknown` (mirrors the static-method /
-        // free-fn empty-collection path), so a `[].map(fn(x): x*2)` yields `List[?]` rather than a
-        // leaked `List[U]`.
+        // Degrade a STILL-unbound method type param to the refinable `Unknown` — BUT ONLY when it
+        // appears in a PARAMETER position (receiver or an argument slot). Such a param was in
+        // principle recoverable from an argument, but that argument's relevant type was itself
+        // `Unknown` (the empty-collection case: `[].map(fn(x): x*2)` — the empty list's element is
+        // `Unknown`, so the closure's body-return `U` is too). Degrading it yields `List[?]` rather
+        // than a leaked `List[U]`, matching the retired bespoke `infer_list_hof`.
+        //
+        // A method type param appearing ONLY in the RETURN position and in NO parameter is genuinely
+        // un-inferable — no argument can ever bind it (`fn make[U](self) -> U`). It must NOT be
+        // degraded: leaving the leaked `Ty::Param` makes the checker REJECT assigning the call result
+        // to a concrete type, upholding the soundness contract (a wrong static type must not escape
+        // onto the value). An unconditional degrade would silently type such a result as `Unknown`,
+        // which `assignable` treats as universally assignable — masking the un-inferable-ness.
+        let wanted: std::collections::HashSet<String> =
+            mtps.iter().map(|tp| tp.name.clone()).collect();
+        let mut in_param_pos: Vec<String> = Vec::new();
+        for p in params {
+            ty_collect_params(p, &wanted, &mut in_param_pos);
+        }
         for tp in mtps {
-            mmap.entry(tp.name.clone()).or_insert(Ty::Unknown);
+            if in_param_pos.contains(&tp.name) {
+                mmap.entry(tp.name.clone()).or_insert(Ty::Unknown);
+            }
         }
         subst(ret, &mmap)
     }
