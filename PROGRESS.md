@@ -176,13 +176,24 @@ module (graph order[0], always-linked) is checked, and `seed_stdlib_structs` re-
 table only — NO `struct_names`/`bare_types` licensing needed, they're UNIVERSE) into `self.structs`; the
 cfg(test) single-module `check` path harvests them straight in via `seed_native_prelude_sigs`. The
 `Ty::List`/`Ty::Map`/`Ty::Set` dispatch arms route through `native_handle_method` with the value's
-element/key/value type substituted for `Ty::Param`. **Generic-recovery `List` methods a flat sig can't
-express stay RESIDUAL (intentionally NOT declared in the prelude struct, logged):** `map`/`filter`/`fold`/
-`sort_by`/`sort_by_key` (closure-driven result types + custom `infer_list_hof` diagnostics) stay bespoke in
-the `Ty::List` arm. (UPDATE 2026-07-03: `sort` is now file-backed via `where T: Comparable` — the bespoke
-Comparable arm was DELETED once `where`-clause bounds landed; and `sum` gained a `where T: Add` annotation
-but KEEPS its `!elem.is_numeric()` residual gate — sum's true requirement is Monoid, `where T: Add` alone is
-too broad, so the numeric gate survives, see the "where-clause generic bounds" entry above.) `Map`/`Set`'s key/element type param carries a `Hashable` bound so the internal
+element/key/value type substituted for `Ty::Param`. **The generic-recovery `List` HOFs are now ALSO
+file-backed (UPDATE 2026-07-03, phase 6 — closure-return loop-back):** `map[U]`/`filter`/`fold[U]`/
+`sort_by`/`sort_by_key[K: Comparable]` are declared in the prelude struct; the bespoke `infer_list_hof`
+arm is DELETED. This needed two generalizations: (1) a **native method may declare its OWN `[U]` type
+param** after the name (parser `parse_native` + AST `NativeDecl.type_params` + harvest onto
+`FnSig.type_params`; grammar `nativeDecl`/`nativeMethodDecl` gain optional `<typeParams>`), so a
+method-own param routes through `infer_generic_method`; (2) the generic solver gained a **closure-return
+LOOP-BACK** — after the per-arg re-inference pass (which pins an unannotated closure's params and computes
+its concrete body-return), `check_generic_arg` now RETURNS the refined actual type, and
+`infer_generic_method` feeds those refined types into a SECOND `unify` pass, filling ONLY params still free
+after pass 1 (safe because `unify` is only-bind-unbound + ignore-Unknown → every already-resolved generic
+call is a strict no-op), then re-enforces bounds on the newly-bound params and degrades any still-free
+param to `Unknown`. Recovers a return-position param from an unannotated closure body generally (not
+map-special): `Box(3).apply(fn(x): x+1)` on `fn apply[U](self, f: fn(T) -> U) -> U` also yields `int`.
+Diagnostics are the uniform general-path wording (retired the bespoke "predicate"/"map expects…"/
+"sort_by_key key type must be Comparable" strings). `sort` stays file-backed via `where T: Comparable`;
+`sum` KEEPS its `!elem.is_numeric()` residual gate (Monoid requirement, `where T: Add` alone too broad).
+Checker/parser-only; runtime type-erased + name-keyed → 3-engine byte-identical parity. `Map`/`Set`'s key/element type param carries a `Hashable` bound so the internal
 `Map[K, V]`/`Set[T]` return types resolve past the hashable gate at harvest. The bespoke
 `list_method_sig`/`map_method_sig`/`set_method_sig` fns are DELETED; `unique_member_owner`'s bail set now
 checks the harvested tables' `methods.contains_key` (byte-identical to the retired arms' 9/8/7 flat

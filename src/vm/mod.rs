@@ -16093,6 +16093,39 @@ mod tests {
         assert_mc_parity(src, expected);
     }
 
+    /// Phase 6 BEHAVIOR-PRESERVING GUARD: the List HOFs `map`/`filter`/`fold`/`sort_by`/`sort_by_key`
+    /// are now file-backed `native fn` decls (routed through the generic solver's closure-return
+    /// loop-back) instead of the bespoke `infer_list_hof` arm. That migration is CHECKER-ONLY — runtime
+    /// dispatch stays name-keyed and type-erased. This drives typed + UNANNOTATED closures, a chained
+    /// map→filter→fold, a nested map, and in-place sort_by/sort_by_key, asserting byte-identical output
+    /// on all three engines (cooperative VM / frozen interp / `--parallel`).
+    #[test]
+    fn list_hof_3engine_parity() {
+        let src = "fn main():\n\
+            \x20   a := [1, 2, 3].map(fn(x: int) -> int: x * 2)\n\
+            \x20   print(a)\n\
+            \x20   b := [1, 2, 3].map(fn(x): x + 1)\n\
+            \x20   print(b)\n\
+            \x20   c := [1, 2, 3, 4].filter(fn(x): x % 2 == 0)\n\
+            \x20   print(c)\n\
+            \x20   s := [1, 2, 3].fold(0, fn(a, x): a + x)\n\
+            \x20   print(s)\n\
+            \x20   chained := [1, 2, 3].map(fn(x): x * 2).filter(fn(x): x > 2).fold(0, fn(a, x): a + x)\n\
+            \x20   print(chained)\n\
+            \x20   nested := [1, 2].map(fn(x): [x, x])\n\
+            \x20   print(nested)\n\
+            \x20   ss := [3, 1, 2]\n\
+            \x20   ss.sort_by(fn(a, b): a - b)\n\
+            \x20   print(ss)\n\
+            \x20   sk := [3, 1, 2]\n\
+            \x20   sk.sort_by_key(fn(x): -x)\n\
+            \x20   print(sk)\n\
+            main()\n";
+        let expected =
+            "[2, 4, 6]\n[2, 3, 4]\n[2, 4]\n6\n10\n[[1, 1], [2, 2]]\n[1, 2, 3]\n[3, 2, 1]\n";
+        assert_mc_parity(src, expected);
+    }
+
     /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: all 16 reserved-protocol SHAPES are now file-backed
     /// in std/prelude.chz, but conformance (`satisfies`/`iter_elem`) + operator binding stay Rust-wired
     /// and untouched. This drives int/float INTRINSIC arithmetic, a user 4-op struct under `+ - * /` AND

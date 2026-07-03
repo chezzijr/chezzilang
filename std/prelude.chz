@@ -37,14 +37,15 @@ native ctor bytearray(x) -> bytearray
 # by `seed_stdlib_structs` into `self.structs`) and routes `Ty::List`/`Ty::Map`/`Ty::Set` method
 # resolution through them (behavior-preserving; the sigs BYTE-MATCH the retired arms).
 #
-# The generic-recovery methods a flat sig cannot express stay RESIDUAL in the checker's Ty::List arm (NOT
-# declared here): `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types). `sort` is
-# now file-backed via `where T: Comparable` (a generic bound enforced at each call site by the Ty::List
-# arm's `enforce_bounds` — the retired bespoke Comparable arm). `sum` carries `where T: Add` as
-# documentation, but its true requirement is MONOID (Add + zero) and both runtimes are numeric-only, so a
-# residual `!elem.is_numeric()` gate survives in the arm (a struct with a structural `add` still errors at
-# CHECK time). `Map`/`Set`'s key/element type params carry a `Hashable` bound so the internal
-# `Map[K, V]`/`Set[T]` return types resolve at harvest.
+# The closure-driven HOFs are now ALSO file-backed here: `map[U]`/`fold[U]`/`sort_by_key[K: Comparable]`
+# declare their OWN method type param (recovered from the closure body by the generic solver's
+# closure-return LOOP-BACK — routed through `infer_generic_method`), and `filter`/`sort_by` are flat
+# closure-typed sigs. This retired the bespoke `infer_list_hof` arm. `sort` is file-backed via
+# `where T: Comparable` (a generic bound enforced at each call site by the Ty::List arm's
+# `enforce_bounds`). `sum` carries `where T: Add` as documentation, but its true requirement is MONOID
+# (Add + zero) and both runtimes are numeric-only, so a residual `!elem.is_numeric()` gate survives in the
+# arm (a struct with a structural `add` still errors at CHECK time). `Map`/`Set`'s key/element type params
+# carry a `Hashable` bound so the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
 
 native struct List[T]:
     native fn len(self) -> int
@@ -57,6 +58,11 @@ native struct List[T]:
     native fn extend(self, other: List[T]) -> nil
     native fn sort(self) -> nil where T: Comparable
     native fn sum(self) -> T where T: Add
+    native fn map[U](self, f: fn(T) -> U) -> List[U]
+    native fn filter(self, p: fn(T) -> bool) -> List[T]
+    native fn fold[U](self, init: U, f: fn(U, T) -> U) -> U
+    native fn sort_by(self, cmp: fn(T, T) -> int) -> nil
+    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> nil
 
 native struct Map[K: Hashable, V]:
     native fn len(self) -> int

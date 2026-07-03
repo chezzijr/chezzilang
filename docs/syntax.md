@@ -2527,11 +2527,15 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   / `Set[T: Hashable]`: their method sigs (`push`/`pop`/`get`/`keys`/`union`/…) are harvested onto the
   RESERVED `Ty::List`/`Ty::Map`/`Ty::Set`, but the **literal syntax** (`[…]`/`{k:v}`/`{1,2}`) and the
   **turbofish ctor** (`List[int]()`) stay compiler-wired (their type-arg-driven element identity is not a
-  flat sig). A few `List` methods a flat sig can't express — the higher-order `map`/`filter`/`fold`/
-  `sort_by`/`sort_by_key` (closure-driven result types) — stay bespoke in the checker rather than declared
-  in the prelude struct. (`sort` IS file-backed as `native fn sort(self) -> nil where T: Comparable`; `sum`
-  is `native fn sum(self) -> T where T: Add` but keeps a residual numeric check-gate — its true requirement
-  is Monoid, so `where T: Add` alone is too broad.) A type param may carry a bound
+  flat sig). The higher-order `map`/`filter`/`fold`/`sort_by`/`sort_by_key` are **also file-backed**: a
+  native method may declare its **own** generic param after the name (`native fn map[U](self, f: fn(T) -> U)
+  -> List[U]`, `fold[U]`, `sort_by_key[K: Comparable]`), and the generic solver **recovers a
+  return-position type param from an (even unannotated) closure argument's body** via a *closure-return
+  loop-back* — this bidirectional inference is general (not map-special), so `Box(3).apply(fn(x): x + 1)`
+  on a user `fn apply[U](self, f: fn(T) -> U) -> U` recovers `U = int` too. (`sort` IS file-backed as
+  `native fn sort(self) -> nil where T: Comparable`; `sum` is `native fn sum(self) -> T where T: Add` but
+  keeps a residual numeric check-gate — its true requirement is Monoid, so `where T: Add` alone is too
+  broad.) A type param may carry a bound
   (`Map[K: Hashable, V]`), letting the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
 - **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
   error** (*native struct declarations are only allowed in standard-library modules*); nesting is a

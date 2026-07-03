@@ -229,6 +229,12 @@
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
                | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
 <nativeHead>  ::= "FN" | "IDENT"
 
 # `native struct` — the TYPE-level analog of `native fn`/`native ctor` (phase 4a). A body-less
@@ -253,9 +259,15 @@
 <nativeFieldDecl>  ::= "IDENT" "COLON" <type> "NEWLINE"
 # A native instance method: `<params>` must begin with the bare receiver `self` (checker/parser rule,
 # not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
+# A native method may declare its OWN generic params after the name (`native fn map[U](self, …)`);
+# these are the method's own `[U]`, distinct from the enclosing native struct's `[T]`, and the harvest
+# routes the sig through the generic-method inference path (e.g. `List.map`/`fold`/`sort_by_key`).
 <nativeMethodDecl> ::= "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
                      | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
                      | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
 
 # `native enum` — the ENUM analog of `native struct` (phase 5b). A body-less `native enum NAME[T…]:`
 # declares a RESERVED builtin enum's variant SHAPE (variant names + payload types) in Chezzi; it maps

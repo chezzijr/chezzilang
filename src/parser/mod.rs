@@ -833,6 +833,11 @@ impl Parser {
         };
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
+        // Optional method-/fn-own generic params: `native fn map[U](self, f: fn(T) -> U) -> List[U]`.
+        // `parse_type_params` only consumes on a leading `[`, so a plain `native fn f(...)` is
+        // unaffected. On a native METHOD these are the method's own `[U]` (distinct from the enclosing
+        // `native struct`'s `[T]`); the harvest routes them through the generic-method path.
+        let type_params = self.parse_type_params()?;
         self.expect(&Token::LParen)?;
         // Phase 4f — accept a DEFAULTED trailing param (`timeout_ms: int = 0`), the file-backed
         // spelling of std.request's optional-tail sig. The grammar already permits it (`<params>`
@@ -882,6 +887,7 @@ impl Parser {
             name,
             name_span,
             kind,
+            type_params,
             params,
             ret,
             where_bounds,
@@ -2932,6 +2938,43 @@ mod tests {
         assert_eq!(d.name, "panic");
         assert_eq!(d.kind, NativeKind::Fn);
         assert!(d.ret.is_none(), "no arrow → ret None (native/never)");
+    }
+
+    #[test]
+    fn native_fn_method_own_type_params_parse() {
+        // A native METHOD may declare its OWN `[U]` after the name (before the param list); the
+        // enclosing native struct's `[T]` and the method's `[U]` coexist.
+        let StmtKind::NativeStruct {
+            name,
+            type_params,
+            methods,
+            ..
+        } = only("native struct List[T]:\n    native fn map[U](self, f: fn(T) -> U) -> List[U]\n")
+        else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(name, "List");
+        assert_eq!(type_params.len(), 1, "struct [T]");
+        assert_eq!(type_params[0].name, "T");
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "map");
+        assert_eq!(methods[0].type_params.len(), 1, "method own [U]");
+        assert_eq!(methods[0].type_params[0].name, "U");
+
+        // A bounded method type param (`sort_by_key[K: Comparable]`) carries its bound.
+        let StmtKind::NativeStruct { methods, .. } = only(
+            "native struct List[T]:\n    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> nil\n",
+        ) else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(methods[0].type_params[0].name, "K");
+        assert_eq!(methods[0].type_params[0].bounds[0].name, "Comparable");
+
+        // A plain native method (no `[...]`) has empty type_params.
+        let StmtKind::Native(d) = only("native fn ord(c: str) -> int\n") else {
+            panic!("expected StmtKind::Native");
+        };
+        assert!(d.type_params.is_empty());
     }
 
     #[test]

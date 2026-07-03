@@ -3791,9 +3791,11 @@ fn list_map_changes_element_type() {
 
 #[test]
 fn list_filter_predicate_must_return_bool() {
+    // Uniform general-path diagnostic (file-backed `filter(self, p: fn(T) -> bool)`): the retired
+    // bespoke "predicate" wording is replaced by the standard argument-mismatch message.
     rejects(
         "xs := [1,2,3]\nys := xs.filter(fn(x: int) -> int: x)\n",
-        "predicate",
+        "argument 1 of 'filter': expected fn(int) -> bool, found fn(int) -> int",
     );
 }
 
@@ -4654,6 +4656,31 @@ fn native_module_sig_via_graph(module: &str) -> ModuleSig {
 #[cfg(test)]
 fn regex_module_sig_via_graph() -> ModuleSig {
     native_module_sig_via_graph("regex")
+}
+
+#[test]
+fn harvest_native_method_own_type_params() {
+    // A native method's own `[U]` lands on the harvested `FnSig.type_params`, and `U` resolves to
+    // `Ty::Param("U")` in the method's params/ret (nested inside the struct's `[T]` scope).
+    let src = "native struct Foo[T]:\n    native fn map[U](self, f: fn(T) -> U) -> List[U]\n";
+    let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+    let mut c = Checker::new();
+    let info = c
+        .harvest_native_struct_table(&module, "Foo")
+        .expect("harvest Foo");
+    let sig = info.methods.get("map").expect("Foo.map harvested");
+    assert_eq!(sig.type_params.len(), 1, "method own [U] on the sig");
+    assert_eq!(sig.type_params[0].name, "U");
+    // `self` stripped → one param `fn(T) -> U`, with U as a `Ty::Param`.
+    assert_eq!(sig.params.len(), 1);
+    match &sig.params[0] {
+        Ty::Func { params, ret, .. } => {
+            assert_eq!(params, &vec![Ty::Param("T".to_string())]);
+            assert_eq!(**ret, Ty::Param("U".to_string()));
+        }
+        other => panic!("expected fn param, got {other}"),
+    }
+    assert_eq!(sig.ret, Ty::list(Ty::Param("U".to_string())));
 }
 
 /// Phase 5a-containers — a `Checker` after a trivial graph check, with the always-linked prelude's
@@ -7117,18 +7144,21 @@ fn sort_by_key_struct_key_ok() {
 
 #[test]
 fn sort_by_key_non_comparable_key_rejected() {
-    // A key function returning a non-Comparable struct (no `compare`) is rejected.
+    // A key function returning a non-Comparable struct (no `compare`) is rejected. File-backed as
+    // `sort_by_key[K: Comparable](...)`: the `K: Comparable` bound is recovered from the closure body
+    // by the loop-back, then enforced — the uniform protocol-conformance diagnostic (was bespoke).
     rejects(
         "struct B:\n    n: int\nxs := [B(2), B(1)]\nxs.sort_by_key(fn(b: B) -> B: b)\n",
-        "sort_by_key key type must be Comparable",
+        "does not satisfy Comparable",
     );
 }
 
 #[test]
 fn sort_by_key_wrong_arity_rejected() {
+    // A 2-arg closure where a `fn(T) -> K` is expected: uniform argument-mismatch diagnostic.
     rejects(
         "xs := [1, 2]\nxs.sort_by_key(fn(a: int, b: int) -> int: a - b)\n",
-        "sort_by_key expects a key function",
+        "argument to 'sort_by_key' has type fn(int, int) -> int, expected fn(int) -> K",
     );
 }
 
@@ -13259,14 +13289,33 @@ fn container_method_sigs_byte_match() {
         vec![Ty::set(Ty::Int)],
         Ty::set(Ty::Int),
     );
-    // Residual methods are INTENTIONALLY not in the harvested List table (they stay bespoke in the
-    // Ty::List arm). A leak would silently change `unique_member_owner`'s pinning set.
-    for m in ["map", "filter", "fold", "sort_by", "sort_by_key", "get"] {
-        assert!(
-            c.native_handle_method("List", m, &[Ty::Int]).is_none(),
-            "List.{m} must NOT be in the harvested table (stays residual/bespoke)"
-        );
-    }
+    // `map`/`filter`/`fold`/`sort_by`/`sort_by_key` are now file-backed too (the closure-return
+    // loop-back landed), so they resolve via the harvested table. `map`/`fold`/`sort_by_key` carry
+    // their own `[U]`/`[K]` type param (routed through `infer_generic_method`); `filter`/`sort_by` are
+    // flat. `get` is genuinely not a List method (it stays a must-not).
+    let map_sig = c.native_handle_method("List", "map", &[Ty::Int]).unwrap();
+    assert_eq!(map_sig.type_params.len(), 1, "List.map carries its own [U]");
+    assert_eq!(map_sig.type_params[0].name, "U");
+    let fold_sig = c.native_handle_method("List", "fold", &[Ty::Int]).unwrap();
+    assert_eq!(fold_sig.type_params[0].name, "U");
+    let sbk_sig = c
+        .native_handle_method("List", "sort_by_key", &[Ty::Int])
+        .unwrap();
+    assert_eq!(sbk_sig.type_params[0].name, "K");
+    assert_eq!(sbk_sig.type_params[0].bounds[0].name, "Comparable");
+    // `filter`/`sort_by` are flat (no own type param) but still harvested (was residual).
+    assert!(
+        c.native_handle_method("List", "filter", &[Ty::Int])
+            .is_some()
+    );
+    assert!(
+        c.native_handle_method("List", "sort_by", &[Ty::Int])
+            .is_some()
+    );
+    assert!(
+        c.native_handle_method("List", "get", &[Ty::Int]).is_none(),
+        "List.get is not a method"
+    );
 }
 
 /// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST
@@ -13393,8 +13442,8 @@ fn closure_param_inferred_from_shared_update_ok() {
     );
 }
 
-// Phase 1b — native list HOFs (`infer_list_hof`): the closure param binds to the
-// element type, so a body use incompatible with it is rejected.
+// Native list HOFs (file-backed `map`/`filter` in std/prelude.chz, routed through the generic solver):
+// the closure param binds to the element type, so a body use incompatible with it is rejected.
 #[test]
 fn map_closure_conflict_rejected() {
     entry_rejects(
@@ -13413,6 +13462,92 @@ fn closure_param_inferred_from_filter_conflict_rejected() {
     entry_rejects(
         "fn main():\n    xs := [1, 2, 3]\n    ys := xs.filter(fn(x): x.upper() == \"A\")\n    print(ys)\n",
         "has no method 'upper'",
+    );
+}
+
+// Phase 6 — generic-solver closure-return LOOP-BACK: a return-position `[U]` inferred ONLY from an
+// UNANNOTATED closure's body must resolve to the CONCRETE body-return type, not leak a `Ty::Param`.
+const APPLY_DEFS: &str = "struct Box[T]:\n    v: T\n    fn apply[U](self, f: fn(T) -> U) -> U:\n        return f(self.v)\n";
+
+#[test]
+fn generic_method_recovers_return_param_from_unannotated_closure_ok() {
+    // `U` is bound ONLY from the unannotated closure `fn(x): x + 1`'s body (int). Before the
+    // loop-back the return leaked `U` (rendered `?`), so `n: int = ...` failed.
+    entry_ok(&format!(
+        "{APPLY_DEFS}fn main():\n    n: int = Box(3).apply(fn(x): x + 1)\n    print(n)\n"
+    ));
+}
+
+#[test]
+fn generic_method_recovers_return_param_from_unannotated_closure_is_concrete() {
+    // The recovered return is CONCRETE `int` (not a leaked `U`): assigning it to `str` must report a
+    // real int/str mismatch — proof the loop-back pinned `U=int`.
+    entry_rejects(
+        &format!("{APPLY_DEFS}fn main():\n    z: str = Box(3).apply(fn(x): x + 1)\n    print(z)\n"),
+        "int",
+    );
+}
+
+// Phase 6 — file-backed List HOF characterization: the inferred types MUST match the retired bespoke
+// `infer_list_hof` exactly (the whole point of the loop-back). Pinned via the assign-mismatch trick.
+#[test]
+fn list_map_typed_closure_infers_list_str() {
+    // Typed closure `fn(x: int) -> str`: map yields List[str]; a str element is fine, an int isn't.
+    entry_ok(
+        "fn main():\n    ys := [1, 2].map(fn(x: int) -> str: \"a\")\n    s: str = ys[0]\n    print(s)\n",
+    );
+    entry_rejects(
+        "fn main():\n    ys := [1, 2].map(fn(x: int) -> str: \"a\")\n    n: int = ys[0]\n    print(n)\n",
+        "cannot assign str to variable of type int",
+    );
+}
+
+#[test]
+fn list_map_unannotated_closure_recovers_int() {
+    // THE PART-1 PAYOFF: an UNANNOTATED closure `fn(x): x * 2` → map yields List[int] (recovered from
+    // the closure body), NOT a leaked List[?]. Assigning an element to str must mismatch on `int`.
+    entry_rejects(
+        "fn main():\n    ys := [1, 2].map(fn(x): x * 2)\n    s: str = ys[0]\n    print(s)\n",
+        "int",
+    );
+}
+
+#[test]
+fn list_map_empty_list_element_behavior_preserved() {
+    // A TYPED-but-empty list: element int, so `map(fn(x): x*2)` degrades cleanly to List[int] via the
+    // loop-back (x=int, body int). No error — byte-identical to the retired bespoke arm.
+    entry_ok(
+        "fn main():\n    xs: List[int] = []\n    ys := xs.map(fn(x): x * 2)\n    n: int = ys[0]\n    print(n)\n",
+    );
+    // A BARE `[]` receiver still needs an annotation — same diagnostic the old bespoke arm produced
+    // (the empty-collection rule is upstream of map dispatch; unchanged by the port).
+    entry_rejects(
+        "fn main():\n    ys := [].map(fn(x): x * 2)\n    print(ys)\n",
+        "cannot infer element type of empty collection",
+    );
+}
+
+#[test]
+fn list_map_chained_and_nested_ok() {
+    // Nested `xs.map(fn(x): [x])` → List[List[int]]; a second `.map` over it flows the element type.
+    entry_ok(
+        "fn main():\n    ys := [1, 2].map(fn(x): [x]).map(fn(r): r.len())\n    n: int = ys[0]\n    print(n)\n",
+    );
+    // Chained map -> filter -> fold: map to str, filter, fold to a joined str.
+    entry_ok(
+        "fn main():\n    r := [1, 2, 3].map(fn(x): x * 2).filter(fn(x): x > 2).fold(0, fn(a, x): a + x)\n    n: int = r\n    print(n)\n",
+    );
+}
+
+#[test]
+fn list_fold_init_typed_result() {
+    // fold's `U` binds from `init` in pass 1 (not the loop-back): a str init → str result.
+    entry_ok(
+        "fn main():\n    s := [1, 2, 3].fold(\"\", fn(a, x): a + \"!\")\n    t: str = s\n    print(t)\n",
+    );
+    entry_rejects(
+        "fn main():\n    s := [1, 2, 3].fold(0, fn(a, x): a + x)\n    t: str = s\n    print(t)\n",
+        "cannot assign int to variable of type str",
     );
 }
 

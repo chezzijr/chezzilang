@@ -1982,6 +1982,11 @@ impl Checker {
     /// Module-level (free) native fns pass `skip_self=false` (the parser already forbids `self` there).
     fn harvest_native_fn_sig(&mut self, decl: &NativeDecl, skip_self: bool) -> FnSig {
         let skip = if skip_self { 1 } else { 0 };
+        // A native METHOD may declare its OWN `[U]` params (`map[U]`); enter them into scope (NESTED
+        // inside the enclosing native struct's `[T]` scope, already entered by the caller) so `U` in
+        // the method's params/ret resolves to `Ty::Param("U")` and does not read as an unknown type.
+        // No-op when the decl has no type params (the common `native fn`/`native ctor`).
+        let saved_tps = self.enter_type_params(&decl.type_params);
         let params: Vec<Ty> = decl
             .params
             .iter()
@@ -1995,6 +2000,7 @@ impl Checker {
             Some(t) => self.resolve_type(t, decl.span),
             None => Ty::Unknown,
         };
+        self.exit_type_params(saved_tps);
         let optional = decl
             .params
             .iter()
@@ -2010,6 +2016,9 @@ impl Checker {
         // `List.sort`'s `where T: Comparable`) it is enforced at each call site by the container
         // method-dispatch arm (the `T` names the enclosing native struct's type param, in scope here).
         sig.where_bounds = decl.where_bounds.clone();
+        // A native method's OWN `[U]` params land on the sig so it routes through the generic-method
+        // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
+        sig.type_params = decl.type_params.clone();
         sig
     }
 
@@ -9725,8 +9734,10 @@ impl Checker {
         // Phase 5a-containers — the `List`/`Map`/`Set` method tables are harvested from
         // `std/prelude.chz` and re-seeded into `self.structs` by `seed_stdlib_structs`; check them for
         // membership (the retired `list_method_sig`/`map_method_sig`/`set_method_sig` arms' replacement).
-        // The harvested tables contain EXACTLY the flat methods those arms covered (`sum` included —
-        // `list_method_sig(m, Unknown)` returned `Some` for it), so the bail set is byte-identical.
+        // As of phase 6 the `List` table ALSO contains the closure-driven HOFs (`map`/`filter`/`fold`/
+        // `sort_by`/`sort_by_key`, formerly the bespoke `infer_list_hof` arm), so those names now bail
+        // here too — correct, since they ARE shared by the parameterized `List` (a name shared across
+        // types never uniquely pins), matching the design's collection-method bail.
         if ["List", "Map", "Set"].iter().any(|ty| {
             self.structs
                 .get(*ty)
@@ -12067,16 +12078,6 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::List(elem) => {
-                // Higher-order methods whose result/param types depend on the closure's
-                // `Ty::Func` can't be expressed by the fixed `list_method_sig` table, so handle
-                // them here. `Ty::Unknown` arguments are tolerated permissively (no cascade).
-                if matches!(
-                    method,
-                    "map" | "filter" | "fold" | "sort_by" | "sort_by_key"
-                ) {
-                    let elem = (**elem).clone();
-                    return self.infer_list_hof(method, &elem, args, span);
-                }
                 // `sum` is harvested from `std/prelude.chz` as `sum(self) -> T where T: Add`, but the
                 // `where T: Add` bound alone is SEMIGROUP (structural `add`) and thus too broad: a plain
                 // Add-satisfying struct has no zero/identity for the EMPTY-list case, and both runtimes
@@ -12105,6 +12106,27 @@ impl Checker {
                     self.native_handle_method("List", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
+                    // A method carrying its OWN `[U]` params (`map`/`fold`/`sort_by_key`, the
+                    // closure-result HOFs that retired `infer_list_hof`) needs the generic solver so its
+                    // return-position param is recovered from the closure body (the loop-back). The
+                    // harvest STRIPS `self`, but `infer_generic_method` expects `params[0]` to be the
+                    // receiver — so PREPEND the concrete receiver `List[elem]`. Non-generic methods
+                    // (`filter`/`sort_by`/every flat method) keep the fixed-arity path.
+                    if !sig.type_params.is_empty() {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(Ty::list(elem.clone()));
+                        params.extend(sig.params.iter().cloned());
+                        return self.infer_generic_method(
+                            method,
+                            &params,
+                            &sig.ret,
+                            &sig.type_params,
+                            &Ty::list(elem.clone()),
+                            type_args,
+                            args,
+                            span,
+                        );
+                    }
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     self.enforce_bounds(
                         &sig.where_bounds,
@@ -12388,208 +12410,6 @@ impl Checker {
         }
     }
 
-    /// Type-check the higher-order list methods `map` / `filter` / `fold`, whose signatures
-    /// depend on the closure argument's `Ty::Func` and so can't live in `list_method_sig`.
-    /// `elem` is the list's element type. Returns the method's result type (`Ty::Unknown` on
-    /// error so a single mismatch doesn't cascade).
-    fn infer_list_hof(&mut self, method: &str, elem: &Ty, args: &[Expr], span: Span) -> Ty {
-        match method {
-            // map(f: fn(T) -> U) -> list[U]
-            "map" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        format!("'map' expects 1 argument(s), got {}", args.len()),
-                    );
-                    self.infer_all(args);
-                    return Ty::Unknown;
-                }
-                let expected = Ty::Func {
-                    params: vec![elem.clone()],
-                    ret: Box::new(Ty::Unknown),
-                    labels: crate::checker::FnLabels::default(),
-                };
-                let ft = self.infer_arg(&args[0], Some(&expected));
-                match ft {
-                    Ty::Unknown => Ty::Unknown,
-                    Ty::Func { params, ret, .. }
-                        if params.len() == 1 && compatible(&params[0], elem) =>
-                    {
-                        Ty::list(*ret)
-                    }
-                    other => {
-                        self.error(
-                            args[0].span,
-                            format!("map expects a function fn({elem}) -> U, found {other}"),
-                        );
-                        Ty::Unknown
-                    }
-                }
-            }
-            // filter(p: fn(T) -> bool) -> list[T]
-            "filter" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        format!("'filter' expects 1 argument(s), got {}", args.len()),
-                    );
-                    self.infer_all(args);
-                    return Ty::Unknown;
-                }
-                let expected = Ty::Func {
-                    params: vec![elem.clone()],
-                    ret: Box::new(Ty::Bool),
-                    labels: crate::checker::FnLabels::default(),
-                };
-                let pt = self.infer_arg(&args[0], Some(&expected));
-                match pt {
-                    Ty::Unknown => Ty::list(elem.clone()),
-                    Ty::Func { params, ret, .. }
-                        if params.len() == 1
-                            && compatible(&params[0], elem)
-                            && compatible(&ret, &Ty::Bool) =>
-                    {
-                        Ty::list(elem.clone())
-                    }
-                    other => {
-                        self.error(
-                            args[0].span,
-                            format!("filter expects a predicate fn({elem}) -> bool, found {other}"),
-                        );
-                        Ty::Unknown
-                    }
-                }
-            }
-            // fold(init: U, f: fn(U, T) -> U) -> U
-            "fold" => {
-                if args.len() != 2 {
-                    self.error(
-                        span,
-                        format!("'fold' expects 2 argument(s), got {}", args.len()),
-                    );
-                    self.infer_all(args);
-                    return Ty::Unknown;
-                }
-                let init = self.infer_value(&args[0]);
-                let expected = Ty::Func {
-                    params: vec![init.clone(), elem.clone()],
-                    ret: Box::new(init.clone()),
-                    labels: crate::checker::FnLabels::default(),
-                };
-                let ft = self.infer_arg(&args[1], Some(&expected));
-                match ft {
-                    Ty::Unknown => {
-                        // Closure type unknown: fall back to the init type as the result.
-                        init
-                    }
-                    Ty::Func { params, ret, .. }
-                        if params.len() == 2
-                            && compatible(&params[0], &init)
-                            && compatible(&params[1], elem)
-                            && compatible(&ret, &init) =>
-                    {
-                        init
-                    }
-                    other => {
-                        self.error(
-                            args[1].span,
-                            format!(
-                                "fold expects a function fn({init}, {elem}) -> {init}, found {other}"
-                            ),
-                        );
-                        Ty::Unknown
-                    }
-                }
-            }
-            // sort_by(cmp: fn(T, T) -> int) -> nil (sorts in place, like sort)
-            "sort_by" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        format!("'sort_by' expects 1 argument(s), got {}", args.len()),
-                    );
-                    self.infer_all(args);
-                    return Ty::Nil;
-                }
-                let expected = Ty::Func {
-                    params: vec![elem.clone(), elem.clone()],
-                    ret: Box::new(Ty::Int),
-                    labels: crate::checker::FnLabels::default(),
-                };
-                let ft = self.infer_arg(&args[0], Some(&expected));
-                match ft {
-                    Ty::Unknown => Ty::Nil,
-                    Ty::Func { params, ret, .. }
-                        if params.len() == 2
-                            && compatible(&params[0], elem)
-                            && compatible(&params[1], elem)
-                            && compatible(&ret, &Ty::Int) =>
-                    {
-                        Ty::Nil
-                    }
-                    other => {
-                        self.error(
-                            args[0].span,
-                            format!(
-                                "sort_by expects a comparator fn({elem}, {elem}) -> int, found {other}"
-                            ),
-                        );
-                        Ty::Nil
-                    }
-                }
-            }
-            // sort_by_key(f: fn(T) -> K) -> nil — sorts in place by a derived key (sugar over
-            // sort_by). `K` must be orderable like `sort()`'s element: int/float/str or a struct
-            // satisfying `Comparable`. Keys are compared by their natural order at runtime.
-            "sort_by_key" => {
-                if args.len() != 1 {
-                    self.error(
-                        span,
-                        format!("'sort_by_key' expects 1 argument(s), got {}", args.len()),
-                    );
-                    self.infer_all(args);
-                    return Ty::Nil;
-                }
-                let expected = Ty::Func {
-                    params: vec![elem.clone()],
-                    ret: Box::new(Ty::Unknown),
-                    labels: crate::checker::FnLabels::default(),
-                };
-                let ft = self.infer_arg(&args[0], Some(&expected));
-                match ft {
-                    Ty::Unknown => Ty::Nil,
-                    Ty::Func { params, ret, .. }
-                        if params.len() == 1 && compatible(&params[0], elem) =>
-                    {
-                        let key = (*ret).clone();
-                        if is_orderable(&key)
-                            || key.is_unknown()
-                            || self.satisfies(&key, "Comparable").is_ok()
-                        {
-                            Ty::Nil
-                        } else {
-                            self.error(
-                                args[0].span,
-                                format!("sort_by_key key type must be Comparable (int, float, str, or a struct with a `compare` method), found {key}"),
-                            );
-                            Ty::Nil
-                        }
-                    }
-                    other => {
-                        self.error(
-                            args[0].span,
-                            format!(
-                                "sort_by_key expects a key function fn({elem}) -> K, found {other}"
-                            ),
-                        );
-                        Ty::Nil
-                    }
-                }
-            }
-            _ => unreachable!("infer_list_hof called with non-HOF method {method}"),
-        }
-    }
-
     /// Type a numeric-polymorphic native call (`std.math` `abs`/`min`/`max`): every argument must be
     /// the *same* numeric type (int or float — no implicit int/float mix, matching the language's
     /// no-implicit-widening rule), and the result type is that argument type. `Ty::Unknown` args are
@@ -12735,8 +12555,15 @@ impl Checker {
     /// against `expected` (binding its unannotated params + reporting body errors here, since
     /// [`Checker::infer_generic_arg_tys`] suppressed them); other args keep `fallback`. Then assert
     /// assignability with the uniform "argument to '<name>'" diagnostic.
-    fn check_generic_arg(&mut self, name: &str, expected: &Ty, fallback: &Ty, arg: &Expr) {
-        if matches!(arg.kind, ExprKind::Closure { .. }) {
+    /// Returns the arg's REFINED actual type: for a closure, its type re-inferred in checking-mode
+    /// against `expected` (so `fn(x): x*2` against `fn(int) -> U` becomes the concrete `fn(int) -> int`
+    /// — its body-return type is now known); for a non-closure, `fallback` unchanged. The generic-METHOD
+    /// path ([`Checker::infer_generic_method`]) feeds these refined types back into a SECOND `unify`
+    /// pass (the loop-back), so a return-position type param bound ONLY from a closure body (e.g. `map`'s
+    /// `U`) resolves concretely instead of leaking a `Ty::Param`. The free-fn/ctor path
+    /// ([`Checker::infer_generic_call`]) ignores the return (its behavior is unchanged).
+    fn check_generic_arg(&mut self, name: &str, expected: &Ty, fallback: &Ty, arg: &Expr) -> Ty {
+        let refined = if matches!(arg.kind, ExprKind::Closure { .. }) {
             // Re-infer the closure in checking-mode against the substituted expected type: this binds
             // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
             // suppressed). The assignability check below still uses the first-pass `fallback`
@@ -12744,15 +12571,19 @@ impl Checker {
             // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
             // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
             // re-check is the real enforcement; the `fallback` check still catches an arity or
-            // annotated-return mismatch.
-            self.infer_arg(arg, Some(expected));
-        }
+            // annotated-return mismatch. The re-inferred type (`fn(int) -> int`) is RETURNED for the
+            // caller's loop-back unify.
+            self.infer_arg(arg, Some(expected))
+        } else {
+            fallback.clone()
+        };
         if !self.assignable(expected, fallback) {
             self.error(
                 arg.span,
                 format!("argument to '{name}' has type {fallback}, expected {expected}"),
             );
         }
+        refined
     }
 
     /// Trial-check the given closure args (by index into `args`/`decl_tys`) against their declared
@@ -14781,7 +14612,10 @@ impl Checker {
         // two positions with conflicting types, e.g. `max(1, "x")`).
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &subst_map);
-            self.check_generic_arg(name, &expected, actual, arg);
+            // The refined closure type is IGNORED on the free-fn/ctor path: the loop-back that
+            // recovers a return-only type param from a closure body is scoped to the generic-METHOD
+            // path (`infer_generic_method`), keeping this path's inference behavior unchanged.
+            let _ = self.check_generic_arg(name, &expected, actual, arg);
         }
         subst(&sig.ret, &subst_map)
     }
@@ -14849,9 +14683,38 @@ impl Checker {
                 format!("receiver of '{method}' has type {recv_ty}, expected {want_recv}"),
             );
         }
+        // Snapshot the params bound after pass 1 (arg-unification + turbofish + iter/index recovery),
+        // so the loop-back below only re-enforces bounds on params NEWLY bound from a refined arg.
+        let bound_after_pass1: std::collections::HashSet<String> = mmap.keys().cloned().collect();
+        let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
-            self.check_generic_arg(method, &want, actual, arg);
+            refined_actuals.push(self.check_generic_arg(method, &want, actual, arg));
+        }
+        // LOOP-BACK (the bidirectional recovery): feed each arg's REFINED type — a closure now
+        // re-inferred WITH its expected param types, so its return is concrete (`fn(int) -> int`) —
+        // back into a SECOND `unify`. This is safe because `unify` only binds a param NOT already in
+        // the map and IGNORES an `Unknown` actual (see `fn unify`), so every param already resolved by
+        // pass 1 is a strict no-op; it ONLY fills a return-position param still free after pass 1 (e.g.
+        // `map`'s `U`, recovered from the closure body). Without it, such a param leaks a `Ty::Param`
+        // into the return type.
+        for (decl, refined) in expected.iter().zip(&refined_actuals) {
+            unify(decl, refined, &mut mmap);
+        }
+        // Enforce bounds for params NEWLY bound by the loop-back only (pass-1-bound params were already
+        // enforced above — enforcing each exactly once avoids a double-report and preserves error
+        // order). So a `[U: Comparable]` recovered from a closure key still has its bound checked.
+        let newly_bound: Vec<TypeParam> = mtps
+            .iter()
+            .filter(|tp| !bound_after_pass1.contains(&tp.name) && mmap.contains_key(&tp.name))
+            .cloned()
+            .collect();
+        self.enforce_bounds(&newly_bound, &mmap, span);
+        // Degrade any STILL-unbound method type param to `Unknown` (mirrors the static-method /
+        // free-fn empty-collection path), so a `[].map(fn(x): x*2)` yields `List[?]` rather than a
+        // leaked `List[U]`.
+        for tp in mtps {
+            mmap.entry(tp.name.clone()).or_insert(Ty::Unknown);
         }
         subst(ret, &mmap)
     }
@@ -16163,7 +16026,21 @@ const STR_METHODS: &[&str] = &[
     "encode",
 ];
 const LIST_METHODS: &[&str] = &[
-    "len", "push", "pop", "reverse", "contains", "index_of", "concat", "extend", "sort", "sum",
+    "len",
+    "push",
+    "pop",
+    "reverse",
+    "contains",
+    "index_of",
+    "concat",
+    "extend",
+    "sort",
+    "sum",
+    "map",
+    "filter",
+    "fold",
+    "sort_by",
+    "sort_by_key",
 ];
 const MAP_METHODS: &[&str] = &[
     "len", "has", "get", "keys", "values", "remove", "merge", "update",
@@ -16228,15 +16105,12 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
 // `native struct List[T]` / `Map[K, V]` / `Set[T]` in `std/prelude.chz`, harvested into that reserved
 // type's method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with
 // the value's element/key/value type substituted for the sig's `Ty::Param`s. The literal syntax + turbofish
-// ctor stay compiler-wired (`resolve_type`/`builtin_container_sig`). The generic-recovery `List` methods a
-// plain sig cannot express stay RESIDUAL in the `Ty::List` arm (NOT declared in the prelude struct):
-// `map`/`filter`/`fold`/`sort_by`/`sort_by_key` (closure-driven result types) and `sort` (Comparable-gated),
-// plus `sum`'s numeric-element gate (a plain `sum(self) -> T` would wrongly accept a non-numeric list).
-
-/// Element types that have a total order for `sort()`: the scalar comparables.
-fn is_orderable(t: &Ty) -> bool {
-    matches!(t, Ty::Int | Ty::Float | Ty::Str)
-}
+// ctor stay compiler-wired (`resolve_type`/`builtin_container_sig`). The generic-recovery `List` methods
+// (`map`/`filter`/`fold`/`sort_by`/`sort_by_key`) are now ALSO file-backed as `native fn map[U](...)` etc:
+// the generic solver's closure-return LOOP-BACK recovers a return-position `[U]`/`[K]` from an
+// (even unannotated) closure body, so the `Ty::List` arm routes their harvested sigs through
+// `infer_generic_method`. The `sum` numeric-element gate is the sole surviving residual (a plain
+// `sum(self) -> T` would wrongly accept a non-numeric list); `sort` is file-backed via `where T: Comparable`.
 
 /// Built-in method signatures on `Channel[T]` (C2). `elem` is the channel's element type.
 fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {

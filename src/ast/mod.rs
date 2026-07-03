@@ -270,6 +270,11 @@ pub struct NativeDecl {
     pub name: String,
     pub name_span: Span,
     pub kind: NativeKind,
+    /// The decl's OWN generic type params (`native fn map[U](...)`), empty for the common case. On a
+    /// native METHOD they are the method's own `[U]` (distinct from the enclosing `native struct`'s
+    /// `[T]`); the harvest lands them on the method's `FnSig.type_params` so it routes through the
+    /// generic-method inference path. A module-level `native fn` may also carry them.
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// `where T: Comparable` bounds declared after the signature (empty when absent). For a native
