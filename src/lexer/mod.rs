@@ -367,11 +367,16 @@ fn keyword(word: &str) -> Option<Token> {
 /// the simplest correct choice. (A perf-tuned lexer would scan bytes — a later optimization.)
 pub struct Lexer {
     chars: Vec<char>,
-    pos: usize,             // index of the next char to read
-    line: usize,            // current line, 1-based (for error messages)
-    line_start: usize,      // char index where the current line begins (for column tracking)
-    indents: Vec<usize>,    // the indentation stack. Starts as vec![0].
-    at_line_start: bool,    // true when the next char begins a fresh logical line
+    pos: usize,  // index of the next char to read
+    line: usize, // current line, 1-based (for error messages)
+    /// Absolute-line offset applied to every emitted span (default 0 → normal lexing is
+    /// byte-identical). Non-zero only when lexing a string-interpolation fragment re-lexed from an
+    /// escape-processed substring: the offset re-anchors fragment token spans to their true source
+    /// line so a runtime fault inside `"{expr}"` reports `expr`'s real line (Bug E).
+    base_line: usize,
+    line_start: usize, // char index where the current line begins (for column tracking)
+    indents: Vec<usize>, // the indentation stack. Starts as vec![0].
+    at_line_start: bool, // true when the next char begins a fresh logical line
     pending: VecDeque<Tok>, // layout tokens computed together but emitted one-per-call (Dedents)
     bracket_depth: usize, // nesting depth of (), [], {}; >0 suppresses layout (multi-line literals)
     /// Side-channel for doc-comments: `(line, stripped_text)` for every comment-ONLY line
@@ -383,10 +388,18 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
+        Lexer::new_at(source, 0)
+    }
+
+    /// Like [`Lexer::new`] but stamps every emitted span with an absolute-line `base_line` offset.
+    /// Used to re-lex string-interpolation fragments so their token spans point at the true source
+    /// line (see [`Lexer::base_line`]). `base_line == 0` is identical to [`Lexer::new`].
+    pub fn new_at(source: &str, base_line: usize) -> Self {
         Lexer {
             chars: source.chars().collect(),
             pos: 0,
             line: 1,
+            base_line,
             line_start: 0,
             indents: vec![0],
             at_line_start: true,
@@ -399,7 +412,7 @@ impl Lexer {
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
         Span {
-            line: self.line,
+            line: self.line + self.base_line,
             col: pos - self.line_start + 1,
         }
     }
@@ -1375,6 +1388,13 @@ impl Lexer {
 /// Convenience free function: `lexer::tokenize(src)`.
 pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
+}
+
+/// Like [`tokenize`] but stamps every token span with an absolute-line `base_line` offset — used to
+/// re-lex string-interpolation fragments so their spans point at the true source line (Bug E).
+/// `base_line == 0` is identical to [`tokenize`].
+pub fn tokenize_at(source: &str, base_line: usize) -> Result<Vec<Tok>, LexError> {
+    Lexer::new_at(source, base_line).tokenize()
 }
 
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment

@@ -79,7 +79,16 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                     ),
                     None => None,
                 };
-                let expr = parse_expr_str(expr_src, span)?;
+                // Re-anchor the fragment's re-lexed spans to the string literal's OPENING source
+                // line so a runtime fault inside `"{expr}"` reports a real, never-misleading line
+                // (Bug E — previously always `line 1`). We anchor to the opening line rather than the
+                // fragment's exact inner line because `raw` is the post-escape payload: a `\n` ESCAPE
+                // and a genuine (triple-quoted) source newline are indistinguishable here, so counting
+                // newlines in `raw` would inflate the line past an escape and point at unrelated code.
+                // `base_line` offsets the fragment lexer's 1-based `self.line`; newlines INSIDE the
+                // fragment itself still compose on top (those are real source lines, not escapes).
+                let base_line = span.line.saturating_sub(1);
+                let expr = parse_expr_str(expr_src, span, base_line)?;
                 chunks.push(Chunk::Expr(expr, spec));
             }
             '}' => {
@@ -97,8 +106,8 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
     Ok(chunks)
 }
 
-fn parse_expr_str(src: &str, span: Span) -> Result<Expr, InterpError> {
-    let tokens = lexer::tokenize(src).map_err(|e| InterpError {
+fn parse_expr_str(src: &str, span: Span, base_line: usize) -> Result<Expr, InterpError> {
+    let tokens = lexer::tokenize_at(src, base_line).map_err(|e| InterpError {
         message: e.to_string(),
         span,
     })?;
