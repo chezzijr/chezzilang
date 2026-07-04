@@ -162,8 +162,8 @@ const Q_INT: u8 = 1;
 /// sees mixed types never thrashes between fast and slow forms.
 const Q_GENERIC: u8 = 2;
 
-/// Stack size for the VM thread (matched to the interpreter's [`crate::interp::INTERP_STACK_BYTES`]):
-/// the VM recurses on the host stack when a builtin/method re-enters the dispatch loop (e.g. a `str`
+/// Stack size for the VM thread: the VM recurses on the host stack when a builtin/method re-enters
+/// the dispatch loop (e.g. a `str`
 /// method re-entering via `run_proto`), so a large dedicated stack decouples the call-depth limit from
 /// the caller's thread. Co-tuned with `MAX_CALL_DEPTH` (10_000) so the depth guard fires *before* the
 /// host stack overflows: the recursive frame here is `run_until` (one per call-depth level), so a new

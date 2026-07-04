@@ -1969,10 +1969,8 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
         );
         let serial = crate::vm::run_capture(&src).expect("vm serial run");
         let parallel = crate::vm::run_capture_parallel(&src).expect("vm parallel run");
-        let interp = crate::vm::run_capture_parallel(&src).expect("interp run");
         assert_eq!(serial, "101\n");
         assert_eq!(parallel, serial, "M:N parity with serial VM");
-        assert_eq!(interp, serial, "interp parity with VM");
     }
 
     /// Write a `.chz` program to a unique temp file (so `import std.ffi` resolves via the graph
@@ -2059,14 +2057,11 @@ print(ffi.load_int32_at(p, 0))\n",
         let (serial, _e, sres, _) = crate::vm::run_file(&entry);
         let (parallel, _pe, pres, _) =
             crate::vm::run_file_parallel(&entry, crate::native::HostConfig::default());
-        let (interp, _ie, ires, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(sres.is_ok(), "vm serial faulted: {sres:?}");
         assert!(pres.is_ok(), "vm parallel faulted: {pres:?}");
-        assert!(ires.is_ok(), "interp faulted: {ires:?}");
         assert_eq!(serial, "-3\n");
         assert_eq!(parallel, serial, "M:N parity with serial VM");
-        assert_eq!(interp, serial, "interp parity with VM");
     }
 
     /// C-buffer alloc layer end-to-end: `ffi.alloc` a buffer of N int64 slots, fill it from a Chezzi

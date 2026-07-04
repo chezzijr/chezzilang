@@ -184,20 +184,15 @@ fn implicit_nursery_toplevel_vm() {
     assert_eq!(run_capture_parallel(src).expect("parallel"), "end\nw\n");
 }
 
-/// Assert a program yields `expected` on all three engines (cooperative VM, frozen interp,
-/// `--parallel`) — the M-C parity bar.
+/// Assert a program yields `expected` on both VM engines (cooperative + M:N `--parallel`) — the
+/// parity bar.
 #[cfg(test)]
 fn assert_mc_parity(src: &str, expected: &str) {
     assert_eq!(run(src), expected, "cooperative VM");
     assert_eq!(
-        run_capture_parallel(src).expect("interp"),
+        run_capture_parallel(src).expect("M:N"),
         expected,
-        "interp"
-    );
-    assert_eq!(
-        run_capture_parallel(src).expect("parallel"),
-        expected,
-        "--parallel"
+        "M:N engine"
     );
 }
 

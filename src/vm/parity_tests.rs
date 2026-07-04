@@ -1,7 +1,9 @@
 // Extracted from vm/mod.rs (test module). `super::` == the `vm` module.
 //! Cross-engine parity: the serial VM (`parallel=false`) and the M:N VM (`parallel=true`) must
-//! agree on stdout *and* error for every program. These are the M5 acceptance tests — any
-//! divergence fails here.
+//! agree on stdout *and* error for every program. NB: both drive the same `Vm` bytecode, so for a
+//! sequential program this is a determinism check on one engine; the differential bite is on
+//! concurrent programs (scheduler/airlock/fault-report), where the two paths genuinely differ.
+//! (Historically these compared the VM against a separate tree-walk interpreter, since removed.)
 use super::*;
 use std::path::PathBuf;
 
