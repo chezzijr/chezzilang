@@ -13859,6 +13859,24 @@ fn free_fn_hof_returnonly_pinned_mismatch_rejected() {
 }
 
 #[test]
+fn free_fn_hof_returnonly_unknown_cored_container_not_laundered() {
+    // SOUNDNESS regression (review fix): a param-dependent closure whose body is a CONTAINER of the
+    // param (`fn(x): [x]` → prepass `List[Unknown]`) must NOT pre-bind the HOF's return-only `U` to
+    // `List[Unknown]` in pass-1 — that would launder `List[str]` onto it (`unify` only skips a
+    // TOP-level Unknown, not a nested one). The pre-bind gate is `ty_fully_concrete`, so `List[Unknown]`
+    // defers to the loop-back's refined re-inference, which recovers the CONCRETE `List[int]`.
+    // (a) recovers the concrete element type — `ys[0][0] + 1` type-checks:
+    entry_ok(
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): [x])\n    print(ys[0][0] + 1)\n",
+    );
+    // (b) does NOT launder — assigning the recovered `List[List[int]]` to `List[List[str]]` is rejected:
+    entry_rejects(
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): [x])\n    zs: List[List[str]] = ys\n    print(zs)\n",
+        "",
+    );
+}
+
+#[test]
 fn free_fn_hof_returnonly_boundaries() {
     const IDENT: &str = "fn ident[T](x: T) -> T:\n    return x\n";
     // p4 — nested free-generic-call body in a CONTAINER HOF (`fn(x): ident(x)`): the prepass leaks

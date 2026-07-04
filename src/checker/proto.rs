@@ -1666,10 +1666,18 @@ impl Checker {
         // `sink: B` = 99 → `int` and the mismatching closure is rejected). A LEAKED-param prepass return
         // (`fn(x): ident(x)`) stays masked, deferred to the loop-back in `recover_return_only_params`.
         for (i, (decl, actual)) in sig.params.iter().zip(&arg_tys).enumerate() {
+            // Gate on FULLY CONCRETE (no `Ty::Param` AND no `Ty::Unknown`, nested too), not merely
+            // "contains no param": a param-dependent body prepass-types to an Unknown-CORED container
+            // (`fn(x): [x]` → `List[Unknown]`), which has no `Ty::Param` — so a bare no-param gate would
+            // `unify(U, List[Unknown])`, binding `U = List[Unknown]` (unify only skips a TOP-LEVEL
+            // Unknown, not a nested one) and laundering `List[str]` onto it. A fully-concrete prepass
+            // return (`fn(): 5` → `int`) still pre-binds here (needed so the `pair(fn(): 5, fn(x): x+1)`
+            // ordering resolves); an Unknown/param-cored one defers to the loop-back's refined
+            // checking-mode re-inference, which recovers the concrete type.
             if matches!(
                 args.get(i).map(|a| &a.kind),
                 Some(ExprKind::Closure { ret: None, .. })
-            ) && matches!(actual, Ty::Func { ret, .. } if !ty_contains_param(ret))
+            ) && matches!(actual, Ty::Func { ret, .. } if ty_fully_concrete(ret))
             {
                 unify(decl, actual, &mut subst_map);
             }

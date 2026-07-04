@@ -2711,33 +2711,6 @@ fn mask_closure_ret(actual: &Ty) -> Ty {
     }
 }
 
-/// True iff `ty` contains a `Ty::Param` anywhere in its structure (a still-free generic type
-/// variable, incl. one leaked from a NESTED generic call in a closure body's prepass return). Gates
-/// the free-fn HOF path's Bug-1 concrete-return sub-pass in `infer_generic_call`: a bare closure whose
-/// PREPASS return is CONCRETE (`fn(): 5` → `int`, `ty_contains_param` FALSE) binds the HOF's
-/// return-only `[U]` before the un-inferable-param probe runs, while one whose prepass return leaked a
-/// rigid `Ty::Param` (`fn(x): ident(x)`, TRUE) stays masked and deferred to the loop-back.
-fn ty_contains_param(ty: &Ty) -> bool {
-    match ty {
-        Ty::Param(_) => true,
-        Ty::List(e)
-        | Ty::Set(e)
-        | Ty::Option(e)
-        | Ty::Channel(e)
-        | Ty::Shared(e)
-        | Ty::Atomic(e)
-        | Ty::RwShared(e) => ty_contains_param(e),
-        Ty::Map(a, b) | Ty::Result(a, b) => ty_contains_param(a) || ty_contains_param(b),
-        Ty::Tuple(parts) | Ty::Struct(_, parts) | Ty::Enum(_, parts) | Ty::NewType(_, parts) => {
-            parts.iter().any(ty_contains_param)
-        }
-        Ty::Func { params, ret, .. } => {
-            params.iter().any(ty_contains_param) || ty_contains_param(ret)
-        }
-        _ => false,
-    }
-}
-
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {
