@@ -13824,6 +13824,124 @@ fn fold_closure_body_free_generic_call_recovers_int() {
     );
 }
 
+// Phase 6b — Bug D FREE-FN analog: the closure-return loop-back must also recover a generic FREE
+// FUNCTION's return-only `[U]` from an inferable closure/fn body. Same mechanism as the method path,
+// ported into `infer_generic_call` (`recover_return_only_params`). Before the fix these all rejected
+// with `cannot apply + to U/B/T and int`.
+#[test]
+fn free_fn_hof_returnonly_recovers_scalar_and_container() {
+    // Scalar return-only U (param pinned by the `fn(int) -> U` slot): `applyone(5, fn(x): x*2)` yields
+    // int, so `y + 1` type-checks.
+    entry_ok(
+        "fn applyone[U](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := applyone(5, fn(x): x * 2)\n    print(y + 1)\n",
+    );
+    // Container `-> List[U]` form: `mymap([1,2,3], fn(x): x*2)` yields List[int], so `ys[0] + 1` checks.
+    entry_ok(
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): x * 2)\n    print(ys[0] + 1)\n",
+    );
+}
+
+#[test]
+fn free_fn_hof_returnonly_pinned_mismatch_rejected() {
+    // SOUNDNESS (the laundering hole — free-fn analog of `fold_closure_wrong_return_rejected`): a
+    // free HOF whose return-only `U` is pinned by a SIBLING value arg (`init: U` = 0 ⇒ `U = int`) and
+    // whose unannotated closure returns a MISMATCHING type (`str`) must be a clean type error, not
+    // laundered onto the pinned `int`. Proves the helper's SEPARATE concrete-return check is load-bearing.
+    entry_rejects(
+        "fn f[U](init: U, g: fn(int) -> U, xs: List[int]) -> U:\n    return g(xs[0])\nfn main():\n    y := f(0, fn(x): str(x), [1, 2, 3])\n    print(y)\n",
+        "returns",
+    );
+    // apply-shape sibling-pin variant: `B` pinned to `int` by the `sink: B` = 99 arg, closure returns str.
+    entry_rejects(
+        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): str(x), 5, 99)\n    print(y)\n",
+        "returns",
+    );
+}
+
+#[test]
+fn free_fn_hof_returnonly_boundaries() {
+    const IDENT: &str = "fn ident[T](x: T) -> T:\n    return x\n";
+    // p4 — nested free-generic-call body in a CONTAINER HOF (`fn(x): ident(x)`): the prepass leaks
+    // ident's own `T`; checking-mode re-inference recovers int, so `ys[0] + 1` checks.
+    entry_ok(&format!(
+        "{IDENT}fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): ident(x))\n    print(ys[0] + 1)\n"
+    ));
+    // p16 — nested free-generic-call body in a SCALAR HOF.
+    entry_ok(&format!(
+        "{IDENT}fn applyone[U](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := applyone(5, fn(x): ident(x))\n    print(y + 1)\n"
+    ));
+    // p12 — protocol-bounded return-only `[U: Add]`: recover U=int AND re-enforce the `Add` bound.
+    entry_ok(
+        "fn mapadd[U: Add](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := mapadd(5, fn(x): x * 2)\n    print(y + 1)\n",
+    );
+    // p2 — sibling value arg pins A (=int), which flows into the closure PARAM; B is return-only.
+    entry_ok(
+        "fn apply[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\nfn main():\n    y := apply(fn(x): x * 2, 5)\n    print(y + 1)\n",
+    );
+    // p11 — multiple return-only params `[U, V]`; only U flows to the result, both recovered.
+    entry_ok(
+        "fn two[U, V](xs: List[int], f: fn(int) -> U, g: fn(int) -> V) -> U:\n    return f(xs[0])\nfn main():\n    y := two([1, 2, 3], fn(x): x * 2, fn(x): str(x))\n    print(y + 1)\n",
+    );
+    // p9 — chained/nested free HOFs `mymap(mymap(...))`.
+    entry_ok(
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap(mymap([1, 2, 3], fn(x): x * 2), fn(y): y + 1)\n    print(ys[0] + 1)\n",
+    );
+    // p17 — str return-only recovered and used via `.len()`.
+    entry_ok(
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): str(x))\n    print(ys[0].len())\n",
+    );
+}
+
+#[test]
+fn free_fn_hof_must_not_regress() {
+    // These ACCEPT on `main` and must stay accepting through the refactor (behavior-preserving).
+    // p5 — named-fn arg with a concrete return (not a closure): `double` is `fn(int) -> int`.
+    entry_ok(
+        "fn double(x: int) -> int:\n    return x * 2\nfn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], double)\n    print(ys[0] + 1)\n",
+    );
+    // p6 — closure body INDEPENDENT of the param (bool), used via `if`.
+    entry_ok(
+        "fn keep[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := keep([1, 2, 3], fn(x): x > 0)\n    if ys[0]:\n        print(\"y\")\n",
+    );
+    // p7 — closure body producing str, used via `.len()` / concat.
+    entry_ok(
+        "fn keep[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := keep([1, 2, 3], fn(x): str(x))\n    print(ys[0].len())\n",
+    );
+    // annotated closure on a leaking body: `fn(x): x*2` param annotated, return still recovered.
+    entry_ok(
+        "fn applyone[U](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := applyone(5, fn(x: int): x * 2)\n    print(y + 1)\n",
+    );
+    // annotated-RETURN closure on a leaking body.
+    entry_ok(
+        "fn applyone[U](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := applyone(5, fn(x) -> int: x * 2)\n    print(y + 1)\n",
+    );
+    // param-position type param whose value is Unknown (empty list) — degrade-to-Unknown edge, `-> int`
+    // result independent of U: was `ok` pre-fix, must stay `ok`.
+    entry_ok(
+        "fn g[U](xs: List[U], f: fn(U) -> int) -> int:\n    return f(xs[0])\nfn main():\n    n := g([], fn(x): 0)\n    print(n)\n",
+    );
+    // genuinely un-inferable return-only param must STILL reject (leaked `Ty::Param`, not degraded).
+    entry_rejects(
+        "fn make[U](x: int) -> U:\n    return x\nfn main():\n    y := make(5)\n    print(y)\n",
+        "U",
+    );
+}
+
+#[test]
+fn free_fn_hof_ambiguous_stays_clean_error() {
+    // A genuinely ambiguous closure body (`fn(y): x+y` — `y` un-inferable) must give a clean
+    // `cannot infer` diagnostic and NO host panic — and EXACTLY ONE error (the new loop-back /
+    // concrete-return check must not swallow, re-order, or double-report it).
+    let errs = check_entry(
+        "fn applyone[U](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := applyone(5, fn(x): fn(y): x + y)\n    print(y)\n",
+    );
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("cannot infer"),
+        "expected a 'cannot infer' diagnostic, got: {errs:?}"
+    );
+}
+
 #[test]
 fn rwshared_read_len_ok() {
     entry_ok(

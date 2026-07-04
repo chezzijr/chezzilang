@@ -390,11 +390,37 @@ was WRONG: it spuriously rejected exactly those concrete-return nested-generic-c
 adversarial-review-caught regression — because the unmasked prepass `fn(?,?) -> T` failed the internal check.
 Checking the refined type fixes both directions.) `U` is bound concretely, never degraded to `Unknown`
 (assigning the result to `List[str]`/`List[List[int]]` is still cleanly rejected). An annotated closure return
-(`fn(a,b) -> int: …`) is left authoritative (no mask), preserving the exact arity-mismatch diagnostic. KNOWN v1 limit (conscious, not silent): the symmetric FREE-fn/ctor HOF path
-(`infer_generic_call`, proto.rs) deliberately ignores refined closure returns, so a user free-fn HOF with a
-return-only type param recovered from a nested-free-generic-call closure body remains a leak — the repro's
-outer HOF is the METHOD `.map`, so it is fixed; extending the mask to the free-fn path is a possible
-follow-up. Runtime is generic-erased → serial==M:N automatic.
+(`fn(a,b) -> int: …`) is left authoritative (no mask), preserving the exact arity-mismatch diagnostic. Runtime is generic-erased → serial==M:N automatic.
+
+**Bug D FREE-FN analog fix (2026-07-05 — the same closure-return recovery now runs on the generic
+FREE-FUNCTION / module-qualified-fn HOF path).** The Bug D fix above landed only on the METHOD path
+(`infer_generic_method`); the symmetric `infer_generic_call` deliberately DISCARDED the refined closure
+type (`let _ = self.check_generic_arg(...)`), so a user free-fn HOF with a **return-only** type param
+leaked `Ty::Param` into its return — `fn applyone[U](x: int, f: fn(int) -> U) -> U` called
+`applyone(5, fn(x): x*2)` then `+ 1`, and the `-> List[U]` container form `mymap([1,2,3], fn(x): x*2)`,
+both rejected with `cannot apply + to U and int`; the sibling-pinned `fn apply[A,B](f: fn(A)->B, a: A)
+-> B` (`apply(fn(x): x*2, 5)`), the protocol-bounded `fn mapadd[U: Add](...)`, and nested-free-generic
+bodies (`fn(x): ident(x)`) likewise. FIX (checker-only, `src/checker/proto.rs`): Bug D's FINAL sound
+mechanism (return-masked pass-1 unify + REFINED-type capture + the SEPARATE concrete-return soundness
+check + the loop-back second `unify` + newly-bound bound re-enforcement + param-position degrade) is
+factored into ONE shared helper `recover_return_only_params` called by BOTH `infer_generic_method` (a
+byte-identical refactor — the existing Bug-D method tests are the safety net) and `infer_generic_call`.
+The free-fn path additionally masks bare-closure returns in its pass-1 `unify` loop (mirroring the
+method path) so a nested-free-generic body's leaked prepass `Param` cannot prematurely pin the
+return-only param before the loop-back. SOUNDNESS is upheld by the same SEPARATE check, not the mask:
+when the return-only param is ALREADY pinned by a sibling value arg / explicit slot, the refined closure
+return is asserted assignable to that pin, so `fn f[U](init: U, g: fn(int) -> U, ...)` called
+`f(0, fn(x): str(x), ...)` is a clean type error (`closure argument to 'f' returns str, expected int`),
+never laundered onto the pinned `int` — the free-fn analog of the `fold`-init laundering hole. A
+genuinely un-inferable return-only param (`fn make[U]() -> U`) stays a leaked `Ty::Param` (concrete
+assignment rejected); a genuinely ambiguous body (`fn(x): fn(y): x+y`) stays exactly one
+`cannot infer type of parameter 'y'` error. OUT OF SCOPE (unchanged): the ctor paths
+(`infer_generic_struct`/`infer_newtype_call`) share the identical discard but have no free-function
+repro — a possible follow-up; Category-2 late/backward inference and the generic-fn-VALUE gap
+(`g := ident; g(5)`) are distinct limitations, untouched. +5 checker tests (recovers scalar+container,
+pinned-mismatch-rejected, boundaries, must-not-regress, ambiguous-stays-clean) + 2 parity tests
+(`parity_free_fn_hof_map`/`_apply_sibling`), all RED-first on the release binary. Runtime is
+generic-erased → serial==M:N automatic.
 
 **✅ NATIVE-PRELUDE — phase 4c-followup (native instance methods now declare `self`, mirroring user
 structs) (2026-07-02).** A `native fn` inside a `native struct` body is an INSTANCE method and now MUST

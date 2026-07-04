@@ -1638,8 +1638,22 @@ impl Checker {
         // conflicting argument is caught by the per-argument check below.
         let mut subst_map: HashMap<String, Ty> =
             self.seed_targs(name, &sig.type_params, targs, span);
-        for (decl, actual) in sig.params.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut subst_map);
+        for (i, (decl, actual)) in sig.params.iter().zip(&arg_tys).enumerate() {
+            // Bug D (free-fn analog): for an unannotated CLOSURE arg, unify against a RETURN-MASKED
+            // copy so only its PARAMETER positions can bind a function type param in pass 1. Its
+            // prepass return may be a leaked `Ty::Param` (an unannotated body that is a nested free
+            // generic call, `fn(x): ident(x)`); letting it bind here would prematurely pin the fn's
+            // return-position `[U]` to that leaked param, and the loop-back in
+            // `recover_return_only_params` (which only fills params still FREE) could not correct it.
+            // Non-closure args unify unchanged. Mirrors `infer_generic_method`.
+            if matches!(
+                args.get(i).map(|a| &a.kind),
+                Some(ExprKind::Closure { ret: None, .. })
+            ) {
+                unify(decl, &mask_closure_ret(actual), &mut subst_map);
+            } else {
+                unify(decl, actual, &mut subst_map);
+            }
         }
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
@@ -1662,14 +1676,20 @@ impl Checker {
         );
         self.enforce_bounds(&sig.type_params, &subst_map, span);
         // Each argument must match its parameter's substituted type (catches a type param used in
-        // two positions with conflicting types, e.g. `max(1, "x")`).
-        for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
-            let expected = subst(decl, &subst_map);
-            // The refined closure type is IGNORED on the free-fn/ctor path: the loop-back that
-            // recovers a return-only type param from a closure body is scoped to the generic-METHOD
-            // path (`infer_generic_method`), keeping this path's inference behavior unchanged.
-            let _ = self.check_generic_arg(name, &expected, actual, arg);
-        }
+        // two positions with conflicting types, e.g. `max(1, "x")`), AND recover a return-only type
+        // param from an inferable closure/fn body (Bug D's loop-back, now shared with the method
+        // path): the free-fn path formerly discarded the refined closure type, leaking `Ty::Param`
+        // into the return so a downstream `+1`/`.upper()` was spuriously rejected.
+        self.recover_return_only_params(
+            name,
+            &sig.params,
+            &arg_tys,
+            args,
+            &sig.params,
+            &sig.type_params,
+            &mut subst_map,
+            span,
+        );
         subst(&sig.ret, &subst_map)
     }
 
@@ -1750,38 +1770,76 @@ impl Checker {
                 format!("receiver of '{method}' has type {recv_ty}, expected {want_recv}"),
             );
         }
-        // Snapshot the params bound after pass 1 (arg-unification + turbofish + iter/index recovery),
-        // so the loop-back below only re-enforces bounds on params NEWLY bound from a refined arg.
-        let bound_after_pass1: std::collections::HashSet<String> = mmap.keys().cloned().collect();
-        let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
-        for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
-            let want = subst(decl, &mmap);
-            // Bug D: `check_generic_arg`'s fallback assignability check compares the prepass `actual`
-            // against `want`. For a closure whose UNANNOTATED body is a nested free generic call, the
-            // prepass return leaks the callee's own `Ty::Param` (`fn(?) -> T`) — NOT the lenient
-            // `Unknown` a direct body yields — so an unmasked check would spuriously mismatch `want`'s
-            // return whether that return is a still-free `[U]` (`xs.map(fn(x): ident(x))`) OR already
-            // concrete (`xs.fold(0, fn(acc, x): ident(x))` — `U` pinned to `int` by `init`). So ALWAYS
-            // mask an unannotated closure's fallback return: the internal check stays on params +
-            // arity, and the REAL return contract is enforced below against the REFINED (checking-mode
-            // re-inferred) type, whose body-inferred return is accurate (`int` for `ident(x)`, `str`
-            // for a wrong body). A still-free `[U]` return is instead deferred to the loop-back.
+        // Bug D closure-return recovery (shared with the free-fn path via `recover_return_only_params`):
+        // re-infer each closure arg in checking-mode, reject a wrong CONCRETE return, loop-back-unify to
+        // fill a still-free return-only `[U]`, re-enforce newly-recovered bounds, and degrade a still-
+        // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
+        // the full list incl receiver for the param-position degrade.
+        self.recover_return_only_params(
+            method, expected, &arg_tys, args, params, mtps, &mut mmap, span,
+        );
+        subst(ret, &mmap)
+    }
+
+    /// Bug D's closure-return recovery, shared by the generic-METHOD (`infer_generic_method`) and
+    /// generic FREE-FN/module-qualified-fn (`infer_generic_call`) HOF paths. After pass-1 unification
+    /// has seeded `map` with everything the argument SHAPES pin, this:
+    ///  1. re-infers each closure arg in checking-mode against its substituted slot type (binding its
+    ///     unannotated params, re-reporting its body errors) and captures the REFINED type;
+    ///  2. SOUNDNESS: when the closure's expected return is ALREADY concrete (a return-only `[U]` pinned
+    ///     by a sibling value arg or an explicit slot), rejects a genuinely wrong body against it — the
+    ///     free-fn analog of `fold`-init laundering; a mask alone would launder a mismatching return;
+    ///  3. LOOP-BACK: feeds the refined types into a SECOND `unify`, filling a return-only param still
+    ///     free after pass 1 (recovered from an inferable closure/fn body) so it no longer leaks a
+    ///     `Ty::Param` into the return;
+    ///  4. re-enforces bounds on params NEWLY bound by the loop-back only (each enforced exactly once);
+    ///  5. degrades a still-unbound PARAMETER-position param to the refinable `Unknown` (the empty-
+    ///     collection case), while leaving a genuinely un-inferable RETURN-ONLY param as a leaked
+    ///     `Ty::Param` so `assignable` still rejects a concrete assignment.
+    ///
+    /// `arg_decls` are the per-argument declared slot types (method: params sans receiver; free-fn: all
+    /// params) — parallel to `arg_tys`/`args`. `all_params` is the full param list used only for the
+    /// param-position degrade scan (method: params INCL receiver; free-fn: all params). The caller must
+    /// snapshot-worthy pass-1 state (turbofish/arg-unify/iter+index recovery, and for the free-fn path
+    /// its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) must be complete BEFORE this
+    /// call, so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn recover_return_only_params(
+        &mut self,
+        name: &str,
+        arg_decls: &[Ty],
+        arg_tys: &[Ty],
+        args: &[Expr],
+        all_params: &[Ty],
+        tps: &[TypeParam],
+        map: &mut HashMap<String, Ty>,
+        span: Span,
+    ) {
+        // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
+        // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
+        let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
+        let mut refined_actuals: Vec<Ty> = Vec::with_capacity(arg_decls.len());
+        for (decl, (actual, arg)) in arg_decls.iter().zip(arg_tys.iter().zip(args)) {
+            let want = subst(decl, map);
+            // For a closure whose UNANNOTATED body is a nested free generic call, the prepass return
+            // leaks the callee's own `Ty::Param` (`fn(?) -> T`) — not the lenient `Unknown` a direct
+            // body yields — so an unmasked fallback check would spuriously mismatch `want`'s return
+            // whether that return is a still-free `[U]` OR already concrete. Mask an unannotated
+            // closure's fallback return: `check_generic_arg`'s internal check stays on params + arity,
+            // and the REAL return contract is enforced below against the REFINED type. Non-closure and
+            // annotated-closure args use their prepass type unchanged.
             let is_bare_closure = matches!(arg.kind, ExprKind::Closure { ret: None, .. });
             let fallback = if is_bare_closure {
                 mask_closure_ret(actual)
             } else {
                 actual.clone()
             };
-            let refined = self.check_generic_arg(method, &want, &fallback, arg);
-            // SOUNDNESS (Bug D): the masked internal check above cannot see a wrong closure-body
-            // return. When the closure's expected return is ALREADY concrete (e.g. `fold[U]`'s `U`
-            // pinned to `int` by `init`), enforce it explicitly here against the REFINED return —
-            // rejecting a genuinely wrong body (`fold(0, fn(acc, x): "wrong")` → `str`) while ACCEPTING
-            // a nested-generic-call body that merely leaked a rigid `Ty::Param` in the prepass
-            // (`fold(0, fn(acc, x): ident(acc))` → refined `int`). When the expected return is still a
-            // free `[U]` (`map`), it is non-concrete here and deferred to the loop-back's recovery, so
-            // this check is skipped (no return contract yet). No `Unknown` laundering: the contract is
-            // checked against the concrete refined type, not degraded.
+            let refined = self.check_generic_arg(name, &want, &fallback, arg);
+            // SOUNDNESS: when the closure's expected return is ALREADY concrete (a return-only `[U]`
+            // pinned by a sibling value arg or an explicit slot), enforce it explicitly here against the
+            // REFINED return — rejecting a genuinely wrong body while ACCEPTING a nested-generic-call
+            // body that merely leaked a rigid `Ty::Param` in the prepass. When the expected return is a
+            // still-free `[U]` it is non-concrete here and deferred to the loop-back (no contract yet).
             if is_bare_closure
                 && let (Ty::Func { ret: want_ret, .. }, Ty::Func { ret: got_ret, .. }) =
                     (&want, &refined)
@@ -1790,56 +1848,43 @@ impl Checker {
             {
                 self.error(
                     arg.span,
-                    format!(
-                        "closure argument to '{method}' returns {got_ret}, expected {want_ret}"
-                    ),
+                    format!("closure argument to '{name}' returns {got_ret}, expected {want_ret}"),
                 );
             }
             refined_actuals.push(refined);
         }
-        // LOOP-BACK (the bidirectional recovery): feed each arg's REFINED type — a closure now
-        // re-inferred WITH its expected param types, so its return is concrete (`fn(int) -> int`) —
-        // back into a SECOND `unify`. This is safe because `unify` only binds a param NOT already in
-        // the map and IGNORES an `Unknown` actual (see `fn unify`), so every param already resolved by
-        // pass 1 is a strict no-op; it ONLY fills a return-position param still free after pass 1 (e.g.
-        // `map`'s `U`, recovered from the closure body). Without it, such a param leaks a `Ty::Param`
-        // into the return type.
-        for (decl, refined) in expected.iter().zip(&refined_actuals) {
-            unify(decl, refined, &mut mmap);
+        // LOOP-BACK: a closure re-inferred WITH its expected param types has a concrete return
+        // (`fn(int) -> int`); feed it back into a SECOND `unify`. `unify` only binds a param NOT already
+        // in the map and IGNORES an `Unknown` actual, so pass-1-resolved params are a strict no-op — it
+        // ONLY fills a return-position param still free after pass 1 (recovered from the closure body).
+        for (decl, refined) in arg_decls.iter().zip(&refined_actuals) {
+            unify(decl, refined, map);
         }
         // Enforce bounds for params NEWLY bound by the loop-back only (pass-1-bound params were already
-        // enforced above — enforcing each exactly once avoids a double-report and preserves error
-        // order). So a `[U: Comparable]` recovered from a closure key still has its bound checked.
-        let newly_bound: Vec<TypeParam> = mtps
+        // enforced by the caller — each enforced exactly once avoids a double-report). So a
+        // `[U: Add]`/`[U: Comparable]` recovered from a closure body still has its bound checked.
+        let newly_bound: Vec<TypeParam> = tps
             .iter()
-            .filter(|tp| !bound_after_pass1.contains(&tp.name) && mmap.contains_key(&tp.name))
+            .filter(|tp| !bound_after_pass1.contains(&tp.name) && map.contains_key(&tp.name))
             .cloned()
             .collect();
-        self.enforce_bounds(&newly_bound, &mmap, span);
-        // Degrade a STILL-unbound method type param to the refinable `Unknown` — BUT ONLY when it
-        // appears in a PARAMETER position (receiver or an argument slot). Such a param was in
-        // principle recoverable from an argument, but that argument's relevant type was itself
-        // `Unknown` (the empty-collection case: `[].map(fn(x): x*2)` — the empty list's element is
-        // `Unknown`, so the closure's body-return `U` is too). Degrading it yields `List[?]` rather
-        // than a leaked `List[U]`, matching the retired bespoke `infer_list_hof`.
-        //
-        // A method type param appearing ONLY in the RETURN position and in NO parameter is genuinely
-        // un-inferable — no argument can ever bind it (`fn make[U](self) -> U`). It must NOT be
-        // degraded: leaving the leaked `Ty::Param` makes the checker REJECT assigning the call result
-        // to a concrete type, upholding the soundness contract (a wrong static type must not escape
-        // onto the value). An unconditional degrade would silently type such a result as `Unknown`,
-        // which `assignable` treats as universally assignable — masking the un-inferable-ness.
+        self.enforce_bounds(&newly_bound, map, span);
+        // Degrade a STILL-unbound type param to `Unknown` ONLY when it appears in a PARAMETER position:
+        // it was in principle recoverable from an argument, but that argument's relevant type was itself
+        // `Unknown` (the empty-collection case, `[].map(fn(x): x*2)`), so degrading yields `List[?]`
+        // rather than a leaked `List[U]`. A param appearing ONLY in the RETURN position and in NO
+        // parameter is genuinely un-inferable (`fn make[U]() -> U`); it must stay a leaked `Ty::Param`
+        // so `assignable` rejects a concrete assignment — an unconditional degrade would launder it.
         let wanted: std::collections::HashSet<String> =
-            mtps.iter().map(|tp| tp.name.clone()).collect();
+            tps.iter().map(|tp| tp.name.clone()).collect();
         let mut in_param_pos: Vec<String> = Vec::new();
-        for p in params {
+        for p in all_params {
             ty_collect_params(p, &wanted, &mut in_param_pos);
         }
-        for tp in mtps {
+        for tp in tps {
             if in_param_pos.contains(&tp.name) {
-                mmap.entry(tp.name.clone()).or_insert(Ty::Unknown);
+                map.entry(tp.name.clone()).or_insert(Ty::Unknown);
             }
         }
-        subst(ret, &mmap)
     }
 }
