@@ -1298,6 +1298,14 @@ builtin, and inside `{…}` string interpolation — including when nested in a 
 / enum payload. Types without a `str` method keep the default repr. Like `Comparable`, `Stringable`
 is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
 
+**Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
+**only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether
+that return type is written explicitly, inferred from the body, or a `str` type-alias). `str` is
+otherwise a normal method you may define however you like: a `str` method with extra parameters, or
+one that returns something other than `str` (e.g. the receiving struct), simply **isn't** the display
+hook — those values fall back to the default repr, and a direct `obj.str(…)` call still works as
+written. (This is why a `fn str(self) -> S: return self` prints `S(...)` rather than looping.)
+
 ```chezzi
 struct Point:
     x: int

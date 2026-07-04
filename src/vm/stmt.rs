@@ -2226,6 +2226,16 @@ impl Vm {
         Ok(())
     }
 
+    /// True iff `v` is a `str` at runtime (a heap [`Obj::Str`]). `str` is the only string
+    /// representation — [`Value`] carries no inline string — so a user `str(self)` display hook's
+    /// result "conforms to `Stringable`" exactly when this holds. Used by the display-hook arms to
+    /// decide, AFTER invoking the hook, whether to use its result or fall back to the default repr
+    /// (Bug B). Checking the runtime VALUE (not the declared syntax) transparently covers an
+    /// annotated `-> str`, an inferred (un-annotated) str, and a str type-alias return alike.
+    pub(super) fn is_str_value(&self, v: Value) -> bool {
+        matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)))
+    }
+
     pub(super) fn stringify_obj_into(
         &mut self,
         out: &mut String,
@@ -2277,8 +2287,18 @@ impl Vm {
                     out.push('}');
                 }
             }
-            Obj::Struct { name, fields, .. } => {
-                // `str(self) -> str` overrides the default repr. Only a self-only method is the hook.
+            Obj::Struct {
+                name, mut fields, ..
+            } => {
+                // A self-only `str(self)` overrides the default repr — but ONLY when it actually
+                // conforms to `Stringable`, i.e. it returns a `str`. Bug B: `str` is a normal user
+                // method that may legitimately return anything (e.g. `-> S` returning the struct
+                // itself, or an inferred/aliased str), and its return type is not reliably reachable
+                // at the bytecode level. So — mirroring arith.rs `struct_hash`/`enum_hash`, which
+                // invoke the hook then inspect the returned value — invoke `str` and use its result
+                // ONLY when it is a `str`. A non-`str` result must NOT be re-stringified: that
+                // re-enters this arm, re-invokes the hook, and recurses forever (uncatchable native
+                // stack overflow). It falls through to the default repr, like a wrong-arity `str`.
                 let def = self.program.structs.get(name.as_ref()).cloned();
                 if let Some(def) = &def
                     && let Some(&proto) = def.methods.get("str")
@@ -2288,7 +2308,16 @@ impl Vm {
                     let res = self.guarded(|vm| {
                         vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
                     })?;
-                    return self.stringify_into(out, res, span, depth);
+                    if self.is_str_value(res) {
+                        return self.stringify_into(out, res, span, depth);
+                    }
+                    // Non-`str`: fall through to the default repr. The hook may have mutated self's
+                    // fields (and triggered GC, freeing the pre-hook `fields` clone taken at fn
+                    // entry), so re-read the live, rooted struct — otherwise the render loop below
+                    // could dereference a swept GcRef and panic uncatchably (GC-safety).
+                    if let Obj::Struct { fields: cur, .. } = self.heap.get(h) {
+                        fields = cur.clone();
+                    }
                 }
                 // Positional layout: recover declaration-order field names from the StructDef (the
                 // same `def` already cloned for the `str` hook) — no per-instance name strings.
@@ -2316,10 +2345,11 @@ impl Vm {
             }
             Obj::Enum {
                 variant_id,
-                payload,
+                mut payload,
             } => {
-                // `str(self) -> str` overrides the default `Variant(payload)` repr (Stringable).
-                // Only a self-only method is the hook (mirrors the struct arm above).
+                // A self-only `str(self)` overrides the default `Variant(payload)` repr, but only
+                // when it returns a `str` — checked on the returned value, not the declared syntax
+                // (mirrors the struct arm; see its Bug B note).
                 let key = self.enum_names(variant_id).0.to_string();
                 if let Some(&proto) = self
                     .program
@@ -2332,7 +2362,14 @@ impl Vm {
                     let res = self.guarded(|vm| {
                         vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
                     })?;
-                    return self.stringify_into(out, res, span, depth);
+                    if self.is_str_value(res) {
+                        return self.stringify_into(out, res, span, depth);
+                    }
+                    // Non-`str`: re-read the live rooted enum before the default render (GC-safety;
+                    // see the struct arm).
+                    if let Obj::Enum { payload: cur, .. } = self.heap.get(h) {
+                        payload = cur.clone();
+                    }
                 }
                 // M19 lever #2 — recover the variant name from the id (cold stringify path).
                 out.push_str(self.enum_names(variant_id).1);
@@ -2344,7 +2381,10 @@ impl Vm {
             }
             // A newtype honors a `str(self) -> str` override (Stringable) exactly like enum/struct;
             // else it renders `Name(inner)` (its raw `Display`).
-            Obj::NewType { type_key, inner } => {
+            Obj::NewType {
+                type_key,
+                mut inner,
+            } => {
                 if let Some(&proto) = self
                     .program
                     .newtype_methods
@@ -2356,7 +2396,14 @@ impl Vm {
                     let res = self.guarded(|vm| {
                         vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
                     })?;
-                    return self.stringify_into(out, res, span, depth);
+                    if self.is_str_value(res) {
+                        return self.stringify_into(out, res, span, depth);
+                    }
+                    // Non-`str`: re-read the live rooted newtype before the default render
+                    // (GC-safety; see the struct arm).
+                    if let Obj::NewType { inner: cur, .. } = self.heap.get(h) {
+                        inner = *cur;
+                    }
                 }
                 let display = crate::compiler::bare_display(type_key.as_ref());
                 let _ = write!(out, "{display}(");

@@ -11557,3 +11557,59 @@ fn non_interpolation_fault_span_unchanged() {
     assert_eq!(run_capture(ok).unwrap(), "x = 5, done\n");
     assert_eq!(run_capture_parallel(ok).unwrap(), "x = 5, done\n");
 }
+
+// ---- Bug B: print's `str(self)` display hook is used only when it CONFORMS to Stringable ----
+// (returns a `str`) — checked on the RETURNED VALUE, so an annotated / inferred / aliased str all
+// work, while a non-`str` return falls back to the default repr instead of recursing forever
+// (was an uncatchable stack-overflow SIGABRT on a check-accepted program).
+
+#[test]
+fn str_hook_nonstr_return_struct_falls_back_to_default_repr() {
+    // The Bug B repro: `str(self) -> S` returns the struct itself. Pre-fix this recursed in the
+    // native stringifier → SIGABRT (the test binary would ABORT). Now it falls back to `S(n=5)`.
+    let src = "struct S:\n    n: int\n    fn str(self) -> S:\n        return self\nfn main(): print(S(5))\nmain()\n";
+    assert_mc_parity(src, "S(n=5)\n");
+}
+
+#[test]
+fn str_hook_nonstr_return_enum_and_newtype_fall_back() {
+    let enum_src = "enum E:\n    A(int)\n    fn str(self) -> E:\n        return self\nfn main(): print(E.A(5))\nmain()\n";
+    assert_mc_parity(enum_src, "A(5)\n");
+    let nt_src = "newtype N = int:\n    fn str(self) -> N:\n        return self\nfn main(): print(N(5))\nmain()\n";
+    assert_mc_parity(nt_src, "N(5)\n");
+}
+
+#[test]
+fn str_hook_used_when_it_returns_str_annotated_inferred_or_aliased() {
+    // Annotated `-> str`.
+    let annotated = "struct S:\n    n: int\n    fn str(self) -> str:\n        return \"A{self.n}\"\nfn main(): print(S(5))\nmain()\n";
+    assert_mc_parity(annotated, "A5\n");
+    // Inferred str (un-annotated) — a syntactic `-> str` gate would wrongly drop this; the
+    // returned-value check keeps it working.
+    let inferred = "struct S:\n    n: int\n    fn str(self):\n        return \"custom<{self.n}>\"\nfn main(): print(S(5))\nmain()\n";
+    assert_mc_parity(inferred, "custom<5>\n");
+    // A str type-alias return also conforms.
+    let aliased = "type MyStr = str\nstruct S:\n    n: int\n    fn str(self) -> MyStr:\n        return \"hi{self.n}\"\nfn main(): print(S(5))\nmain()\n";
+    assert_mc_parity(aliased, "hi5\n");
+    // Same gate applies inside string interpolation.
+    let interp = "struct S:\n    n: int\n    fn str(self) -> S:\n        return self\nfn main(): print(\"v={S(5)}\")\nmain()\n";
+    assert_mc_parity(interp, "v=S(n=5)\n");
+}
+
+#[test]
+fn str_hook_direct_call_returning_nonstr_still_works() {
+    // `str` stays a normal user method: a direct `s.str()` returning the struct is unaffected by the
+    // display-hook gate (no checker rejection, no runtime restriction).
+    let src = "struct S:\n    n: int\n    fn str(self) -> S:\n        return self\nfn main():\n    x := S(5).str()\n    print(x.n)\nmain()\n";
+    assert_mc_parity(src, "5\n");
+}
+
+#[test]
+fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
+    // A non-`str`-returning `str(self)` that MUTATES a non-interned heap field (a List) and
+    // allocates enough to trigger a mark-sweep before returning `self`: the default-repr fallback
+    // must re-read the LIVE rooted struct (not the pre-hook clone, whose old field was swept), or it
+    // would dereference a dangling GcRef and panic uncatchably. Expect the CURRENT field state.
+    let src = "struct S:\n    n: int\n    tag: List[int]\n    fn str(self) -> S:\n        self.tag = [9, 9, 9]\n        i := 0\n        acc := [0]\n        while i < 100000:\n            acc = [i]\n            i = i + 1\n        return self\nfn main(): print(S(5, [1, 2, 3]))\nmain()\n";
+    assert_mc_parity(src, "S(n=5, tag=[9, 9, 9])\n");
+}
