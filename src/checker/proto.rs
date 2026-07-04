@@ -1742,7 +1742,12 @@ impl Checker {
         let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
-            refined_actuals.push(self.check_generic_arg(method, &want, actual, arg));
+            let fallback = if matches!(arg.kind, ExprKind::Closure { ret: None, .. }) {
+                mask_closure_ret(actual)
+            } else {
+                actual.clone()
+            };
+            refined_actuals.push(self.check_generic_arg(method, &want, &fallback, arg));
         }
         // LOOP-BACK (the bidirectional recovery): feed each arg's REFINED type — a closure now
         // re-inferred WITH its expected param types, so its return is concrete (`fn(int) -> int`) —

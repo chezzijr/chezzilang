@@ -2692,6 +2692,17 @@ fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<String, Ty>) 
     }
 }
 
+fn mask_closure_ret(actual: &Ty) -> Ty {
+    match actual {
+        Ty::Func { params, labels, .. } => Ty::Func {
+            params: params.clone(),
+            ret: Box::new(Ty::Unknown),
+            labels: labels.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {
