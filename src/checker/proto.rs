@@ -1689,6 +1689,7 @@ impl Checker {
             &sig.type_params,
             &mut subst_map,
             span,
+            false,
         );
         subst(&sig.ret, &subst_map)
     }
@@ -1776,7 +1777,7 @@ impl Checker {
         // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
         // the full list incl receiver for the param-position degrade.
         self.recover_return_only_params(
-            method, expected, &arg_tys, args, params, mtps, &mut mmap, span,
+            method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
         subst(ret, &mmap)
     }
@@ -1793,16 +1794,29 @@ impl Checker {
     ///     free after pass 1 (recovered from an inferable closure/fn body) so it no longer leaks a
     ///     `Ty::Param` into the return;
     ///  4. re-enforces bounds on params NEWLY bound by the loop-back only (each enforced exactly once);
-    ///  5. degrades a still-unbound PARAMETER-position param to the refinable `Unknown` (the empty-
-    ///     collection case), while leaving a genuinely un-inferable RETURN-ONLY param as a leaked
-    ///     `Ty::Param` so `assignable` still rejects a concrete assignment.
+    ///  5. (METHOD PATH ONLY, `degrade_unbound_param_pos`) degrades a still-unbound PARAMETER-position
+    ///     param to the refinable `Unknown` (the empty-collection case, `[].map(fn(x): x*2)` → `List[?]`,
+    ///     matching the retired `infer_list_hof`), while leaving a genuinely un-inferable RETURN-ONLY
+    ///     param as a leaked `Ty::Param` so `assignable` still rejects a concrete assignment.
     ///
     /// `arg_decls` are the per-argument declared slot types (method: params sans receiver; free-fn: all
     /// params) — parallel to `arg_tys`/`args`. `all_params` is the full param list used only for the
-    /// param-position degrade scan (method: params INCL receiver; free-fn: all params). The caller must
-    /// snapshot-worthy pass-1 state (turbofish/arg-unify/iter+index recovery, and for the free-fn path
-    /// its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) must be complete BEFORE this
-    /// call, so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
+    /// param-position degrade scan (method: params INCL receiver; free-fn: all params).
+    ///
+    /// `degrade_unbound_param_pos` gates step 5. It is `true` ONLY on the generic-METHOD path, whose
+    /// receiver-collection HOFs (`[].map(...)`) intentionally degrade an empty-collection element param
+    /// to `List[?]`. It is `false` on the generic FREE-FN path: `infer_generic_call` never degraded, so
+    /// a still-unbound param-position free-fn type param (`first([])` — `U` from an empty `List[U]` arg
+    /// that flows to the return) must stay a leaked `Ty::Param` that downstream concrete use REJECTS,
+    /// and the deliberate Category-2 "un-inferred type parameter; bind at the construction site"
+    /// diagnostic must survive. Degrading it there silently laundered a compile error into a runtime
+    /// panic (adversarial-review bugs 1 & 2). Free-fn CLOSURE-param type params left un-inferable by an
+    /// empty arg are already bound to `Unknown` by the caller's `report_uninferable_closure_params`, so
+    /// omitting the degrade there is behavior-preserving.
+    ///
+    /// The caller must complete pass-1 state (turbofish/arg-unify/iter+index recovery, and for the
+    /// free-fn path its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) BEFORE this call,
+    /// so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn recover_return_only_params(
         &mut self,
@@ -1814,6 +1828,7 @@ impl Checker {
         tps: &[TypeParam],
         map: &mut HashMap<String, Ty>,
         span: Span,
+        degrade_unbound_param_pos: bool,
     ) {
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
@@ -1869,12 +1884,19 @@ impl Checker {
             .cloned()
             .collect();
         self.enforce_bounds(&newly_bound, map, span);
-        // Degrade a STILL-unbound type param to `Unknown` ONLY when it appears in a PARAMETER position:
-        // it was in principle recoverable from an argument, but that argument's relevant type was itself
-        // `Unknown` (the empty-collection case, `[].map(fn(x): x*2)`), so degrading yields `List[?]`
-        // rather than a leaked `List[U]`. A param appearing ONLY in the RETURN position and in NO
-        // parameter is genuinely un-inferable (`fn make[U]() -> U`); it must stay a leaked `Ty::Param`
-        // so `assignable` rejects a concrete assignment — an unconditional degrade would launder it.
+        // Degrade a STILL-unbound type param to `Unknown` ONLY when it appears in a PARAMETER position —
+        // and ONLY on the method path (`degrade_unbound_param_pos`). It was in principle recoverable
+        // from an argument, but that argument's relevant type was itself `Unknown` (the empty-collection
+        // case, `[].map(fn(x): x*2)`), so degrading yields `List[?]` rather than a leaked `List[U]`. A
+        // param appearing ONLY in the RETURN position and in NO parameter is genuinely un-inferable
+        // (`fn make[U]() -> U`); it must stay a leaked `Ty::Param` so `assignable` rejects a concrete
+        // assignment. On the FREE-FN path the whole degrade is skipped: `infer_generic_call` never
+        // degraded, so a param-position free-fn type param left unbound by an empty-collection arg
+        // (`first([])`) must stay a leaked `Ty::Param` too — degrading it laundered a clean compile
+        // error into a runtime panic and silently suppressed the Category-2 construction-site diagnostic.
+        if !degrade_unbound_param_pos {
+            return;
+        }
         let wanted: std::collections::HashSet<String> =
             tps.iter().map(|tp| tp.name.clone()).collect();
         let mut in_param_pos: Vec<String> = Vec::new();

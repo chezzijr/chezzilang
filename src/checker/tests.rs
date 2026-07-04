@@ -13943,6 +13943,46 @@ fn free_fn_hof_ambiguous_stays_clean_error() {
 }
 
 #[test]
+fn free_fn_generic_empty_arg_return_param_stays_rejected() {
+    // REGRESSION (adversarial-review bugs 1 & 2): a generic FREE-FN whose type param appears in
+    // PARAMETER position but is bound to `Unknown`-nothing by an empty-collection arg must NOT be
+    // silently degraded to `Ty::Unknown` on the free-fn path (the method-path degrade is scoped to the
+    // method path). Its return-flowing `Ty::Param` must stay leaked so downstream concrete use rejects
+    // — matching `main`. The Category-2 empty-collection diagnostic is intended (out of scope of the
+    // closure-return recovery) and must survive the shared-helper refactor.
+    //
+    // `first([]) + 1`: on `main` this is `cannot apply + to U and int`; the branch wrongly degraded U
+    // to Unknown and accepted (then panicked at runtime `index 0 out of bounds`).
+    entry_rejects(
+        "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
+        "cannot apply + to U and int",
+    );
+    // `pick([], 0).nonexistent_method()`: U in param position, return-only method use — must reject on
+    // the leaked `Ty::Param` (`type parameter U has no method`), not silently accept a method on
+    // `Unknown`.
+    entry_rejects(
+        "fn pick[U](xs: List[U], i: int) -> U:\n    return xs[i]\nfn main():\n    y := pick([], 0)\n    print(y.nonexistent_method())\n",
+        "type parameter U has no method",
+    );
+    // (Note: `takes_str(pick([], 0))` — a leaked `Ty::Param` passed to a concrete `str` slot — is
+    // accepted by `main` too, a SEPARATE pre-existing `assignable(concrete, Ty::Param)` leniency, so it
+    // is NOT asserted here; this fix only restores the operator/method-use rejections that the branch's
+    // Unknown-degrade had laundered.)
+    // `tag([])` then heterogeneous pushes: must emit the deliberate Category-2 "un-inferred type
+    // parameter U; bind it at the construction site" diagnostic on EACH push (2 errors), not degrade
+    // to `List[Unknown]` and backward-pin the element to the first push's type.
+    let errs = check_entry(
+        "fn tag[U](xs: List[U]) -> List[U]:\n    return xs\nfn main():\n    x := tag([])\n    x.push(\"hello\")\n    x.push(42)\n",
+    );
+    assert_eq!(errs.len(), 2, "expected exactly two errors, got: {errs:?}");
+    assert!(
+        errs.iter()
+            .all(|e| e.message.contains("un-inferred type parameter U")),
+        "expected the un-inferred-U construction-site diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
 fn rwshared_read_len_ok() {
     entry_ok(
         "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",

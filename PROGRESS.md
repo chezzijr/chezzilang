@@ -402,12 +402,22 @@ both rejected with `cannot apply + to U and int`; the sibling-pinned `fn apply[A
 -> B` (`apply(fn(x): x*2, 5)`), the protocol-bounded `fn mapadd[U: Add](...)`, and nested-free-generic
 bodies (`fn(x): ident(x)`) likewise. FIX (checker-only, `src/checker/proto.rs`): Bug D's FINAL sound
 mechanism (return-masked pass-1 unify + REFINED-type capture + the SEPARATE concrete-return soundness
-check + the loop-back second `unify` + newly-bound bound re-enforcement + param-position degrade) is
-factored into ONE shared helper `recover_return_only_params` called by BOTH `infer_generic_method` (a
-byte-identical refactor — the existing Bug-D method tests are the safety net) and `infer_generic_call`.
-The free-fn path additionally masks bare-closure returns in its pass-1 `unify` loop (mirroring the
-method path) so a nested-free-generic body's leaked prepass `Param` cannot prematurely pin the
-return-only param before the loop-back. SOUNDNESS is upheld by the same SEPARATE check, not the mask:
+check + the loop-back second `unify` + newly-bound bound re-enforcement + the method-only param-position
+degrade) is factored into ONE shared helper `recover_return_only_params` called by BOTH
+`infer_generic_method` (a byte-identical refactor — the existing Bug-D method tests are the safety net)
+and `infer_generic_call`. The free-fn path additionally masks bare-closure returns in its pass-1
+`unify` loop (mirroring the method path) so a nested-free-generic body's leaked prepass `Param` cannot
+prematurely pin the return-only param before the loop-back. IMPORTANT (adversarial-review fix): the
+final param-position degrade-to-`Unknown` step is **gated `true` on the METHOD path only** (its
+receiver-collection HOFs `[].map(...)` intentionally degrade an empty element param to `List[?]`) and
+**`false` on the free-fn path** — `infer_generic_call` never degraded, so a still-unbound param-position
+free-fn type param bound to nothing by an empty-collection arg (`fn first[U](xs: List[U]) -> U` called
+`first([]) + 1`, or `fn tag[U](xs: List[U]) -> List[U]`) must stay a leaked `Ty::Param` that downstream
+concrete use REJECTS and that keeps the deliberate Category-2 "un-inferred type parameter; bind at the
+construction site" diagnostic; degrading it there laundered a compile error into a runtime panic and is
+NOT this change's scope. Free-fn CLOSURE-param type params left un-inferable by an empty arg are already
+`Unknown`-bound by `report_uninferable_closure_params`, so skipping the degrade there is
+behavior-preserving. SOUNDNESS is upheld by the same SEPARATE check, not the mask:
 when the return-only param is ALREADY pinned by a sibling value arg / explicit slot, the refined closure
 return is asserted assignable to that pin, so `fn f[U](init: U, g: fn(int) -> U, ...)` called
 `f(0, fn(x): str(x), ...)` is a clean type error (`closure argument to 'f' returns str, expected int`),
