@@ -206,7 +206,7 @@ hands it (`Disp::Offload`) to the pool. The pool runs it with no `Vm`/heap (`Off
 raw `NativeRet` on `Fiber.resume_native`, and `complete_offload`s the fiber back. `MnSched.inflight`
 (a 4th fiber state) folds into the deadlock predicate so an in-flight call can't fire a false deadlock;
 a panic in an offloaded native is caught and faulted (never a pinned hang). G3 starvation fixed
-(`sleep_ms` ×N ≈ max not sum); cooperative/`--interp` byte-identical.
+(`sleep_ms` ×N ≈ max not sum); serial `--serial` byte-identical.
 
 **Landed (owe #1 + #2):** owe #1 — `std.request` (`get`/`post`) + `std.process` (`cmd`) classified
 blocking-offloadable (verified off-heap-safe), guarded by a member-name-uniqueness test. Owe #2 — a
@@ -304,8 +304,8 @@ Channel is a cross-nursery wakeup (handlers reach clients via sockets, which wor
 
 ## Cross-cutting invariants (all phases)
 
-- **Serial engine frozen** — D1–D6 are `--parallel`-only; cooperative stays the parity oracle. Run
-  the VM==interp sequential-subset parity suite every phase.
+- **Serial engine frozen** — D1–D6 are `--parallel`-only; the serial `--serial` VM stays the parity oracle. Run
+  the serial-vs-M:N sequential-subset parity suite every phase.
 - **Decision F** — output flushed in task order on join; deterministic transcript despite concurrent
   execution. All fault-free goldens stay byte-identical. The terminal (lowest-index propagating) fault
   ALSO flushes its buffered output at its task-order slot so a faulting task's partial output is not
@@ -356,8 +356,8 @@ Critical + Important findings before the completion claim.
   scope-scoped stop having drained the GLOBAL queue), and a nested builder EARLY-ENLISTS the outer
   nursery's still-pending siblings (so the nested owner runs them — the cross-nursery wake) while
   DEFERRING each enlisted scope's output flush to its OWN `JoinNursery` (per-nursery flush order →
-  three-engine parity for non-blocking nested spawns). The cooperative (default `run`) engine still
-  serializes nested levels, so the same program **still faults `deadlock` on `run`/`--interp`**; the
+  two-engine parity for non-blocking nested spawns). The cooperative `--serial` engine still
+  serializes nested levels, so the same program **still faults `deadlock` on `--serial`**; the
   cooperative-engine flatten is a **separate, later commit**. Workaround on `run`: siblings in ONE
   nursery (doc case C). The fix also routes the inline outer-body's own `send`/`close` through the held
   sched (`..._inline_send.chz`/`..._inline_close.chz`), runs a `spawn:` issued *after* the enlist

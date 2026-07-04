@@ -27,9 +27,9 @@ GC**. No value in one thread's heap ever references another's. A `Value::Obj(GcR
 into *one specific* heap (`GcRef(pub u32)`), meaningless anywhere else — so GcRefs *cannot* cross
 threads, and per-thread collection needs **no stop-the-world, no handshake, no atomic mark bits**.
 Everything below exists to preserve this: values cross the thread boundary only as a **serialized,
-`Send` wire form**, never as live heap references. The interpreter (`src/interp/`) is **not** part of B3 —
-it stays the frozen sequential parity oracle (suspendable/parallel interp is a permanent non-goal); **the VM
-is the sole concurrent engine.**
+`Send` wire form**, never as live heap references. **The VM is the sole engine** (its two schedulers —
+serial `--serial` and default M:N — both preserve this). (A tree-walk interpreter formerly served as the
+frozen sequential parity oracle; it has since been removed.)
 
 ---
 
@@ -41,7 +41,7 @@ is the sole concurrent engine.**
 
 2. **Wire-format airlock — replaces `deep_clone`.** A `WireValue` enum mirrors the **sendable** value set
    (scalars, `List/Map/Set/Tuple`, `Struct`, `Enum`, plus **`Channel`/`Shared`/`Executor` handles** carried
-   as the `Arc<…Core>` itself). `to_wire(v)` is the same tree-walk `deep_clone` does but emits a `Send`
+   as the `Arc<…Core>` itself). `to_wire(v)` does the same deep copy the VM's `deep_clone` does but emits a `Send`
    value; `from_wire(w)` reconstructs in the *destination* heap. Only sendable values reach `to_wire`
    (checker-gated at `spawn`/`send`/`submit`); a non-sendable value is a **defensive runtime fault**, not
    `unreachable!()`.
@@ -65,15 +65,16 @@ is the sole concurrent engine.**
 ### A. Determinism contract — the highest-priority decision
 
 Real parallelism makes output ordering **nondeterministic**, breaking byte-identical goldens (most sharply
-cooperative-interleave goldens like ping-pong's exact ordering) and **VM == interp** parity (interp stays
-sequential forever) — you cannot keep those goldens *and* have real parallelism produce them. **Decision:
+cooperative-interleave goldens like ping-pong's exact ordering) and the deterministic two-engine parity
+goldens — you cannot keep those goldens *and* have real parallelism produce them. **Decision (historical):
 keep the cooperative single-thread engine as the DEFAULT; gate OS-thread multicore behind a `--parallel`
-flag** (mirroring `--interp` plumbing; "flags must precede the file"). Every existing
-concurrency golden + GC-stress + 3-way VM==interp parity stays green untouched on the default engine; the
+flag** (mirroring the existing flag plumbing; "flags must precede the file"). Every existing
+concurrency golden + GC-stress + parity test stays green untouched on the cooperative engine; the
 parallel engine gets its own **deterministic-by-construction** suite (collect→drain→sort→print, or
-order-insensitive set-of-lines assertions). **VM==interp parity is suspended by definition under
-`--parallel`** — the interp oracle does not extend to the parallel engine. This is also what lets B3.0–B3.2
-ship behind unchanged behavior.
+order-insensitive set-of-lines assertions). **Byte-identical parity is suspended by definition under
+`--parallel`** — real parallelism reorders output. This is also what lets B3.0–B3.2
+ship behind unchanged behavior. (The default has since flipped to the M:N engine; `--serial` selects the
+cooperative parity oracle.)
 
 ### B. Bounded work pool, not thread-per-task
 
@@ -245,8 +246,8 @@ flatten is a separate, later commit. See `docs/concurrency-tier-d.md` "Open / de
 `WireValue::Closure` (the arm B3.3 deferred):** a submitted closure crosses **by value**
 (`{ proto, captured, home }`, all `GcRef`-free since `home` is a `module_objs` index). `Vm::wire_callable`
 produces it, but `submit` calls it **only under `--parallel`**; on the cooperative default engine `submit`
-crosses by handle so its same-heap drain shares captures by reference — matching the interp oracle
-(**Review C-01:** an unconditional `wire_callable` broke `VM == interp` for the sequential subset; fixed by
+crosses by handle so its same-heap drain shares captures by reference — matching the same-heap sequential semantics
+(**Review C-01:** an unconditional `wire_callable` broke sequential-subset parity; fixed by
 the engine gate). **Drain:** under `--parallel`, `shutdown` marks `shut`, drains under the core lock (guard
 dropped before invoke), then farms tasks to the pool via **`run_workers_on_pool`** — the farm/inline/join/
 flush core **extracted verbatim** from `run_parallel_nursery` (a pure refactor; that path stays byte-identical).

@@ -27,7 +27,7 @@
 >   NOT special-cased; it only must never PANIC and never HANG (it completes or faults `deadlock` cleanly,
 >   guarded by `parallel_cross_nursery_contended_never_panics`). This is the same semantic gap the
 >   cooperative flatten would close.
-> - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels → the same program still
+> - **Cooperative (`--serial`)** still serializes nested nursery levels → the same program still
 >   faults `deadlock` there. The cooperative-engine flatten (§5 "Cooperative") is a **separate, later
 >   commit**; the design below still applies. Workaround: case C (siblings in one nursery).
 > - **Case B — inline outer-body *blocking* recv (§4 last paragraph):** the fix is **wake-side only**.
@@ -194,8 +194,8 @@ than the nesting fix.)
    green; the global predicate must fault, never hang.
 3. **Structured cancellation unchanged** — first-fault cancels siblings, `defer` ordering, `?`-escape
    (B3.4). Join records carry the existing `cancel` flag.
-4. **Two-engine parity** — cooperative and `--parallel` identical stdout; the frozen interp is the
-   reference (it has no fibers, so its sequential semantics are the parity floor).
+4. **Two-engine parity** — the serial `--serial` VM and `--parallel` produce identical stdout; the serial
+   VM is the reference (it has no fibers, so its sequential semantics are the parity floor).
 
 ## 7. Recommended path
 

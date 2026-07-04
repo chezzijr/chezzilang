@@ -532,9 +532,9 @@ recursive match) is the bulk of the win. The fused hot loops (`loop`) and alloc/
 
 **The Eq parity gotcha (pinned by test):** the generic numeric `Eq` is **lossy f64**
 (`as_f64(a)==as_f64(b)`), so `2^53 == 2^53+1` is **true**. The quickened int path deliberately
-replicates that loss rather than doing exact `x==y` — exactness would diverge from the interpreter and
+replicates that loss rather than doing exact `x==y` — exactness would change observable output and
 break two-engine parity. `quicken_eq_preserves_lossy_f64_semantics` locks the behavior; any future
-"fix" to int equality must change the generic path + interp together, as a separate non-perf change.
+"fix" to int equality must change the generic path as a separate non-perf change.
 
 **Behavior-preserving:** 6 new VM/parity guards (`quicken_*`: table presizing + prefix-sum,
 lossy-f64 Eq, small-int Eq, int→float→str deopt, stack arith/compare fast path, overflow/div-zero

@@ -12,7 +12,7 @@ A fast, statically-typed, Python-feel scripting language. Hand-built in Rust.
 ## Goals (ranked)
 
 1. **Self-contained** — the guts (lexer, parser, type checker, VM, GC) are hand-built on Rust `std` only: no transpiling, no codegen shortcuts, minimal dependencies.
-2. **Usable tool** — bytecode VM for ~10x over a tree-walker; real modules so programs split into files.
+2. **Usable tool** — bytecode VM (the original M5 baseline was ~10× over the then-existing, now-removed tree-walker); real modules so programs split into files.
 3. **LLM-friendly** — static types as guardrails, explicit signatures, machine-readable compiler errors, small orthogonal grammar.
 
 Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
@@ -22,7 +22,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 | Decision | Choice |
 |----------|--------|
 | Implementation host | **Rust** |
-| Execution model | **Tree-walk first → bytecode stack VM** |
+| Execution model | **Bytecode stack VM** (a tree-walk interpreter was the historical bootstrap, since removed) |
 | Type system | **Static, local inference** (explicit param types; inferred locals *and* fn return types) |
 | Surface syntax | **Indentation blocks** (Python-feel; lexer emits INDENT/DEDENT) |
 | Errors | **Result/Option + `?`** (errors as values, no hidden control flow) |
@@ -154,13 +154,14 @@ pip/wheels) is captured in [`docs/ffi-and-packaging.md`](ffi-and-packaging.md).
 **`yield`/generators** were originally a deliberate non-goal (lazy sequences are written as adapter
 structs over `Iterator[T]`, Rust's `Map`/`Take` model). They are now a **complete, VM-only**
 feature: a `fn` declaring `-> Iterator[T]` may `yield` values; calling it returns a
-suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds). It is
-VM-only — the frozen tree-walk interpreter rejects `yield` (it cannot suspend a native Rust call),
-so two-engine parity is **waived** for generators. The adapter-struct model remains the
-parity-clean, recommended way to write lazy sequences. Live status is tracked in
+suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds).
+Generators run on **both** VM engines (serial `--serial` and the default M:N). The only caveat is a
+runtime one, not a parity waiver: a **live** generator is not sendable across a task airlock on the M:N
+engine (it holds a VM frame), so passing one over a channel/`spawn` faults gracefully. The adapter-struct
+model remains the recommended way to write lazy sequences. Live status is tracked in
 [`PROGRESS.md`](../PROGRESS.md).
 
-**`Iterable[T]` protocol + `.iter()`** (additive over the `Iterator[T]` iteration model, all three
+**`Iterable[T]` protocol + `.iter()`** (additive over the `Iterator[T]` iteration model, both
 engines parity-clean). `Iterable[T]` promises `.iter() -> Iterator[T]` (a fresh COMPOSABLE cursor);
 `Iterator[T]` additionally promises `.next()`, so every `Iterator` IS `Iterable` (its `iter()` returns
 self). Every built-in collection (`list`/`set`/`map`→keys/`str`→char/`bytes`/`bytearray`→int) now
@@ -369,7 +370,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   parameter DEFAULT value (`fn g(a: float = 3)`), a
   `-> float` return, a `float` struct field, native/`extern` `double` params, and a **mixed-numeric-literal**
   collection (a list/map literal with ≥1 float literal infers `List[float]`/`Map[_, float]`). The compiler
-  emits a real conversion (`Op::CoerceFloat`; the interp applies an equivalent helper) so the checked path
+  emits a real conversion (`Op::CoerceFloat`) so the checked path
   and the parity harness are byte-identical across both engines. Lossy conversions stay type errors
   (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`, `int`→`float` across a **newtype**
   boundary). Widening is **scalar-at-the-sink**: a compound/nested float annotation is NOT widened —
@@ -473,7 +474,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > type-side form. Inference is unchanged: `Box.Has(5)` (no turbofish) still infers `Box[int]`; the
 > turbofish is needed only when args can't bind the params (`Box[int].Empty`, multi-param enums). The
 > change is in the checker's resolution + the value's inferred type args only — runtime is type-erased,
-> so all three engines stay byte-identical.
+> so both engines stay byte-identical.
 
 > **Turbofish at the declaration site — member-side (PART 2, landed).** Completes the rule: a **member**
 > declares its OWN type args (`fn make[U]`, `fn first[A, B](self, …)`), pinned on the member and
@@ -493,8 +494,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > now needs parens on any receiver — `(recv.name[k])(args)` (the bare-ident receiver already required
 > this); the numeric form `arr[0].handlers[0](20)` still parses as index-then-call (an int is not a
 > type). A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
-> Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so VM, interp, and
-> `--parallel` are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
+> Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), so both engines
+> (serial `--serial` VM and the default M:N VM) are byte-identical (`examples/turbofish_member_args.chz`). Still out of scope: static
 > methods on `newtype` and associated protocol requirements (`T.zero()`) — the latter **SHELVED**
 > after two rejected attempts (see `docs/future.md` §3.13).
 
@@ -511,7 +512,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > (`e: Stack[str] = Stack([])`) and a return-only param of a generic fn (`xs: List[int] = empty()` for
 > `fn empty[T]() -> List[T]`). Checker-only (a new expected-type hint threaded into the ctor/call
 > inference, consumed by `unify` before the un-inferable-closure-param probe); runtime is type-erased,
-> so VM, interp, and `--parallel` stay byte-identical. **Remaining gap:** the hint does not yet reach a
+> so both engines stay byte-identical. **Remaining gap:** the hint does not yet reach a
 > generic ctor nested inside a **container literal** (`a: List[Heap[int]] = [Heap([], …)]`) — that
 > outer expression is a list literal, not a call, so annotate the closure params or turbofish there.
 
@@ -519,10 +520,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
 > and expose it as a module member, instead of reimplementing everything in Chezzi.
 > - ✅ **`NativeFn`** — a Rust fn registered as a callable Chezzi value (member of a native module),
->   added to both `interp::Value` (`Native`) and `vm::Obj` (`Native`); parity-tested.
+>   carried by `vm::Obj` (`Native`); parity-tested.
 > - ✅ **`Host` trait** (`src/native/mod.rs`) — the engine-agnostic context a native fn uses
 >   (`arg_int`/`arg_float`/`arg_str`, stdout/stderr/stdin, args/env/cwd) so a binding is written
->   once and runs on both the interp (Rc values) and the VM (heap handles). Returns flow back as an
+>   once and runs on the VM (heap handles). Returns flow back as an
 >   engine-neutral `NativeRet`, lowered to each engine's value *after* the call (GC-safe).
 > - **Dependency policy:** the **core** (lexer/parser/checker/compiler/VM/GC) is Rust `std` only.
 >   The **runtime** links a small fixed set of crates *unconditionally* (no Cargo features): `regex`
@@ -530,8 +531,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   + `std.net`), and `libffi`/`libloading` (the Level-3 C-ABI FFI). See `Cargo.toml`.
 > - ✅ **Level-3 dynamic C-ABI (v1)** — an `extern "lib":` indentation block of statically-typed C
 >   signatures, bound at module init by `dlopen`+`dlsym` and called at runtime via `libffi`, reusing
->   the SAME `Host`/`NativeRet` seam (so VM + interp + `--parallel` produce identical output).
->   `extern` fns become ordinary module globals (`vm::Obj::Cffi(Arc<Cffi>)` / `interp::Value::Cffi`),
+>   the SAME `Host`/`NativeRet` seam (so both VM engines produce identical output).
+>   `extern` fns become ordinary module globals (`vm::Obj::Cffi(Arc<Cffi>)`),
 >   so the normal call-dispatch and `infer_named_call` type-check paths work with zero special-casing.
 >   The checker enforces **C-marshallability** (int/float/bool/str/ptr params + returns, void return,
 >   the fixed-width ints, and a flat-scalar struct by value) on the resolved type, so a non-marshallable
@@ -680,12 +681,14 @@ source.chz
   → Parser       (Pratt expr parsing + recursive-descent stmts) → AST
   → Desugar      (AST → AST lowering: pipe, optional chaining/`??`, comprehensions, defaults)
   → Checker      (local inference; explicit fn sigs; machine-readable errors) → typed AST
-  → [Phase 1] Tree-walk interpreter        ← reference semantics, working lang fast
-  → [Phase 2] Bytecode compiler → Stack VM (+ mark-sweep GC)
+  → Bytecode compiler → Stack VM (+ mark-sweep GC)
 ```
 
-Each component is an isolated, separately-testable module. Golden tests assert the tree-walker
-and the VM produce identical output.
+(Historically a Phase-1 tree-walk interpreter ran first as the reference semantics; it has since been
+removed — the bytecode VM is the sole engine.)
+
+Each component is an isolated, separately-testable module. Golden tests assert the two VM engines
+(the serial `--serial` VM and the default M:N VM) produce identical output.
 
 ### Repo layout
 
@@ -696,9 +699,8 @@ src/
   ast/          # node definitions
   desugar/      # AST → AST lowering (pipe, ?., ??, comprehensions, defaults)
   checker/      # type inference + checking
-  interp/       # tree-walk interpreter (Phase 1)
-  compiler/     # AST → bytecode (Phase 2)
-  vm/           # stack machine
+  compiler/     # AST → bytecode
+  vm/           # stack machine (sole engine; serial + M:N schedulers)
   gc/           # mark-sweep
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
@@ -752,7 +754,7 @@ tests/          # Rust unit + golden tests
 ## Verification
 
 - **Per-phase Rust unit tests** — lexer token streams, parser AST shapes, checker accept/reject cases.
-- **Golden tests** — `examples/*.chz` + `*.expected`; harness runs each through both tree-walker and VM, asserts identical stdout.
+- **Golden tests** — `examples/*.chz` + `*.expected`; harness runs each through both VM engines (serial `--serial` and default M:N), asserts identical stdout.
 - **Manual end-to-end** via the `chezzi` CLI subcommand for each phase (`tokens`/`ast`/`run`).
 - **LLM-codegen eval** — feed the grammar cheatsheet + `--errors=json` to a model, measure first-try compile rate; failures feed grammar/error-message work.
 - **Perf check** — tracked against CPython via the `benches/` harness (`benches/run.chz`, hyperfine);

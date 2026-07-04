@@ -86,7 +86,7 @@
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
-# `yield <expr>` (generators, VM-only) — always carries a value. Legal only inside a
+# `yield <expr>` (generators) — always carries a value. Legal only inside a
 # function declaring `-> Iterator[T]` (checker-enforced, not grammar). Suspends the generator.
 <yieldStmt> ::= "YIELD" <expr> "NEWLINE"
 
@@ -578,8 +578,8 @@
 # A "STR" token is the whole string literal (the lexer has already stripped quotes + resolved
 # backslash escapes). Its `{expr}` / `{expr:spec}` interpolations — including the Python-style format
 # mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are parsed in a
-# SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation /
-# interp::interpolate), so they need NO production here.
+# SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation),
+# so they need NO production here.
 # A "BYTES" token is a whole `b"..."` / `b'...'` byte-string literal (the lexer stripped the `b`
 # prefix + quotes and resolved escapes, incl. `\xHH`; no `\u`, no interpolation — see syntax.md).
 # A "RAWSTR" token is a whole `r"..."` / `r'...'` (or triple `r"""..."""` / `r'''...'''`) raw-string

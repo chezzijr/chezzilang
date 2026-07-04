@@ -713,7 +713,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # but reusing one exhausted cursor yields nothing on a second pass. A cursor IS sendable across
 # `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
-# `yield` / generators (VM-only — the frozen interpreter rejects `yield`, so parity is waived). A fn that declares
+# `yield` / generators (run on both VM engines; a live generator is just not sendable across a task airlock on M:N). A fn that declares
 # `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a
 # value. It runs lazily, suspending at each `yield` and resuming on the next `.next()`.
 fn count_up(n: int) -> Iterator[int]:
@@ -1968,14 +1968,11 @@ prints `5.0`. An **unknown type char** or trailing junk in the spec, and a **typ
 (e.g. `{name:d}` on a string, `{x:.2f}` on a string, zero-pad on a non-number), are both reported as
 **errors before any output** — surfaced with a runtime-error prefix and *not* caught by `chezzi check`
 (interpolation specs are validated when the program starts running, after the type-check phase). The
-spec is parsed once, shared by both engines (`src/fmtspec.rs`), so the VM and interpreter produce
+spec is parsed once, shared by both engines (`src/fmtspec.rs`), so both engines produce
 byte-identical output. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
 slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
-spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`. (Edge case: on a *malformed* spec
-over a side-effecting expression, the interpreter evaluates the expression before erroring while the
-VM errors at compile time, so observable stdout-before-error can differ; well-formed programs are
-always byte-identical.)
+spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
 
 **Float formatting (plain) never uses scientific notation.** A bare float — `print(x)`, `str(x)`, or
 a `{x}` interpolation with no spec — always renders its **full decimal expansion**, never an `e`
@@ -2204,8 +2201,8 @@ fn fetch_all(urls: List[str]):
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
-  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on all
-  engines** — the cooperative default, the interpreter, and `--parallel` (the M:N multi-channel blocking
+  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on both
+  engines** — the serial `--serial` VM and the default M:N VM (the M:N multi-channel blocking
   park, including `timer` arms, has landed). See
   [`concurrency.md §6d`](concurrency.md) and `examples/wait_select.chz`.
 - **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
@@ -2307,7 +2304,7 @@ a non-numeric arg like a `str`/`bool` is still rejected). A no-return signature 
 **flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
 other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-
 field/…) with a *not C-marshallable* error. Calls run inline (a slow C call pins its worker under
-`--parallel`) and produce identical output on all three engines (VM / `--interp` / `--parallel`).
+`--parallel`) and produce identical output on both engines (serial `--serial` / default M:N).
 
 **Structs by value.** Name a Chezzi `struct` as an extern param and/or return type to pass/return a C
 struct **by value** (not by pointer). The struct's **field order + types define the C layout** — libffi
@@ -2646,7 +2643,7 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
   import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` (or `math.sqrt`) are reached
   exactly as before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`;
-  `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **three-engine
+  `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **both-engine
   byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
   hand-built `native_module_sig` arms for the five pure-function modules. (Checker-side metadata a
   `native fn` decl can't express — `math.pi`/`e` module values, `math.abs`'s numeric polymorphism, and

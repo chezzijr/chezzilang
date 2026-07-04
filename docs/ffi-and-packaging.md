@@ -77,7 +77,7 @@ qualified/imported return struct whose fields are typed via the defining module'
 (`core/cdefs.chz`: `type Half = int32` + `struct DivT{quot:Half; rem:Half}`; `main`:
 `extern fn div(...) -> cdefs.DivT`) marshals correctly — a colliding/invisible `Half` in the importer
 can't drop the field. A cyclic alias chain is a clean "not C-marshallable" error (never a hang).
-(3-engine parity: VM / `--serial` / interp; verified silent-safe — the prior bug returned void with
+(2-engine parity: serial `--serial` / default M:N; verified silent-safe — the prior bug returned void with
 `check` passing.) There is exactly **one** extern-type resolver — the checker — for single-file source
 and multi-file projects alike; the backends do zero type resolution of their own, so a second resolver
 cannot drift.
@@ -106,9 +106,8 @@ struct, or nested callback) marshals a Chezzi closure into a libffi `ffi_closure
 receives the trampoline's code address as a `void*`; when C invokes it (synchronously, *during* the
 extern call), the trampoline reads the C scalar args, re-enters the engine through one engine-neutral
 seam (`Host::invoke_callback`, keyed by arg index so no engine `Value` leaks across the FFI layer),
-and writes the Chezzi result back into C's return slot. Wired on **both** engines (VM via
-`guarded`+`invoke_value`; interp via a callback-capable `InterpCallbackHost` that re-enters
-`call_value`) — two-engine parity asserted, and consistent under `--parallel` (a sync callback fires
+and writes the Chezzi result back into C's return slot. Wired on the VM (via
+`guarded`+`invoke_value`) and consistent under `--parallel` (a sync callback fires
 on the calling worker thread, no cross-thread hand-off). The closure is freed when the extern call
 returns (sync scope ⇒ **no** GC rooting). Example:
 
@@ -126,7 +125,7 @@ CPython's `ctypes` instead swallows a callback exception to stderr and returns `
 
 **Hazards this slice handles** (the synchronous subset of the UB-class list): the **unsafe executable
 trampoline** (libffi `ffi_closure`), **engine re-entrancy** (the `Host::invoke_callback` seam solves
-both `&mut Vm` aliasing and VM↔interp parity), **inbound marshalling** (`CType::Callback{params, ret}`
+the `&mut Vm` aliasing), **inbound marshalling** (`CType::Callback{params, ret}`
 + checker support, scalars only), and **unwind safety** (the catch+re-raise above). **Cross-thread
 invocation** and **GC rooting across the boundary** are *not* needed here because the callback can only
 fire inside the same `ffi_call` on the same thread — they are the next deferred milestone (below).
@@ -238,9 +237,8 @@ crate** (`tch`/`candle`/`burn` itself) exposed through Level-2 — *once the sea
 
 One feature unlocks every handle-based Rust/C library. Four layers:
 
-1. **Value layer** — a new heap object on each engine:
+1. **Value layer** — a new heap object:
    - VM: `Obj::Native(Arc<dyn Any + Send + Sync>)`
-   - interp: `Value::Userdata(Rc<dyn Any>)`
    - GC trace = no-op (no Chezzi children); GC collect drops the `Arc` → Rust `Drop` frees the
      tensor / GPU memory. Refcount lifecycle for free.
 2. **Seam layer** — extend the airlock (`src/native/mod.rs`):
@@ -333,7 +331,7 @@ proven (`std.str`/`std.cmp` are Chezzi). This is npm-for-source — ship it firs
 
 ### 6.2 Native packages — the hard part
 **Today: native = edit `src/native/` + `Cargo.toml` + recompile the whole binary.** The Level-2 seam is
-statically linked. You **cannot** `chezzi add burn` against an installed interpreter. There is no
+statically linked. You **cannot** `chezzi add burn` against an installed Chezzi binary. There is no
 mechanism for distributable native packages — this is the real gap, bigger than the userdata variant.
 
 A registry serving native packages needs one of:

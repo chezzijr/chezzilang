@@ -494,7 +494,7 @@ dirname/split/splitext) and Go `path.Clean` (`normalize`). `import std.path` (or
 ### `std.datetime` — civil-calendar date/time (UTC-only)
 Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native
 `std.time` clock (`time.now()` only). Built from pure integer math (Howard Hinnant's branch-free
-civil-calendar algorithms), so it is **identical across all three engines**. `import std.datetime`
+civil-calendar algorithms), so it is **identical across both engines**. `import std.datetime`
 (or `as dt`).
 
 **CONTRACT — load-bearing semantics (these are contractual, not incidental):**
@@ -543,7 +543,7 @@ Formatters are **fixed** (no `strftime` pattern in v1). The `DateTime` struct li
 
 ### `std.collections` — generic single-threaded data structures
 Pure-Chezzi generic structs over `T` built on the builtin `list`/`map`, so they are **identical
-across all three engines** (interp / VM / `--parallel`). `import std.collections` (or `as col`).
+across both engines** (serial `--serial` / default M:N). `import std.collections` (or `as col`).
 
 **EMPTY SEMANTICS (load-bearing, consistent):** every removal/peek returns `Option[T]` — an empty
 container yields `None`, never a fault, matching the builtin `list.pop() -> Option[T]`.
@@ -605,8 +605,8 @@ on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no
 
 ### `std.concurrency.collection` — thread-safe collections over `RwShared`
 Pure-Chezzi generic structs wrapping the `RwShared[Map[...]]` runtime cell (many concurrent readers
-**or** one exclusive writer), so they are **identical across all three engines** (interp / VM /
-`--parallel`). `import std.concurrency.collection` (or `as col`). This is the **first nested std
+**or** one exclusive writer), so they are **identical across both engines** (serial `--serial` /
+default M:N). `import std.concurrency.collection` (or `as col`). This is the **first nested std
 module** — the dotted path resolves to `std/concurrency/collection.chz` with no special-casing.
 
 **Why over raw `RwShared`:** raw `read`/`write` closures are verbose, and the **compound** mutations

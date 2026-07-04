@@ -32,7 +32,6 @@ exactly Go's value proposition.
 
 **Implementation shape**
 - Per-frame deferred-call stack, drained LIFO on *every* frame exit including unwind.
-  - Interp: drain in the `Flow` / propagating channel path **and** the `recover` snapshot/restore path.
   - VM: drain at `Return` **and** inside the handler-stack unwind (`PushHandler`/`PopHandler` already exist).
 - **Arg-evaluation timing:** evaluate `defer` arguments *at the `defer` statement* (Go semantics),
   not at exit. Less surprising; the deferred call closes over already-evaluated values.
@@ -76,9 +75,10 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators have since landed as
    a complete, VM-only feature** (was a permanent non-goal): a `fn` declaring `-> Iterator[T]`
    may `yield`; the call returns a suspendable generator (one-shot cooperative coroutine, own private
-   frame/stack swapped into the VM, resumed by an intrinsic `.next()`). VM-only — the frozen
-   interpreter cannot suspend a native Rust call and rejects `yield`, so two-engine parity is waived
-   here. The adapter-struct pattern stays the parity-clean default for lazy streaming.
+   frame/stack swapped into the VM, resumed by an intrinsic `.next()`). Generators run on **both** VM
+   engines (serial `--serial` and default M:N); the only caveat is runtime, not a parity waiver — a
+   **live** generator holds a VM frame and so is not sendable across a task airlock on the M:N engine
+   (passing one over a channel/`spawn` faults gracefully). The adapter-struct pattern stays the default for lazy streaming.
 4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
    `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
    dropped. `examples/concat_merge.chz`.
@@ -145,7 +145,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     "can-lower" boundary**, so every run half-covers the lowering surface and a prosecutor finds the next
     axis (cross-module call, `spawn:`/`parallel:` body, first-class value / `defer` (`g := make; g()`),
     inferred-T through a container `xs: List[T]`, non-leading bound param). Each shape either crashes the
-    compiler or diverges VM↔interp. Making it sound needs a *complete* lowering contract enforced in one
+    compiler or diverges the two VM engines. Making it sound needs a *complete* lowering contract enforced in one
     checker gate — a real design pass, not another blind run.
     **Current behavior on main (the sharp edge): a no-`self` protocol requirement is DECLARABLE but
     UNUSABLE.** Main does **not** reject the no-`self` rule — `protocol Default: fn default() -> Self`
@@ -201,7 +201,7 @@ built-in test runner, LSP.
 > `loop` (no calls) is 1.32×, `fib` (all calls) is 3.54×. The M19 levers below are marked landed;
 > the **ranked not-started backlog is "Post-M19 next levers"** further down.
 
-Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. The two real costs are
+The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tree-walker, near the safe-match-dispatch floor; the current live comparison is vs CPython (see `docs/benchmarks.md`). The two real costs are
 **dispatch count** and **name lookup** — with **per-call allocation** a close third on call-heavy code.
 
 **Cheap — do first:**
@@ -314,7 +314,7 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   the bytecode `Op::Call` path flattens. The two coexist: HOFs nest a sub-loop when they must, the
   common recursive/bytecode call no longer does. Cheap warm-up that stands alone even without
   flattening: **hoist the per-call `Arc::clone`** (raw-pointer/restructure the program borrow) — a free
-  few-percent on every call-bound bench. Blast radius is **VM-only** (the frozen interp is untouched);
+  few-percent on every call-bound bench. Blast radius is **VM-only**;
   parity is testable against the existing fib / recover-in-recursion / defer-in-recursion / deep-
   recursion-overflow goldens. Bigger than a Medium item, smaller than the register-VM rewrite below.
 - **NaN-boxing the `Value` — BLOCKED by full 64-bit ints (2026-06-12 reality-check).** The goal
@@ -325,8 +325,7 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
   the taggable range, plus a semantics-sensitive overflow path — i.e. *not* behavior-preserving for
   free, and an uncertain net win on the very int-heavy benches it targets. **Lua 5.4 made exactly
   this call** — it stayed at a 16-byte tagged union *because* it added 64-bit ints. Blast radius is
-  **VM-only** (the frozen interp has its own `Rc`-based `Value` in `src/interp/value.rs`, untouched),
-  but it's still a milestone-sized design spike (box-big-ints scheme + measure), not a clean
+  **VM-only**, but it's still a milestone-sized design spike (box-big-ints scheme + measure), not a clean
   behavior-preserving session. Park until the int model is up for revisiting.
 - **Register VM** instead of stack — fewer ops, less stack traffic. Effectively a VM rewrite; only
   if dispatch count is still the wall after superinstructions.
@@ -402,8 +401,8 @@ Current: ~4–6.5× over the tree-walker, near the safe-match-dispatch floor. Th
 6. **HOF borrow-release clone (new finding).** List `map`/`filter`/`fold` do `self.heap.get(h).clone()`
    to release the heap borrow before `invoke_value(&mut self, …)` — an N×16 B copy per HOF call. A `Vm`
    split (`&mut ExecState` + `&Heap`) lets the borrow coexist. Structural refactor, not a one-session lever.
-7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — mandated by the interp's snapshot parity;
-   `alloc_char` (Phase 3) already halved the string case. Parity-blocked.
+7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — mandated by the for-loop's observable
+   snapshot semantics (identical on both engines); `alloc_char` (Phase 3) already halved the string case. Behavior-blocked.
 8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
 
 **Land order:** **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete** as **JIT groundwork** (the positional

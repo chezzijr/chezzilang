@@ -15,11 +15,12 @@ the techniques, who uses them, and the ranked plan for Chezzi.
 
 ## The blind spot in our current setup
 
-Chezzi already has a strong **VM↔interp parity oracle**: every golden test asserts the bytecode VM and
-the tree-walk interpreter produce byte-identical output. This is powerful — but it has one structural
-blind spot:
+Chezzi has a **two-VM parity oracle**: every golden test asserts the serial `--serial` VM and the
+default M:N VM produce byte-identical output. This is a real differential for *concurrent* programs (it
+catches scheduler-dependent divergence) — but it has one structural blind spot:
 
-> **The two engines were co-developed, so they share bugs.** Differential testing catches
+> **Both engines are the same `Vm`; for sequential programs they run identical bytecode.** So for
+> non-concurrent code, parity is a determinism check, not a differential — it catches
 > *divergence*, never *shared wrongness*.
 
 Every bug found in the June 2026 hunt was invisible to parity because **both** engines had it:
@@ -33,7 +34,7 @@ The remedy is twofold and is the core of this strategy:
 
 ## What we already have
 
-- **VM↔interp parity oracle** — `assert_parity` / golden `examples/*.chz` + `.expected` (~2736 unit tests). Catches engine divergence.
+- **Two-VM parity oracle** — `assert_parity` / golden `examples/*.chz` + `.expected` (~2736 unit tests). Catches serial-vs-M:N scheduler divergence (a determinism check for sequential code, which runs identical bytecode on both engines).
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
@@ -84,7 +85,7 @@ cases.
 **Tier 2 — structural, medium effort:**
 
 4. **`proptest` properties:** `parse∘print == id`; peephole on == off; const-fold result == unfolded
-   result; `--serial` == default == interp over *randomly generated* programs (extends parity beyond
+   result; `--serial` == default over *randomly generated* programs (extends parity beyond
    the curated corpus).
 5. **Generative grammar fuzzer** from `grammar.bnf` → random *valid* programs → run both engines +
    CPython. Complements #1 (which targets the error paths) by targeting the *accept* paths.
@@ -111,7 +112,7 @@ both *crashes* (fuzz) and *wrong answers* (differential), the two techniques tha
 parity blind spot. Run them unattended; triage findings through the existing
 `auto-task` → `post-merge-gate` pipeline.
 
-Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the interpreter semantics are
+Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the VM semantics are
 correct (it must produce byte-identical results to the VM). Standing up Tier 1 first — so the
 reference semantics are fuzzed and differentially validated — de-risks the JIT before a line of it is
 written.
@@ -130,8 +131,8 @@ written.
 code + simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative
 bounds (it *avoids* overflow, deep nesting, aliasing). It emits **no** generics, structs, enums, `match`,
 closures/HOF, protocols, `Result`/`Option`/`?`, recursion, or modules. So every bug in those features is
-invisible to it. The VM↔interp **parity** oracle is also blind here: the two engines were co-developed,
-so they share bugs — parity catches *divergence*, never *shared wrongness*. A bug that both engines agree
+invisible to it. The two-VM **parity** oracle is also blind here: both engines are the same `Vm`
+running identical bytecode for this sequential code, so they share bugs — parity catches *divergence*, never *shared wrongness*. A bug that both engines agree
 on **and** lives in an un-generated feature is undiscoverable by automation. That is exactly where the
 real bugs have been.
 
@@ -171,7 +172,7 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
    - **Run on BOTH engines** (`run` and `run --serial`) **and** `check`. Divergence = bug. Where the
      semantics should match Python, diff against `python3`.
    - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite
-     spec) + ACTUAL (quoted) + VM/interp divergence? + severity. No speculation; "clean" if an angle
+     spec) + ACTUAL (quoted) + serial/M:N divergence? + severity. No speculation; "clean" if an angle
      yields nothing, with the angles covered listed.
 4. **Triage each confirmed bug** through `auto-task` (research → plan → TDD → prosecute/defend) →
    merge → `post-merge-gate`. Batch by file seam (most checker bugs touch `src/checker/mod.rs` in
@@ -239,7 +240,7 @@ reports the **seed + the raw triggering input** (the input *is* the artifact —
 reproducible with `panicfuzz --seed N`.
 
 **Parity is N/A for this lever** — it exercises only the front-end's crash-safety; it never runs the
-VM/interp, so the two-engine parity bar does not apply.
+VM, so the two-engine parity bar does not apply.
 
 How to run:
 

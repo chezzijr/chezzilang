@@ -236,8 +236,8 @@ n := ch.len()              # current queued count
   keep its copy.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
 - **`try_recv() -> T?` is shipped (A1, both engines).** The non-blocking sibling of `recv`: it
-  pops-or-returns-`None` and never blocks, faults, or suspends a fiber — so it is identical under the
-  sequential interpreter and the VM (parity-tested). With B1/B2's blocking `recv` on the VM, a fiber
+  pops-or-returns-`None` and never blocks, faults, or suspends a fiber — so it is identical under
+  both engines (serial `--serial` and default M:N) (parity-tested). With B1/B2's blocking `recv`, a fiber
   can also drain a mailbox's residue after a blocking `recv` resumes. `recv -> T` stays primary; reach
   for `try_recv` to poll without guarding on `len()`.
 
@@ -409,8 +409,8 @@ It is **level-triggered**: any `recv` at or after the deadline yields `true` (th
 once). Delivery is handled at `recv` time, in the receiver's own engine — so a `timer` created at the top
 level can be `recv`'d inside a `--parallel` child. On `--parallel` the receiver parks and a background
 job (on the netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false
-deadlock; the cooperative VM and the interpreter inline-sleep to the deadline (single-threaded, like their
-`sleep_ms`). Observable output is identical across all three engines.
+deadlock; the cooperative `--serial` VM inline-sleeps to the deadline (single-threaded, like its
+`sleep_ms`). Observable output is identical across both engines.
 
 > **v1 limitation:** a `timer.recv()` reached *inside a native callback* (a `Shared.update` closure, a
 > list-HOF, an `Executor` task) under `--parallel` pins that worker for the timeout rather than demoting a
@@ -419,15 +419,15 @@ deadlock; the cooperative VM and the interpreter inline-sleep to the deadline (s
 
 ---
 
-## 6d. `wait` — racing multiple channel receives *(shipped on all three engines)*
+## 6d. `wait` — racing multiple channel receives *(shipped on both engines)*
 
 > **Status:** the surface and semantics below are **locked** (brainstormed 2026-06) and **implemented on
-> all three engines** (2026-06-13): lexer→parser→checker→interp→VM, with non-blocking arms (`else:`, an
-> already-ready arm, a `timer` arm) AND the **blocking multi-channel park** working in **every** engine —
-> the cooperative scheduler, the interpreter (sequential poll/inline-sleep), and now the **M:N
+> both engines** (2026-06-13): lexer→parser→checker→VM, with non-blocking arms (`else:`, an
+> already-ready arm, a `timer` arm) AND the **blocking multi-channel park** working in **both** engines —
+> the serial `--serial` cooperative scheduler (sequential poll/inline-sleep) and the **M:N
 > (`--parallel`) blocking park** (landed 2026-06-13, the M:N park notes below). A blocking `wait` under
 > `--parallel` now parks one fiber on N channels (woken by the first sender, swept out of the other
-> buckets) instead of faulting. See `examples/wait_select.chz` (byte-identical across VM/interp/`--parallel`).
+> buckets) instead of faulting. See `examples/wait_select.chz` (byte-identical across serial `--serial` / default M:N).
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
 and run that arm. Because Chezzi channels are **unbounded** (a `send` never blocks), `wait` is purely
@@ -466,15 +466,15 @@ exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park the fiber on *all*
    live arm channels and re-poll on the first wake.
 
-**Implementation notes.** *(Done on all three engines. A new `Op::WaitPoll` holds the N arm channel
+**Implementation notes.** *(Done on both engines. A new `Op::WaitPoll` holds the N arm channel
 handles on the operand stack, polls source order, and jumps to the chosen arm's body / `else`, handles a
 live `timer` arm (see below), faults all-closed, or parks. The cooperative multi-channel park
 files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index out of the other
 buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` token.)*
 
 > **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
-> differently per engine. The cooperative VM + interp are single-threaded, so they **inline-sleep** to the
-> soonest deadline then take the timer arm — nothing can `send` during the sleep, so the source-order
+> differently per engine. The cooperative `--serial` VM is single-threaded, so it **inline-sleeps** to the
+> soonest deadline then takes the timer arm — nothing can `send` during the sleep, so the source-order
 > "first ready wins" rule is preserved. The M:N engine (`--parallel`) must **not** inline-sleep: that would
 > pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
 > `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel (guarded by an
@@ -501,9 +501,9 @@ buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` to
   while the fiber heap is live (mirrors `Disp::Park`). The single-channel `recv` park stays the **1-key
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
-- *Cooperative VM / interp* (sequential): poll arms once in source order; first ready wins; else if `else`,
+- *Cooperative `--serial` VM* (sequential): poll arms once in source order; first ready wins; else if `else`,
   run it; else if any arm is timer-backed, inline-sleep to the soonest deadline and take that arm; else
-  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the VM holds.
+  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the M:N engine holds.
 - *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
   `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register all N arm
   channels in `demoted_chans`, poll all N queues source-order under the core lock on a bounded
@@ -579,7 +579,7 @@ background canceller task — so a self-polling timeout loop stops on time ident
 engine. (`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)
 
 **Cooperative contract (by design).** A token *signals* cancellation; it cannot forcibly interrupt.
-On the single-threaded `--serial`/`--interp` oracles, a pure-CPU loop that never polls `cancelled()`
+On the single-threaded `--serial` oracle, a pure-CPU loop that never polls `cancelled()`
 and never yields runs to completion — a sibling's manual `cancel()` only lands when that sibling gets
 the thread. The default OS-thread engine preempts such a loop. So a *manual* cancel of a non-polling
 CPU sibling **diverges by engine** (this is why `examples/cancel_cpu.chz` carries no golden
@@ -814,7 +814,7 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 |---|------|--------|
 | **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **already enforced** — emergent from the persistent `capture_floors` + the `infer_ident` read gate; pinned by a regression test (`read_captured_closure_through_nested_closure_in_spawn_block_rejected`). |
-| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so the interp runs it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
+| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
 > *Dropped from Group A:* **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the
 > closure in-heap at the drain, so a non-sendable capture is *benign today*; gating it now would
@@ -858,19 +858,15 @@ no host call stack to rebuild. The design (all in `src/vm/mod.rs`):
 - **`std.os.exit` in a child** aborts its siblings and the program (rides the existing `pending_exit`
   hard-halt path, which stays VM-global, not per-fiber).
 
-**Decision — interp B1/B2 is a deliberate NON-GOAL (do not build it).** The tree-walking interpreter
-stays frozen at the **sequential concurrency subset** and serves as the **differential-testing parity
-oracle** for the non-blocking language surface — its real value is catching VM / GC / compiler bugs,
-not running concurrent workloads. Suspendable execution would require stackful coroutines or a full
-CPS rewrite of `eval`: a large, risky cost to cover a narrow slice the oracle does not need. **The VM
-is the sole concurrent engine.** This makes the parity contract *narrowed by design*: the engines
-agree on the sequential subset (including all non-blocking `parallel:`/`spawn`/`Channel`/`Shared`/
-`Executor` programs, byte-identical, parity-tested), while a **blocking `recv` is VM-only** — under
-`--interp` it faults `deadlock` (pinned: `interp::tests::channel_block_chz_faults_deadlock_on_interp`
-vs the VM golden `golden_channel_block_chz_matches_expected`). This is the stated contract, not a bug
-to fix. Note: **A1** (`Channel.try_recv`) shipped on **both** engines after all — being *non-blocking*
-it never suspends, so the interp runs it identically and it stays parity-tested (it is not gated on the
-blocking-`recv` divergence).
+**Decision (historical) — interp B1/B2 was a deliberate NON-GOAL.** The tree-walking interpreter (since
+removed) was kept frozen at the **sequential concurrency subset** as the differential-testing parity
+oracle for the non-blocking language surface — its value was catching VM / GC / compiler bugs, not
+running concurrent workloads. Suspendable execution would have required stackful coroutines or a full
+CPS rewrite of `eval`, a cost the oracle did not need. **The VM is the sole engine.** Today's parity
+contract is between the two VM schedulers (serial `--serial` and default M:N); both run identical
+bytecode for the sequential subset and diverge only in scheduling. (Historically, while the interp
+existed, a **blocking `recv` was VM-only** — under the old `--interp` it faulted `deadlock`; A1
+(`Channel.try_recv`), being non-blocking, ran identically on all engines and stayed parity-tested.)
 
 **Landed (VM):** **B3** OS-thread multicore (the alternative bet, taken — B3.0–B3.6), **B4** real
 `Shared`, **B5** real `Executor` pool (+ A3b) — then **Tier-D** rebuilt `--parallel` as an M:N
@@ -885,8 +881,8 @@ owner stop), plus early-enlisting an outer nursery's siblings so a nested owner 
 queue — runs them. The fix also routes the inline outer-body's own `send`/`close` through the held sched
 (so they wake an enlisted, parked sibling), runs a `spawn:` issued *after* the enlist, and makes the
 enlist atomic — see §11 below and [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md).
-The cooperative (default `run`) engine still serializes nested nursery levels, so the
-same program **still faults `deadlock` on `run`** (and on `--interp`); the cooperative-engine flatten is a
+The cooperative `--serial` engine still serializes nested nursery levels, so the
+same program **still faults `deadlock` on `--serial`**; the cooperative-engine flatten is a
 **separate, later commit**. Workaround on the cooperative engine: keep mutually-dependent blocking tasks as
 SIBLINGS in ONE nursery (the doc case C pattern).
 
@@ -908,7 +904,7 @@ SIBLINGS in ONE nursery (the doc case C pattern).
     An uncaught **fault** propagating out of a body cancels-and-reports the implicit nursery's
     unstarted tasks (abnormal exit, not a join). `defer`s run *after* the implicit join (tasks
     complete, then cleanup). The report is emitted **per nursery** (innermost-first — two stacked
-    nurseries print two lines), identically on the VM, the frozen interp, and `--parallel`. The
+    nurseries print two lines), identically on both engines (serial `--serial` and default M:N). The
     **module** top-level nursery is the one exception: an uncaught *top-level* fault leaves it silent
     (it joins only on a clean run to program end). [resolved 2026-06-12 — see PROGRESS.md; previously
     the VM dropped these reports while the interp printed them.]
@@ -916,7 +912,7 @@ SIBLINGS in ONE nursery (the doc case C pattern).
     `spawn` (a compile-time pre-scan, `compiler::block_has_bare_spawn`); bodies without one emit
     byte-identical bytecode to pre-M-C. Implemented as a single join site — the compiler emits the
     opening `Op::EnterNursery` and flags the `Proto`; the VM's `do_return` joins for `return`/`?`/end.
-    Implementation: `src/{checker,compiler,vm,interp}`; tests in `vm::tests::implicit_nursery_*` +
+    Implementation: `src/{checker,compiler,vm}`; tests in `vm::tests::implicit_nursery_*` +
     `examples/implicit_nursery.chz`.
 - **Real concurrency (C5):** the Tier-A cooperative scheduler and/or Tier-C OS threads — true
   multicore and mid-flight task communication, behind the unchanged surface.
@@ -995,12 +991,11 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
 (1) ✅ **B3.4 + B3.5 landed** — a deadlocked default fails loudly (cancellation + nursery-local
 deadlock detection), not hangs; (2) ✅ **per-task overhead dropped** (D1/D2); (3) a still-open
 determinism-contract decision — accept **task-ordered** output (decision F's
-flush-on-join) as the default and demote VM==interp parity to a *sequential-subset* contract run under
+flush-on-join) as the default and demote two-engine (serial-vs-M:N) parity to a *sequential-subset* contract run under
 an explicit `--serial` flag. Serial is **never deleted** — it stays permanently as the deterministic
 parity oracle + reproducible-debug engine. Not a date; a checklist.
 
-- **Reuse map for the implementer:** builtin method dispatch (`list_method`/`map_method` —
-  `src/interp/builtins.rs`, `src/interp/mod.rs`; VM `core_method` — `src/vm/mod.rs`); parameterized
+- **Reuse map for the implementer:** builtin method dispatch (VM `core_method` — `src/vm/mod.rs`); parameterized
   types (`Type::Generic` — `src/ast/mod.rs`; `Ty::List/Map/Set` — `src/checker/ty.rs`;
   `infer_method_call` — `src/checker/mod.rs`); the re-entrant call-into-Chezzi path (list HOFs) for
   `JoinNursery`; block parsing/scoping (`parse_block`, `exec_scoped_block`/`exec_block`, defer-scope
@@ -1066,7 +1061,7 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     differ from the cooperative engine, or it may deadlock-fault. It is NOT gated and NOT special-cased;
     it only must never PANIC and never HANG (completes or faults `deadlock` cleanly — see
     `parallel_cross_nursery_contended_never_panics`). Same gap the cooperative flatten would close.
-  - **Cooperative (`run`) / `--interp`** still serialize nested nursery levels, so the same program
+  - **Cooperative (`--serial`)** still serializes nested nursery levels, so the same program
     **still faults `deadlock`** there — the cooperative-engine flatten is a separate, later commit.
     Workaround: keep mutually-dependent blocking tasks as SIBLINGS in ONE nursery
     (`examples/parallel_cross_nursery_ok.chz`, the doc case C pattern).
