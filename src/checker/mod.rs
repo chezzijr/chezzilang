@@ -2711,6 +2711,24 @@ fn mask_closure_ret(actual: &Ty) -> Ty {
     }
 }
 
+/// Whether a closure arg's SUBSTITUTED expected type (`want`) still has a return that mentions an
+/// unbound method type param (a name in `mtp_names`). Gates the check-pass fallback return-mask
+/// (`infer_generic_method`): masking is safe ONLY while `want`'s return is a still-free `[U]` awaiting
+/// the loop-back's checking-mode recovery. When the return is already concrete — e.g. `fold[U]`'s `U`
+/// pinned to `int` by `init` — this returns `false`, so the closure's real return stays subject to the
+/// fallback assignability check and a wrong-typed body (a str-returning `fold`) is rejected, not
+/// laundered. A non-`Func` `want` returns `false` (nothing to defer).
+fn closure_ret_wants_free_mtp(want: &Ty, mtp_names: &std::collections::HashSet<String>) -> bool {
+    match want {
+        Ty::Func { ret, .. } => {
+            let mut found = Vec::new();
+            ty_collect_params(ret, mtp_names, &mut found);
+            !found.is_empty()
+        }
+        _ => false,
+    }
+}
+
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {

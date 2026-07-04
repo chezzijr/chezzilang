@@ -13707,6 +13707,24 @@ fn bug_d_boundaries_stay_green() {
 }
 
 #[test]
+fn fold_closure_wrong_return_rejected() {
+    // SOUNDNESS (the mask must NOT disable the closure-return check when the method's return-position
+    // `[U]` is ALREADY pinned by another argument): `fold[U]`'s `U` is pinned to `int` by `init` (arg
+    // 0), so the closure's return `fn(U, T) -> U` has the CONCRETE contract `int`. An unannotated
+    // closure whose body is a `str` must be rejected at check time — masking its fallback return to
+    // `Unknown` (which `assignable` laundered) let a str value escape onto an `int`-typed binding.
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): \"wrong\")\n    print(s + 1)\n",
+        "fold",
+    );
+    // The same hole via an explicit annotation: `n: int` must not accept a str-returning fold body.
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    n: int = xs.fold(0, fn(acc, x): \"wrong\")\n    print(n)\n",
+        "fold",
+    );
+}
+
+#[test]
 fn rwshared_read_len_ok() {
     entry_ok(
         "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",

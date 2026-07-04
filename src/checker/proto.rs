@@ -1753,6 +1753,10 @@ impl Checker {
         // Snapshot the params bound after pass 1 (arg-unification + turbofish + iter/index recovery),
         // so the loop-back below only re-enforces bounds on params NEWLY bound from a refined arg.
         let bound_after_pass1: std::collections::HashSet<String> = mmap.keys().cloned().collect();
+        // The method's own type params, used to decide whether a closure arg's substituted expected
+        // return is STILL free (an unbound `[U]`) or has already been pinned to a concrete type.
+        let mtp_names: std::collections::HashSet<String> =
+            mtps.iter().map(|tp| tp.name.clone()).collect();
         let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
@@ -1760,10 +1764,16 @@ impl Checker {
             // against `want`. For a closure whose UNANNOTATED body is a nested free generic call, the
             // prepass return leaks the callee's own `Ty::Param` (`fn(?) -> T`) — NOT the lenient
             // `Unknown` a direct body yields — so it would spuriously mismatch `want`'s still-free
-            // return `[U]`. Mask the closure's fallback return (the body/return is re-enforced by the
-            // checking-mode re-inference inside `check_generic_arg`, and `U` is recovered by the
-            // loop-back below), keeping the fallback check to params + arity.
-            let fallback = if matches!(arg.kind, ExprKind::Closure { ret: None, .. }) {
+            // return `[U]` (`xs.map(fn(x): ident(x))`). Mask the closure's fallback return ONLY when
+            // `want`'s return still mentions an unbound method type param: then the return is deferred
+            // to the loop-back's checking-mode re-inference (which recovers `U` as the CONCRETE `int`),
+            // and the fallback check stays on params + arity. When `want`'s return is ALREADY concrete
+            // — e.g. `fold[U]`'s `U` pinned to `int` by `init` — masking must NOT happen: the closure
+            // body's return is then a real contract the fallback check must enforce, or a wrong static
+            // type (a str-returning `fold` body bound to `int`) would launder onto the value.
+            let fallback = if matches!(arg.kind, ExprKind::Closure { ret: None, .. })
+                && closure_ret_wants_free_mtp(&want, &mtp_names)
+            {
                 mask_closure_ret(actual)
             } else {
                 actual.clone()
