@@ -358,12 +358,17 @@ UNANNOTATED body `ident(x)` was prepass-inferred under `generic_arg_prepass` (`x
 `src/checker/mod.rs`): in `infer_generic_method`, when the arg is a closure **with NO return annotation**,
 (1) unify pass-1 against a RETURN-MASKED copy of its actual `Func` (return → `Ty::Unknown`) so only its
 PARAMETER positions can bind a method type param, and (2) mask the same closure's fallback return in the
-`check_generic_arg` assignability check (the prepass leaked `Param` would otherwise mismatch the still-free
-`U`). This defers `U` to the loop-back's checking-mode re-inference, which recovers it as the CONCRETE
-return (`int`) → `ys: List[int]`, prints `2`. STAYS SOUND: `U` is bound concretely, never degraded to
-`Unknown` (assigning the result to `List[str]`/`List[List[int]]` is still cleanly rejected). An annotated
-closure return (`fn(a,b) -> int: …`) is left authoritative (no mask), preserving the exact arity-mismatch
-diagnostic. KNOWN v1 limit (conscious, not silent): the symmetric FREE-fn/ctor HOF path
+`check_generic_arg` assignability check — but ONLY when the substituted expected return still mentions an
+unbound method type param (`closure_ret_wants_free_mtp`); the prepass leaked `Param` would otherwise mismatch
+the still-free `U`. This defers `U` to the loop-back's checking-mode re-inference, which recovers it as the
+CONCRETE return (`int`) → `ys: List[int]`, prints `2`. STAYS SOUND: `U` is bound concretely, never degraded
+to `Unknown` (assigning the result to `List[str]`/`List[List[int]]` is still cleanly rejected). CRUCIALLY the
+step-(2) mask is GATED, not blanket: when the closure's return-position `[U]` is ALREADY pinned to a concrete
+type by another arg — e.g. `fold[U]`'s `U` fixed to `int` by `init` — the mask is SKIPPED so the closure
+body's real return stays subject to the assignability check; `xs.fold(0, fn(acc,x): "wrong")` is correctly
+rejected at check time (a blanket mask laundered the str onto an `int` binding — the review-caught soundness
+hole). An annotated closure return (`fn(a,b) -> int: …`) is likewise left authoritative (no mask), preserving
+the exact arity-mismatch diagnostic. KNOWN v1 limit (conscious, not silent): the symmetric FREE-fn/ctor HOF path
 (`infer_generic_call`, proto.rs) deliberately ignores refined closure returns, so a user free-fn HOF with a
 return-only type param recovered from a nested-free-generic-call closure body remains a leak — the repro's
 outer HOF is the METHOD `.map`, so it is fixed; extending the mask to the free-fn path is a possible
