@@ -13650,6 +13650,97 @@ fn return_only_method_type_param_stays_uninferable_rejected() {
     );
 }
 
+// Phase 6 — Bug D: the closure-return loop-back must recover a method `[U]` when the closure body is
+// a NESTED FREE generic call whose return is the callee's own type param. `xs.map(fn(x): ident(x))`
+// where `ident[T](x: T) -> T` must yield List[int] (not a leaked List[T]).
+const IDENT_DEFS: &str = "fn ident[T](x: T) -> T:\n    return x\n";
+
+#[test]
+fn map_closure_body_free_generic_call_recovers_int() {
+    // The repro: closure body `ident(x)` returns ident's OWN `T`; the solver knows `x: int` and must
+    // unify `int` into ident's `T` via the checking-mode re-inference, so `ys: List[int]` and
+    // `ys[0] + 1` type-checks (prints 2 at runtime).
+    entry_ok(&format!(
+        "{IDENT_DEFS}fn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): ident(x))\n    print(ys[0] + 1)\n"
+    ));
+}
+
+#[test]
+fn map_closure_body_free_generic_call_stays_sound() {
+    // SOUNDNESS guard: `U` must be recovered as CONCRETE `int`, never degraded to `Unknown` (which
+    // `assignable` would launder). Assigning the int-typed result to List[str] / List[List[int]] must
+    // reject naming `int`.
+    entry_rejects(
+        &format!(
+            "{IDENT_DEFS}fn main():\n    xs := [1, 2, 3]\n    zs: List[str] = xs.map(fn(x): ident(x))\n    print(zs)\n"
+        ),
+        "int",
+    );
+    entry_rejects(
+        &format!(
+            "{IDENT_DEFS}fn main():\n    xs := [1, 2, 3]\n    ws: List[List[int]] = xs.map(fn(x): ident(x))\n    print(ws)\n"
+        ),
+        "int",
+    );
+}
+
+#[test]
+fn bug_d_boundaries_stay_green() {
+    // (1) direct closure body — already worked, must stay green.
+    entry_ok("fn main():\n    ys := [1, 2].map(fn(x): x * 2)\n    n: int = ys[0]\n    print(n)\n");
+    // (2) generic METHOD in body — receiver carries the type arg, resolves fine today.
+    entry_ok(
+        "struct W[T]:\n    v: T\n    fn get(self) -> T:\n        return self.v\nfn main():\n    ws := [W(1), W(2)]\n    n: int = ws.map(fn(w): w.get())[0] + 1\n    print(n)\n",
+    );
+    // (3) downstream-pinned — fold's `+` and filter's `>` pin T=int via the body arithmetic.
+    entry_ok(&format!(
+        "{IDENT_DEFS}fn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): acc + ident(x))\n    print(s)\n"
+    ));
+    entry_ok(&format!(
+        "{IDENT_DEFS}fn main():\n    xs := [1, 2, 3]\n    ys := xs.filter(fn(x): ident(x) > 1)\n    print(ys)\n"
+    ));
+    // (4) genuinely ambiguous closure body — must give a clean "cannot infer" diagnostic, not a panic.
+    entry_rejects(
+        "fn main():\n    ys := [1, 2].map(fn(x): fn(y): x + y)\n    print(ys)\n",
+        "cannot infer",
+    );
+}
+
+#[test]
+fn fold_closure_wrong_return_rejected() {
+    // SOUNDNESS (the mask must NOT disable the closure-return check when the method's return-position
+    // `[U]` is ALREADY pinned by another argument): `fold[U]`'s `U` is pinned to `int` by `init` (arg
+    // 0), so the closure's return `fn(U, T) -> U` has the CONCRETE contract `int`. An unannotated
+    // closure whose body is a `str` must be rejected at check time — masking its fallback return to
+    // `Unknown` (which `assignable` laundered) let a str value escape onto an `int`-typed binding.
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): \"wrong\")\n    print(s + 1)\n",
+        "fold",
+    );
+    // The same hole via an explicit annotation: `n: int` must not accept a str-returning fold body.
+    entry_rejects(
+        "fn main():\n    xs := [1, 2, 3]\n    n: int = xs.fold(0, fn(acc, x): \"wrong\")\n    print(n)\n",
+        "fold",
+    );
+}
+
+#[test]
+fn fold_closure_body_free_generic_call_recovers_int() {
+    // Bug D (adversarial-review fix): a `fold[U]` whose `U` is pinned CONCRETE by `init` (arg 0) AND
+    // whose unannotated closure body is a NESTED FREE generic call (`ident(x)` / `ident(acc)`, where
+    // `ident[T](x: T) -> T`) must be ACCEPTED — the prepass leaks the callee's own rigid `Ty::Param`,
+    // but the checking-mode re-inference types the body `int`. The earlier gate (masking only a still-
+    // free `[U]`) spuriously rejected these with `argument to 'fold' has type fn(?, ?) -> T`.
+    // (a) body references the closure's element param `x`.
+    entry_ok(
+        "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(x))\n    print(s + 1)\n",
+    );
+    // (b) body references the closure's accumulator param `acc` (bare nested generic call).
+    entry_ok(
+        "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(acc))\n    print(s)\n",
+    );
+}
+
 #[test]
 fn rwshared_read_len_ok() {
     entry_ok(

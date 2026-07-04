@@ -347,6 +347,36 @@ checks the harvested tables' `methods.contains_key` (byte-identical to the retir
 methods) and the `builtin_method_slices_all_resolve` hover drift-guard resolves the slices against the
 seeded tables. Parser+checker-only. ~1283 checker tests + 3-engine parity green.
 
+**Bug D fix (2026-07-04 — closure-return loop-back now recovers a method `[U]` through a NESTED FREE
+generic call in the body).** `xs.map(fn(x): ident(x))` where `fn ident[T](x: T) -> T` was spuriously
+rejected (`cannot apply + to T and int` on `ys[0] + 1`): the closure param `x` inferred `int`, but the
+UNANNOTATED body `ident(x)` was prepass-inferred under `generic_arg_prepass` (`x: Unknown`), so
+`infer_generic_call(ident, [Unknown])` could not bind ident's own `T` and returned a LEAKED
+`Ty::Param("T")`. Pass-1 `unify` in `infer_generic_method` then prematurely pinned `map`'s return-position
+`U := Param("T")`, and the loop-back — which only fills params still FREE — could not correct it, so
+`ys: List[T]` leaked. FIX (checker-only, `src/checker/proto.rs` + a `mask_closure_ret` helper in
+`src/checker/mod.rs`): in `infer_generic_method`, when the arg is a closure **with NO return annotation**,
+(1) unify pass-1 against a RETURN-MASKED copy of its actual `Func` (return → `Ty::Unknown`) so only its
+PARAMETER positions can bind a method type param, and (2) ALWAYS mask the same closure's fallback return in the
+`check_generic_arg` assignability check (the prepass leaked `Param` would otherwise mismatch `want`'s return —
+whether that return is a still-free `[U]` OR already concrete), keeping the internal check to params + arity.
+This defers `U` to the loop-back's checking-mode re-inference, which recovers it as the CONCRETE return (`int`)
+→ `ys: List[int]`, prints `2`. SOUNDNESS is upheld by a SEPARATE explicit check, not by the mask's presence:
+after `check_generic_arg` returns the REFINED (checking-mode re-inferred) closure type, when the closure's
+expected return is ALREADY concrete (e.g. `fold[U]`'s `U` pinned to `int` by `init`) the refined return is
+asserted assignable to it — so `xs.fold(0, fn(acc,x): "wrong")` is rejected (`str` ≠ `int`) while
+`xs.fold(0, fn(acc,x): ident(x))`/`ident(acc)` — whose prepass leaked a rigid `Ty::Param` but whose refined
+body types `int` — is ACCEPTED. (The earlier gate that masked only a still-free `[U]` (`closure_ret_wants_free_mtp`)
+was WRONG: it spuriously rejected exactly those concrete-return nested-generic-call `fold` bodies — the
+adversarial-review-caught regression — because the unmasked prepass `fn(?,?) -> T` failed the internal check.
+Checking the refined type fixes both directions.) `U` is bound concretely, never degraded to `Unknown`
+(assigning the result to `List[str]`/`List[List[int]]` is still cleanly rejected). An annotated closure return
+(`fn(a,b) -> int: …`) is left authoritative (no mask), preserving the exact arity-mismatch diagnostic. KNOWN v1 limit (conscious, not silent): the symmetric FREE-fn/ctor HOF path
+(`infer_generic_call`, proto.rs) deliberately ignores refined closure returns, so a user free-fn HOF with a
+return-only type param recovered from a nested-free-generic-call closure body remains a leak — the repro's
+outer HOF is the METHOD `.map`, so it is fixed; extending the mask to the free-fn path is a possible
+follow-up. Runtime is generic-erased → serial==M:N automatic.
+
 **✅ NATIVE-PRELUDE — phase 4c-followup (native instance methods now declare `self`, mirroring user
 structs) (2026-07-02).** A `native fn` inside a `native struct` body is an INSTANCE method and now MUST
 declare a leading bare `self` as its first parameter (`native fn read(self, n: int) -> Result[str]`,
