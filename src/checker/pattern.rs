@@ -1,0 +1,2808 @@
+// checker::pattern — split out of checker/mod.rs. `super::*` == the `checker` module.
+// Pattern / match-arm binding and or-pattern consistency.
+
+use super::*;
+
+impl Checker {
+    /// Type-check a *nested* sub-pattern (a variant payload slot or tuple element — gap #15) against
+    /// its expected type `ty`, declaring any bindings into the current scope. Returns whether the
+    /// sub-pattern is **irrefutable** (matches every value of `ty`): a binding/wildcard is, a
+    /// literal/variant is not, a tuple is iff all its elements are.
+    pub(super) fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
+        match pattern {
+            Pattern::Wildcard => true,
+            Pattern::Ident(name, bind_span) => {
+                // A nested bare identifier names a *built-in* nullary variant of the matched type (a
+                // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
+                // variants must be written qualified (handled below), never resolved bare here.
+                let is_builtin_variant = matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                if is_builtin_variant {
+                    if let Some(vmap) = self.variants_of(ty)
+                        && let Some(payload) = vmap.get(name)
+                    {
+                        if payload.is_empty() {
+                            // A nullary built-in variant of `ty`: a refutable match, binds nothing.
+                            return false;
+                        }
+                        // A non-nullary variant used without its payload — needs `Name(...)`.
+                        self.error(
+                            span,
+                            format!("variant '{name}' of {ty} requires its payload — write '{name}(...)'"),
+                        );
+                        return false;
+                    }
+                    // A built-in variant name that ISN'T a variant of `ty` cannot be a binding: the
+                    // compiler routes it by the variant registry (a `MatchArm` test), so it would trap
+                    // on the VM while the interp binds. Reject it so all engines agree.
+                    if !ty.is_unknown() {
+                        self.error(span, format!("'{name}' is not a variant of {ty}"));
+                        return false;
+                    }
+                }
+                // A *user* variant must be written qualified — never resolved bare, never silently a
+                // binding (the bare→binding trap). Reject with a hint to the qualified form.
+                if self.variant_owners.contains_key(name) {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
+                    return false;
+                }
+                // EDITOR HOVER: a pattern binding (`n` in `Col.Val(n)`, `a`/`b` in `(a, b)`) is a
+                // NAME, not an `Expr` the probe visits — record its decl-site hover at the binding
+                // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
+                // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
+                self.hover_record_at(*bind_span, ty, HoverKind::Local, None);
+                self.declare(name, ty.clone());
+                true
+            }
+            Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),
+            Pattern::Literal(lit) => {
+                let lit_ty = lit_pattern_ty(lit);
+                if !ty.is_unknown() && &lit_ty != ty {
+                    self.error(
+                        span,
+                        format!("literal of type {lit_ty} cannot match a value of type {ty}"),
+                    );
+                }
+                false
+            }
+            Pattern::Range { .. } => {
+                // A range sub-pattern is int-only and always refutable.
+                if !ty.is_unknown() && ty != &Ty::Int {
+                    self.error(
+                        span,
+                        format!("range pattern cannot match a value of type {ty}"),
+                    );
+                }
+                false
+            }
+            Pattern::Tuple(subs) => match ty {
+                Ty::Tuple(tys) => {
+                    if tys.len() != subs.len() {
+                        self.error(
+                            span,
+                            format!(
+                                "tuple pattern has {} element(s), but the value has {}",
+                                subs.len(),
+                                tys.len()
+                            ),
+                        );
+                    }
+                    let mut irref = true;
+                    for (sub, t) in subs.iter().zip(tys.iter()) {
+                        irref &= self.bind_subpattern(sub, t, span);
+                    }
+                    irref
+                }
+                Ty::Unknown => {
+                    // §4.1 — a STRUCTURAL sub-pattern (here a tuple) over an un-inferable element/
+                    // payload would destructure a value whose shape we can't prove → it traps at
+                    // runtime on a wrong shape (a trailing `_` cannot rescue it). Reject; annotate the
+                    // enclosing param. Still bind the sub-patterns (as Unknown) so the arm body does
+                    // not cascade into spurious "unknown name" errors.
+                    self.error(
+                        span,
+                        "cannot match a tuple pattern on a value of un-inferable type; annotate it"
+                            .to_string(),
+                    );
+                    for sub in subs {
+                        self.bind_subpattern(sub, &Ty::Unknown, span);
+                    }
+                    false
+                }
+                other => {
+                    self.error(
+                        span,
+                        format!("tuple pattern cannot match a value of type {other}"),
+                    );
+                    for sub in subs {
+                        self.bind_subpattern(sub, &Ty::Unknown, span);
+                    }
+                    false
+                }
+            },
+            Pattern::Variant {
+                name,
+                bindings,
+                enum_name,
+                module_name,
+            } => {
+                self.check_pattern_qualifier(
+                    module_name,
+                    enum_name,
+                    name,
+                    Self::scrutinee_enum(ty),
+                    span,
+                );
+                match self.variants_of(ty) {
+                    Some(vmap) => {
+                        // A nested variant sub-pattern is irrefutable ONLY when its enum has exactly
+                        // one variant (so naming it covers the whole domain) AND every payload
+                        // sub-pattern is itself irrefutable. `Some(Some(v))` (2-variant Option) or
+                        // `Some(0)` (literal payload) stays refutable; `Outer.Wrap(Inner.Only(x))`
+                        // over single-variant enums is irrefutable and may close its parent variant.
+                        let single_variant = vmap.len() == 1;
+                        match vmap.get(name) {
+                            Some(payload) => {
+                                if payload.len() != bindings.len() {
+                                    self.error(
+                                        span,
+                                        format!(
+                                            "variant '{name}' binds {} value(s), but {} given",
+                                            payload.len(),
+                                            bindings.len()
+                                        ),
+                                    );
+                                }
+                                let mut sub_irref = true;
+                                for (b, t) in bindings.iter().zip(payload.iter()) {
+                                    sub_irref &= self.bind_subpattern(b, t, span);
+                                }
+                                single_variant && sub_irref
+                            }
+                            None => {
+                                self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                for b in bindings {
+                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                }
+                                false
+                            }
+                        }
+                    }
+                    None if ty.is_unknown() => {
+                        // §4.1 — a STRUCTURAL sub-pattern (here an enum/variant) over an un-inferable
+                        // element/payload tests a variant tag against a value whose type we can't
+                        // prove → it traps at runtime on a wrong shape (a trailing `_` cannot rescue
+                        // it). Reject; annotate the enclosing param. Still bind the payload (as
+                        // Unknown) so the arm body does not cascade into "unknown name" errors.
+                        self.error(
+                            span,
+                            "cannot match a variant pattern on a value of un-inferable type; annotate it"
+                                .to_string(),
+                        );
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                        false
+                    }
+                    None => {
+                        self.error(
+                            span,
+                            format!("variant pattern '{name}' cannot match a value of type {ty}"),
+                        );
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bind the alternatives of an or-pattern in a *sub-pattern* position against `ty`, enforcing
+    /// that every alternative binds the EXACT same set of names with unifiable types, then declaring
+    /// the agreed set once into the current scope. Returns `true` iff ANY alternative is
+    /// irrefutable. Bounded by the finite pattern tree (recursion only descends sub-patterns).
+    pub(super) fn bind_or_alternatives(&mut self, alts: &[Pattern], ty: &Ty, span: Span) -> bool {
+        // An or-pattern is irrefutable iff ANY alternative is irrefutable (one alt that always
+        // matches makes the whole or-pattern always match) — OR, not AND.
+        let mut irref = false;
+        let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
+        for (i, alt) in alts.iter().enumerate() {
+            self.push_scope();
+            let alt_irref = self.bind_subpattern(alt, ty, span);
+            irref |= alt_irref;
+            // Snapshot the names this alternative introduced (its scratch scope's top frame).
+            let snap: std::collections::BTreeMap<String, Ty> = self
+                .scopes
+                .last()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            self.pop_scope();
+            binders.push((i, snap));
+        }
+        self.enforce_or_consistency(&binders, span);
+        irref
+    }
+
+    /// Enforce that all alternatives' binder snapshots agree on the bound-name set + unifiable types,
+    /// then declare the agreed names once into the current (real) scope. `binders[0]` is the
+    /// reference set; mismatches are reported once, clearly, and the first set is still declared so
+    /// the arm body type-checks (no cascading "unknown name" errors).
+    pub(super) fn enforce_or_consistency(
+        &mut self,
+        binders: &[(usize, std::collections::BTreeMap<String, Ty>)],
+        span: Span,
+    ) {
+        if binders.is_empty() {
+            return;
+        }
+        let (_, first) = &binders[0];
+        for (_, other) in &binders[1..] {
+            if first.keys().ne(other.keys()) {
+                let left: Vec<&str> = first.keys().map(|s| s.as_str()).collect();
+                let right: Vec<&str> = other.keys().map(|s| s.as_str()).collect();
+                self.error(
+                    span,
+                    format!(
+                        "or-pattern alternatives must bind the same variables: left binds {{{}}}, right binds {{{}}}",
+                        left.join(", "),
+                        right.join(", "),
+                    ),
+                );
+                break;
+            }
+            // Same key set — check per-name type compatibility (in either direction).
+            for (name, lt) in first.iter() {
+                if let Some(rt) = other.get(name)
+                    && !compatible(lt, rt)
+                    && !compatible(rt, lt)
+                {
+                    self.error(
+                        span,
+                        format!("or-pattern binds '{name}' as {lt} in one alternative and {rt} in another"),
+                    );
+                }
+            }
+        }
+        // Declare the agreed set once into the real scope.
+        for (name, ty) in first.iter() {
+            self.declare(name, ty.clone());
+        }
+    }
+
+    /// Push a scope and bind one arm's pattern, recording coverage + diagnostics. Returns `true` if
+    /// this arm is **irrefutable** (a `_` wildcard, or a tuple of irrefutable sub-patterns — either
+    /// makes the match exhaustive). The caller must `pop_scope` after the arm body.
+    pub(super) fn bind_match_arm(
+        &mut self,
+        pattern: &Pattern,
+        kind: &MatchKind,
+        span: Span,
+        covered: &mut std::collections::HashSet<String>,
+        guarded: bool,
+    ) -> bool {
+        // A wildcard binds nothing and is valid in every mode.
+        if let Pattern::Wildcard = pattern {
+            self.push_scope();
+            return true;
+        }
+        // An or-pattern at the top of an arm: bind each alternative into a scratch scope (threading
+        // coverage so `Red | Green | Blue` closes the variant domain), enforce that all alternatives
+        // bind the same names with unifiable types, then declare the agreed set into the arm scope.
+        // Irrefutable iff ANY alternative is (e.g. `1 | _` is irrefutable via `_`). OR, not AND.
+        if let Pattern::Or(alts) = pattern {
+            self.push_scope(); // the arm scope the caller pops
+            let mut irref = false;
+            let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
+            for (i, alt) in alts.iter().enumerate() {
+                // Recurse: this pushes a scratch scope, threads `covered`, binds the alternative.
+                // Thread `guarded` unchanged: a top-level guard makes EVERY alternative refutable,
+                // so a guarded `E.A(0) | E.B` closes nothing; an unguarded one lets each alternative
+                // decide its own payload-irrefutability independently.
+                let alt_irref = self.bind_match_arm(alt, kind, span, covered, guarded);
+                let snap: std::collections::BTreeMap<String, Ty> = self
+                    .scopes
+                    .last()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                self.pop_scope(); // discard the scratch scope (we re-declare into the arm scope)
+                irref |= alt_irref;
+                binders.push((i, snap));
+            }
+            self.enforce_or_consistency(&binders, span);
+            return irref;
+        }
+        // Reject a name bound more than once within this (non-Or, non-Wildcard) pattern, e.g. `(x, x)`
+        // or `E.V(a, a)` — Rust's rule. Emitted (not early-returned) so the arm body still checks on
+        // the last binding, avoiding cascade errors. Or-alternatives are checked when this fn recurses
+        // on each alt above, so a duplicate inside one alt is still caught.
+        // A bare ident is a real binder UNLESS it names a (refutable) nullary variant — the built-in
+        // `Ok`/`Err`/`Some`/`None` or a user enum variant — which binds nothing (see `bind_subpattern`).
+        // Mirror that registry here so `(None, None, None)` isn't falsely flagged as a duplicate binding.
+        let is_binder = |name: &str| {
+            !(self.variant_owners.contains_key(name)
+                || matches!(name, "Ok" | "Err" | "Some" | "None"))
+        };
+        if let Some(dup) = first_duplicate_binder(pattern, &is_binder) {
+            self.error(
+                span,
+                format!("identifier '{dup}' is bound more than once in this pattern"),
+            );
+        }
+        match kind {
+            MatchKind::Skip => {
+                // Un-inferable scrutinee with only binding/`_` arms: accept the pattern shape
+                // permissively, binding everything as `Unknown`. Still scope so the caller can
+                // `pop_scope` uniformly. (A structural arm here was already rejected upstream by §4.1.)
+                self.push_scope();
+                match pattern {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                        module_name,
+                    } => {
+                        // Un-inferable scrutinee (Skip): no enum to validate the qualifier against.
+                        self.check_pattern_qualifier(module_name, enum_name, name, None, span);
+                        // A bare name (no qualifier, no payload) that is NOT a known variant is an
+                        // irrefutable binding catch-all — `n:` binds the scrutinee like `_` and
+                        // closes the match, exactly as a concretely-typed scrutinee does (the parser
+                        // models every bare pattern name as a nullary `Variant`). Declaring it +
+                        // returning irrefutable keeps the un-inferable path consistent with the
+                        // typed-`Literal` path; treating it as a refutable variant instead would both
+                        // leave the binding undeclared (`unknown name`) and wrongly report the match
+                        // non-exhaustive.
+                        let is_known_variant = self.variant_owners.contains_key(name)
+                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                        if enum_name.is_none()
+                            && module_name.is_none()
+                            && bindings.is_empty()
+                            && !is_known_variant
+                        {
+                            self.declare(name, Ty::Unknown);
+                            return true;
+                        }
+                        covered.insert(name.clone());
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                    }
+                    Pattern::Tuple(subs) => {
+                        for s in subs {
+                            self.bind_subpattern(s, &Ty::Unknown, span);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MatchKind::Variants { label, variants } => {
+                self.push_scope();
+                match pattern {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                        module_name,
+                    } => {
+                        self.check_pattern_qualifier(
+                            module_name,
+                            enum_name,
+                            name,
+                            Some(label.as_str()),
+                            span,
+                        );
+                        let payload = variants.get(name).cloned();
+                        if payload.is_none() {
+                            self.error(
+                                span,
+                                format!(
+                                    "'{name}' is not a variant of {}",
+                                    crate::compiler::bare_display(label.as_str())
+                                ),
+                            );
+                        }
+                        // Bind the payload FIRST, accumulating whether every sub-pattern is
+                        // irrefutable (a wildcard or plain binding). A literal/range/nested-variant
+                        // sub-pattern (e.g. `Some(0)`, `P.Pair(0, y)`) makes the payload refutable,
+                        // so the arm covers only part of the variant's domain — it must NOT close it.
+                        let mut payload_irref = true;
+                        match &payload {
+                            Some(payload) => {
+                                if payload.len() != bindings.len() {
+                                    self.error(
+                                        span,
+                                        format!(
+                                            "variant '{name}' binds {} value(s), but {} given",
+                                            payload.len(),
+                                            bindings.len()
+                                        ),
+                                    );
+                                }
+                                for (b, t) in bindings.iter().zip(payload.iter()) {
+                                    payload_irref &= self.bind_subpattern(b, t, span);
+                                }
+                            }
+                            None => {
+                                for b in bindings {
+                                    payload_irref &= self.bind_subpattern(b, &Ty::Unknown, span);
+                                }
+                            }
+                        }
+                        // A variant is `covered` ONLY when an arm for it is BOTH unguarded AND has an
+                        // all-irrefutable payload (docs/syntax.md §8: a guarded arm is never
+                        // irrefutable). Duplicate-arm detection fires only against a PRIOR fully
+                        // closing arm, so a guard-then-fallback on the same variant is legal.
+                        if covered.contains(name) {
+                            self.error(span, format!("duplicate match arm '{name}'"));
+                        } else if !guarded && payload_irref {
+                            covered.insert(name.clone());
+                        }
+                    }
+                    Pattern::Literal(_) => self.error(
+                        span,
+                        format!(
+                            "cannot match a literal against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
+                    Pattern::Range { .. } => self.error(
+                        span,
+                        format!(
+                            "cannot match a range against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
+                    Pattern::Tuple(_) => self.error(
+                        span,
+                        format!(
+                            "cannot match a tuple against {}",
+                            crate::compiler::bare_display(label.as_str())
+                        ),
+                    ),
+                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
+                        unreachable!("ident/wildcard/or handled elsewhere")
+                    }
+                }
+            }
+            MatchKind::Literal(ty) => {
+                self.push_scope();
+                match pattern {
+                    Pattern::Literal(lit) => {
+                        let lit_ty = lit_pattern_ty(lit);
+                        if &lit_ty != ty {
+                            self.error(
+                                span,
+                                format!(
+                                    "literal of type {lit_ty} cannot match scrutinee of type {ty}"
+                                ),
+                            );
+                        }
+                    }
+                    Pattern::Range { .. } => {
+                        // A range pattern is int-only; reject against str/bool scrutinees.
+                        if ty != &Ty::Int {
+                            self.error(
+                                span,
+                                format!("range pattern cannot match scrutinee of type {ty}"),
+                            );
+                        }
+                    }
+                    // int/str/bool have no nullary variants, so a bare top-level identifier here is a
+                    // binding capturing the whole scrutinee value (irrefutable catch-all). The parser
+                    // emits it as `Variant { bindings: [] }`; reinterpret it as a binding — UNLESS the
+                    // name is a registered variant (e.g. `None`). The compiler routes by the variant
+                    // registry, so a colliding name would bind in the interp but trap on the VM; reject
+                    // it here so all engines agree. (Rename the binding to fix.)
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                        module_name,
+                    } if bindings.is_empty() => {
+                        // A *qualified* `Enum.Variant` is unambiguously a variant, never a binding —
+                        // validate the qualifier and reject it against an int/str/bool scrutinee (a
+                        // variant cannot match a literal-typed value). Falls through the bare path
+                        // below otherwise.
+                        if enum_name.is_some() {
+                            // int/str/bool scrutinee: no enum to validate against (the variant is
+                            // rejected below regardless).
+                            self.check_pattern_qualifier(module_name, enum_name, name, None, span);
+                            self.error(span, format!("cannot match a variant against {ty}"));
+                            return false;
+                        }
+                        // Match the compiler's variant registry: user enums PLUS the built-in
+                        // Result/Option variants (which the checker special-cases elsewhere).
+                        if self.variant_owners.contains_key(name)
+                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                        {
+                            self.error(
+                                span,
+                                format!(
+                                    "'{name}' is a variant name and cannot bind a scrutinee of type {ty}; rename the binding"
+                                ),
+                            );
+                            return false;
+                        }
+                        self.declare(name, ty.clone());
+                        return true;
+                    }
+                    Pattern::Variant {
+                        bindings,
+                        enum_name,
+                        name,
+                        module_name,
+                    } => {
+                        self.check_pattern_qualifier(module_name, enum_name, name, None, span);
+                        self.error(span, format!("cannot match a variant against {ty}"));
+                        // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
+                        // cascade into spurious "unknown name" errors — notably the desugared `?.`
+                        // case, where the payload binding is an internal `__opt` temp the user can't
+                        // see. (The `cannot match` error already flags the real problem.)
+                        for b in bindings {
+                            self.bind_subpattern(b, &Ty::Unknown, span);
+                        }
+                    }
+                    Pattern::Tuple(_) => {
+                        self.error(span, format!("cannot match a tuple against {ty}"))
+                    }
+                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
+                        unreachable!("ident/wildcard/or handled elsewhere")
+                    }
+                }
+            }
+            MatchKind::Tuple(tys) => {
+                self.push_scope();
+                if let Pattern::Tuple(subs) = pattern {
+                    if tys.len() != subs.len() {
+                        self.error(
+                            span,
+                            format!(
+                                "tuple pattern has {} element(s), but the value has {}",
+                                subs.len(),
+                                tys.len()
+                            ),
+                        );
+                    }
+                    let mut irref = true;
+                    for (sub, t) in subs.iter().zip(tys.iter()) {
+                        irref &= self.bind_subpattern(sub, t, span);
+                    }
+                    return irref;
+                }
+                self.error(
+                    span,
+                    "a tuple scrutinee requires a tuple pattern (or `_`)".to_string(),
+                );
+            }
+        }
+        false
+    }
+
+    /// Report a non-exhaustive match.
+    /// - Variants mode: missing variants, unless a `_` wildcard was seen.
+    /// - Literal mode: int/str/bool literal domains are open, so a `_` wildcard is *required*
+    ///   (we do NOT special-case `true`+`false` closing the bool domain — keeping one rule).
+    /// - Skip mode: un-inferable scrutinee, no exhaustiveness check.
+    pub(super) fn check_exhaustive(
+        &mut self,
+        kind: &MatchKind,
+        covered: &std::collections::HashSet<String>,
+        has_wildcard: bool,
+        span: Span,
+    ) {
+        if has_wildcard {
+            return;
+        }
+        match kind {
+            MatchKind::Skip => {}
+            MatchKind::Variants { label, variants } => {
+                let mut missing: Vec<String> = variants
+                    .keys()
+                    .filter(|v| !covered.contains(*v))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    missing.sort();
+                    self.error(
+                        span,
+                        format!(
+                            "non-exhaustive match on {}: missing {}",
+                            crate::compiler::bare_display(label.as_str()),
+                            missing.join(", ")
+                        ),
+                    );
+                }
+            }
+            MatchKind::Literal(_) => {
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
+            MatchKind::Tuple(_) => {
+                // A tuple match is exhaustive only via an irrefutable arm (a `_`, or a tuple of
+                // all-binding sub-patterns). `has_wildcard` already captured that.
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
+        }
+    }
+
+    /// `wait:` — Chezzi's `select` (§6d). Each arm's channel expr must be a `Channel[T]`; the arm's
+    /// target binds (`:=`)/assigns (`=`)/discards (`_`) the element `T`. `wait` is a runtime race, not
+    /// a type match, so it is **not** exhaustive — no coverage analysis, ≥1 arm is the only structural
+    /// rule (parser-enforced). Each arm body is its own lexical sub-scope (like a `match` arm).
+    pub(super) fn check_wait(&mut self, arms: &[WaitArm], else_block: Option<&Block>) {
+        for arm in arms {
+            let elem = match self.infer(&arm.chan) {
+                Ty::Channel(e) => *e,
+                Ty::Unknown => Ty::Unknown,
+                other => {
+                    self.error(
+                        arm.chan.span,
+                        format!("a wait arm must recv from a Channel, found {other}"),
+                    );
+                    Ty::Unknown
+                }
+            };
+            self.push_scope();
+            match &arm.target {
+                WaitTarget::Bind(name) => self.declare(name, elem),
+                // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
+                // (assignability, type match, read-only/loop-var gates).
+                WaitTarget::Assign(target) => {
+                    self.check_assign(target, AssignOp::Eq, elem, arm.span)
+                }
+                WaitTarget::Discard => {}
+            }
+            for stmt in &arm.body {
+                self.check_stmt(stmt);
+            }
+            self.pop_scope();
+        }
+        if let Some(b) = else_block {
+            self.check_block(b);
+        }
+    }
+
+    pub(super) fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let kind = self.match_kind(scrutinee, &pats);
+        let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
+        for arm in arms {
+            // PERSISTENT refine-on-first-use (see `check_block`): a STATEMENT-`match` arm mirrors an
+            // if/else statement body — a refine-on-first-use pin of an OUTER empty collection inside
+            // one arm PERSISTS across sibling arms and past the match (Option B: a cross-arm element-
+            // type conflict is a hard error). No snapshot/restore here, so the pin `repin` wrote to
+            // the binding's OWNING scope survives `pop_scope` (which only removes the arm's binders).
+            // The EXPRESSION-position matcher `infer_match` keeps its barrier — value-arms stay
+            // independent.
+            let irref = self.bind_match_arm(
+                &arm.pattern,
+                &kind,
+                scrutinee.span,
+                &mut covered,
+                arm.guard.is_some(),
+            );
+            // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
+            // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
+            if let Some(guard) = &arm.guard {
+                self.expect_bool(guard, "match guard");
+            }
+            has_wildcard |= irref && arm.guard.is_none();
+            for stmt in &arm.body {
+                self.check_stmt(stmt);
+            }
+            self.pop_scope();
+        }
+        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+    }
+
+    /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
+    /// types into one result. Exhaustiveness is still enforced.
+    pub(super) fn infer_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[crate::ast::MatchExprArm],
+    ) -> Ty {
+        // Capture + clear the expected-type hint before the scrutinee/guards (the hint is for the
+        // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
+        // is equally the value, and `infer_call` drains the single take()-once slot, so without
+        // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
+        let hint = self.expected_hint.take();
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let kind = self.match_kind(scrutinee, &pats);
+        let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
+        let mut result: Option<Ty> = None;
+        for arm in arms {
+            // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
+            // conditionally too — refinement inside one arm must not leak across arms or past it.
+            let snap = self.snapshot_refinable();
+            let irref = self.bind_match_arm(
+                &arm.pattern,
+                &kind,
+                scrutinee.span,
+                &mut covered,
+                arm.guard.is_some(),
+            );
+            if let Some(guard) = &arm.guard {
+                self.expect_bool(guard, "match guard");
+            }
+            has_wildcard |= irref && arm.guard.is_none();
+            self.expected_hint = hint.clone();
+            let t = self.infer(&arm.body);
+            self.pop_scope();
+            self.restore_refinable(snap);
+            result = Some(self.unify_branch(result, t, arm.body.span));
+        }
+        self.expected_hint = None;
+        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+        result.unwrap_or(Ty::Unknown)
+    }
+
+    /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
+    pub(super) fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
+        // Capture + clear the expected-type hint before the condition: the hint is for the branch
+        // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
+        // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
+        // re-installing it the second-inferred branch would lose the hint and a generic ctor there
+        // would deadlock (acceptance would depend on branch order).
+        let hint = self.expected_hint.take();
+        self.expect_bool(cond, "if condition");
+        // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
+        // conditionally — refinement inside one must not leak into the other or past the `if`.
+        let snap = self.snapshot_refinable();
+        self.expected_hint = hint.clone();
+        let t_then = self.infer(then);
+        self.restore_refinable(snap.clone());
+        self.expected_hint = hint;
+        let t_els = self.infer(els);
+        self.expected_hint = None;
+        self.restore_refinable(snap);
+        let acc = self.unify_branch(None, t_then, then.span);
+        self.unify_branch(Some(acc), t_els, els.span)
+    }
+
+    /// Fold one branch's type into a match/if expression's running result type. The first concrete
+    /// branch sets the type; a later incompatible branch is a real error (and yields `Unknown` to
+    /// suppress cascades). `Unknown` branches never override a concrete result.
+    pub(super) fn unify_branch(&mut self, acc: Option<Ty>, t: Ty, span: Span) -> Ty {
+        match acc {
+            None => t,
+            Some(prev) => {
+                if compatible(&prev, &t) {
+                    if prev.is_unknown() { t } else { prev }
+                } else {
+                    self.error(
+                        span,
+                        format!("branches have incompatible types: {prev} and {t}"),
+                    );
+                    Ty::Unknown
+                }
+            }
+        }
+    }
+
+    // ===== expression inference =====
+
+    /// Type-check an interpolated string literal's `{...}` fragment expressions. The string is
+    /// parsed into chunks by the SHARED `crate::interpolation` parser (the very one the compiler
+    /// emits from — so the checker and the compiler can never disagree on how a string is chunked),
+    /// and every fragment `Expr` is run through the normal `infer_value` path: undefined names,
+    /// type/method/arity mismatches, and void-call fragments all surface here as compile errors
+    /// instead of slipping past `check` to panic the compiler (`global_slot`) or fault at runtime.
+    ///
+    /// A malformed interpolation (unterminated `{`, bad format spec) is reported as an error; we
+    /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
+    /// stays the compiler's job — we discard the parsed spec and only infer the expression.
+    ///
+    /// Span: a fragment expr is parsed from the `{…}` substring with fragment-relative spans (its
+    /// root is `line 1, col 1`), so an error keyed on the fragment ROOT node — the nil-in-value-position
+    /// ban, the only diagnostic anchored there — would otherwise report the bogus `(1,1)` fallback.
+    /// We stamp the whole-string-literal `span` onto each fragment's root before inferring, matching
+    /// the compiler's existing emit site (it uses the string span for fragment bytecode too) so the
+    /// nil error points at the real string literal. Errors raised DEEPER inside a fragment (an
+    /// undefined name in a nested call) keep their fragment-relative child spans; narrowing those is
+    /// out of scope and fragments are short. Always returns `Ty::Str`.
+    pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
+        match crate::interpolation::parse_interpolation(raw, span) {
+            Ok(chunks) => {
+                // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment
+                // ordinal) so two fragments whose first named-arg value shares a fragment-relative
+                // column don't alias one table slot (each fragment is re-lexed from a fresh source).
+                // Save/restore for nested interpolations. The compiler/interp keep the identical pair.
+                let saved_ctx = self.kw_frag_ctx;
+                let saved_ord = self.kw_frag_ord;
+                let mut ord = 0usize;
+                for chunk in chunks {
+                    if let crate::interpolation::Chunk::Expr(mut e, _spec) = chunk {
+                        self.kw_frag_ctx = span;
+                        self.kw_frag_ord = ord;
+                        // Anchor the fragment root at the string literal so a nil-fragment error
+                        // points at the literal, not the `(1,1)` fragment-relative fallback.
+                        e.span = span;
+                        // Discard the inferred type; we only want the side-effecting checks
+                        // (name resolution, arity/type/method validation, nil ban).
+                        let _ = self.infer_value(&e);
+                        ord += 1;
+                    }
+                }
+                self.kw_frag_ctx = saved_ctx;
+                self.kw_frag_ord = saved_ord;
+            }
+            Err(e) => self.error(span, e.message),
+        }
+        Ty::Str
+    }
+
+    /// Infer an expression that is used in **value position** (assignment RHS, a call/collection
+    /// argument, a binary/unary operand, an index/range bound, …). `nil` is a return-only / void
+    /// type, never a writable value: a void call's result must not silently propagate into a binding
+    /// or another expression. So if the expr is exactly `Ty::Nil`, report it and degrade to `Unknown`
+    /// (suppressing the cascade). A bare void call AS A STATEMENT keeps using plain `infer` (legal),
+    /// as does a fn/closure RETURN expr (returning nil just makes a void fn — not "using nil").
+    pub(super) fn infer_value(&mut self, expr: &Expr) -> Ty {
+        let ty = self.infer(expr);
+        if ty == Ty::Nil {
+            self.error(
+                expr.span,
+                "expression returns no value (nil) and cannot be used as a value".to_string(),
+            );
+            return Ty::Unknown;
+        }
+        ty
+    }
+
+    pub(super) fn infer(&mut self, expr: &Expr) -> Ty {
+        let ty = self.infer_kind(expr);
+        // EDITOR HOVER probe: record this expr's type if its leaf/field anchor is the cursor token.
+        // No-op (one `Option` check) unless a probe is armed. Children infer before parents and only
+        // LEAF kinds record, so a parent expression never overwrites the smaller symbol's type.
+        if self.hover_probe.is_some() {
+            self.hover_record_expr(expr, &ty);
+        }
+        ty
+    }
+
+    pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
+        match &expr.kind {
+            ExprKind::Int(_) => Ty::Int,
+            ExprKind::Float(_) => Ty::Float,
+            ExprKind::Str(raw) => self.check_interpolation(raw, expr.span),
+            ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
+            ExprKind::Bytes(_) => Ty::Bytes,
+            ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::Ident(name) => self.infer_ident(name, expr.span),
+            ExprKind::List(items) => {
+                // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
+                // arg, a return position — or the synthesized variadic list). `take()` so the
+                // hint drives THIS literal's element type and never leaks into a nested element
+                // call. `None` keeps the ordinary bottom-up inference.
+                let hint = self.expected_hint.take();
+                self.infer_list(items, hint.as_ref())
+            }
+            ExprKind::Tuple(items) => {
+                Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
+            }
+            ExprKind::Map(entries) => self.infer_map(entries),
+            ExprKind::Set(elems) => self.infer_set(elems),
+            ExprKind::Comprehension {
+                kind,
+                key,
+                elem,
+                clauses,
+            } => self.infer_comprehension(*kind, key.as_deref(), elem, clauses),
+            ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
+            ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => self.infer_slice(
+                obj,
+                start.as_deref(),
+                end.as_deref(),
+                step.as_deref(),
+                expr.span,
+            ),
+            ExprKind::Range { start, end } => {
+                self.expect_int(start, "range bound");
+                self.expect_int(end, "range bound");
+                Ty::list(Ty::Int)
+            }
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                type_args,
+            } => self.infer_call(callee, args, named, type_args, expr.span),
+            ExprKind::Field { obj, name, .. } => self.infer_field(obj, name),
+            ExprKind::Index { obj, index } => self.infer_index(obj, index),
+            ExprKind::Try(inner) => self.infer_try(inner, expr.span),
+            // Optional-chaining `?.` / null-coalescing `??` are carrier nodes lowered to `match` by
+            // the desugar pass (`resolver::build_graph` → `desugar::run`), which always runs before
+            // the checker. Reaching here means the pipeline skipped desugar — an internal invariant
+            // break, not a user error.
+            ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => {
+                unreachable!("`?.`/`??` must be lowered by the desugar pass before checking")
+            }
+            ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
+            ExprKind::Closure { params, ret, body } => {
+                // No expected type at the generic `infer` seam — free-closure inference (sources
+                // #2/#3) and the ambiguity check happen inside `infer_closure`.
+                self.infer_closure(params, ret.as_ref(), body, None)
+            }
+            ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
+            ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
+            ExprKind::Recover(block) => self.infer_recover(block),
+            // `Type[T1, T2]` is a type-application HEAD — only valid as the receiver of a member
+            // access / call (`Result[int, str].Ok(5)`, nullary `Box[int].Empty`). The `infer_call`
+            // and `infer_field` paths consume it before it reaches here; a bare one in value
+            // position is a use of a type as a value.
+            ExprKind::TypeApply { name, .. } => {
+                self.error(
+                    expr.span,
+                    format!(
+                        "'{name}' is a type, not a value; access a member (`{name}[…].member`)"
+                    ),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// Record `(ty, kind)` as the hover result if `span` is the armed probe position (entry module,
+    /// first hit wins). The single place a probe hit is committed; both the expr-leaf path and the
+    /// let-binding path funnel through here. A no-op when no probe is armed.
+    pub(super) fn hover_record_at(
+        &mut self,
+        span: Span,
+        ty: &Ty,
+        kind: HoverKind,
+        doc: Option<String>,
+    ) {
+        let Some((pl, pc)) = self.hover_probe else {
+            return;
+        };
+        if self.hover_result.is_some() || self.current_module_id != self.hover_entry {
+            return;
+        }
+        if span.line == pl && span.col == pc {
+            self.hover_result = Some((ty.clone(), kind, doc));
+        }
+    }
+
+    /// PART B — like [`Self::hover_record_at`], but for an occurrence of a NAMED binding. When the
+    /// probe lands on an occurrence whose recorded type still carries an `Unknown`-in-slot (a
+    /// not-yet-refined empty collection), DON'T lock `hover_result` to that provisional type; instead
+    /// stash the binding's `(name, kind, doc)` in `hover_pending`. The end-of-scope finalize then looks
+    /// up the binding's FINAL (refined) type and writes it to `hover_result`, so an earlier occurrence
+    /// of `b` (its `b := []` decl or any use before the refining `b.push(0)`) shows `List[int]`, not
+    /// `List[Unknown]`. A concrete (fully-known) type records immediately like `hover_record_at`.
+    /// Probe-gated; entirely inert off the hover probe → VM/interp parity-neutral.
+    pub(super) fn hover_record_binding(
+        &mut self,
+        span: Span,
+        ty: &Ty,
+        name: &str,
+        kind: HoverKind,
+        doc: Option<String>,
+    ) {
+        let Some((pl, pc)) = self.hover_probe else {
+            return;
+        };
+        if self.hover_result.is_some() || self.current_module_id != self.hover_entry {
+            return;
+        }
+        if span.line == pl && span.col == pc {
+            if contains_unknown_in_slot(ty) {
+                // defer: the binding may be refined later; resolve to its final type at the end-of-scope
+                // seam that OWNS it. Record that owning scope (reverse walk, like `repin`/`drop_empty_site`)
+                // so an intervening inner fn/method `check_fn_body` seam doesn't finalize it prematurely
+                // (correctness-0). Fall back to the innermost scope if the binding isn't declared yet
+                // (a decl-site hover recorded before `declare`) — at top level that is the module scope.
+                let owning = (0..self.scopes.len())
+                    .rev()
+                    .find(|&i| self.scopes[i].contains_key(name))
+                    .unwrap_or(self.scopes.len().saturating_sub(1));
+                self.hover_pending = Some((owning, name.to_string(), kind, doc));
+            } else {
+                self.hover_result = Some((ty.clone(), kind, doc));
+            }
+        }
+    }
+
+    /// PART B — at end-of-scope (fn body / module, BEFORE `pop_scope`), if the probe deferred onto an
+    /// unrefined-empty binding (`hover_pending` set) and no concrete hover landed elsewhere, resolve
+    /// the binding's FINAL (now-refined) type from its owning scope and commit it to `hover_result`.
+    /// A no-op off the probe (`hover_pending` stays `None`).
+    pub(super) fn finalize_hover_pending(&mut self) {
+        if self.hover_result.is_some() {
+            return; // a concrete hover already landed elsewhere
+        }
+        // Only resolve at the seam that OWNS the pending binding (the scope about to be popped). A
+        // pending binding owned by an ENCLOSING scope (`owning < idx`) is still refinable after this
+        // pop — leave it for that scope's own finalize, else an intervening inner fn/method seam would
+        // lock it to the still-unrefined `List[Unknown]` (correctness-0). Mirrors `finalize_empty_coll_sites`.
+        let idx = self.scopes.len().saturating_sub(1);
+        let owns_here = matches!(&self.hover_pending, Some((owning, ..)) if *owning >= idx);
+        if owns_here && let Some((_owning, name, kind, doc)) = self.hover_pending.take() {
+            let ty = self.lookup(&name).unwrap_or(Ty::Unknown);
+            self.hover_result = Some((ty, kind, doc));
+        }
+    }
+
+    /// Editor hover for a `from M import T` user type (struct/enum/newtype). Computes the effective
+    /// doc — the type's own decl docstring carried across the module boundary, else a `kind (from
+    /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
+    /// (`x: T[..]`) annotation use surfaces the same doc (those arms read `name_docs`), and (2) records
+    /// the import-line token hover at `name_span`. Both halves are probe-gated no-ops off the hover
+    /// probe (`name_docs` is editor-tooling-only and entry-module-scoped), so this is parity-neutral.
+    pub(super) fn record_imported_type_hover(
+        &mut self,
+        bind: &str,
+        name_span: Span,
+        ty: &Ty,
+        own_doc: Option<&str>,
+        kind_word: &str,
+        path: &[String],
+    ) {
+        if self.hover_probe.is_none() {
+            return;
+        }
+        let doc = own_doc
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{kind_word} (from {})", path.join(".")));
+        self.name_docs.insert(bind.to_string(), doc.clone());
+        self.hover_record_at(name_span, ty, HoverKind::Type, Some(doc));
+    }
+
+    /// Editor hover for a per-name import of a native/reserved TYPE (`import Shared from
+    /// std.concurrency`, `import Socket from std.net`, `import ptr from std.ffi`, …). These branches
+    /// license the name via the per-module sets and short-circuit BEFORE the user-struct import arm
+    /// that records a hover, so the import-line token would otherwise show nothing. Records that
+    /// token hover with the type's `builtin_type_doc` blurb (else a `(from <module>)` fallback) and
+    /// its resolved native `Ty` for display. Probe-gated no-op off the hover probe; unlike a user
+    /// `.chz` type NO `name_docs` seeding is needed — the bare/annotation use already resolves its
+    /// doc through `builtin_type_doc` in the `Type::Named`/`Type::Generic` hover arms.
+    pub(super) fn record_native_type_import_hover(
+        &mut self,
+        member: &str,
+        name_span: Span,
+        path: &[String],
+    ) {
+        if self.hover_probe.is_none() {
+            return;
+        }
+        let ty = self
+            .qualified_builtin_ty(member, &[])
+            .unwrap_or(Ty::Unknown);
+        let doc = builtin_type_doc(member)
+            .unwrap_or_else(|| format!("{member} (from {})", path.join(".")));
+        self.hover_record_at(name_span, &ty, HoverKind::Type, Some(doc));
+    }
+
+    /// The DISPLAY-only signature for a reserved callable builtin, for editor hover + value-position
+    /// typing. The eight MIGRATED universe builtins (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/
+    /// `bytearray`) source their sig from `std/prelude.chz` via [`Checker::native_prelude_sigs`]; the
+    /// still-synthetic `print` + container/runtime ctors fall through to [`builtin_container_sig`].
+    /// Covers exactly [`RESERVED_CALLABLE`] (drift-guarded). Not used for direct-call typing (the
+    /// `infer_named_call` arms handle that) — only hover + the first-class value form.
+    pub(super) fn builtin_sig(&self, name: &str) -> Option<FnSig> {
+        if let Some(sig) = self.native_prelude_sigs.get(name) {
+            return Some(sig.clone());
+        }
+        builtin_container_sig(name)
+    }
+
+    /// Hover-record a LEAF expression (identifier / literal) or a field-name access. Non-leaf kinds
+    /// (Binary/Index/Call/…) are skipped so hovering `a` in `a[0]` reports `a`'s type, not the element
+    /// type — the parent never overwrites the child. The field-name access anchors on `name_span` (the
+    /// field-name token), not the receiver-start `expr.span`, so `a.b.c` resolves the hovered segment.
+    pub(super) fn hover_record_expr(&mut self, expr: &Expr, ty: &Ty) {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal, None),
+            ExprKind::Ident(name) => {
+                // doc source mirrors the resolution: a `let`-bound local/global → `name_docs`; a free
+                // fn → its `FnSig::doc`; a bare type/ctor name used as a value → `name_docs`. All keyed
+                // by simple name, entry-module-scoped (safe — hover only fires in the entry module).
+                if self.lookup(name).is_some() {
+                    // Only a TRUE module-top-level binding (resolves at scope 0) owns its `name_docs`
+                    // entry; a shadowing param/local of the same name has no doc of its own and must
+                    // NOT borrow the global's (`name_docs` is keyed by bare name).
+                    let at_top_level = (0..self.scopes.len())
+                        .rev()
+                        .find(|&i| self.scopes[i].contains_key(name))
+                        == Some(0);
+                    let doc = if at_top_level {
+                        self.name_docs.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    // PART B: a use of a binding whose recorded type is still an unrefined empty
+                    // collection defers to the binding's final (refined) type via `hover_record_binding`.
+                    self.hover_record_binding(expr.span, ty, name, HoverKind::Local, doc);
+                } else if let Some(sig) = self.functions.get(name) {
+                    self.hover_record_at(expr.span, ty, HoverKind::Func, sig.doc.clone());
+                } else {
+                    let doc = self.name_docs.get(name).cloned();
+                    self.hover_record_at(expr.span, ty, HoverKind::Other, doc);
+                }
+            }
+            ExprKind::Field { name_span, .. } => {
+                self.hover_record_at(*name_span, ty, HoverKind::Field, None);
+            }
+            _ => {}
+        }
+    }
+
+    /// Build a DISPLAY-only `Ty::Func` for a by-name call callee (free fn, struct constructor, or a
+    /// reserved builtin via [`builtin_sig`]), for editor hover. `None` only for bare enum variants —
+    /// they carry no recordable signature, so hover stays `None`. Pure read of the fn/struct/builtin
+    /// tables: emits no error and changes no checking decision (it is only ever called under the hover
+    /// probe). The free-fn branch displays a generic fn's declared signature verbatim (`FnSig`
+    /// params/ret stay `Ty::Param(T)` → "fn(T, T) -> T"); the struct branch mirrors `name_is_generic`'s
+    /// module-keyed `bare_key` lookup and renders fields → `Struct` ("fn(int, int) -> Vec2"); the
+    /// builtin branch returns a canonical display sig ("fn(int) -> List[int]" for `range`).
+    pub(super) fn callee_display_ty(&self, name: &str) -> Option<Ty> {
+        if let Some(sig) = self.functions.get(name) {
+            return Some(Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+                labels: crate::checker::FnLabels::default(),
+            });
+        }
+        // A RESERVED builtin container/handle (`List`/`Map`/`Set`/`Channel`/`Shared`/…) now ALSO has a
+        // `self.structs` entry — for its harvested METHOD table — but it is NOT a nominal struct: its
+        // ctor callee must display the FLAT `builtin_container_sig` shape (`fn(?) -> List[?]`), NOT a
+        // struct-ctor sig synthesized from the (empty) field list. Skip the struct branch for these so
+        // they fall through to `builtin_sig` below (mirrors `resolve_type`'s reserved-type guard).
+        if builtin_container_sig(name).is_none()
+            && let Some(info) = self.structs.get(&self.bare_key(name))
+        {
+            let params: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
+            let targs: Vec<Ty> = info
+                .type_params
+                .iter()
+                .map(|tp| Ty::Param(tp.name.clone()))
+                .collect();
+            return Some(Ty::Func {
+                params,
+                ret: Box::new(Ty::Struct(name.to_string(), targs)),
+                labels: FnLabels::default(),
+            });
+        }
+        // A newtype constructor (`UserId(10)`): one arg of the underlying type → the newtype. Mirrors
+        // the struct branch (module-keyed `bare_key` lookup); a generic newtype keeps its declared
+        // `Ty::Param`s so it Displays "fn(list[T]) -> Stack[T]".
+        if self.newtype_names.contains(name) {
+            let key = self.bare_key(name);
+            if let Some((under, _)) = self.newtype_defs.get(&key) {
+                let targs: Vec<Ty> = self
+                    .newtype_type_params
+                    .get(&key)
+                    .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
+                    .unwrap_or_default();
+                return Some(Ty::Func {
+                    params: vec![under.clone()],
+                    ret: Box::new(Ty::NewType(name.to_string(), targs)),
+                    labels: crate::checker::FnLabels::default(),
+                });
+            }
+        }
+        // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
+        // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
+        // be user-shadowed, so this never collides with the fn/struct tables above.
+        if let Some(sig) = self.builtin_sig(name) {
+            return Some(Ty::Func {
+                params: sig.params,
+                ret: Box::new(sig.ret),
+                labels: crate::checker::FnLabels::default(),
+            });
+        }
+        None
+    }
+
+    /// `recover: <block>` yields `Result[T, Error]` where `T` is the type of the block's trailing
+    /// expression (or `nil`). Non-final statements are checked for their effects.
+    pub(super) fn infer_recover(&mut self, block: &Block) -> Ty {
+        // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
+        // would escape it are rejected (both engines agree). `?` is fine — it propagates normally.
+        if let Some((span, kw)) = recover_escaping_flow(block, false) {
+            self.error(
+                span,
+                format!("'{kw}' is not allowed inside a recover block"),
+            );
+        }
+        self.push_scope();
+        self.recover_depth += 1;
+        let mut value_ty = Ty::Nil;
+        if let Some((last, init)) = block.split_last() {
+            for stmt in init {
+                self.check_stmt(stmt);
+            }
+            match &last.kind {
+                StmtKind::Expr(e) => value_ty = self.infer(e),
+                _ => self.check_stmt(last),
+            }
+            // A `recover:` whose tail provably diverges (a statement-form `match` whose every arm
+            // `panic`s, `while true:`, all-branch-returning `if/else`, a trailing `exit`/`panic`)
+            // yields no normal value, so its `Ok` payload is bottom (`Unknown`), not `nil` — exactly
+            // like the direct `recover: panic(...)` form, which `infer`s `panic` to `Unknown` via the
+            // `Expr` arm above. Without this, a diverging *statement* tail leaves `value_ty = Nil` and
+            // its `Ok(v)` is wrongly nil-banned in value position. Guarding on `== Ty::Nil` keeps every
+            // concrete-tail recover (`recover: 5` -> `int`) and non-diverging statement tail
+            // (`recover: x := 5` -> `Result[nil]`) untouched. Reuses the sound, conservative
+            // `stmt_terminates` divergence predicate.
+            if value_ty == Ty::Nil && Self::stmt_terminates(last) {
+                value_ty = Ty::Unknown;
+            }
+        }
+        self.recover_depth -= 1;
+        self.pop_scope();
+        Ty::result(value_ty)
+    }
+
+    pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
+        if let Some(ty) = self.lookup(name) {
+            // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
+            // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
+            // reading it inside the task is an error — the read-side counterpart to the reassignment
+            // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
+            // task like free functions, so reading an imported module here is fine.
+            if self.is_local_capture(name) && !self.sendable(&ty) {
+                self.error(
+                    span,
+                    format!(
+                        "cannot use non-sendable captured binding '{name}' of type {disp} inside a \
+                         spawned task (captures cross the airlock — communicate via a Channel or Shared)",
+                        disp = if self.is_ref_decl(name) { ref_display(&ty) } else { ty.to_string() }
+                    ),
+                );
+            }
+            return ty;
+        }
+        if let Some(sig) = self.functions.get(name) {
+            return Ty::Func {
+                params: sig.params.clone(),
+                ret: Box::new(sig.ret.clone()),
+                // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
+                // labelled function value and `g(name="Bob")` resolves through it.
+                labels: FnLabels(sig.labels.clone()),
+            };
+        }
+        // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
+        // `defer print(...)`). Typed as the dedicated `Ty::BuiltinFn` from `builtin_sig` — a genuine
+        // callable that is sendable (crosses the spawn airlock) yet, unlike `Ty::Unknown`, is rejected
+        // by `expect_bool` (so `if print:` is a type error, not a VM/interp divergence). Only the four
+        // first-class fns; type/ctor names fall through to the "unknown/not first-class" arms below
+        // (uniform with `f := Point`).
+        //
+        // BUT a same-named MODULE-LEVEL global read here is NOT the builtin: `lookup` already resolved
+        // a binding that is in scope (the first arm above), so reaching here with a declared global
+        // name means it is used BEFORE its definition line — a use-before-def error, exactly like a
+        // non-builtin `x := y` before `y := …` (which errors `unknown name 'y'`). Suppress the
+        // first-class arm for such a name so it falls through to the same error, keeping the VM (whose
+        // `collect_globals` pre-slots every top-level `let` to `nil`) and the interp (source-order
+        // env → `Value::Builtin`) from diverging on a program that would otherwise wrongly type-check.
+        // `print`'s VALUE form is a FIXED 1-arg function, NOT its variadic call signature: the
+        // variadic + `sep=`/`end=` shapes need the specialized `CallPrint`/`CallPrintSep` opcodes,
+        // which are unreachable through a bound value (`p := print`). So force the canonical 1-arg
+        // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
+        // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
+        // fixed). Suppressed for a use-before-def module global, exactly like the general arm below.
+        if name == "print" && !self.module_global_lets.contains(name) {
+            return Ty::BuiltinFn {
+                params: vec![Ty::Unknown],
+                ret: Box::new(Ty::Nil),
+            };
+        }
+        if is_firstclass_builtin_fn(name)
+            && !self.module_global_lets.contains(name)
+            && let Some(sig) = self.builtin_sig(name)
+        {
+            return Ty::BuiltinFn {
+                params: sig.params,
+                ret: Box::new(sig.ret),
+            };
+        }
+        if name == "None" {
+            return Ty::option(Ty::Unknown);
+        }
+        // A bare user-variant name used as a value (`Red`, `Leaf`) is no longer allowed — variants are
+        // scoped under their enum and must be written qualified (`Color.Red`, `Tree.Leaf`).
+        if self.variant_owners.contains_key(name) {
+            let hint = self.qualify_hint(name);
+            self.error(span, hint);
+            return Ty::Unknown;
+        }
+        // A bare use of a name that is a type declared in some (un-imported) module — typically a
+        // constructor like `Point(1)` whose module wasn't `from`-imported. Hint how to import it.
+        if self.types_by_name.contains_key(name) {
+            self.error(span, self.unknown_type_msg(name));
+            return Ty::Unknown;
+        }
+        // A multi-level path mistake (`std.concurrency.Shared(0)`): the head `std` is the first
+        // segment of a real imported dotted module path, NOT a bound name. Steer to the two-level form
+        // instead of the misleading bare "unknown name 'std'". Narrow: fires ONLY for a literal import
+        // path head, never a genuine typo (which has no `import_path_heads` entry).
+        if let Some((dotted, bound)) = self.import_path_heads.get(name).cloned() {
+            self.error(
+                span,
+                format!(
+                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
+                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
+                     multi-level paths like `{name}.….<Name>` are not supported"
+                ),
+            );
+            return Ty::Unknown;
+        }
+        self.error(span, format!("unknown name '{name}'"));
+        Ty::Unknown
+    }
+
+    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
+        // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
+        // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
+        // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
+        // unifying siblings bottom-up. A heterogeneous literal whose every element is assignable to
+        // `E` then types as `List[E]`: the element-homogeneity rule is bypassed because the declared
+        // element type already sanctions the mix. This is what makes the `Any` top type the honest
+        // variadic element type — `fn f(...xs: Any)` called `f(1, "a", true)` (and the equivalent
+        // `xs: List[Any] = [1, "a", true]`) collapse to a `List[Any]` and check clean, since every
+        // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
+        // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
+        // (int→float) widening for a genuinely mistyped literal.
+        if let Some(Ty::List(e)) = expected
+            && !e.is_unknown()
+            && !items.is_empty()
+        {
+            let tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
+            if tys.iter().all(|t| t.is_unknown() || self.assignable(e, t)) {
+                return Ty::list((**e).clone());
+            }
+            // Not all elements fit `E` — re-run the homogeneity check over the ALREADY-inferred
+            // element types (no re-inference) so the usual diagnostics fire against the literal.
+            let mut elem = Ty::Unknown;
+            for (t, item) in tys.iter().zip(items) {
+                if elem.is_unknown() {
+                    elem = t.clone();
+                } else if numeric_mix(&elem, t) {
+                    elem = Ty::Float;
+                } else if !t.is_unknown() && !compatible(&elem, t) {
+                    self.error(item.span, format!("list elements differ: {elem} vs {t}"));
+                }
+            }
+            return Ty::list(elem);
+        }
+        let mut elem = Ty::Unknown;
+        for item in items {
+            let t = self.infer_value(item);
+            if elem.is_unknown() {
+                elem = t;
+            } else if numeric_mix(&elem, &t) {
+                // One-way int→float widening: a mixed int/float list literal infers `list[float]`.
+                elem = Ty::Float;
+            } else if !t.is_unknown() && !compatible(&elem, &t) {
+                self.error(item.span, format!("list elements differ: {elem} vs {t}"));
+            }
+        }
+        Ty::list(elem)
+    }
+
+    /// Infer the type of a map literal `{k: v, …}`. Keys must share one (hashable) type, values
+    /// another; heterogeneity and non-hashable keys are errors. Empty `{}` → `map[?, ?]`.
+    pub(super) fn infer_set(&mut self, elems: &[Expr]) -> Ty {
+        let mut elem = Ty::Unknown;
+        for e in elems {
+            let et = self.infer_value(e);
+            if !et.is_unknown() && !self.is_hashable_key(&et) {
+                self.error(
+                    e.span,
+                    format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
+                );
+            }
+            if elem.is_unknown() {
+                elem = et;
+            } else if !et.is_unknown() && !compatible(&elem, &et) {
+                self.error(e.span, format!("set elements differ: {elem} vs {et}"));
+            }
+        }
+        Ty::set(elem)
+    }
+
+    pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)]) -> Ty {
+        let mut key = Ty::Unknown;
+        let mut value = Ty::Unknown;
+        for (k_expr, v_expr) in entries {
+            let kt = self.infer_value(k_expr);
+            let vt = self.infer_value(v_expr);
+            if !kt.is_unknown() && !self.is_hashable_key(&kt) {
+                self.error(
+                    k_expr.span,
+                    format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
+                );
+            }
+            if key.is_unknown() {
+                key = kt;
+            } else if !kt.is_unknown() && !compatible(&key, &kt) {
+                self.error(k_expr.span, format!("map keys differ: {key} vs {kt}"));
+            }
+            if value.is_unknown() {
+                value = vt;
+            } else if numeric_mix(&value, &vt) {
+                // One-way int→float widening on the VALUE position (keys stay strict — float keys are
+                // banned anyway): a mixed int/float map value infers `map[K, float]`.
+                value = Ty::Float;
+            } else if !vt.is_unknown() && !compatible(&value, &vt) {
+                self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
+            }
+        }
+        Ty::map(key, value)
+    }
+
+    /// Infer a comprehension's type. Walks each `for` clause in order (first outermost): binds the
+    /// clause's loop variable(s) to the iterand's element type(s) via `for_bindings` (the exact path
+    /// a `for` loop uses, so every iterable behaves the same) — inferred in the scope of the earlier
+    /// clauses so a later clause can reference an earlier binding — and checks each guard is `Bool`.
+    /// Then it infers the element (and key) in the cumulative scope. The result mirrors
+    /// `infer_list`/`infer_set`/`infer_map`, including the Hashable check on set elements and map keys.
+    pub(super) fn infer_comprehension(
+        &mut self,
+        kind: CompKind,
+        key: Option<&Expr>,
+        elem: &Expr,
+        clauses: &[CompClause],
+    ) -> Ty {
+        self.push_scope();
+        for clause in clauses {
+            // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
+            // bindings (the whole point of nesting). Compute before declaring this clause's vars.
+            let bindings = self.for_bindings(&clause.vars, &clause.iter);
+            // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
+            // termination depends on `close()`. Draining it into a list/set/map is out of scope and would
+            // DIVERGE between engines (the VM's `compile_comprehension` reuses the channel-aware
+            // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject
+            // on both engines instead — the `for v in ch:` statement form is the way to drain a channel.
+            // Checked per clause so a channel in ANY clause is rejected.
+            if matches!(self.infer(&clause.iter), Ty::Channel(_)) {
+                self.error(
+                    clause.iter.span,
+                    "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
+                );
+            }
+            for (name, ty) in bindings {
+                // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
+                // binding can't be assigned to — no divergence to guard against. If a statement-bearing
+                // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
+                self.declare(&name, ty);
+            }
+            for g in &clause.guards {
+                self.expect_bool(g, "comprehension guard");
+            }
+        }
+        let result = match kind {
+            CompKind::List => Ty::list(self.infer_value(elem)),
+            CompKind::Set => {
+                let et = self.infer_value(elem);
+                if !et.is_unknown() && !self.is_hashable_key(&et) {
+                    self.error(
+                        elem.span,
+                        format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
+                    );
+                }
+                Ty::set(et)
+            }
+            CompKind::Map => {
+                let key = key.expect("a map comprehension always carries a key expression");
+                let kt = self.infer_value(key);
+                let vt = self.infer_value(elem);
+                if !kt.is_unknown() && !self.is_hashable_key(&kt) {
+                    self.error(
+                        key.span,
+                        format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
+                    );
+                }
+                Ty::map(kt, vt)
+            }
+        };
+        self.pop_scope();
+        result
+    }
+
+    pub(super) fn infer_unary(&mut self, op: UnaryOp, inner: &Expr) -> Ty {
+        let t = self.infer_value(inner);
+        match op {
+            UnaryOp::Neg => {
+                // int/float negate natively; a struct/newtype/type-param negates via the `Neg`
+                // protocol (method `neg(self) -> Self`) — the unary mirror of how `+` consults `Add`.
+                if t.is_numeric() || t.is_unknown() || self.satisfies(&t, "Neg").is_ok() {
+                    t
+                } else {
+                    self.error(inner.span, format!("cannot negate {t}"));
+                    Ty::Unknown
+                }
+            }
+            UnaryOp::Not => {
+                if t != Ty::Bool && !t.is_unknown() {
+                    self.error(inner.span, format!("'not' expects bool, found {t}"));
+                }
+                Ty::Bool
+            }
+        }
+    }
+
+    pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
+        use BinaryOp::*;
+        let l = self.infer_value(lhs);
+        let r = self.infer_value(rhs);
+        let either_unknown = l.is_unknown() || r.is_unknown();
+        match op {
+            And | Or => {
+                if l != Ty::Bool && !l.is_unknown() {
+                    self.error(
+                        lhs.span,
+                        format!("logical operator expects bool, found {l}"),
+                    );
+                }
+                if r != Ty::Bool && !r.is_unknown() {
+                    self.error(
+                        rhs.span,
+                        format!("logical operator expects bool, found {r}"),
+                    );
+                }
+                Ty::Bool
+            }
+            Add => {
+                if l == Ty::Str && r == Ty::Str {
+                    Ty::Str
+                } else if l.is_numeric() && r.is_numeric() {
+                    numeric_result(&l, &r)
+                } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
+                    t
+                } else if let (Ty::List(le), Ty::List(re)) = (&l, &r) {
+                    // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
+                    // Element types must be compatible; an empty `[]` side (Unknown elem) is
+                    // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
+                    if compatible(le, re) {
+                        Ty::List(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                        Ty::Unknown
+                    }
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                    Ty::Unknown
+                }
+            }
+            // `-`/`*` overload via the `Sub`/`Mul` protocols on same-typed structs; `/`/`%` stay
+            // numeric-only (no protocol).
+            Sub | Mul => {
+                let proto = if op == Sub { "Sub" } else { "Mul" };
+                if l.is_numeric() && r.is_numeric() {
+                    numeric_result(&l, &r)
+                } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
+                    t
+                } else if op == Mul && matches!((&l, &r), (Ty::List(_), Ty::Int)) {
+                    // List repeat (gap #3): `[0] * 3` → `list[T]`. Result keeps the list's element.
+                    l.clone()
+                } else if op == Mul && matches!((&l, &r), (Ty::Int, Ty::List(_))) {
+                    // Commutative, Python-style: `3 * [0]` → `list[T]`.
+                    r.clone()
+                } else if op == Sub
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                        );
+                        Ty::Unknown
+                    }
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(
+                        lhs.span,
+                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                    );
+                    Ty::Unknown
+                }
+            }
+            // `/`/`%` overload via the `Div`/`Mod` protocols on same-typed structs/enums/type-params,
+            // exactly like `-`/`*` use `Sub`/`Mul` (M22). `op_overload_result` also covers the same
+            // SCALAR numeric newtype auto-flow (`Meters / Meters`), so no hand-rolled newtype branch.
+            Div | Mod => {
+                let proto = if op == Div { "Div" } else { "Mod" };
+                if l.is_numeric() && r.is_numeric() {
+                    numeric_result(&l, &r)
+                } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
+                    t
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(
+                        lhs.span,
+                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                    );
+                    Ty::Unknown
+                }
+            }
+            Lt | LtEq | Gt | GtEq => {
+                let ok = (l.is_numeric() && r.is_numeric())
+                    || (l == Ty::Str && r == Ty::Str)
+                    || self.ordering_allowed(&l, &r);
+                if !ok && !either_unknown {
+                    self.error(lhs.span, format!("cannot compare {l} and {r}"));
+                }
+                Ty::Bool
+            }
+            // Bitwise/shift ops are int-only (gap #13), EXCEPT `| & ^` also do set algebra
+            // (gap #3): union / intersection / symmetric-difference on two `set[T]`. Shifts
+            // (`<< >>`) stay strictly int-only.
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                if l == Ty::Int && r == Ty::Int {
+                    Ty::Int
+                } else if matches!(op, BitAnd | BitOr | BitXor)
+                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                {
+                    // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
+                    // identical to the `.union`/`.intersection` methods (`^` has no method form).
+                    if compatible(le, re) {
+                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    } else {
+                        self.error(
+                            lhs.span,
+                            format!(
+                                "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                                op_sym(op)
+                            ),
+                        );
+                        Ty::Unknown
+                    }
+                } else if either_unknown {
+                    Ty::Unknown
+                } else {
+                    self.error(
+                        lhs.span,
+                        format!(
+                            "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                            op_sym(op)
+                        ),
+                    );
+                    Ty::Unknown
+                }
+            }
+            Eq | NotEq => Ty::Bool, // equality is permissive (matches the interpreter)
+            // `x in xs` — membership, type-directed on the RHS container. List/Set test element
+            // membership, Map tests KEY membership (Python-style), Str tests substring. Always
+            // yields `bool`. No user-`Contains` overload (reject anything else). The element/key
+            // type must be compatible with the LHS.
+            In => {
+                // A bare range has no runtime value (only valid as a `for` iterable) yet types as
+                // `list[int]` — reject a range RHS here or the engines diverge: the VM rejects the
+                // bare range at compile time, the interpreter dies at runtime. Mirrors the
+                // compiler's bare-range rejection.
+                if matches!(rhs.kind, ExprKind::Range { .. }) {
+                    self.error(rhs.span, "cannot use `in` on a range (a range is only valid as the iterable of a `for` loop)".to_string());
+                    return Ty::Bool;
+                }
+                match &r {
+                    Ty::List(elem) | Ty::Set(elem) => {
+                        if !either_unknown && !compatible(elem, &l) {
+                            self.error(lhs.span, format!("cannot test membership of {l} in {r}"));
+                        }
+                    }
+                    Ty::Map(key, _) => {
+                        if !either_unknown && !compatible(key, &l) {
+                            self.error(
+                                lhs.span,
+                                format!(
+                                    "cannot test membership of {l} in {r} (map `in` tests keys)"
+                                ),
+                            );
+                        }
+                    }
+                    Ty::Str => {
+                        if l != Ty::Str && !either_unknown {
+                            self.error(
+                                lhs.span,
+                                format!("substring `in` requires a str on the left, found {l}"),
+                            );
+                        }
+                    }
+                    Ty::Unknown => {}
+                    other => {
+                        self.error(
+                            rhs.span,
+                            format!(
+                                "cannot use `in` on {other} (expected a list, set, map, or str)"
+                            ),
+                        );
+                    }
+                }
+                Ty::Bool
+            }
+        }
+    }
+
+    /// A "this name is a variant — write it qualified" diagnostic, naming the owning enum(s).
+    /// Falls back to "unknown name" if the name isn't a known variant (shouldn't normally happen at
+    /// the call sites, which guard on `variant_owners` first).
+    pub(super) fn qualify_hint(&self, name: &str) -> String {
+        match self.variant_owners.get(name).map(Vec::as_slice) {
+            Some([en]) => {
+                format!("'{name}' is a variant of enum '{en}'; write it qualified as '{en}.{name}'")
+            }
+            Some(ens @ [_, _, ..]) => {
+                let opts = ens
+                    .iter()
+                    .map(|e| format!("'{e}.{name}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "'{name}' is a variant of several enums; write it qualified (one of {opts})"
+                )
+            }
+            _ => format!("unknown name '{name}'"),
+        }
+    }
+
+    /// The enum a scrutinee/slot type belongs to (`Color`, or `Result`/`Option` for the built-ins),
+    /// or `None` for a non-enum / un-inferable type. Used to validate a pattern's `Enum.` qualifier
+    /// against the value being matched.
+    pub(super) fn scrutinee_enum(ty: &Ty) -> Option<&str> {
+        match ty {
+            Ty::Enum(name, _) => Some(name),
+            Ty::Result(..) => Some("Result"),
+            Ty::Option(_) => Some("Option"),
+            _ => None,
+        }
+    }
+
+    /// Validate the `Enum.` qualifier on a `case Enum.Variant:` pattern. The named variant must (a)
+    /// belong to `enum_name`, and (b) — since variant names may now be shared across enums — name the
+    /// **scrutinee's** enum (`scrut_enum`): owning the name isn't enough, because a foreign qualifier
+    /// resolves to a different `variant_id` (a dead arm that would still be miscounted toward
+    /// exhaustiveness → a "checked-OK" match that traps at runtime). When *unqualified*, a user variant
+    /// name is an error — variants must be written qualified (built-in Ok/Err/Some/None stay bare).
+    pub(super) fn check_pattern_qualifier(
+        &mut self,
+        module_name: &Option<String>,
+        enum_name: &Option<String>,
+        name: &str,
+        scrut_enum: Option<&str>,
+        span: Span,
+    ) {
+        // A leading module binder (`module.Enum.Variant`) is validated here then dropped: the module
+        // must be bound and must own the named enum. Resolution mirrors construction
+        // (`infer_field`'s module.Enum.Variant path) — `imported_modules` → `ModuleSig` → `enum_defs`.
+        // Errors render BARE names only (never the qualified identity key). On success we fall through
+        // to the existing `enum_name` validation, which is scrutinee-driven and keeps everything else
+        // (variant-exists, scrutinee-agrees, exhaustiveness-by-identity) unchanged.
+        // When a module binder is present and resolves, this holds the enum's true IDENTITY KEY
+        // (`module::Enum`), used below instead of the bare/scrutinee fallback so variant-lookup and
+        // scrutinee-agreement key on the SAME identity as construction.
+        let mut module_ekey: Option<String> = None;
+        if let Some(m) = module_name {
+            let Some(en) = enum_name else {
+                // A module binder always comes with an enum name from the parser (3-part form); a
+                // None here would be a parser bug. Defensive: nothing to validate.
+                return;
+            };
+            let Some(mid) = self.imported_modules.get(m).cloned() else {
+                self.error(span, format!("unknown module '{m}'"));
+                return;
+            };
+            match self.module_sigs.get(&mid) {
+                Some(sig) if sig.enum_defs.contains_key(en) => {
+                    module_ekey = Some(self.type_key(&mid, en));
+                }
+                _ => {
+                    self.error(span, format!("module '{m}' has no enum '{en}'"));
+                    return;
+                }
+            }
+        }
+        match enum_name {
+            Some(en) => {
+                // ROOT REDESIGN — the pattern carries the BARE written enum name. Resolve it to its
+                // qualified IDENTITY KEY for the layout lookup. A module binder (`module.Enum.Variant`)
+                // resolves the key directly (above). Otherwise a bare-visible enum (local / from-import
+                // / std) resolves via `bare_types`; a WHOLE-module-imported enum (`Color` from
+                // `import geo`) is NOT bare-visible, so fall back to the SCRUTINEE's own enum key when
+                // its bare display name equals `en` (the pattern `Color.Red` matching a `geo::Color`
+                // value). Error messages keep the bare `en`.
+                let ekey = match module_ekey {
+                    Some(k) => k,
+                    None => match self.bare_types.get(en) {
+                        Some(k) => k.clone(),
+                        None => match scrut_enum {
+                            Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
+                            _ => en.to_string(),
+                        },
+                    },
+                };
+                // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
+                // Result/Option variants don't, so accept their canonical enums explicitly.
+                let builtin_ok = matches!(
+                    (en.as_str(), name),
+                    ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
+                );
+                if !builtin_ok
+                    && !self
+                        .variants
+                        .contains_key(&(ekey.clone(), name.to_string()))
+                {
+                    self.error(span, format!("enum '{en}' has no variant '{name}'"));
+                    return;
+                }
+                // The qualifier must name the scrutinee's own enum. (Skipped when the scrutinee enum
+                // is unknown — an int/str/bool or un-inferable scrutinee, handled by the caller.) The
+                // scrutinee carries the runtime key, so compare against the resolved `ekey`.
+                if let Some(s) = scrut_enum
+                    && ekey != s
+                {
+                    self.error(
+                        span,
+                        format!(
+                            "variant '{en}.{name}' cannot match a value of enum '{}'",
+                            crate::compiler::bare_display(s)
+                        ),
+                    );
+                }
+            }
+            None => {
+                // A bare user-variant name in a pattern must be qualified. (Built-ins are not in
+                // `variant_owners`, so they pass through untouched.)
+                if self.variant_owners.contains_key(name) {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
+                }
+            }
+        }
+    }
+
+    pub(super) fn infer_field(&mut self, obj: &Expr, name: &str) -> Ty {
+        // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
+        // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
+        // an imported dotted module path (`std`) — never a bound name — and `name` is the NEXT segment.
+        // The enclosing call/field already consumed the rest, so we identify the module by its
+        // (head, next) prefix and name its EXACT bound name (correct for 2- and 3+-level imports and
+        // sibling collisions; the trailing type isn't visible here, hence the `<Name>` placeholder).
+        if let ExprKind::Ident(head) = &obj.kind
+            && self.lookup(head).is_none()
+            && !self.imported_modules.contains_key(head)
+            && let Some(slot) = self
+                .module_prefix2
+                .get(&(head.clone(), name.to_string()))
+                .cloned()
+        {
+            let hint = match slot {
+                Some((dotted, bound)) => format!(
+                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
+                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
+                     multi-level paths like `{head}.{name}.<Name>` are not supported"
+                ),
+                None => format!(
+                    "Chezzi uses two-level paths — reference an imported module by its bound name \
+                     (its last path segment, or an alias); multi-level paths like \
+                     `{head}.{name}.<Name>` are not supported"
+                ),
+            };
+            self.error(obj.span, hint);
+            return Ty::Unknown;
+        }
+        // `module.Enum.Variant` used as a value: a bound module dotted with one of its enums dotted
+        // with a nullary variant — the qualified analogue of the bare `Enum.Variant` value form.
+        if let ExprKind::Field {
+            obj: inner_obj,
+            name: ename,
+            ..
+        } = &obj.kind
+            && let ExprKind::Ident(mname) = &inner_obj.kind
+            && !self.is_local_binding(mname)
+            && let Some(mid) = self.imported_modules.get(mname).cloned()
+            && let Some(sig) = self.module_sigs.get(&mid).cloned()
+            && let Some(edef) = sig.enum_defs.get(ename)
+        {
+            match edef.variant_names.iter().position(|v| v == name) {
+                Some(i) if edef.variants[i].payload.is_empty() => {
+                    return Ty::Enum(
+                        self.type_key(&mid, ename),
+                        vec![Ty::Unknown; edef.type_params.len()],
+                    );
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!("variant '{name}' of enum '{ename}' carries a payload; construct it as {mname}.{ename}.{name}(…)"),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    return Ty::Unknown;
+                }
+            }
+        }
+        // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
+        // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local
+        // named like the enum) wins, so only when `lookup` finds nothing. The bare enum name is gated
+        // by `enum_names` (visibility) and resolved to its runtime key for the layout lookup.
+        if let ExprKind::Ident(ename) = &obj.kind
+            && !self.is_local_binding(ename)
+            && self.enum_names.contains(ename)
+        {
+            let ekey = self.bare_key(ename);
+            let resolved = self
+                .variants
+                .get(&(ekey.clone(), name.to_string()))
+                .cloned();
+            match resolved {
+                Some(v) if v.payload.is_empty() => {
+                    let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
+                    return Ty::Enum(ekey, vec![Ty::Unknown; nparams]);
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!("variant '{name}' of enum '{ename}' carries a payload; construct it as {ename}.{name}(…)"),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    return Ty::Unknown;
+                }
+            }
+        }
+        // `Type[T…].Variant` used as a VALUE (no call) — the declaration-site turbofish on a nullary
+        // variant: `Box[int].Empty`. Mirrors the bare `Enum.Variant` value form above, but returns
+        // the EXPLICIT type args (resolved), not `Unknown`. Both carriers (single-arg `Index`,
+        // multi-arg `TypeApply`) converge through `type_apply_head`.
+        if let Some((tname, type_exprs)) = self.type_apply_head(obj)
+            && self.enum_names.contains(&tname)
+        {
+            let ekey = self.bare_key(&tname);
+            let resolved: Vec<Ty> = type_exprs
+                .iter()
+                .map(|t| self.resolve_type(t, obj.span))
+                .collect();
+            // Arity-check the explicit args against the enum's params (reuse `seed_targs`).
+            let tps = self
+                .enum_type_params
+                .get(&ekey)
+                .cloned()
+                .unwrap_or_default();
+            self.seed_targs(&tname, &tps, &resolved, obj.span);
+            match self
+                .variants
+                .get(&(ekey.clone(), name.to_string()))
+                .cloned()
+            {
+                Some(v) if v.payload.is_empty() => {
+                    return Ty::Enum(ekey, resolved);
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!("variant '{name}' of enum '{tname}' carries a payload; construct it as {tname}[…].{name}(…)"),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    self.error(obj.span, format!("enum '{tname}' has no variant '{name}'"));
+                    return Ty::Unknown;
+                }
+            }
+        }
+        let obj_ty = self.infer(obj);
+        match &obj_ty {
+            // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
+            // decimal string; out-of-range or non-numeric is an error.
+            Ty::Tuple(elems) => match name.parse::<usize>() {
+                Ok(i) if i < elems.len() => elems[i].clone(),
+                _ => {
+                    self.error(obj.span, format!("tuple {obj_ty} has no element '.{name}'"));
+                    Ty::Unknown
+                }
+            },
+            Ty::Struct(sname, targs) => {
+                if let Some(info) = self.structs.get(sname) {
+                    let map = struct_param_map(info, targs);
+                    if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
+                        return subst(ty, &map);
+                    }
+                    if let Some(sig) = info.methods.get(name) {
+                        let params = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        return Ty::Func {
+                            params,
+                            ret: Box::new(subst(&sig.ret, &map)),
+                            labels: FnLabels::default(),
+                        };
+                    }
+                }
+                self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));
+                Ty::Unknown
+            }
+            Ty::Module(mname) => {
+                let member = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|id| self.module_sigs.get(id))
+                    .map(|sig| {
+                        if let Some(fsig) = sig.functions.get(name) {
+                            // A first-class function VALUE is fixed-arity (Ty::Func carries no
+                            // optional tail), so expose only the REQUIRED params — `f := request.get`
+                            // then `f(url)` keeps working. The optional tail (e.g. timeout_ms) is
+                            // reachable via a direct `request.get(url, ms)` call.
+                            Some(Ty::Func {
+                                params: fsig.params[..fsig.min_params].to_vec(),
+                                ret: Box::new(fsig.ret.clone()),
+                                labels: crate::checker::FnLabels::default(),
+                            })
+                        } else {
+                            sig.values.get(name).cloned()
+                        }
+                    });
+                match member {
+                    Some(Some(ty)) => ty,
+                    _ => {
+                        self.error(obj.span, format!("module '{mname}' has no member '{name}'"));
+                        Ty::Unknown
+                    }
+                }
+            }
+            Ty::Unknown => Ty::Unknown,
+            other => {
+                self.error(obj.span, format!("type {other} has no field '{name}'"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    pub(super) fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
+        // Map keys are NOT int — infer the object first and check the index against the key type.
+        match self.infer_value(obj) {
+            Ty::Map(k, v) => {
+                let idx_ty = self.infer_value(index);
+                if !compatible(&k, &idx_ty) {
+                    self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                }
+                *v
+            }
+            Ty::List(inner) => {
+                self.expect_int(index, "index");
+                *inner
+            }
+            Ty::Str => {
+                self.expect_int(index, "index");
+                Ty::Str
+            }
+            Ty::Unknown => {
+                self.expect_int(index, "index");
+                Ty::Unknown
+            }
+            // A bounded `[C: Index[K, V]]` type parameter is indexable inside the generic body; its
+            // value type is the bound's `V` arg (resolved with sibling params in scope).
+            Ty::Param(name) => {
+                if let Some((k, v)) = self.param_index_kv(&name, obj.span) {
+                    let idx_ty = self.infer_value(index);
+                    if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                    }
+                    return v;
+                }
+                self.expect_int(index, "index");
+                self.error(obj.span, format!("cannot index into {name}"));
+                Ty::Unknown
+            }
+            other => {
+                // A user struct satisfying `Index` (has `index(self, K) -> V`) is indexable by `K`.
+                if let Some((k, v)) = self.index_kv(&other) {
+                    let idx_ty = self.infer_value(index);
+                    if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                    }
+                    return v;
+                }
+                self.expect_int(index, "index");
+                self.error(obj.span, format!("cannot index into {other}"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// The `(K, V)` of a bounded type parameter's `Index`/`IndexSet` bound, resolved with the
+    /// surrounding params in scope. `None` ⇒ the param has no indexing bound.
+    pub(super) fn param_index_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+        let bound = self
+            .type_params
+            .get(name)?
+            .iter()
+            .find(|b| matches!(b.name.as_str(), "Index" | "IndexSet"))
+            .cloned()?;
+        let k = bound
+            .args
+            .first()
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        let v = bound
+            .args
+            .get(1)
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        Some((k, v))
+    }
+
+    /// The `(K, V)` of a bounded type parameter's `IndexSet` bound (write requires `IndexSet`
+    /// specifically — a read-only `Index` bound is not assignable). `None` ⇒ no `IndexSet` bound.
+    pub(super) fn param_indexset_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+        let bound = self
+            .type_params
+            .get(name)?
+            .iter()
+            .find(|b| b.name == "IndexSet")
+            .cloned()?;
+        let k = bound
+            .args
+            .first()
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        let v = bound
+            .args
+            .get(1)
+            .map(|a| self.resolve_type(a, span))
+            .unwrap_or(Ty::Unknown);
+        Some((k, v))
+    }
+
+    /// Type `obj[start:end:step]`. Each *present* component must be `int`; the result type follows the
+    /// `Slice` protocol — `list[T] → list[T]`, `str → str`, or a struct's
+    /// `slice(self, int?, int?, int?) -> R`.
+    pub(super) fn infer_slice(
+        &mut self,
+        obj: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        step: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        // Only the *present* components are constrained to int; an omitted bound/step is `None`.
+        for comp in [start, end, step].into_iter().flatten() {
+            self.expect_int(comp, "slice bound");
+        }
+        let obj_ty = self.infer_value(obj);
+        if obj_ty.is_unknown() {
+            return Ty::Unknown;
+        }
+        // A bounded `[C: Slice[R]]` type parameter is sliceable inside the generic body; its result
+        // type is the bound's `R` arg (resolved with sibling params in scope).
+        if let Ty::Param(name) = &obj_ty
+            && let Some(bound) = self
+                .type_params
+                .get(name)
+                .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
+        {
+            return bound
+                .args
+                .first()
+                .map(|a| self.resolve_type(a, span))
+                .unwrap_or(Ty::Unknown);
+        }
+        match self.slice_result(&obj_ty) {
+            Some(r) => r,
+            None => {
+                self.error(span, format!("cannot slice {obj_ty}"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    pub(super) fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
+        let t = self.infer(inner);
+        // Inside a `recover:` block, `?` short-circuits to the boundary (try-block style), not the
+        // enclosing function. The boundary's error type is `Error`, and its result is `Result`-typed,
+        // so only a `Result` operand fits — `?` on an `Option` is rejected here.
+        if self.recover_depth > 0 {
+            return match t {
+                Ty::Result(ok, err) => {
+                    if !self.assignable(&Ty::error_proto(), &err) {
+                        self.error(
+                            span,
+                            format!("'?' inside a recover block propagates error {err}, which must satisfy Error"),
+                        );
+                    }
+                    *ok
+                }
+                Ty::Unknown => Ty::Unknown,
+                Ty::Option(_) => {
+                    self.error(span, "'?' on an Option is not allowed inside a recover block (its result is Result-typed); use match instead".to_string());
+                    Ty::Unknown
+                }
+                other => {
+                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    Ty::Unknown
+                }
+            };
+        }
+        // The enclosing function must be able to early-return the Err/None. The operand's sum-type
+        // KIND must match the enclosing return's KIND — a Result-`?` early-returns an `Err`, so the
+        // function must itself return `Result`; an Option-`?` early-returns a `None`, so it must
+        // return `Option`. `Nil` (top-level / `fn main()` — the interpreter unwinds at the boundary)
+        // accepts either. Mixing kinds would make the function return the wrong sum-type and fault a
+        // downstream exhaustive `match`/`??` at runtime even though `check` passed.
+        match t {
+            Ty::Result(ok, err) => {
+                match self.current_ret.clone() {
+                    // Propagating an `Err` early-returns it as the enclosing function's error, so the
+                    // inner error type must fit the enclosing one (Rust-like).
+                    Ty::Result(_, re) => {
+                        if !self.assignable(&re, &err) {
+                            self.error(
+                                span,
+                                format!("'?' propagates error {err}, but the enclosing function's error type is {re}"),
+                            );
+                        }
+                    }
+                    // Top-level / `fn main()` — the interpreter unwinds the Err at the boundary.
+                    Ty::Nil => {}
+                    Ty::Option(_) => {
+                        self.error(
+                            span,
+                            "'?' propagates a Result error, but the enclosing function returns Option, not Result".to_string(),
+                        );
+                    }
+                    other => {
+                        self.error(
+                            span,
+                            format!(
+                                "'?' used in a function that returns {other}, not Result or Option"
+                            ),
+                        );
+                    }
+                }
+                *ok
+            }
+            Ty::Option(inner) => {
+                match self.current_ret.clone() {
+                    Ty::Option(_) | Ty::Nil => {}
+                    Ty::Result(..) => {
+                        self.error(
+                            span,
+                            "'?' propagates a None, but the enclosing function returns Result, not Option".to_string(),
+                        );
+                    }
+                    other => {
+                        self.error(
+                            span,
+                            format!(
+                                "'?' used in a function that returns {other}, not Result or Option"
+                            ),
+                        );
+                    }
+                }
+                *inner
+            }
+            Ty::Unknown => Ty::Unknown,
+            other => {
+                self.error(span, format!("'?' expects Result or Option, found {other}"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// `json.decode[T](s)` — the source must be `str`, the target `T` must be decodable. Yields
+    /// `Result[T]`. (`obj` is the json-module expression; we infer it only to surface a bad-module
+    /// error, but place no constraint on it — any module exposing `parse` works at runtime.)
+    pub(super) fn infer_decode(&mut self, obj: &Expr, ty: &Type, arg: &Expr, span: Span) -> Ty {
+        let _ = self.infer(obj);
+        let arg_ty = self.infer_value(arg);
+        if !compatible(&Ty::Str, &arg_ty) {
+            self.error(span, format!("decode source must be str, found {arg_ty}"));
+        }
+        let target = self.resolve_type(ty, span);
+        if let Err(msg) = self.is_decodable(&target, &mut Vec::new()) {
+            self.error(span, msg);
+            return Ty::Unknown;
+        }
+        Ty::result(target)
+    }
+
+    /// Whether `json.decode` can produce a value of this type. Mirrors `json_decode::from_type`'s
+    /// acceptance (kept in sync): scalars, `list`/`map[str,_]`/`Option` of decodables, and
+    /// non-generic, non-recursive structs of decodable fields. `visiting` rejects recursive structs.
+    pub(super) fn is_decodable(&self, ty: &Ty, visiting: &mut Vec<String>) -> Result<(), String> {
+        match ty {
+            Ty::Int | Ty::Float | Ty::Str | Ty::Bool => Ok(()),
+            Ty::Unknown => Ok(()), // an error was already reported; don't pile on
+            Ty::List(t) | Ty::Option(t) => self.is_decodable(t, visiting),
+            Ty::Map(k, v) => {
+                if !matches!(**k, Ty::Str) {
+                    return Err(format!("decode: map keys must be str, found {k}"));
+                }
+                self.is_decodable(v, visiting)
+            }
+            Ty::Struct(name, args) => {
+                if !args.is_empty() {
+                    return Err(format!("decode: cannot decode into generic struct {ty}"));
+                }
+                if visiting.iter().any(|s| s == name) {
+                    return Err(format!(
+                        "decode: recursive struct '{name}' is not decodable; use the Json enum instead"
+                    ));
+                }
+                let Some(info) = self.structs.get(name) else {
+                    return Err(format!("decode: '{name}' is not a decodable type"));
+                };
+                visiting.push(name.clone());
+                let fields = info.fields.clone();
+                for (_, fty) in &fields {
+                    self.is_decodable(fty, visiting)?;
+                }
+                visiting.pop();
+                Ok(())
+            }
+            other => Err(format!("decode: cannot decode into {other}")),
+        }
+    }
+
+    /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only
+    /// when there is no expected/slot type). **Shallow + precise** (closes the bare-param structural
+    /// trap without over-pinning): source #2 — a `match` whose scrutinee is the BARE param identifier
+    /// (`match x:`, not `match x.f:` / `match g(x):`), pinned from its first concrete arm; source #3 —
+    /// a member access on the bare param (`x.f` / `x.m()`) whose name is declared by exactly one struct.
+    /// Source #2 wins. Does NOT descend into nested closures (an inner param shadowing the name is
+    /// unrelated). Read-only; returns `None` when nothing pins the param.
+    pub(super) fn scan_free_closure_param(&self, name: &str, body: &Expr) -> Option<Ty> {
+        let mut match_pin = None;
+        let mut member_pin = None;
+        self.scan_expr_for_pin(name, body, &mut match_pin, &mut member_pin);
+        match_pin.or(member_pin)
+    }
+
+    /// Walk `e` (skipping nested closures) accumulating the source-#2 (`match_pin`) and source-#3
+    /// (`member_pin`) candidates for a free closure's param `name`. Stops descending once a source-#2
+    /// pin is found (highest priority). See [`Checker::scan_free_closure_param`].
+    pub(super) fn scan_expr_for_pin(
+        &self,
+        name: &str,
+        e: &Expr,
+        match_pin: &mut Option<Ty>,
+        member_pin: &mut Option<Ty>,
+    ) {
+        if match_pin.is_some() {
+            return;
+        }
+        match &e.kind {
+            // Source #2: a match whose scrutinee is the BARE param — pin from the first concrete arm.
+            ExprKind::Match { scrutinee, arms } => {
+                if let ExprKind::Ident(s) = &scrutinee.kind
+                    && s == name
+                {
+                    for arm in arms {
+                        if let Some(t) = self.pin_ty_of_pattern(&arm.pattern) {
+                            *match_pin = Some(t);
+                            return;
+                        }
+                    }
+                }
+                self.scan_expr_for_pin(name, scrutinee, match_pin, member_pin);
+                for arm in arms {
+                    // Scope-awareness: an arm whose pattern BINDS `name` (a tuple/variant sub-position
+                    // or a bare catch-all of the same spelling) shadows the closure param inside the
+                    // guard + body — a `match <name>:` there reads that binding, not the param, so it
+                    // must NOT pin. Skip the shadowed arm's guard/body.
+                    if pattern_binds(&arm.pattern, name) {
+                        continue;
+                    }
+                    if let Some(g) = &arm.guard {
+                        self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, &arm.body, match_pin, member_pin);
+                }
+            }
+            // Source #3: a member access (field or method receiver) on the bare param.
+            ExprKind::Field {
+                obj, name: member, ..
+            } => {
+                if member_pin.is_none()
+                    && let ExprKind::Ident(r) = &obj.kind
+                    && r == name
+                    && let Some(t) = self.unique_member_owner(member)
+                {
+                    *member_pin = Some(t);
+                }
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+            }
+            // A nested closure is its own scope — never descend (it may shadow `name`).
+            ExprKind::Closure { .. } => {}
+            // Every other expression: recurse into its child expressions.
+            ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+                for c in es {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    self.scan_expr_for_pin(name, v, match_pin, member_pin);
+                }
+            }
+            ExprKind::Comprehension {
+                key, elem, clauses, ..
+            } => {
+                // Scope-awareness: a clause's `vars` shadow `name` for every LATER clause's
+                // iter/guards and for the key/elem. Scan each clause's iter (evaluated before this
+                // clause binds), then stop once a clause binds `name` — its own guards and everything
+                // downstream read the shadowing binding, not the param.
+                let mut shadowed = false;
+                for c in clauses {
+                    if !shadowed {
+                        self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
+                    }
+                    if c.vars.iter().any(|v| v == name) {
+                        shadowed = true;
+                    }
+                    if !shadowed {
+                        for g in &c.guards {
+                            self.scan_expr_for_pin(name, g, match_pin, member_pin);
+                        }
+                    }
+                }
+                if !shadowed {
+                    if let Some(k) = key {
+                        self.scan_expr_for_pin(name, k, match_pin, member_pin);
+                    }
+                    self.scan_expr_for_pin(name, elem, match_pin, member_pin);
+                }
+            }
+            ExprKind::Unary { expr, .. } => {
+                self.scan_expr_for_pin(name, expr, match_pin, member_pin)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.scan_expr_for_pin(name, lhs, match_pin, member_pin);
+                self.scan_expr_for_pin(name, rhs, match_pin, member_pin);
+            }
+            ExprKind::Range { start, end } => {
+                self.scan_expr_for_pin(name, start, match_pin, member_pin);
+                self.scan_expr_for_pin(name, end, match_pin, member_pin);
+            }
+            ExprKind::Call { callee, args, .. } => {
+                self.scan_expr_for_pin(name, callee, match_pin, member_pin);
+                for a in args {
+                    self.scan_expr_for_pin(name, a, match_pin, member_pin);
+                }
+            }
+            ExprKind::Index { obj, index } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, index, match_pin, member_pin);
+            }
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                for c in [start, end, step].into_iter().flatten() {
+                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
+                }
+            }
+            ExprKind::Try(inner) => self.scan_expr_for_pin(name, inner, match_pin, member_pin),
+            ExprKind::DecodeCall { obj, arg, .. } => {
+                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
+                self.scan_expr_for_pin(name, arg, match_pin, member_pin);
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.scan_expr_for_pin(name, cond, match_pin, member_pin);
+                self.scan_expr_for_pin(name, then, match_pin, member_pin);
+                self.scan_expr_for_pin(name, els, match_pin, member_pin);
+            }
+            // String interpolation: the `{…}` fragment expressions are not stored as child `Expr`s —
+            // they live inside the raw text and are produced on demand by the shared interpolation
+            // parser (the same one `check_interpolation` uses). Parse + scan them so a param pinned
+            // ONLY by a member access inside an interpolation (`"{x.f}"`) resolves via source #3. A
+            // malformed interpolation is ignored here (it is diagnosed by `check_interpolation`).
+            ExprKind::Str(raw) => {
+                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
+                    for chunk in &chunks {
+                        if let crate::interpolation::Chunk::Expr(frag, _) = chunk {
+                            self.scan_expr_for_pin(name, frag, match_pin, member_pin);
+                        }
+                    }
+                }
+            }
+            // `?.`/`??` carriers are lowered before checking. `recover:` carries a statement block
+            // (which can introduce its own bindings); it is NOT scanned — a param pinnable only from
+            // inside a `recover:` body stays un-inferable and requires an annotation (sound: this is
+            // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`TypeApply`/
+            // `RawStr`) have no child to scan.
+            _ => {}
+        }
+    }
+
+    /// The scrutinee type a top-level match arm pattern implies (source #2 classification). Mirrors
+    /// [`Checker::reconstruct_unknown_kind`]'s arm classification: a qualified/unique enum variant or
+    /// builtin `Ok`/`Err`/`Some`/`None` → that enum/Result/Option (type args `Unknown`); a tuple → an
+    /// all-`Unknown` tuple of that arity; a literal/range → its scalar; a binding/wildcard/ambiguous →
+    /// `None` (no pin).
+    pub(super) fn pin_ty_of_pattern(&self, p: &Pattern) -> Option<Ty> {
+        match p {
+            Pattern::Or(alts) => alts.first().and_then(|a| self.pin_ty_of_pattern(a)),
+            Pattern::Tuple(subs) => Some(Ty::Tuple(vec![Ty::Unknown; subs.len()])),
+            Pattern::Literal(lit) => Some(lit_pattern_ty(lit)),
+            Pattern::Range { .. } => Some(Ty::Int),
+            Pattern::Variant {
+                name,
+                enum_name,
+                module_name,
+                ..
+            } => {
+                // A module-qualified variant can't be resolved through the bare-name table — no pin.
+                if module_name.is_some() {
+                    return None;
+                }
+                if let Some(en) = enum_name {
+                    let key = self.bare_key(en);
+                    return self
+                        .enums
+                        .contains_key(&key)
+                        .then(|| self.enum_ty_unknown_args(&key));
+                }
+                match name.as_str() {
+                    "Ok" | "Err" => Some(Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown))),
+                    "Some" | "None" => Some(Ty::Option(Box::new(Ty::Unknown))),
+                    other => {
+                        // A bare variant uniquely owned by one enum pins it; an ambiguous one, or a
+                        // bare binding name (not a known variant), does not.
+                        let owners = self.variant_owners.get(other)?;
+                        if owners.len() != 1 {
+                            return None;
+                        }
+                        let key = self.bare_key(&owners[0]);
+                        self.enums
+                            .contains_key(&key)
+                            .then(|| self.enum_ty_unknown_args(&key))
+                    }
+                }
+            }
+            Pattern::Ident(..) | Pattern::Wildcard => None,
+        }
+    }
+
+    /// A user enum's `Ty::Enum` with its type arguments filled as `Unknown` (the scrutinee shape an
+    /// arm pattern pins — element types are unknown, the enum identity is what matters for call-site
+    /// checking).
+    pub(super) fn enum_ty_unknown_args(&self, key: &str) -> Ty {
+        let n = self
+            .enum_type_params
+            .get(key)
+            .map(|tps| tps.len())
+            .unwrap_or(0);
+        Ty::Enum(key.to_string(), vec![Ty::Unknown; n])
+    }
+
+    /// If exactly one struct declares a field OR method `member`, return that struct's type (type args
+    /// `Unknown`); else `None` (source #3 only fires for a UNIQUELY-owned member — a name shared by
+    /// >1 type, or none, never pins). Read-only.
+    pub(super) fn unique_member_owner(&self, member: &str) -> Option<Ty> {
+        // A member shared by any PARAMETERIZED collection (`len`/`map`/`get`/`push`/… on
+        // `list`/`map`/`set`) is never a unique pin: it is shared across types AND would only pin a
+        // weak `list[Unknown]`-style type (design §3 — "methods/fields shared by >1 type … never
+        // pin"). Bail before collecting owners so such members fall through to the annotation rule.
+        // Phase 5a-containers — the `List`/`Map`/`Set` method tables are harvested from
+        // `std/prelude.chz` and re-seeded into `self.structs` by `seed_stdlib_structs`; check them for
+        // membership (the retired `list_method_sig`/`map_method_sig`/`set_method_sig` arms' replacement).
+        // As of phase 6 the `List` table ALSO contains the closure-driven HOFs (`map`/`filter`/`fold`/
+        // `sort_by`/`sort_by_key`, formerly the bespoke `infer_list_hof` arm), so those names now bail
+        // here too — correct, since they ARE shared by the parameterized `List` (a name shared across
+        // types never uniquely pins), matching the design's collection-method bail.
+        if ["List", "Map", "Set"].iter().any(|ty| {
+            self.structs
+                .get(*ty)
+                .is_some_and(|info| info.methods.contains_key(member))
+        }) {
+            return None;
+        }
+        // Collect every PINNABLE owner of `member`: user structs (by field or method) plus the
+        // concrete scalar builtins `str`/`bytes` (the design's `x.upper()` → `str` case). The pin
+        // fires only when exactly one type owns it.
+        let mut owners: Vec<Ty> = Vec::new();
+        for (key, info) in &self.structs {
+            // Source #3 pins only from a USER type. The `Builtin`-origin native structs
+            // (Match/Response/ProcResult/…) are seeded into `self.structs` unconditionally at init
+            // regardless of imports, so scanning them would mis-pin a param to an unimported,
+            // unreferenced builtin (their fields like `end`/`code`/`status`). Skip them.
+            if info.origin == StructOrigin::Builtin {
+                continue;
+            }
+            let has =
+                info.fields.iter().any(|(n, _)| n == member) || info.methods.contains_key(member);
+            if has {
+                let n = info.type_params.len();
+                owners.push(Ty::Struct(key.clone(), vec![Ty::Unknown; n]));
+            }
+        }
+        if str_method_sig(member).is_some() {
+            owners.push(Ty::Str);
+        }
+        if bytes_method_sig(member).is_some() {
+            owners.push(Ty::Bytes);
+        }
+        if owners.len() == 1 {
+            owners.pop()
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn infer_closure(
+        &mut self,
+        params: &[Param],
+        ret: Option<&Type>,
+        body: &Expr,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a
+        // `fn(..)` whose arity matches, an UNANNOTATED param binds to the expected param type
+        // (checking-mode), and a non-`Unknown` expected return becomes the body's return context.
+        // On an arity mismatch the params stay `Unknown` here and the call site's `assignable` check
+        // reports the mismatch (single diagnostic).
+        let (exp_params, exp_ret): (Option<Vec<Ty>>, Option<Ty>) = match expected {
+            Some(Ty::Func {
+                params: p, ret: r, ..
+            }) if p.len() == params.len() => (Some(p.clone()), Some((**r).clone())),
+            _ => (None, None),
+        };
+        // A `fn`-typed slot whose arity does NOT match: keep unannotated params silently `Unknown`
+        // here and let the call site's `assignable` check report the single arity diagnostic — do
+        // NOT route them through the free-closure scan (which would emit a spurious, misdirecting
+        // "cannot infer type of parameter").
+        let expected_arity_mismatch =
+            matches!(expected, Some(Ty::Func { params: p, .. }) if p.len() != params.len());
+        // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
+        // the closure's definition must not make a `break`/`continue` inside it legal.
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
+        // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
+        // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
+        // supplies that context when the closure is unannotated.
+        let declared_ret = ret
+            .map(|t| self.resolve_type(t, body.span))
+            .or_else(|| exp_ret.clone().filter(|r| !r.is_unknown()))
+            .unwrap_or(Ty::Unknown);
+        let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
+        // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
+        // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
+        // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
+        let saved_yield = self.yield_ty.take();
+        self.push_scope();
+        let param_tys: Vec<Ty> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                // A closure `ref T` param is a `Ref[T]` box, exactly like a named-fn `ref` param
+                // (charge 3): the body's reads/writes were lowered to `.get()`/`.set()` by desugar,
+                // and a `ref` arg aliases at the call site. `check_ref_ty` rejects a non-boxable
+                // pointee. Without a `ref`, the param keeps its by-value type, or — for an
+                // unannotated param — the expected (slot) param type (source #1), else `Unknown`.
+                let ty = match &p.ty {
+                    Some(t) if p.is_ref => {
+                        self.check_ref_ty(t, body.span);
+                        self.resolve_type(
+                            &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
+                            body.span,
+                        )
+                    }
+                    Some(t) => self.resolve_type(t, body.span),
+                    None => {
+                        // An unannotated param: prefer the expected (slot) param type (source #1);
+                        // else infer it from the body — source #2 (a match whose scrutinee is the
+                        // bare param) / source #3 (a uniquely-owned member access).
+                        //
+                        // An `Unknown` expected param type is NOT a pin: it arises when a generic
+                        // slot's type param was unified ONLY from this closure (`store(fn(a): …)` →
+                        // `T = fn(Unknown) -> Unknown`), so binding the param to it silently would
+                        // leave the call site unchecked → check-passes-then-traps. Filter it out and
+                        // fall through to the body scan / annotation requirement (soundness).
+                        if let Some(t) = exp_params
+                            .as_ref()
+                            .and_then(|ps| ps.get(i))
+                            .filter(|t| !t.is_unknown())
+                            .cloned()
+                        {
+                            t
+                        } else if expected_arity_mismatch {
+                            // Arity mismatch against a `fn`-typed slot — stay `Unknown`; the call
+                            // site reports the mismatch (single diagnostic).
+                            Ty::Unknown
+                        } else if self.generic_arg_prepass {
+                            // Generic unification prepass: keep the param `Unknown` so the other
+                            // args / substituted slot type drive unification; `check_generic_arg`
+                            // re-infers it in checking-mode afterwards. Running the free scan here
+                            // would corrupt unification (see `generic_arg_prepass` doc).
+                            Ty::Unknown
+                        } else if let Some(t) = self.scan_free_closure_param(&p.name, body) {
+                            t
+                        } else {
+                            // Genuinely unresolved: no expected/slot type and nothing in the body
+                            // pins it. Require an annotation rather than degrade the param to a
+                            // runtime `Unknown` value (the one place `Unknown` could reach a value).
+                            // Bind `Unknown` after erroring so the body still checks (no cascade).
+                            self.error(
+                                p.name_span,
+                                format!(
+                                    "cannot infer type of parameter '{}'; add a type annotation",
+                                    p.name
+                                ),
+                            );
+                            Ty::Unknown
+                        }
+                    }
+                };
+                // Editor hover: record the closure param's type at its DECL-site name span (no-op
+                // off-probe; first-hit-wins, so a body-use span records separately). SKIP during the
+                // generic-arg unification prepass: there an unannotated param is forced `Unknown`
+                // (see the `generic_arg_prepass` arm above), and first-hit-wins would latch that `?`
+                // over the real type the later per-arg check (run with the substituted slot type and
+                // `generic_arg_prepass=false`) infers — so `xs.map(fn(a): a + 1)` would hover `?`.
+                if !self.generic_arg_prepass {
+                    self.hover_record_at(p.name_span, &ty, HoverKind::Param, None);
+                }
+                self.declare(&p.name, ty.clone());
+                if p.is_ref {
+                    self.declare_ref(&p.name);
+                }
+                ty
+            })
+            .collect();
+        let body_ty = self.infer(body);
+        self.pop_scope();
+        self.loop_depth = saved_loop_depth;
+        self.recover_depth = saved_recover;
+        self.current_ret = saved_ret;
+        self.yield_ty = saved_yield;
+        let ret_ty = match ret {
+            Some(t) => {
+                let declared = self.resolve_type(t, body.span);
+                if !self.assignable(&declared, &body_ty) {
+                    self.error(
+                        body.span,
+                        format!(
+                            "closure body has type {body_ty}, but its return type is {declared}"
+                        ),
+                    );
+                }
+                declared
+            }
+            None => body_ty,
+        };
+        // A closure/lambda value carries its param names as labels, so a keyword call through a
+        // closure value (`cb := fn(name: str): …; cb(name="X")`) resolves.
+        let labels: Vec<Option<String>> = params.iter().map(|p| Some(p.name.clone())).collect();
+        Ty::Func {
+            params: param_tys,
+            ret: Box::new(ret_ty),
+            labels: FnLabels(labels),
+        }
+    }
+
+    // ===== calls =====
+}
