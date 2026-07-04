@@ -1718,8 +1718,22 @@ impl Checker {
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.
         unify(receiver, recv_ty, &mut mmap);
-        for (decl, actual) in expected.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut mmap);
+        for (i, (decl, actual)) in expected.iter().zip(&arg_tys).enumerate() {
+            // Bug D: for a CLOSURE arg, unify against a RETURN-MASKED copy so only its PARAMETER
+            // positions can bind a method type param in pass 1. Its prepass return may be a leaked
+            // `Ty::Param` (an unannotated body that is a nested free generic call, `fn(x): ident(x)`);
+            // letting it bind here would prematurely pin the method's return-position `[U]` to that
+            // leaked param, and the loop-back below (which only fills params still FREE) could not
+            // correct it. Masking defers `U` to the loop-back's checking-mode re-inference, which
+            // recovers it as the CONCRETE return type. Non-closure args unify unchanged.
+            if matches!(
+                args.get(i).map(|a| &a.kind),
+                Some(ExprKind::Closure { ret: None, .. })
+            ) {
+                unify(decl, &mask_closure_ret(actual), &mut mmap);
+            } else {
+                unify(decl, actual, &mut mmap);
+            }
         }
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
@@ -1742,7 +1756,19 @@ impl Checker {
         let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
-            refined_actuals.push(self.check_generic_arg(method, &want, actual, arg));
+            // Bug D: `check_generic_arg`'s fallback assignability check compares the prepass `actual`
+            // against `want`. For a closure whose UNANNOTATED body is a nested free generic call, the
+            // prepass return leaks the callee's own `Ty::Param` (`fn(?) -> T`) — NOT the lenient
+            // `Unknown` a direct body yields — so it would spuriously mismatch `want`'s still-free
+            // return `[U]`. Mask the closure's fallback return (the body/return is re-enforced by the
+            // checking-mode re-inference inside `check_generic_arg`, and `U` is recovered by the
+            // loop-back below), keeping the fallback check to params + arity.
+            let fallback = if matches!(arg.kind, ExprKind::Closure { ret: None, .. }) {
+                mask_closure_ret(actual)
+            } else {
+                actual.clone()
+            };
+            refined_actuals.push(self.check_generic_arg(method, &want, &fallback, arg));
         }
         // LOOP-BACK (the bidirectional recovery): feed each arg's REFINED type — a closure now
         // re-inferred WITH its expected param types, so its return is concrete (`fn(int) -> int`) —

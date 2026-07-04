@@ -2692,6 +2692,25 @@ fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<String, Ty>) 
     }
 }
 
+/// Return-mask a closure's actual `Func` type for pass-1 unification: replace its return with
+/// `Ty::Unknown` so only its PARAMETER positions can bind a method type param in pass 1. Used on the
+/// generic-METHOD path (`infer_generic_method`) so an UNANNOTATED closure whose body is a nested free
+/// generic call (`xs.map(fn(x): ident(x))`) — whose prepass return leaks the callee's own `Ty::Param`
+/// — does NOT prematurely pin the method's return-position `[U]` to that leaked param. The loop-back's
+/// checking-mode re-inference then recovers `U` as the CONCRETE return type (`int`). No `Unknown`
+/// laundering: `U` is bound concretely by the loop-back, not degraded. A non-closure actual (or a
+/// non-`Func`) is returned unchanged, so param/receiver unification is untouched.
+fn mask_closure_ret(actual: &Ty) -> Ty {
+    match actual {
+        Ty::Func { params, labels, .. } => Ty::Func {
+            params: params.clone(),
+            ret: Box::new(Ty::Unknown),
+            labels: labels.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {

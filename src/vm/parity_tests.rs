@@ -3076,6 +3076,16 @@ fn parity_list_fold_sum() {
     assert_eq!(vm_outcome(src).unwrap(), "10\n");
 }
 
+#[test]
+fn parity_map_closure_free_generic_call() {
+    // Bug D: `xs.map(fn(x): ident(x))` where `ident[T](x: T) -> T` type-checks to List[int] (the
+    // closure-return loop-back recovers `map`'s `U` from the nested free generic call). Runtime is
+    // generic-erased, so both engines print the same `2`.
+    let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    ys := xs.map(fn(x): ident(x))\n    print(ys[0] + 1)\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "2\n");
+}
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
