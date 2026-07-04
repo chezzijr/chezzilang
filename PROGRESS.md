@@ -407,7 +407,22 @@ degrade) is factored into ONE shared helper `recover_return_only_params` called 
 `infer_generic_method` (a byte-identical refactor — the existing Bug-D method tests are the safety net)
 and `infer_generic_call`. The free-fn path additionally masks bare-closure returns in its pass-1
 `unify` loop (mirroring the method path) so a nested-free-generic body's leaked prepass `Param` cannot
-prematurely pin the return-only param before the loop-back. IMPORTANT (adversarial-review fix): the
+prematurely pin the return-only param before the loop-back. **Two adversarial-review bugs fixed on a
+follow-up pass (2026-07-05):** (bug 1) the free-fn path's un-inferable-param probe
+(`report_uninferable_closure_params`) runs BEFORE the loop-back, so a return-only `[T]` bound only from
+a bare closure's CONCRETE return was still masked-away and mis-reported as a deadlock when a SIBLING
+closure used the same `[T]` in PARAMETER position (`fn pair[T](f: fn()->T, g: fn(T)->int)` called
+`pair(fn(): 5, fn(x): x+1)` — accepted on `main`, wrongly rejected on the branch). FIX: a small
+concrete-return sub-pass right after pass-1 binds `[T]` from any bare closure whose prepass return is
+already concrete (`ty_contains_param` FALSE) — AFTER value/param args (only-bind-unbound `unify`, so a
+sibling value arg still wins, no binding race) and BEFORE the probe; a leaked-`Param` prepass return
+stays masked/deferred to the loop-back. (bug 2) two closures binding the SAME return-only `[U]` to
+CONFLICTING concrete types type-checked OK but bound `[U]` from only the first, dropping the second
+(`fn pick[U](cond, a: fn()->U, b: fn()->U)` / `fn two[U](f: fn(int)->U, g: fn(int)->U)` with a `str` vs
+`int` pair — accepted then crashed at runtime). FIX: the loop-back `unify` is now INTERLEAVED into the
+per-arg loop, so once the first closure binds `[U]` the sibling's `want` return is CONCRETE and its
+mismatching body is rejected by the SEPARATE concrete-return soundness check instead of being silently
+dropped. IMPORTANT (adversarial-review fix): the
 final param-position degrade-to-`Unknown` step is **gated `true` on the METHOD path only** (its
 receiver-collection HOFs `[].map(...)` intentionally degrade an empty element param to `List[?]`) and
 **`false` on the free-fn path** — `infer_generic_call` never degraded, so a still-unbound param-position
@@ -427,10 +442,12 @@ assignment rejected); a genuinely ambiguous body (`fn(x): fn(y): x+y`) stays exa
 `cannot infer type of parameter 'y'` error. OUT OF SCOPE (unchanged): the ctor paths
 (`infer_generic_struct`/`infer_newtype_call`) share the identical discard but have no free-function
 repro — a possible follow-up; Category-2 late/backward inference and the generic-fn-VALUE gap
-(`g := ident; g(5)`) are distinct limitations, untouched. +5 checker tests (recovers scalar+container,
-pinned-mismatch-rejected, boundaries, must-not-regress, ambiguous-stays-clean) + 2 parity tests
-(`parity_free_fn_hof_map`/`_apply_sibling`), all RED-first on the release binary. Runtime is
-generic-erased → serial==M:N automatic.
+(`g := ident; g(5)`) are distinct limitations, untouched. +7 checker tests (recovers scalar+container,
+pinned-mismatch-rejected, boundaries, must-not-regress, ambiguous-stays-clean, empty-arg-stays-rejected,
+plus the two adversarial-review regressions: sibling-closure-param-use-recovers [bug 1] and
+conflicting-return-only-closures-rejected [bug 2]) + 3 parity tests
+(`parity_free_fn_hof_map`/`_apply_sibling`/`_sibling_closure_param`), all RED-first on the release
+binary. Runtime is generic-erased → serial==M:N automatic.
 
 **✅ NATIVE-PRELUDE — phase 4c-followup (native instance methods now declare `self`, mirroring user
 structs) (2026-07-02).** A `native fn` inside a `native struct` body is an INSTANCE method and now MUST

@@ -1655,6 +1655,25 @@ impl Checker {
                 unify(decl, actual, &mut subst_map);
             }
         }
+        // Bug 1 recovery (free-fn path only): after the masked pass-1 above has let every VALUE and
+        // closure-PARAMETER arg pin its params, bind the HOF's return-only `[U]` from a bare closure
+        // whose prepass return is ALREADY CONCRETE (`fn(): 5` → `int`, no leaked `Ty::Param`). This runs
+        // BEFORE `report_uninferable_closure_params` so a `[U]` recoverable from such a closure RETURN is
+        // not mis-reported as an un-inferable deadlock when a SIBLING closure uses the same `[U]` in
+        // PARAMETER position (`pair(fn(): 5, fn(x): x + 1)` — adversarial-review bug 1). `unify` only
+        // binds a param still FREE, so a sibling VALUE arg that already pinned `[U]` STILL WINS (no
+        // closure-vs-value binding race, e.g. `apply(fn(x): str(x), 5, 99)` keeps `B` pinned to the
+        // `sink: B` = 99 → `int` and the mismatching closure is rejected). A LEAKED-param prepass return
+        // (`fn(x): ident(x)`) stays masked, deferred to the loop-back in `recover_return_only_params`.
+        for (i, (decl, actual)) in sig.params.iter().zip(&arg_tys).enumerate() {
+            if matches!(
+                args.get(i).map(|a| &a.kind),
+                Some(ExprKind::Closure { ret: None, .. })
+            ) && matches!(actual, Ty::Func { ret, .. } if !ty_contains_param(ret))
+            {
+                unify(decl, actual, &mut subst_map);
+            }
+        }
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
@@ -1833,7 +1852,6 @@ impl Checker {
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
-        let mut refined_actuals: Vec<Ty> = Vec::with_capacity(arg_decls.len());
         for (decl, (actual, arg)) in arg_decls.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, map);
             // For a closure whose UNANNOTATED body is a nested free generic call, the prepass return
@@ -1866,14 +1884,16 @@ impl Checker {
                     format!("closure argument to '{name}' returns {got_ret}, expected {want_ret}"),
                 );
             }
-            refined_actuals.push(refined);
-        }
-        // LOOP-BACK: a closure re-inferred WITH its expected param types has a concrete return
-        // (`fn(int) -> int`); feed it back into a SECOND `unify`. `unify` only binds a param NOT already
-        // in the map and IGNORES an `Unknown` actual, so pass-1-resolved params are a strict no-op — it
-        // ONLY fills a return-position param still free after pass 1 (recovered from the closure body).
-        for (decl, refined) in arg_decls.iter().zip(&refined_actuals) {
-            unify(decl, refined, map);
+            // LOOP-BACK (INTERLEAVED per-arg): a closure re-inferred WITH its expected param types has a
+            // concrete return (`fn(int) -> int`); feed it straight back into a SECOND `unify` NOW, before
+            // the NEXT arg's `want` is substituted. `unify` only binds a param NOT already in the map and
+            // IGNORES an `Unknown` actual, so pass-1-resolved params are a strict no-op — it ONLY fills a
+            // return-position param still free after pass 1 (recovered from the closure body). Interleaving
+            // (vs a separate post-loop pass) is load-bearing for SOUNDNESS: once one closure binds a
+            // return-only `[U]`, a SIBLING closure binding the SAME `[U]` to a CONFLICTING type sees `want`
+            // now CONCRETE and is REJECTED by the soundness check above, instead of being silently dropped
+            // by only-bind-unbound `unify` (adversarial-review bug 2: `two(fn(x): x*2, fn(x): str(x))`).
+            unify(decl, &refined, map);
         }
         // Enforce bounds for params NEWLY bound by the loop-back only (pass-1-bound params were already
         // enforced by the caller — each enforced exactly once avoids a double-report). So a

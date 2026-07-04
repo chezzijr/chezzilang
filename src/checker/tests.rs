@@ -13983,6 +13983,50 @@ fn free_fn_generic_empty_arg_return_param_stays_rejected() {
 }
 
 #[test]
+fn free_fn_hof_sibling_closure_param_use_recovers() {
+    // REGRESSION (adversarial-review bug 1): a return-only `[T]` bound from a bare closure's CONCRETE
+    // return (`fn(): 5` → `int`) must be recovered BEFORE the un-inferable-param probe runs, so a
+    // SIBLING closure that uses the SAME `[T]` in PARAMETER position (`g: fn(T) -> int`) is not
+    // spuriously rejected as an un-inferable deadlock. On the branch before this fix, pass-1 masking
+    // left `T` unbound and `report_uninferable_closure_params` fired `cannot infer type parameter T`
+    // + `cannot infer type of parameter 'x'`; `main` accepts and runs (prints 6).
+    entry_ok(
+        "fn pair[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f())\nfn main():\n    print(pair(fn(): 5, fn(x): x + 1))\n",
+    );
+    // The same shape with the return-only param flowing through a chain of consumers.
+    entry_ok(
+        "fn chain[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f()) + 1\nfn main():\n    print(chain(fn(): 5, fn(x): x + 1))\n",
+    );
+    // The Bug-1 recovery must NOT pre-empt a sibling VALUE arg that pins the same return-only param: a
+    // concrete closure return that CONFLICTS with a value-arg pin is still rejected (no binding race).
+    entry_rejects(
+        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): str(x), 5, 99)\n    print(y)\n",
+        "returns",
+    );
+}
+
+#[test]
+fn free_fn_hof_conflicting_returnonly_closures_rejected() {
+    // SOUNDNESS (adversarial-review bug 2): two closure args binding the SAME return-only `[U]` must
+    // AGREE or be rejected. The interleaved loop-back binds `[U]` from the first closure, then the
+    // second closure's `want` return is CONCRETE and its mismatching body is rejected by the
+    // concrete-return soundness check — instead of being silently dropped by only-bind-unbound `unify`.
+    // On the branch before this fix both `chezzi check` succeeded and `chezzi run` aborted at runtime.
+    entry_rejects(
+        "fn pick[U](cond: bool, a: fn() -> U, b: fn() -> U) -> U:\n    if cond:\n        return a()\n    return b()\nfn main():\n    r := pick(false, fn(): 1, fn(): \"hello\")\n    print(r + 1)\n",
+        "returns",
+    );
+    entry_rejects(
+        "fn two[U](f: fn(int) -> U, g: fn(int) -> U) -> U:\n    return f(0)\nfn main():\n    r := two(fn(x): x * 2, fn(x): str(x))\n    print(r + 1)\n",
+        "returns",
+    );
+    // Two closures that AGREE on the return-only param still ACCEPT (recovered, no false positive).
+    entry_ok(
+        "fn two[U](f: fn(int) -> U, g: fn(int) -> U) -> U:\n    return f(0)\nfn main():\n    r := two(fn(x): x * 2, fn(x): x + 1)\n    print(r + 1)\n",
+    );
+}
+
+#[test]
 fn rwshared_read_len_ok() {
     entry_ok(
         "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",

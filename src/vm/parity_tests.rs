@@ -3116,6 +3116,17 @@ fn parity_free_fn_hof_apply_sibling() {
     assert_eq!(vm_outcome(src).unwrap(), "11\n");
 }
 
+#[test]
+fn parity_free_fn_hof_sibling_closure_param() {
+    // adversarial-review bug 1: `pair[T](f: fn()->T, g: fn(T)->int) -> int` with
+    // `pair(fn(): 5, fn(x): x + 1)`. `T` is recovered from the FIRST closure's concrete return (int)
+    // before the un-inferable-param probe runs, so the SECOND closure's `x: T` param is not rejected.
+    // Runtime is generic-erased → both engines print `6`.
+    let src = "fn pair[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f())\nfn main():\n    print(pair(fn(): 5, fn(x): x + 1))\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "6\n");
+}
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
