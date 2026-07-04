@@ -415,6 +415,20 @@ closure passed to a **generic** slot whose type parameter only *it* would pin (`
 for `fn store[T](x: T) -> T`) is likewise un-inferable → annotate (`fn(a: int): …`): the param is
 never silently left dynamic, so a later call can never trap.
 
+**Return-only type params recover from an inferable closure/fn body.** A generic higher-order
+function whose type parameter appears **only in its return** (e.g.
+`fn applyone[U](x: int, f: fn(int) -> U) -> U`, `fn mymap[U](xs: List[int], f: fn(int) -> U) ->
+List[U]`) recovers that `U` from the body of the closure/fn passed for `f` — exactly as the builtin
+methods `.map`/`.fold` do. So `applyone(5, fn(x): x * 2)` yields `int` (and `+ 1` type-checks) and
+`mymap([1,2,3], fn(x): str(x))` yields `List[str]`. The closure body is re-inferred with its param
+types pinned, then its return flows back to fix `U` — the same principle as omitting a function's
+return type and inferring it from the body. This works whether the body is a direct expression, a
+`.method(…)` call, or a **nested generic call** (`fn(x): ident(x)` for `fn ident[T](x: T) -> T`). When
+`U` is instead **already pinned** by a sibling value argument or an explicit slot (`fn f[U](init: U, g:
+fn(int) -> U) -> U` with `init = 0` ⇒ `U = int`), the closure's return is *checked* against that pin,
+so a mismatching body (`fn(x): str(x)` where `U = int`) is a clean type error, not laundered. A
+return-only param that **no** body can pin (`fn make[U]() -> U`) stays genuinely un-inferable.
+
 A type *annotation* also counts as expected-type context for source **(1)** when it surrounds a
 generic constructor or generic function call: a `let`-binding's declared type, a function's declared
 return type, and a call argument's declared parameter type each pin the called generic's type

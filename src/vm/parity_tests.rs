@@ -3097,6 +3097,36 @@ fn parity_fold_closure_free_generic_call() {
     assert_eq!(vm_outcome(src).unwrap(), "4\n");
 }
 
+#[test]
+fn parity_free_fn_hof_map() {
+    // Bug D free-fn analog: `mymap([1,2,3], fn(x): x*2)` where `mymap[U](..., fn(int)->U) -> List[U]`
+    // type-checks to List[int] (the closure-return loop-back now runs on the free-fn path too). Runtime
+    // is generic-erased, so both engines print the same `3` (ys=[2,4,6], ys[0]+1).
+    let src = "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): x * 2)\n    print(ys[0] + 1)\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "3\n");
+}
+
+#[test]
+fn parity_free_fn_hof_apply_sibling() {
+    // `apply[A,B](f: fn(A)->B, a: A) -> B` with `apply(fn(x): x*2, 5)`: A pinned int by the sibling
+    // value arg, B (return-only) recovered from the closure body → int, so `y + 1` = 11. Both engines.
+    let src = "fn apply[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\nfn main():\n    y := apply(fn(x): x * 2, 5)\n    print(y + 1)\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "11\n");
+}
+
+#[test]
+fn parity_free_fn_hof_sibling_closure_param() {
+    // adversarial-review bug 1: `pair[T](f: fn()->T, g: fn(T)->int) -> int` with
+    // `pair(fn(): 5, fn(x): x + 1)`. `T` is recovered from the FIRST closure's concrete return (int)
+    // before the un-inferable-param probe runs, so the SECOND closure's `x: T` param is not rejected.
+    // Runtime is generic-erased → both engines print `6`.
+    let src = "fn pair[T](f: fn() -> T, g: fn(T) -> int) -> int:\n    return g(f())\nfn main():\n    print(pair(fn(): 5, fn(x): x + 1))\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "6\n");
+}
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
