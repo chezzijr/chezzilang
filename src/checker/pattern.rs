@@ -799,14 +799,14 @@ impl Checker {
     /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
     /// stays the compiler's job — we discard the parsed spec and only infer the expression.
     ///
-    /// Span: a fragment expr is parsed from the `{…}` substring with fragment-relative spans (its
-    /// root is `line 1, col 1`), so an error keyed on the fragment ROOT node — the nil-in-value-position
-    /// ban, the only diagnostic anchored there — would otherwise report the bogus `(1,1)` fallback.
-    /// We stamp the whole-string-literal `span` onto each fragment's root before inferring, matching
-    /// the compiler's existing emit site (it uses the string span for fragment bytecode too) so the
-    /// nil error points at the real string literal. Errors raised DEEPER inside a fragment (an
-    /// undefined name in a nested call) keep their fragment-relative child spans; narrowing those is
-    /// out of scope and fragments are short. Always returns `Ty::Str`.
+    /// Span: a fragment expr is parsed from the `{…}` substring via `tokenize_at`, which re-anchors
+    /// each fragment token span to its true source LINE (the string literal's line, plus any physical
+    /// newlines before the fragment) — see Bug E. Columns stay fragment-relative (unrecoverable from
+    /// the escape-processed substring). We still stamp the whole-string-literal `span` onto each
+    /// fragment's ROOT node before inferring, matching the compiler's emit site, so the nil-in-value-
+    /// position ban (the only diagnostic anchored at the root) reports the string literal's exact
+    /// column too. Errors raised DEEPER inside a fragment now also carry the fragment's real source
+    /// line (best-effort column). Always returns `Ty::Str`.
     pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => {

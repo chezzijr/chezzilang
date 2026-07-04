@@ -11477,3 +11477,69 @@ print(x == y)
 ";
     assert_eq!(run(src), "true\n");
 }
+
+// ---- Bug E: runtime faults inside string interpolation report the real source line ----
+
+/// Assert a runtime fault reports `line == expected_line` on BOTH engines (serial + M:N).
+fn assert_fault_line(src: &str, needle: &str, expected_line: usize) {
+    let e = run_capture(src).unwrap_err();
+    assert!(
+        e.message.contains(needle),
+        "serial: expected message to contain {needle:?}, got {:?}",
+        e.message
+    );
+    assert_eq!(
+        e.span.line, expected_line,
+        "serial: expected line {expected_line}, got {} (col {})",
+        e.span.line, e.span.col
+    );
+    let ep = run_capture_parallel(src).unwrap_err();
+    assert!(
+        ep.message.contains(needle),
+        "M:N: expected message to contain {needle:?}, got {:?}",
+        ep.message
+    );
+    assert_eq!(
+        ep.span.line, expected_line,
+        "M:N: expected line {expected_line}, got {} (col {})",
+        ep.span.line, ep.span.col
+    );
+}
+
+#[test]
+fn interpolation_div_by_zero_reports_real_line() {
+    let src =
+        "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"result = {10 / b}\"\nprint(msg)\n";
+    assert_fault_line(src, "division by zero", 4);
+}
+
+#[test]
+fn interpolation_index_oob_reports_real_line() {
+    let src = "print(\"line 1\")\nprint(\"line 2\")\nxs := [1, 2, 3]\nmsg := \"val = {xs[9]}\"\nprint(msg)\n";
+    assert_fault_line(src, "index", 4);
+}
+
+#[test]
+fn interpolation_overflow_reports_real_line() {
+    let src = "print(\"line 1\")\nprint(\"line 2\")\nbig := 9223372036854775807\nmsg := \"val = {big * big}\"\nprint(msg)\n";
+    assert_fault_line(src, "overflow", 4);
+}
+
+#[test]
+fn interpolation_multiline_attributes_to_fault_line() {
+    // Triple-quoted string opens on line 4; the interpolated fault sits on physical line 6.
+    let src = "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"\"\"\nsome text\nresult = {10 / b}\n\"\"\"\nprint(msg)\n";
+    assert_fault_line(src, "division by zero", 6);
+}
+
+#[test]
+fn non_interpolation_fault_span_unchanged() {
+    // A direct top-level fault (no interpolation) still reports its real line — proves base_line=0
+    // leaves normal lexing byte-identical.
+    let src = "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nc := 10 / b\nprint(c)\n";
+    assert_fault_line(src, "division by zero", 4);
+    // A literal-only string + a valid interpolation still runs with correct output on both engines.
+    let ok = "x := 5\nprint(\"x = {x}, done\")\n";
+    assert_eq!(run_capture(ok).unwrap(), "x = 5, done\n");
+    assert_eq!(run_capture_parallel(ok).unwrap(), "x = 5, done\n");
+}
