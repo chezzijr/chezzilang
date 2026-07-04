@@ -800,13 +800,15 @@ impl Checker {
     /// stays the compiler's job — we discard the parsed spec and only infer the expression.
     ///
     /// Span: a fragment expr is parsed from the `{…}` substring via `tokenize_at`, which re-anchors
-    /// each fragment token span to its true source LINE (the string literal's line, plus any physical
-    /// newlines before the fragment) — see Bug E. Columns stay fragment-relative (unrecoverable from
+    /// each fragment token span to the string literal's OPENING source line — see Bug E. We anchor to
+    /// the opening line rather than the fragment's exact inner line because `raw` is the post-escape
+    /// payload: a `\n` escape and a genuine source newline are indistinguishable, so counting them
+    /// would risk a confidently-wrong line. Columns stay fragment-relative (also unrecoverable from
     /// the escape-processed substring). We still stamp the whole-string-literal `span` onto each
     /// fragment's ROOT node before inferring, matching the compiler's emit site, so the nil-in-value-
     /// position ban (the only diagnostic anchored at the root) reports the string literal's exact
-    /// column too. Errors raised DEEPER inside a fragment now also carry the fragment's real source
-    /// line (best-effort column). Always returns `Ty::Str`.
+    /// column too. Errors raised DEEPER inside a fragment carry the string's opening line (best-effort
+    /// column). Always returns `Ty::Str`.
     pub(super) fn check_interpolation(&mut self, raw: &str, span: Span) -> Ty {
         match crate::interpolation::parse_interpolation(raw, span) {
             Ok(chunks) => {

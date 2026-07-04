@@ -39,11 +39,6 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
     let mut chunks = Vec::new();
     let mut lit = String::new();
     let mut chars = raw.chars().peekable();
-    // Running count of physical newlines consumed from `raw` before the current position, so each
-    // fragment's re-lexed token spans can be re-anchored to its true source line (Bug E). Best-effort:
-    // `raw` is post-escape, so a literal `\n` ESCAPE on one physical line would inflate this — the
-    // same inherent ceiling as columns (genuine triple-quoted newlines are counted exactly).
-    let mut newlines = 0usize;
     while let Some(c) = chars.next() {
         match c {
             '{' if chars.peek() == Some(&'{') => {
@@ -58,19 +53,12 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                 if !lit.is_empty() {
                     chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
                 }
-                // Newlines consumed BEFORE this fragment's first char — its root line. Newlines
-                // *inside* the fragment are tracked by the fragment lexer's own `self.line`, which
-                // composes on top of this base, so multi-line fragments attribute correctly too.
-                let frag_newlines = newlines;
                 let mut inner = String::new();
                 let mut closed = false;
                 for ic in chars.by_ref() {
                     if ic == '}' {
                         closed = true;
                         break;
-                    }
-                    if ic == '\n' {
-                        newlines += 1;
                     }
                     inner.push(ic);
                 }
@@ -91,10 +79,15 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                     ),
                     None => None,
                 };
-                // Re-anchor the fragment's re-lexed spans to the true source line: the string
-                // literal opens on `span.line`, and `frag_newlines` physical newlines precede this
-                // fragment. `base_line` offsets the fragment lexer's 1-based `self.line`.
-                let base_line = span.line.saturating_sub(1) + frag_newlines;
+                // Re-anchor the fragment's re-lexed spans to the string literal's OPENING source
+                // line so a runtime fault inside `"{expr}"` reports a real, never-misleading line
+                // (Bug E — previously always `line 1`). We anchor to the opening line rather than the
+                // fragment's exact inner line because `raw` is the post-escape payload: a `\n` ESCAPE
+                // and a genuine (triple-quoted) source newline are indistinguishable here, so counting
+                // newlines in `raw` would inflate the line past an escape and point at unrelated code.
+                // `base_line` offsets the fragment lexer's 1-based `self.line`; newlines INSIDE the
+                // fragment itself still compose on top (those are real source lines, not escapes).
+                let base_line = span.line.saturating_sub(1);
                 let expr = parse_expr_str(expr_src, span, base_line)?;
                 chunks.push(Chunk::Expr(expr, spec));
             }
@@ -104,12 +97,7 @@ pub(crate) fn parse_interpolation(raw: &str, span: Span) -> Result<Vec<Chunk>, I
                     span,
                 });
             }
-            _ => {
-                if c == '\n' {
-                    newlines += 1;
-                }
-                lit.push(c);
-            }
+            _ => lit.push(c),
         }
     }
     if !lit.is_empty() {

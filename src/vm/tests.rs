@@ -11526,10 +11526,24 @@ fn interpolation_overflow_reports_real_line() {
 }
 
 #[test]
-fn interpolation_multiline_attributes_to_fault_line() {
-    // Triple-quoted string opens on line 4; the interpolated fault sits on physical line 6.
+fn interpolation_multiline_attributes_to_opening_line() {
+    // Triple-quoted string opens on line 4; a fault in a fragment on a later physical line is
+    // attributed to the string's OPENING line (4), not `line 1`. We anchor to the opening line
+    // rather than the exact inner line (6) because `raw` is post-escape: a `\n` escape and a real
+    // source newline are indistinguishable, so counting them would risk a confidently-wrong line
+    // past an escape. Opening-line is honest and never points at unrelated code.
     let src = "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"\"\"\nsome text\nresult = {10 / b}\n\"\"\"\nprint(msg)\n";
-    assert_fault_line(src, "division by zero", 6);
+    assert_fault_line(src, "division by zero", 4);
+}
+
+#[test]
+fn interpolation_escape_newline_before_fragment_not_misattributed() {
+    // A `\n` ESCAPE in the literal text before a fragment must NOT shift the reported line: the
+    // string is on physical line 4, so a fault in `{10 / b}` reports line 4 (not an inflated line
+    // pointing at unrelated code). Regression guard for the escape-newline miscount.
+    let src =
+        "print(\"line 1\")\nprint(\"line 2\")\nb := 0\nmsg := \"a\\nb {10 / b}\"\nprint(msg)\n";
+    assert_fault_line(src, "division by zero", 4);
 }
 
 #[test]
