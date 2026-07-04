@@ -1345,6 +1345,13 @@ impl Checker {
                     // struct whose method table may not contain `m.name`. Keyed by the runtime key
                     // (mirror the enum arm below) so the layout resolves in the multi-module path —
                     // otherwise a bare-`name` miss silently SKIPS body checking entirely.
+                    // A duplicate-named method already produced a clear hoist-time "already defined"
+                    // error; its body would be checked against the collapsed-map SURVIVOR's signature,
+                    // emitting a misleading return-type mismatch. Skip so the dup error is the sole
+                    // signal (guarded on count>1 so unique methods still get their bodies checked).
+                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
+                        continue;
+                    }
                     if let Some(sig) = self
                         .structs
                         .get(&self.bare_key(name))
@@ -1402,6 +1409,11 @@ impl Checker {
                     } else if is_suite && is_lifecycle_hook(&m.name) {
                         self.validate_lifecycle_hook(m);
                     }
+                    // Skip a duplicate-named method's body check (see the struct arm) — its clear
+                    // hoist-time dup error stands alone instead of a misleading return-type mismatch.
+                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
+                        continue;
+                    }
                     if let Some(sig) = self
                         .enum_methods
                         .get(&self.bare_key(name))
@@ -1437,6 +1449,11 @@ impl Checker {
                         // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
                         // anyway to keep the suite invariants explicit.
                         self.validate_test_fn_shape(m, true);
+                    }
+                    // Skip a duplicate-named method's body check (see the struct arm) — its clear
+                    // hoist-time dup error stands alone instead of a misleading return-type mismatch.
+                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
+                        continue;
                     }
                     if let Some(sig) = self
                         .newtype_defs

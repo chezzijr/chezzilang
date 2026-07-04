@@ -261,6 +261,23 @@ impl Checker {
                     span,
                 );
             }
+            // `Newtype.member(args)` — a bare (unbound) newtype name dotted with a member. Newtypes
+            // have NO static (associated) methods (a deferred v1 limit — only struct and enum do), and
+            // there is no other valid `Newtype.member` form, so any such call is rejected with a clear
+            // message here rather than falling through to the value path's cryptic "unknown name".
+            if let ExprKind::Ident(tname) = &obj.kind
+                && !self.is_local_binding(tname)
+                && self.newtype_names.contains(tname)
+            {
+                self.infer_all(args);
+                self.error(
+                    span,
+                    format!(
+                        "static (associated) methods on a newtype are not supported yet (only struct and enum have them); '{tname}.{name}' cannot be called"
+                    ),
+                );
+                return Ty::Unknown;
+            }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
             // (`Box[int].empty()`). Two carriers converge here:

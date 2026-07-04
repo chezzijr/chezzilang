@@ -11,6 +11,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ CHECKER LENIENCY — five decl footguns now rejected (2026-07-05).** All checker-only,
+reject-earlier in the decl-hoist pass (`src/checker/setup.rs` Struct/Enum/NewType arms) + a
+cascade-suppression tweak in the pass-2 body loops (`src/checker/sig.rs`); no runtime/VM change, so
+two-engine parity holds by construction. (1) **Duplicate instance method** (struct/enum/newtype) — was
+silently last-wins, now `method 'f' is already defined` at its decl-site span. (2) **Duplicate struct
+field** — was first-wins with a dead-but-positionally-required ctor slot, now `field 'x' is already
+defined`. (3) **Field + method sharing a name** — now `'f' is declared as both a field and a method of
+'P'` (mirrors the enum variant/static disjointness rule). (4) **Same-name method's confusing return-type
+cascade** — the pass-2 body loops now `continue` past a duplicate-named method (`filter(count>1)`
+guard), so the clear dup error is the sole diagnostic instead of the misleading "expected int, found
+str". (5) **Newtype static method** (`fn zero()` — no `self`) — was unreachable → cryptic "unknown name
+'Meters'", now a clear "static (associated) methods on a newtype are not supported yet (only struct and
+enum have them)" at BOTH the decl site and any `Newtype.method()` call site (the feature stays deferred,
+not implemented). Reuse: one `report_dup_names(iter<(name,span)>, kind)` helper (`setup.rs`) drives the
+method-dup checks in all three arms + the field-dup check. Tests: 7 new negative tests in
+`src/checker/tests.rs` (beside `duplicate_variant_within_one_enum_is_reported`). Full suite + conformance
++ clippy green; `all_shipped_examples_typecheck` unaffected (std/examples sweep found zero real clashes).
+Docs: `docs/spec.md` M21 row + newtype note de-staled.
+
 **✅ BUGFIX — `for`/`List()`/`Set()` over a NAMED builtin cursor now CONSUMES it in place (2026-07-04).**
 A `for x in it:` (or `List(it)`/`Set(it)`) driven by a NAMED `Obj::Iter` cursor from `xs.iter()` used to
 snapshot a private copy and never advance the shared cursor, while `.next()` and struct iterators DID
@@ -1012,7 +1031,9 @@ struct-static arm + reuses the qualified-enum-variant arm's no-variant fallthrou
 (variant-first preserved); compiler adds a Field-over-Field arm emitting the SAME `Op::CallStatic` keyed
 by `type_key`; interp extracts `lookup_static_method_by_key` and adds the parity twin. Negative
 `module.Type.no_such()` → "type 'Type' has no static method 'no_such'". Newtype statics stay unsupported
-(struct/enum-gated, fall through to the existing error).
+(struct/enum-gated); declaring one is now **rejected with a clear "not supported yet" error** at the
+decl site + any `Newtype.method()` call site (was a cryptic "unknown name" — see the checker-leniency
+note in Current focus).
 **Part 2 — clear two-level-path diagnostics** for the natural 3+-level mistake (import paths *are*
 multi-level, so users assume type refs are too). TYPE position (`x: std.concurrency.Shared[int]`): the
 parser detects a third `.` after a qualified type and emits the targeted hint instead of cryptic

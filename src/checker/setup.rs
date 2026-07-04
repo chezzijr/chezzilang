@@ -740,6 +740,24 @@ impl Checker {
         self.errors.push(CheckError { message, span });
     }
 
+    /// Report each name that repeats within `items` as a "`<kind>` '`<name>`' is already defined"
+    /// error at its decl-site span. Fires once per REPEAT occurrence (the 2nd, 3rd, … copy), so the
+    /// first occurrence stays the surviving definition (mirrors the dup-variant precedent). Shared by
+    /// the struct/enum/newtype method-hoist arms and the struct field-hoist arm so the seen-set loop
+    /// is written once, not inlined four times.
+    pub(super) fn report_dup_names<'a>(
+        &mut self,
+        items: impl IntoIterator<Item = (&'a str, Span)>,
+        kind: &str,
+    ) {
+        let mut seen: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+        for (name, span) in items {
+            if !seen.insert(name) {
+                self.error(span, format!("{kind} '{name}' is already defined"));
+            }
+        }
+    }
+
     /// Reset per-module state (functions, scopes, imports, current fn) before checking the next
     /// module of a multi-file program. Program-global tables (structs/enums/variants/their names,
     /// `module_sigs`) and accumulated `errors` are kept.
@@ -2058,6 +2076,33 @@ impl Checker {
                     // The struct's type parameters are in scope across its field and method
                     // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
                     let saved = self.enter_type_params(type_params);
+                    // A repeated field name adds a dead-but-still-positionally-required ctor slot
+                    // (ctor is positional over the field Vec; field lookup is first-wins) — reject it.
+                    self.report_dup_names(
+                        fields.iter().map(|f| (f.name.as_str(), f.name_span)),
+                        "field",
+                    );
+                    // A repeated method name silently last-wins (the HashMap collapses it) — reject at
+                    // hoist so the dup is the headline error, not a downstream return-type mismatch.
+                    self.report_dup_names(
+                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
+                        "method",
+                    );
+                    // A field and a method may not share a name on the same struct (mirrors the enum
+                    // variant/static disjointness below): `p.f` would be ambiguous between the two.
+                    let field_names: std::collections::HashSet<&str> =
+                        fields.iter().map(|f| f.name.as_str()).collect();
+                    for m in methods {
+                        if field_names.contains(m.name.as_str()) {
+                            self.error(
+                                m.name_span,
+                                format!(
+                                    "'{}' is declared as both a field and a method of '{name}'",
+                                    m.name
+                                ),
+                            );
+                        }
+                    }
                     let fields: Vec<(String, Ty)> = fields
                         .iter()
                         .map(|f| (f.name.clone(), self.resolve_type(&f.ty, s.span)))
@@ -2149,6 +2194,11 @@ impl Checker {
                     }
                     // Methods see the enum's type parameters in scope (like the struct path), so a
                     // generic `fn get(self) -> T` resolves `T`. Name-keyed exactly like struct methods.
+                    // A repeated method name silently last-wins (the HashMap collapses it) — reject.
+                    self.report_dup_names(
+                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
+                        "method",
+                    );
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
@@ -2198,6 +2248,26 @@ impl Checker {
                     // A newtype cannot wrap itself or another newtype's identity that's still a bare
                     // newtype value — but a newtype OF a newtype is simply nominal nesting (allowed:
                     // construct/unwrap one level at a time). No special rejection needed here.
+                    // A repeated method name silently last-wins (the HashMap collapses it) — reject.
+                    self.report_dup_names(
+                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
+                        "method",
+                    );
+                    // Static (associated) methods on a newtype (`fn zero()` — no `self`) parse but are
+                    // unreachable: the call site (`Meters.zero()`) has no newtype static-dispatch path
+                    // and falls through to a cryptic "unknown name 'Meters'". Reject at the decl site
+                    // with a clear not-supported message (deferred v1 limit; struct/enum only).
+                    for m in methods {
+                        if m.params.first().is_none_or(|p| p.name != "self") {
+                            self.error(
+                                m.name_span,
+                                format!(
+                                    "static (associated) method '{}' on a newtype is not supported yet (only struct and enum have them)",
+                                    m.name
+                                ),
+                            );
+                        }
+                    }
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))

@@ -3010,6 +3010,89 @@ fn duplicate_variant_within_one_enum_is_reported() {
 }
 
 #[test]
+fn dup_struct_method_is_reported() {
+    // Two instance methods sharing a name silently last-wins; reject it at hoist.
+    rejects(
+        "struct P:\n    fn f(self) -> int: return 1\n    fn f(self) -> int: return 2\n",
+        "method 'f' is already defined",
+    );
+}
+
+#[test]
+fn dup_struct_field_is_reported() {
+    // A repeated field name adds a dead-but-positionally-required slot; reject it.
+    rejects(
+        "struct P:\n    x: int\n    x: int\n",
+        "field 'x' is already defined",
+    );
+}
+
+#[test]
+fn struct_field_and_method_same_name_is_reported() {
+    // A field and a method may not share a name on the same struct.
+    rejects(
+        "struct P:\n    f: int\n    fn f(self) -> int: return 1\n",
+        "'f' is declared as both a field and a method",
+    );
+}
+
+#[test]
+fn dup_enum_method_is_reported() {
+    rejects(
+        "enum E:\n    A\n    fn f(self) -> int: return 1\n    fn f(self) -> int: return 2\n",
+        "method 'f' is already defined",
+    );
+}
+
+#[test]
+fn dup_newtype_method_is_reported() {
+    rejects(
+        "newtype N = int:\n    fn f(self) -> int: return 1\n    fn f(self) -> int: return 2\n",
+        "method 'f' is already defined",
+    );
+}
+
+#[test]
+fn newtype_static_method_is_rejected_with_clear_message() {
+    // Static (associated) methods on a newtype are a deferred v1 limit; reject with a clear
+    // message at the decl site instead of a cryptic 'unknown name' at the call site.
+    let errs = check_src(
+        "newtype Meters = float:\n    fn zero() -> Meters: return Meters(0.0)\nm := Meters.zero()\n",
+    );
+    assert!(
+        errs.iter().any(|e| {
+            e.message.contains("static")
+                && e.message.contains("newtype")
+                && e.message.contains("not supported")
+        }),
+        "expected a clear not-supported message, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("unknown name")),
+        "should not surface the cryptic 'unknown name' error, got: {errs:?}"
+    );
+}
+
+#[test]
+fn dup_method_diagnostic_is_clear_not_return_mismatch() {
+    // The duplicate-method error must be the headline, not the misleading return-type cascade.
+    let errs = check_src(
+        "struct P:\n    fn f(self) -> int: return 1\n    fn f(self) -> str: return \"x\"\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("method 'f' is already defined")),
+        "expected the duplicate-method error, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("expected") && e.message.contains("found str")),
+        "should not surface the return-mismatch cascade, got: {errs:?}"
+    );
+}
+
+#[test]
 fn bare_variant_value_is_rejected_with_qualify_hint() {
     // A user variant used bare as a value must be qualified — the error names the enum.
     rejects(
