@@ -1753,32 +1753,49 @@ impl Checker {
         // Snapshot the params bound after pass 1 (arg-unification + turbofish + iter/index recovery),
         // so the loop-back below only re-enforces bounds on params NEWLY bound from a refined arg.
         let bound_after_pass1: std::collections::HashSet<String> = mmap.keys().cloned().collect();
-        // The method's own type params, used to decide whether a closure arg's substituted expected
-        // return is STILL free (an unbound `[U]`) or has already been pinned to a concrete type.
-        let mtp_names: std::collections::HashSet<String> =
-            mtps.iter().map(|tp| tp.name.clone()).collect();
         let mut refined_actuals: Vec<Ty> = Vec::with_capacity(expected.len());
         for (decl, (actual, arg)) in expected.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, &mmap);
             // Bug D: `check_generic_arg`'s fallback assignability check compares the prepass `actual`
             // against `want`. For a closure whose UNANNOTATED body is a nested free generic call, the
             // prepass return leaks the callee's own `Ty::Param` (`fn(?) -> T`) — NOT the lenient
-            // `Unknown` a direct body yields — so it would spuriously mismatch `want`'s still-free
-            // return `[U]` (`xs.map(fn(x): ident(x))`). Mask the closure's fallback return ONLY when
-            // `want`'s return still mentions an unbound method type param: then the return is deferred
-            // to the loop-back's checking-mode re-inference (which recovers `U` as the CONCRETE `int`),
-            // and the fallback check stays on params + arity. When `want`'s return is ALREADY concrete
-            // — e.g. `fold[U]`'s `U` pinned to `int` by `init` — masking must NOT happen: the closure
-            // body's return is then a real contract the fallback check must enforce, or a wrong static
-            // type (a str-returning `fold` body bound to `int`) would launder onto the value.
-            let fallback = if matches!(arg.kind, ExprKind::Closure { ret: None, .. })
-                && closure_ret_wants_free_mtp(&want, &mtp_names)
-            {
+            // `Unknown` a direct body yields — so an unmasked check would spuriously mismatch `want`'s
+            // return whether that return is a still-free `[U]` (`xs.map(fn(x): ident(x))`) OR already
+            // concrete (`xs.fold(0, fn(acc, x): ident(x))` — `U` pinned to `int` by `init`). So ALWAYS
+            // mask an unannotated closure's fallback return: the internal check stays on params +
+            // arity, and the REAL return contract is enforced below against the REFINED (checking-mode
+            // re-inferred) type, whose body-inferred return is accurate (`int` for `ident(x)`, `str`
+            // for a wrong body). A still-free `[U]` return is instead deferred to the loop-back.
+            let is_bare_closure = matches!(arg.kind, ExprKind::Closure { ret: None, .. });
+            let fallback = if is_bare_closure {
                 mask_closure_ret(actual)
             } else {
                 actual.clone()
             };
-            refined_actuals.push(self.check_generic_arg(method, &want, &fallback, arg));
+            let refined = self.check_generic_arg(method, &want, &fallback, arg);
+            // SOUNDNESS (Bug D): the masked internal check above cannot see a wrong closure-body
+            // return. When the closure's expected return is ALREADY concrete (e.g. `fold[U]`'s `U`
+            // pinned to `int` by `init`), enforce it explicitly here against the REFINED return —
+            // rejecting a genuinely wrong body (`fold(0, fn(acc, x): "wrong")` → `str`) while ACCEPTING
+            // a nested-generic-call body that merely leaked a rigid `Ty::Param` in the prepass
+            // (`fold(0, fn(acc, x): ident(acc))` → refined `int`). When the expected return is still a
+            // free `[U]` (`map`), it is non-concrete here and deferred to the loop-back's recovery, so
+            // this check is skipped (no return contract yet). No `Unknown` laundering: the contract is
+            // checked against the concrete refined type, not degraded.
+            if is_bare_closure
+                && let (Ty::Func { ret: want_ret, .. }, Ty::Func { ret: got_ret, .. }) =
+                    (&want, &refined)
+                && ty_fully_concrete(want_ret)
+                && !self.assignable(want_ret, got_ret)
+            {
+                self.error(
+                    arg.span,
+                    format!(
+                        "closure argument to '{method}' returns {got_ret}, expected {want_ret}"
+                    ),
+                );
+            }
+            refined_actuals.push(refined);
         }
         // LOOP-BACK (the bidirectional recovery): feed each arg's REFINED type — a closure now
         // re-inferred WITH its expected param types, so its return is concrete (`fn(int) -> int`) —

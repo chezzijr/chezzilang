@@ -13725,6 +13725,23 @@ fn fold_closure_wrong_return_rejected() {
 }
 
 #[test]
+fn fold_closure_body_free_generic_call_recovers_int() {
+    // Bug D (adversarial-review fix): a `fold[U]` whose `U` is pinned CONCRETE by `init` (arg 0) AND
+    // whose unannotated closure body is a NESTED FREE generic call (`ident(x)` / `ident(acc)`, where
+    // `ident[T](x: T) -> T`) must be ACCEPTED — the prepass leaks the callee's own rigid `Ty::Param`,
+    // but the checking-mode re-inference types the body `int`. The earlier gate (masking only a still-
+    // free `[U]`) spuriously rejected these with `argument to 'fold' has type fn(?, ?) -> T`.
+    // (a) body references the closure's element param `x`.
+    entry_ok(
+        "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(x))\n    print(s + 1)\n",
+    );
+    // (b) body references the closure's accumulator param `acc` (bare nested generic call).
+    entry_ok(
+        "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(acc))\n    print(s)\n",
+    );
+}
+
+#[test]
 fn rwshared_read_len_ok() {
     entry_ok(
         "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",

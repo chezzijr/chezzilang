@@ -3086,6 +3086,17 @@ fn parity_map_closure_free_generic_call() {
     assert_eq!(vm_outcome(src).unwrap(), "2\n");
 }
 
+#[test]
+fn parity_fold_closure_free_generic_call() {
+    // Bug D (adversarial-review fix): `xs.fold(0, fn(acc, x): ident(x))` where `ident[T](x: T) -> T`
+    // type-checks (fold's `U` pinned `int` by `init`, closure body re-inferred `int`). The reducer
+    // returns the last element via identity → `s = 3`, `print(s + 1)` = `4`. Generic-erased runtime,
+    // so both engines print the same.
+    let src = "fn ident[T](x: T) -> T:\n    return x\nfn main():\n    xs := [1, 2, 3]\n    s := xs.fold(0, fn(acc, x): ident(x))\n    print(s + 1)\nmain()\n";
+    assert_parity(src);
+    assert_eq!(vm_outcome(src).unwrap(), "4\n");
+}
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
