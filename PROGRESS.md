@@ -3239,6 +3239,19 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   only at the `==`/`!=` op sites. Map `==` is now order-independent value equality. (Interp's *call*-depth
   overflow in **debug** builds is left as-is — the tree-walk engine is slated for removal; release + VM
   are fine.)
+  - **Airlock cyclic-sendable guard (2026-07-04).** The same class of bug survived on the concurrency
+    airlock: copying a value across a task boundary (`spawn` arg / `Channel.send` / `Shared(...)` /
+    worker return / M:N module-global snapshot) deep-walks it via `Vm::to_wire` / `to_snap` (src/vm/sched.rs)
+    with **no depth guard**, so a check-accepted cyclic sendable overflowed the host stack → uncatchable
+    SIGABRT on **both** engines. Fix: extend the same `MAX_STRUCTURAL_DEPTH = 10_000` recoverable-error
+    guard into a shared depth-counted worker behind both serializers (`to_wire`→`to_wire_depth`,
+    `to_snap`→`to_snap_depth`, fast path threads the shared budget) so serial `to_snap` and M:N `to_wire`
+    trip at the identical depth; a cyclic value now degrades to the catchable `maximum structural depth
+    (10000) exceeded (cyclic data structure?)` error, byte-identical serial vs M:N. Two `to_wire`
+    call-sites already holding a span (serial `Executor.submit`, `#[cfg(test)]` worker return) route
+    through `to_wire_at` so the error reports the real site, not line 0. Wide-but-shallow sendables (100k
+    elements) still cross fine (the counter measures nesting depth). golden `examples/airlock_cycle.chz`
+    + 5 unit tests (both-engine spawn/channel/shared, M:N-only module-global, wide-acyclic-crosses-fine).
 - **`defer:` block form** — `defer` takes an indented block as well as a single call (multi-action cleanup
   without N `defer` lines), mirroring `spawn`'s dual form with no new VM op. Body runs top-to-bottom at
   scope exit, LIFO as a unit, free vars snapshot by value at the `defer` point, runs on all exit paths.

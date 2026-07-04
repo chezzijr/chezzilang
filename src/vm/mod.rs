@@ -2546,7 +2546,7 @@ impl ReadyWorker {
         let ret = Self::invoke(&mut self.worker, self.call, span)?;
         // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
         // worker-heap `GcRef` back to the parent.
-        let value = self.worker.to_wire(ret)?;
+        let value = self.worker.to_wire_at(ret, span)?;
         self.worker.ensure_crossable(&value, span)?;
         Ok(WorkerResult {
             value,

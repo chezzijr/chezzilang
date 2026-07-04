@@ -621,6 +621,17 @@ captured bindings are **read-only inside the task**.
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
   so the copy semantics are obvious: read captured config freely, but produce output only via a
   `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.
+- **Cyclic sendables degrade gracefully, not copied.** The airlock copies a sendable by a structural
+  deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global snapshot),
+  so a value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b; b.next = a`)
+  is not deep-copyable. Rather than recurse unbounded on the host stack and abort the process, the walk
+  is **depth-guarded** (the same `MAX_STRUCTURAL_DEPTH = 10000` bound the display / `==` paths use):
+  crossing the airlock with a cyclic value raises the **recoverable** runtime error `maximum structural
+  depth (10000) exceeded (cyclic data structure?)`, re-stamped with the real airlock site and catchable
+  by `recover:` — byte-identical on the serial and M:N engines. (A genuinely >10000-deep *acyclic*
+  sendable trips the same bound; large-but-**shallow** data — e.g. a 100k-element list — crosses fine,
+  since the counter measures nesting depth, not element count. Chezzi does not memo/copy the cycle the
+  way Python's `deepcopy` does.)
 
 ```chezzi
 fn worker(id: int, prefix: str, out: Channel[str]):

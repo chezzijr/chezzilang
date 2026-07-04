@@ -1,0 +1,69 @@
+# examples/airlock_cycle.chz — a CYCLIC value crossing the concurrency airlock (a `spawn` arg, a
+# `Channel.send`, a `Shared(...)`) used to recurse unbounded in the airlock serializer (`to_wire`) on
+# the HOST stack and crash the process with an UNCATCHABLE stack overflow (SIGABRT). The airlock walk
+# is now depth-guarded — the SAME recoverable `maximum structural depth` RuntimeError the display /
+# `==` paths raise — so a cycle degrades gracefully and `recover:` catches it, byte-identically on the
+# serial and M:N engines (every section below uses a LOCAL cyclic value → the `to_wire` path on both).
+
+import std.concurrency
+
+struct Node:
+    val: int
+    next: List[Node]
+
+fn use_it(n: Node):
+    print("got {n.val}")
+
+fn use_wide(xs: List[int]):
+    print("wide got len {xs.len()} first {xs[0]} last {xs[99999]}")
+
+# 1) a cyclic value as a `spawn` argument is now catchable.
+spawn_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)           # a -> b -> a  (cycle)
+    parallel:
+        spawn use_it(a)
+    "done"
+match spawn_r:
+    Ok(v):  print("spawn ok: {v}")
+    Err(e): print("spawn caught: {e.message()}")
+
+# 2) the same cycle handed to `Channel.send` is catchable.
+chan_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    ch := Channel[Node]()
+    ch.send(a)
+    "done"
+match chan_r:
+    Ok(v):  print("channel ok: {v}")
+    Err(e): print("channel caught: {e.message()}")
+
+# 3) the same cycle wrapped in `Shared(...)` is catchable.
+shared_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    s := Shared(a)
+    "done"
+match shared_r:
+    Ok(v):  print("shared ok: {v}")
+    Err(e): print("shared caught: {e.message()}")
+
+# 4) a wide, ACYCLIC sendable (100k shallow siblings, structural depth ~2) still crosses fine — the
+# 10_000 depth cap counts nesting LEVELS, not siblings, so large-but-shallow data never false-trips.
+wide := recover:
+    xs := [0]
+    for i in 1..100000:
+        xs.push(i)
+    parallel:
+        spawn use_wide(xs)
+    "crossed"
+match wide:
+    Ok(v):  print("wide ok: {v}")
+    Err(e): print("wide caught: {e.message()}")
