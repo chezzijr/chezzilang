@@ -289,7 +289,9 @@ fn main():
 main()";
     let normal = run_capture(src).unwrap();
     assert_eq!(run_capture_stress(src), normal);
-    assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    // M:N delivers the same channel values, but the three racing spawns can interleave, so compare
+    // order-insensitively (the exact cooperative order is pinned above).
+    assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
 }
 
 /// B3.1 regression: a core nested *inside* another core. The channel core is reachable ONLY
@@ -338,7 +340,8 @@ fn main():
 main()";
     let normal = run_capture(src).unwrap();
     assert_eq!(run_capture_stress(src), normal);
-    assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    // (No M:N cross-check: the two spawns race under the pooled engine, so their push order — and
+    // thus the printed list — is not deterministic. GC survival, the point here, is cooperative.)
 }
 
 /// Executor: submitted task closures (queued in the heap obj) and the popped task drained at
@@ -365,5 +368,7 @@ main()";
         normal,
         "VM gc_stress diverged (executor rooting bug?)"
     );
-    assert_eq!(normal, crate::interp::run_capture(src).expect("interp run"));
+    // The two Executor tasks race on the M:N pool, so their sends arrive in either order — compare
+    // order-insensitively (the exact cooperative order is pinned above).
+    assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
 }

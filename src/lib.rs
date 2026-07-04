@@ -18,12 +18,6 @@ pub mod checker;
 pub mod compiler;
 pub mod desugar;
 pub mod fmtspec;
-// The tree-walk interpreter is compiled only under test (it is the `#[cfg(test)]`-only parity oracle,
-// exactly as in `main.rs`). The front-end never references it in non-test code, so omitting it from
-// release builds is sound; the `#[cfg(test)]` modules inside `vm`/`native` do reference it, so it must
-// be present when the lib's own tests compile.
-#[cfg(test)]
-pub mod interp;
 pub mod interpolation;
 pub mod json_decode;
 pub mod lexer;

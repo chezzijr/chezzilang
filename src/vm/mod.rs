@@ -3206,6 +3206,23 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
     (vm.out, result)
 }
 
+/// Assert two program outputs contain the SAME lines regardless of order. For a concurrency test
+/// where the cooperative and M:N engines deliver the same *set* of results but the interleaving —
+/// and hence line order — legitimately differs under the M:N scheduler (racing spawns / Executor
+/// tasks / multi-producer channel drains). The deterministic exact order stays asserted on the
+/// cooperative engine separately; this only cross-checks that M:N produced the same multiset.
+#[cfg(test)]
+pub fn assert_same_lines(cooperative: &str, mn: &str) {
+    let mut a: Vec<&str> = cooperative.lines().collect();
+    let mut b: Vec<&str> = mn.lines().collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    assert_eq!(
+        a, b,
+        "serial vs M:N line multiset differs\n serial:\n{cooperative}\n M:N:\n{mn}"
+    );
+}
+
 /// Run a single-file program and return its full stdout, or the error (test helper).
 #[cfg(test)]
 pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
@@ -3244,6 +3261,71 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
+}
+
+/// Parallel (M:N) counterpart of [`run_program`]: parse + compile + run with `parallel = true`,
+/// returning `(stdout, result)` so buffered stdout is observable even when the program faults. The
+/// M:N engine is the post-interp parity oracle for the cooperative VM (both live in [`Vm`]; only the
+/// scheduler differs), replacing the removed tree-walk interpreter.
+#[cfg(test)]
+pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let tokens = match lexer::tokenize(&src) {
+                Ok(t) => t,
+                Err(e) => {
+                    return (
+                        String::new(),
+                        Err(RuntimeError {
+                            message: e.to_string(),
+                            span: Span { line: 1, col: 1 },
+                        }),
+                    );
+                }
+            };
+            let module = match parser::parse(tokens) {
+                Ok(m) => m,
+                Err(e) => {
+                    return (
+                        String::new(),
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                    );
+                }
+            };
+            let program = match crate::compiler::compile_module_standalone(&module) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        String::new(),
+                        Err(RuntimeError {
+                            message: e.message,
+                            span: e.span,
+                        }),
+                    );
+                }
+            };
+            let mut vm = Vm::new(Arc::new(program));
+            vm.parallel = true;
+            let result = vm
+                .run()
+                .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+            (vm.out, result)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
+/// Parallel (M:N) counterpart of [`run_file`] with default host config — the file-based parity
+/// oracle for the cooperative VM after the tree-walk interpreter's removal.
+#[cfg(test)]
+pub fn run_file_p(entry: &std::path::Path) -> RunOutput {
+    run_file_parallel(entry, crate::native::HostConfig::default())
 }
 
 /// Run a single-file program, returning stdout (or error) plus the final live-object count.

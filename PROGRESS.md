@@ -11,6 +11,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ REFACTOR — split the mega-files + REMOVED the tree-walk interpreter (2026-07-04).** Two parts:
+- **File split (behavior-preserving).** `impl Vm` (one ~12.4k-line block) split across
+  `vm/{exec,arith,call,sched,netio,stmt}.rs`; `impl Checker` split across
+  `checker/{setup,sig,pattern,expr,proto}.rs`; the big inline `mod tests`/`gc_tests`/`parity_tests`
+  moved to `vm/{tests,gc_tests,parity_tests}.rs`. `vm/mod.rs` 32,988→~3.5k, `checker/mod.rs`
+  17,698→~4.5k. Mechanism: an inherent method's privacy keys off the *impl's module*, so split-out
+  private methods are widened to `pub(super)` (visible throughout the parent module, still
+  crate-internal). No logic changes.
+- **Interpreter REMOVED.** `src/interp/` deleted; the tree-walk engine is gone. Two-engine parity is
+  now **serial-VM (`parallel=false`) == M:N-VM (`parallel=true`)** — both are the same `Vm`, only the
+  scheduler differs. The ~250 parity tests swapped their oracle interp→M:N (`run_capture`→
+  `run_capture_parallel`, added `run_program_parallel`/`run_file_p` helpers). Tests that pinned
+  *cooperative-only* semantics (Executor drain order, by-reference capture, racing spawns, GC-stress)
+  dropped their now-invalid M:N cross-arm and keep their concrete cooperative expecteds; interp-only
+  tests (`interp_rejects_generators`, `bench_vm_faster_than_interp`, …) were deleted. All `interp::`
+  refs in prod code were only `/// Mirrors interp::X` doc-comments (no code coupling); `--serial`
+  already routed to the VM. Docs updated: `CLAUDE.md`, `main.rs`, this file.
+
 **✅ LANGUAGE — the `pass` keyword: no-op statement + empty protocol/struct bodies, and `Any` wired
 into the prelude (2026-07-04).** `pass` is now a REAL reserved keyword (`Token::Pass` in the lexer
 KEYWORDS table — reserved-as-a-name BY CONSTRUCTION, `expect_ident` rejects it like `ref`/`fn`), NOT

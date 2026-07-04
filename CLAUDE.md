@@ -50,7 +50,7 @@ cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
-cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (DEPRECATED — frozen parity oracle, kept for tests)
+cargo run -- run --serial   examples/hello.chz   # cooperative single-thread VM (the byte-identical parity oracle for the default M:N engine)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (engine is now default)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
@@ -73,22 +73,22 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 > top-to-bottom, and with a `:function` suffix that function is then called (missing/non-function =
 > clear error). Without the suffix the module top-level runs only. `chezzi run <file>` runs that file
 > (top-level only, scripting model).
-> `chezzi run` defaults to the VM's real-thread OS-thread engine. `--serial` selects the
-> cooperative single-thread VM (**deprecated** — the frozen byte-identical parity oracle, kept for now
-> for the golden tests, not for normal use); `--parallel` is kept as a no-op alias for the default.
+> `chezzi run` defaults to the VM's real-thread OS-thread (M:N) engine. `--serial` selects the
+> cooperative single-thread VM — the byte-identical **parity oracle** for the default M:N engine
+> (both are the same `Vm`, toggled by the `parallel` flag; only the scheduler differs). `--parallel`
+> is kept as a no-op alias for the default.
 > `--threads=N` (or env `CHEZZI_THREADS`) sizes the OS-thread engine's worker pool — `0`/omitted = all
 > cores, the flag wins over the env, and it errors with `--serial` (not multi-threaded).
-> `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter is likewise **deprecated**
-> and slated for removal — kept for now as the parity oracle for the golden VM-vs-interp tests, with
-> **no CLI flag**.)
+> `--parallel`/`--serial` are mutually exclusive. (The tree-walk interpreter has been **removed**; the
+> two-engine parity tests now assert serial-VM == M:N-VM.)
 
 ## Conventions
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
-  `desugar` → `checker` → `compiler` → `vm` (the engine of record) / `interp` (**deprecated**
-  tree-walk reference, slated for removal), plus `gc`, `native` + `runtime` (builtins / std),
-  `resolver` (module paths).
+  `desugar` → `checker` → `compiler` → `vm` (the engine of record; its `impl Vm` is split across
+  `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` + `runtime` (builtins / std),
+  `resolver` (module paths). (The tree-walk `interp` engine has been removed.)
 - Keep modules small and single-purpose.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
   reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`,
@@ -97,17 +97,17 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   module's `native_module_sig` and gate the bare name behind `import` via the per-module licensing set
   (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
   dispatch unchanged (the gate is checker-only name resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
-  BOTH vm + interp, or `from M import X` faults at runtime — cover it with a test that RUNS both engines.
+  the vm, or `from M import X` faults at runtime — cover it with a test that RUNS the program (serial + M:N).
   A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree
   (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree
   `target/` dirs (~1.6G each) accumulate and fill the disk. Delete rejected branches too.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
-- **Interpreter is DEPRECATED.** The bytecode VM is the engine of record. The tree-walk `interp`
-  is deprecated and slated for removal; it's kept *for now* only as the byte-identical parity
-  oracle behind the golden `examples/*.chz` tests. While it's still around, VM↔interp parity is
-  asserted — so don't let a VM change diverge — but build **no** new features on `interp`, and edit
-  it freely to keep parity (it's on its way out, not a second target to design against).
+- **Tree-walk interpreter REMOVED.** The bytecode VM is the sole engine. Two-engine parity is now
+  **serial-VM (`parallel=false`) == M:N-VM (`parallel=true`)** — both are the same `Vm`, only the
+  scheduler differs. Test helpers: `run_capture`/`run_program`/`run_file` are the serial engine;
+  `run_capture_parallel`/`run_program_parallel`/`run_file_p` are the M:N oracle. Keep them in sync —
+  a VM change that diverges serial vs M:N is a bug.
 
 ## Where things stand
 
@@ -124,7 +124,7 @@ See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next
 
 Right now: **M19 — Perf track (in progress).** This milestone is performance-focused, so while perf
 work is in flight the bar is **behavior-preserving + two-engine parity** on every change —
-a VM speedup that diverges from the interpreter (or changes observable output) is a bug, not a win.
+a VM speedup that diverges between the serial and M:N engines (or changes observable output) is a bug, not a win.
 (The language is still evolving — new features can land; they just go through their own milestone,
 not silently inside a perf change.)
 Landed: peephole/const-fold, superinstructions, `invoke_value` clone-kill, in-place call args,

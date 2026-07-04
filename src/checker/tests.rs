@@ -12960,17 +12960,11 @@ fn prelude_table_is_single_source_of_truth() {
         }
     }
 
-    // (4) Cross-phase invariant: the compiler and interp `is_builtin` sets must AGREE per row, and the
-    //     table's `intrinsic` decides membership — `Builtin`/`Ctor` ⇒ handled by `is_builtin`
-    //     (CallBuiltin-dispatched); `Print` ⇒ excluded (its own CallPrint/CallPrintSep opcodes).
+    // (4) Cross-phase invariant: the `intrinsic` column decides `compiler::is_builtin` membership —
+    //     `Builtin`/`Ctor` ⇒ handled by `is_builtin` (CallBuiltin-dispatched); `Print` ⇒ excluded
+    //     (its own CallPrint/CallPrintSep opcodes).
     for p in PRELUDE {
         let comp = crate::compiler::is_builtin(p.name);
-        let interp = crate::interp::builtins::is_builtin(p.name);
-        assert_eq!(
-            comp, interp,
-            "'{}': compiler::is_builtin and interp::builtins::is_builtin diverge",
-            p.name
-        );
         match p.intrinsic {
             Intrinsic::Builtin | Intrinsic::Ctor => assert!(
                 comp,

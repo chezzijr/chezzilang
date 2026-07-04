@@ -1,13 +1,13 @@
 // Extracted from vm/mod.rs (test module). `super::` == the `vm` module.
-//! Cross-engine parity: the VM and the tree-walk interpreter must agree on stdout *and* error
-//! for every program. These are the M5 acceptance tests — any divergence fails here.
+//! Cross-engine parity: the serial VM (`parallel=false`) and the M:N VM (`parallel=true`) must
+//! agree on stdout *and* error for every program. These are the M5 acceptance tests — any
+//! divergence fails here.
 use super::*;
 use std::path::PathBuf;
-use std::time::Instant;
 
-/// Outcome of a run, normalized so interp and VM results compare directly.
-fn interp_outcome(src: &str) -> Result<String, String> {
-    crate::interp::run_capture(src).map_err(|e| e.to_string())
+/// Outcome of a run, normalized so the serial and M:N VM results compare directly.
+fn parallel_outcome(src: &str) -> Result<String, String> {
+    run_capture_parallel(src).map_err(|e| e.to_string())
 }
 fn vm_outcome(src: &str) -> Result<String, String> {
     run_capture(src).map_err(|e| e.to_string())
@@ -16,7 +16,7 @@ fn vm_outcome(src: &str) -> Result<String, String> {
 fn assert_parity(src: &str) {
     assert_eq!(
         vm_outcome(src),
-        interp_outcome(src),
+        parallel_outcome(src),
         "VM/interp divergence for:\n{src}"
     );
 }
@@ -233,7 +233,7 @@ fn assert_parity_file(files: &[(&str, &str)], entry: &str) -> String {
         }
     }
     let entry_path = entry_path.expect("entry must be one of the files");
-    let (io, ie_out, ir, _) = crate::interp::run_file(&entry_path);
+    let (io, ie_out, ir, _) = run_file_p(&entry_path);
     let (vo, ve_out, vr, _) = run_file(&entry_path);
     assert_eq!(io, vo, "stdout divergence (interp vs vm) for entry {entry}");
     assert_eq!(
@@ -599,7 +599,7 @@ fn imported_struct_across_airlock_three_engine() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = crate::interp::run_file(&entry);
+    let (io, _, ir, _) = run_file_p(&entry);
     let (vo, _, vr, _) = run_file(&entry);
     let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
     assert!(
@@ -708,7 +708,7 @@ fn decode_collision_three_engine() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = crate::interp::run_file(&entry);
+    let (io, _, ir, _) = run_file_p(&entry);
     let (vo, _, vr, _) = run_file(&entry);
     let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
     assert!(
@@ -746,7 +746,7 @@ fn match_arm_scrutinee_driven_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (io, _, ir, _) = run_file_p(&entry);
         let (vo, _, vr, _) = run_file(&entry);
         let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
         assert!(
@@ -783,7 +783,7 @@ fn match_arm_only_in_a_variant_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = crate::interp::run_file(&entry);
+        let (io, _, ir, _) = run_file_p(&entry);
         let (vo, _, vr, _) = run_file(&entry);
         let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
         assert!(
@@ -817,7 +817,7 @@ fn collision_struct_sent_across_task() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = crate::interp::run_file(&entry);
+    let (io, _, ir, _) = run_file_p(&entry);
     let (vo, _, vr, _) = run_file(&entry);
     let (po, _, pr, _) = run_file_parallel(&entry, crate::native::HostConfig::default());
     assert!(
@@ -1540,7 +1540,7 @@ fn math_abs_min_overflows() {
     let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    print(math.abs(x))\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let ie = crate::interp::run_file(&entry).2.unwrap_err().to_string();
+    let ie = run_file_p(&entry).2.unwrap_err().to_string();
     let ve = run_file(&entry).2.unwrap_err().to_string();
     assert_eq!(
         ie, ve,
@@ -1564,7 +1564,7 @@ fn exit_threads_code_through_both_engines() {
     let src = "import std.os\nfn main():\n    print(\"before\")\n    os.exit(3)\n    print(\"after\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+    let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert_eq!(io, "before\n", "interp stdout");
     assert_eq!(vo, "before\n", "vm stdout");
@@ -1583,7 +1583,7 @@ fn defer_top_level_skipped_by_os_exit() {
     let src = "import std.os\nfn log(s: str):\n    print(s)\ndefer log(\"cleanup\")\nprint(\"before\")\nos.exit(2)\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+    let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert_eq!(io, "before\n", "interp: cleanup defer skipped by os.exit");
     assert_eq!(vo, "before\n", "vm: cleanup defer skipped by os.exit");
@@ -1602,7 +1602,7 @@ fn defer_top_level_runs_on_unhandled_error() {
     let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"nope\")\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
     let (vo, _ve, vr, _vc) = run_file(&entry);
     assert_eq!(
         io, "before\ncleanup\n",
@@ -1624,7 +1624,7 @@ fn exit_is_not_caught_by_recover() {
     let src = "import std.os\nfn main():\n    x := recover:\n        os.exit(7)\n    print(\"unreachable\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, _ir, ic) = crate::interp::run_file(&entry);
+    let (io, _ie, _ir, ic) = run_file_p(&entry);
     let (vo, _ve, _vr, vc) = run_file(&entry);
     assert_eq!(io, "", "interp: nothing after the recover runs");
     assert_eq!(vo, "", "vm: nothing after the recover runs");
@@ -1640,7 +1640,7 @@ fn exit_in_spawned_child_aborts_siblings() {
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = crate::interp::run_file(&entry);
+    let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert_eq!(
         vo, "a\n",
@@ -2586,7 +2586,7 @@ fn parallel_finished_task_leaves_sibling_deadlocked() {
 fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, ie_out, ir, _ic) = crate::interp::run_file_with(&entry, mk_cfg());
+    let (io, ie_out, ir, _ic) = run_file_parallel(&entry, mk_cfg());
     let (vo, ve_out, vr, _vc) = run_file_with(&entry, mk_cfg());
     assert_eq!(io, vo, "stdout divergence (interp vs vm)");
     assert_eq!(ie_out, ve_out, "stderr divergence (interp vs vm)");
@@ -2614,7 +2614,7 @@ fn parity_std_io_read_write_file() {
         "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        Ok(_): io.print(\"wrote\")\n        Err(e): io.print(e)\n    match io.read_file(\"{data}\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(e)\nmain()"
     );
     let entry = t.write("main.chz", &src);
-    let (io_out, _ie, ir, _) = crate::interp::run_file(&entry);
+    let (io_out, _ie, ir, _) = run_file_p(&entry);
     let (vo, _ve, vr, _) = run_file(&entry);
     assert!(ir.is_ok() && vr.is_ok(), "interp={ir:?} vm={vr:?}");
     assert_eq!(io_out, vo);
@@ -3082,7 +3082,7 @@ fn fixture(rel: &str) -> PathBuf {
 fn assert_file_parity(rel: &str) {
     let path = fixture(rel);
     let (vm_out, vm_err, vm_res, _) = run_file(&path);
-    let (ip_out, ip_err, ip_res, _) = crate::interp::run_file(&path);
+    let (ip_out, ip_err, ip_res, _) = run_file_p(&path);
     assert_eq!(vm_out, ip_out, "stdout divergence for {rel}");
     assert_eq!(vm_err, ip_err, "stderr divergence for {rel}");
     assert_eq!(
@@ -3840,9 +3840,9 @@ fn stack_trace_reports_call_chain_on_both_engines() {
     );
 
     // Interp parity: identical formatted trace.
-    let (_o, _er, ip_res, _) = crate::interp::run_file(&path);
+    let (_o, _er, ip_res, _) = run_file_p(&path);
     let ie = ip_res.expect_err("program should fault");
-    let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
 }
 
@@ -3905,9 +3905,9 @@ fn recursion_trace_parity_vm_vs_interp() {
     let (_o, _e, res, _) = run_file(&path);
     let e = res.expect_err("deep recursion should fault");
     let vm_fmt = format_trace(&e.message, e.span, &e.trace);
-    let (_o2, _e2, ip_res, _) = crate::interp::run_file(&path);
+    let (_o2, _e2, ip_res, _) = run_file_p(&path);
     let ie = ip_res.expect_err("deep recursion should fault");
-    let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must produce the same bounded/collapsed trace"
@@ -3936,13 +3936,13 @@ fn format_trace_caps_distinct_name_chain() {
     assert!(!vm_fmt.contains("identical frames"), "got:\n{vm_fmt}");
 
     // Parity: interp renders the identical synthetic trace.
-    let ip_trace: Vec<crate::interp::TraceFrame> = (0..50)
-        .map(|n| crate::interp::TraceFrame {
+    let ip_trace: Vec<TraceFrame> = (0..50)
+        .map(|n| TraceFrame {
             function: format!("f{n}"),
             span,
         })
         .collect();
-    let ip_fmt = crate::interp::format_trace("boom", span, &ip_trace);
+    let ip_fmt = format_trace("boom", span, &ip_trace);
     assert_eq!(vm_fmt, ip_fmt, "engines must agree on the capped trace");
 }
 
@@ -3982,19 +3982,19 @@ fn format_trace_cap_never_orphans_collapse_marker() {
         }
     }
     // Parity with interp on the same synthetic trace.
-    let ip_trace: Vec<crate::interp::TraceFrame> = (0..25)
+    let ip_trace: Vec<TraceFrame> = (0..25)
         .flat_map(|n| {
             let f = format!("g{n}");
             [
-                crate::interp::TraceFrame {
+                TraceFrame {
                     function: f.clone(),
                     span,
                 },
-                crate::interp::TraceFrame { function: f, span },
+                TraceFrame { function: f, span },
             ]
         })
         .collect();
-    let ip_fmt = crate::interp::format_trace("boom", span, &ip_trace);
+    let ip_fmt = format_trace("boom", span, &ip_trace);
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must agree on the capped collapsed trace"
@@ -4039,9 +4039,9 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
         "deferred fault's chain"
     );
     let vm_fmt = format_trace(&e.message, e.span, &e.trace);
-    let (_o2, _e2, ip_res, _) = crate::interp::run_file(&path);
+    let (_o2, _e2, ip_res, _) = run_file_p(&path);
     let ie = ip_res.expect_err("should fault");
-    let ip_fmt = crate::interp::format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must agree on a deferred-fault trace"
@@ -4184,7 +4184,7 @@ fn golden_exit_via_run_file() {
     let path = fixture("examples/exit.chz");
     let expected = std::fs::read_to_string(fixture("examples/exit.expected")).unwrap();
     let (vo, _ve, vr, vc) = run_file(&path);
-    let (io, _ie, ir, ic) = crate::interp::run_file(&path);
+    let (io, _ie, ir, ic) = run_file_p(&path);
     assert!(
         vr.is_ok() && ir.is_ok(),
         "exit is a clean halt: vm={vr:?} interp={ir:?}"
@@ -4509,24 +4509,9 @@ fn parity_map_gc_stress_heap_keys_and_values() {
     );
 }
 
-/// Record the VM speedup over the interpreter on a loop-heavy script (the spec's perf check).
-/// Asserts a conservative floor that holds even in debug builds; the real ~6x lands in release.
-#[test]
-fn bench_vm_faster_than_interp() {
-    let src = "fn main():\n    total := 0\n    i := 0\n    while i < 500000:\n        total += (i * 3 - 1) % 7\n        i += 1\n    print(total)\nmain()";
-    let t = Instant::now();
-    let ip = crate::interp::run_capture(src).unwrap();
-    let interp_t = t.elapsed();
-    let t = Instant::now();
-    let vm = run_capture(src).unwrap();
-    let vm_t = t.elapsed();
-    assert_eq!(vm, ip, "engines disagree on the benchmark output");
-    let ratio = interp_t.as_secs_f64() / vm_t.as_secs_f64();
-    println!(
-        "VM speedup over interp: {ratio:.1}x (interp {interp_t:?}, vm {vm_t:?}) [debug build; ~6x in release]"
-    );
-    assert!(ratio >= 1.2, "VM not faster than interp: {ratio:.2}x");
-}
+// (Removed `bench_vm_faster_than_interp`: it timed the bytecode VM against the tree-walk
+// interpreter, which no longer exists. Perf tracking lives in `benches/run.chz` vs CPython and
+// `docs/benchmarks.md`; serial-vs-M:N output parity on loop-heavy code is covered by other tests.)
 
 // ===== gap #8: tuples + multi-return + destructuring =====
 
@@ -4683,7 +4668,7 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
     let expected = include_str!("../../examples/closure_capture.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, crate::interp::run_capture(src).expect("interp run"));
+    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
     assert_eq!(vm_out, run_capture_parallel(src).expect("parallel run"));
 }
 
@@ -4702,7 +4687,7 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
     let entry = dir.join("main.chz");
     std::fs::write(&entry, src).unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = crate::interp::run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
     let (po, _pe, pr, _pc) = run_file_parallel(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
@@ -5245,7 +5230,7 @@ fn generator_iter_returns_self_vm() {
 fn widen_three_engines(src: &str, want: &str) {
     assert_eq!(run_capture(src).expect("vm"), want, "vm engine");
     assert_eq!(
-        crate::interp::run_capture(src).expect("interp"),
+        run_capture_parallel(src).expect("interp"),
         want,
         "interp engine"
     );

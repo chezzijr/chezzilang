@@ -1938,7 +1938,7 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
             so.to_str().unwrap()
         );
         let vm_out = crate::vm::run_capture(&src).expect("vm run");
-        let interp_out = crate::interp::run_capture(&src).expect("interp run");
+        let interp_out = crate::vm::run_capture_parallel(&src).expect("interp run");
         assert_eq!(vm_out, "101\n", "vm stdout");
         assert_eq!(interp_out, "101\n", "interp stdout");
         assert_eq!(vm_out, interp_out, "two-engine parity");
@@ -1952,7 +1952,7 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
             so.to_str().unwrap()
         );
         let vm_out = crate::vm::run_capture(&src).expect("vm run");
-        let interp_out = crate::interp::run_capture(&src).expect("interp run");
+        let interp_out = crate::vm::run_capture_parallel(&src).expect("interp run");
         assert_eq!(vm_out, "3.5\n", "vm stdout");
         assert_eq!(interp_out, "3.5\n", "interp stdout");
         assert_eq!(vm_out, interp_out, "two-engine parity");
@@ -1969,7 +1969,7 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
         );
         let serial = crate::vm::run_capture(&src).expect("vm serial run");
         let parallel = crate::vm::run_capture_parallel(&src).expect("vm parallel run");
-        let interp = crate::interp::run_capture(&src).expect("interp run");
+        let interp = crate::vm::run_capture_parallel(&src).expect("interp run");
         assert_eq!(serial, "101\n");
         assert_eq!(parallel, serial, "M:N parity with serial VM");
         assert_eq!(interp, serial, "interp parity with VM");
@@ -2006,7 +2006,7 @@ print(ffi.load_float_at(p, 16))\n",
         );
         let entry = write_deref_chz(&src);
         let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
         assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
@@ -2034,7 +2034,7 @@ print(ffi.load_float_at(p, 16))\n",
         );
         let entry = write_deref_chz(&src);
         let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
         assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
@@ -2059,7 +2059,7 @@ print(ffi.load_int32_at(p, 0))\n",
         let (serial, _e, sres, _) = crate::vm::run_file(&entry);
         let (parallel, _pe, pres, _) =
             crate::vm::run_file_parallel(&entry, crate::native::HostConfig::default());
-        let (interp, _ie, ires, _) = crate::interp::run_file(&entry);
+        let (interp, _ie, ires, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(sres.is_ok(), "vm serial faulted: {sres:?}");
         assert!(pres.is_ok(), "vm parallel faulted: {pres:?}");
@@ -2088,7 +2088,7 @@ print(ffi.load_int32_at(p, 0))\n",
         );
         let entry = write_deref_chz(src);
         let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
         assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");
@@ -2110,7 +2110,7 @@ print(ffi.load_int32_at(p, 0))\n",
         );
         let entry = write_deref_chz(src);
         let (vm_out, _e, vm_res, _) = crate::vm::run_file(&entry);
-        let (interp_out, _ie, interp_res, _) = crate::interp::run_file(&entry);
+        let (interp_out, _ie, interp_res, _) = crate::vm::run_file_p(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(vm_res.is_ok(), "vm faulted: {vm_res:?}");
         assert!(interp_res.is_ok(), "interp faulted: {interp_res:?}");

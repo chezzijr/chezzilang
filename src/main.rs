@@ -3,14 +3,14 @@
 //! Design spec: docs/spec.md
 //!
 //! Pipeline (built incrementally — see roadmap in docs/spec.md):
-//!   source.chz → lexer → parser → checker → tree-walk interp → bytecode VM
+//!   source.chz → lexer → parser → checker → compiler → bytecode VM
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
 
 // `src/main.rs` is a thin CLI shim over the `chezzi` **library** crate (`src/lib.rs`): the front-end
 // modules live there as `pub mod`s and compile once, so this binary declares no modules of its own —
 // it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the two-engine
-// VM/interp parity tests now live + run once in the lib's test target, not in this bin.)
+// serial-VM/M:N-VM parity tests now live + run once in the lib's test target, not in this bin.)
 use chezzi::{checker, lexer, manifest, native, parser, resolver, test_runner, vm};
 
 use std::process::ExitCode;
