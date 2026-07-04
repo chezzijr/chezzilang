@@ -10992,6 +10992,157 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
 }
 
+/// Bug A regression — a CYCLIC value crossing the concurrency airlock (`spawn` arg) used to recurse
+/// unbounded in `to_wire` on the HOST stack and SIGABRT (uncatchable process kill). It is now the
+/// SAME recoverable `maximum structural depth` `RuntimeError` the display/`==` paths already raise,
+/// catchable by `recover:`, byte-identical on the serial and M:N engines (both copy the local cyclic
+/// value via `deep_clone`→`to_wire`).
+#[test]
+fn airlock_cyclic_struct_recoverable_both_engines() {
+    let src = "\
+struct Node:
+    val: int
+    next: List[Node]
+fn use_it(n: Node):
+    print(\"got {n.val}\")
+fn main():
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    r := recover:
+        parallel:
+            spawn use_it(a)
+        \"done\"
+    match r:
+        Ok(v):  print(\"ok: {v}\")
+        Err(e): print(\"caught: {e.message()}\")
+main()
+";
+    assert_mc_parity(
+        src,
+        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
+    );
+}
+
+/// Bug A regression — the same cyclic value crossing via `Channel.send` and `Shared(...)` (both route
+/// through `to_wire_at`) also degrades to the recoverable depth error, not a SIGABRT. Regression lock
+/// on the other airlock entry points beyond a bare `spawn` arg.
+#[test]
+fn airlock_cyclic_via_channel_send_and_shared_recoverable() {
+    let chan_src = "\
+import std.concurrency
+struct Node:
+    val: int
+    next: List[Node]
+fn main():
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    r := recover:
+        ch := Channel[Node]()
+        ch.send(a)
+        \"done\"
+    match r:
+        Ok(v):  print(\"ok: {v}\")
+        Err(e): print(\"caught: {e.message()}\")
+main()
+";
+    assert_mc_parity(
+        chan_src,
+        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
+    );
+    let shared_src = "\
+import std.concurrency
+struct Node:
+    val: int
+    next: List[Node]
+fn main():
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    r := recover:
+        s := Shared(a)
+        \"done\"
+    match r:
+        Ok(v):  print(\"ok: {v}\")
+        Err(e): print(\"caught: {e.message()}\")
+main()
+";
+    assert_mc_parity(
+        shared_src,
+        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
+    );
+}
+
+/// Bug A regression — a cyclic MODULE-GLOBAL value snapshotted for an M:N worker (`to_snap`) is also
+/// depth-guarded. This path is M:N-ONLY: the serial engine never snapshots module globals, so this is
+/// a `run_capture_parallel`-only assertion (NOT `assert_mc_parity`). The empty `parallel:` nursery
+/// forces worker-prep (`snapshot_modules` → `to_snap`) to walk the cyclic global.
+#[test]
+fn airlock_cyclic_module_global_recoverable_mn() {
+    let src = "\
+struct Node:
+    val: int
+    next: List[Node]
+a := Node(1, [])
+b := Node(2, [])
+a.next.push(b)
+b.next.push(a)
+fn worker():
+    print(\"w\")
+fn main():
+    r := recover:
+        parallel:
+            spawn worker()
+        \"done\"
+    match r:
+        Ok(v):  print(\"ok: {v}\")
+        Err(e): print(\"caught: {e.message()}\")
+main()
+";
+    let out = run_capture_parallel(src).expect("M:N run should not crash");
+    assert_eq!(
+        out,
+        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
+    );
+}
+
+/// Bug A guard-precision — a BREADTH-shaped acyclic value (~100k shallow siblings, structural depth
+/// ~2) must STILL cross the airlock fine: the 10_000 depth cap counts nesting LEVELS, not siblings,
+/// so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
+/// error — same false-positive the print/`==` path already has — so this is deliberately breadth-shaped.)
+#[test]
+fn airlock_wide_acyclic_crosses_fine() {
+    let src = "\
+fn use_it(xs: List[int]):
+    print(\"len {xs.len()} first {xs[0]} last {xs[99999]}\")
+fn main():
+    xs := [0]
+    for i in 1..100000:
+        xs.push(i)
+    parallel:
+        spawn use_it(xs)
+main()
+";
+    assert_mc_parity(src, "len 100000 first 0 last 99999\n");
+}
+
+/// Golden: `examples/airlock_cycle.chz` — a cyclic sendable crossing the airlock (`spawn` arg /
+/// `Channel.send` / `Shared`) degrades to a recoverable depth error, and a wide-acyclic sendable
+/// still crosses fine. All sections use LOCAL cyclic values (the `to_wire` path), so the output is
+/// byte-identical on the serial and M:N engines.
+#[test]
+fn golden_airlock_cycle_chz_matches_expected() {
+    let src = include_str!("../../examples/airlock_cycle.chz");
+    let expected = include_str!("../../examples/airlock_cycle.expected");
+    let vm_out = run_capture(src).expect("vm run");
+    assert_eq!(vm_out, expected);
+    assert_eq!(vm_out, run_capture_parallel(src).expect("M:N run"));
+}
+
 /// Tech-debt parity: a `set` nested inside a struct / list must compare unordered on BOTH
 /// engines (top-level set `==` already did). Previously the interp's derived `SetData::eq` was
 /// order-sensitive, so `W(Set([1,2,3])) == W(Set([3,2,1]))` was `true` on the VM but `false` on

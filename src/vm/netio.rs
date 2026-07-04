@@ -1374,7 +1374,7 @@ impl Vm {
                     let w = if self.parallel {
                         self.wire_callable(args[0], span)?
                     } else {
-                        self.to_wire(args[0])?
+                        self.to_wire_at(args[0], span)?
                     };
                     g.queue.push_back(w);
                 }

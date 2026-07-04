@@ -1777,6 +1777,24 @@ impl Vm {
     /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
     /// forwards the generator error up through container recursion).
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
+        self.to_wire_depth(v, 0)
+    }
+
+    /// Depth-counted worker behind [`Vm::to_wire`]. A **cyclic** sendable (e.g. a struct whose field
+    /// points back at itself, reachable across the concurrency airlock) would otherwise recurse
+    /// unbounded on the HOST stack and `SIGABRT` (uncatchable). This bound — the SAME
+    /// `MAX_STRUCTURAL_DEPTH` limit and message the display / `==` paths use (`stmt.rs` / `arith.rs`)
+    /// — turns that into a recoverable `RuntimeError` (placeholder `Span{0,0}`, re-stamped with the
+    /// real airlock site by `to_wire_at`), so a cycle degrades gracefully instead of aborting the
+    /// process. Kept in lockstep with [`Vm::to_snap`] (which shares this budget on its fast path) so
+    /// the serial and M:N engines trip at the identical depth.
+    fn to_wire_depth(&self, v: Value, depth: usize) -> Result<WireValue, RuntimeError> {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.err(
+                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                Span { line: 0, col: 0 },
+            ));
+        }
         Ok(match v {
             Value::Int(n) => WireValue::Int(n),
             Value::Float(f) => WireValue::Float(f),
@@ -1826,28 +1844,32 @@ impl Vm {
                 Obj::List(items) => {
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
-                        out.push(self.to_wire(*x)?);
+                        out.push(self.to_wire_depth(*x, depth + 1)?);
                     }
                     WireValue::List(out)
                 }
                 Obj::Tuple(items) => {
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
-                        out.push(self.to_wire(*x)?);
+                        out.push(self.to_wire_depth(*x, depth + 1)?);
                     }
                     WireValue::Tuple(out)
                 }
                 Obj::Map(m) => {
                     let mut out = Vec::with_capacity(m.entries.len());
                     for (hash, k, val) in &m.entries {
-                        out.push((*hash, self.to_wire(*k)?, self.to_wire(*val)?));
+                        out.push((
+                            *hash,
+                            self.to_wire_depth(*k, depth + 1)?,
+                            self.to_wire_depth(*val, depth + 1)?,
+                        ));
                     }
                     WireValue::Map(out)
                 }
                 Obj::Set(s) => {
                     let mut out = Vec::with_capacity(s.entries.len());
                     for (hash, e) in &s.entries {
-                        out.push((*hash, self.to_wire(*e)?));
+                        out.push((*hash, self.to_wire_depth(*e, depth + 1)?));
                     }
                     WireValue::Set(out)
                 }
@@ -1865,14 +1887,14 @@ impl Vm {
                     let mut out = Vec::with_capacity(vals.len());
                     for (i, val) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
-                        out.push((k, self.to_wire(*val)?));
+                        out.push((k, self.to_wire_depth(*val, depth + 1)?));
                     }
                     WireValue::Struct { name, fields: out }
                 }
                 Obj::Enum { variant_id, payload } => {
                     let mut out = Vec::with_capacity(payload.len());
                     for x in payload {
-                        out.push(self.to_wire(*x)?);
+                        out.push(self.to_wire_depth(*x, depth + 1)?);
                     }
                     // M19 lever #2 — carry the dense `variant_id` directly on the COLD wire path. All
                     // workers share one `Arc<Program>`, so the id is meaningful on both sides; carrying
@@ -1883,7 +1905,7 @@ impl Vm {
                 // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
                 Obj::NewType { type_key, inner } => WireValue::NewType {
                     type_key: type_key.clone(),
-                    inner: Box::new(self.to_wire(*inner)?),
+                    inner: Box::new(self.to_wire_depth(*inner, depth + 1)?),
                 },
                 // Experimental generators cannot cross an OS-thread heap boundary — their parked
                 // frames reference this heap. The checker marks them non-sendable, so this is a
@@ -1903,7 +1925,7 @@ impl Vm {
                     let items = items.clone();
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
-                        out.push(self.to_wire(x)?);
+                        out.push(self.to_wire_depth(x, depth + 1)?);
                     }
                     WireValue::Iter { items: out, pos }
                 }
@@ -2478,20 +2500,38 @@ impl Vm {
     /// error (re-stamped with the real nursery span by `ensure_snapshot`) instead of a panic. The
     /// recursion propagates that error with `?`, so a generator nested in any container faults too.
     pub(super) fn to_snap(&self, v: Value) -> Result<SnapValue, RuntimeError> {
+        self.to_snap_depth(v, 0)
+    }
+
+    /// Depth-counted worker behind [`Vm::to_snap`] — the serial engine never snapshots, so this is the
+    /// M:N module-global crossing path. Shares [`Vm::to_wire_depth`]'s cyclic-data guard: the same
+    /// `MAX_STRUCTURAL_DEPTH` bound turns a cyclic module global into a recoverable `RuntimeError`
+    /// (re-stamped with the real nursery span by `ensure_snapshot`) rather than a host `SIGABRT`. The
+    /// fast path threads `depth` into `to_wire_depth` and every slow arm recurses at `depth + 1`, so
+    /// the shared budget keeps `to_snap` and `to_wire` in lockstep.
+    fn to_snap_depth(&self, v: Value, depth: usize) -> Result<SnapValue, RuntimeError> {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.err(
+                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
+                Span { line: 0, col: 0 },
+            ));
+        }
         let h = match v {
             Value::Obj(h) => h,
             // A scalar (Int/Float/Bool/Nil) is always sendable — never `Obj::Generator`, so this
             // `.expect` is unreachable for a generator.
             scalar => {
                 return Ok(SnapValue::Wire(
-                    self.to_wire(scalar).expect("scalar is always sendable"),
+                    self.to_wire_depth(scalar, depth)
+                        .expect("scalar is always sendable"),
                 ));
             }
         };
         // Fast path: no embedded callable/module → the wire form is exact and cheap. A generator's
         // `to_wire` errors (so the `if let Ok` fails) — we fall through to the `Obj::Generator` arm,
-        // which re-produces the same graceful error below.
-        if let Ok(w) = self.to_wire(v)
+        // which re-produces the same graceful error below. Threads the SHARED `depth` so a cyclic
+        // pure-data global trips `to_wire_depth`'s guard at the same budget as the M:N spawn-arg path.
+        if let Ok(w) = self.to_wire_depth(v, depth)
             && !w.has_handle()
         {
             return Ok(SnapValue::Wire(w));
@@ -2503,7 +2543,7 @@ impl Vm {
                 let names = &self.program.protos[proto].capture_names;
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {
-                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap(*cv)?));
+                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1)?));
                 }
                 SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }
             }
@@ -2515,7 +2555,7 @@ impl Vm {
                 None => {
                     let mut globals = Vec::new();
                     for (k, mv) in module_slot_pairs(&slots, &index) {
-                        globals.push((k, self.to_snap(mv)?));
+                        globals.push((k, self.to_snap_depth(mv, depth + 1)?));
                     }
                     SnapValue::ModuleInline { name, globals }
                 }
@@ -2532,14 +2572,14 @@ impl Vm {
             Obj::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap(*x)?);
+                    out.push(self.to_snap_depth(*x, depth + 1)?);
                 }
                 SnapValue::List(out)
             }
             Obj::Tuple(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap(*x)?);
+                    out.push(self.to_snap_depth(*x, depth + 1)?);
                 }
                 SnapValue::Tuple(out)
             }
@@ -2555,14 +2595,14 @@ impl Vm {
                 let mut out = Vec::with_capacity(fields.len());
                 for (i, fv) in fields.iter().enumerate() {
                     let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
-                    out.push((k, self.to_snap(*fv)?));
+                    out.push((k, self.to_snap_depth(*fv, depth + 1)?));
                 }
                 SnapValue::Struct { name, fields: out }
             }
             Obj::Enum { variant_id, payload } => {
                 let mut out = Vec::with_capacity(payload.len());
                 for x in &payload {
-                    out.push(self.to_snap(*x)?);
+                    out.push(self.to_snap_depth(*x, depth + 1)?);
                 }
                 // M19 lever #2 — carry the dense `variant_id` directly on the cold snap path (mirrors
                 // `to_wire`); replay reuses it as-is against the shared program.
@@ -2570,19 +2610,23 @@ impl Vm {
             }
             Obj::NewType { type_key, inner } => SnapValue::NewType {
                 type_key,
-                inner: Box::new(self.to_snap(inner)?),
+                inner: Box::new(self.to_snap_depth(inner, depth + 1)?),
             },
             Obj::Map(m) => {
                 let mut out = Vec::with_capacity(m.entries.len());
                 for (hash, k, val) in &m.entries {
-                    out.push((*hash, self.to_snap(*k)?, self.to_snap(*val)?));
+                    out.push((
+                        *hash,
+                        self.to_snap_depth(*k, depth + 1)?,
+                        self.to_snap_depth(*val, depth + 1)?,
+                    ));
                 }
                 SnapValue::Map(out)
             }
             Obj::Set(s) => {
                 let mut out = Vec::with_capacity(s.entries.len());
                 for (hash, e) in &s.entries {
-                    out.push((*hash, self.to_snap(*e)?));
+                    out.push((*hash, self.to_snap_depth(*e, depth + 1)?));
                 }
                 SnapValue::Set(out)
             }
@@ -2618,7 +2662,7 @@ impl Vm {
             Obj::Iter { items, pos } => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap(*x)?);
+                    out.push(self.to_snap_depth(*x, depth + 1)?);
                 }
                 SnapValue::Iter { items: out, pos }
             }

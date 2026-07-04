@@ -1,0 +1,5 @@
+spawn caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+channel caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+shared caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+wide got len 100000 first 0 last 99999
+wide ok: crossed
