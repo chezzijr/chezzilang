@@ -105,4 +105,14 @@ fn main():
     print(List([5, 6, 7].iter()))         # [5, 6, 7]
     print(Set({2, 2, 3}.iter()).len())    # 2  (deduped)
 
+    # --- a NAMED cursor is CONSUMED in place: `for` advances the shared cursor, so a later
+    #     `next()`/`List()`/`for` sees only what's left (partial-consume-then-drain) ---
+    it := [1, 2, 3, 4].iter()
+    for x in it:
+        if x == 2:
+            break                         # consumed 1, 2 — cursor now sits before 3
+    print(it.next())                      # Some(3)  (advances past 3)
+    print(List(it))                       # [4]      (drains the remainder in place)
+    print(it.next())                      # None     (exhausted)
+
 main()

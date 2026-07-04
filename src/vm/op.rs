@@ -352,6 +352,12 @@ pub enum Op {
     /// g():` to route a generator result into the same lazy `next()` step as a struct iterator
     /// (type-erased: the compiler can't tell a generator result from a struct statically).
     IsGenerator,
+    /// Pop a value; push `true` if it is a builtin cursor (`Obj::Iter`, the `.iter()` result), else
+    /// `false`. Used by `for x in it:` to route a NAMED/converted cursor into the same lazy `next()`
+    /// step as a struct iterator, so `for` DRIVES the shared cursor in place (advancing the original)
+    /// instead of snapshotting a private copy — keeping `for`/`List()`/`Set()` consistent with
+    /// `.next()`. Emitted right after `IsGenerator` (so it runs post-`IterableToCursor` conversion).
+    IsCursor,
     /// `for`-loop one-time conversion for a PURE-`Iterable` struct (one with `iter(self)` but NO
     /// `next`). Pop a value: if it is a struct that has `iter` but not `next`, call `iter()` once and
     /// push the resulting cursor (an `Obj::Iter`, which the seq path then drains like any sequence);

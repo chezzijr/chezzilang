@@ -1657,6 +1657,12 @@ impl Vm {
                     matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Generator(_)));
                 self.push(Value::Bool(is_gen));
             }
+            Op::IsCursor => {
+                let v = self.pop();
+                let is_cursor =
+                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Iter { .. }));
+                self.push(Value::Bool(is_cursor));
+            }
             Op::IterableToCursor => {
                 // One-time `for`-entry conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
                 // becomes its cursor (so the seq path drains it); everything else passes through.

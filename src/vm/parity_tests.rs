@@ -5185,6 +5185,103 @@ fn for_over_pure_iterable_struct() {
     assert_parity_out(both, "100\n101\n");
 }
 
+// ---- Bug C: a `for`/`List()`/`Set()` over a NAMED builtin cursor consumes it in place ----
+// (must match `.next()` and struct iterators and docs/syntax.md:709-713).
+
+#[test]
+fn for_named_cursor_partial_consume_then_drain() {
+    // The repro: partial-consume via a broken `for`, then `List()` drains the REMAINDER.
+    let src = concat!(
+        "fn main():\n",
+        "    it := [1, 2, 3, 4].iter()\n",
+        "    seen := 0\n",
+        "    for x in it:\n",
+        "        seen = seen + 1\n",
+        "        if x == 2:\n",
+        "            break\n",
+        "    rest := List(it)\n",
+        "    print(\"seen={seen} rest={rest}\")\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap().trim(), "seen=2 rest=[3, 4]");
+    assert_parity(src);
+}
+
+#[test]
+fn for_named_cursor_two_pass_second_yields_nothing() {
+    // A named cursor is consumed by the first `for`; the second pass yields nothing.
+    let src = concat!(
+        "fn main():\n",
+        "    it := [1, 2, 3].iter()\n",
+        "    for x in it:\n",
+        "        print(x)\n",
+        "    for x in it:\n",
+        "        print(x)\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n");
+    assert_parity(src);
+}
+
+#[test]
+fn next_after_for_over_named_cursor_is_none() {
+    // `for` advances the shared cursor; a trailing `.next()` sees it exhausted.
+    let src = concat!(
+        "fn main():\n",
+        "    it := [10, 20].iter()\n",
+        "    for x in it:\n",
+        "        print(x)\n",
+        "    print(it.next())\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap(), "10\n20\nNone\n");
+    assert_parity(src);
+}
+
+#[test]
+fn for_over_collection_reiterates_fully_twice() {
+    // Invariant 1: a NON-cursor collection (list) keeps fresh-snapshot semantics — both passes full.
+    let src = concat!(
+        "fn main():\n",
+        "    xs := [1, 2, 3]\n",
+        "    for x in xs:\n",
+        "        print(x)\n",
+        "    for x in xs:\n",
+        "        print(x)\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n1\n2\n3\n");
+    assert_parity(src);
+}
+
+#[test]
+fn iter_of_iter_fresh_cursor() {
+    // Invariant 2: `xs.iter().iter()` is one fresh cursor (no double-advance).
+    let src = concat!(
+        "fn main():\n",
+        "    a := [5, 6].iter().iter()\n",
+        "    print(a.next())\n",
+        "    for x in a:\n",
+        "        print(x)\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap(), "Some(5)\n6\n");
+    assert_parity(src);
+}
+
+#[test]
+fn for_over_fresh_temp_cursor_full() {
+    // Invariant 3: a fresh unnamed temp cursor still fully iterates.
+    let src = concat!(
+        "fn main():\n",
+        "    for x in [7, 8, 9].iter():\n",
+        "        print(x)\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).unwrap(), "7\n8\n9\n");
+    assert_parity(src);
+}
+
 #[test]
 fn cursor_crosses_spawn_airlock_three_engine_parity() {
     // A cursor IS sendable: it crosses the spawn/channel airlock as a DEEP COPY (independent

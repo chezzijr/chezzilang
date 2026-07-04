@@ -710,7 +710,9 @@ total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `ne
 List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/Set() drain it)
 # A cursor SNAPSHOTS the collection at `.iter()` (later mutation doesn't change the sequence). NOTE
 # (no compile-time multi-pass safety, unfixable without ownership): each `.iter()` is a fresh cursor,
-# but reusing one exhausted cursor yields nothing on a second pass. A cursor IS sendable across
+# but reusing one exhausted cursor yields nothing on a second pass. Driving a NAMED cursor with `for`,
+# `List(it)` or `Set(it)` CONSUMES it in place (advances the shared position, exactly like `.next()`),
+# so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
 # `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
 # `yield` / generators (run on both VM engines; a live generator is just not sendable across a task airlock on M:N). A fn that declares

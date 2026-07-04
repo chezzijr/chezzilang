@@ -11,6 +11,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ BUGFIX — `for`/`List()`/`Set()` over a NAMED builtin cursor now CONSUMES it in place (2026-07-04).**
+A `for x in it:` (or `List(it)`/`Set(it)`) driven by a NAMED `Obj::Iter` cursor from `xs.iter()` used to
+snapshot a private copy and never advance the shared cursor, while `.next()` and struct iterators DID
+advance in place — so `for` had opposite semantics depending on the iterand kind, contradicting
+`docs/syntax.md` ("reusing one exhausted cursor yields nothing on a second pass"). Fixed: added an
+`IsCursor` opcode (mirrors `IsGenerator`); `compile_for` now routes a named/converted cursor onto the
+lazy `next()` step (advances the shared heap cursor via `call.rs`), and `drain_iterable` consumes a
+cursor in place (clone remaining, advance `pos` to end). Now `it := [1,2,3,4].iter(); for … break at 2;
+List(it)` yields `[3, 4]`; a second `for` over the same cursor yields nothing; `next()` after a `for`
+returns `None`. Invariants kept: non-cursor collections still fresh-snapshot each loop; `xs.iter().iter()`
+is one fresh cursor; a fresh temp `for x in xs.iter():` still fully iterates; generators unchanged.
+Serial==M:N byte-identical. (Multi-var `for a,b in named_cursor:` still snapshots — out of scope,
+behavior unchanged; noted as a follow-up.) Tests: 6 new in `vm/parity_tests.rs` + golden
+`examples/iterable.chz`. Docs: `docs/syntax.md` clause added.
+
 **✅ REFACTOR — split the mega-files + REMOVED the tree-walk interpreter (2026-07-04).** Two parts:
 - **File split (behavior-preserving).** `impl Vm` (one ~12.4k-line block) split across
   `vm/{exec,arith,call,sched,netio,stmt}.rs`; `impl Checker` split across

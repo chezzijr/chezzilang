@@ -1822,6 +1822,17 @@ impl Compiler {
             fc.emit(Op::True, span);
             fc.emit(Op::SetLocal(struct_mode_slot), span);
             fc.patch_jump(not_gen);
+            // A builtin cursor (`Obj::Iter`, an `.iter()` result — possibly the one just produced by
+            // `IterableToCursor`) also answers `next()` intrinsically. Force `struct_mode` true so a
+            // NAMED cursor rides the lazy `next()` step and DRIVES the shared heap cursor in place
+            // (advancing the original), keeping `for` consistent with `.next()`/`List()`/`Set()` and
+            // with struct iterators — instead of the seq path, which would snapshot a private copy.
+            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit(Op::IsCursor, span);
+            let not_cursor = fc.emit_jump(Op::JumpIfFalse(0), span);
+            fc.emit(Op::True, span);
+            fc.emit(Op::SetLocal(struct_mode_slot), span);
+            fc.patch_jump(not_cursor);
             // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
             // lazy paths simply never touch them) and the lazy paths' `Option` result slot.
             let item_slot = fc.add_local(vars[0].clone());

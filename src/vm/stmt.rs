@@ -1133,6 +1133,22 @@ impl Vm {
         v: Value,
         span: Span,
     ) -> Result<Vec<Value>, RuntimeError> {
+        // A cursor (`Obj::Iter`) is CONSUMED in place: clone its REMAINING items (`items[pos..]`),
+        // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
+        // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
+        // and with the docs ("reusing one exhausted cursor yields nothing on a second pass"). Lifted
+        // OUT of the immutable-borrow `match self.heap.get(h)` below so `get_mut` can advance `pos`.
+        if let Value::Obj(h) = v
+            && matches!(self.heap.get(h), Obj::Iter { .. })
+        {
+            let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+                unreachable!()
+            };
+            let start = (*pos).min(items.len());
+            let drained = items[start..].to_vec();
+            *pos = items.len();
+            return Ok(drained);
+        }
         // Built-in collections: copy directly, no re-entry.
         if let Value::Obj(h) = v {
             match self.heap.get(h) {
@@ -1151,11 +1167,7 @@ impl Vm {
                     let chars: Vec<char> = s.chars().collect();
                     return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
                 }
-                // A cursor drains its REMAINING snapshot (`items[pos..]`) directly — it IS an
-                // `Iterator[T]`, so `List(xs.iter())`/`Set(...)` round-trip for free.
-                Obj::Iter { items, pos } => {
-                    return Ok(items[(*pos).min(items.len())..].to_vec());
-                }
+                // (`Obj::Iter` cursors are handled above by the consume-in-place guard.)
                 _ => {}
             }
         }
