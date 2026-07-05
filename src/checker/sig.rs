@@ -2956,10 +2956,8 @@ impl Checker {
                         lit_ty = Some(lit_pattern_ty(lit));
                     }
                 }
-                Pattern::Range { .. } => {
-                    if lit_ty.is_none() {
-                        lit_ty = Some(Ty::Int);
-                    }
+                Pattern::Range { .. } if lit_ty.is_none() => {
+                    lit_ty = Some(Ty::Int);
                 }
                 // Ident/Wildcard/(nested Or) — no structural or literal signal.
                 _ => {}

@@ -2451,22 +2451,20 @@ impl Checker {
                         );
                     }
                 }
-                StmtKind::NativeEnum { span, .. } => {
-                    // `native enum` is PRELUDE/STD-ONLY, the ENUM analog of `native struct` (a user
-                    // program can't declare a reserved builtin enum's variant shape). Reject it in a
-                    // non-stdlib module. In a stdlib module it is a NO-OP here: the ONLY native enums are
-                    // `std/prelude.chz`'s `Option`/`Result`, whose variant SHAPE is harvested as a
-                    // DRIFT-GUARD MIRROR (see `harvest_native_enum_table`) and whose identity stays the
-                    // reserved `Ty::Option`/`Ty::Result`. Crucially it must NOT register into
-                    // `self.enums`/`enum_names` — that would mint a colliding nominal `Ty::Enum` and
-                    // silently break `?`/match; type identity stays 100% in `resolve_type`.
-                    if !self.current_module_is_stdlib {
-                        self.error(
-                            *span,
-                            "native enum declarations are only allowed in standard-library modules"
-                                .to_string(),
-                        );
-                    }
+                // `native enum` is PRELUDE/STD-ONLY, the ENUM analog of `native struct` (a user
+                // program can't declare a reserved builtin enum's variant shape). Reject it in a
+                // non-stdlib module (the guard). In a stdlib module it is a NO-OP (falls to `_`): the
+                // ONLY native enums are `std/prelude.chz`'s `Option`/`Result`, whose variant SHAPE is
+                // harvested as a DRIFT-GUARD MIRROR (see `harvest_native_enum_table`) and whose identity
+                // stays the reserved `Ty::Option`/`Ty::Result`. Crucially it must NOT register into
+                // `self.enums`/`enum_names` — that would mint a colliding nominal `Ty::Enum` and
+                // silently break `?`/match; type identity stays 100% in `resolve_type`.
+                StmtKind::NativeEnum { span, .. } if !self.current_module_is_stdlib => {
+                    self.error(
+                        *span,
+                        "native enum declarations are only allowed in standard-library modules"
+                            .to_string(),
+                    );
                 }
                 _ => {}
             }
