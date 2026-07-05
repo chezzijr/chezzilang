@@ -467,10 +467,18 @@ impl Checker {
             // checker's inferred ret), leaving a runtime `int` under a `float` type — `x / 2` would
             // do integer division. So mixed int/float branches CONFLICT: annotate `-> float` (which
             // coerces correctly) to opt in.
-            (Result(at, ae), Result(bt, be)) => Ok(Ty::Result(
-                Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
-                Box::new(Self::join_slot(ae, be).ok_or_else(conflict)?),
-            )),
+            // Merge the T-slot (Ok payload) normally; the E-slot is NOT inferred — an inferred
+            // `Result` always finalizes its error slot to the `Error` protocol (`fill_ret`). So the
+            // `Err`-branch payload type never pins E, and two branches with DIFFERENT `Err` payloads
+            // (`Err("s")` vs `Err(myErr)`) must NOT conflict. Collapse E to `Unknown` (finalize fills
+            // it with `Error`); a concrete E requires an explicit `-> Result[T, E]` annotation.
+            (Result(at, ae), Result(bt, be)) => {
+                let _ = (ae, be);
+                Ok(Ty::Result(
+                    Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
+                    Box::new(Ty::Unknown),
+                ))
+            }
             (Option(x), Option(y)) => Ok(Ty::Option(Box::new(
                 Self::join_slot(x, y).ok_or_else(conflict)?,
             ))),
@@ -523,10 +531,12 @@ impl Checker {
             .collect()
     }
 
-    /// FINALIZE a folded return type after the fixpoint converges: fill the `Result` E-slot default
-    /// (`Unknown` → the `Error` protocol, matching the `T!` shorthand) and REJECT any OTHER residual
-    /// `Unknown` (top-level, a `Result` T-slot, an `Option` T-slot, a List/Set/Map element/key/value,
-    /// or a Struct/Enum/NewType type-arg) with `cannot infer return type of '<name>'`. A `Ty::Param`
+    /// FINALIZE a folded return type after the fixpoint converges: force the `Result` E-slot to the
+    /// `Error` protocol (an inferred error slot is ALWAYS `Error`, matching the `T!` / `Result[T]`
+    /// shorthand — the `Err` payload type never pins it; a concrete E needs an explicit annotation)
+    /// and REJECT any OTHER residual `Unknown` (top-level, a `Result` T-slot, an `Option` T-slot, a
+    /// List/Set/Map element/key/value, or a Struct/Enum/NewType type-arg) with
+    /// `cannot infer return type of '<name>'`. A `Ty::Param`
     /// (generic fns / the proto.rs HOF loop-back) is LEFT UNTOUCHED — not this pass's concern. When
     /// `suppress` is set (the body already emitted a real error) the residual-`Unknown` diagnostic is
     /// skipped to avoid a cascade, but the E-default fill still applies.
@@ -542,25 +552,27 @@ impl Checker {
         filled
     }
 
-    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` filling the `Result` E-slot default
-    /// and flagging (`*bad = true`) every OTHER residual `Unknown`. `Ty::Param` and all leaf types
-    /// pass through unchanged.
+    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` forcing every `Result` E-slot to the
+    /// `Error` protocol and flagging (`*bad = true`) every OTHER residual `Unknown`. `Ty::Param` and
+    /// all leaf types pass through unchanged.
     fn fill_ret(t: &Ty, bad: &mut bool) -> Ty {
         match t {
             Ty::Unknown => {
                 *bad = true;
                 Ty::Unknown
             }
-            // A `Result` E-slot `Unknown` DEFAULTS to the `Error` protocol (the `T!` semantics); the
-            // T-slot is an ordinary value slot (a residual `Unknown` there is un-inferable → `bad`).
+            // A `Result` E-slot ALWAYS defaults to the `Error` protocol in an inferred return (the
+            // `T!` / single-arg `Result[T]` semantics): the `Err`-branch payload type never pins E, so
+            // `b` is discarded. A concrete E is honored ONLY via an explicit `-> Result[T, E]`
+            // annotation (resolved by `resolve_type`, which bypasses this inference path). The T-slot
+            // is an ordinary value slot — a residual `Unknown` there is un-inferable → `bad` (this
+            // preserves the `Err`-only / `None`-only / `[]` leak guards, which leave the T-slot Unknown).
             Ty::Result(a, b) => {
-                let na = Self::fill_ret(a, bad);
-                let nb = if b.is_unknown() {
-                    Ty::error_proto()
-                } else {
-                    Self::fill_ret(b, bad)
-                };
-                Ty::Result(Box::new(na), Box::new(nb))
+                let _ = b;
+                Ty::Result(
+                    Box::new(Self::fill_ret(a, bad)),
+                    Box::new(Ty::error_proto()),
+                )
             }
             Ty::Option(x) => Ty::Option(Box::new(Self::fill_ret(x, bad))),
             Ty::List(x) => Ty::List(Box::new(Self::fill_ret(x, bad))),

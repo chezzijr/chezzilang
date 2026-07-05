@@ -801,18 +801,25 @@ impl Checker {
         }
     }
 
-    /// Default an UNANNOTATED if/match-expression's folded `Result` error slot to the built-in
-    /// `Error` protocol when no branch pinned it — matching the return-inference E-default and the
-    /// `T!`/`Result[T]` shorthand (docs/syntax.md). E.g. `x := if c: Ok(1) else: Ok(2)` folds to
-    /// `Result[int, Unknown]` (no `Err` branch), and the leaked `Unknown` would silently satisfy any
-    /// enclosing error type on a `?`. Applied ONLY without an expected-type hint (an annotated
+    /// Force an UNANNOTATED if/match-expression's folded `Result` error slot to the built-in `Error`
+    /// protocol — matching the return-inference E-default and the `T!`/`Result[T]` shorthand
+    /// (docs/syntax.md): an inferred error slot is ALWAYS `Error`, the `Err`-branch payload never
+    /// pins it. E.g. `x := if c: Ok(1) else: Ok(2)` folds to `Result[int, Unknown]` (no `Err`
+    /// branch) and `x := if c: Ok(1) else: Err("e")` folds to `Result[int, Unknown]` too (the fold
+    /// keeps the `Ok` branch's E-`Unknown`, not the `Err` branch's `str`) — both normalize to an
+    /// `Error` slot here. Applied ONLY without an expected-type hint (an annotated
     /// `x: Result[str, str] = if …` keeps its declared E) and ONLY to the top-level `Result` — it
     /// does NOT reject a residual `Unknown` (binding position stays lenient: `x := if c: None else:
     /// None` is as legal as `x := None`). The T-slot / deeper order-dependent branch merge is
     /// intentionally out of scope here (`unify_branch` keeps its `compatible`-based fold untouched).
     fn default_expr_result_e(t: Ty) -> Ty {
         match t {
-            Ty::Result(v, e) if e.is_unknown() => Ty::Result(v, Box::new(Ty::error_proto())),
+            // An UNANNOTATED if/match-expression's `Result` error slot is ALWAYS the `Error` protocol
+            // (matching the return-inference E-default): the `Err`-branch payload never pins E. This
+            // fires only on the no-hint path (an explicit `x: Result[str, str] = if …` keeps its
+            // declared E), so it normalizes both the common `Ok`-only fold (`Result[int, Unknown]`)
+            // and the degenerate all-`Err` fold (`Result[Unknown, str]`) to an `Error` slot.
+            Ty::Result(v, _e) => Ty::Result(v, Box::new(Ty::error_proto())),
             other => other,
         }
     }

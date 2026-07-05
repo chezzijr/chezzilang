@@ -2362,9 +2362,9 @@ fn fact_still_infers_int() {
 
 #[test]
 fn infer_ok_err_branches_merge_slotwise() {
-    // (a) Ok/Err sibling branches merge SLOT-WISE: Ok("h")=Result[str,?] ⊔ Err("a")=Result[?,str]
-    // → Result[str, str]. So `res()?` is str and `y: int = x` must ERROR. Today res leaks
-    // Result[Unknown, str] (T never merged from the Ok branch) and this WRONGLY type-checks.
+    // (a) Ok/Err sibling branches merge the T-slot: Ok("h")=Result[str,?] ⊔ Err("a")=Result[?,str]
+    // → Result[str, Error] (the E-slot is NOT pinned from the Err payload — an inferred error slot
+    // always defaults to `Error`). So `res()?` is str and `y: int = x` must ERROR.
     entry_rejects(
         "fn res():\n    if false:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return Ok(x)\nfn main():\n    pass\n",
         "cannot assign str to variable of type int",
@@ -2446,7 +2446,9 @@ fn infer_concurrency_box_with_inferable_element_ok() {
 
 #[test]
 fn multibranch_return_ok_err_no_error() {
-    // NEIGHBOR: Ok(5) + Err("x") → Result[int, str], no error (both slots fill from siblings).
+    // NEIGHBOR: Ok(5) + Err("x") → Result[int, Error] (T fills from the Ok branch; the E-slot
+    // always defaults to `Error`, not the Err payload's `str`). No error; `e` binds as `Error` and
+    // `print(e)` accepts it.
     entry_ok(
         "fn f(c: bool):\n    if c:\n        return Ok(5)\n    return Err(\"x\")\nfn main():\n    match f(true):\n        Ok(v): print(v)\n        Err(e): print(e)\n",
     );
@@ -2504,6 +2506,38 @@ fn multibranch_two_structs_conflict() {
     entry_rejects(
         "struct A:\n    x: int\n    fn speak(self) -> str:\n        return \"a\"\nstruct B:\n    y: int\n    fn speak(self) -> str:\n        return \"b\"\nfn f(c: bool):\n    if c:\n        return A(1)\n    return B(2)\nfn main():\n    pass\n",
         "conflicting branches",
+    );
+}
+
+#[test]
+fn infer_ok_err_mixed_defaults_e_to_error() {
+    // The Err-branch payload does NOT pin E: `Ok("h")` + `Err("a")` infers `Result[str, Error]`,
+    // not `Result[str, str]`. Proof: propagating `res()?` into a `-> str!DbErr` fn hits the
+    // Error-vs-DbErr mismatch exactly like the annotated `-> str!` version would.
+    entry_rejects(
+        &format!(
+            "{DBERR}fn res(c: bool):\n    if c:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!DbErr:\n    x := res(true)?\n    return Ok(x)\nfn main():\n    pass\n"
+        ),
+        "propagates error Error",
+    );
+}
+
+#[test]
+fn infer_distinct_err_payloads_no_conflict() {
+    // Two branches with DIFFERENT Err payload types no longer conflict on the E-slot (both finalize
+    // to `Error`); the Ok branch pins T=int. `e` binds as `Error` → `e.message()` is available.
+    entry_ok(
+        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int):\n    if k == 0:\n        return Err(EA(1))\n    if k == 1:\n        return Err(EB(2))\n    return Ok(5)\nfn main():\n    match f(2):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+    );
+}
+
+#[test]
+fn explicit_return_result_keeps_concrete_e() {
+    // REGRESSION GUARD: the E-default is inference-ONLY. An EXPLICIT `-> Result[str, str]` annotation
+    // (resolved by `resolve_type`, bypassing inference) keeps the concrete `str` error slot — so
+    // matching `Err(e)` gives `e: str` and `e.trim()` (a str method, not on `Error`) type-checks.
+    entry_ok(
+        "fn res(c: bool) -> Result[str, str]:\n    if c:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn main():\n    match res(true):\n        Ok(v): print(v)\n        Err(e): print(e.trim())\n",
     );
 }
 

@@ -479,15 +479,20 @@ widening sink, so annotate `-> float` to opt into the coercion (widening emits `
 at an explicit sink); (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
 `Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
 side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
-payloads — `Result[int]` and `Result[float]` **conflict**); (4) otherwise → a **conflict** error
+payloads — `Result[int]` and `Result[float]` **conflict**). The `Result` **error slot is the one
+exception**: it is **never inferred** from an `Err` branch — it always finalizes to the built-in
+`Error` protocol (see below), so branches with *different* `Err` payload types (`return Err("s")` vs
+`return Err(myErr)`) never conflict. (4) otherwise → a **conflict** error
 `cannot infer return type: conflicting branches (X vs Y); add a -> annotation`. There is **no
 common-supertype / protocol / `Any` search**: two distinct concrete types (e.g. two structs that both
 have a `speak()` method) *conflict* — a protocol return must be spelled explicitly (`-> Shape`).
 
-So `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, str]` (the `Ok` branch's
-`T=str` and the `Err` branch's `E=str` merge). Two slots that stay un-inferable after the merge are
-resolved at a **finalize** step: a `Result` **error slot** defaults to the built-in `Error` protocol
-(so `fn ok(): return Ok(5)` is `Result[int, Error]`, matching the `T!` shorthand); **any other**
+So `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, Error]` (the `Ok`
+branch pins `T=str`; the error slot is **not** pinned by the `Err` payload — it defaults to `Error`).
+A concrete error type is honored **only** when written explicitly (`-> Result[str, str]` /
+`-> int!DbErr`). Slots that stay un-inferable after the merge are resolved at a **finalize** step: the
+`Result` **error slot** always becomes the built-in `Error` protocol (so `fn ok(): return Ok(5)` is
+`Result[int, Error]`, matching the `T!` shorthand); **any other**
 residual un-inferable slot — a `Result`/`Option` value slot, a `List`/`Map`/`Set` element — is an error
 `cannot infer return type of '<name>'; add a -> annotation`. Hence `fn err(): return Err("x")`,
 `fn none(): return None`, and `fn f(): return []` are each rejected (the value type is un-inferable, the
