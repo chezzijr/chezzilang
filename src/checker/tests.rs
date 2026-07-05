@@ -6478,6 +6478,38 @@ fn recover_tail_stmt_if_value_is_result_of_branch_type() {
     );
 }
 
+// REGRESSION GUARD: a `recover:` tail `match`/`if` whose arms are genuinely HETEROGENEOUS (a
+// `str` arm and an `int` arm, or a void `print(...)` arm mixed with a value arm) has no single value
+// type. It must FALL BACK to `Result[nil]` (value dropped, consumed only via `Ok(_)`), NOT be rejected
+// with "branches have incompatible types" — which was the over-strict regression of the first cut of
+// this feature (previously-valid fault-isolation `recover:`s stopped compiling).
+#[test]
+fn recover_tail_stmt_match_heterogeneous_arms_falls_back_to_nil() {
+    // str vs int arms — value ignored (`Ok(_)`): accepted, typed `Result[nil]`, no incompat error.
+    entry_ok(
+        "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")\n",
+    );
+    // void-call arm (nil) mixed with an int arm — same fall-back to `Result[nil]`.
+    entry_ok(
+        "fn logit():\n    print(\"log\")\nfn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"log\": logit()\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"log\")\n",
+    );
+    // Because the block is `Result[nil]`, binding the value and USING it is still nil-banned (proves
+    // the fall-back really is nil, so the heterogeneous runtime payload is never observable).
+    entry_rejects(
+        "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"failed\")\nfoo(\"a\")\n",
+        "expression returns no value (nil) and cannot be used as a value",
+    );
+}
+
+// REGRESSION GUARD (if analog): heterogeneous `if/else` branches fall back to `Result[nil]`, not
+// rejected.
+#[test]
+fn recover_tail_stmt_if_heterogeneous_branches_falls_back_to_nil() {
+    entry_ok(
+        "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)\n",
+    );
+}
+
 // A void-call fragment inside an interpolated string is a real nil-in-value-position error, but the
 // span must point at the string literal (the print call line), never the fallback (1,1).
 #[test]

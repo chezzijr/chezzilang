@@ -1511,6 +1511,23 @@ fn recover_tail_match_value_catches_fault_is_err() {
 }
 
 #[test]
+fn recover_tail_match_heterogeneous_arms_run_parity() {
+    // REGRESSION GUARD: heterogeneous tail-match arms (str vs int) fall back to `Result[nil]` at the
+    // checker but the compiler still compiles the tail as a value — whichever arm runs, its value is
+    // `Ok`-wrapped and simply IGNORED by `Ok(_)`. The program must check + RUN identically on both
+    // engines (the first cut of the feature rejected it at `check`).
+    let src = "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")";
+    assert_parity_out(src, "done\n");
+}
+
+#[test]
+fn recover_tail_if_heterogeneous_branches_run_parity() {
+    // The `if/else` analog of the heterogeneous fall-back: runs, value ignored, both engines agree.
+    let src = "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)";
+    assert_parity_out(src, "done\n");
+}
+
+#[test]
 fn parity_std_math_predicates() {
     // is_nan / is_inf / is_finite — float predicates returning bool, identical on both engines.
     let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";
