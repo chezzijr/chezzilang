@@ -677,6 +677,8 @@ fn applyit(f: fn(int) -> int, x: int) -> int:
     return f(x)
 print(applyit(ident, 5) + 1)         # 6 — HOF parameter pins T against the param type
 
+print([1, 2, 3].map(ident))          # [1, 2, 3] — a builtin HOF slot fn(int) -> U also pins T=int
+
 fn getf() -> fn(int) -> int:
     return ident                     # return position pins T against the declared return type
 ```
@@ -685,7 +687,12 @@ The pin is checked strictly: an **unsatisfiable** target (`g: fn(str) -> int = i
 both) is a type error, a **bound violation** (`addone[str]` where `str` is not `Add`) is rejected, a
 **turbofish arity mismatch** (`pair[int]` for a two-param `pair[A, B]`) is a clean error, and the value
 keeps its **concrete** type downstream (`g := ident[int]` then `s: str = g(5)` is rejected — `g(5)` is
-`int`). The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
+`int`). The pin works through a **builtin container HOF parameter slot** exactly as through a
+user-defined HOF: passing a bare same-module generic fn to `.map`/`.filter`/`.fold` (and the other
+closure-taking container methods) pins its `[T]` from the element type — `[1,2,3].map(conv)` for a
+`conv[T](x: T) -> str` type-checks to `List[str]`, and `[1,2,3].fold(0, add)` for an `add[T: Add]` pins
+`T=int` and enforces the bound — even though those methods also carry their own result type parameter.
+The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
 adds no overhead and behaves identically on both engines. A **bare, un-pinned** generic fn value (`g :=
 ident` with no turbofish and no expected `fn(...) -> ...` type, then called) stays an **error**: add a
 turbofish (`ident[int]`) or a `fn(...) -> ...` annotation. First-class (rank-N) polymorphism — one

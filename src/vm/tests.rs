@@ -11721,3 +11721,48 @@ fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
     let src = "struct S:\n    n: int\n    tag: List[int]\n    fn str(self) -> S:\n        self.tag = [9, 9, 9]\n        i := 0\n        acc := [0]\n        while i < 100000:\n            acc = [i]\n            i = i + 1\n        return self\nfn main(): print(S(5, [1, 2, 3]))\nmain()\n";
     assert_mc_parity(src, "S(n=5, tag=[9, 9, 9])\n");
 }
+
+// A bare same-module generic fn pinned through a builtin closure-result HOF slot (`.map`/`.fold`)
+// must RUN correctly on both engines (runtime is generic-erased; the checker fix is what unblocks it).
+
+#[test]
+fn generic_fn_value_map_conv_runs_both_engines() {
+    // `.map(conv)` — conv's own T pinned = int from the element type; yields the string list.
+    let src = "fn conv[T](x: T) -> str:\n    return str(x)\nprint([1, 2, 3].map(conv))\n";
+    assert_mc_parity(src, "[1, 2, 3]\n");
+}
+
+#[test]
+fn generic_fn_value_map_ident_runs_both_engines() {
+    // `.map(ident)` — return-only T pinned = int; yields the int list unchanged.
+    let src = "fn ident[T](x: T) -> T:\n    return x\nprint([1, 2, 3].map(ident))\n";
+    assert_mc_parity(src, "[1, 2, 3]\n");
+}
+
+#[test]
+fn generic_fn_value_fold_add_runs_both_engines() {
+    // `.fold(0, add)` — accumulator U pinned by init=int, then add's T pinned from fn(int,int)->int.
+    let src = "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nprint([1, 2, 3].fold(0, add))\n";
+    assert_mc_parity(src, "6\n");
+}
+
+#[test]
+fn generic_fn_value_map_closure_still_runs_both_engines() {
+    // Regression: the unannotated-closure loop-back is untouched — still [2, 4, 6].
+    let src = "print([1, 2, 3].map(fn(x): x * 2))\n";
+    assert_mc_parity(src, "[2, 4, 6]\n");
+}
+
+#[test]
+fn generic_fn_value_filter_keep_runs_both_engines() {
+    // Regression: a bare generic keep[T] into .filter still runs (concrete fn(int)->bool slot).
+    let src = "fn keep[T](x: T) -> bool:\n    return true\nprint([1, 2, 3].filter(keep))\n";
+    assert_mc_parity(src, "[1, 2, 3]\n");
+}
+
+#[test]
+fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
+    // Regression: the pre-existing user-HOF pin and the turbofish workaround still run unchanged.
+    let src = "fn conv[T](x: T) -> str:\n    return str(x)\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
+    assert_mc_parity(src, "[1, 2, 3]\n[1, 2, 3]\n");
+}

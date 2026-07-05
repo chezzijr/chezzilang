@@ -1758,7 +1758,7 @@ impl Checker {
                 ),
             );
         }
-        let arg_tys = self.infer_generic_arg_tys(args);
+        let mut arg_tys = self.infer_generic_arg_tys(args);
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
@@ -1766,7 +1766,21 @@ impl Checker {
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.
         unify(receiver, recv_ty, &mut mmap);
-        for (i, (decl, actual)) in expected.iter().zip(&arg_tys).enumerate() {
+        for i in 0..expected.len() {
+            let decl = &expected[i];
+            // Scope-A-through-a-method-slot: a bare same-module GENERIC fn passed as a non-closure arg
+            // is prepass-typed rigid (`fn(T) -> str`) because `infer_generic_arg_tys` has no expected
+            // hint. Re-pin its OWN `[T]` from the slot with everything bound SO FAR (`fn(int) -> U` for
+            // `.map`; `fn(int, int) -> int` for `.fold`'s arg1 once `init` bound `U`), replacing the
+            // rigid prepass type with the concrete one so pass-1 unify + the loop-back compose. This is
+            // interleaved (uses the LIVE `mmap`) so `.fold`'s accumulator ordering holds. The helper only
+            // fires on a bare-ident generic fn that pins FULLY concrete; otherwise `arg_tys[i]` is
+            // unchanged and behavior is byte-identical.
+            let want = subst(decl, &mmap);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+                arg_tys[i] = refined;
+            }
+            let actual = &arg_tys[i];
             // Bug D: for a CLOSURE arg, unify against a RETURN-MASKED copy so only its PARAMETER
             // positions can bind a method type param in pass 1. Its prepass return may be a leaked
             // `Ty::Param` (an unannotated body that is a nested free generic call, `fn(x): ident(x)`);
@@ -1807,6 +1821,64 @@ impl Checker {
             method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
         subst(ret, &mmap)
+    }
+
+    /// Scope A, delivered through a generic METHOD's concrete parameter slot. `arg` is a call argument
+    /// to a builtin/generic container method (`.map`/`.fold`/…); `want` is that argument's declared slot
+    /// type substituted with everything the method has pinned SO FAR (for `.map` this is `fn(int) -> U`,
+    /// for `.fold`'s arg1 `fn(int, int) -> int`). When `arg` is a BARE reference to a same-module generic
+    /// fn (`[1,2,3].map(conv)`), its `[T]` params are pinned from `want`'s concrete positions and the
+    /// FULLY-substituted concrete fn type returned — the direct analog of `infer_ident`'s Scope A (a HOF
+    /// PARAMETER-slot hint), which fires for a user HOF but not for these own-`[U]`-carrying builtin
+    /// methods (their arg goes through `infer_generic_arg_tys` with no `expected_hint`, so it stays
+    /// rigid). Returns `None` (leaving the rigid prepass type untouched) unless EVERY arg-fn param binds
+    /// AND the result is fully concrete — so a still-free `want` slot (`.fold`'s arg1 before `init` binds
+    /// `U`) or a genuinely un-inferable return-only arg-fn param defers to the existing path unchanged,
+    /// preserving the Category-1 leak guard and every clean reject. A FRESH substitution map per call
+    /// means two distinct pins never launder.
+    fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
+        // Only a bare identifier that is NOT shadowed by an in-scope binding (`lookup` None) and IS a
+        // same-module generic fn — mirrors Scope A's gate exactly.
+        let ExprKind::Ident(name) = &arg.kind else {
+            return None;
+        };
+        if self.lookup(name).is_some() || !self.local_fn_names.contains(name) {
+            return None;
+        }
+        let sig = self.functions.get(name)?;
+        if sig.type_params.is_empty() {
+            return None;
+        }
+        // The slot must be a concrete-arity `fn(..) -> ..` (everything pinned so far); its param slots
+        // drive the pin (`unify` binds the arg fn's params from them).
+        let Ty::Func { params: wp, .. } = want else {
+            return None;
+        };
+        if wp.len() != sig.params.len() {
+            return None;
+        }
+        // Clone sig fields before the &mut-self `enforce_bounds` call (mirrors infer_ident Scope A).
+        let type_params = sig.type_params.clone();
+        let declared = Ty::Func {
+            params: sig.params.clone(),
+            ret: Box::new(sig.ret.clone()),
+            labels: FnLabels(sig.labels.clone()),
+        };
+        let mut m: HashMap<String, Ty> = HashMap::new();
+        unify(&declared, want, &mut m);
+        // Accept ONLY when every arg-fn param bound AND the refined type is fully concrete. A slot
+        // position that is still a free method param (`.fold` arg1 before `init` binds `U`) or a
+        // return-only arg-fn param never pinned leaves a `Ty::Param` in `refined` → bail, unchanged.
+        if !type_params.iter().all(|tp| m.contains_key(&tp.name)) {
+            return None;
+        }
+        let refined = subst(&declared, &m);
+        if !ty_fully_concrete(&refined) {
+            return None;
+        }
+        // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
+        self.enforce_bounds(&type_params, &m, span);
+        Some(refined)
     }
 
     /// Bug D's closure-return recovery, shared by the generic-METHOD (`infer_generic_method`) and

@@ -15266,3 +15266,65 @@ fn local_shadowing_generic_fn_name_indexes_normally() {
     );
     ok("fn ident[T](x: T) -> T:\n    return x\n\nfn h(ident: List[int]):\n    print(ident[0])\n");
 }
+
+// ---- builtin-HOF slot pins a bare same-module generic fn's own [T] (scope A through .map/.fold) ----
+
+#[test]
+fn generic_fn_value_into_builtin_map_return_concrete_ok() {
+    // `.map`'s slot fn(int) -> U pins conv's own T=int; the map result is List[str].
+    ok(
+        "fn conv[T](x: T) -> str:\n    return str(x)\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_into_builtin_map_return_only_ok() {
+    // ident's return-only T is pinned = int from the .map element type; result is List[int].
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    xs := [1, 2, 3].map(ident)\n    n: int = xs[0]\n    print(n + 1)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_into_builtin_fold_ok() {
+    // .fold(0, add): the accumulator U is pinned by `init`=int FIRST, then add's own T=int is pinned
+    // from the resulting fn(int, int) -> int slot; the bound [T: Add] is enforced under the pin.
+    ok(
+        "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_into_builtin_filter_still_ok() {
+    // .filter's slot is fully concrete fn(int) -> bool; a bare generic keep[T] still pins T=int.
+    ok(
+        "fn keep[T](x: T) -> bool:\n    return true\n\nfn main():\n    xs := [1, 2, 3].filter(keep)\n    print(xs)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_two_distinct_pins_no_launder_ok() {
+    // Same conv pinned once into .map (str-returning slot) and once into a user HOF with a
+    // fn(int) -> str param; each call site gets a FRESH substitution map so neither launders.
+    ok(concat!(
+        "fn conv[T](x: T) -> str:\n    return str(x)\n",
+        "\nfn use2(f: fn(int) -> str) -> str:\n    return f(9)\n",
+        "\nfn main():\n    a := [1, 2, 3].map(conv)\n    sa: str = a[0]\n    b := use2(conv)\n    print(sa)\n    print(b)\n",
+    ));
+}
+
+#[test]
+fn generic_fn_value_into_map_bound_violation_rejected() {
+    // A [T: Comparable]-bounded fn pinned to a non-Comparable element type must reject via
+    // enforce_bounds under the pin (the helper mirrors Scope A's bound enforcement).
+    rejects(
+        "struct Tag:\n    n: int\n\nfn cmp[T: Comparable](x: T) -> T:\n    return x\n\nfn main():\n    xs := [Tag(1), Tag(2)].map(cmp)\n    print(xs)\n",
+        "Comparable",
+    );
+}
+
+#[test]
+fn generic_fn_value_map_closure_still_infers_ok() {
+    // Regression: the unannotated-closure loop-back is untouched — still infers List[int].
+    ok("fn main():\n    xs := [1, 2, 3].map(fn(x): x * 2)\n    n: int = xs[0]\n    print(n)\n");
+}
