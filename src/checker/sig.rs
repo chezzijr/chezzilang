@@ -413,7 +413,7 @@ impl Checker {
             let mut iter = branches.into_iter();
             match iter.next() {
                 None => Ok(Ty::Nil),
-                Some(first) => iter.try_fold(first, |acc, b| Self::join_ret(&acc, &b)),
+                Some(first) => iter.try_fold(first, |acc, b| self.join_ret(&acc, &b)),
             }
         };
         if !finalize {
@@ -451,7 +451,7 @@ impl Checker {
     ///    NewType) → MERGE SLOT-WISE via [`Self::join_slot`].
     /// 5. otherwise (incl. Nil-vs-value, two distinct structs) → CONFLICT. There is deliberately NO
     ///    common-supertype / protocol / `Any` search: a protocol return must be spelled explicitly.
-    fn join_ret(a: &Ty, b: &Ty) -> Result<Ty, (Ty, Ty)> {
+    fn join_ret(&self, a: &Ty, b: &Ty) -> Result<Ty, (Ty, Ty)> {
         use Ty::*;
         if a == b {
             return Ok(a.clone());
@@ -467,18 +467,15 @@ impl Checker {
             // checker's inferred ret), leaving a runtime `int` under a `float` type — `x / 2` would
             // do integer division. So mixed int/float branches CONFLICT: annotate `-> float` (which
             // coerces correctly) to opt in.
-            // Merge the T-slot (Ok payload) normally; the E-slot is NOT inferred — an inferred
-            // `Result` always finalizes its error slot to the `Error` protocol (`fill_ret`). So the
-            // `Err`-branch payload type never pins E, and two branches with DIFFERENT `Err` payloads
-            // (`Err("s")` vs `Err(myErr)`) must NOT conflict. Collapse E to `Unknown` (finalize fills
-            // it with `Error`); a concrete E requires an explicit `-> Result[T, E]` annotation.
-            (Result(at, ae), Result(bt, be)) => {
-                let _ = (ae, be);
-                Ok(Ty::Result(
-                    Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
-                    Box::new(Ty::Unknown),
-                ))
-            }
+            // Merge the T-slot (Ok payload) normally; merge the E-slot with `join_err_slot` — two
+            // DIFFERENT `Err` payloads that BOTH satisfy `Error` do NOT conflict (they unify to the
+            // uniform `Error` existential at finalize), but a non-`Error` payload keeps `join_slot`'s
+            // equal-or-conflict semantics so a genuine mismatch is still reported. `fill_ret` decides
+            // the final Error-default per-slot; a concrete E is honored via an explicit annotation.
+            (Result(at, ae), Result(bt, be)) => Ok(Ty::Result(
+                Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
+                Box::new(self.join_err_slot(ae, be).ok_or_else(conflict)?),
+            )),
             (Option(x), Option(y)) => Ok(Ty::Option(Box::new(
                 Self::join_slot(x, y).ok_or_else(conflict)?,
             ))),
@@ -523,6 +520,29 @@ impl Checker {
         if a == b { Some(a.clone()) } else { None }
     }
 
+    /// Merge two inferred `Result` **error slots**. Like [`Self::join_slot`] (equal → keep; one
+    /// `Unknown` → the other), EXCEPT two DIFFERENT concrete payloads that BOTH satisfy the `Error`
+    /// protocol merge to `Unknown` — `fill_ret` then unifies them to the uniform `Error` existential,
+    /// so branches returning distinct *error* types (`Err(EA())` vs `Err(EB())`) don't spuriously
+    /// conflict. A pair where at least one side is a non-`Error` concrete keeps `join_slot`'s strict
+    /// equal-or-conflict rule (a real type mismatch is still reported; forcing `Error` there would be
+    /// unsound). Equal concretes are kept as-is — `fill_ret` decides Error-defaulting per slot.
+    fn join_err_slot(&self, a: &Ty, b: &Ty) -> Option<Ty> {
+        if a == b {
+            return Some(a.clone());
+        }
+        if a.is_unknown() {
+            return Some(b.clone());
+        }
+        if b.is_unknown() {
+            return Some(a.clone());
+        }
+        if self.assignable(&Ty::error_proto(), a) && self.assignable(&Ty::error_proto(), b) {
+            return Some(Ty::Unknown);
+        }
+        None
+    }
+
     /// Slot-merge two equal-length type-arg lists position-wise; `None` if any slot conflicts.
     fn join_slots(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
         a.iter()
@@ -531,18 +551,18 @@ impl Checker {
             .collect()
     }
 
-    /// FINALIZE a folded return type after the fixpoint converges: force the `Result` E-slot to the
-    /// `Error` protocol (an inferred error slot is ALWAYS `Error`, matching the `T!` / `Result[T]`
-    /// shorthand — the `Err` payload type never pins it; a concrete E needs an explicit annotation)
-    /// and REJECT any OTHER residual `Unknown` (top-level, a `Result` T-slot, an `Option` T-slot, a
-    /// List/Set/Map element/key/value, or a Struct/Enum/NewType type-arg) with
-    /// `cannot infer return type of '<name>'`. A `Ty::Param`
+    /// FINALIZE a folded return type after the fixpoint converges: default the `Result` E-slot to the
+    /// `Error` protocol when it is `Unknown` or its payload satisfies `Error` (matching the `T!` /
+    /// `Result[T]` shorthand — a concrete non-`Error` payload is preserved; a deliberate concrete E
+    /// needs an explicit annotation) and REJECT any OTHER residual `Unknown` (top-level, a `Result`
+    /// T-slot, an `Option` T-slot, a List/Set/Map element/key/value, or a Struct/Enum/NewType
+    /// type-arg) with `cannot infer return type of '<name>'`. A `Ty::Param`
     /// (generic fns / the proto.rs HOF loop-back) is LEFT UNTOUCHED — not this pass's concern. When
     /// `suppress` is set (the body already emitted a real error) the residual-`Unknown` diagnostic is
     /// skipped to avoid a cascade, but the E-default fill still applies.
     pub(super) fn finalize_ret(&mut self, t: &Ty, name: &str, span: Span, suppress: bool) -> Ty {
         let mut bad = false;
-        let filled = Self::fill_ret(t, &mut bad);
+        let filled = self.fill_ret(t, &mut bad);
         if bad && !suppress {
             self.error(
                 span,
@@ -552,68 +572,72 @@ impl Checker {
         filled
     }
 
-    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` forcing every `Result` E-slot to the
-    /// `Error` protocol and flagging (`*bad = true`) every OTHER residual `Unknown`. `Ty::Param` and
-    /// all leaf types pass through unchanged.
-    fn fill_ret(t: &Ty, bad: &mut bool) -> Ty {
+    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` defaulting a `Result` E-slot to the
+    /// `Error` protocol WHEN it is `Unknown` or its payload satisfies `Error` (a concrete non-`Error`
+    /// payload is preserved — see the `Ty::Result` arm), and flagging (`*bad = true`) every OTHER
+    /// residual `Unknown`. `Ty::Param` and all leaf types pass through unchanged.
+    fn fill_ret(&self, t: &Ty, bad: &mut bool) -> Ty {
         match t {
             Ty::Unknown => {
                 *bad = true;
                 Ty::Unknown
             }
-            // A `Result` E-slot ALWAYS defaults to the `Error` protocol in an inferred return (the
-            // `T!` / single-arg `Result[T]` semantics): the `Err`-branch payload type never pins E, so
-            // `b` is discarded. A concrete E is honored ONLY via an explicit `-> Result[T, E]`
-            // annotation (resolved by `resolve_type`, which bypasses this inference path). The T-slot
-            // is an ordinary value slot — a residual `Unknown` there is un-inferable → `bad` (this
-            // preserves the `Err`-only / `None`-only / `[]` leak guards, which leave the T-slot Unknown).
+            // An inferred `Result` E-slot defaults to the `Error` protocol (the `T!` / single-arg
+            // `Result[T]` semantics) when it is un-pinned (`Unknown`) OR the pinned payload actually
+            // SATISFIES `Error` — so the common `Err("msg")` / custom-error branches unify to the
+            // uniform `Error` existential. A concrete E that does NOT satisfy `Error` (a struct with
+            // no `message`, or `int`) is PRESERVED — forcing it to `Error` would launder a non-Error
+            // value into the `Error` existential (the pass-2 return check / a downstream method-call
+            // check then rejects any Error-method use soundly). A deliberate concrete non-`Error` E
+            // needs an explicit `-> Result[T, E]` annotation (resolved by `resolve_type`, a separate
+            // path). The T-slot is an ordinary value slot — a residual `Unknown` there is
+            // un-inferable → `bad` (preserving the `Err`-only / `None`-only / `[]` leak guards).
             Ty::Result(a, b) => {
-                let _ = b;
-                Ty::Result(
-                    Box::new(Self::fill_ret(a, bad)),
-                    Box::new(Ty::error_proto()),
-                )
+                let na = self.fill_ret(a, bad);
+                let nb = if b.is_unknown() || self.assignable(&Ty::error_proto(), b) {
+                    Ty::error_proto()
+                } else {
+                    self.fill_ret(b, bad)
+                };
+                Ty::Result(Box::new(na), Box::new(nb))
             }
-            Ty::Option(x) => Ty::Option(Box::new(Self::fill_ret(x, bad))),
-            Ty::List(x) => Ty::List(Box::new(Self::fill_ret(x, bad))),
-            Ty::Set(x) => Ty::Set(Box::new(Self::fill_ret(x, bad))),
+            Ty::Option(x) => Ty::Option(Box::new(self.fill_ret(x, bad))),
+            Ty::List(x) => Ty::List(Box::new(self.fill_ret(x, bad))),
+            Ty::Set(x) => Ty::Set(Box::new(self.fill_ret(x, bad))),
             Ty::Map(k, v) => Ty::Map(
-                Box::new(Self::fill_ret(k, bad)),
-                Box::new(Self::fill_ret(v, bad)),
+                Box::new(self.fill_ret(k, bad)),
+                Box::new(self.fill_ret(v, bad)),
             ),
-            Ty::Struct(n, a) => Ty::Struct(
-                n.clone(),
-                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
-            ),
-            Ty::Enum(n, a) => Ty::Enum(
-                n.clone(),
-                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
-            ),
-            Ty::NewType(n, a) => Ty::NewType(
-                n.clone(),
-                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
-            ),
-            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| Self::fill_ret(x, bad)).collect()),
+            Ty::Struct(n, a) => {
+                Ty::Struct(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
+            }
+            Ty::Enum(n, a) => {
+                Ty::Enum(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
+            }
+            Ty::NewType(n, a) => {
+                Ty::NewType(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
+            }
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| self.fill_ret(x, bad)).collect()),
             // Concurrency boxes and function types ALSO carry inner `Ty`, so a residual `Unknown`
             // nested here must be flagged too — otherwise `import std.concurrency; fn f(): return
             // Shared([])` launders a `Shared[List[Unknown]]` past the rejector (List[int] vs
             // List[str] both then assignable off `.get()`). Recurse into every child.
-            Ty::Channel(x) => Ty::Channel(Box::new(Self::fill_ret(x, bad))),
-            Ty::Shared(x) => Ty::Shared(Box::new(Self::fill_ret(x, bad))),
-            Ty::Atomic(x) => Ty::Atomic(Box::new(Self::fill_ret(x, bad))),
-            Ty::RwShared(x) => Ty::RwShared(Box::new(Self::fill_ret(x, bad))),
+            Ty::Channel(x) => Ty::Channel(Box::new(self.fill_ret(x, bad))),
+            Ty::Shared(x) => Ty::Shared(Box::new(self.fill_ret(x, bad))),
+            Ty::Atomic(x) => Ty::Atomic(Box::new(self.fill_ret(x, bad))),
+            Ty::RwShared(x) => Ty::RwShared(Box::new(self.fill_ret(x, bad))),
             Ty::Func {
                 params,
                 ret,
                 labels,
             } => Ty::Func {
-                params: params.iter().map(|x| Self::fill_ret(x, bad)).collect(),
-                ret: Box::new(Self::fill_ret(ret, bad)),
+                params: params.iter().map(|x| self.fill_ret(x, bad)).collect(),
+                ret: Box::new(self.fill_ret(ret, bad)),
                 labels: labels.clone(),
             },
             Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
-                params: params.iter().map(|x| Self::fill_ret(x, bad)).collect(),
-                ret: Box::new(Self::fill_ret(ret, bad)),
+                params: params.iter().map(|x| self.fill_ret(x, bad)).collect(),
+                ret: Box::new(self.fill_ret(ret, bad)),
             },
             // Leaf types carry no inner `Ty` (nothing to fill or flag). `Ty::Param` is intentionally
             // passed through UNTOUCHED — generic fns / the proto.rs HOF loop-back own it, an `Unknown`

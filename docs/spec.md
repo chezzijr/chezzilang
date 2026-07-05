@@ -384,10 +384,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   emits `Op::CoerceFloat` only at an explicit sink), so mixed `if c: return 1 else: return 2.0`
   **conflicts**; annotate `-> float` to opt in. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
   widening inside a merged type-arg slot — the `float! = Ok(3)` error above). The `Result` **error
-  slot is never inferred** from an `Err` branch — it always defaults to the built-in `Error` protocol
-  (`return Err("a")` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`); a
-  concrete error type requires an explicit annotation (`-> Result[str, str]` / `-> int!DbErr`). See
-  [`docs/syntax.md`](syntax.md) "Return type inference".
+  slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
+  `Error`** (`return Err("a")` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
+  because `str` satisfies `Error`; two distinct `Error`-satisfying payloads across branches unify to
+  `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` is preserved
+  (not laundered into the `Error` existential); a deliberate concrete error type is spelled explicitly
+  (`-> Result[str, str]` / `-> int!DbErr`). See [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte

@@ -59,11 +59,11 @@ let `x := err()?; y: int = x; z: str = x` all type-check). **Now:** ALL `return`
 inline/implicit-trailing expr) are typed and folded with a join `J`: `a==b`; the one `{int,float}→float`
 widen (bare scalars only, no recursion into slots); the **same** type-constructor (`Result`/`Option`/
 `List`/`Map`/`Set` or same generic struct/enum/newtype) → **merge slot-wise** (`Ok("h")` ⊔ `Err("a")` =
-`Result[str, Error]` — the error slot is NOT merged from the `Err` payload; see the 2026-07-05 addendum
-below); otherwise a **conflict** (`cannot infer return type: conflicting branches (X vs Y)`
+`Result[str, Error]` — the error slot defaults to `Error` when its payload satisfies `Error`; see the
+2026-07-05 addendum below); otherwise a **conflict** (`cannot infer return type: conflicting branches (X vs Y)`
 — NO common-supertype/protocol/`Any` search, so two distinct structs conflict, a protocol return must be
-spelled). A post-fixpoint **finalize** forces the `Result` **error slot** to the `Error`
-protocol (always, matching `T!`, so `fn ok(): return Ok(5)` is `Result[int, Error]`) and REJECTS any other
+spelled). A post-fixpoint **finalize** defaults the `Result` **error slot** to the `Error`
+protocol when un-pinned or its payload satisfies `Error` (matching `T!`, so `fn ok(): return Ok(5)` is `Result[int, Error]`) and REJECTS any other
 residual un-inferable `Unknown` (`fn err(): return Err("x")`, `fn none(): return None`, `fn f(): return
 []` — the return-position analogue of the empty-collection diagnostic; also closes the old
 baseless-recursion permissive gap). `Ty::Param` (generic fns / the proto.rs HOF loop-back) is left
@@ -77,20 +77,32 @@ Acceptance demo: `fn res(): if …: return Err("a")` then `return Ok("h")` infer
 (byte-identical serial == M:N). Docs: `docs/syntax.md` "Return type inference", `docs/spec.md` widening
 note. Full suite (3065) + conformance + clippy green.
 
-**↳ ADDENDUM (2026-07-05) — inferred `Result` error slot ALWAYS defaults to `Error`.** Refines the
-above: an inferred error slot is now **never pinned** from the `Err`-branch payload — it always
-finalizes to the built-in `Error` protocol. So `Ok("h")` ⊔ `Err("a")` infers `Result[str, Error]`
-(was `Result[str, str]`), and branches with *different* `Err` payload types (`Err("s")` vs
-`Err(myErr)`) no longer conflict (both → `Error`). A concrete error type is honored ONLY via an
-explicit annotation (`-> Result[str, str]` / `-> int!DbErr`), which bypasses inference through
-`resolve_type`. Two arms changed in `src/checker/sig.rs` (`join_ret` Result arm collapses the E-slot to
-`Unknown`; `fill_ret` Result arm forces E to `Error` unconditionally) + `default_expr_result_e` in
-`src/checker/pattern.rs` for the if/match-expression path (consistency, incl. the degenerate all-`Err`
-fold). Rationale: uniform, consistent with `T!` / `Result[T]`; tradeoff (accepted) — a single custom
-error type is erased to `Error` in inference unless annotated. Runtime values unchanged (checker-only).
-3 new checker tests (mixed-`Ok`/`Err`→`Error` propagate-mismatch, distinct-`Err`-payloads no-conflict,
-explicit-`Result[str,str]` keeps concrete E) + comments refreshed. Serial == M:N verified on
-`playground/main.chz` (un-annotated) → `Err(World)`/`Ok(Hello)`.
+**↳ ADDENDUM (2026-07-05) — inferred `Result` error slot defaults to `Error` when the payload
+satisfies `Error`.** Refines the above: an inferred error slot defaults to the built-in `Error`
+protocol when it is un-pinned (`Unknown`) OR its `Err`-branch payload **satisfies `Error`**. So
+`Ok("h")` ⊔ `Err("a")` infers `Result[str, Error]` (was `Result[str, str]`; `str` satisfies `Error`),
+and two *different* `Err` payloads that both satisfy `Error` (`Err(EA())` vs `Err(EB())`) unify to
+`Error` instead of conflicting. A concrete payload that does **not** satisfy `Error` (a struct with no
+`message`, `int`, …) is **preserved**, not laundered. A deliberate concrete error type is spelled
+explicitly (`-> Result[str, str]` / `-> int!DbErr`, resolved by `resolve_type`). Implementation
+(`src/checker/sig.rs` + `src/checker/pattern.rs`, checker-only): `join_ret` uses `join_err_slot`
+(equal→keep, one `Unknown`→other, two `Error`-satisfying concretes→`Unknown`, else conflict);
+`fill_ret` and `default_expr_result_e` default E→`Error` iff `Unknown || assignable(Error, E)`. All
+three are now `&self` (need the `assignable(Error, ·)` predicate, same check as recover-`?`).
+Rationale: uniform, consistent with `T!` / `Result[T]`; accepted tradeoff — a *custom error type that
+satisfies `Error`* is erased to `Error` in inference unless annotated.
+
+**Adversarial-review caught a soundness bug in the first cut** (the "always force E→`Error`
+unconditionally" version, commit 29513bd): two independent prosecutors + repro showed that forcing a
+concrete NON-`Error` payload to `Error` (a) LAUNDERED it in the if/match-expression path
+(`x := if c: foo() else: foo()` where `foo -> Result[int, MyErr]`, `MyErr` has no `message` →
+`e.message()` check-passed then faulted at runtime — the expr path has no post-hoc re-check), and (b)
+OVER-REJECTED forwarding (`fn wrap(): return foo()` newly failed `Result[int] vs Result[int, MyErr]`).
+Chezzi does not enforce `E: Error` on the slot, so this was reachable. Remediated by the
+`assignable(Error, E)` gate above; both repros now behave correctly (reject the bad `.message()` at
+check time, accept the forward). Runtime values unchanged (checker-only). 5 new checker tests total
+(intent + soundness + no-over-reject regression guards). Serial == M:N verified; full suite +
+conformance + clippy green.
 
 **✅ GENERIC FN AS A VALUE — scope A + B, erased runtime (2026-07-05).** A generic function
 (`fn ident[T](x: T) -> T`) is now a usable **value** once its type params are **pinned**: via an explicit

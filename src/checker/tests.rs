@@ -2532,6 +2532,38 @@ fn infer_distinct_err_payloads_no_conflict() {
 }
 
 #[test]
+fn infer_expr_non_error_payload_not_laundered() {
+    // SOUNDNESS (adversarial-review): the if/match-EXPRESSION E-default must NOT force a concrete
+    // NON-Error payload to `Error` — that path has no post-hoc assignability re-check, so laundering
+    // `MyErr` (no `message`) into the `Error` existential would make `e.message()` check-pass then
+    // fault at runtime. E is kept concrete → the method-call check rejects it at check time.
+    entry_rejects(
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn main():\n    c := true\n    x := if c: foo(true) else: foo(false)\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "no method 'message'",
+    );
+    // A bare non-Error scalar payload (`Err(42)`) is likewise preserved as `int`, not laundered.
+    entry_rejects(
+        "fn main():\n    c := true\n    x := if c: Err(42) else: Err(43)\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "no method 'message'",
+    );
+}
+
+#[test]
+fn infer_return_non_error_payload_preserved_no_over_reject() {
+    // NO OVER-REJECTION (adversarial-review): forwarding a `Result` whose E does NOT satisfy `Error`
+    // must still type-check — the inferred E is kept concrete (`MyErr`), not forced to `Error` (which
+    // pass-2 would then reject as `Result[int, Error]` vs the actual `Result[int, MyErr]`).
+    entry_ok(
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool):\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.code)\n",
+    );
+    // …but calling an Error-only method on that preserved concrete `MyErr` is still rejected (sound).
+    entry_rejects(
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool):\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "no method 'message'",
+    );
+}
+
+#[test]
 fn explicit_return_result_keeps_concrete_e() {
     // REGRESSION GUARD: the E-default is inference-ONLY. An EXPLICIT `-> Result[str, str]` annotation
     // (resolved by `resolve_type`, bypassing inference) keeps the concrete `str` error slot — so
