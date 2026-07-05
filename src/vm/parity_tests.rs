@@ -1636,27 +1636,38 @@ fn exit_is_not_caught_by_recover() {
 
 #[test]
 fn exit_in_spawned_child_aborts_siblings() {
-    // B1/B2: `std.os.exit` inside a child fiber is a hard halt — it aborts the remaining siblings
-    // and the rest of the program. The first child prints then exits(3); the second child and the
-    // post-`parallel:` statement never run. Identical on both engines (no blocking involved).
+    // B1/B2: `std.os.exit` inside a child is a hard halt — it aborts the rest of the program: the
+    // post-`parallel:` statement never runs and the exit code propagates. The two engines differ on
+    // one order-observable detail and that is *expected*, not a parity bug: `--serial` (cooperative,
+    // `run_file`) runs `a()` to its `os.exit` before `b()` ever starts, so `b` never prints; the M:N
+    // engine (`run_file_p`) dispatches both children to real worker threads, so `b` can flush its
+    // print before the exit halts the pool. So the serial arm is exact, and the M:N arm asserts the
+    // race-tolerant contract — same as the sibling `parallel_child_os_exit_halts_with_code` (B3.4).
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
+    // serial: cooperative, `a()` finishes (incl. exit) before `b()` starts → `b` never prints.
     assert_eq!(
         vo, "a\n",
-        "vm: sibling and post-parallel statement aborted by os.exit"
+        "serial: sibling and post-parallel statement aborted by os.exit"
     );
-    assert_eq!(
-        io, "a\n",
-        "interp: sibling and post-parallel statement aborted by os.exit"
+    // M:N: `b` may race in a print before the exit halts the pool, but the halt itself is firm —
+    // the exiting child's output is flushed and the post-`parallel:` statement never runs.
+    assert!(
+        io.contains('a'),
+        "M:N: the exiting child's output is flushed: got {io:?}"
     );
-    assert_eq!(vc, Some(3), "vm exit code");
-    assert_eq!(ic, Some(3), "interp exit code");
+    assert!(
+        !io.contains("after"),
+        "M:N: the post-parallel statement never runs after os.exit: got {io:?}"
+    );
+    assert_eq!(vc, Some(3), "serial exit code");
+    assert_eq!(ic, Some(3), "M:N exit code");
     assert!(
         ir.is_ok() && vr.is_ok(),
-        "os.exit is a clean halt, not an error: interp={ir:?} vm={vr:?}"
+        "os.exit is a clean halt, not an error: mn={ir:?} serial={vr:?}"
     );
 }
 
