@@ -1332,7 +1332,9 @@ struct MnSched {
     /// was tripped after its `recv` empty-check but before it actually parks.
     cancel: Arc<AtomicBool>,
     /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the predicate
-    /// fires, so the join's lowest-index-fault reduce propagates it byte-identically (`DEADLOCK_MSG`).
+    /// fires, so the join's lowest-index-fault reduce propagates it (`DEADLOCK_MSG`). The parked
+    /// fiber's OWN buffered stdout travels into its slot alongside this error (see `flag_deadlock`),
+    /// so a parked task's partial output flushes at its task-order slot like a real fault would.
     deadlock_err: RuntimeError,
     /// D4a — the authoritative count of *runnable* fibers (queued and waiting to be picked up; not
     /// running, parked, or done). In D2b's single shared queue this exactly mirrors `runq.len()`, but
@@ -2456,6 +2458,10 @@ impl SchedCore {
     /// terminate (called under the lock). Correct because the global predicate firing means nothing can
     /// progress anywhere. A `Wait` token sits in N buckets but is ONE fiber — claim-once (the wake CAS)
     /// dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
+    /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
+    /// when it parked) is carried into its Fault slot, so `reduce_task_slots` flushes it at the
+    /// parked task's task-order slot — matching the serial engine, which printed those lines live
+    /// before the deadlock returned.
     fn flag_deadlock(&mut self, err: &RuntimeError) {
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
         for v in buckets {
@@ -2481,12 +2487,20 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    self.slots[f.task_index] = Some(TaskOutcome::Fault {
+                    // Carry the parked fiber's OWN buffered stdout/stderr into its Fault slot (not
+                    // an empty buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out`
+                    // when it parked; the downstream `reduce_task_slots` flushes the lowest-index
+                    // propagating fault's buffer at its task-order slot, so — like the real-fault
+                    // path (fix 888684d) — the deadlock-abort path now preserves a parked task's
+                    // partial output byte-identically to the serial engine. `task_index`/`scope_id`
+                    // are Copy, read before the partial move of `f.ctx.out`/`f.ctx.stderr`.
+                    let (ti, sid) = (f.task_index, f.scope_id);
+                    self.slots[ti] = Some(TaskOutcome::Fault {
                         err: err.clone(),
-                        out: String::new(),
-                        stderr: String::new(),
+                        out: f.ctx.out,
+                        stderr: f.ctx.stderr,
                     });
-                    self.scopes[f.scope_id].done += 1;
+                    self.scopes[sid].done += 1;
                 }
             }
         }

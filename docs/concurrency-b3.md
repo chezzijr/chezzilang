@@ -235,7 +235,10 @@ worker blocked in its child nursery's join.
 **B3.5 — nursery-local deadlock detection under threads.** A per-nursery `DeadlockWatch` cloned into each
 worker; a barrier-confirm detector in the blocking `recv` — a parked worker confirms its channel empty at
 most once per `epoch`, and `confirms == live` ⇒ fault `deadlock` with the cooperative engine's byte-identical
-message. `send`/`task_finished` bump `epoch`; watch and channel `q` locks are never held together.
+message. `send`/`task_finished` bump `epoch`; watch and channel `q` locks are never held together. When the
+detector fires (Tier-D `SchedCore::flag_deadlock`), each still-parked fiber's OWN buffered stdout/stderr is
+moved into its `Fault` slot, so a parked task's partial output flushes at its task-order slot exactly like a
+real fault (decision F) — the serial engine printed those lines live before returning the deadlock error.
 **Residual hangs documented:** `Executor`-spanning / orphaned-message / saturated-pool cases. (The
 **cross-nursery** circular case is now **RESOLVED under `--parallel`** by Tier-D's VM-global flat
 scheduler — `examples/parallel_cross_nursery_circular.chz`; the cooperative engine's cross-nursery
