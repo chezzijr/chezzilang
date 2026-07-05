@@ -265,6 +265,65 @@ main()
     }
 }
 
+/// Deadlock-abort MULTI-PARKED output-flush parity: when a `parallel:` nursery deadlocks with TWO
+/// OR MORE parked fibers, EVERY parked fiber's already-buffered stdout must be flushed at its
+/// task-order slot — matching serial, which printed those lines live. Pre-fix `reduce_task_slots`
+/// flushed only the LOWEST-index propagating fault's buffer (the `first_fault.is_none()` guard), so
+/// a HIGHER-index parked printer whose LOWER-index sibling parks silently had its output silently
+/// dropped on M:N (the silent lower-index fiber's empty buffer won `first_fault`).
+///
+/// This repro is order-DETERMINISTIC: `silent` (task_index 0) prints NOTHING, so `printer`
+/// (task_index 1) is the sole printer and its single line is fixed. Both fibers park forever on an
+/// empty channel no sibling can fill → the deadlock detector fires. Both engines fault with
+/// `DEADLOCK_MSG`; both must emit the single line. Looped to catch scheduler-interleaving flakiness.
+#[test]
+fn parallel_nursery_deadlock_multiparked_flushes_higher_index_2engine() {
+    let src = r#"fn silent(ch: Channel[int]):
+    x := ch.recv()
+fn printer(ch: Channel[int]):
+    print("HI-FROM-PRINTER")
+    x := ch.recv()
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn silent(ch)
+        spawn printer(ch)
+main()
+"#;
+    for _ in 0..50 {
+        assert_fault_parity(src, "HI-FROM-PRINTER\n");
+    }
+}
+
+/// Deadlock-abort THREE-PARKED multi-printer SET parity: two printers with DISJOINT single lines +
+/// one silent fiber all park and deadlock. Both engines must emit the same SET of lines
+/// {SET-LINE-1, SET-LINE-2}. Asserted order-INSENSITIVELY (`assert_same_lines`): with two fibers
+/// each printing before they park the interleaving is genuinely nondeterministic under M:N, so an
+/// exact-order assert would flake (mn-parity discipline) — the disjoint single lines keep the SET
+/// fixed. Looped to catch flakiness.
+#[test]
+fn parallel_nursery_deadlock_multiparked_multiprinter_set_3parked() {
+    let src = r#"fn silent(ch: Channel[int]):
+    x := ch.recv()
+fn p1(ch: Channel[int]):
+    print("SET-LINE-1")
+    x := ch.recv()
+fn p2(ch: Channel[int]):
+    print("SET-LINE-2")
+    x := ch.recv()
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn silent(ch)
+        spawn p1(ch)
+        spawn p2(ch)
+main()
+"#;
+    for _ in 0..50 {
+        assert_fault_same_lines(src);
+    }
+}
+
 /// Phase 5a-containers REGRESSION GUARD: the List/Map/Set method-surface migration to file-backed
 /// `native struct` decls in std/prelude.chz is CHECKER-ONLY — the literals/ctors still lower to the
 /// native build opcodes and runtime method dispatch is by name (untouched). This drives a
@@ -422,6 +481,19 @@ fn assert_fault_parity(src: &str, expected_out: &str) {
     assert!(it_res.is_err(), "interp expected to fault, got {it_out:?}");
     assert_eq!(it_out, expected_out, "interp stdout");
     assert_eq!(vm_out, it_out, "VM/interp cancel-report divergence");
+}
+
+/// Like [`assert_fault_parity`] but asserts the order-INSENSITIVE SET of stdout lines matches
+/// (`assert_same_lines`), for a genuinely-racing multi-printer deadlock where the interleaving is
+/// nondeterministic under M:N. Both engines must fault. Goes through the `(stdout, result)` harness
+/// (NOT `run_capture_parallel`, which drops stdout on `Err`) so the parked buffers are observable.
+#[cfg(test)]
+fn assert_fault_same_lines(src: &str) {
+    let (vm_out, vm_res) = run_program(src);
+    assert!(vm_res.is_err(), "VM expected to fault, got {vm_out:?}");
+    let (mn_out, mn_res) = run_program_parallel(src);
+    assert!(mn_res.is_err(), "M:N expected to fault, got {mn_out:?}");
+    assert_same_lines(&vm_out, &mn_out);
 }
 
 /// Parity gap fix (T1): an UNCAUGHT body fault with one un-run task on the function's implicit
@@ -5142,7 +5214,8 @@ fn mnsched_park_requeues_when_cancel_tripped() {
 }
 
 /// D2b/U4: every not-done fiber parked, none running, run queue empty ⇒ deadlock. `take_runnable`
-/// detects it, faults every parked fiber with `DEADLOCK_MSG`, and terminates.
+/// detects it, records a `Deadlocked` outcome (`err.message == DEADLOCK_MSG`) for every parked
+/// fiber, and terminates.
 #[test]
 fn mnsched_deadlock_when_all_parked_runq_empty() {
     let sched = mk_sched(2);
@@ -5157,7 +5230,9 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     let slots = sched.take_slots();
     assert_eq!(slots.len(), 2);
     for s in slots {
-        assert!(matches!(s, Some(TaskOutcome::Fault { err, .. }) if err.message == DEADLOCK_MSG));
+        assert!(
+            matches!(s, Some(TaskOutcome::Deadlocked { err, .. }) if err.message == DEADLOCK_MSG)
+        );
     }
 }
 

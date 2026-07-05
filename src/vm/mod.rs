@@ -1165,6 +1165,18 @@ enum TaskOutcome {
         out: String,
         stderr: String,
     },
+    /// The M:N deadlock detector aborted a nursery: EVERY still-parked fiber was recorded with this
+    /// synthetic `DEADLOCK_MSG` outcome (see [`SchedCore::flag_deadlock`]). It is DISTINCT from
+    /// `Fault` so `reduce_task_slots` can flush ALL parked buffers in task order (matching the serial
+    /// engine, which printed those lines live before the deadlock returned) — a real multi-fault
+    /// reduce still flushes only the terminal fault's buffer. Only ever originates in `flag_deadlock`
+    /// (M:N); the legacy-pool reduce never produces it. A real fault/exit trips `terminate` first, so
+    /// `Deadlocked` never coexists with `Fault`/`Exit` in one reduce.
+    Deadlocked {
+        err: RuntimeError,
+        out: String,
+        stderr: String,
+    },
 }
 
 /// B3.3-threads — the per-task outcome slots a `--parallel` nursery collects (task order; `None`
@@ -2459,9 +2471,10 @@ impl SchedCore {
     /// progress anywhere. A `Wait` token sits in N buckets but is ONE fiber — claim-once (the wake CAS)
     /// dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
     /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
-    /// when it parked) is carried into its Fault slot, so `reduce_task_slots` flushes it at the
-    /// parked task's task-order slot — matching the serial engine, which printed those lines live
-    /// before the deadlock returned.
+    /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
+    /// parked buffer at its task-order slot — matching the serial engine, which printed those lines
+    /// live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
+    /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
     fn flag_deadlock(&mut self, err: &RuntimeError) {
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
         for v in buckets {
@@ -2487,15 +2500,16 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    // Carry the parked fiber's OWN buffered stdout/stderr into its Fault slot (not
-                    // an empty buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out`
-                    // when it parked; the downstream `reduce_task_slots` flushes the lowest-index
-                    // propagating fault's buffer at its task-order slot, so — like the real-fault
-                    // path (fix 888684d) — the deadlock-abort path now preserves a parked task's
-                    // partial output byte-identically to the serial engine. `task_index`/`scope_id`
-                    // are Copy, read before the partial move of `f.ctx.out`/`f.ctx.stderr`.
+                    // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot
+                    // (not an empty buffer). `swap_ctx` moved this fiber's live prints into
+                    // `f.ctx.out` when it parked; the downstream `reduce_task_slots` flushes EVERY
+                    // Deadlocked slot's buffer at its task-order slot (not just the lowest-index one,
+                    // as with a real Fault), so with two-or-more parked fibers a higher-index
+                    // printer's output is preserved byte-identically to the serial engine.
+                    // `task_index`/`scope_id` are Copy, read before the partial move of
+                    // `f.ctx.out`/`f.ctx.stderr`.
                     let (ti, sid) = (f.task_index, f.scope_id);
-                    self.slots[ti] = Some(TaskOutcome::Fault {
+                    self.slots[ti] = Some(TaskOutcome::Deadlocked {
                         err: err.clone(),
                         out: f.ctx.out,
                         stderr: f.ctx.stderr,
