@@ -1766,7 +1766,11 @@ impl Checker {
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.
         unify(receiver, recv_ty, &mut mmap);
-        for i in 0..expected.len() {
+        // Clamp to the shorter of the two lengths — `arg_tys.len() == args.len()` can be < `expected.len()`
+        // when the method is called with too few arguments. The arity error is already reported above
+        // (it does not early-return), so this loop must not index `args[i]`/`arg_tys[i]` out of bounds;
+        // the base `expected.iter().zip(&arg_tys)` clamped implicitly, this preserves that.
+        for i in 0..expected.len().min(arg_tys.len()) {
             let decl = &expected[i];
             // Scope-A-through-a-method-slot: a bare same-module GENERIC fn passed as a non-closure arg
             // is prepass-typed rigid (`fn(T) -> str`) because `infer_generic_arg_tys` has no expected

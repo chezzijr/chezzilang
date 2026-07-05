@@ -15328,3 +15328,34 @@ fn generic_fn_value_map_closure_still_infers_ok() {
     // Regression: the unannotated-closure loop-back is untouched — still infers List[int].
     ok("fn main():\n    xs := [1, 2, 3].map(fn(x): x * 2)\n    n: int = xs[0]\n    print(n)\n");
 }
+
+// ---- arity guard: a generic method called with TOO FEW args reports cleanly, never panics ----
+// (adversarial-review bugs 1 & 2: the pass-1 pin loop must clamp to `arg_tys.len()`, not index
+// `expected.len()` out of bounds when the arity check reports-but-does-not-return.)
+
+#[test]
+fn generic_method_too_few_args_reports_not_panics_fold() {
+    // `.fold` expects (init, f) — passing only `init` must report the arity error, not index-panic.
+    rejects(
+        "fn main():\n    print([1, 2, 3].fold(0))\n",
+        "'fold' expects 2 argument(s), got 1",
+    );
+}
+
+#[test]
+fn generic_method_too_few_args_reports_not_panics_map() {
+    // `.map` expects (f) — passing none must report the arity error, not index-panic.
+    rejects(
+        "fn main():\n    print([1, 2, 3].map())\n",
+        "'map' expects 1 argument(s), got 0",
+    );
+}
+
+#[test]
+fn generic_user_method_too_few_args_reports_not_panics() {
+    // A user generic method routed through infer_generic_method with too few args reports cleanly.
+    rejects(
+        "struct B[T]:\n    v: T\n    fn map_to[U](self, f: fn(T) -> U) -> U:\n        return f(self.v)\nfn main():\n    b := B(1)\n    print(b.map_to())\n",
+        "'map_to' expects 1 argument(s), got 0",
+    );
+}
