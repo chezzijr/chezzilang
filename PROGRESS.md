@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ GENERIC FN AS A VALUE — scope A + B, erased runtime (2026-07-05).** A generic function
+(`fn ident[T](x: T) -> T`) is now a usable **value** once its type params are **pinned**: via an explicit
+**turbofish** (`g := ident[int]` ⇒ `fn(int) -> int`, scope B) OR against a **known concrete
+`fn(...) -> ...`** — an annotation (`h: fn(int) -> int = ident`), a HOF parameter (`applyit(ident, 5)`), a
+return position (`fn getf() -> fn(int) -> int: return ident`), or an assignment target (scope A). Two
+independent seams, both **same-module** gated so checker-accept ⟺ compiler-erase stay in lockstep:
+**checker** (`src/checker/pattern.rs`) — `infer_ident` A-path (unify the declared sig against the
+`expected_hint` `Ty::Func`, enforce bounds, return the substituted concrete fn — never `expected`, so an
+unsatisfiable target is caught by the existing assignability check) and `infer_index` B-path (turbofish
+`ident[int]` → `seed_targs` arity-check + `enforce_bounds` + `subst`); **compiler**
+(`src/compiler/mod.rs`) — a tiny Index-arm erase (drop the type index for a non-shadowed top-level fn
+name, load the plain fn value). Runtime is generic-**ERASED** (the value IS the underlying function), so
+**serial == M:N** is automatic — but every accepted case has a both-engines RUN test (the bind-import
+trap). Soundness rejects (all TDD'd, failing-then-green): unsatisfiable pin, bound violation (turbofish +
+annotation), turbofish arity mismatch, downstream concrete-type misuse. Must-not-regress: direct calls,
+non-generic fn values, call-site turbofish `ident[int](5)`, generic-HOF-param (closure path), and
+compiler-erase shadow-safety (a local/param shadowing the fn name is a real index). New checker + parity
+tests in `src/checker/tests.rs` + `src/vm/parity_tests.rs`. **Known v1 limits (deferred):** (C)
+first-class / rank-N polymorphism — a bare un-pinned generic fn value (`g := ident` then `g(5)`), or one
+binding used at two different types, stays a clean error (hint: turbofish or a `fn(...) -> ...`
+annotation); and an **imported** generic fn used bare as a value stays the un-pinned error (same-module
+only — resolves the accept⟺erase lockstep without a span side-table). Docs: `docs/syntax.md` fn-value
+section. Full suite + conformance + clippy green.
+
 **✅ CHECKER LENIENCY — five decl footguns now rejected (2026-07-05).** All checker-only,
 reject-earlier in the decl-hoist pass (`src/checker/setup.rs` Struct/Enum/NewType arms) + a
 cascade-suppression tweak in the pass-2 body loops (`src/checker/sig.rs`); no runtime/VM change, so

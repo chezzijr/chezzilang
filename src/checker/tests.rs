@@ -14807,3 +14807,125 @@ fn variadic_method_keyword_only_with_collision() {
     );
     assert!(errs.is_empty(), "expected clean, got: {errs:?}");
 }
+
+// ===== Generic fn as a VALUE (scope A + B): pin type params from a known concrete fn type or an
+// explicit turbofish; runtime is generic-ERASED. A bare un-pinned generic fn value stays an error.
+
+#[test]
+fn generic_fn_value_turbofish_ok() {
+    // B — turbofish on a fn value: `g := ident[int]` → g : fn(int) -> int
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident[int]\n    print(g(5) + 1)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_annot_ok() {
+    // A1 — annotated binding pins T=int from the annotation.
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g: fn(int) -> int = ident\n    print(g(5) + 1)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_hofarg_ok() {
+    // A2 — HOF argument pins T against the param type.
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn applyit(f: fn(int) -> int, x: int) -> int:\n    return f(x)\n\nfn main():\n    print(applyit(ident, 5) + 1)\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_return_ok() {
+    // A3 — return position pins T against the declared return type.
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn getf() -> fn(int) -> int:\n    return ident\n\nfn main():\n    g := getf()\n    print(g(5) + 1)\n",
+    );
+}
+
+// ---- soundness rejects ----
+
+#[test]
+fn generic_fn_value_unsatisfiable_rejected() {
+    // ident is fn(T)->T; can't be both str and int → concrete subst is fn(str)->str, rejected vs fn(str)->int.
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g: fn(str) -> int = ident\n",
+        "cannot assign fn(str) -> str to variable of type fn(str) -> int",
+    );
+}
+
+#[test]
+fn generic_fn_value_turbofish_bound_violation_rejected() {
+    rejects(
+        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h := addone[str]\n    print(h(\"a\"))\n",
+        "Add",
+    );
+}
+
+#[test]
+fn generic_fn_value_annot_bound_violation_rejected() {
+    rejects(
+        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h: fn(str) -> str = addone\n",
+        "Add",
+    );
+}
+
+#[test]
+fn generic_fn_value_turbofish_arity_mismatch_rejected() {
+    rejects(
+        "fn pair[A, B](a: A, b: B) -> A:\n    return a\n\nfn main():\n    p := pair[int]\n",
+        "expects 2 type argument(s), found 1",
+    );
+}
+
+#[test]
+fn generic_fn_value_downstream_misuse_rejected() {
+    // g := ident[int]; g(5) is int, not str.
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident[int]\n    s: str = g(5)\n",
+        "cannot assign int to variable of type str",
+    );
+}
+
+// ---- must-not-regress ----
+
+#[test]
+fn bare_unpinned_generic_fn_value_stays_error() {
+    // OUT OF SCOPE (scope C) — a bare generic-fn value with no expected type + no turbofish, then called.
+    let errs = check_src(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
+    );
+    assert!(
+        !errs.is_empty(),
+        "bare un-pinned generic fn value must stay an error"
+    );
+}
+
+#[test]
+fn generic_fn_direct_call_unchanged() {
+    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident(5) + 1)\n");
+}
+
+#[test]
+fn generic_fn_call_site_turbofish_unchanged() {
+    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident[int](5) + 1)\n");
+}
+
+#[test]
+fn nongeneric_fn_indexed_rejected() {
+    // A NON-generic fn indexed is NOT a turbofish — checker must reject (the compiler-erase relies on
+    // this: only a checker-accepted generic-fn turbofish ever reaches the erase path).
+    rejects(
+        "fn g(x: int) -> int:\n    return x\n\nfn main():\n    y := g[0]\n",
+        "cannot index into fn(int) -> int",
+    );
+}
+
+#[test]
+fn local_shadowing_generic_fn_name_indexes_normally() {
+    // A local/param that shadows a top-level generic fn name is a REAL index, not an erased turbofish.
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn h():\n    ident := [10, 20, 30]\n    print(ident[1])\n",
+    );
+    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn h(ident: List[int]):\n    print(ident[0])\n");
+}

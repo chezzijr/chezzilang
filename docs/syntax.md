@@ -633,6 +633,41 @@ same as a direct named call, and work in `defer`/`spawn` position too (`defer d(
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
 `DeferCall` / `SpawnCall` stay positional), so all engines produce identical output.
 
+**A GENERIC fn as a value.** A generic function (`fn ident[T](x: T) -> T`) becomes a usable **value**
+once its type parameters are **pinned** — either with an explicit **turbofish** or against a **known
+concrete `fn(...) -> ...` type** (an annotation, a HOF parameter, a return position, or an assignment
+target). The value then has the fully-substituted concrete function type; calling it works like any
+other fn value.
+
+```chezzi
+fn ident[T](x: T) -> T:
+    return x
+
+g := ident[int]                      # turbofish pins T=int  ⇒ g : fn(int) -> int
+print(g(5) + 1)                      # 6
+
+h: fn(int) -> int = ident            # annotation pins T=int
+print(h(5) + 1)                      # 6
+
+fn applyit(f: fn(int) -> int, x: int) -> int:
+    return f(x)
+print(applyit(ident, 5) + 1)         # 6 — HOF parameter pins T against the param type
+
+fn getf() -> fn(int) -> int:
+    return ident                     # return position pins T against the declared return type
+```
+
+The pin is checked strictly: an **unsatisfiable** target (`g: fn(str) -> int = ident` — `ident` can't be
+both) is a type error, a **bound violation** (`addone[str]` where `str` is not `Add`) is rejected, a
+**turbofish arity mismatch** (`pair[int]` for a two-param `pair[A, B]`) is a clean error, and the value
+keeps its **concrete** type downstream (`g := ident[int]` then `s: str = g(5)` is rejected — `g(5)` is
+`int`). The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
+adds no overhead and behaves identically on both engines. A **bare, un-pinned** generic fn value (`g :=
+ident` with no turbofish and no expected `fn(...) -> ...` type, then called) stays an **error**: add a
+turbofish (`ident[int]`) or a `fn(...) -> ...` annotation. First-class (rank-N) polymorphism — one
+binding used at two different types — is a future addition. (v1 limit: the pin currently requires a
+**same-module** generic fn — an *imported* generic fn used bare as a value stays the un-pinned error.)
+
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
 return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type

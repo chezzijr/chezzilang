@@ -160,6 +160,12 @@ struct Compiler {
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
     globals: HashMap<String, u32>,
+    /// The CURRENT module's top-level `fn` names (rebuilt per `compile_module` in `collect_globals`).
+    /// Drives the generic-fn-as-value turbofish erase: a `Name[TypeArgs]` whose `Name` is a
+    /// (non-shadowed) top-level fn is a generic-fn turbofish the checker already accepted, so the index
+    /// is dropped and only the plain fn value is loaded (runtime is generic-ERASED). The exact
+    /// same-module set the checker's `local_fn_names` gates on, keeping accept ⟺ erase in lockstep.
+    fn_names: std::collections::HashSet<String>,
     /// The current module's globals in slot order (slot `i` ⇒ `global_slots[i]`), recorded into the
     /// module's [`ModuleProto`] so the run driver can pre-size storage + build its name→slot index.
     global_slots: Vec<String>,
@@ -389,6 +395,7 @@ impl Compiler {
             program,
             struct_fields: HashMap::new(),
             globals: HashMap::new(),
+            fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             field_ic_next: 0,
             method_ic_next: 0,
@@ -535,6 +542,7 @@ impl Compiler {
         use crate::ast::Import;
         self.globals.clear();
         self.global_slots.clear();
+        self.fn_names.clear();
         let add = |name: String, globals: &mut HashMap<String, u32>, slots: &mut Vec<String>| {
             if !globals.contains_key(&name) {
                 globals.insert(name.clone(), slots.len() as u32);
@@ -563,6 +571,8 @@ impl Compiler {
         for stmt in stmts {
             if let StmtKind::Fn(decl) = &stmt.kind {
                 add(decl.name.clone(), &mut self.globals, &mut self.global_slots);
+                // Same-module top-level fn — licenses the generic-fn-as-value turbofish erase below.
+                self.fn_names.insert(decl.name.clone());
             }
             // Each extern C fn is a module global bound at init (like a top-level `fn`).
             if let StmtKind::Extern { fns, .. } = &stmt.kind {
@@ -2902,6 +2912,21 @@ impl Compiler {
                 }
             }
             ExprKind::Index { obj, index } => {
+                // Generic-fn-as-value turbofish erase: `ident[int]` where `ident` is a (non-shadowed)
+                // top-level fn is a generic-fn turbofish the checker already validated/accepted. The
+                // runtime is generic-ERASED — the value IS the underlying function — so drop the type
+                // index and load only the plain fn value. The checker rejects EVERY non-generic-fn
+                // `fn`-typed Index, so the only fn Index that reaches codegen is exactly this case;
+                // a shadowing local/capture (`xs := [1,2]; xs[0]`) is never in `fn_names`, so a real
+                // index still compiles below.
+                if let ExprKind::Ident(name) = &obj.kind
+                    && self.fn_names.contains(name)
+                    && fc.resolve_local(name).is_none()
+                    && !fc.captures(name)
+                {
+                    self.compile_expr(fc, obj)?;
+                    return Ok(());
+                }
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
                 // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.

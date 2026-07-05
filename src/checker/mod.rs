@@ -1260,6 +1260,13 @@ struct Checker {
     /// `Ref[T]` (the user wrote `Ref`). Charge-5 transparency without lying in the other direction.
     ref_decls: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
+    /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
+    /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
+    /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
+    /// codegen, keeping checker-accept ⟺ compiler-erase in lockstep (an imported generic-fn turbofish
+    /// stays a clean "cannot index into fn(T) -> T" error, a documented v1 limit). Cleared per-module
+    /// with `functions` (`begin_module`) and populated at the same-module fn-sig registration.
+    local_fn_names: std::collections::HashSet<String>,
     structs: HashMap<String, StructInfo>,
     /// Structural protocols by name. Program-global (like structs). Pre-seeded with `Comparable`.
     protocols: HashMap<String, ProtocolInfo>,
