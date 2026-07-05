@@ -232,6 +232,39 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
     assert_mc_parity(src, "SOLO-PARTIAL\ncaught boom\n");
 }
 
+/// Deadlock-abort output-flush parity: when a `parallel:` nursery is aborted by the M:N
+/// scheduler's deadlock detector, a still-PARKED task's ALREADY-BUFFERED stdout must be
+/// preserved at its task-order slot — matching serial. Pre-fix `flag_deadlock` wrote each parked
+/// fiber's `Fault` slot with an EMPTY buffer (`out: String::new()`), so the parked consumer's
+/// three buffered lines were silently discarded on M:N (serial prints them live, so it kept them).
+///
+/// This repro is order-DETERMINISTIC: the consumer is the SOLE printer. The producer's buffered
+/// `send(1)` deterministically satisfies the consumer's first `recv()` (→ `1`), so the consumer
+/// always prints exactly the three lines before it parks forever on the second `recv()` and the
+/// deadlock detector fires. Both engines fault with `DEADLOCK_MSG`; both must emit the three lines.
+/// Looped to catch any scheduler-interleaving flakiness (there must be none — content is fixed).
+#[test]
+fn parallel_nursery_deadlock_flushes_parked_stdout_2engine() {
+    let src = r#"fn producer(ch: Channel[int]):
+    ch.send(1)
+fn consumer(ch: Channel[int]):
+    print("LINE-A")
+    print("got {ch.recv()}")
+    print("blocking now")
+    x := ch.recv()
+    print("never")
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn producer(ch)
+        spawn consumer(ch)
+main()
+"#;
+    for _ in 0..50 {
+        assert_fault_parity(src, "LINE-A\ngot 1\nblocking now\n");
+    }
+}
+
 /// Phase 5a-containers REGRESSION GUARD: the List/Map/Set method-surface migration to file-backed
 /// `native struct` decls in std/prelude.chz is CHECKER-ONLY — the literals/ctors still lower to the
 /// native build opcodes and runtime method dispatch is by name (untouched). This drives a

@@ -314,7 +314,11 @@ Channel is a cross-nursery wakeup (handlers reach clients via sockets, which wor
   output-producer** — with additional output-producing siblings the M:N transcript can still diverge
   from serial's strict stop-at-first-fault order (a sibling reaching `Done` before the cancel-trip
   keeps output serial never produced; `Fault`-vs-`Cancelled` classification is itself a race), a
-  pre-existing nondeterminism the buffer-and-flush model cannot reconcile and does not assert.
+  pre-existing nondeterminism the buffer-and-flush model cannot reconcile and does not assert. The
+  **nursery deadlock-abort path is symmetric**: `SchedCore::flag_deadlock` carries each still-parked
+  fiber's OWN buffered stdout/stderr into its `Fault` slot (not an empty buffer), so a parked task's
+  partial output flushes at its task-order slot exactly like a real fault — the same sole-producer
+  parity guarantee (the parked task that printed then blocked is the deterministic producer).
 - **Decision C** — `os.exit` hard-halts, wins over sibling fault, uncatchable by an outer `recover:`.
 - **Share-nothing** — every fiber owns its heap; no value crosses a heap boundary except via
   `WireValue` copy (`Channel.send` / `spawn` args) or `Arc`'d cores (`Channel` / `Shared` /
