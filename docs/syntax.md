@@ -469,17 +469,38 @@ inline expr against `-> nil`, e.g. a bare void call, stays legal).
 `nil`. Multiline functions return via an explicit `return`.
 
 **Return type inference.** Omitting `-> T` infers the return type: for an inline-expr body it is the
-expression's type (`fn ten(): 10` infers `-> int`); otherwise it is inferred from the body's `return`
-statements — the first concrete return wins, conflicting returns are a type error, and a body with no
-value-returning `return` infers `nil`. Param types stay required. Inference is **order-independent**: a
-recursive call contributes no type (it is skipped, the non-recursive returns decide), and forward
-references / mutual recursion resolve via a fixpoint — so a callee defined *after* the caller still
-yields the caller's precise inferred type. A function that is genuinely un-inferable (pure self- or
-mutual recursion with **no concrete base case anywhere**) keeps a permissive inferred type; annotate
-it with an explicit `-> T` for a precise type. This applies uniformly to **struct/enum methods** as
-well as free functions: an inferred method return flows to call sites (`P(3).val()` is typed by the
-inferred return, not `Unknown`) and to **protocol satisfaction** (an inferred `compare(self, o)`
-yielding `bool` fails `Comparable`, which requires `-> int`, exactly as an explicit `-> bool` would).
+expression's type (`fn ten(): 10` infers `-> int`); otherwise **all** the body's `return` branches
+(plus an implicit trailing/inline expression) are typed and **merged** with a join. A body with no
+value-returning `return` infers `nil`. Param types stay required. The join `J(a, b)` is: (1) equal
+types → that type; (2) `{int, float}` → `float` (the one numeric widen — **bare scalars only**, it does
+*not* recurse into type-arg slots); (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
+`Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
+side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
+payloads — `Result[int]` and `Result[float]` **conflict**); (4) otherwise → a **conflict** error
+`cannot infer return type: conflicting branches (X vs Y); add a -> annotation`. There is **no
+common-supertype / protocol / `Any` search**: two distinct concrete types (e.g. two structs that both
+have a `speak()` method) *conflict* — a protocol return must be spelled explicitly (`-> Shape`).
+
+So `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, str]` (the `Ok` branch's
+`T=str` and the `Err` branch's `E=str` merge). Two slots that stay un-inferable after the merge are
+resolved at a **finalize** step: a `Result` **error slot** defaults to the built-in `Error` protocol
+(so `fn ok(): return Ok(5)` is `Result[int, Error]`, matching the `T!` shorthand); **any other**
+residual un-inferable slot — a `Result`/`Option` value slot, a `List`/`Map`/`Set` element — is an error
+`cannot infer return type of '<name>'; add a -> annotation`. Hence `fn err(): return Err("x")`,
+`fn none(): return None`, and `fn f(): return []` are each rejected (the value type is un-inferable, the
+return-position analogue of the empty-collection diagnostic) — annotate them (`-> str!`, `-> int?`,
+`-> List[int]`).
+
+Inference is **order-independent**: a recursive call contributes no type mid-analysis (it is absorbed,
+the concrete branches decide), and forward references / mutual recursion resolve via a fixpoint — so a
+callee defined *after* the caller still yields the caller's precise inferred type. A function that is
+genuinely un-inferable (pure self- or mutual recursion with **no concrete base case anywhere**) leaves a
+residual un-inferable return and is rejected the same way; annotate it with an explicit `-> T`. This all
+applies uniformly to **struct/enum methods** *and* **closures** (a free `f := fn(): Ok(5)` gets
+`Result[int, Error]`; a free `fn(): Err("x")` is rejected) as well as free functions: an inferred method
+return flows to call sites (`P(3).val()` is typed by the inferred return, not `Unknown`) and to
+**protocol satisfaction** (an inferred `compare(self, o)` yielding `bool` fails `Comparable`, which
+requires `-> int`, exactly as an explicit `-> bool` would).
 
 **Returns on every path (enforced).** A **multiline** function with a **declared non-void return
 type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a

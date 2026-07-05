@@ -378,7 +378,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors (use explicit floats or a
   mixed literal). Carve-outs: a plain reassignment `x = 3` to a `float` local is rejected (type-blind
   target), and an un-annotated non-literal mixed collection is inferred `List[float]` but its non-literal
-  `int` element is not widened at runtime (annotate to convert).
+  `int` element is not widened at runtime (annotate to convert). The same scalar-only rule governs
+  **un-annotated multi-branch return inference**: sibling `return` branches merge with a join that
+  applies the one `int`→`float` widen **only to bare-scalar branches** (`if c: return 1 else: return
+  2.0` infers `-> float`), never inside a merged type-arg slot — `return Ok(1)` and `return Ok(2.0)`
+  *conflict* (they would demand `Result[float]` from `Ok(int)`, the `float! = Ok(3)` error above). See
+  [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
