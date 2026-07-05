@@ -11,6 +11,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ `recover:` TRAILING STATEMENT-`match`/`if` IS THE BLOCK VALUE (2026-07-05).** A `recover:` block
+whose TRAILING statement is a statement-form `match` (or `if`) with value-producing arms/branches was
+typed `Result[nil]` and the produced value was SILENTLY DROPPED (`Ok(nil)`) — only a genuine trailing
+*expression* (or the `y := match …; y` workaround) yielded `Result[<arm type>]`. **Now** a total tail
+`match` (≥1 arm, every arm body ends in a value `Expr`) or `if/else` (has `else`, every branch/else body
+ends in a value `Expr`) is treated as the block's value expression: its unified arm/branch type becomes
+the `Result[T]` T, and `Ok(v)` wraps the real value. A non-value tail (a `let`, a non-total/`else`-less
+construct, a nested-statement tail) stays `Result[nil]` byte-identically; an all-`panic` tail stays
+bottom (`Result[Unknown]`, matching direct `recover: panic(…)`). Fix at BOTH stages that `split_last`
+the recover block, gated on ONE shared `crate::ast` predicate (`match_tail_is_value`/`if_tail_is_value`/
+`block_produces_value`) so checker + compiler can never drift on which tail is a value: checker
+`infer_recover` (`src/checker/pattern.rs`) folds arm/branch trailing-expr types via `unify_branch`
+(dedicated `infer_recover_tail_{match,if}`, statement-form persistent-refine, match/if typing elsewhere
+untouched); compiler `compile_recover` (`src/compiler/mod.rs`) reuses `compile_match_{lit,general}` +
+a value `run_body` / a value analog of `compile_if` so exactly one value converges pre-`Ok`-wrap (the
+`DrainHandlerDefers`/`NewEnum Ok`/`PopHandler` tail stays byte-identical → serial == M:N). Defers inside
+a value arm/branch run without clobbering the value (drain touches `frame.deferred`, not the stack). The
+recover rejection rules (`return`/`break`/`?`-on-`Option`) are separate and untouched. TDD: 2 checker
+(`recover_tail_stmt_{match,if}_value_*`) + 4 parity (`recover_tail_stmt_{match,if}_value_run_parity`,
+`…defer_in_arm…`, `…catches_fault_is_err`), all RED-first. Docs: `docs/syntax.md` recover section.
+
 **✅ MULTI-BRANCH RETURN INFERENCE — JOIN merge + finalize, `Unknown`-leak fix (2026-07-05).**
 Checker-only (`src/checker/sig.rs` + a closure hook in `src/checker/pattern.rs`); no runtime/VM/grammar
 change, so two-engine parity + conformance hold by construction. **Before:** `infer_returns` was

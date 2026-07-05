@@ -3046,6 +3046,20 @@ impl Compiler {
             }
             match &last.kind {
                 StmtKind::Expr(e) => self.compile_expr(fc, e)?, // trailing value
+                // A trailing statement-form `match`/`if` whose every arm/branch produces a value is
+                // the block's value expression — compile it to leave ONE value on the stack (the
+                // unified arm/branch value), exactly like an inline expression tail. The
+                // `crate::ast` predicate is the SAME one the checker used to type this as
+                // `Result[T]`, so the two stages agree on which tail is a value (never `Ok(nil)`).
+                StmtKind::Match { scrutinee, arms } if crate::ast::match_tail_is_value(arms) => {
+                    self.compile_match_value_tail(fc, scrutinee, arms, last.span)?;
+                }
+                StmtKind::If {
+                    branches,
+                    else_block,
+                } if crate::ast::if_tail_is_value(branches, else_block) => {
+                    self.compile_if_value(fc, branches, else_block.as_deref(), last.span)?;
+                }
                 _ => {
                     self.compile_stmt(fc, last)?;
                     fc.emit(Op::Nil, span);
@@ -3072,6 +3086,132 @@ impl Compiler {
         fc.emit(Op::PopHandler, span);
         let done = fc.here();
         fc.patch_jump_to(push, done);
+        Ok(())
+    }
+
+    /// A statement-form `match` used as the `recover:` block's VALUE tail: dispatch through the
+    /// generic `compile_match_lit`/`compile_match_general` (identical control flow to a statement
+    /// match) but with a `run_body` that leaves the arm's trailing-expression VALUE on the stack, so
+    /// the whole match converges one value at the join — exactly like `compile_match_expr`. Only
+    /// reached when [`crate::ast::match_tail_is_value`] holds (every arm body ends in an `Expr`).
+    fn compile_match_value_tail(
+        &mut self,
+        fc: &mut FnComp,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
+            return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
+                s.compile_arm_tail_value(fc, body)
+            });
+        }
+        self.compile_match_general(fc, scrutinee, arms, span, |s, fc, body| {
+            s.compile_arm_tail_value(fc, body)
+        })
+    }
+
+    /// Compile a statement-`match` arm body as a VALUE (recover-tail): the arm's lexical scope is
+    /// already opened/closed by `compile_match_{lit,general}`, so this is the value analog of
+    /// `compile_defer_scoped_arm` — defer-bracket the *flat* body (when it directly holds a `defer`),
+    /// compile init statements, and leave the trailing `Expr`'s value on the stack. The `defer` drain
+    /// (`LeaveDeferScope`) touches only `frame.deferred`, never the operand stack, so the value
+    /// survives it. `match_tail_is_value` guarantees a non-empty body with a trailing `Expr`.
+    fn compile_arm_tail_value(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
+        let has_defer = block_has_defer(stmts);
+        if has_defer {
+            fc.emit(Op::EnterDeferScope, stmts[0].span);
+            fc.defer_scopes += 1;
+        }
+        self.compile_tail_value_body(fc, stmts)?;
+        if has_defer {
+            fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+            fc.defer_scopes -= 1;
+        }
+        Ok(())
+    }
+
+    /// Statement-form `if/else` used as the `recover:` block's VALUE tail: the value analog of
+    /// `compile_if`. Each branch (and the mandatory `else`) leaves exactly one value via
+    /// `compile_branch_tail_value`, so one value remains at the join. Only reached when
+    /// [`crate::ast::if_tail_is_value`] holds (has an `else`; every branch/else body ends in an `Expr`).
+    fn compile_if_value(
+        &mut self,
+        fc: &mut FnComp,
+        branches: &[(Expr, Block)],
+        else_block: Option<&[Stmt]>,
+        _span: Span,
+    ) -> Result<(), CompileError> {
+        let mut end_jumps = Vec::new();
+        for (cond, body) in branches {
+            self.compile_expr(fc, cond)?;
+            fc.emit(Op::AsBool, cond.span);
+            let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
+            self.compile_branch_tail_value(fc, body)?;
+            end_jumps.push(fc.emit_jump(Op::Jump(0), cond.span));
+            fc.patch_jump(skip);
+        }
+        // `if_tail_is_value` guarantees an `else` — control always reaches a value-leaving branch.
+        if let Some(body) = else_block {
+            self.compile_branch_tail_value(fc, body)?;
+        }
+        for j in end_jumps {
+            fc.patch_jump(j);
+        }
+        Ok(())
+    }
+
+    /// Compile an `if`/`else` branch body as a VALUE (recover-tail): the value analog of
+    /// `compile_defer_scoped_block` — own lexical scope (locals don't leak), defer-bracketed, leaving
+    /// the trailing `Expr`'s value on the stack. `if_tail_is_value` guarantees a non-empty body with a
+    /// trailing `Expr`.
+    fn compile_branch_tail_value(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
+        fc.begin_scope();
+        let has_defer = block_has_defer(stmts);
+        if has_defer {
+            fc.emit(Op::EnterDeferScope, stmts[0].span);
+            fc.defer_scopes += 1;
+        }
+        self.compile_tail_value_body(fc, stmts)?;
+        if has_defer {
+            fc.emit(Op::LeaveDeferScope, stmts[stmts.len() - 1].span);
+            fc.defer_scopes -= 1;
+        }
+        fc.end_scope();
+        Ok(())
+    }
+
+    /// Compile a value-producing statement block's init statements for effect, then leave the
+    /// trailing `Expr`'s value on the stack. Shared by the recover-tail match-arm and if-branch value
+    /// helpers so they can never disagree on how a tail block yields its value. The caller's
+    /// `crate::ast` predicate guarantees a non-empty block with a trailing `Expr`; the defensive `_`
+    /// arm keeps a `nil` if that ever changes (never reached from the recover-tail dispatch).
+    fn compile_tail_value_body(
+        &mut self,
+        fc: &mut FnComp,
+        stmts: &[Stmt],
+    ) -> Result<(), CompileError> {
+        let (last, init) = stmts
+            .split_last()
+            .expect("tail-value predicate guarantees a non-empty block");
+        for stmt in init {
+            self.compile_stmt(fc, stmt)?;
+        }
+        match &last.kind {
+            StmtKind::Expr(e) => self.compile_expr(fc, e)?, // trailing value
+            _ => {
+                self.compile_stmt(fc, last)?;
+                fc.emit(Op::Nil, last.span);
+            }
+        }
         Ok(())
     }
 

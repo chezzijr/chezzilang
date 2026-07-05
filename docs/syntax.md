@@ -1757,6 +1757,14 @@ match r:
     Err(e): print("recovered: {e.message()}")   # a fault becomes Err(message)
 ```
 
+The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
+when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
+in a value), the whole construct is the block's value expression and `Ok` wraps its unified arm/branch
+type — so `recover: … ; match x: 3: 100; _: 200` is `Result[int]`, not `Result[nil]`. A tail that
+does *not* uniformly produce a value (a trailing `let`, a non-total `match`, an `else`-less `if`) has
+no value, so the block is `Result[nil]` as before. (A tail that provably *diverges* — every arm
+`panic`s — is bottom, matching a direct `recover: panic(…)`.)
+
 It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `Err`
 lands in `r`), so one `recover:` handles *both* panics and propagated `Result` errors. Because `?`
 targets the boundary rather than the function, it is allowed even when the enclosing function does
