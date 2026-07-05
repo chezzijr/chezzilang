@@ -1480,6 +1480,54 @@ fn parity_int_div_by_zero_still_faults() {
 }
 
 #[test]
+fn recover_tail_stmt_match_value_run_parity() {
+    // A `recover:` whose TAIL is a statement-form `match` with value-producing arms yields
+    // `Ok(<arm value>)` — the value is NOT dropped (the old bug wrapped `Ok(nil)`). v=100.
+    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    assert_parity_out(src, "v=100\n");
+}
+
+#[test]
+fn recover_tail_stmt_if_value_run_parity() {
+    // Trailing statement-form `if/else` analog: the taken branch's value is the `Ok` payload.
+    let src = "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    assert_parity_out(src, "v=100\n");
+}
+
+#[test]
+fn recover_tail_stmt_match_value_defer_in_arm_run_parity() {
+    // A `defer` inside a value-producing tail-match arm must run for effect WITHOUT clobbering the
+    // trailing value that becomes the `Ok` payload (defers touch frame.deferred, never the stack).
+    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3:\n                defer print(\"cleanup\")\n                100\n            _: 200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    assert_parity_out(src, "cleanup\nv=100\n");
+}
+
+#[test]
+fn recover_tail_match_value_catches_fault_is_err() {
+    // Must-not-break: even though the block is now value-typed, a fault raised BEFORE the tail-match
+    // is still caught and converted to `Err` (single-Result stack invariant preserved).
+    let src = "fn main():\n    r := recover:\n        xs := [1, 2]\n        y := xs[9]\n        match y:\n            _: 100\n    match r:\n        Ok(v): print(\"ok={v}\")\n        Err(e): print(\"err\")\nmain()";
+    assert_parity_out(src, "err\n");
+}
+
+#[test]
+fn recover_tail_match_heterogeneous_arms_run_parity() {
+    // REGRESSION GUARD: heterogeneous tail-match arms (str vs int) fall back to `Result[nil]` at the
+    // checker but the compiler still compiles the tail as a value — whichever arm runs, its value is
+    // `Ok`-wrapped and simply IGNORED by `Ok(_)`. The program must check + RUN identically on both
+    // engines (the first cut of the feature rejected it at `check`).
+    let src = "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")";
+    assert_parity_out(src, "done\n");
+}
+
+#[test]
+fn recover_tail_if_heterogeneous_branches_run_parity() {
+    // The `if/else` analog of the heterogeneous fall-back: runs, value ignored, both engines agree.
+    let src = "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)";
+    assert_parity_out(src, "done\n");
+}
+
+#[test]
 fn parity_std_math_predicates() {
     // is_nan / is_inf / is_finite — float predicates returning bool, identical on both engines.
     let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";

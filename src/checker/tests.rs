@@ -6508,6 +6508,64 @@ fn recover_non_never_value_unaffected() {
     );
 }
 
+// A `recover:` whose TAIL is a statement-form `match` with value-producing arms is typed by the
+// unified arm type (`Result[int]` here), not `Result[nil]` — so binding `Ok(v)` gives `v: int` and
+// using it as a value (interpolation) is accepted instead of nil-banned. (Result has no `is_ok()`
+// method in Chezzi — it is consumed via `match`; the task's `r.is_ok()` was just illustrating that
+// the block type was wrong. The sound observable is that `v` is the arm value type, not nil.)
+#[test]
+fn recover_tail_stmt_match_value_is_result_of_arm_type() {
+    entry_ok(
+        "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+}
+
+// A `recover:` whose TAIL is a statement-form `if/else` with value-producing branches is typed by
+// the unified branch type — same as the trailing-`match` analog.
+#[test]
+fn recover_tail_stmt_if_value_is_result_of_branch_type() {
+    entry_ok(
+        "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()\n",
+    );
+    // A trailing `if` WITHOUT an `else` is not total -> stays `Result[nil]` (value use rejected).
+    entry_rejects(
+        "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n    match r:\n        Ok(v): print(\"{v}\")\n        Err(e): print(\"err\")\nmain()\n",
+        "expression returns no value (nil) and cannot be used as a value",
+    );
+}
+
+// REGRESSION GUARD: a `recover:` tail `match`/`if` whose arms are genuinely HETEROGENEOUS (a
+// `str` arm and an `int` arm, or a void `print(...)` arm mixed with a value arm) has no single value
+// type. It must FALL BACK to `Result[nil]` (value dropped, consumed only via `Ok(_)`), NOT be rejected
+// with "branches have incompatible types" — which was the over-strict regression of the first cut of
+// this feature (previously-valid fault-isolation `recover:`s stopped compiling).
+#[test]
+fn recover_tail_stmt_match_heterogeneous_arms_falls_back_to_nil() {
+    // str vs int arms — value ignored (`Ok(_)`): accepted, typed `Result[nil]`, no incompat error.
+    entry_ok(
+        "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")\n",
+    );
+    // void-call arm (nil) mixed with an int arm — same fall-back to `Result[nil]`.
+    entry_ok(
+        "fn logit():\n    print(\"log\")\nfn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"log\": logit()\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"log\")\n",
+    );
+    // Because the block is `Result[nil]`, binding the value and USING it is still nil-banned (proves
+    // the fall-back really is nil, so the heterogeneous runtime payload is never observable).
+    entry_rejects(
+        "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"failed\")\nfoo(\"a\")\n",
+        "expression returns no value (nil) and cannot be used as a value",
+    );
+}
+
+// REGRESSION GUARD (if analog): heterogeneous `if/else` branches fall back to `Result[nil]`, not
+// rejected.
+#[test]
+fn recover_tail_stmt_if_heterogeneous_branches_falls_back_to_nil() {
+    entry_ok(
+        "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)\n",
+    );
+}
+
 // A void-call fragment inside an interpolated string is a real nil-in-value-position error, but the
 // span must point at the string literal (the print call line), never the fallback (1,1).
 #[test]

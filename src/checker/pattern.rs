@@ -1262,6 +1262,23 @@ impl Checker {
             }
             match &last.kind {
                 StmtKind::Expr(e) => value_ty = self.infer(e),
+                // A trailing statement-form `match` whose every arm produces a value is the block's
+                // value expression (docs/syntax.md): its unified arm type becomes the `Result[T]` T.
+                // The `crate::ast` predicate is the SAME one the compiler uses to decide whether to
+                // push the arm value vs `Op::Nil`, so the two stages can never drift. A non-total /
+                // non-value-arm `match` falls to the `_` arm below (checked for effects, tail stays
+                // `nil`) exactly as before.
+                StmtKind::Match { scrutinee, arms } if crate::ast::match_tail_is_value(arms) => {
+                    value_ty = self.infer_recover_tail_match(scrutinee, arms);
+                }
+                // A trailing statement-form `if/else` whose every branch (and the `else`) produces a
+                // value behaves identically — the unified branch type becomes T.
+                StmtKind::If {
+                    branches,
+                    else_block,
+                } if crate::ast::if_tail_is_value(branches, else_block) => {
+                    value_ty = self.infer_recover_tail_if(branches, else_block);
+                }
                 _ => self.check_stmt(last),
             }
             // A `recover:` whose tail provably diverges (a statement-form `match` whose every arm
@@ -1280,6 +1297,162 @@ impl Checker {
         self.recover_depth -= 1;
         self.pop_scope();
         Ty::result(value_ty)
+    }
+
+    /// Fold one recover-TAIL arm/branch type into the running block value type WITHOUT erroring on a
+    /// mismatch — the crucial difference from `unify_branch`. A statement-form `match`/`if` whose every
+    /// arm merely *ends in* an `Expr` (the syntactic `match_tail_is_value` predicate, shared with the
+    /// compiler) can still have genuinely heterogeneous arm types: a void `print(...)` arm (`nil`) mixed
+    /// with an `int` arm, or `str` vs `int`. Such a tail has no single value type, so — per the feature's
+    /// design contract ("do not force a value where there isn't one") — it FALLS BACK to `Result[nil]`,
+    /// value dropped, exactly as before this feature, instead of being rejected. `acc == None` means "not
+    /// uniform yet decided"; once this returns `None` the caller latches non-uniform and types the block
+    /// `nil`. `Unknown` arms (a `panic`) never break uniformity (they were already skipped by
+    /// `unify_branch`), so `[100, panic(...)]` still types `Result[int]`.
+    ///
+    /// SOUNDNESS (why the compiler needs no matching gate): the compiler always compiles the tail as a
+    /// VALUE (pushing each arm's real value → `Ok(<real value>)` at runtime), but when this returns
+    /// non-uniform the block is typed `Result[nil]`, and the nil-in-value-position ban makes a
+    /// `nil`-typed `Ok(v)` binding UNUSABLE in every value context (interpolation, list literal, call
+    /// arg, arithmetic). So the heterogeneous runtime payload can never be observed — observationally
+    /// identical to the pre-feature `Result[nil]` value-drop, with no checker/runtime divergence.
+    fn fold_recover_tail(acc: Option<Ty>, t: Ty) -> Option<Ty> {
+        match acc {
+            None => Some(t),
+            Some(prev) => {
+                if compatible(&prev, &t) {
+                    Some(if prev.is_unknown() { t } else { prev })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// A statement-form `match` in `recover:` TAIL position, used as the block's value expression.
+    /// Structurally IS `check_match` (same `bind_match_arm` / guard `expect_bool` / exhaustiveness),
+    /// but each arm body is split into init statements (checked for effects) + a trailing value
+    /// expression, and the trailing types are folded via `fold_recover_tail` into the block's `T`. Only
+    /// reached when [`crate::ast::match_tail_is_value`] holds (every arm body ends in an `Expr`), so
+    /// `split_last` always yields an `Expr` tail. Uses the statement-form PERSISTENT refine-on-first-
+    /// use (no snapshot/restore) exactly like `check_match`; refinement is checker-only (no engine
+    /// effect). Scoped to the recover tail — `match` typing elsewhere is untouched. Genuinely
+    /// heterogeneous arms fall back to `Result[nil]` (see `fold_recover_tail`) rather than erroring.
+    fn infer_recover_tail_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) -> Ty {
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let kind = self.match_kind(scrutinee, &pats);
+        let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
+        let mut result: Option<Ty> = None;
+        let mut uniform = true;
+        for arm in arms {
+            let irref = self.bind_match_arm(
+                &arm.pattern,
+                &kind,
+                scrutinee.span,
+                &mut covered,
+                arm.guard.is_some(),
+            );
+            if let Some(guard) = &arm.guard {
+                self.expect_bool(guard, "match guard");
+            }
+            has_wildcard |= irref && arm.guard.is_none();
+            // `match_tail_is_value` guarantees a non-empty body with a trailing `Expr`.
+            let (last, init) = arm
+                .body
+                .split_last()
+                .expect("match_tail_is_value guarantees a non-empty arm body");
+            for stmt in init {
+                self.check_stmt(stmt);
+            }
+            // Always infer every arm's trailing expr (surfaces intra-arm errors); only the CROSS-arm
+            // fold is gated on `uniform` so heterogeneous arms fall back to nil instead of erroring.
+            let t = match &last.kind {
+                StmtKind::Expr(e) => self.infer(e),
+                _ => {
+                    self.check_stmt(last);
+                    Ty::Nil
+                }
+            };
+            self.pop_scope();
+            if uniform {
+                match Self::fold_recover_tail(result.take(), t) {
+                    Some(u) => result = Some(u),
+                    None => uniform = false,
+                }
+            }
+        }
+        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+        if uniform {
+            result.unwrap_or(Ty::Nil)
+        } else {
+            Ty::Nil
+        }
+    }
+
+    /// A statement-form `if/else` in `recover:` TAIL position, used as the block's value expression.
+    /// Mirrors the statement-`If` checker (`sig.rs`) + `check_block`'s per-branch push/pop PERSISTENT
+    /// refine, but each branch body (and the `else`) is split into init statements + a trailing value
+    /// expression whose types fold via `fold_recover_tail` into `T`. Only reached when
+    /// [`crate::ast::if_tail_is_value`] holds (has an `else` and every branch/else body ends in an
+    /// `Expr`). Scoped to the recover tail — `if` typing elsewhere is untouched. Genuinely
+    /// heterogeneous branches fall back to `Result[nil]` (see `fold_recover_tail`) rather than erroring.
+    fn infer_recover_tail_if(
+        &mut self,
+        branches: &[(Expr, Block)],
+        else_block: &Option<Block>,
+    ) -> Ty {
+        let mut result: Option<Ty> = None;
+        let mut uniform = true;
+        for (cond, body) in branches {
+            self.expect_bool(cond, "if condition");
+            let (t, _span) = self.infer_recover_tail_block(body);
+            if uniform {
+                match Self::fold_recover_tail(result.take(), t) {
+                    Some(u) => result = Some(u),
+                    None => uniform = false,
+                }
+            }
+        }
+        // `if_tail_is_value` guarantees `else_block.is_some()`.
+        if let Some(body) = else_block {
+            let (t, _span) = self.infer_recover_tail_block(body);
+            if uniform {
+                match Self::fold_recover_tail(result.take(), t) {
+                    Some(u) => result = Some(u),
+                    None => uniform = false,
+                }
+            }
+        }
+        if uniform {
+            result.unwrap_or(Ty::Nil)
+        } else {
+            Ty::Nil
+        }
+    }
+
+    /// Check a statement block used in recover TAIL position and return its trailing value type +
+    /// the trailing expression's span (for `unify_branch` diagnostics). Mirrors `check_block`'s
+    /// push/pop PERSISTENT refine; init statements are checked for effects, the trailing `Expr` is
+    /// the value (`nil` if the block does not end in one — the caller's predicate rules that out).
+    fn infer_recover_tail_block(&mut self, block: &Block) -> (Ty, Span) {
+        self.push_scope();
+        let out = if let Some((last, init)) = block.split_last() {
+            for stmt in init {
+                self.check_stmt(stmt);
+            }
+            match &last.kind {
+                StmtKind::Expr(e) => (self.infer(e), last.span),
+                _ => {
+                    self.check_stmt(last);
+                    (Ty::Nil, last.span)
+                }
+            }
+        } else {
+            (Ty::Nil, Span::default())
+        };
+        self.pop_scope();
+        out
     }
 
     pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
