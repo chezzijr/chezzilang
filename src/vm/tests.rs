@@ -2020,26 +2020,36 @@ fn channel_core_shared_across_handles() {
     );
 }
 
-/// B3.3-threads sub-step 2: under `--parallel`, a `recv` on an empty channel **blocks the OS
-/// thread** on the core's `Condvar` and is woken by a `send` from another thread (real
-/// cross-thread blocking, not a fiber park). Two `Vm`s share one `ChannelCore` via `Arc`; the
-/// worker blocks in `recv` on its own thread, the main thread `send`s and wakes it. The outcome
-/// is `42` regardless of interleaving (send-first → immediate pop; block-first → cv wake), so the
-/// test is deterministic without sleeps. Also a compile-time proof that `Vm: Send` (it moves into
+/// Cross-thread channel delivery through one shared `ChannelCore`: a value `send`-queued on the
+/// main thread is `recv`-popped on a **separate OS thread** running its own `Vm` — proving both
+/// the `Arc<ChannelCore>` airlock is genuinely shared across threads AND `Vm: Send` (it moves into
 /// `thread::spawn`), the load-bearing fact for the whole thread-flip.
+///
+/// NOTE: the ORDER is send-then-spawn on purpose. The original B3.3-threads step-2 shape spawned
+/// the recv first and relied on a bare-`parallel` `recv` **blocking on the core's `Condvar`** until
+/// woken. That condvar-recv path was RETIRED in D2b (4ac1c1b) when the M:N scheduler replaced
+/// thread-per-task blocking with fiber snapshot-park (`send_wake` + the predicate deadlock detector).
+/// A bare `parallel = true` `Vm` with NO scheduler (`mn == None`) now takes the cooperative path, so
+/// an empty top-level `recv` is a deadlock FAULT by design — spawning recv-first was racy (it only
+/// passed when `send` won the race; CI caught the block-first interleaving). The real
+/// block-until-woken contract lives in the scheduler `send_wake`/park tests above (and
+/// `parallel_recv_parks_deep_in_flattened_frames_and_resumes`), which exercise the actual current
+/// mechanism; this test now covers only the still-true cross-thread-delivery + `Vm: Send` facts.
 #[test]
 fn parallel_recv_blocks_until_send_wakes_it() {
     let core = Arc::new(ChannelCore::default());
+    let mut sender = Vm::new(Arc::new(empty_program()));
+    let sh = sender.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let mut worker = Vm::new(Arc::new(empty_program()));
     worker.parallel = true;
     let wh = worker.heap.alloc(Obj::Channel(Arc::clone(&core)));
-    let mut sender = Vm::new(Arc::new(empty_program()));
-    let sh = sender.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let sp = Span { line: 1, col: 1 };
-    let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
+    // Queue first, then hand the receiving `Vm` to another thread: the value is already in the
+    // shared core, so the cross-thread `recv` pops it deterministically (no interleaving race).
     sender
         .channel_method(sh, "send", &[Value::Int(42)], sp)
         .unwrap();
+    let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
     assert_eq!(handle.join().unwrap(), Value::Int(42));
 }
 
