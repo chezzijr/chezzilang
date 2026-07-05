@@ -250,7 +250,9 @@ print(r + 100)     # 106 — usable anywhere its value is
 - **One transparency gap — string interpolation.** Inside a `"{ ... }"` interpolation, a bare `ref`
   binding is **not** auto-dereferenced (interpolation fragments are parsed out-of-band, after the
   desugar pass), so `"{r}"` prints the underlying box (`Ref(value=…)`), exactly as an explicit
-  `Ref[T]` would. Write `"{r + 0}"` or bind a copy (`v := r`) first if you need the value in a string.
+  `Ref[T]` would. Bind a copy first (`v := r`) and interpolate `"{v}"` if you need the value in a
+  string — the auto-deref that applies to `r` in arithmetic does **not** reach inside an interpolation
+  fragment, so `"{r + 0}"` is itself a type error (`Ref[int]` + `int`).
   Everywhere else (`print(r)`, arithmetic, args, indexing) `r` reads as its value.
 - **Where it's allowed.** Locals + params **only**. `ref` is a **parse error** as a return type, a
   generic argument, a collection element, a tuple element, a struct field, or on a destructuring binding
