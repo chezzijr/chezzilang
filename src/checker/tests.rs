@@ -2475,10 +2475,19 @@ fn multibranch_void_stays_nil_no_error() {
 }
 
 #[test]
-fn multibranch_int_float_widens_to_float() {
-    // NEIGHBOR: int + float sibling branches widen to float (the ONE numeric widen, bare scalars).
+fn multibranch_int_float_conflicts_not_inferred() {
+    // Mixed int/float sibling branches CONFLICT (annotate `-> float` to opt in). Inferring `float`
+    // here would set the static type to float WITHOUT the compiler emitting `Op::CoerceFloat` (it
+    // reads `decl.ret`, the annotation, not the inferred ret), leaving a runtime int under a float
+    // type — `x / 2` would do integer division. Widening is a SINK-only rule (an inferred return is
+    // not a sink).
+    entry_rejects(
+        "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    pass\n",
+        "conflicting branches",
+    );
+    // …but an explicit `-> float` annotation DOES widen (the real sink emits the coercion).
     entry_ok(
-        "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    x := f(true)\n    y := x + 1.5\n    print(y)\n",
+        "fn f(c: bool) -> float:\n    if c:\n        return 1\n    return 2.0\nfn main():\n    x := f(true)\n    print(x / 2)\n",
     );
 }
 

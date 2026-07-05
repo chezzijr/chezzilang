@@ -459,7 +459,14 @@ impl Checker {
         let conflict = || (a.clone(), b.clone());
         match (a, b) {
             (Unknown, other) | (other, Unknown) => Ok(other.clone()),
-            (Int, Float) | (Float, Int) => Ok(Float),
+            // NOTE: no `(Int, Float) -> Float` widen here. An inferred return type is NOT a widening
+            // "sink" (spec.md: int->float widens only at an explicit sink — a typed binding/param/
+            // `-> float` annotation, which emits `Op::CoerceFloat`). Inferring `float` from mixed
+            // `return 3` / `return 4.0` branches would set the static type to float WITHOUT the
+            // compiler emitting the coercion (compile_fn reads `decl.ret`, the annotation, not the
+            // checker's inferred ret), leaving a runtime `int` under a `float` type — `x / 2` would
+            // do integer division. So mixed int/float branches CONFLICT: annotate `-> float` (which
+            // coerces correctly) to opt in.
             (Result(at, ae), Result(bt, be)) => Ok(Ty::Result(
                 Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
                 Box::new(Self::join_slot(ae, be).ok_or_else(conflict)?),

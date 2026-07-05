@@ -379,10 +379,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   mixed literal). Carve-outs: a plain reassignment `x = 3` to a `float` local is rejected (type-blind
   target), and an un-annotated non-literal mixed collection is inferred `List[float]` but its non-literal
   `int` element is not widened at runtime (annotate to convert). The same scalar-only rule governs
-  **un-annotated multi-branch return inference**: sibling `return` branches merge with a join that
-  applies the one `int`→`float` widen **only to bare-scalar branches** (`if c: return 1 else: return
-  2.0` infers `-> float`), never inside a merged type-arg slot — `return Ok(1)` and `return Ok(2.0)`
-  *conflict* (they would demand `Result[float]` from `Ok(int)`, the `float! = Ok(3)` error above). See
+  **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
+  **not** widen `int`→`float` across branches — an inferred return is not a widening *sink* (widening
+  emits `Op::CoerceFloat` only at an explicit sink), so mixed `if c: return 1 else: return 2.0`
+  **conflicts**; annotate `-> float` to opt in. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
+  widening inside a merged type-arg slot — the `float! = Ok(3)` error above). See
   [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with

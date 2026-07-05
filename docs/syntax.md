@@ -472,8 +472,9 @@ inline expr against `-> nil`, e.g. a bare void call, stays legal).
 expression's type (`fn ten(): 10` infers `-> int`); otherwise **all** the body's `return` branches
 (plus an implicit trailing/inline expression) are typed and **merged** with a join. A body with no
 value-returning `return` infers `nil`. Param types stay required. The join `J(a, b)` is: (1) equal
-types → that type; (2) `{int, float}` → `float` (the one numeric widen — **bare scalars only**, it does
-*not* recurse into type-arg slots); (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
+types → that type; (2) mixed `{int, float}` branches **conflict** — an inferred return is *not* a
+widening sink, so annotate `-> float` to opt into the coercion (widening emits `Op::CoerceFloat` only
+at an explicit sink); (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
 `Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
 side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
 payloads — `Result[int]` and `Result[float]` **conflict**); (4) otherwise → a **conflict** error
