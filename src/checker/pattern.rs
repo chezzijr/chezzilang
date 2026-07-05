@@ -712,6 +712,7 @@ impl Checker {
         // is equally the value, and `infer_call` drains the single take()-once slot, so without
         // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
         let hint = self.expected_hint.take();
+        let had_hint = hint.is_some();
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
@@ -740,7 +741,12 @@ impl Checker {
         }
         self.expected_hint = None;
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
-        result.unwrap_or(Ty::Unknown)
+        let res = result.unwrap_or(Ty::Unknown);
+        if had_hint {
+            res
+        } else {
+            Self::default_expr_result_e(res)
+        }
     }
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
@@ -751,6 +757,7 @@ impl Checker {
         // re-installing it the second-inferred branch would lose the hint and a generic ctor there
         // would deadlock (acceptance would depend on branch order).
         let hint = self.expected_hint.take();
+        let had_hint = hint.is_some();
         self.expect_bool(cond, "if condition");
         // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
         // conditionally — refinement inside one must not leak into the other or past the `if`.
@@ -763,7 +770,28 @@ impl Checker {
         self.expected_hint = None;
         self.restore_refinable(snap);
         let acc = self.unify_branch(None, t_then, then.span);
-        self.unify_branch(Some(acc), t_els, els.span)
+        let res = self.unify_branch(Some(acc), t_els, els.span);
+        if had_hint {
+            res
+        } else {
+            Self::default_expr_result_e(res)
+        }
+    }
+
+    /// Default an UNANNOTATED if/match-expression's folded `Result` error slot to the built-in
+    /// `Error` protocol when no branch pinned it — matching the return-inference E-default and the
+    /// `T!`/`Result[T]` shorthand (docs/syntax.md). E.g. `x := if c: Ok(1) else: Ok(2)` folds to
+    /// `Result[int, Unknown]` (no `Err` branch), and the leaked `Unknown` would silently satisfy any
+    /// enclosing error type on a `?`. Applied ONLY without an expected-type hint (an annotated
+    /// `x: Result[str, str] = if …` keeps its declared E) and ONLY to the top-level `Result` — it
+    /// does NOT reject a residual `Unknown` (binding position stays lenient: `x := if c: None else:
+    /// None` is as legal as `x := None`). The T-slot / deeper order-dependent branch merge is
+    /// intentionally out of scope here (`unify_branch` keeps its `compatible`-based fold untouched).
+    fn default_expr_result_e(t: Ty) -> Ty {
+        match t {
+            Ty::Result(v, e) if e.is_unknown() => Ty::Result(v, Box::new(Ty::error_proto())),
+            other => other,
+        }
     }
 
     /// Fold one branch's type into a match/if expression's running result type. The first concrete

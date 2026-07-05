@@ -2507,6 +2507,62 @@ fn multibranch_two_structs_conflict() {
     );
 }
 
+// A `struct DbErr` satisfying the `Error` protocol, used by the if/match-expr E-default tests below.
+const DBERR: &str =
+    "struct DbErr:\n    msg: str\n    fn message(self) -> str:\n        return self.msg\n";
+
+#[test]
+fn if_expr_all_ok_defaults_result_e_to_error() {
+    // An unannotated all-`Ok` if-EXPRESSION folds to `Result[int, Unknown]` (no `Err` branch pins E);
+    // the E-slot must default to the `Error` protocol, not leak `Unknown`. Proof: propagating `x?`
+    // into a `-> int!DbErr` fn now hits the `'?' propagates error Error, but ... DbErr` mismatch that
+    // a leaked `Unknown` (compatible with anything) would silently pass.
+    entry_rejects(
+        &format!(
+            "{DBERR}fn g() -> int!DbErr:\n    x := if true: Ok(1) else: Ok(2)\n    return x?\nfn main():\n    pass\n"
+        ),
+        "propagates error Error",
+    );
+}
+
+#[test]
+fn match_expr_all_ok_defaults_result_e_to_error() {
+    // Same E-default on the match-EXPRESSION surface.
+    entry_rejects(
+        &format!(
+            "{DBERR}fn g() -> int!DbErr:\n    k := 1\n    x := match k:\n        1: Ok(1)\n        _: Ok(2)\n    return x?\nfn main():\n    pass\n"
+        ),
+        "propagates error Error",
+    );
+}
+
+#[test]
+fn if_expr_edefault_does_not_over_reject_error_str_merge() {
+    // MUST-NOT-BREAK (the regression the auto-task's stricter merge introduced): mixing a
+    // `Result[_, Error]` branch with a `Result[_, str]` branch stays ACCEPTED — `str` conforms to the
+    // `Error` protocol, and `unify_branch`'s `compatible`-based fold is left untouched by the
+    // E-default (which only fills a top-level `Unknown` E-slot, never re-checks branch acceptance).
+    entry_ok(
+        "fn get_err() -> int!:\n    return Err(\"boom\")\nfn main():\n    c := true\n    x := if c: get_err() else: Err(\"other\")\n    print(\"ok\")\n",
+    );
+}
+
+#[test]
+fn if_expr_edefault_keeps_binding_leniency_and_neighbors() {
+    // The E-default must NOT import return-position strictness: an un-inferable if-expr bound via `:=`
+    // stays as lenient as the equivalent direct binding.
+    entry_ok("fn main():\n    x := if true: None else: None\n    print(x)\n"); // like `x := None`
+    // T-merge across Ok/Err still works; annotated form still works; int/float still conflicts.
+    entry_ok("fn main():\n    x := if true: Some(3) else: None\n    print(x)\n");
+    entry_ok(
+        "fn main():\n    x: Result[str, str] = if true: Ok(\"a\") else: Err(\"b\")\n    print(x)\n",
+    );
+    entry_rejects(
+        "fn main():\n    x := if true: 3 else: 4.0\n    print(x)\n",
+        "incompatible types",
+    );
+}
+
 #[test]
 fn multibranch_annotated_float_still_widens() {
     // NEIGHBOR: the ANNOTATED-return widening path is untouched (`-> float: return 3` still widens).

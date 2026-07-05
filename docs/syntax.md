@@ -1672,7 +1672,11 @@ sign := if n > 0: "pos" else: "neg"
 grade := if s >= 90: "A" else if s >= 80: "B" else: "F"
 ```
 
-All arms (and both `if` branches) must agree on a type. The statement forms — `match s:` /
+All arms (and both `if` branches) must agree on a type. When every branch is an `Ok(…)` (no `Err`
+branch pins the error type), an **unannotated** `if`/`match`-expression's `Result` error slot defaults
+to the built-in `Error` protocol — `x := if c: Ok(1) else: Ok(2)` is `Result[int, Error]`, matching the
+`T!`/`Result[T]` shorthand and return-type inference (it does not leak an un-pinned error type onto a
+later `?`). An explicit annotation (`x: Result[int, DbErr] = …`) still wins. The statement forms — `match s:` /
 `if c:` with indented blocks and `return`/assignments inside — are unchanged; loops and
 **multiline** function bodies are statement sequences (they return via explicit `return`). The one
 exception is the **inline-expr function body** (`fn a(): <expr>`, §5), whose single bare expression is
