@@ -1480,7 +1480,10 @@ impl Vm {
     /// interp oracle, which writes a faulting task's partial output before the fault unwinds. Higher-
     /// index racy `Fault`s and `Cancelled` still drop (no deterministic slot — the work is incomplete /
     /// ran past the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
-    /// byte-identical. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
+    /// byte-identical. A `Deadlocked` slot (the M:N deadlock-abort synthetic outcome — every parked
+    /// fiber gets one, and it never coexists with a real `Fault`/`Exit`) is different: ALL parked
+    /// buffers flush in task order (not just the lowest-index one), matching serial's live prints, and
+    /// ONE deadlock error propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
     /// `Exit` wins over any `Fault` regardless of index — otherwise a lower-index recoverable fault
     /// could demote a child's `os.exit` to a catchable error. Within a kind, the lowest index wins
     /// (scan order + `is_none()`).
@@ -1490,6 +1493,7 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<RuntimeError> = None;
+        let mut deadlock_err: Option<RuntimeError> = None;
         for slot in slots {
             match slot.expect("every task slot was filled before join returned") {
                 TaskOutcome::Done(wr) => {
@@ -1510,9 +1514,11 @@ impl Vm {
                     // racy faults still drop (they ran concurrently past the terminal fault's cancel;
                     // no deterministic slot position).
                     //
-                    // RESIDUAL RACE (intentionally not chased here): this matches the cooperative/interp
-                    // oracle byte-for-byte only when the faulting task is the nursery's SOLE
-                    // output-producer. With additional output-producing siblings the M:N result can
+                    // RESIDUAL RACE (intentionally not chased here — applies ONLY to a genuine
+                    // multi-printer REAL-fault reduce; the multi-parked DEADLOCK case is handled by
+                    // the `Deadlocked` arm below, which flushes ALL parked buffers): this matches the
+                    // cooperative/interp oracle byte-for-byte only when the faulting task is the
+                    // nursery's SOLE output-producer. With additional output-producing siblings the M:N result can
                     // still diverge from serial's strict stop-at-first-fault order — a sibling that
                     // reaches `Done` before the faulter's cancel-trip keeps its output (serial would
                     // never have run it), and whether a lower-index sibling ends `Fault` vs `Cancelled`
@@ -1527,21 +1533,37 @@ impl Vm {
                         first_fault = Some(err);
                     }
                 }
+                TaskOutcome::Deadlocked { err, out, stderr } => {
+                    // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
+                    // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
+                    // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
+                    // a higher-index printer's output is preserved, matching the serial engine which
+                    // printed those lines live before the deadlock returned. Only ONE deadlock error
+                    // propagates (the first, i.e. lowest task-order); a real fault/exit trips
+                    // `terminate` first, so `Deadlocked` never coexists with `Fault`/`Exit`.
+                    self.out.push_str(&out);
+                    self.stderr.push_str(&stderr);
+                    if deadlock_err.is_none() {
+                        deadlock_err = Some(err);
+                    }
+                }
                 TaskOutcome::Cancelled => {}
             }
         }
-        match (first_exit, first_fault) {
+        match (first_exit, first_fault, deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
             // `recover:` to the driver, which reports `code` as the process exit status (decision C).
             // It wins over any sibling fault — a hard halt is never demoted to a catchable error.
-            (Some(code), _) => {
+            (Some(code), _, _) => {
                 self.pending_exit = Some(code);
                 Err(self.err("exit".to_string(), Span { line: 1, col: 1 }))
             }
             // A real fault propagates normally so an outer `recover:` can still catch it.
-            (None, Some(e)) => Err(e),
-            (None, None) => Ok(()),
+            (None, Some(e), _) => Err(e),
+            // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
+            (None, None, Some(e)) => Err(e),
+            (None, None, None) => Ok(()),
         }
     }
 

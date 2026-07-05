@@ -315,10 +315,13 @@ Channel is a cross-nursery wakeup (handlers reach clients via sockets, which wor
   from serial's strict stop-at-first-fault order (a sibling reaching `Done` before the cancel-trip
   keeps output serial never produced; `Fault`-vs-`Cancelled` classification is itself a race), a
   pre-existing nondeterminism the buffer-and-flush model cannot reconcile and does not assert. The
-  **nursery deadlock-abort path is symmetric**: `SchedCore::flag_deadlock` carries each still-parked
-  fiber's OWN buffered stdout/stderr into its `Fault` slot (not an empty buffer), so a parked task's
-  partial output flushes at its task-order slot exactly like a real fault — the same sole-producer
-  parity guarantee (the parked task that printed then blocked is the deterministic producer).
+  **nursery deadlock-abort path is stronger**: `SchedCore::flag_deadlock` records each still-parked
+  fiber with a DISTINCT `TaskOutcome::Deadlocked` outcome carrying that fiber's OWN buffered
+  stdout/stderr, and `reduce_task_slots` flushes EVERY parked buffer at its task-order slot (not just
+  the lowest-index one, as with a real `Fault`). So a deadlock with TWO-OR-MORE parked fibers preserves
+  a higher-index printer's output too — full serial parity, not just the sole-producer case. The
+  distinct outcome (never coexisting with a real `Fault`/`Exit`, which trip `terminate` first) is what
+  lets the reduce flush all parked buffers without touching the real-fault multi-fault ordering above.
 - **Decision C** — `os.exit` hard-halts, wins over sibling fault, uncatchable by an outer `recover:`.
 - **Share-nothing** — every fiber owns its heap; no value crosses a heap boundary except via
   `WireValue` copy (`Channel.send` / `spawn` args) or `Arc`'d cores (`Channel` / `Shared` /

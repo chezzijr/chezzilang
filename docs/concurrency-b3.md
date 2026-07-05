@@ -237,8 +237,10 @@ worker; a barrier-confirm detector in the blocking `recv` — a parked worker co
 most once per `epoch`, and `confirms == live` ⇒ fault `deadlock` with the cooperative engine's byte-identical
 message. `send`/`task_finished` bump `epoch`; watch and channel `q` locks are never held together. When the
 detector fires (Tier-D `SchedCore::flag_deadlock`), each still-parked fiber's OWN buffered stdout/stderr is
-moved into its `Fault` slot, so a parked task's partial output flushes at its task-order slot exactly like a
-real fault (decision F) — the serial engine printed those lines live before returning the deadlock error.
+moved into a distinct `TaskOutcome::Deadlocked` slot, and `reduce_task_slots` flushes EVERY parked buffer at
+its task-order slot (not just the lowest-index one) — so a deadlock with two-or-more parked fibers preserves a
+higher-index printer's output too, matching the serial engine which printed those lines live before returning
+the deadlock error (decision F).
 **Residual hangs documented:** `Executor`-spanning / orphaned-message / saturated-pool cases. (The
 **cross-nursery** circular case is now **RESOLVED under `--parallel`** by Tier-D's VM-global flat
 scheduler — `examples/parallel_cross_nursery_circular.chz`; the cooperative engine's cross-nursery
