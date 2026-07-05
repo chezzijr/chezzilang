@@ -9599,14 +9599,16 @@ fn parallel_recover_inside_worker_does_not_catch_cancel() {
 }
 
 /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
-/// join. Byte-identical on the VM, the interpreter, and the `.expected` file.
+/// join. Byte-identical to the `.expected` file on the cooperative VM (deterministic FIFO in spawn
+/// order); on the M:N engine the three workers `send` concurrently, so the queued strings arrive in
+/// EITHER order — the line SET is identical, asserted order-insensitively (like `golden_try_recv`).
 #[test]
 fn golden_channel_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/channel.chz");
     let expected = include_str!("../../examples/channel.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+    assert_same_lines(&vm_out, &run_capture_parallel(src).expect("M:N run"));
 }
 
 /// `Atomic[int].add` cross-thread atomicity: N real-OS-thread fibers each `add(1)` one shared
