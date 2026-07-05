@@ -100,6 +100,26 @@ annotation); and an **imported** generic fn used bare as a value stays the un-pi
 only — resolves the accept⟺erase lockstep without a span side-table). Docs: `docs/syntax.md` fn-value
 section. Full suite + conformance + clippy green.
 
+**✅ GENERIC FN VALUE PIN NOW COMPOSES THROUGH A BUILTIN `.map`/`.fold` SLOT (2026-07-05).** Scope A
+fired for a user-defined HOF param (`applyit(ident, 5)`) but NOT for a builtin container method that
+carries its OWN result type param (`[1,2,3].map(conv)` / `.fold(0, add)` were WRONGLY rejected with a
+leaked `T`: "argument to 'map' has type fn(T) -> str, expected fn(int) -> str"), while `.filter(keep)`
+(fully-concrete slot) and the turbofish workaround (`.map(conv[int])`) worked — an inconsistency.
+Root cause: a bare generic fn arg is prepass-typed rigid by `infer_generic_arg_tys` (no `expected_hint`),
+so its own `[T]` was never pinned from the method's element slot; `infer_generic_method`'s own-`U`
+recovery couldn't simultaneously pin the arg fn's `[T]`. Fix (`src/checker/proto.rs`,
+`infer_generic_method`): a per-arg re-pin `try_pin_generic_fn_value_arg` INTERLEAVED in the pass-1 loop
+(uses the live subst map so `.fold`'s accumulator `U` is bound by `init` FIRST) — for a bare same-module
+generic-fn arg, unify its declared sig against the slot substituted-so-far (`fn(int) -> U`) in a FRESH
+map, ACCEPT the concrete result ONLY when every arg-fn param binds AND `ty_fully_concrete` (so a
+still-free slot or a genuinely un-inferable return-only arg-fn param defers unchanged — the Category-1
+leak guard + every clean reject survive), enforcing the arg fn's declared bounds. Additive checker-only,
+runtime generic-erased (serial == M:N automatic; both-engine RUN tests). Must-not-regress verified:
+unannotated-closure loop-back (`.map(fn(x): x*2)`), `.filter(keep)`, user-HOF `mymap`, turbofish,
+two-distinct-pins-no-launder (fresh map per call), un-inferable `produce[V]` stays a leaked-`V` reject
+(not degraded to `List[Unknown]`), and a user struct uniquely owning `.map` still resolves to the USER
+method. Tests in `src/checker/tests.rs` + `src/vm/tests.rs`; docs: `docs/syntax.md` fn-value section.
+
 **✅ CHECKER LENIENCY — five decl footguns now rejected (2026-07-05).** All checker-only,
 reject-earlier in the decl-hoist pass (`src/checker/setup.rs` Struct/Enum/NewType arms) + a
 cascade-suppression tweak in the pass-2 body loops (`src/checker/sig.rs`); no runtime/VM change, so
