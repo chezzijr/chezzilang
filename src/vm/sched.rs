@@ -1481,7 +1481,8 @@ impl Vm {
     /// index racy `Fault`s and `Cancelled` still drop (no deterministic slot — the work is incomplete /
     /// ran past the terminal fault's cancel). The fault-free goldens only ever hit `Done`, so they stay
     /// byte-identical. A `Deadlocked` slot (the M:N deadlock-abort synthetic outcome — every parked
-    /// fiber gets one, and it never coexists with a real `Fault`/`Exit`) is different: ALL parked
+    /// fiber gets one; a real `Fault`/`Exit` normally trips `terminate` first, and the precedence below
+    /// resolves any mix deterministically) is different: ALL parked
     /// buffers flush in task order (not just the lowest-index one), matching serial's live prints, and
     /// ONE deadlock error propagates. Precedence: an `os.exit` is an UNCONDITIONAL hard halt, so the lowest-index
     /// `Exit` wins over any `Fault` regardless of index — otherwise a lower-index recoverable fault
@@ -1539,8 +1540,10 @@ impl Vm {
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
                     // a higher-index printer's output is preserved, matching the serial engine which
                     // printed those lines live before the deadlock returned. Only ONE deadlock error
-                    // propagates (the first, i.e. lowest task-order); a real fault/exit trips
-                    // `terminate` first, so `Deadlocked` never coexists with `Fault`/`Exit`.
+                    // propagates (the first, i.e. lowest task-order); a real fault/exit normally trips
+                    // `terminate` before the detector fires, but the terminal `match` below applies a
+                    // strict `Exit` > `Fault` > `Deadlocked` precedence so a mixed vector (were one to
+                    // arise under a race) still resolves deterministically.
                     self.out.push_str(&out);
                     self.stderr.push_str(&stderr);
                     if deadlock_err.is_none() {

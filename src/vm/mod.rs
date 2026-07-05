@@ -1170,8 +1170,11 @@ enum TaskOutcome {
     /// `Fault` so `reduce_task_slots` can flush ALL parked buffers in task order (matching the serial
     /// engine, which printed those lines live before the deadlock returned) — a real multi-fault
     /// reduce still flushes only the terminal fault's buffer. Only ever originates in `flag_deadlock`
-    /// (M:N); the legacy-pool reduce never produces it. A real fault/exit trips `terminate` first, so
-    /// `Deadlocked` never coexists with `Fault`/`Exit` in one reduce.
+    /// (M:N); the legacy-pool reduce never produces it. In practice a real fault/exit trips
+    /// `terminate` before the deadlock detector fires, so a slot vector is normally all-`Deadlocked`;
+    /// but the invariant is NOT relied upon — `reduce_task_slots` applies a strict `Exit` > `Fault` >
+    /// `Deadlocked` precedence for the terminal outcome, so a mixed vector (were one to arise under a
+    /// race) still resolves deterministically.
     Deadlocked {
         err: RuntimeError,
         out: String,
