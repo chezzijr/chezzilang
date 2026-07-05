@@ -1610,7 +1610,10 @@ Likewise a variant arm whose payload contains a *refutable* sub-pattern (a liter
 variant — e.g. `Some(0)`, `Pair(0, y)`) covers only part of that variant's domain, so it does **not**
 close the variant; only an unguarded arm whose payload is all wildcards/plain bindings does. (A guarded
 variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
-then `E.A(n)` — without a "duplicate arm" error.)
+then `E.A(n)` — without a "duplicate arm" error.) An exact-duplicate **literal** arm (`1:` twice,
+`"x":` twice, `1 | 1`) is likewise a `duplicate match arm` error — dead code under first-match — with
+the same guard carve-out (`1 if c:` then `1:` is legal). (Range *subsumption* — a literal inside an
+earlier covering range — is not yet flagged.)
 
 **Matching on an unannotated closure parameter.** An unannotated closure param is now *inferred* to a
 concrete type from its context (see "Closure-parameter inference" above), so `fn(x): match x: E.A: …;

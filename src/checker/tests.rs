@@ -2877,6 +2877,45 @@ fn match_expression_duplicate_arm_rejected() {
 }
 
 #[test]
+fn match_duplicate_literal_arm_rejected() {
+    // An exact-duplicate literal arm is dead (first-match) and now errors, matching enum-variant
+    // dup detection (was silently accepted — a diagnostic inconsistency).
+    rejects(
+        "fn f(n: int) -> int:\n    match n:\n        1: return 1\n        1: return 2\n        _: return 0\n",
+        "duplicate match arm",
+    );
+    rejects(
+        "fn f(s: str) -> int:\n    match s:\n        \"x\": return 1\n        \"x\": return 2\n        _: return 0\n",
+        "duplicate match arm",
+    );
+    rejects(
+        "fn f(b: bool) -> int:\n    match b:\n        true: return 1\n        true: return 2\n        _: return 0\n",
+        "duplicate match arm",
+    );
+    // or-pattern duplicate `1 | 1` (coverage threads through alternatives).
+    rejects(
+        "fn f(n: int) -> int:\n    match n:\n        1 | 1: return 1\n        _: return 0\n",
+        "duplicate match arm",
+    );
+}
+
+#[test]
+fn match_duplicate_literal_guard_carveout_and_distinct_ok() {
+    // A GUARDED arm never closes the literal, so `1 if c: … / 1: …` is legal (must NOT over-reject).
+    ok(
+        "fn f(n: int) -> int:\n    c := true\n    match n:\n        1 if c: return 1\n        1: return 2\n        _: return 0\n",
+    );
+    // Distinct literals are fine; a literal inside an earlier covering RANGE is NOT flagged (range
+    // subsumption is deliberately out of scope — only exact literal dups are detected).
+    ok(
+        "fn f(n: int) -> int:\n    match n:\n        1: return 1\n        2: return 2\n        _: return 0\n",
+    );
+    ok(
+        "fn f(n: int) -> int:\n    match n:\n        0..10: return 1\n        5: return 2\n        _: return 0\n",
+    );
+}
+
+#[test]
 fn if_expression_unknown_branch_does_not_poison() {
     // One branch is Unknown (undefined name — reported on its own), the other concrete. The result
     // takes the concrete type, so there's no spurious "incompatible types" error.

@@ -482,6 +482,29 @@ impl Checker {
                                 ),
                             );
                         }
+                        // Exact-duplicate literal-arm detection, mirroring the enum-variant
+                        // `covered`/`guarded` logic above: a literal closed by a PRIOR UNGUARDED arm
+                        // makes any later same-literal arm dead → a `duplicate match arm` error (was
+                        // silently accepted; enum-variant dups already erred — this closes the
+                        // inconsistency). A GUARDED arm never closes, so `1 if c: … / 1: …` stays
+                        // legal. Keyed with a `:`-bearing prefix so it can never collide with a
+                        // variant name (identifiers have no `:`). Range subsumption is out of scope.
+                        use crate::ast::LitPattern;
+                        let key = match lit {
+                            LitPattern::Int(n) => format!("lit:i{n}"),
+                            LitPattern::Str(s) => format!("lit:s{s}"),
+                            LitPattern::Bool(b) => format!("lit:b{b}"),
+                        };
+                        if covered.contains(&key) {
+                            let shown = match lit {
+                                LitPattern::Int(n) => n.to_string(),
+                                LitPattern::Str(s) => format!("\"{s}\""),
+                                LitPattern::Bool(b) => b.to_string(),
+                            };
+                            self.error(span, format!("duplicate match arm '{shown}'"));
+                        } else if !guarded {
+                            covered.insert(key);
+                        }
                     }
                     Pattern::Range { .. } => {
                         // A range pattern is int-only; reject against str/bool scrutinees.

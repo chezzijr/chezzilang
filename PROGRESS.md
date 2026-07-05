@@ -11,6 +11,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ EXACT-DUPLICATE LITERAL MATCH ARMS ERROR (2026-07-05).** `match n: 1: … 1: …` (and `"x":` twice,
+`1 | 1`) is now a `duplicate match arm` error — dead code under first-match — matching the existing
+enum-variant dup detection (was silently accepted, a diagnostic inconsistency). Same guard carve-out
+(`1 if c:` then `1:` stays legal). Range *subsumption* (a literal inside an earlier covering range) is
+still not flagged. `src/checker/pattern.rs` (the `MatchKind::Literal` arm), tests in `src/checker/tests.rs`.
+
 **✅ `recover:` TRAILING STATEMENT-`match`/`if` IS THE BLOCK VALUE (2026-07-05).** A `recover:` block
 whose TRAILING statement is a statement-form `match` (or `if`) with value-producing arms/branches was
 typed `Result[nil]` and the produced value was SILENTLY DROPPED (`Ok(nil)`) — only a genuine trailing
