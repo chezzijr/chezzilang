@@ -11,6 +11,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ MULTI-BRANCH RETURN INFERENCE — JOIN merge + finalize, `Unknown`-leak fix (2026-07-05).**
+Checker-only (`src/checker/sig.rs` + a closure hook in `src/checker/pattern.rs`); no runtime/VM/grammar
+change, so two-engine parity + conformance hold by construction. **Before:** `infer_returns` was
+first-concrete-return-wins with `Unknown`-fill — one branch's shape won and complementary type-arg slots
+stayed `Ty::Unknown`, which then LEAKED as a type-check bypass (an `Err`-only fn's `Result[Unknown, str]`
+let `x := err()?; y: int = x; z: str = x` all type-check). **Now:** ALL `return` branches (plus an
+inline/implicit-trailing expr) are typed and folded with a join `J`: `a==b`; the one `{int,float}→float`
+widen (bare scalars only, no recursion into slots); the **same** type-constructor (`Result`/`Option`/
+`List`/`Map`/`Set` or same generic struct/enum/newtype) → **merge slot-wise** (`Ok("h")` ⊔ `Err("a")` =
+`Result[str, str]`); otherwise a **conflict** (`cannot infer return type: conflicting branches (X vs Y)`
+— NO common-supertype/protocol/`Any` search, so two distinct structs conflict, a protocol return must be
+spelled). A post-fixpoint **finalize** fills the `Result` **error slot** default (`Unknown`→`Error`
+protocol, matching `T!`, so `fn ok(): return Ok(5)` is `Result[int, Error]`) and REJECTS any other
+residual un-inferable `Unknown` (`fn err(): return Err("x")`, `fn none(): return None`, `fn f(): return
+[]` — the return-position analogue of the empty-collection diagnostic; also closes the old
+baseless-recursion permissive gap). `Ty::Param` (generic fns / the proto.rs HOF loop-back) is left
+untouched. Applies uniformly to free fns, struct/enum methods, AND free closures (`f := fn(): Ok(5)` →
+`Result[int, Error]`; `fn(): Err("x")` rejected — gated to `expected.is_none() && !generic_arg_prepass`
+so `fn`-typed slots / generic-HOF contexts are excluded). Cascade-safe: a body that already errored
+suppresses the finalize diagnostic. 18 new checker tests (repro a–e + must-not-break neighbors +
+closure-gated); 4 existing tests updated to the new documented semantics (int-vs-str/int-vs-str method
+conflicts now say `conflicting branches`; pure self-/mutual recursion now REJECTED not permissive).
+Acceptance demo: `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, str]`
+(byte-identical serial == M:N). Docs: `docs/syntax.md` "Return type inference", `docs/spec.md` widening
+note. Full suite (3065) + conformance + clippy green.
+
 **✅ GENERIC FN AS A VALUE — scope A + B, erased runtime (2026-07-05).** A generic function
 (`fn ident[T](x: T) -> T`) is now a usable **value** once its type params are **pinned**: via an explicit
 **turbofish** (`g := ident[int]` ⇒ `fn(int) -> int`, scope B) OR against a **known concrete

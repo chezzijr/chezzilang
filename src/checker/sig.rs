@@ -199,10 +199,17 @@ impl Checker {
         // final pass confirm no change (the fixpoint). A non-productive pass breaks the loop early.
         let cap = self.count_uninferred(stmts) + 1;
         for _ in 0..cap {
-            if !self.infer_returns_pass(stmts) {
+            if !self.infer_returns_pass(stmts, false) {
                 break;
             }
         }
+        // FINALIZE: one last pass that folds ALL return branches (a top-level `Unknown` from a
+        // forward-ref/recursive sibling is absorbed by `join_ret`), fills the `Result` E-slot default
+        // (`Error`), and ERRORS on any residual un-inferable `Unknown` (an `Err`-only / `None`-only /
+        // empty-`[]` return, or a genuinely baseless recursion). Kept SEPARATE from the fixpoint so
+        // the passes above stay permissive: a callee's ret must be free to be `Unknown` mid-fixpoint
+        // (it resolves on a later pass) without being prematurely rejected or E-defaulted.
+        self.infer_returns_pass(stmts, true);
     }
 
     /// Count the un-annotated free fns + struct/enum methods that `infer_returns` infers — the
@@ -226,7 +233,7 @@ impl Checker {
     /// per the truncate-errors model in `infer_fn_ret`) and writes the result back into the stored
     /// `FnSig.ret` immediately, so a callee resolved earlier in THIS pass is already visible to a
     /// caller later in the pass. Returns `true` iff any stored ret changed (drives the fixpoint).
-    pub(super) fn infer_returns_pass(&mut self, stmts: &[Stmt]) -> bool {
+    pub(super) fn infer_returns_pass(&mut self, stmts: &[Stmt], finalize: bool) -> bool {
         let mut changed = false;
         for s in stmts {
             match &s.kind {
@@ -234,7 +241,7 @@ impl Checker {
                     let Some(sig) = self.functions.get(&decl.name).cloned() else {
                         continue;
                     };
-                    let ret = self.infer_fn_ret(decl, None, &sig.params);
+                    let ret = self.infer_fn_ret(decl, None, &sig.params, finalize);
                     if let Some(sig) = self.functions.get_mut(&decl.name)
                         && sig.ret != ret
                     {
@@ -266,7 +273,8 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
+                        let ret =
+                            self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params, finalize);
                         if let Some(ms) = self
                             .structs
                             .get_mut(&key)
@@ -302,7 +310,8 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params);
+                        let ret =
+                            self.infer_fn_ret(m, Some(self_ty.clone()), &sig.params, finalize);
                         if let Some(ms) = self
                             .enum_methods
                             .get_mut(&key)
@@ -337,7 +346,13 @@ impl Checker {
     /// un-inferable function (no concrete base anywhere) stays `Unknown` after convergence — that
     /// residual stays permissive (not rejected; soundly rejecting it needs call-graph cycle
     /// detection — a follow-up).
-    pub(super) fn infer_fn_ret(&mut self, decl: &FnDecl, self_ty: Option<Ty>, params: &[Ty]) -> Ty {
+    pub(super) fn infer_fn_ret(
+        &mut self,
+        decl: &FnDecl,
+        self_ty: Option<Ty>,
+        params: &[Ty],
+        finalize: bool,
+    ) -> Ty {
         let mark = self.errors.len();
         let saved_tps = self.enter_type_params(&decl.type_params);
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
@@ -377,16 +392,190 @@ impl Checker {
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.exit_type_params(saved_tps);
+        // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
+        // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
+        // genuine un-inferable return — suppress the finalize error to avoid piling on.
+        let body_had_err = self.errors.len() > mark;
         self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
-        if let Some(t) = inline_ret {
-            t
-        } else if let Some(t) = found.iter().find(|t| !t.is_unknown() && **t != Ty::Nil) {
-            t.clone()
-        } else if found.iter().any(|t| t.is_unknown()) {
-            // A value-return we couldn't pin (forward ref / recursion): stay permissive, not `nil`.
-            Ty::Unknown
-        } else {
-            Ty::Nil
+
+        // Collect every return branch: an inline-expr body's single implicit return, else all the
+        // `return`s (a bare `return` contributed `Nil`; no returns at all ⇒ an empty set ⇒ void).
+        let branches: Vec<Ty> = match inline_ret {
+            Some(t) => vec![t],
+            None => found,
+        };
+        // Fold the branches with the JOIN function `J` (`join_ret`): a==b, the one int→float widen,
+        // or slot-wise merge of a shared type-constructor; a top-level `Unknown` (forward ref /
+        // recursion / cascade) is ABSORBED by the other side, so a recursive fn still resolves to its
+        // concrete base during the fixpoint (matching the old first-concrete-wins timing). An empty
+        // branch set is `Nil` (void). A conflict yields `Err((X, Y))`.
+        let folded: Result<Ty, (Ty, Ty)> = {
+            let mut iter = branches.into_iter();
+            match iter.next() {
+                None => Ok(Ty::Nil),
+                Some(first) => iter.try_fold(first, |acc, b| Self::join_ret(&acc, &b)),
+            }
+        };
+        if !finalize {
+            // Fixpoint pass: stay permissive. A conflict collapses to `Unknown` (suppressed; the
+            // FINALIZE pass re-runs the fold and emits the real conflict diagnostic).
+            return folded.unwrap_or(Ty::Unknown);
+        }
+        // FINALIZE pass: emit the conflict diagnostic, else fill the E-default / reject residual
+        // un-inferable `Unknown`.
+        match folded {
+            Err((x, y)) => {
+                if !body_had_err {
+                    self.error(
+                        decl.name_span,
+                        format!(
+                            "cannot infer return type: conflicting branches ({x} vs {y}); add a -> annotation"
+                        ),
+                    );
+                }
+                Ty::Unknown
+            }
+            Ok(t) => self.finalize_ret(&t, &decl.name, decl.name_span, body_had_err),
+        }
+    }
+
+    /// The JOIN function `J` over two RETURN branch types. Pure (no `self`). Returns the merged type,
+    /// or `Err((a, b))` on a genuine conflict (the caller renders `cannot infer return type:
+    /// conflicting branches (a vs b)`). Rules, in order:
+    /// 1. `a == b` → `a`.
+    /// 2. a top-level `Unknown` is absorbed by the other side (a forward-ref / recursive / cascade
+    ///    branch carries no information — it must not drag a concrete sibling to a conflict).
+    /// 3. `{int, float}` → `float` (the ONE numeric widen — BARE SCALARS ONLY; it does NOT recurse
+    ///    into type-arg slots, per `docs/spec.md` `float! = Ok(3)` already being a type error).
+    /// 4. same type-constructor (Result/Option/List/Set/Map, or a same-name-same-arity Struct/Enum/
+    ///    NewType) → MERGE SLOT-WISE via [`Self::join_slot`].
+    /// 5. otherwise (incl. Nil-vs-value, two distinct structs) → CONFLICT. There is deliberately NO
+    ///    common-supertype / protocol / `Any` search: a protocol return must be spelled explicitly.
+    fn join_ret(a: &Ty, b: &Ty) -> Result<Ty, (Ty, Ty)> {
+        use Ty::*;
+        if a == b {
+            return Ok(a.clone());
+        }
+        let conflict = || (a.clone(), b.clone());
+        match (a, b) {
+            (Unknown, other) | (other, Unknown) => Ok(other.clone()),
+            (Int, Float) | (Float, Int) => Ok(Float),
+            (Result(at, ae), Result(bt, be)) => Ok(Ty::Result(
+                Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
+                Box::new(Self::join_slot(ae, be).ok_or_else(conflict)?),
+            )),
+            (Option(x), Option(y)) => Ok(Ty::Option(Box::new(
+                Self::join_slot(x, y).ok_or_else(conflict)?,
+            ))),
+            (List(x), List(y)) => Ok(Ty::List(Box::new(
+                Self::join_slot(x, y).ok_or_else(conflict)?,
+            ))),
+            (Set(x), Set(y)) => Ok(Ty::Set(Box::new(
+                Self::join_slot(x, y).ok_or_else(conflict)?,
+            ))),
+            (Map(k1, v1), Map(k2, v2)) => Ok(Ty::Map(
+                Box::new(Self::join_slot(k1, k2).ok_or_else(conflict)?),
+                Box::new(Self::join_slot(v1, v2).ok_or_else(conflict)?),
+            )),
+            (Struct(n1, a1), Struct(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(Ty::Struct(
+                n1.clone(),
+                Self::join_slots(a1, a2).ok_or_else(conflict)?,
+            )),
+            (Enum(n1, a1), Enum(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(Ty::Enum(
+                n1.clone(),
+                Self::join_slots(a1, a2).ok_or_else(conflict)?,
+            )),
+            (NewType(n1, a1), NewType(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(
+                Ty::NewType(n1.clone(), Self::join_slots(a1, a2).ok_or_else(conflict)?),
+            ),
+            _ => Err(conflict()),
+        }
+    }
+
+    /// Slot merge `S` for a single type-arg position INSIDE a shared constructor. `None` = conflict.
+    /// One side `Unknown` → the concrete other (partial `Ok`/`Err`/`Some`/`[]` branches fill each
+    /// other's slots); both `Unknown` → `Unknown` (finalize handles the residual). Both concrete →
+    /// must be EQUAL else conflict: widening does NOT apply inside payloads/elements (`int` vs `float`
+    /// here CONFLICTS), per `docs/spec.md` (`float! = Ok(3)` is already a type error). No recursion —
+    /// a nested same-ctor mismatch (`Some(Ok(5))` vs `Some(Err("x"))`) conflicts rather than merges.
+    fn join_slot(a: &Ty, b: &Ty) -> Option<Ty> {
+        if a.is_unknown() {
+            return Some(b.clone());
+        }
+        if b.is_unknown() {
+            return Some(a.clone());
+        }
+        if a == b { Some(a.clone()) } else { None }
+    }
+
+    /// Slot-merge two equal-length type-arg lists position-wise; `None` if any slot conflicts.
+    fn join_slots(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| Self::join_slot(x, y))
+            .collect()
+    }
+
+    /// FINALIZE a folded return type after the fixpoint converges: fill the `Result` E-slot default
+    /// (`Unknown` → the `Error` protocol, matching the `T!` shorthand) and REJECT any OTHER residual
+    /// `Unknown` (top-level, a `Result` T-slot, an `Option` T-slot, a List/Set/Map element/key/value,
+    /// or a Struct/Enum/NewType type-arg) with `cannot infer return type of '<name>'`. A `Ty::Param`
+    /// (generic fns / the proto.rs HOF loop-back) is LEFT UNTOUCHED — not this pass's concern. When
+    /// `suppress` is set (the body already emitted a real error) the residual-`Unknown` diagnostic is
+    /// skipped to avoid a cascade, but the E-default fill still applies.
+    pub(super) fn finalize_ret(&mut self, t: &Ty, name: &str, span: Span, suppress: bool) -> Ty {
+        let mut bad = false;
+        let filled = Self::fill_ret(t, &mut bad);
+        if bad && !suppress {
+            self.error(
+                span,
+                format!("cannot infer return type of '{name}'; add a -> annotation"),
+            );
+        }
+        filled
+    }
+
+    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` filling the `Result` E-slot default
+    /// and flagging (`*bad = true`) every OTHER residual `Unknown`. `Ty::Param` and all leaf types
+    /// pass through unchanged.
+    fn fill_ret(t: &Ty, bad: &mut bool) -> Ty {
+        match t {
+            Ty::Unknown => {
+                *bad = true;
+                Ty::Unknown
+            }
+            // A `Result` E-slot `Unknown` DEFAULTS to the `Error` protocol (the `T!` semantics); the
+            // T-slot is an ordinary value slot (a residual `Unknown` there is un-inferable → `bad`).
+            Ty::Result(a, b) => {
+                let na = Self::fill_ret(a, bad);
+                let nb = if b.is_unknown() {
+                    Ty::error_proto()
+                } else {
+                    Self::fill_ret(b, bad)
+                };
+                Ty::Result(Box::new(na), Box::new(nb))
+            }
+            Ty::Option(x) => Ty::Option(Box::new(Self::fill_ret(x, bad))),
+            Ty::List(x) => Ty::List(Box::new(Self::fill_ret(x, bad))),
+            Ty::Set(x) => Ty::Set(Box::new(Self::fill_ret(x, bad))),
+            Ty::Map(k, v) => Ty::Map(
+                Box::new(Self::fill_ret(k, bad)),
+                Box::new(Self::fill_ret(v, bad)),
+            ),
+            Ty::Struct(n, a) => Ty::Struct(
+                n.clone(),
+                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
+            ),
+            Ty::Enum(n, a) => Ty::Enum(
+                n.clone(),
+                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
+            ),
+            Ty::NewType(n, a) => Ty::NewType(
+                n.clone(),
+                a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
+            ),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| Self::fill_ret(x, bad)).collect()),
+            other => other.clone(),
         }
     }
 

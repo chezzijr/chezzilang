@@ -2783,6 +2783,10 @@ impl Checker {
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
         let saved_yield = self.yield_ty.take();
+        // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
+        // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
+        // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
+        let closure_mark = self.errors.len();
         self.push_scope();
         let param_tys: Vec<Ty> = params
             .iter()
@@ -2864,6 +2868,7 @@ impl Checker {
             })
             .collect();
         let body_ty = self.infer(body);
+        let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
@@ -2882,7 +2887,19 @@ impl Checker {
                 }
                 declared
             }
-            None => body_ty,
+            // An un-annotated closure's body IS its inferred return — apply the SAME finalize as a
+            // free fn/method (Result E-slot default + reject a residual un-inferable `Unknown`), but
+            // ONLY for a GENUINELY FREE closure literal. Gated on `expected.is_none()` so a closure
+            // sitting in a `fn`-typed slot (source #1) is untouched, and `!generic_arg_prepass` so the
+            // proto.rs generic/HOF loop-back contexts (where an `Unknown`/`Param` return is legit and
+            // resolved later) are excluded. `!body_had_err` avoids piling onto a real body error.
+            None => {
+                if expected.is_none() && !self.generic_arg_prepass && !closure_had_err {
+                    self.finalize_ret(&body_ty, "<closure>", body.span, false)
+                } else {
+                    body_ty
+                }
+            }
         };
         // A closure/lambda value carries its param names as labels, so a keyword call through a
         // closure value (`cb := fn(name: str): …; cb(name="X")`) resolves.

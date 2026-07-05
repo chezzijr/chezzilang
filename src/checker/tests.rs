@@ -2219,9 +2219,11 @@ fn inferred_return_recursive() {
 
 #[test]
 fn inferred_return_conflict_rejected() {
+    // Multi-branch JOIN: int and str do not merge (no common-supertype search) → a CONFLICT that
+    // names both branches, rather than the old first-branch-wins `expected int, found str`.
     rejects(
         "fn f(c: bool):\n    if c:\n        return 1\n    return \"x\"\n",
-        "expected return type int, found str",
+        "conflicting branches (int vs str)",
     );
 }
 
@@ -2269,13 +2271,14 @@ fn inferred_forward_ref_callee_later_is_permissive() {
 }
 
 #[test]
-fn inferred_recursion_only_stays_permissive() {
+fn inferred_recursion_only_rejected() {
     // A body whose only return is a self-recursive call has NO concrete base, so its return type is
-    // genuinely un-inferable: the fixpoint leaves it `Unknown`, which stays permissive (NOT rejected
-    // — a blanket "leftover Unknown ⇒ require annotation" check over-reaches onto non-recursive
-    // Unknown sources like `return x[0]` of an empty collection; soundly rejecting only this needs
-    // call-graph cycle detection, tracked as a follow-up).
-    ok("fn loopy(n: int):\n    return loopy(n - 1)\n");
+    // genuinely un-inferable: the fixpoint leaves it `Unknown`, and the FINALIZE pass now REJECTS
+    // that residual (the leak-fix: `Unknown` must not leak permissively out of a return). Annotate it.
+    rejects(
+        "fn loopy(n: int):\n    return loopy(n - 1)\n",
+        "cannot infer return type of 'loopy'",
+    );
 }
 
 #[test]
@@ -2308,11 +2311,14 @@ fn inferred_mutual_recursion_with_base_resolves() {
 }
 
 #[test]
-fn inferred_pure_mutual_recursion_stays_permissive() {
+fn inferred_pure_mutual_recursion_rejected() {
     // Pure mutual recursion with NO concrete base anywhere: both returns stay `Unknown` after the
-    // fixpoint and stay permissive (same residual as the self-recursive-only case above — a
-    // follow-up needs cycle detection to reject it without over-reaching).
-    ok("fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n");
+    // fixpoint, and the FINALIZE pass now REJECTS each residual (the leak-fix — same policy as the
+    // self-recursive-only case above). Both need a `-> T` annotation.
+    rejects(
+        "fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n",
+        "cannot infer return type",
+    );
 }
 
 #[test]
@@ -2352,6 +2358,144 @@ fn fact_still_infers_int() {
     );
 }
 
+// ===== 9c. multi-branch return-type inference: JOIN merge + finalize (leak fix) =====
+
+#[test]
+fn infer_ok_err_branches_merge_slotwise() {
+    // (a) Ok/Err sibling branches merge SLOT-WISE: Ok("h")=Result[str,?] ⊔ Err("a")=Result[?,str]
+    // → Result[str, str]. So `res()?` is str and `y: int = x` must ERROR. Today res leaks
+    // Result[Unknown, str] (T never merged from the Ok branch) and this WRONGLY type-checks.
+    entry_rejects(
+        "fn res():\n    if false:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return Ok(x)\nfn main():\n    pass\n",
+        "cannot assign str to variable of type int",
+    );
+}
+
+#[test]
+fn infer_ok_only_defaults_error_e() {
+    // (b) `fn ok(): return Ok(5)` must finalize to Result[int, Error] (E defaults to the Error
+    // protocol, matching `T!`). Propagating `ok()?` into a `-> int!DbErr` fn must then mismatch
+    // (Error vs DbErr) exactly like the annotated `-> int!` version. Today ok() leaks
+    // Result[int, Unknown] so `?` launders into DbErr with no error.
+    entry_rejects(
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok():\n    return Ok(5)\nfn caller() -> int!DbErr:\n    x := ok()?\n    return Ok(x)\nfn main():\n    pass\n",
+        "propagates error Error",
+    );
+}
+
+#[test]
+fn infer_err_only_uninferable_errors() {
+    // (c) `fn err(): return Err("x")` — T is un-inferable (no default for the value slot), so it
+    // must ERROR like the empty-collection diagnostic. Today it leaks Result[Unknown, str].
+    entry_rejects(
+        "fn err():\n    return Err(\"x\")\nfn main():\n    pass\n",
+        "cannot infer return type of 'err'",
+    );
+}
+
+#[test]
+fn infer_none_only_uninferable_errors() {
+    // (d) `fn none(): return None` — T un-inferable → ERROR (return position is stricter than the
+    // binding-position `x := None`, which stays legal).
+    entry_rejects(
+        "fn none():\n    return None\nfn main():\n    pass\n",
+        "cannot infer return type",
+    );
+}
+
+#[test]
+fn infer_empty_list_return_uninferable_errors() {
+    // (e) `fn f(): return []` — element un-inferable → ERROR. Today leaks List[Unknown] (the
+    // empty-collection error is binding-scoped and never fires at a return position).
+    entry_rejects(
+        "fn f():\n    return []\nfn main():\n    pass\n",
+        "cannot infer return type",
+    );
+}
+
+#[test]
+fn multibranch_return_ok_err_no_error() {
+    // NEIGHBOR: Ok(5) + Err("x") → Result[int, str], no error (both slots fill from siblings).
+    entry_ok(
+        "fn f(c: bool):\n    if c:\n        return Ok(5)\n    return Err(\"x\")\nfn main():\n    match f(true):\n        Ok(v): print(v)\n        Err(e): print(e)\n",
+    );
+}
+
+#[test]
+fn multibranch_return_some_none_no_error() {
+    // NEIGHBOR: Some(5) + None → Option[int], no error (T filled from the Some branch).
+    entry_ok(
+        "fn f(c: bool):\n    if c:\n        return Some(5)\n    return None\nfn main():\n    match f(true):\n        Some(v): print(v)\n        None: print(\"none\")\n",
+    );
+}
+
+#[test]
+fn multibranch_return_empty_and_nonempty_list_no_error() {
+    // NEIGHBOR: [] + [1, 2] → List[int], no error (empty element filled from the non-empty sibling).
+    entry_ok(
+        "fn f(c: bool):\n    if c:\n        return []\n    return [1, 2]\nfn main():\n    xs := f(true)\n    print(xs)\n",
+    );
+}
+
+#[test]
+fn multibranch_void_stays_nil_no_error() {
+    // NEIGHBOR: a fn with no value-return stays void/nil (nil != Unknown → no "cannot infer").
+    entry_ok("fn f():\n    print(1)\nfn main():\n    f()\n");
+}
+
+#[test]
+fn multibranch_int_float_widens_to_float() {
+    // NEIGHBOR: int + float sibling branches widen to float (the ONE numeric widen, bare scalars).
+    entry_ok(
+        "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    x := f(true)\n    y := x + 1.5\n    print(y)\n",
+    );
+}
+
+#[test]
+fn multibranch_generic_identity_preserves_param() {
+    // NEIGHBOR: generic `fn id[T](x: T): return x` → T (Ty::Param preserved, no finalize error).
+    entry_ok("fn id[T](x: T):\n    return x\nfn main():\n    print(id(5))\n    print(id(\"h\"))\n");
+}
+
+#[test]
+fn multibranch_two_structs_conflict() {
+    // NEIGHBOR (must ERROR): two distinct concrete structs across branches CONFLICT — never join to
+    // a shared protocol or Any. A protocol return must be spelled explicitly.
+    entry_rejects(
+        "struct A:\n    x: int\n    fn speak(self) -> str:\n        return \"a\"\nstruct B:\n    y: int\n    fn speak(self) -> str:\n        return \"b\"\nfn f(c: bool):\n    if c:\n        return A(1)\n    return B(2)\nfn main():\n    pass\n",
+        "conflicting branches",
+    );
+}
+
+#[test]
+fn multibranch_annotated_float_still_widens() {
+    // NEIGHBOR: the ANNOTATED-return widening path is untouched (`-> float: return 3` still widens).
+    entry_ok("fn f() -> float:\n    return 3\nfn main():\n    print(f())\n");
+}
+
+#[test]
+fn multibranch_map_hof_loopback_intact() {
+    // NEIGHBOR: the proto.rs return-only HOF loop-back still infers `map`'s closure return.
+    entry_ok("fn main():\n    ys := [1, 2, 3].map(fn(x): x * 2)\n    print(ys)\n");
+}
+
+#[test]
+fn closure_free_uninferable_errors() {
+    // CLOSURE: a genuinely-free closure literal whose body is un-inferable errors on finalize.
+    entry_rejects(
+        "fn main():\n    f := fn(): Err(\"x\")\n    print(f)\n",
+        "cannot infer return type",
+    );
+}
+
+#[test]
+fn closure_free_ok_defaults_error_e() {
+    // CLOSURE: a free `fn(): Ok(5)` finalizes to Result[int, Error] (E default), no leak error.
+    entry_ok(
+        "fn main():\n    f := fn(): Ok(5)\n    x := f()\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+    );
+}
+
 #[test]
 fn inferred_divergent_returns_accepted_when_annotated_protocol() {
     // Divergent concrete returns are the user's job to annotate: an explicit `-> Shape` protocol
@@ -2373,11 +2517,11 @@ fn inferred_nested_fn_does_not_pollute_outer() {
 
 #[test]
 fn inferred_method_return() {
-    // The un-annotated method infers `int` from `return self.v`; the later `return "x"` conflicts.
-    // The conflict proves inference ran on the method body.
+    // The un-annotated method infers from `return self.v` (int) and `return "x"` (str); the two
+    // branches CONFLICT under the multi-branch JOIN. The conflict proves inference ran on the body.
     rejects(
         "struct Box:\n    v: int\n    fn get(self):\n        if true:\n            return self.v\n        return \"x\"\n",
-        "expected return type int, found str",
+        "conflicting branches (int vs str)",
     );
 }
 
