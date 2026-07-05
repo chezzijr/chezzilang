@@ -575,7 +575,46 @@ impl Checker {
                 a.iter().map(|x| Self::fill_ret(x, bad)).collect(),
             ),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| Self::fill_ret(x, bad)).collect()),
-            other => other.clone(),
+            // Concurrency boxes and function types ALSO carry inner `Ty`, so a residual `Unknown`
+            // nested here must be flagged too — otherwise `import std.concurrency; fn f(): return
+            // Shared([])` launders a `Shared[List[Unknown]]` past the rejector (List[int] vs
+            // List[str] both then assignable off `.get()`). Recurse into every child.
+            Ty::Channel(x) => Ty::Channel(Box::new(Self::fill_ret(x, bad))),
+            Ty::Shared(x) => Ty::Shared(Box::new(Self::fill_ret(x, bad))),
+            Ty::Atomic(x) => Ty::Atomic(Box::new(Self::fill_ret(x, bad))),
+            Ty::RwShared(x) => Ty::RwShared(Box::new(Self::fill_ret(x, bad))),
+            Ty::Func {
+                params,
+                ret,
+                labels,
+            } => Ty::Func {
+                params: params.iter().map(|x| Self::fill_ret(x, bad)).collect(),
+                ret: Box::new(Self::fill_ret(ret, bad)),
+                labels: labels.clone(),
+            },
+            Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
+                params: params.iter().map(|x| Self::fill_ret(x, bad)).collect(),
+                ret: Box::new(Self::fill_ret(ret, bad)),
+            },
+            // Leaf types carry no inner `Ty` (nothing to fill or flag). `Ty::Param` is intentionally
+            // passed through UNTOUCHED — generic fns / the proto.rs HOF loop-back own it, an `Unknown`
+            // it later resolves is not this pass's concern. Enumerated exhaustively (NO catch-all) so
+            // any FUTURE `Ty` variant carrying an inner type fails to compile here instead of silently
+            // re-opening the residual-`Unknown` leak.
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Param(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Ptr
+            | Ty::Protocol(_)
+            | Ty::Module(_) => t.clone(),
         }
     }
 

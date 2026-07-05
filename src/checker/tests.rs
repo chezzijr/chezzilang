@@ -2414,6 +2414,37 @@ fn infer_empty_list_return_uninferable_errors() {
 }
 
 #[test]
+fn infer_uninferable_unknown_in_concurrency_box_errors() {
+    // REGRESSION (adversarial review parity-perf-0): a residual `Unknown` nested inside a
+    // concurrency box (Shared/Atomic/RwShared/Channel) or a function type must ALSO be rejected —
+    // `fill_ret`'s original catch-all skipped these containers, so `return Shared([])` laundered a
+    // `Shared[List[Unknown]]` past the rejector (`.get()` then assignable to both List[int] and
+    // List[str]). Each un-inferable box now errors like `return []` does.
+    for box_ctor in ["Shared([])", "Atomic([])", "RwShared([])"] {
+        entry_rejects(
+            &format!(
+                "import std.concurrency\nfn f():\n    return {box_ctor}\nfn main():\n    pass\n"
+            ),
+            "cannot infer return type",
+        );
+    }
+    // the full laundering the leak enabled — both incompatible assignments off one `.get()`.
+    entry_rejects(
+        "import std.concurrency\nfn f():\n    return Shared([])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    b: List[str] = s.get()\n",
+        "cannot infer return type",
+    );
+}
+
+#[test]
+fn infer_concurrency_box_with_inferable_element_ok() {
+    // NEIGHBOR: a box whose element IS inferable from the constructor value stays legal (the fix
+    // only flags a residual Unknown, never a resolved element).
+    entry_ok(
+        "import std.concurrency\nfn f():\n    return Shared([1])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    print(a)\n",
+    );
+}
+
+#[test]
 fn multibranch_return_ok_err_no_error() {
     // NEIGHBOR: Ok(5) + Err("x") → Result[int, str], no error (both slots fill from siblings).
     entry_ok(
