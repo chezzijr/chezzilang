@@ -1274,12 +1274,54 @@ impl Checker {
             return ty;
         }
         if let Some(sig) = self.functions.get(name) {
+            let type_params = sig.type_params.clone();
+            let params = sig.params.clone();
+            let ret = sig.ret.clone();
+            let labels = sig.labels.clone();
+            // Scope A — a GENERIC fn referenced in value position (a bare `Name`, NOT the callee of a
+            // direct call) whose type params can be PINNED from a concrete expected `fn(..) -> ..`
+            // hint (a `let` annotation, a HOF param, or a return position — all delivered via the
+            // `expected_hint` slot). Unify the fn's declared signature against the hint to bind its
+            // params, enforce its declared bounds against the bindings, then give the value the
+            // fully-substituted CONCRETE fn type. Runtime is generic-ERASED — the value is just the
+            // underlying function, so an indirect call already works; this is a checker-only pin.
+            //
+            // SOUNDNESS: `unify` is first-binding-wins + a silent no-op on mismatch, so an
+            // unsatisfiable hint (`g: fn(str) -> int = ident`) binds `T=str` (the param position wins)
+            // and we return the CONCRETE `fn(str) -> str` — NEVER `expected` — leaving the existing
+            // assignability / arg / return check to reject it against `fn(str) -> int`. When the hint
+            // fails to pin EVERY param (or is absent / not a matching-arity concrete `Ty::Func`), fall
+            // through to the rigid `fn(T) -> T` arm, preserving the out-of-scope bare `g := ident`
+            // error (a still-free `Ty::Param` must never leak into a binding).
+            //
+            // Gated on a SAME-MODULE fn (`local_fn_names`) — the identical same-module restriction the
+            // turbofish B-path + the compiler's erase set use, so accept ⟺ runtime stays in lockstep
+            // (an imported generic-fn-as-value stays the rigid error, a documented v1 limit).
+            if !type_params.is_empty()
+                && self.local_fn_names.contains(name)
+                && let Some(expected) = self.expected_hint.clone()
+                && let Ty::Func { params: ep, .. } = &expected
+                && ep.len() == params.len()
+                && ty_fully_concrete(&expected)
+            {
+                let declared = Ty::Func {
+                    params: params.clone(),
+                    ret: Box::new(ret.clone()),
+                    labels: FnLabels(labels.clone()),
+                };
+                let mut map = HashMap::new();
+                unify(&declared, &expected, &mut map);
+                if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
+                    self.enforce_bounds(&type_params, &map, span);
+                    return subst(&declared, &map);
+                }
+            }
             return Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
+                params,
+                ret: Box::new(ret),
                 // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
                 // labelled function value and `g(name="Bob")` resolves through it.
-                labels: FnLabels(sig.labels.clone()),
+                labels: FnLabels(labels),
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
@@ -2079,6 +2121,52 @@ impl Checker {
     }
 
     pub(super) fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
+        // Scope B — turbofish on a generic fn VALUE: `ident[int]` pins the fn's type params from the
+        // explicit type arg and yields the CONCRETE `fn(int) -> int` value (`ident[int]` parses as
+        // `Index { Ident(ident), int }`, so it lands here). Gated on a SAME-MODULE generic fn
+        // (`local_fn_names` — the exact set the compiler erases at codegen, keeping checker-accept ⟺
+        // compiler-erase in lockstep) that is NOT shadowed by a local/param binding, indexed by a
+        // type-shaped expression. Runs BEFORE `infer_value(obj)`/inferring the index (which would
+        // wrongly report `int` as an unknown name and "cannot index into fn").
+        if let ExprKind::Ident(name) = &obj.kind {
+            let is_local_generic = self.local_fn_names.contains(name)
+                && self.lookup(name).is_none()
+                && self
+                    .functions
+                    .get(name)
+                    .is_some_and(|s| !s.type_params.is_empty());
+            if is_local_generic && let Some(ty_expr) = self.index_as_type(index) {
+                let (type_params, params, ret, labels) = {
+                    let s = &self.functions[name];
+                    (
+                        s.type_params.clone(),
+                        s.params.clone(),
+                        s.ret.clone(),
+                        s.labels.clone(),
+                    )
+                };
+                let targ = self.resolve_type(&ty_expr, index.span);
+                // `seed_targs` arity-checks the single type arg against the param count and emits the
+                // clean "'name' expects N type argument(s), found 1" error on a mismatch.
+                let map = self.seed_targs(name, &type_params, &[targ], obj.span);
+                if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
+                    // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
+                    // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
+                    self.enforce_bounds(&type_params, &map, obj.span);
+                    return subst(
+                        &Ty::Func {
+                            params,
+                            ret: Box::new(ret),
+                            labels: FnLabels(labels),
+                        },
+                        &map,
+                    );
+                }
+                // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
+                // falling through to the "cannot index into fn" double-report.
+                return Ty::Unknown;
+            }
+        }
         // Map keys are NOT int — infer the object first and check the index against the key type.
         match self.infer_value(obj) {
             Ty::Map(k, v) => {

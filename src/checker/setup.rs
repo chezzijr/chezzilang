@@ -12,6 +12,7 @@ impl Checker {
             loop_vars: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
+            local_fn_names: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
             type_params: HashMap::new(),
@@ -765,6 +766,7 @@ impl Checker {
         self.scopes.clear();
         self.loop_vars.clear();
         self.functions.clear();
+        self.local_fn_names.clear();
         self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
@@ -2033,6 +2035,10 @@ impl Checker {
                     }
                     let sig = self.fn_sig(decl, s.span);
                     self.functions.insert(decl.name.clone(), sig);
+                    // Same-module fn name (top-level `fn` only, NOT an import) — licenses the
+                    // generic-fn-as-value turbofish B-path in `infer_index`, in lockstep with the
+                    // compiler's `fn_names` erase set.
+                    self.local_fn_names.insert(decl.name.clone());
                 }
                 StmtKind::Struct {
                     name,

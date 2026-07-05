@@ -5492,3 +5492,54 @@ fn widen_annotated_list_widens_nonliteral_element() {
 fn widen_unannotated_nonliteral_mixed_collection_carveout() {
     widen_three_engines("a := 1\nb := 2.3\nxs := [a, b]\nprint(xs[0] / 2)\n", "0\n");
 }
+
+// ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so serial == M:N is
+// automatic; a RUN test on BOTH engines is still required per accepted case (the bind-import trap:
+// a checker-accept that faults at runtime).
+
+#[test]
+fn generic_fn_value_turbofish_parity() {
+    // B — turbofish on a fn value.
+    assert_parity_out(
+        "fn ident[T](x: T) -> T:\n    return x\n\ng := ident[int]\nprint(g(5) + 1)\n",
+        "6\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_annot_parity() {
+    // A1 — annotated binding.
+    assert_parity_out(
+        "fn ident[T](x: T) -> T:\n    return x\n\ng: fn(int) -> int = ident\nprint(g(5) + 1)\n",
+        "6\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_hofarg_parity() {
+    // A2 — HOF argument.
+    assert_parity_out(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn applyit(f: fn(int) -> int, x: int) -> int:\n    return f(x)\n\nprint(applyit(ident, 5) + 1)\n",
+        "6\n",
+    );
+}
+
+#[test]
+fn generic_fn_value_return_parity() {
+    // A3 — return position.
+    assert_parity_out(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn getf() -> fn(int) -> int:\n    return ident\n\ng := getf()\nprint(g(5) + 1)\n",
+        "6\n",
+    );
+}
+
+#[test]
+fn generic_fn_name_shadowed_local_index_parity() {
+    // Compiler-erase shadow-safety: a fn-local binding that shadows a top-level generic fn name is a
+    // REAL index (not an erased turbofish) on BOTH engines. (The shadow must be a fn-LOCAL — a
+    // top-level `ident := …` would collide with `fn ident`, which the checker rejects.)
+    assert_parity_out(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn h():\n    ident := [10, 20, 30]\n    print(ident[1])\n\nh()\n",
+        "20\n",
+    );
+}

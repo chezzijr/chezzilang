@@ -517,6 +517,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > so both engines stay byte-identical. **Remaining gap:** the hint does not yet reach a
 > generic ctor nested inside a **container literal** (`a: List[Heap[int]] = [Heap([], …)]`) — that
 > outer expression is a list literal, not a call, so annotate the closure params or turbofish there.
+> The same expected-type / turbofish machinery now also pins a generic fn used as a **VALUE** (not
+> called, or called indirectly): `g := ident[int]` (turbofish) and `h: fn(int) -> int = ident` /
+> HOF-param / return-position (against a concrete `fn(...) -> ...`) yield the substituted concrete fn
+> value; a bare un-pinned generic fn value stays an error (see `docs/syntax.md`, "A GENERIC fn as a value").
 
 > **Native FFI — Level-2 SHIPPED in M6c; Level-3 dynamic C-ABI v1 SHIPPED.** Because Chezzi is
 > written in Rust, the native-stdlib mechanism doubles as a foreign-function interface: bind a Rust fn
