@@ -121,11 +121,16 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   **static** method requirement is now REJECTED in every value-annotation position (param/field/return/
   binding/reassign slot AND nested — `List[Convert[int]]`, `Option[Convert[int]]`, tuple element, `type`
   alias body) with `protocol 'Convert' has a static method and can only be used as a bound, not a value
-  type`. Keyed on the STRUCTURAL static-slot property (not the name), gated at the `resolve_type`
-  protocol arms (bare + parameterized) — the general instance-method parameterized-protocol value
+  type`. Keyed on the STRUCTURAL static-slot property (not the name): `protocol_has_static_method` scans
+  a protocol's OWN methods AND its **transitively-embedded** requirements (so a bundle
+  `protocol MakeInt: Convert[int]` that EMBEDS a static-ctor protocol is bound-only too), and a
+  **cross-module** alias body (`import Foo from a` / qualified `a.Foo`) — resolved by the read-only
+  resolver (no gate) and returned pre-resolved — is re-gated at the two consumer seams by a recursive
+  `Ty`-walk (`first_static_ctor_protocol`). The general instance-method parameterized-protocol value
   position (`c: Container[int]`) is UNAFFECTED (regression-guarded). **This CLOSES the value-position
   false-accept** (the spike where `fn takes(c: Convert[int])` accepted `Port(1)` with no error — the
-  open item below). Checker-only, runtime-erased; positive witness runs byte-identical serial == M:N.
+  open item below — plus the embed + cross-module-alias laundering vectors). Checker-only,
+  runtime-erased; positive witness runs byte-identical serial == M:N.
   · 3 **`T.convert`
   static-through-bound, concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify) —
   **PENDING** (`T.convert` through a bound still errors `unknown name 'T'`). Memory: auto-task

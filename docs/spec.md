@@ -749,8 +749,9 @@ protocol `Convert[S]` exists as a reserved builtin. A type **witnesses** `Conver
 like `Comparable`/`Add`, but `is_static`-aware (an instance `convert(self, …)` does NOT witness it). It
 is usable **only as a generic bound** `[T: Convert[S]]`; because a static ctor cannot be invoked on a
 value, `Convert[S]` is **rejected as a value-annotation type** (param/field/return/binding, including
-nested `List[Convert[int]]`/`Option[…]`/tuple/alias) — bound-only by the same static-slot rule that
-applies to any static-ctor protocol. NOT yet available: calling `T.convert(x)` **through** the bound (a
+nested `List[Convert[int]]`/`Option[…]`/tuple, a same- or cross-module type alias, and a protocol that
+*embeds* a static-ctor protocol) — bound-only by the same static-slot rule that applies to any
+static-ctor protocol. NOT yet available: calling `T.convert(x)` **through** the bound (a
 separate pending slice — still errors `unknown name 'T'`), so generic construction over the bound is not
 claimed. The cheap scalar fills (`bool(x)` truthiness cast + `Result`-returning
 `parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.

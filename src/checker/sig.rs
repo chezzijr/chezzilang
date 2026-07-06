@@ -768,16 +768,81 @@ impl Checker {
         }
     }
 
-    /// Does `n` name a protocol with ANY STATIC method requirement (first param NOT `self`)? Such a
-    /// protocol (e.g. `Convert`'s static-ctor `convert(x: S) -> Self`) is witnessable only by a STATIC
-    /// method — a VALUE cannot invoke it — so it is usable ONLY as a generic bound `[T: P]`, never as a
-    /// value-annotation type. Keys on the STRUCTURAL property, so a future/user static-ctor protocol is
+    /// Does `n` name a protocol with ANY STATIC method requirement (first param NOT `self`), directly OR
+    /// through a transitively-embedded protocol? Such a protocol (e.g. `Convert`'s static-ctor
+    /// `convert(x: S) -> Self`, or a bundle `protocol MakeInt: Convert[int]` that EMBEDS it) is
+    /// witnessable only by a STATIC method — a VALUE cannot invoke it — so it is usable ONLY as a generic
+    /// bound `[T: P]`, never as a value-annotation type. Keys on the STRUCTURAL property (own + flattened
+    /// embed requirements), so a future/user static-ctor protocol — and any bundle embedding one — is
     /// gated the same way. Ordinary instance-method protocols (all `is_static == false`) return `false`
     /// and stay usable as value existentials (`c: Container[int]`).
     pub(super) fn protocol_has_static_method(&self, n: &str) -> bool {
-        self.protocols
-            .get(n)
-            .is_some_and(|p| p.methods.iter().any(|(_, s)| s.is_static))
+        let Some(p) = self.protocols.get(n) else {
+            return false;
+        };
+        if p.methods.iter().any(|(_, s)| s.is_static) {
+            return true;
+        }
+        // Flatten the transitive embed method set (cycle-capped, read-only) and check it too, so a
+        // bundle that pulls in a static-ctor requirement via `embeds` is gated the same as one declaring
+        // it directly.
+        let mut path = vec![n.to_string()];
+        let (required, _cyclic, _conflict) = self.flatten_embed_methods(&p.embeds, &mut path);
+        required.values().any(|s| s.is_static)
+    }
+
+    /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
+    /// `Ty` — directly (`Convert[int]`), or nested under a container / `Option` / tuple / `Result` /
+    /// `Func` / struct-or-enum type arg. Read-only. This is the value-position gate for a `Ty` that
+    /// arrives ALREADY RESOLVED — a cross-module type-alias body, computed by the `&self` read-only
+    /// resolver (`resolve_ty_ro_d`) which cannot emit — so the mutable `resolve_type` arm gate never
+    /// sees it. `resolve_type` itself recurses through the arm gate for every FRESHLY-resolved position,
+    /// so this only needs to run at the pre-resolved-body seams.
+    fn first_static_ctor_protocol(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Protocol(n, args) => {
+                if self.protocol_has_static_method(n) {
+                    Some(n.clone())
+                } else {
+                    args.iter().find_map(|a| self.first_static_ctor_protocol(a))
+                }
+            }
+            Ty::List(t)
+            | Ty::Set(t)
+            | Ty::Option(t)
+            | Ty::Channel(t)
+            | Ty::Shared(t)
+            | Ty::Atomic(t)
+            | Ty::RwShared(t) => self.first_static_ctor_protocol(t),
+            Ty::Map(k, v) | Ty::Result(k, v) => self
+                .first_static_ctor_protocol(k)
+                .or_else(|| self.first_static_ctor_protocol(v)),
+            Ty::Tuple(ts) | Ty::Struct(_, ts) | Ty::Enum(_, ts) | Ty::NewType(_, ts) => {
+                ts.iter().find_map(|t| self.first_static_ctor_protocol(t))
+            }
+            Ty::Func { params, ret, .. } => params
+                .iter()
+                .find_map(|p| self.first_static_ctor_protocol(p))
+                .or_else(|| self.first_static_ctor_protocol(ret)),
+            _ => None,
+        }
+    }
+
+    /// If a resolved value-position `ty` embeds a static-ctor protocol (arriving pre-resolved from a
+    /// cross-module alias body, so the `resolve_type` arm gate never fired), reject it with the SAME
+    /// bound-only error the arms emit and return `Ty::Unknown`; otherwise return `ty` unchanged.
+    fn reject_static_protocol_value(&mut self, ty: Ty, span: Span) -> Ty {
+        if let Some(n) = self.first_static_ctor_protocol(&ty) {
+            self.error(
+                span,
+                format!(
+                    "protocol '{n}' has a static method and can only be used as a bound, not a value type"
+                ),
+            );
+            Ty::Unknown
+        } else {
+            ty
+        }
     }
 
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
@@ -929,7 +994,10 @@ impl Checker {
                     // `ffi_alias_ok`, but since the body is already a concrete `Ty` no width re-check is
                     // needed here.
                     _ if self.imported_alias_tys.contains_key(n) => {
-                        self.imported_alias_tys[n].clone()
+                        // The body was resolved read-only in its defining module (no gate), so a
+                        // static-ctor protocol could hide in it — re-gate it out of value position here.
+                        let ty = self.imported_alias_tys[n].clone();
+                        self.reject_static_protocol_value(ty, span)
                     }
                     // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
                     // type imports. Each resolves to a plain `int` (`Ty::Int`) — the width/signedness is a
@@ -1379,7 +1447,10 @@ impl Checker {
                     }
                     Ty::NewType(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
-                    asig.body.clone()
+                    // Pre-resolved in the exporting module by the read-only resolver (no gate) — re-gate
+                    // a static-ctor protocol out of value position (`import a; c: a.Foo`).
+                    let body = asig.body.clone();
+                    self.reject_static_protocol_value(body, span)
                 } else if sig.types.contains(name) {
                     // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
                     // `net.Socket`, `ffi.int32`/`ffi.ptr`). These names live ONLY in their owning std

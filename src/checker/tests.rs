@@ -9980,6 +9980,75 @@ fn user_static_ctor_protocol_bound_only_and_instance_regression() {
 }
 
 #[test]
+fn convert_embed_launders_static_requirement_bound_only() {
+    // BUG 1 (adversarial): a protocol that EMBEDS a static-ctor protocol inherits the static requirement
+    // transitively, so it too is bound-only — a VALUE still cannot witness the embedded static ctor.
+    // Pre-fix `protocol_has_static_method` scanned only OWN methods, so `protocol MakeInt: Convert[int]`
+    // (no own static method) returned false and was admitted as a value-annotation type, re-opening the
+    // exact spike hole (a plain value inhabiting a static-ctor existential).
+    entry_rejects(
+        "protocol MakeInt:\n    Convert[int]\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: MakeInt) -> int:\n    return 0\nfn main():\n    p := Port(n=7)\n    print(takes(p))\nmain()\n",
+        "has a static method",
+    );
+    // Two levels deep — a bundle embedding a bundle that embeds `Convert` is still gated.
+    entry_rejects(
+        "protocol MakeInt:\n    Convert[int]\nprotocol MakeInt2:\n    MakeInt\nfn takes(c: MakeInt2):\n    pass\nfn main():\n    pass\nmain()\n",
+        "has a static method",
+    );
+    // REGRESSION — a bundle embedding ONLY an instance-method protocol stays a valid value type (the
+    // transitive gate must not over-reject).
+    entry_ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nprotocol Box2:\n    Container[int]\nfn takes(c: Box2):\n    pass\nfn main():\n    pass\nmain()\n",
+    );
+}
+
+#[test]
+fn convert_cross_module_alias_bound_only() {
+    // BUG 2 (adversarial): a static-ctor protocol reaches VALUE position through a CROSS-MODULE type
+    // alias whose body was computed by the read-only resolver (which cannot emit the gate). The
+    // `import Foo from a` / `import a; a.Foo` consumers return the pre-resolved `Ty::Protocol('Convert',
+    // [int])` DIRECTLY, so the mutable resolve_type arm gate never runs. Pre-fix both forms type-checked
+    // a plain VALUE in a static-ctor annotation.
+    let t = TmpDir::new();
+    t.write("a.chz", "type Foo = Convert[int]\n");
+    let check = |src: &str| -> Vec<CheckError> {
+        let entry = t.write("main.chz", src);
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        match check_graph(&graph) {
+            Ok(()) => Vec::new(),
+            Err(e) => e,
+        }
+    };
+    // selective-import form (`import X from mod`)
+    let errs = check(
+        "import Foo from a\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("has a static method")),
+        "selective-import alias to a static-ctor protocol must be bound-only, got: {errs:?}"
+    );
+    // qualified form `import a` + `a.Foo`
+    let errs = check(
+        "import a\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: a.Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("has a static method")),
+        "qualified alias to a static-ctor protocol must be bound-only, got: {errs:?}"
+    );
+    // nested — a cross-module alias body wrapping the protocol in a container must be gated too.
+    t.write("c.chz", "type Bar = List[Convert[int]]\n");
+    let errs =
+        check("import Bar from c\nfn takes(c: Bar):\n    pass\nfn main():\n    pass\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("has a static method")),
+        "nested cross-module alias (List[Convert[int]]) must be bound-only, got: {errs:?}"
+    );
+}
+
+#[test]
 fn protocol_bound_and_typeparam_named_protocol_still_ok() {
     // Boundary: the FIX-A reservation must NOT leak into the protocol BOUND or a type PARAM named
     // like a protocol. (a) a user type that satisfies a prebuilt protocol used via its bound; and
