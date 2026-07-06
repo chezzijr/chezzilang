@@ -1247,8 +1247,25 @@ fn first[X: Container[int]](c: X) -> int:   # T pinned to int; c.get(0) is int
 ```
 
 The number of args must match the protocol's arity (a bare protocol takes none). A parameterized
-protocol is usable **only as a bound**, not as an existential value type (`c: Container[int]` is an
-error — its type args have nowhere to live in a value).
+protocol is also a first-class **value/annotation type** — `c: Container[int]` is a valid parameter,
+return, field, or reassignment slot (an *existential*: any type that satisfies `Container[int]` is
+accepted, and only the protocol's own methods are callable on it). The concrete args are witnessed
+**statically at every store/pass boundary** (assigning a value into the slot checks conformance
+there) and then **erased at runtime** (methods dispatch by name, like every protocol existential). A
+method that returns the protocol's param **recovers** the carried arg — `c.get(0)` on a
+`Container[int]` yields `int`, not the bare `T`:
+
+```chezzi
+fn first(c: Container[int]) -> int:   # existential value slot
+    return c.get(0) + 1               # c.get(0) recovers to int
+```
+
+Value-position parameterized protocols are **strictly invariant**: `Container[int]`, `Container[str]`,
+and bare `Container` are three distinct, non-interchangeable types (exact-arg match — no
+`Iterator[int]`→`Iterable[int]` value-position subsumption). A **bare generic** protocol used as a
+value type stays an existential with unbound params, so a struct whose method returns a concrete type
+does **not** conform to it — supply the args (`Container[int]`) to use it as a value. (Cross-module
+qualified protocols are not exported as value types.)
 
 The prebuilt **`Iterator[T]`** is a parameterized bound with extra magic: `[S: Iterator[T], T]`
 accepts any iterable `S` and **recovers** `T` from the iterand's element (by unifying it), rather

@@ -358,7 +358,11 @@ impl Checker {
         use Ty::*;
         match (expected, actual) {
             (Unknown, _) | (_, Unknown) => true,
-            (Protocol(p), a) => self.satisfies(a, p).is_ok(),
+            // A protocol existential slot: the actual type must satisfy the protocol WITH the carried
+            // args (empty for a bare existential — reproduces the old `satisfies(a, p)`). This single
+            // witness is shared by every value write-site (param/return/field/reassign) since they all
+            // route assignment through `assignable`.
+            (Protocol(p, pargs), a) => self.satisfies_args(a, p, pargs).is_ok(),
             (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
             (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
             (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
@@ -505,7 +509,7 @@ impl Checker {
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
                 _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n), Vec::new()),
-                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
+                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone(), Vec::new()),
                 _ => Ty::Unknown,
             },
             Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
@@ -525,6 +529,15 @@ impl Checker {
                     self.resolve_ty_ro_d(k, depth + 1),
                     self.resolve_ty_ro_d(v, depth + 1),
                 ),
+                // `Iterator[T]` is an existential ITERATOR value, represented as `Ty::Struct("Iterator",
+                // [T])` — NOT a protocol. Mirror the mutable `resolve_type` arm (sig.rs) so the two
+                // resolvers agree on identical syntax; without this it would fall to the protocol arm
+                // below and mint `Protocol("Iterator",[T])`, which downstream Iterator logic (keyed on
+                // `Ty::Struct(name=="Iterator")`) would not recognize.
+                ("Iterator", [elem]) => Ty::Struct(
+                    "Iterator".to_string(),
+                    vec![self.resolve_ty_ro_d(elem, depth + 1)],
+                ),
                 _ if self.struct_names.contains(n) => Ty::Struct(
                     self.bare_key(n),
                     args.iter()
@@ -539,6 +552,15 @@ impl Checker {
                 ),
                 _ if self.newtype_names.contains(n) => Ty::NewType(
                     self.bare_key(n),
+                    args.iter()
+                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
+                        .collect(),
+                ),
+                // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
+                // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
+                // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
+                _ if self.protocols.contains_key(n) => Ty::Protocol(
+                    n.clone(),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
@@ -949,9 +971,14 @@ impl Checker {
             }
             return Ok(());
         }
-        // A protocol existential value satisfies a protocol iff it IS that protocol.
-        if let Ty::Protocol(p) = ty {
-            return if p == protocol {
+        // A protocol existential value satisfies a protocol iff it IS that protocol AND its carried
+        // args match the required ones (arity + arg-wise `compatible`). This enforces strict
+        // invariance when a Protocol VALUE is the subject: a bare `Container` value does NOT satisfy
+        // `Container[int]` (0 args vs 1) and vice-versa, and `Container[str]` ≠ `Container[int]`.
+        if let Ty::Protocol(p, pargs) = ty {
+            let args_match =
+                pargs.len() == args.len() && pargs.iter().zip(args).all(|(x, y)| compatible(x, y));
+            return if p == protocol && args_match {
                 Ok(())
             } else {
                 Err(format!("type {ty} does not satisfy {protocol}"))
@@ -1302,7 +1329,7 @@ impl Checker {
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
-            Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_) => false,
+            Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_, _) => false,
             // A first-class builtin fn value is pure code (no captured environment) — always
             // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
             // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable

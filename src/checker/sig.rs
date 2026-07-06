@@ -618,6 +618,12 @@ impl Checker {
                 Ty::NewType(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
             }
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| self.fill_ret(x, bad)).collect()),
+            // A parameterized protocol existential (`Container[int]`) carries inner `Ty` args, so a
+            // residual `Unknown` nested there must be flagged too — recurse into every arg (matches
+            // the Struct/Enum/concurrency-box recursion; a bare `Error` has no args, a no-op).
+            Ty::Protocol(n, a) => {
+                Ty::Protocol(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
+            }
             // Concurrency boxes and function types ALSO carry inner `Ty`, so a residual `Unknown`
             // nested here must be flagged too — otherwise `import std.concurrency; fn f(): return
             // Shared([])` launders a `Shared[List[Unknown]]` past the rejector (List[int] vs
@@ -656,7 +662,6 @@ impl Checker {
             | Ty::Socket
             | Ty::Listener
             | Ty::Ptr
-            | Ty::Protocol(_)
             | Ty::Module(_) => t.clone(),
         }
     }
@@ -989,7 +994,7 @@ impl Checker {
                         Ty::NewType(key, Vec::new())
                     }
                     // A protocol name used as a value type (existential), e.g. `Error`.
-                    _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone()),
+                    _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone(), Vec::new()),
                     _ => {
                         self.error(span, self.unknown_type_msg(n));
                         Ty::Unknown
@@ -1194,18 +1199,25 @@ impl Checker {
                         }
                         Ty::Enum(key, resolved)
                     }
-                    // A parameterized protocol may only be a bound (`[X: Container[int]]`), not an
-                    // existential value type — `Ty::Protocol` carries no args. Resolve the args anyway so
-                    // an unknown type inside is still reported.
+                    // A parameterized protocol used as a value type (`Container[int]`): resolve the
+                    // args, arity-check against the protocol's own type params, and carry them on the
+                    // existential. Conformance is witnessed at every store/pass boundary (via
+                    // `assignable` → `satisfies_args`); the args are then erased at runtime. Mirrors
+                    // the struct/enum parameterized arms above.
                     _ if self.protocols.contains_key(n) => {
-                        for a in args {
-                            let _ = self.resolve_type(a, span);
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        let nparams = self.protocols.get(n).map_or(0, |p| p.type_params.len());
+                        if nparams != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{n}' expects {nparams} type argument(s), got {}",
+                                    resolved.len()
+                                ),
+                            );
                         }
-                        self.error(
-                        span,
-                        format!("parameterized protocol '{n}' can only be used as a bound, not as a value type"),
-                    );
-                        Ty::Unknown
+                        Ty::Protocol(n.clone(), resolved)
                     }
                     // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
                     _ if self.newtype_names.contains(n) => {
@@ -1747,7 +1759,7 @@ impl Checker {
                 ..
             } => {
                 if self.hover_probe.is_some() {
-                    let ty = Ty::Protocol(name.clone());
+                    let ty = Ty::Protocol(name.clone(), Vec::new());
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }

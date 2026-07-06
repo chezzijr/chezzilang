@@ -153,10 +153,16 @@ pub enum Ty {
     /// no fields; only `==`/`!=` against another `ptr` (incl. `std.ffi.null()`) and pass/return.
     /// Untyped (one `ptr` for every handle), never auto-freed. Sendable (a plain address).
     Ptr,
-    /// A protocol used *as a value type* (existential), e.g. the default error type `Error`. A
-    /// concrete type is assignable to it iff it satisfies the protocol; only the protocol's own
-    /// methods are callable on it. Type-erased at runtime (methods dispatch by name).
-    Protocol(String),
+    /// A protocol used *as a value type* (existential), e.g. the default error type `Error`, or a
+    /// PARAMETERIZED protocol `Container[int]`. The `Vec<Ty>` carries the protocol's concrete type
+    /// arguments (empty for a bare/non-generic existential like `Error`). A concrete type is
+    /// assignable to it iff it satisfies the protocol WITH those args (witnessed statically at every
+    /// store/pass boundary); only the protocol's own methods are callable on it — with the carried
+    /// args substituted into the method's params/return so `c.get(0)` on a `Container[int]` yields
+    /// `int`, not the bare param `T`. Type-erased at runtime (methods dispatch by name; the args are
+    /// a checker-only witness, never constructed in the vm/compiler). STRICT INVARIANCE: bare
+    /// `Container` (0 args) and `Container[int]` (1 arg) are distinct, non-interchangeable types.
+    Protocol(String, Vec<Ty>),
     /// An imported module, identified by the name it's bound under in the current module. Member
     /// access (`io.read()`) resolves against the module's exported signatures.
     Module(String),
@@ -184,7 +190,7 @@ impl Ty {
     }
     /// The default error type: the `Error` protocol as an existential.
     pub fn error_proto() -> Ty {
-        Ty::Protocol("Error".to_string())
+        Ty::Protocol("Error".to_string(), Vec::new())
     }
     pub fn option(inner: Ty) -> Ty {
         Ty::Option(Box::new(inner))
@@ -238,8 +244,13 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Result(at, ae), Result(bt, be)) => compatible(at, bt) && compatible(ae, be),
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
         // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
-        (Protocol(a), Protocol(b)) => a == b,
-        (Protocol(p), Str) if p == "Error" => true,
+        // STRICT INVARIANCE: same protocol name AND same arg arity AND arg-wise compatible (mirrors
+        // the `Struct`/`Enum`/`NewType` arms), so bare `Container` (0 args) and `Container[int]`
+        // (1 arg) are distinct, and `Container[str]` ≠ `Container[int]`.
+        (Protocol(a, aa), Protocol(b, ba)) => {
+            a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
+        }
+        (Protocol(p, pa), Str) if p == "Error" && pa.is_empty() => true,
         (Map(ka, va), Map(kb, vb)) => compatible(ka, kb) && compatible(va, vb),
         (Set(a), Set(b)) => compatible(a, b),
         (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
@@ -344,7 +355,7 @@ impl fmt::Display for Ty {
             // `Result[T]` when the error is the default `Error` or still unconstrained (`?`);
             // `Result[T, E]` for an explicit error type.
             Ty::Result(t, e) => match e.as_ref() {
-                Ty::Protocol(p) if p == "Error" => write!(f, "Result[{t}]"),
+                Ty::Protocol(p, pa) if p == "Error" && pa.is_empty() => write!(f, "Result[{t}]"),
                 Ty::Unknown => write!(f, "Result[{t}]"),
                 _ => write!(f, "Result[{t}, {e}]"),
             },
@@ -357,7 +368,20 @@ impl fmt::Display for Ty {
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),
             Ty::Ptr => write!(f, "ptr"),
-            Ty::Protocol(n) => write!(f, "{n}"),
+            Ty::Protocol(n, args) => {
+                write!(f, "{n}")?;
+                if !args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
             Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 // `n` is the qualified IDENTITY key (`<module-key>::Name`); user-facing
                 // diagnostics must render the BARE display name, matching runtime display.

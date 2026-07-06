@@ -11,6 +11,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ PARAMETERIZED PROTOCOLS IN VALUE/ANNOTATION POSITION (2026-07-06).** A parameterized protocol is
+now a first-class **value/annotation type** — `c: Container[int]` is valid as a param, return, struct
+field, and reassignment slot (was a hard "parameterized protocol N can only be used as a bound, not as
+a value type" error). Ships DECISION-1 option (a): carry the concrete args on the checker-only
+`Ty::Protocol(String, Vec<Ty>)` variant, **witness conformance statically at every store/pass
+boundary** (`assignable` → `satisfies_args`, shared by all four write-sites), then **erase at runtime**
+(no `Ty::Protocol` exists in vm/compiler — grep-verified — so the variant change is contained to
+`src/checker/**` and cannot diverge the two engines). **Method-return element RECOVERY** is on: at
+`c.get(0)` where `c: Container[int]`, the protocol's own type-params are substituted → the carried args
+into the method's params AND return, so it yields `int`, not the bare `T` (sound — the store/pass
+boundary already witnessed conformance; same model as `Iterator.next() -> Option[T]`). **STRICT
+INVARIANCE**: `Container[int]` ≠ `Container[str]` ≠ bare `Container` (exact-arg match via the existing
+conservative `compatible`, no value-position subsumption). `Iterator[T]` stays on its
+`Ty::Struct("Iterator",[T])` path (not merged). Touch points (all `src/checker/**`, additive):
+variant `ty.rs` + all hand-written destructures fixed via the non-exhaustive-match exhaustiveness
+guarantee (compatible/Display/error_proto/assignable/satisfies-subject/sendable_rec/fill_ret/subst/
+bare-construction arms), the rejection→accept flip (`sig.rs`, arity-checked against `pinfo.type_params`),
+the read-only resolver Generic arm (`proto.rs` — mints `Ty::Protocol` so it no longer silent-accepts as
+`Unknown`), and the method-return recovery arm (`expr.rs infer_method_call`). Cross-module qualified
+protocols are not exported as value types (rejected at the annotation, not silent-accepted). Tests:
+11 checker units (accept/wrong-arg-reject/bare-non-generic/both-direction-invariance/return recovery/
+three write-site rejects/nesting) + 3 two-engine goldens (`vm::tests`, byte-identical serial-VM == M:N).
+Docs: `docs/syntax.md` (limitation lifted), `docs/spec.md` (M14 rows).
+
 **✅ SCALARS INTRINSICALLY SATISFY `Stringable` (2026-07-06).** `int`/`float`/`bool`/`str` now satisfy
 the prebuilt `Stringable` protocol (sole method `str(self) -> str`) intrinsically, so a
 `fn show[T: Stringable](v: T)` generic accepts them — closing the last inconsistency where every other
