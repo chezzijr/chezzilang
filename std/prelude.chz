@@ -197,3 +197,12 @@ protocol IndexSet[K, V]:
 # both engines always pass all three explicitly. `R` is the slice result type, recovered at call sites.
 protocol Slice[R]:
     fn slice(self, start: int?, end: int?, step: int?) -> R
+
+# `Convert[S]` — the extensible type-conversion protocol (Rust `From`, target-keyed). Its sole method
+# `convert(x: S) -> Self` is STATIC (first param is `x`, NOT `self`), so it is called `Target.convert(src)`
+# and produces a fresh `Self`. `S` (the source type) is the one arity param, so the bound reads
+# `[T: Convert[str]]`. Slice 1 (this): the protocol is declared + reserved + bound-parseable only —
+# structural witnessing (a concrete type SATISFYING it) is slice 2, and `T.convert(..)` through a bound is
+# slice 3. The shape mirrors the Rust seed in `prebuilt_protocols` (`is_static`, `[S]`).
+protocol Convert[S]:
+    fn convert(x: S) -> Self

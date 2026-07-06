@@ -640,7 +640,7 @@ impl Checker {
     /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
     /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
     /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. All 17 reserved protocols are mirrored;
+    /// the two source expressions from silently drifting. All 18 reserved protocols are mirrored;
     /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
     /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
     /// byte-matches too. Called only on the always-linked prelude module; the body is
@@ -671,6 +671,7 @@ impl Checker {
             "Index",
             "IndexSet",
             "Slice",
+            "Convert",
         ] {
             let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
                 panic!("reserved protocol '{name}' missing from std/prelude.chz")

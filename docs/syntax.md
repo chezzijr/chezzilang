@@ -2326,18 +2326,21 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 16
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 17
   prebuilt PROTOCOL names (`Comparable`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
-  `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`) are reserved the same way — usable
+  `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`) are reserved the same way — usable
   as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
   is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
-  (All 17 are file-backed, `Any` and `Iterable` included — `Any` is `protocol Any:` + `pass` (empty), and
+  (All 18 are file-backed, `Any` and `Iterable` included — `Any` is `protocol Any:` + `pass` (empty), and
   `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
-  Rust seed uses, so their shapes mirror cleanly like the rest.)
+  Rust seed uses, so their shapes mirror cleanly like the rest.) `Convert[S]` (`fn convert(x: S) -> Self`,
+  a STATIC method — the extensible type-conversion protocol, Rust `From`) is DECLARED + reserved +
+  bound-parseable (`[T: Convert[str]]`) as of slice 1 only — structural WITNESSING (a concrete type
+  satisfying it) and `T.convert(..)` construction through a bound are not wired yet (slices 2/3).
 - **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
   `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
