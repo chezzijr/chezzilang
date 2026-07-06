@@ -390,6 +390,7 @@ fn is_reserved_protocol(name: &str) -> bool {
             | "Index"
             | "IndexSet"
             | "Slice"
+            | "Convert"
     )
 }
 
@@ -991,9 +992,9 @@ impl Checker {
             // assert-only (no effect on resolution/output), so behavior + 3-engine parity are unchanged.
             if lm.dotted == ["std", "prelude"] {
                 c.assert_native_enum_shape_matches(&lm.ast);
-                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 17 reserved
+                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 18 reserved
                 // protocols (`Any`, Comparable/Stringable/Error/Hashable, the operator protocols, the
-                // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`) are now ALSO declared in
+                // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`, `Convert`) are now ALSO declared in
                 // `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
                 // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
                 // parsed+resolved shape byte-equals the Rust seed so the two can't drift. Keeps
@@ -2518,6 +2519,25 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                     Ty::Param("R".into()),
                 ),
             )],
+        },
+    );
+    // `Convert[S]` — the extensible type-conversion protocol (Rust `From`, target-keyed). Its sole
+    // method `convert(x: S) -> Self` is STATIC (first param is `x: S`, NOT `self`), so it harvests to
+    // params `[Ty::Param("S")]` (no leading `Ty::Unknown` self slot) with `is_static: true`. `S` is the
+    // one arity param, so the bound reads `[T: Convert[str]]`. Slice 1: declared + reserved +
+    // bound-parseable only; structural witnessing (slice 2) + `T.convert` through a bound (slice 3) are
+    // NOT wired yet. `is_static` is load-bearing for those slices but NOT compared by `fn_sig_eq`/the
+    // drift guard (params + ret + min_params only); set it to match the parsed prelude shape.
+    m.insert(
+        "Convert".to_string(),
+        ProtocolInfo {
+            type_params: vec!["S".to_string()],
+            embeds: Vec::new(),
+            methods: vec![("convert".to_string(), {
+                let mut sig = FnSig::plain(vec![Ty::Param("S".into())], Ty::Param("Self".into()));
+                sig.is_static = true;
+                sig
+            })],
         },
     );
     m

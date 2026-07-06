@@ -100,10 +100,17 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   standard reserved conversion interface. So Phase 1's real substance is witnessing + `T.convert`, not
   direct-call plumbing.
 - **SLICES (risk-ranked):** 1 declare `Convert[S]` prebuilt protocol in prelude + reserve the name
-  (LOW, mechanical — mirror `Comparable`) · 2 **sound static-slot witnessing + bound-only enforcement**
-  (HIGH — checker soundness, hand-do + two-engine runtime-verify) · 3 **`T.convert` static-through-bound,
-  concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify). Memory: auto-task
-  over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
+  (LOW, mechanical — mirror `Comparable`) — **✅ LANDED (2026-07-06, slice 1)**: the parameterized
+  STATIC protocol `Convert[S]` (`fn convert(x: S) -> Self`, `is_static`) is file-backed in `prelude.chz`,
+  seeded in `prebuilt_protocols()` (drift-guarded), reserved via `is_reserved_protocol` (user redeclare +
+  `struct`/`enum`/`newtype`/`type Convert` rejected `reserved (builtin)`), and binds as a generic bound
+  `[T: Convert[int]]` with arity-checking (`[T: Convert]`/`[T: Convert[int,str]]` → clear arity error).
+  Checker-only, runtime-erased (no `Ty::Protocol` reaches the VM). NOT wired: witnessing (a concrete type
+  satisfying it — slice 2) or `T.convert(..)` through a bound (slice 3, still errors `unknown name 'T'`).
+  · 2 **sound static-slot witnessing + bound-only enforcement**
+  (HIGH — checker soundness, hand-do + two-engine runtime-verify) — **PENDING** · 3 **`T.convert`
+  static-through-bound, concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify) —
+  **PENDING**. Memory: auto-task over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
   `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
@@ -359,8 +366,8 @@ collided with `pass`-as-variable + `protocol pass:`). Three roles off the single
 - `pass` is the SOLE-line marker only: `pass`+member and `pass pass` are parse errors (modeled as the
   body being exactly `pass NEWLINE DEDENT`, in both the hand parser and grammar.bnf `<structBody>`/
   `<protoBody>`). Empty ENUM is OUT — `pass` in an enum body is a clear parse error.
-- **`Any` wired into the prelude:** `protocol Any:` + `pass` added to `std/prelude.chz` (17 reserved
-  protocols now mirrored, was 16) + `Any` added to the `assert_native_protocol_shape_matches` drift
+- **`Any` wired into the prelude:** `protocol Any:` + `pass` added to `std/prelude.chz` (took the mirrored
+  count to 17, was 16; later 18 with `Convert`) + `Any` added to the `assert_native_protocol_shape_matches` drift
   list. `prebuilt_protocols()` stays the Rust source of truth; the prelude is the additive
   drift-guarded mirror. A USER redeclare of `Any` stays rejected (`is_reserved_protocol`); the prelude
   is exempt via the validate-and-no-op stdlib hoist. Empty protocols are NO LONGER "unparseable".
@@ -545,8 +552,8 @@ of each protocol shape, pinned to the Rust seed by `assert_native_protocol_shape
 always-on `harvest_protocol_shape` + `debug_assert_eq!`/`fn_sig_eq` on the always-linked prelude — assert-only,
 resolution-inert, keeps the harvest helper production-live) and by the unit guard
 `native_protocol_shapes_match_prebuilt_seed` (harvested `type_params`/`embeds`/ordered method sigs
-byte-equal `prebuilt_protocols()`). **COUNT:** 16 reserved protocols total; ALL 16 now file-backed +
-drift-guarded (Iterable no longer the exception). Runtime `Iterable` satisfaction (`iterable_elem`/
+byte-equal `prebuilt_protocols()`). **COUNT:** 16 reserved protocols at this 5c milestone; ALL now file-backed +
+drift-guarded (Iterable no longer the exception). Grew to 18 later (`Any`, then `Convert`). Runtime `Iterable` satisfaction (`iterable_elem`/
 `iter_elem`, for-loop lowering, `infer_method_call`'s `Iterable.iter` element recovery) is UNTOUCHED — the
 `.chz` decl is validate-and-no-op at hoist, never inserted into the protocol table. **BEHAVIOR-PRESERVING / three-engine
 byte-identical:** `examples/protocols_5c.chz` (int/float intrinsic arithmetic, a user 4-op struct under

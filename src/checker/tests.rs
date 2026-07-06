@@ -519,6 +519,22 @@ fn redeclaring_comparable_rejected() {
     );
 }
 
+#[test]
+fn redeclaring_convert_rejected() {
+    // `Convert` is a reserved (builtin) protocol (slice 1 of the Convert/From type-conversion work) —
+    // a user `protocol Convert[S]:` redeclaration is rejected, exactly like `Comparable`. Both the
+    // parameterized form (matching the prelude shape) and a bare `protocol Convert:` are reserved on
+    // the name alone.
+    rejects(
+        "protocol Convert[S]:\n    fn convert(x: S) -> Self\n",
+        "reserved",
+    );
+    rejects(
+        "protocol Convert:\n    fn convert(x: int) -> int\n",
+        "reserved",
+    );
+}
+
 // ----- Stringable protocol (M10-G1) -----
 
 #[test]
@@ -9772,7 +9788,7 @@ fn extern_owned_str_param_via_alias_rejected() {
 
 #[test]
 fn protocol_named_types_rejected_at_decl() {
-    // The 15 prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
+    // The 16 prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
     // redeclared as a struct/enum/newtype/type alias — left ungated such a decl silently shadowed
     // the protocol and produced a self-contradictory diagnostic ("type Comparable does not satisfy
     // Comparable"). Mirrors the reserved-TYPE-name reservation (Result/Channel/...). The DECL of the
@@ -9793,6 +9809,7 @@ fn protocol_named_types_rejected_at_decl() {
         "Index",
         "IndexSet",
         "Slice",
+        "Convert",
     ] {
         for src in [
             format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n"),
@@ -9817,6 +9834,36 @@ fn protocol_named_types_rejected_at_decl() {
         errs.iter()
             .any(|e| e.message.contains("Comparable") && e.message.contains("reserved (builtin)")),
         "struct Comparable repro must reject as reserved, got: {errs:?}"
+    );
+}
+
+#[test]
+fn convert_bound_binds_and_arity_checked() {
+    // Slice 1 of Convert/From: the reserved `Convert[S]` protocol binds as a generic bound. This checks
+    // ONLY that the bound RESOLVES (no "unknown protocol") and is arity-checked against its 1 type param.
+    // NOT tested here: that a concrete type SATISFIES it (witnessing = slice 2), nor `T.convert(..)`
+    // through the bound (slice 3 — still errors "unknown name 'T'"). So `foo` stays UNCALLED — invoking
+    // it would fire slice-2 conformance, which is intentionally not wired yet.
+    entry_ok(
+        "fn foo[T: Convert[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+    );
+    // `[T: Convert]` — 0 args for a 1-param protocol → arity error (mirrors `Iterator[Elem]`).
+    let errs = check_entry(
+        "fn foo[T: Convert](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("Convert")
+            && e.message.contains("takes 1 type argument(s), found 0")),
+        "[T: Convert] must be an arity error, got: {errs:?}"
+    );
+    // `[T: Convert[int, str]]` — 2 args for a 1-param protocol → arity error.
+    let errs = check_entry(
+        "fn foo[T: Convert[int, str]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("Convert")
+            && e.message.contains("takes 1 type argument(s), found 2")),
+        "[T: Convert[int, str]] must be an arity error, got: {errs:?}"
     );
 }
 
@@ -13725,13 +13772,13 @@ fn native_enum_option_result_shape_matches_inline() {
     );
 }
 
-/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 17 reserved protocols are now ALSO declared
+/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: all 18 reserved protocols are now ALSO declared
 /// in `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live runtime source
 /// (conformance / operator lowering / `check_bounds` untouched). This asserts each file-backed protocol's
 /// harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS the Rust seed, so the two
 /// source expressions can never silently drift. `Iterable` completes the set: its `iter(self) ->
 /// Iterator[Elem]` return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
-/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the other 15.
+/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the other 16.
 #[test]
 fn native_protocol_shapes_match_prebuilt_seed() {
     let path = crate::resolver::std_root().join("prelude.chz");
@@ -13758,6 +13805,7 @@ fn native_protocol_shapes_match_prebuilt_seed() {
         "Index",
         "IndexSet",
         "Slice",
+        "Convert",
     ] {
         let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
             panic!("reserved protocol '{name}' must be declared in std/prelude.chz")
