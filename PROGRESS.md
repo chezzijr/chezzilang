@@ -34,8 +34,19 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   predicate like `Comparable`. Call-site algo unchanged: infer params from arg types → substitute →
   verify each bound in dependency order (resolve `T`, then check `U: From[T]`; topological over the bound
   graph) → any `Unknown` defers (existing behavior). Contained blast radius.
-- **Phase 0 — scalar fills** (trivial, independent, additive, ship first): `bool(x)` truthiness cast;
-  `Result`-returning parse variants alongside `Option`-returning `to_int`/`to_float`.
+- **Phase 0 — scalar fills — ✅ LANDED (2026-07-06, `auto-task/scalar-fills`).** Two additive fills,
+  each mirroring an existing pattern exactly (no From-protocol/generics work): (1) `bool(x)` global
+  scalar-conversion ctor — a sixth `native ctor` beside int/float/str/bytes/bytearray, wired through
+  the identical touch points (prelude decl → RESERVED_CALLABLE → PRELUDE Ctor row → checker
+  `infer_named_call` arm mirroring `str` → VM `do_call_builtin` + `builtin_bool`). Truthiness: int
+  `0`→false; float `0.0`/`-0.0`→false, NaN→true (Rust `f!=0.0`, Python parity); bool identity; str
+  ``""``→false else true (non-empty, NOT a parse — `bool(" ")` is true); scalar-newtype unwraps;
+  never faults on a scalar (non-scalar faults like int()/float()). (2) `s.parse_int() -> Result[int,
+  str]` / `s.parse_float() -> Result[float, str]` — Result-returning, error-message-carrying siblings
+  of the Option-returning `to_int`/`to_float`, wired the same way (STR_METHODS + str_method_sig +
+  vm/call.rs arms, `alloc_enum("Result", …)`). Two-engine goldens (serial==M:N) for all three +
+  checker type tests + `examples/str_methods.chz` golden extended. Docs: spec.md/stdlib.md/syntax.md/
+  future.md §15 updated ("No bool(x)" / "No Result-returning parse" lines removed).
 - **Phase 1 — `From[S]`, single-source.** Parameterized protocol (reuses the just-landed first-class
   parameterized-protocol machinery above), reserved + file-backed in `prelude.chz` like `Comparable`.
   Method `fn from(x: S) -> Self` (static — first param not `self`). Make `from` a **contextual keyword**

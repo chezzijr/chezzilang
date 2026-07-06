@@ -22,6 +22,7 @@ Conventions used below:
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
+| `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (Python parity), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (non-empty is truthy — **not** a parse, so `bool(" ")` is `true`). |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. |
 | `ord` | `ord(s) -> int` | Unicode codepoint of the first character of `s`. |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
@@ -65,6 +66,8 @@ Conventions used below:
 | `split_lines` | `() -> List[str]` | Split on `"\n"`. |
 | `to_int` | `() -> int?` | Safe parse (trims first): `Some(n)` or `None` on bad input. |
 | `to_float` | `() -> float?` | Safe parse (trims first): `Some(f)` or `None` on bad input. |
+| `parse_int` | `() -> Result[int, str]` | Result-returning parse (trims first): `Ok(n)` or `Err(msg)` carrying a human-readable parse-error message. The error-message sibling of `to_int`. |
+| `parse_float` | `() -> Result[float, str]` | Result-returning parse (trims first): `Ok(f)` or `Err(msg)`. The error-message sibling of `to_float`. |
 | `encode` | `() -> bytes` | UTF-8 encode. |
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 

@@ -1218,6 +1218,14 @@ impl Checker {
                 self.infer_all(args);
                 Some(Ty::Float)
             }
+            "bool" => {
+                self.check_arity("bool", 1, args, span);
+                // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str, +
+                // newtype-unwrap) — like `str`, it accepts anything (every scalar underlying is a
+                // valid truthiness input), so no newtype-mismatch check here.
+                self.infer_all(args);
+                Some(Ty::Bool)
+            }
             "str" => {
                 self.check_arity("str", 1, args, span);
                 // `str` is dual: for `newtype N = str` it UNWRAPS the inner str; for any other

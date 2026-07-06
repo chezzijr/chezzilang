@@ -199,8 +199,10 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
       and newtype ergonomics. A fallible conversion is just `from(x: S) -> Result[Self, E]` — so **no
       separate `TryFrom`** is needed. **Skip `Into`** initially: it needs expected-type threading into
       the receiver (Chezzi infers bottom-up), which is a larger, separate change — `From` first.
-    - **Cheap scalar fills** (additive, low risk, can land independently): `bool(x)` truthiness cast;
-      `Result`-returning parse variants alongside the `Option`-returning `to_int`/`to_float`.
+    - **Cheap scalar fills — ✅ LANDED** (additive, low risk, landed independently ahead of the
+      `From` protocol): `bool(x)` truthiness cast (int/float/bool/str, never faults on a scalar) +
+      the `Result`-returning `s.parse_int() -> Result[int, str]` / `s.parse_float() -> Result[float,
+      str]` siblings of the `Option`-returning `to_int`/`to_float`.
     Variance/soundness note: a `from`-based conversion is a value-producing call, not a subtype
     relation — no covariance holes. This is a language feature (own milestone), not a perf lever.
 

@@ -1,5 +1,6 @@
 # gap #1 (minimal subset) + #7 demo: receiver methods on `str` that forward to the std.str free
-# fns (no import needed), plus the Option-returning safe-parse methods to_int / to_float.
+# fns (no import needed), plus the Option-returning safe-parse methods to_int / to_float and their
+# Result-returning siblings parse_int / parse_float (Err carries a parse-error message).
 
 fn main():
     # ends_with: hit, miss, empty suffix (always true), suffix longer than s (false).
@@ -57,5 +58,11 @@ fn main():
     print("abc".to_int())
     print("4.5".to_float())
     print("x".to_float())
+
+    # parse_int / parse_float: Result-returning siblings — Ok on good input, Err(msg) on bad.
+    print("42".parse_int())
+    print("x".parse_int())
+    print("3.14".parse_float())
+    print("x".parse_float())
 
 main()

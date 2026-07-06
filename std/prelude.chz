@@ -28,6 +28,7 @@ native fn panic(msg: str)
 
 native ctor int(x) -> int
 native ctor float(x) -> float
+native ctor bool(x) -> bool
 native ctor str(x) -> str
 native ctor bytes(x) -> bytes
 native ctor bytearray(x) -> bytearray

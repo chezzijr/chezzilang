@@ -4643,7 +4643,7 @@ mod capture_layout_tests {
 
         // Phase 2a — the scalar-conversion CTORS must STILL lower to the name-keyed CallBuiltin,
         // byte-identical to their old `is_builtin` fall-through (now table-driven via `Intrinsic::Ctor`).
-        for name in ["int", "float", "str", "bytes", "bytearray"] {
+        for name in ["int", "float", "bool", "str", "bytes", "bytearray"] {
             let ops = all_ops(&compile(&format!("{name}(\"5\")\n")));
             assert!(
                 ops.iter()

@@ -707,12 +707,15 @@ coercion, and keep newtypes nominally distinct so a conversion is always visible
 |------|-----------|---------|
 | `int(x)` | `int`/`float`/`bool`/`str` → `int` | truncates a float; **faults** (recoverable) on a non-finite float or an unparseable string |
 | `float(x)` | `float`/`int`/`bool`/`str` → `float` | **faults** on an unparseable string |
+| `bool(x)` | `int`/`float`/`bool`/`str` → `bool` | never fails — a truthiness cast (int `0`/float `0.0`/`-0.0`/empty `str` → `false`; `NaN` → `true`; non-empty `str` is `true`, **not** a parse) |
 | `str(x)` | **anything** → `str` | never fails — the `Stringable` display cast (`print`/interpolation use the same path) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
 **Safe (non-faulting) string parse** — return `Option` instead of faulting: `s.to_int() -> int?`,
-`s.to_float() -> float?` (`None` on bad input). Use these over `int()`/`float()` when the input is
-untrusted.
+`s.to_float() -> float?` (`None` on bad input). Their error-message-carrying siblings return a
+`Result` instead: `s.parse_int() -> Result[int, str]`, `s.parse_float() -> Result[float, str]`
+(`Ok(n)` or `Err(msg)` with a human-readable parse-error message). Use these over `int()`/`float()`
+when the input is untrusted.
 
 **Implicit coercion — one-way `int` → `float` widening only** (C-like). An `int` value flows into a
 `float` slot and is converted to a real `f64` at every value-definition boundary (typed binding,
@@ -733,17 +736,15 @@ native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their
 **What does NOT exist (current boundaries):**
 
 - No `as` operator (`as` in the grammar is only import aliasing).
-- No `bool(x)` truthiness cast.
 - No `From`/`Into`/`TryFrom` protocol — struct↔struct / enum↔enum conversion is a hand-written
   function; there is no extensible conversion mechanism.
-- No `Result`-returning parse variant (only the faulting `int()`/`float()` or the `Option`-returning
-  `to_int`/`to_float`).
 - `cast[T](val: Any) -> Option[T]` (a checked downcast off the `Any` top type) is **deferred** — it
   needs runtime type tags, since generics are erased (`docs/future.md`).
 
 The intended future direction is a structural **`Convert`/`From` protocol** (a type declaring
-`fn from(x: S) -> Self`), witnessed structurally like `Comparable`/`Add`, plus cheap scalar fills
-(`bool(x)`, `Result`-returning parse). Recorded in `docs/future.md §3`.
+`fn from(x: S) -> Self`), witnessed structurally like `Comparable`/`Add`. The cheap scalar fills
+(`bool(x)` truthiness cast + `Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded
+in `docs/future.md §3`.
 
 ## Architecture — pipeline
 

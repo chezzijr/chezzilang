@@ -985,6 +985,63 @@ fn assert_parity_out(src: &str, expect: &str) {
     );
 }
 
+// ----- Phase 0 scalar fills: bool(x) truthiness cast + Result-returning parse variants -----
+
+#[test]
+fn bool_ctor_parity() {
+    // `bool(x)` truthiness: int 0->false else true; float 0.0/-0.0->false, NaN->true, else true;
+    // bool->identity; str ""->false else true (non-empty, NOT a parse — " " is true).
+    let src = r#"
+fn main():
+    print(bool(0))
+    print(bool(5))
+    print(bool(0.0))
+    nz := 0.0
+    print(bool(-nz))
+    nan := 0.0 / 0.0
+    print(bool(nan))
+    print(bool(3.14))
+    print(bool(true))
+    print(bool(false))
+    print(bool(""))
+    print(bool("x"))
+    print(bool(" "))
+
+main()
+"#;
+    assert_parity_out(
+        src,
+        "false\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn parse_int_parity() {
+    // `s.parse_int() -> Result[int, str]` — the error-message-carrying sibling of `to_int() -> int?`.
+    let src = r#"
+fn main():
+    print("42".parse_int())
+    print("  7 ".parse_int())
+    print("x".parse_int())
+
+main()
+"#;
+    assert_parity_out(src, "Ok(42)\nOk(7)\nErr(cannot parse 'x' as an integer)\n");
+}
+
+#[test]
+fn parse_float_parity() {
+    // `s.parse_float() -> Result[float, str]` — the sibling of `to_float() -> float?`.
+    let src = r#"
+fn main():
+    print("3.14".parse_float())
+    print("x".parse_float())
+
+main()
+"#;
+    assert_parity_out(src, "Ok(3.14)\nErr(cannot parse 'x' as a float)\n");
+}
+
 #[test]
 fn bitwise_ops_parity() {
     assert_parity_out(
