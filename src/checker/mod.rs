@@ -2661,6 +2661,12 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::NewType(n, args) => {
             Ty::NewType(n.clone(), args.iter().map(|t| subst(t, map)).collect())
         }
+        // A parameterized protocol existential (`Container[int]`) must recurse into its carried args
+        // so DECISION-2 method-return recovery is not inert (`c.get(0)` substituting the protocol's
+        // param → the carried arg flows through here). A bare `Error` has no args (a no-op).
+        Ty::Protocol(n, args) => {
+            Ty::Protocol(n.clone(), args.iter().map(|t| subst(t, map)).collect())
+        }
         other => other.clone(),
     }
 }

@@ -1882,18 +1882,35 @@ impl Checker {
                 self.error(span, format!("module '{mname}' has no member '{method}'"));
                 Ty::Unknown
             }
-            // A protocol existential (e.g. `Error`): only the protocol's own methods are callable.
-            Ty::Protocol(pname) => {
-                let sig = self
-                    .protocols
-                    .get(pname)
-                    .and_then(|pinfo| pinfo.methods.iter().find(|(m, _)| m == method))
-                    .map(|(_, msig)| msig.clone());
-                if let Some(msig) = sig {
+            // A protocol existential (e.g. `Error`, or a parameterized `Container[int]`): only the
+            // protocol's own methods are callable.
+            Ty::Protocol(pname, pargs) => {
+                let found = self.protocols.get(pname).and_then(|pinfo| {
+                    pinfo
+                        .methods
+                        .iter()
+                        .find(|(m, _)| m == method)
+                        .map(|(_, msig)| (msig.clone(), pinfo.type_params.clone()))
+                });
+                if let Some((msig, ptps)) = found {
+                    // DECISION-2 element RECOVERY: substitute the protocol's own type params → the
+                    // carried concrete args into the method's params AND return, so `c.get(0)` on a
+                    // `Container[int]` witnesses `i: int` and yields `int` (not the bare param `T`).
+                    // Empty `pargs` (a bare existential like `Error`) yields an empty map — a no-op
+                    // that reproduces the prior bare behaviour. This is SOUND because the store/pass
+                    // boundary already witnessed conformance with these same args.
+                    let pmap: HashMap<String, Ty> =
+                        ptps.iter().cloned().zip(pargs.iter().cloned()).collect();
                     // First param is the implicit receiver; explicit args correspond to params[1..].
-                    let expected = msig.params.get(1..).unwrap_or(&[]).to_vec();
+                    let expected: Vec<Ty> = msig
+                        .params
+                        .get(1..)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|t| subst(t, &pmap))
+                        .collect();
                     self.check_args(method, &expected, args, span);
-                    return msig.ret;
+                    return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
                 self.error(span, format!("type {pname} has no method '{method}'"));

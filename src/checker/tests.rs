@@ -1255,15 +1255,17 @@ r := b.ident()
 }
 
 #[test]
-fn param_protocol_as_value_type_rejected() {
-    // A parameterized protocol may only be a bound, not an existential value type (out of scope).
+fn param_protocol_as_value_type_accepted() {
+    // A parameterized protocol is now a first-class value/annotation type (Q1). The carried arg is
+    // witnessed at every store/pass boundary; a method returning the protocol's param recovers to the
+    // carried concrete type (`c.get(0)` on a `Container[int]` yields `int`).
     let src = "\
 protocol Container[T]:
     fn get(self, i: int) -> T
-fn bad(c: Container[int]) -> int:
+fn good(c: Container[int]) -> int:
     return c.get(0)
 ";
-    rejects(src, "value type");
+    ok(src);
 }
 
 // ----- review-panel regressions (G1/G2) -----
@@ -15443,5 +15445,100 @@ fn generic_user_method_too_few_args_reports_not_panics() {
     rejects(
         "struct B[T]:\n    v: T\n    fn map_to[U](self, f: fn(T) -> U) -> U:\n        return f(self.v)\nfn main():\n    b := B(1)\n    print(b.map_to())\n",
         "'map_to' expects 1 argument(s), got 0",
+    );
+}
+
+// ── Parameterized protocols in value/annotation position (Q1) ───────────────────────────────
+
+/// A `Container[int]` param annotation is ACCEPTED (was a hard "can only be used as a bound" error);
+/// a struct whose `get` returns `int` conforms and the call type-checks.
+#[test]
+fn param_parameterized_protocol_accepts() {
+    ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn f(c: Container[int]) -> int:\n    return c.get(0)\nfn main():\n    print(f(Bag()))\n",
+    );
+}
+
+/// A `Container[str]` slot must REJECT an int-returning Bag — the carried arg is witnessed at the
+/// call boundary (no over-accept), so the value fails the parameter's assignability check.
+#[test]
+fn param_protocol_wrong_arg_rejected() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn f(c: Container[str]) -> int:\n    return 0\nfn main():\n    f(Bag())\n",
+        "expected Container[str], found Bag",
+    );
+}
+
+/// A bare NON-GENERIC protocol existential still ACCEPTS a conforming struct (0-arg existential
+/// preserved — the `Error`/`Show` case, unchanged by the parameterization work).
+#[test]
+fn bare_protocol_still_accepts() {
+    ok(
+        "protocol Show:\n    fn show(self) -> str\nstruct Bag:\n    fn show(self) -> str:\n        return \"bag\"\nfn f(c: Show) -> str:\n    return c.show()\nfn main():\n    print(f(Bag()))\n",
+    );
+}
+
+/// A bare `Container` value is NOT assignable into a `Container[int]` slot (strict invariance / arity).
+#[test]
+fn bare_not_equal_parameterized_reject_into_param() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn g(c: Container) -> Container[int]:\n    return c\nfn main():\n    pass\n",
+        "expected",
+    );
+}
+
+/// A `Container[int]` value is NOT assignable into a bare `Container` slot (strict invariance / arity).
+#[test]
+fn parameterized_not_equal_bare_reject_into_bare() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn g(c: Container[int]) -> Container:\n    return c\nfn main():\n    pass\n",
+        "expected",
+    );
+}
+
+/// Method-return element RECOVERY: `c: Container[int]; c.get(0)` infers to `int`, usable in int arithmetic.
+#[test]
+fn param_protocol_method_return_recovered() {
+    ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn f(c: Container[int]) -> int:\n    x := c.get(0)\n    return x + 1\nfn main():\n    print(f(Bag()))\n",
+    );
+}
+
+/// Write-site (a): a `-> Container[int]` return with a str-returning value REJECTS.
+#[test]
+fn param_protocol_return_site_rejects() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct StrBag:\n    fn get(self, i: int) -> str:\n        return \"x\"\nfn g() -> Container[int]:\n    return StrBag()\nfn main():\n    pass\n",
+        "expected return type Container[int], found StrBag",
+    );
+}
+
+/// Write-site (b): a `struct S: c: Container[int]` field initialised with a str-returning value REJECTS.
+#[test]
+fn param_protocol_field_site_rejects() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct StrBag:\n    fn get(self, i: int) -> str:\n        return \"x\"\nstruct S:\n    c: Container[int]\nfn main():\n    S(StrBag())\n",
+        "expected Container[int], found StrBag",
+    );
+}
+
+/// Write-site (c): reassigning a str-returning value into a `Container[int]` local REJECTS.
+#[test]
+fn param_protocol_reassign_site_rejects() {
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct IntBag:\n    fn get(self, i: int) -> int:\n        return 1\nstruct StrBag:\n    fn get(self, i: int) -> str:\n        return \"x\"\nfn f(c: Container[int]):\n    c = StrBag()\nfn main():\n    f(IntBag())\n",
+        "cannot assign StrBag to Container[int]",
+    );
+}
+
+/// Nesting: `List[Container[int]]` threads the args into the nested Protocol; a wrong-arg nested variant REJECTS.
+#[test]
+fn param_protocol_nesting_accepts_and_wrong_rejects() {
+    ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn h(xs: List[Container[int]]) -> int:\n    return xs[0].get(0)\nfn main():\n    print(h([Bag()]))\n",
+    );
+    rejects(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn h(xs: List[Container[str]]) -> int:\n    return 0\nfn main():\n    h([Bag()])\n",
+        "expected List[Container[str]], found List[Bag]",
     );
 }

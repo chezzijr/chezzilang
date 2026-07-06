@@ -11791,3 +11791,37 @@ fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
     let src = "fn conv[T](x: T) -> str:\n    return str(x)\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
     assert_mc_parity(src, "[1, 2, 3]\n[1, 2, 3]\n");
 }
+
+// ── Parameterized protocols in value position (Q1) — two-engine goldens ──────────────────────
+
+#[test]
+fn param_protocol_value_arg_runs_both_engines() {
+    // A `Container[int]` parameter accepts a conforming struct; `c.get(0)` dispatches by name and
+    // yields the recovered `int` on both engines.
+    let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    items: List[int]\n    fn get(self, i: int) -> int:\n        return self.items[i]\nfn f(c: Container[int]) -> int:\n    return c.get(0) + 1\nfn main():\n    print(f(Bag([41])))\nmain()\n";
+    assert_mc_parity(src, "42\n");
+}
+
+#[test]
+fn param_protocol_method_return_recovered_runs_both_engines() {
+    // DECISION-2 recovery: `x := c.get(0)` is typed `int` and used in int arithmetic; identical
+    // stdout across the serial VM and the M:N engine.
+    let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn f(c: Container[int]) -> int:\n    x := c.get(0)\n    return x * 6\nfn main():\n    print(f(Bag()))\nmain()\n";
+    assert_mc_parity(src, "42\n");
+}
+
+#[test]
+fn param_protocol_field_and_nesting_run_both_engines() {
+    // A `Container[int]` struct field and a `List[Container[int]]` param both witness + erase; the
+    // stored values dispatch by name identically on both engines.
+    let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    n: int\n    fn get(self, i: int) -> int:\n        return self.n\nstruct Holder:\n    c: Container[int]\nfn sum2(xs: List[Container[int]]) -> int:\n    return xs[0].get(0) + xs[1].get(0)\nfn main():\n    h := Holder(Bag(10))\n    print(h.c.get(0))\n    print(sum2([Bag(20), Bag(30)]))\nmain()\n";
+    assert_mc_parity(src, "10\n50\n");
+}
+
+#[test]
+fn param_protocol_reassign_accept_runs_both_engines() {
+    // DECISION-3 reassignment write-site (accept path): reassigning a different conforming struct into
+    // a `Container[int]` local witnesses at the reassign boundary, then dispatches by name identically.
+    let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct A:\n    fn get(self, i: int) -> int:\n        return 1\nstruct B:\n    fn get(self, i: int) -> int:\n        return 2\nfn f(c: Container[int]) -> int:\n    c = B()\n    return c.get(0)\nfn main():\n    print(f(A()))\nmain()\n";
+    assert_mc_parity(src, "2\n");
+}
