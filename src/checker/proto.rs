@@ -848,6 +848,15 @@ impl Checker {
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return Ok(());
         }
+        // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
+        // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
+        // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
+        // Note the membership is all FOUR scalars — unlike Comparable (no Bool) / Hashable (no Float).
+        // Structs/enums/newtypes still fall through to the structural `satisfies_methods` below (a type
+        // WITHOUT a `str(self) -> str` method stays correctly rejected; newtypes stay opt-in).
+        if protocol == "Stringable" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
+            return Ok(());
+        }
         // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
         // restriction; float is excluded — its equality is a hazard). Struct conformance falls
         // through to the structural check (needs a `hash(self) -> int` method).

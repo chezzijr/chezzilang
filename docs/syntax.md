@@ -1387,6 +1387,12 @@ builtin, and inside `{…}` string interpolation — including when nested in a 
 / enum payload. Types without a `str` method keep the default repr. Like `Comparable`, `Stringable`
 is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
 
+The scalar types **`int`/`float`/`bool`/`str` intrinsically satisfy `Stringable`** — all four
+stringify, so they flow into a `[T: Stringable]` generic with no method to define (mirroring the
+intrinsic scalar arms of `Comparable`/`Hashable`/`Add`). Inside the erased body a `v.str()` on such a
+scalar renders exactly as `str(v)` does. (Like the other intrinsic protocols, this is bound-only:
+a direct `(5).str()` on a concrete scalar is still a compile error — use the free `str(5)` builtin.)
+
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether
 that return type is written explicitly, inferred from the body, or a `str` type-alias). `str` is

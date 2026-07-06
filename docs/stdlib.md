@@ -22,7 +22,7 @@ Conventions used below:
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. |
-| `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). |
+| `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. |
 | `ord` | `ord(s) -> int` | Unicode codepoint of the first character of `s`. |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
 | `panic` | `panic(msg) -> never` | Raise a recoverable fault (caught by the nearest `recover:`, else aborts). Bottom-typed. |

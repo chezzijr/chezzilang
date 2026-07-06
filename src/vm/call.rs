@@ -746,6 +746,25 @@ impl Vm {
                 return Ok(());
             }
         }
+        // `str` on a scalar: int/float/bool/str intrinsically satisfy `Stringable`, so an erased
+        // generic body may call `.str()` on a concrete scalar. Render via `stringify` (the same path
+        // `str(x)`/interpolation use) and alloc a fresh `Obj::Str`. The already-`Str` receiver (T=str)
+        // MUST be intercepted here too — otherwise it would fall to struct-method dispatch and fault;
+        // `stringify` returns its raw unquoted contents. GC-safe: `recv` is already popped, and for a
+        // scalar receiver `stringify` runs no user code, so the owned `String` exists before the alloc.
+        // Mirrors the `compare` scalar branch above. Structs with their own `str` fall through below.
+        if method == "str" && args.is_empty() {
+            let is_scalar = matches!(
+                recv,
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil
+            ) || matches!(recv, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)));
+            if is_scalar {
+                let s = self.stringify(recv, span, 0)?;
+                let h = self.heap.alloc(Obj::Str(s.into()));
+                self.push(Value::Obj(h));
+                return Ok(());
+            }
+        }
         let Value::Obj(h) = recv else {
             return Err(self.err(
                 format!("type {} has no method '{method}'", self.type_name(recv)),

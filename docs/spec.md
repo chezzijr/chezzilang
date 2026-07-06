@@ -427,6 +427,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   native fn can return a structured value.
 - **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
   protocol — any `Hashable` type is now a valid map/set key.
+- **Shipped:** the scalar types `int`/`float`/`bool`/`str` now **intrinsically satisfy `Stringable`**
+  (a `[T: Stringable]` generic accepts them, and the erased body's `v.str()` dispatches to the scalar
+  render), closing the last inconsistency where every other scalar-friendly builtin protocol
+  (`Comparable`/`Hashable`/`Add`/…) already had an intrinsic scalar arm but `Stringable` did not.
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
   via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;

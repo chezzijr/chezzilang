@@ -11321,6 +11321,19 @@ fn primitive_compare_method_on_vm() {
     assert_eq!(run(src), "-1\n1\n");
 }
 
+/// Scalars intrinsically satisfy `Stringable` (checker arm in `proto.rs`) AND the erased generic
+/// body's `v.str()` is dispatched by the scalar `str` branch in `do_method_call` — a checker-only
+/// change would type-OK then runtime-trap "type int has no method 'str'". Covers all four scalars
+/// (int/float/bool/str; the T=str arm exercises the already-`Obj::Str` receiver re-alloc). Parity:
+/// serial-VM == M:N-VM (both share `do_method_call`).
+#[test]
+fn primitive_str_method_on_vm() {
+    let src = "fn show[T: Stringable](v: T) -> str:\n    return v.str()\nprint(show(5))\nprint(show(3.14))\nprint(show(true))\nprint(show(\"hi\"))\n";
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, "5\n3.14\ntrue\nhi\n");
+    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+}
+
 /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)
 /// is byte-identical on the VM, the interpreter, and its `.expected`.
 #[test]
