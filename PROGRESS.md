@@ -92,12 +92,18 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   way to make `T.convert` work on an *abstract* `T` (thread the concrete `convert` in as a hidden arg).
   Its own scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
   per-call-shape special cases instead — that's the path to inconsistent generics.
-- **SLICES (risk-ranked, for implementation):** 1a `convert`/`Convert[S]` reserved name + prelude decl
-  (LOW, mechanical) · 1b protocol wired like `Comparable` (LOW) · 1c **sound static-slot witnessing +
-  bound-only decision** (HIGH — checker soundness, hand-do + two-engine runtime-verify) · 1d **`T.convert`
-  static-through-bound, concrete-pinned rewrite** (HIGH — generics, hand-do + runtime-verify) · 1e drop
-  (fallible-via-Result-protocol not in phase 1). Memory: auto-task over-reaches on checker soundness →
-  auto-task 1a/1b only, hand-do 1c/1d.
+- **NOTHING to reserve for `convert` — it's a plain method name.** Only the **protocol `Convert`** is
+  reserved (prebuilt + file-backed in `prelude.chz`, like `Comparable`/`Add`/`Stringable`; user
+  redeclaration rejected "reserved (builtin)"). NOTE: a user can ALREADY write `fn convert(c: Celsius)
+  -> Fahrenheit` + call `Fahrenheit.convert(c)` TODAY via plain static-method dispatch — no protocol
+  needed for DIRECT conversion. The protocol adds ONLY: (a) the generic bound `[T: Convert[S]]`, (b) a
+  standard reserved conversion interface. So Phase 1's real substance is witnessing + `T.convert`, not
+  direct-call plumbing.
+- **SLICES (risk-ranked):** 1 declare `Convert[S]` prebuilt protocol in prelude + reserve the name
+  (LOW, mechanical — mirror `Comparable`) · 2 **sound static-slot witnessing + bound-only enforcement**
+  (HIGH — checker soundness, hand-do + two-engine runtime-verify) · 3 **`T.convert` static-through-bound,
+  concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify). Memory: auto-task
+  over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
   `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
