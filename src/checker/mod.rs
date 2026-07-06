@@ -194,6 +194,7 @@ const RESERVED_CALLABLE: &[&str] = &[
     "range",
     "int",
     "float",
+    "bool",
     "str",
     "ord",
     "chr",
@@ -294,7 +295,8 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
         intrinsic: Intrinsic::Builtin,
         first_class: true,
     },
-    // Phase 2a — the five scalar-conversion CTORS. `first_class: false` (ALWAYS, for every Ctor row):
+    // Phase 2a — the scalar-conversion CTORS (int/float/bool/str/bytes/bytearray). `first_class:
+    // false` (ALWAYS, for every Ctor row):
     // a value-position use (`f := int`) stays rejected, uniform with `f := Point` / `f := List`.
     PreludeFn {
         name: "int",
@@ -303,6 +305,11 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
     },
     PreludeFn {
         name: "float",
+        intrinsic: Intrinsic::Ctor,
+        first_class: false,
+    },
+    PreludeFn {
+        name: "bool",
         intrinsic: Intrinsic::Ctor,
         first_class: false,
     },
@@ -2959,6 +2966,8 @@ const STR_METHODS: &[&str] = &[
     "strip_suffix",
     "to_int",
     "to_float",
+    "parse_int",
+    "parse_float",
     "encode",
 ];
 const LIST_METHODS: &[&str] = &[
@@ -3031,6 +3040,10 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         // gap #7: safe numeric parse — Option-returning (None on bad input) instead of raising.
         "to_int" => (vec![], Ty::option(Ty::Int)),
         "to_float" => (vec![], Ty::option(Ty::Float)),
+        // Result-returning parse siblings: `Ok(n)` or `Err(msg)` carrying a human-readable
+        // parse-error string (explicit `str` error type, not the default `Error` existential).
+        "parse_int" => (vec![], Ty::result_e(Ty::Int, Ty::Str)),
+        "parse_float" => (vec![], Ty::result_e(Ty::Float, Ty::Str)),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

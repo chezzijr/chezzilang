@@ -2061,6 +2061,29 @@ impl Vm {
                             Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
+                    // Result-returning parse siblings of to_int/to_float — carry a human-readable
+                    // Err(msg) instead of None (trims first, like int()/float()/to_int/to_float).
+                    "parse_int" => {
+                        self.arity_err("parse_int", args, 0, span)?;
+                        match s.trim().parse::<i64>() {
+                            Ok(n) => Ok(self.alloc_enum("Result", "Ok", vec![Value::Int(n)])),
+                            Err(_) => {
+                                let msg =
+                                    self.alloc_str(format!("cannot parse '{s}' as an integer"));
+                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                            }
+                        }
+                    }
+                    "parse_float" => {
+                        self.arity_err("parse_float", args, 0, span)?;
+                        match s.trim().parse::<f64>() {
+                            Ok(f) => Ok(self.alloc_enum("Result", "Ok", vec![Value::Float(f)])),
+                            Err(_) => {
+                                let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
+                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                            }
+                        }
+                    }
                     _ => Err(self.err(format!("type str has no method '{method}'"), span)),
                 }
             }

@@ -1034,6 +1034,7 @@ impl Vm {
             "range" => self.builtin_range(&args, span)?,
             "int" => self.builtin_int(&args, span)?,
             "float" => self.builtin_float(&args, span)?,
+            "bool" => self.builtin_bool(&args, span)?,
             "str" => self.builtin_str(&args, span)?,
             "ord" => self.builtin_ord(&args, span)?,
             "chr" => self.builtin_chr(&args, span)?,
@@ -1642,6 +1643,40 @@ impl Vm {
             }
             other => Err(self.err(
                 format!("float() cannot convert {}", self.type_name(other)),
+                span,
+            )),
+        }
+    }
+
+    /// `bool(x)` — total truthiness cast over the scalars. Never faults on int/float/bool/str
+    /// (+ scalar newtype-unwrap): int 0 -> false else true; float 0.0/-0.0 -> false, NaN -> true
+    /// (Rust `f != 0.0` is already false for both zeros and true for NaN — matches Python), else
+    /// true; bool -> identity; str "" -> false else true (non-empty is truthy — NOT a parse, so
+    /// `bool(" ")` is true). A non-scalar arg faults exactly like `int()`/`float()`.
+    pub(super) fn builtin_bool(
+        &mut self,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        self.arity_err("bool", args, 1, span)?;
+        match args[0] {
+            Value::Int(n) => Ok(Value::Bool(n != 0)),
+            Value::Float(f) => Ok(Value::Bool(f != 0.0)),
+            Value::Bool(b) => Ok(Value::Bool(b)),
+            Value::Obj(h) => match self.heap.get(h) {
+                Obj::Str(s) => Ok(Value::Bool(!s.is_empty())),
+                // `bool(newtype)` unwraps the inner scalar (mirrors int/float's cast-unwrap).
+                Obj::NewType { inner, .. } => {
+                    let inner = *inner;
+                    self.builtin_bool(&[inner], span)
+                }
+                _ => Err(self.err(
+                    format!("bool() cannot convert {}", self.type_name(args[0])),
+                    span,
+                )),
+            },
+            other => Err(self.err(
+                format!("bool() cannot convert {}", self.type_name(other)),
                 span,
             )),
         }

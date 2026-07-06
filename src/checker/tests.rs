@@ -3603,6 +3603,31 @@ fn str_methods_infer_types_ok() {
 }
 
 #[test]
+fn bool_ctor_infers_bool() {
+    // `bool(x)` accepts any scalar and infers `bool` — verified via a typed target.
+    ok("b: bool = bool(3)\nprint(b)\n");
+    ok("b: bool = bool(3.0)\nprint(b)\n");
+    ok("b: bool = bool(true)\nprint(b)\n");
+    ok("b: bool = bool(\"x\")\nprint(b)\n");
+}
+
+#[test]
+fn bool_ctor_is_not_int() {
+    // `bool(x)` yields `bool`, not `int` — a mismatched typed target must reject.
+    rejects("n: int = bool(3)\n", "to variable of type int");
+}
+
+#[test]
+fn parse_int_infers_result_int_str() {
+    ok("s := \"5\"\nr: Result[int, str] = s.parse_int()\nprint(r)\n");
+}
+
+#[test]
+fn parse_float_infers_result_float_str() {
+    ok("s := \"5.0\"\nr: Result[float, str] = s.parse_float()\nprint(r)\n");
+}
+
+#[test]
 fn str_len_is_int() {
     // len() must be int — use it where an int is required.
     ok("s := \"hi\"\nn: int = s.len()\nprint(n)\n");
@@ -13341,7 +13366,7 @@ fn newtype_operator_method_fails_generic_bound() {
 /// is the single source: `builtin_sig` is keyed off the same names.
 #[test]
 fn reserved_callables_all_have_builtin_sig() {
-    // `builtin_sig` is now a Checker METHOD (phase 3a): the eight migrated universe builtins source
+    // `builtin_sig` is now a Checker METHOD (phase 3a): the nine migrated universe builtins source
     // their sig from the always-linked std/prelude.chz, seeded here via `seed_native_prelude_sigs`
     // (the single-module `check` path does the same). `print` + the container/runtime ctors stay
     // hard-coded, so they resolve without the seed too.
@@ -13370,7 +13395,7 @@ fn prelude_table_is_single_source_of_truth() {
     use std::collections::BTreeSet;
 
     // (1) Phase 2a: the table now holds two families — the four FIRST-CLASS universe pure fns AND the
-    //     five NON-first-class scalar-conversion CTORS (`Intrinsic::Ctor`). The container/reserved-type
+    //     NON-first-class scalar-conversion CTORS (`Intrinsic::Ctor`). The container/reserved-type
     //     ctors (List/Map/Set/range) are GENERIC / carry reserved-type identity → phase 2b, still OUT.
     let firstclass: BTreeSet<&str> = PRELUDE
         .iter()
@@ -13395,6 +13420,7 @@ fn prelude_table_is_single_source_of_truth() {
         BTreeSet::from([
             "int",
             "float",
+            "bool",
             "str",
             "bytes",
             "bytearray",
@@ -13403,7 +13429,7 @@ fn prelude_table_is_single_source_of_truth() {
             "Set",
             "range"
         ]),
-        "the Ctor PRELUDE rows must be the five scalar-conversion ctors plus the four container ctors"
+        "the Ctor PRELUDE rows must be the six scalar-conversion ctors plus the four container ctors"
     );
     // The four container/reserved-type ctors are now IN the table (phase 2b), each a NON-first-class
     // `Intrinsic::Ctor` row (dispatch single-source; generic identity stays in resolve_type).
@@ -13440,7 +13466,7 @@ fn prelude_table_is_single_source_of_truth() {
     // (3) Every table row has a checker `builtin_sig` (drives editor hover + value-position typing).
     //     `first_class` is true IFF the row lowers to a first-class runtime value — Print|Builtin — and
     //     is NEVER true for a Ctor (the hard invariant: no scalar ctor is first-class). `builtin_sig`
-    //     is now a Checker METHOD sourcing the eight migrated sigs from std/prelude.chz (seeded here).
+    //     is now a Checker METHOD sourcing the nine migrated sigs from std/prelude.chz (seeded here).
     let mut chk = Checker::new();
     chk.seed_native_prelude_sigs();
     for p in PRELUDE {
@@ -13487,11 +13513,11 @@ fn prelude_table_is_single_source_of_truth() {
         }
     }
 
-    // (5) PHASE 3a — the eight migrated universe builtins are now DECLARED in std/prelude.chz. Build a
+    // (5) PHASE 3a — the nine migrated universe builtins are now DECLARED in std/prelude.chz. Build a
     //     real graph (which always-links std.prelude), read the prelude module's `native` decls, and
-    //     cross-check: the parsed native-decl NAME SET equals the eight migrated names; `native fn` ⇒
+    //     cross-check: the parsed native-decl NAME SET equals the nine migrated names; `native fn` ⇒
     //     Builtin & first_class, `native ctor` ⇒ Ctor & !first_class (matching the hollow Rust table);
-    //     the union {parsed 8} ∪ {print} equals the whole first-class-or-ctor prelude surface; and each
+    //     the union {parsed 9} ∪ {print} equals the whole first-class-or-ctor prelude surface; and each
     //     parsed FnSig equals its HISTORICAL hand-built shape (behavior-preserving migration).
     let t = TmpDir::new();
     let entry = t.write("main.chz", "print(\"hi\")\n");
@@ -13518,11 +13544,12 @@ fn prelude_table_is_single_source_of_truth() {
             "panic",
             "int",
             "float",
+            "bool",
             "str",
             "bytes",
             "bytearray"
         ]),
-        "std/prelude.chz native decls must be the eight migrated universe builtins plus ported `print`"
+        "std/prelude.chz native decls must be the nine migrated universe builtins plus ported `print`"
     );
     // Metadata agreement: the parsed decl KIND must match the hollow Rust table's intrinsic/first_class.
     for (name, kind) in &parsed {
@@ -13546,7 +13573,7 @@ fn prelude_table_is_single_source_of_truth() {
             }
         }
     }
-    // The `.chz`-DECLARED surface = {parsed 8} ∪ {print, synthetic}. Phase 2b folded the four GENERIC
+    // The `.chz`-DECLARED surface = {parsed 9} ∪ {print, synthetic}. Phase 2b folded the four GENERIC
     // container ctors into the table for DISPATCH single-source, but they are deliberately NOT `.chz`
     // decls (they are generic — native ctor generic-decl support is a later, maybe-never concern), so
     // they are the exact set by which the TABLE surface exceeds the `.chz`-declared surface. Asserting
@@ -13562,7 +13589,7 @@ fn prelude_table_is_single_source_of_truth() {
     }
     assert_eq!(
         whole, table_minus_containers,
-        "the PRELUDE table MINUS the four container ctors must equal the eight std/prelude.chz decls plus synthetic `print`"
+        "the PRELUDE table MINUS the four container ctors must equal the nine std/prelude.chz decls plus synthetic `print`"
     );
     for c in CONTAINER_CTORS {
         let p = prelude_fn(c).unwrap_or_else(|| panic!("'{c}' must be a PRELUDE row (2b)"));
