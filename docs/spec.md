@@ -694,6 +694,57 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
+## Type conversions & casting
+
+Chezzi has **no `as` cast operator** and **no `From`/`Into`/`TryFrom` conversion protocol** (yet — see
+`docs/future.md`). Conversion is done by a small fixed set of explicit builtins plus one implicit
+numeric widening. The design is deliberately minimal: prefer an explicit constructor call over silent
+coercion, and keep newtypes nominally distinct so a conversion is always visible in the source.
+
+**Scalar conversion constructors** (global builtins — see `docs/stdlib.md §1`):
+
+| Form | From → To | Failure |
+|------|-----------|---------|
+| `int(x)` | `int`/`float`/`bool`/`str` → `int` | truncates a float; **faults** (recoverable) on a non-finite float or an unparseable string |
+| `float(x)` | `float`/`int`/`bool`/`str` → `float` | **faults** on an unparseable string |
+| `str(x)` | **anything** → `str` | never fails — the `Stringable` display cast (`print`/interpolation use the same path) |
+| `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
+
+**Safe (non-faulting) string parse** — return `Option` instead of faulting: `s.to_int() -> int?`,
+`s.to_float() -> float?` (`None` on bad input). Use these over `int()`/`float()` when the input is
+untrusted.
+
+**Implicit coercion — one-way `int` → `float` widening only** (C-like). An `int` value flows into a
+`float` slot and is converted to a real `f64` at every value-definition boundary (typed binding,
+`float` param/default, `-> float` return, `float` struct field, mixed-numeric-literal collection). It
+is **scalar-at-the-sink**: never propagated into a compound (`List[float] = [1, 2]` stays an error),
+and the reverse (`float` → `int`) is always a lossy type error. Emitted as `Op::CoerceFloat` so both
+engines are byte-identical. (Full rules in the numeric-arithmetic section above.)
+
+**Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:
+wrap with `Name(x)`, unwrap with the matching scalar/aggregate cast (`int(n)`, `list(s)`, …; the
+underlying must match exactly). A numeric-scalar newtype auto-flows the underlying's native operators;
+everything else is methods-only. See the M21 note above.
+
+**Stringable** — every scalar (`int`/`float`/`bool`/`str`) intrinsically satisfies the `Stringable`
+protocol, so `[T: Stringable]` generics accept them (an erased `v.str()` body dispatches to the same
+native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their own `str(self) -> str`.
+
+**What does NOT exist (current boundaries):**
+
+- No `as` operator (`as` in the grammar is only import aliasing).
+- No `bool(x)` truthiness cast.
+- No `From`/`Into`/`TryFrom` protocol — struct↔struct / enum↔enum conversion is a hand-written
+  function; there is no extensible conversion mechanism.
+- No `Result`-returning parse variant (only the faulting `int()`/`float()` or the `Option`-returning
+  `to_int`/`to_float`).
+- `cast[T](val: Any) -> Option[T]` (a checked downcast off the `Any` top type) is **deferred** — it
+  needs runtime type tags, since generics are erased (`docs/future.md`).
+
+The intended future direction is a structural **`Convert`/`From` protocol** (a type declaring
+`fn from(x: S) -> Self`), witnessed structurally like `Comparable`/`Add`, plus cheap scalar fills
+(`bool(x)`, `Result`-returning parse). Recorded in `docs/future.md §3`.
+
 ## Architecture — pipeline
 
 ```

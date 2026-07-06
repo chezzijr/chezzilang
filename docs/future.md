@@ -188,6 +188,22 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     types on lists/maps, type args on structs) — its own milestone (also a prerequisite for reflection).
     Record this so a future `cast` implementation starts from the erasure contract, not a surprise.
 
+15. **Type conversion protocol (`Convert`/`From`) + scalar fills — 🎯 DESIGN, not started.** Today
+    conversion is a fixed set of builtins (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`)
+    plus one-way `int`→`float` widening, and one-way newtype wrap/unwrap — there is **no extensible
+    mechanism** (no `as`, no `From`/`Into`/`TryFrom`, no struct↔struct conversion). Full current-state
+    inventory in `docs/spec.md` "Type conversions & casting". The intended direction, in leverage order:
+    - **`Convert`/`From` structural protocol** (the big one) — a type declares `fn from(x: S) -> Self`,
+      witnessed structurally exactly like `Comparable`/`Add` (reuse `satisfies_args`; no nominal
+      trait-impl machinery — fits Chezzi's structural model). Enables user struct↔struct / enum↔enum
+      and newtype ergonomics. A fallible conversion is just `from(x: S) -> Result[Self, E]` — so **no
+      separate `TryFrom`** is needed. **Skip `Into`** initially: it needs expected-type threading into
+      the receiver (Chezzi infers bottom-up), which is a larger, separate change — `From` first.
+    - **Cheap scalar fills** (additive, low risk, can land independently): `bool(x)` truthiness cast;
+      `Result`-returning parse variants alongside the `Option`-returning `to_int`/`to_float`.
+    Variance/soundness note: a `from`-based conversion is a value-producing call, not a subtype
+    relation — no covariance holes. This is a language feature (own milestone), not a perf lever.
+
 **Ecosystem (Tier 4, separate track):** REPL (huge for scripting iteration), formatter, `assert` +
 built-in test runner, LSP.
 
