@@ -11,6 +11,57 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS (DESIGN DECIDED 2026-07-06, not started).**
+Closes the documented gap in `docs/spec.md` "Type conversions & casting" / `docs/future.md §15`: today
+conversion is a fixed builtin set (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`) + one-way
+`int→float` widening + one-way newtype wrap/unwrap — **no extensible mechanism**. Brainstorm outcome:
+build a structural `From[S]` protocol, **phased**, anchored on a reference generics model so it stays
+consistent (this lang's generics are the buggy-if-improvised part — anchor or bust).
+
+- **Reference model = Java (erased) generics.** Chezzi generics are **erased** (`docs/future.md §14`
+  erasure contract), so Java — the only mainstream *erased* model — is the anchor, NOT Rust/Swift (their
+  `T.from`-anywhere freedom comes from monomorphization / reified witness tables, machinery that
+  contradicts erasure; copying their ergonomics without their mechanism is exactly how generics go
+  inconsistent). Transfers directly: dependent bounds allowed, bounds checked statically at BOTH
+  definition-site (body may *use* the bound) and call-site (must *prove* concrete satisfaction), and the
+  "can't construct through an abstract typevar" wall is Java's wall too.
+- **Determinacy rule (the key safeguard).** Every type param must be determined — appear in a value-param
+  position (inferable bottom-up) OR be explicit turbofish. A param appearing ONLY inside another param's
+  bound (e.g. `T` in `fn[T: Comparable, U: From[T]](x: U)`) is a **static error** ("type parameter `T`
+  not determined by any argument — annotate it"), NOT a crash. This is what makes pathological/creative
+  bound signatures fail loudly at the checker instead of at runtime.
+- **Bound checking rides existing `satisfies_args`** — `From` adds ZERO new inference power; it's another
+  predicate like `Comparable`. Call-site algo unchanged: infer params from arg types → substitute →
+  verify each bound in dependency order (resolve `T`, then check `U: From[T]`; topological over the bound
+  graph) → any `Unknown` defers (existing behavior). Contained blast radius.
+- **Phase 0 — scalar fills** (trivial, independent, additive, ship first): `bool(x)` truthiness cast;
+  `Result`-returning parse variants alongside `Option`-returning `to_int`/`to_float`.
+- **Phase 1 — `From[S]`, single-source.** Parameterized protocol (reuses the just-landed first-class
+  parameterized-protocol machinery above), reserved + file-backed in `prelude.chz` like `Comparable`.
+  Method `fn from(x: S) -> Self` (static — first param not `self`). Make `from` a **contextual keyword**
+  (it's currently reserved for `import`; small parser change) so the method name stays coherent with the
+  protocol name. Call shape `Target.from(x)` — explicit static call, conversion always visible in source;
+  **no `Into`, no implicit coercion sites** (fits bottom-up inference). Fallible = `from(x) -> Result[Self, E]`
+  (no separate `TryFrom`). Structural witnessing via extended `satisfies_args` (static slot). ONE `from`
+  per type this phase. Covers struct↔struct, enum↔enum, newtype, and the generic bound `[T: From[str]]`.
+- **`T.from(x)` construction-through-typevar — RESTRICTED (Java/Go model).** Legal ONLY where `T` is
+  concretely pinned at the call site (checker rewrites `T.from` → concrete slot pre-erasure). Inside a
+  generic body over an *abstract* `T`, you pass the converter explicitly (`fn parse_all[T](xs, mk: fn(str)->T)`).
+  HONEST LIMITATION: this means the sugar `parse_all[T: From[str]](xs).map(fn(l): T.from(l))` is NOT
+  offered in phase 1 — under pure erasure there is nothing to dispatch `T.from` to on an abstract `T`.
+- **Phase 2 — multi-source (designed now, built later).** A type may witness `From[Celsius]` AND
+  `From[Kelvin]` — separate conformances, **type-argument-keyed** (Rust's coherent model, NOT ad-hoc
+  overloading — general method overloading stays banned). Resolve `Type.from(x)` by `typeof x` → the
+  `From[typeof x]` witness; tie-break rule **exact source beats `int→float` widening**. Additive to
+  phase 1.
+- **Witness-passing (Haskell/Swift dictionaries) — DEFERRED escape hatch.** The only erasure-compatible
+  way to make `T.from` work on an *abstract* `T` (thread the concrete `from` in as a hidden arg). Its own
+  scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
+  per-call-shape special cases instead — that's the path to inconsistent generics.
+- **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
+  `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`), general
+  method overloading (this is type-keyed witness selection, not that).
+
 **✅ PARAMETERIZED PROTOCOLS IN VALUE/ANNOTATION POSITION (2026-07-06).** A parameterized protocol is
 now a first-class **value/annotation type** — `c: Container[int]` is valid as a param, return, struct
 field, and reassignment slot (was a hard "parameterized protocol N can only be used as a bound, not as
