@@ -529,6 +529,15 @@ impl Checker {
                     self.resolve_ty_ro_d(k, depth + 1),
                     self.resolve_ty_ro_d(v, depth + 1),
                 ),
+                // `Iterator[T]` is an existential ITERATOR value, represented as `Ty::Struct("Iterator",
+                // [T])` — NOT a protocol. Mirror the mutable `resolve_type` arm (sig.rs) so the two
+                // resolvers agree on identical syntax; without this it would fall to the protocol arm
+                // below and mint `Protocol("Iterator",[T])`, which downstream Iterator logic (keyed on
+                // `Ty::Struct(name=="Iterator")`) would not recognize.
+                ("Iterator", [elem]) => Ty::Struct(
+                    "Iterator".to_string(),
+                    vec![self.resolve_ty_ro_d(elem, depth + 1)],
+                ),
                 _ if self.struct_names.contains(n) => Ty::Struct(
                     self.bare_key(n),
                     args.iter()

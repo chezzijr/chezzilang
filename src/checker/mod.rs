@@ -2536,6 +2536,9 @@ fn ty_fully_concrete(ty: &Ty) -> bool {
         Ty::Map(k, v) => ty_fully_concrete(k) && ty_fully_concrete(v),
         Ty::Result(a, b) => ty_fully_concrete(a) && ty_fully_concrete(b),
         Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().all(ty_fully_concrete),
+        // A parameterized protocol existential carrying a free type-param (`Container[T]`) is NOT
+        // concrete — recurse into the carried args (no catch-all Protocol laundering).
+        Ty::Protocol(_, a) => a.iter().all(ty_fully_concrete),
         Ty::Tuple(ts) => ts.iter().all(ty_fully_concrete),
         Ty::Func { params, ret, .. } => {
             params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret)
@@ -2745,6 +2748,7 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Struct(dn, da), Ty::Struct(an, aa))
         | (Ty::Enum(dn, da), Ty::Enum(an, aa))
         | (Ty::NewType(dn, da), Ty::NewType(an, aa))
+        | (Ty::Protocol(dn, da), Ty::Protocol(an, aa))
             if dn == an && da.len() == aa.len() =>
         {
             da.iter().zip(aa).for_each(|(d, a)| unify(d, a, map));
@@ -2793,7 +2797,11 @@ fn ty_collect_params(ty: &Ty, wanted: &std::collections::HashSet<String>, out: &
             ty_collect_params(a, wanted, out);
             ty_collect_params(b, wanted, out);
         }
-        Ty::Tuple(parts) | Ty::Struct(_, parts) | Ty::Enum(_, parts) | Ty::NewType(_, parts) => {
+        Ty::Tuple(parts)
+        | Ty::Struct(_, parts)
+        | Ty::Enum(_, parts)
+        | Ty::NewType(_, parts)
+        | Ty::Protocol(_, parts) => {
             for p in parts {
                 ty_collect_params(p, wanted, out);
             }
