@@ -81,7 +81,15 @@ impl Checker {
                     .as_ref()
                     .map(|t| self.resolve_type(t, span))
                     .unwrap_or(Ty::Nil);
-                (m.name.clone(), FnSig::plain(params, ret))
+                // A protocol method whose first param is NOT `self` (or which has no params) is a STATIC
+                // (associated) requirement — mirrors `Checker::fn_sig`'s rule for concrete methods. This
+                // is load-bearing for `Convert`-style static-ctor protocols: it drives both the
+                // static-slot witnessing check (`method_matches`) and the bound-only value-position gate
+                // (`protocol_has_static_method`). Ordinary `fn get(self, …)` requirements are instance
+                // methods (`is_static == false`), unchanged.
+                let mut sig = FnSig::plain(params, ret);
+                sig.is_static = m.params.first().is_none_or(|p| p.name != "self");
+                (m.name.clone(), sig)
             })
             .collect();
         self.type_params = saved; // restore
@@ -1128,7 +1136,10 @@ impl Checker {
                 type_params: Vec::new(),
                 where_bounds: Vec::new(),
                 min_params,
-                is_static: false,
+                // Carry the protocol requirement's static-ness (e.g. `Convert`'s `convert(x: S)` is
+                // STATIC) so `method_matches` can reject an instance/self-slot witness of a static slot.
+                // Instance-method requirements keep `is_static == false`, so this is inert for them.
+                is_static: msig.is_static,
                 doc: None,
                 variadic: None,
             };

@@ -11825,3 +11825,12 @@ fn param_protocol_reassign_accept_runs_both_engines() {
     let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct A:\n    fn get(self, i: int) -> int:\n        return 1\nstruct B:\n    fn get(self, i: int) -> int:\n        return 2\nfn f(c: Container[int]) -> int:\n    c = B()\n    return c.get(0)\nfn main():\n    print(f(A()))\nmain()\n";
     assert_mc_parity(src, "2\n");
 }
+
+#[test]
+fn convert_witness_runs_two_engine() {
+    // Convert/From slice 2 — a static-ctor witness of `[T: Convert[int]]` type-checks; the bound-check
+    // runs at the call site then erases (the trivial body never calls `T.convert` — that's slice 3), so
+    // the program runs byte-identically on the serial VM and the M:N engine.
+    let src = "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Port](5))\nmain()\n";
+    assert_mc_parity(src, "5\n");
+}

@@ -78,11 +78,13 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   generic body over an *abstract* `T`, you pass the converter explicitly (`fn parse_all[T](xs, mk: fn(str)->T)`).
   HONEST LIMITATION: the sugar `parse_all[T: Convert[str]](xs).map(fn(l): T.convert(l))` is NOT offered
   in phase 1 — under pure erasure there is nothing to dispatch `T.convert` to on an abstract `T`.
-- **BOUND-ONLY vs value-position (open, resolve in the spec).** A spike showed a static-ctor-only
-  protocol currently "matches" a VALUE annotation (`fn takes(c: Convert[int])` accepted `Port(1)` with
-  no error) — a soundness smell, since a value can't call a static ctor. `Convert[S]` should almost
-  certainly be **bound-only** (`[T: Convert[S]]`), NOT a value-annotation type (unlike the general
-  parameterized protocols above). Decide + enforce this in slice 1c.
+- **BOUND-ONLY vs value-position — ✅ RESOLVED (slice 2, 2026-07-07).** The spike showed a static-ctor-
+  only protocol "matched" a VALUE annotation (`fn takes(c: Convert[int])` accepted `Port(1)` with no
+  error) — unsound, since a value can't call a static ctor. **Decided + enforced bound-only:** ANY
+  protocol with ≥1 static method requirement (`Convert[S]` and future/user static-ctor protocols) is
+  now usable ONLY as a generic bound `[T: Convert[S]]` and REJECTED in every value-annotation position
+  (keyed on the structural static-slot property, gated at `resolve_type`; instance-method parameterized
+  protocols stay value-usable). See the slice-2 landed note below.
 - **Phase 2 — multi-source (designed now, built later).** A type may witness `Convert[Celsius]` AND
   `Convert[Kelvin]` — separate conformances, **type-argument-keyed** (Rust's coherent model, NOT ad-hoc
   overloading — general method overloading stays banned). Resolve `Type.convert(x)` by `typeof x` → the
@@ -108,9 +110,31 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   Checker-only, runtime-erased (no `Ty::Protocol` reaches the VM). NOT wired: witnessing (a concrete type
   satisfying it — slice 2) or `T.convert(..)` through a bound (slice 3, still errors `unknown name 'T'`).
   · 2 **sound static-slot witnessing + bound-only enforcement**
-  (HIGH — checker soundness, hand-do + two-engine runtime-verify) — **PENDING** · 3 **`T.convert`
+  (HIGH — checker soundness) — **✅ LANDED (2026-07-07, slice 2)**: (A) structural conformance is now
+  `is_static`-aware — a concrete type witnesses `Convert[int]` (satisfies `[T: Convert[int]]` at a call
+  site) IFF it has a **STATIC** `convert(x: int) -> Self`; an instance/`self`-slot `convert` (even at
+  matching arity, `convert(self) -> Self`), a wrong-source (`convert(x: str)`), a wrong-return
+  (`convert(x: int) -> Other`), or a missing `convert` all correctly reject. Wired in `method_matches`
+  (`proto.is_static == actual.is_static`) + `satisfies_methods` (carries the requirement's `is_static`);
+  `hoist_protocol` now computes a protocol method's `is_static` from its first-param name so USER
+  static-ctor protocols are covered too. `Unknown` still defers. (B) bound-only: a protocol with ≥1
+  **static** method requirement is now REJECTED in every value-annotation position (param/field/return/
+  binding/reassign slot AND nested — `List[Convert[int]]`, `Option[Convert[int]]`, tuple element, `type`
+  alias body) with `protocol 'Convert' has a static method and can only be used as a bound, not a value
+  type`. Keyed on the STRUCTURAL static-slot property (not the name): `protocol_has_static_method` scans
+  a protocol's OWN methods AND its **transitively-embedded** requirements (so a bundle
+  `protocol MakeInt: Convert[int]` that EMBEDS a static-ctor protocol is bound-only too), and a
+  **cross-module** alias body (`import Foo from a` / qualified `a.Foo`) — resolved by the read-only
+  resolver (no gate) and returned pre-resolved — is re-gated at the two consumer seams by a recursive
+  `Ty`-walk (`first_static_ctor_protocol`). The general instance-method parameterized-protocol value
+  position (`c: Container[int]`) is UNAFFECTED (regression-guarded). **This CLOSES the value-position
+  false-accept** (the spike where `fn takes(c: Convert[int])` accepted `Port(1)` with no error — the
+  open item below — plus the embed + cross-module-alias laundering vectors). Checker-only,
+  runtime-erased; positive witness runs byte-identical serial == M:N.
+  · 3 **`T.convert`
   static-through-bound, concrete-pinned checker rewrite** (HIGH — generics, hand-do + runtime-verify) —
-  **PENDING**. Memory: auto-task over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
+  **PENDING** (`T.convert` through a bound still errors `unknown name 'T'`). Memory: auto-task
+  over-reaches on checker soundness → auto-task slice 1 only, hand-do 2/3.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
   `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).

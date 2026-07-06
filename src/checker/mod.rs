@@ -2706,6 +2706,14 @@ fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
     if proto.params.len() != actual.params.len() {
         return false;
     }
+    // A STATIC-slot protocol requirement (`Convert`'s `convert(x: S) -> Self`, first param NOT `self`)
+    // is witnessed ONLY by a matching STATIC method — a value cannot invoke a static ctor, so an
+    // instance/`self`-slot method with the same arity (`convert(self) -> Self`) must NOT falsely satisfy
+    // it (and vice-versa). Every non-static protocol requirement keeps `is_static == false`, so this is a
+    // no-op for every existing instance-method protocol.
+    if proto.is_static != actual.is_static {
+        return false;
+    }
     let map = HashMap::from([("Self".to_string(), self_ty.clone())]);
     proto
         .params
