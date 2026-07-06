@@ -564,6 +564,26 @@ x := show(Bare(1))
 }
 
 #[test]
+fn stringable_scalar_satisfies_ok() {
+    // int/float/bool/str intrinsically satisfy Stringable (sole method `str(self) -> str`),
+    // mirroring the Comparable/Hashable/Add intrinsic scalar arms.
+    for lit in ["show(5)", "show(3.14)", "show(true)", "show(\"hi\")"] {
+        let src = format!("fn show[T: Stringable](v: T) -> str:\n    return v.str()\ns := {lit}\n");
+        ok(&src);
+    }
+}
+
+#[test]
+fn scalar_str_direct_call_is_bound_only() {
+    // The intrinsic Stringable arm is BOUND-only, exactly like the Comparable arm: a direct
+    // concrete-receiver `(5).str()` stays a compile error (no direct scalar method), matching
+    // `(5).compare(3)`. The free `str(5)` builtin covers direct use. Keeps str consistent with
+    // every sibling intrinsic protocol (none adds a first-class direct scalar method).
+    rejects("x := (5).str()\n", "type int has no method 'str'");
+    rejects("x := (5).compare(3)\n", "type int has no method 'compare'");
+}
+
+#[test]
 fn redeclaring_stringable_rejected() {
     rejects(
         "protocol Stringable:\n    fn str(self) -> str\n",

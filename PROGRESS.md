@@ -11,6 +11,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**✅ SCALARS INTRINSICALLY SATISFY `Stringable` (2026-07-06).** `int`/`float`/`bool`/`str` now satisfy
+the prebuilt `Stringable` protocol (sole method `str(self) -> str`) intrinsically, so a
+`fn show[T: Stringable](v: T)` generic accepts them — closing the last inconsistency where every other
+scalar-friendly builtin protocol (`Comparable`/`Hashable`/`Add`/…) already had an intrinsic scalar arm
+in `satisfies_args_d` but `Stringable` did not. Coordinated checker + VM change (a checker-only arm
+would type-OK then runtime-trap `v.str()` on an int): (1) checker `satisfies_args_d` scalar arm
+(`src/checker/proto.rs`, beside the Comparable arm — all FOUR scalars, unlike Comparable/no-Bool or
+Hashable/no-Float); (2) VM `do_method_call` scalar `str` branch (`src/vm/call.rs`, before the
+`Value::Obj` guard, mirroring the `compare` branch — `stringify`→alloc `Obj::Str`→push; the already-`Str`
+receiver for `T=str` is intercepted + re-alloc'd or it would fault in struct dispatch). Bound-only like
+every sibling intrinsic arm: a direct `(5).str()` on a concrete scalar stays a compile error (matches
+`(5).compare(3)`; use the free `str(5)` builtin). Parity: serial-VM == M:N-VM (both share
+`do_method_call`). Tests: `checker::tests::stringable_scalar_satisfies_ok` + `scalar_str_direct_call_is_bound_only`,
+`vm::tests::primitive_str_method_on_vm` (two-engine). Docs: `docs/syntax.md`/`docs/spec.md`/`docs/stdlib.md`.
+
 **✅ EXACT-DUPLICATE LITERAL MATCH ARMS ERROR (2026-07-05).** `match n: 1: … 1: …` (and `"x":` twice,
 `1 | 1`) is now a `duplicate match arm` error — dead code under first-match — matching the existing
 enum-variant dup detection (was silently accepted, a diagnostic inconsistency). Same guard carve-out
