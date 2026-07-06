@@ -696,8 +696,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 
 ## Type conversions & casting
 
-Chezzi has **no `as` cast operator** and **no `From`/`Into`/`TryFrom` conversion protocol** (yet — see
-`docs/future.md`). Conversion is done by a small fixed set of explicit builtins plus one implicit
+Chezzi has **no `as` cast operator**, no `Into`/`TryFrom`, and no general-purpose value-level
+conversion protocol (yet — see `docs/future.md`); a **bound-only** `Convert[S]` conversion protocol
+exists as a generic bound (below). Conversion is done by a small fixed set of explicit builtins plus one implicit
 numeric widening. The design is deliberately minimal: prefer an explicit constructor call over silent
 coercion, and keep newtypes nominally distinct so a conversion is always visible in the source.
 
@@ -736,15 +737,23 @@ native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their
 **What does NOT exist (current boundaries):**
 
 - No `as` operator (`as` in the grammar is only import aliasing).
-- No `From`/`Into`/`TryFrom` protocol — struct↔struct / enum↔enum conversion is a hand-written
-  function; there is no extensible conversion mechanism.
+- No `Into`/`TryFrom`, and no value-level conversion protocol — a `Convert[S]` **bound** exists (see
+  below), but there is not yet an ergonomic value-position conversion mechanism (`T.convert` through a
+  bound is a separate pending slice).
 - `cast[T](val: Any) -> Option[T]` (a checked downcast off the `Any` top type) is **deferred** — it
   needs runtime type tags, since generics are erased (`docs/future.md`).
 
-The intended future direction is a structural **`Convert`/`From` protocol** (a type declaring
-`fn from(x: S) -> Self`), witnessed structurally like `Comparable`/`Add`. The cheap scalar fills
-(`bool(x)` truthiness cast + `Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded
-in `docs/future.md §3`.
+**`Convert[S]` — bound-only conversion protocol (partial).** A structural, target-keyed conversion
+protocol `Convert[S]` exists as a reserved builtin. A type **witnesses** `Convert[S]` by declaring a
+**static** method `fn convert(x: S) -> Self` (associated / no `self` receiver) — witnessed structurally
+like `Comparable`/`Add`, but `is_static`-aware (an instance `convert(self, …)` does NOT witness it). It
+is usable **only as a generic bound** `[T: Convert[S]]`; because a static ctor cannot be invoked on a
+value, `Convert[S]` is **rejected as a value-annotation type** (param/field/return/binding, including
+nested `List[Convert[int]]`/`Option[…]`/tuple/alias) — bound-only by the same static-slot rule that
+applies to any static-ctor protocol. NOT yet available: calling `T.convert(x)` **through** the bound (a
+separate pending slice — still errors `unknown name 'T'`), so generic construction over the bound is not
+claimed. The cheap scalar fills (`bool(x)` truthiness cast + `Result`-returning
+`parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.
 
 ## Architecture — pipeline
 

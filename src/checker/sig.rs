@@ -768,6 +768,18 @@ impl Checker {
         }
     }
 
+    /// Does `n` name a protocol with ANY STATIC method requirement (first param NOT `self`)? Such a
+    /// protocol (e.g. `Convert`'s static-ctor `convert(x: S) -> Self`) is witnessable only by a STATIC
+    /// method — a VALUE cannot invoke it — so it is usable ONLY as a generic bound `[T: P]`, never as a
+    /// value-annotation type. Keys on the STRUCTURAL property, so a future/user static-ctor protocol is
+    /// gated the same way. Ordinary instance-method protocols (all `is_static == false`) return `false`
+    /// and stay usable as value existentials (`c: Container[int]`).
+    pub(super) fn protocol_has_static_method(&self, n: &str) -> bool {
+        self.protocols
+            .get(n)
+            .is_some_and(|p| p.methods.iter().any(|(_, s)| s.is_static))
+    }
+
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named {
@@ -993,8 +1005,22 @@ impl Checker {
                         }
                         Ty::NewType(key, Vec::new())
                     }
-                    // A protocol name used as a value type (existential), e.g. `Error`.
-                    _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone(), Vec::new()),
+                    // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
+                    // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
+                    // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
+                    _ if self.protocols.contains_key(n) => {
+                        if self.protocol_has_static_method(n) {
+                            self.error(
+                                span,
+                                format!(
+                                    "protocol '{n}' has a static method and can only be used as a bound, not a value type"
+                                ),
+                            );
+                            Ty::Unknown
+                        } else {
+                            Ty::Protocol(n.clone(), Vec::new())
+                        }
+                    }
                     _ => {
                         self.error(span, self.unknown_type_msg(n));
                         Ty::Unknown
@@ -1217,7 +1243,19 @@ impl Checker {
                                 ),
                             );
                         }
-                        Ty::Protocol(n.clone(), resolved)
+                        // A static-method (static-ctor) protocol like `Convert[int]` is BOUND-ONLY —
+                        // no value can witness a static requirement, so it is rejected in value position.
+                        if self.protocol_has_static_method(n) {
+                            self.error(
+                                span,
+                                format!(
+                                    "protocol '{n}' has a static method and can only be used as a bound, not a value type"
+                                ),
+                            );
+                            Ty::Unknown
+                        } else {
+                            Ty::Protocol(n.clone(), resolved)
+                        }
                     }
                     // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
                     _ if self.newtype_names.contains(n) => {

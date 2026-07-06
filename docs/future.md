@@ -188,17 +188,22 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
     types on lists/maps, type args on structs) — its own milestone (also a prerequisite for reflection).
     Record this so a future `cast` implementation starts from the erasure contract, not a surprise.
 
-15. **Type conversion protocol (`Convert`/`From`) + scalar fills — 🎯 DESIGN, not started.** Today
+15. **Type conversion protocol (`Convert[S]`) + scalar fills — 🚧 PARTIALLY LANDED (slices 1+2).** Today
     conversion is a fixed set of builtins (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`)
-    plus one-way `int`→`float` widening, and one-way newtype wrap/unwrap — there is **no extensible
-    mechanism** (no `as`, no `From`/`Into`/`TryFrom`, no struct↔struct conversion). Full current-state
+    plus one-way `int`→`float` widening, and one-way newtype wrap/unwrap. The extensible mechanism is
+    the reserved `Convert[S]` protocol (there is still no `as`, no `Into`/`TryFrom`). Full current-state
     inventory in `docs/spec.md` "Type conversions & casting". The intended direction, in leverage order:
-    - **`Convert`/`From` structural protocol** (the big one) — a type declares `fn from(x: S) -> Self`,
-      witnessed structurally exactly like `Comparable`/`Add` (reuse `satisfies_args`; no nominal
-      trait-impl machinery — fits Chezzi's structural model). Enables user struct↔struct / enum↔enum
-      and newtype ergonomics. A fallible conversion is just `from(x: S) -> Result[Self, E]` — so **no
-      separate `TryFrom`** is needed. **Skip `Into`** initially: it needs expected-type threading into
-      the receiver (Chezzi infers bottom-up), which is a larger, separate change — `From` first.
+    - **`Convert[S]` structural protocol** (the big one) — a type witnesses it with a **static** method
+      `fn convert(x: S) -> Self`, witnessed structurally like `Comparable`/`Add` (reuses `satisfies_args`,
+      made `is_static`-aware; no nominal trait-impl machinery — fits Chezzi's structural model). **Slices
+      1+2 LANDED** (2026-07-07): the protocol is reserved + binds as `[T: Convert[S]]`, sound static-slot
+      witnessing (an instance `convert(self,…)` does NOT witness it), and **bound-only** enforcement
+      (rejected as a value-annotation type — a value can't invoke a static ctor). **Slice 3 PENDING:**
+      calling `T.convert(x)` **through** the bound (still `unknown name 'T'`), which is what enables the
+      generic struct↔struct / enum↔enum / newtype ergonomics. A fallible conversion would be
+      `convert(x: S) -> Result[Self, E]` — so **no separate `TryFrom`** is needed. **Skip `Into`**
+      initially: it needs expected-type threading into the receiver (Chezzi infers bottom-up), which is a
+      larger, separate change.
     - **Cheap scalar fills — ✅ LANDED** (additive, low risk, landed independently ahead of the
       `From` protocol): `bool(x)` truthiness cast (int/float/bool/str, never faults on a scalar) +
       the `Result`-returning `s.parse_int() -> Result[int, str]` / `s.parse_float() -> Result[float,

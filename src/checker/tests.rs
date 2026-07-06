@@ -9868,6 +9868,118 @@ fn convert_bound_binds_and_arity_checked() {
 }
 
 #[test]
+fn convert_witness_static_slot_only() {
+    // Slice 2 of Convert/From — SOUND structural witnessing. A concrete type witnesses `Convert[int]`
+    // (i.e. satisfies the bound `[T: Convert[int]]` at a call site) IFF it has a STATIC method
+    // `convert(x: int) -> Self`. `use2` has a trivial body (does NOT call `T.convert` — that's slice 3),
+    // so the bound-check runs at the call site then erases.
+    // POSITIVE — a genuine static ctor witness.
+    entry_ok(
+        "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Port](5))\nmain()\n",
+    );
+    // IMPOSTER 1 — self-only `convert(self) -> Self`: arity matches the static `convert(x: S)` slot (1
+    // param each), so ONLY the `is_static` check rejects it. This is the exact value-model hole: a value
+    // cannot invoke a static ctor. Pre-fix this FALSELY witnessed (self param → Unknown, compatible with
+    // int, ret matches, is_static never compared).
+    entry_rejects(
+        "struct Bad:\n    n: int\n    fn convert(self) -> Bad:\n        return self\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad](5))\nmain()\n",
+        "does not satisfy Convert",
+    );
+    // IMPOSTER 2 — instance-slot `convert(self, x: int) -> Self` (arity 2 vs the static 1): rejected.
+    entry_rejects(
+        "struct Bad2:\n    n: int\n    fn convert(self, x: int) -> Bad2:\n        return self\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad2](5))\nmain()\n",
+        "does not satisfy Convert",
+    );
+    // IMPOSTER 3 — wrong source: static `convert(x: str)` under `Convert[int]` → rejected.
+    entry_rejects(
+        "struct Bad3:\n    n: int\n    fn convert(x: str) -> Bad3:\n        return Bad3(n=1)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad3](5))\nmain()\n",
+        "does not satisfy Convert",
+    );
+    // IMPOSTER 4 — wrong return: static `convert(x: int) -> Other` (not Self) → rejected.
+    entry_rejects(
+        "struct Other:\n    z: int\nstruct Bad4:\n    n: int\n    fn convert(x: int) -> Other:\n        return Other(z=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad4](5))\nmain()\n",
+        "does not satisfy Convert",
+    );
+    // IMPOSTER 5 — missing `convert` entirely → rejected.
+    entry_rejects(
+        "struct Bad5:\n    n: int\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad5](5))\nmain()\n",
+        "does not satisfy Convert",
+    );
+}
+
+#[test]
+fn convert_bound_only_not_value_type() {
+    // Slice 2 — BOUND-ONLY enforcement. `Convert[S]` has a STATIC method requirement, so a VALUE cannot
+    // witness it (a value can't invoke a static ctor). It is usable ONLY as a generic bound
+    // `[T: Convert[S]]`, and REJECTED in every value-annotation position. The gate keys on the STRUCTURAL
+    // property (protocol has a static-slot requirement), not the literal name.
+    let needle = "has a static method";
+    // param type
+    entry_rejects(
+        "fn takes(c: Convert[int]):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    // struct field
+    entry_rejects(
+        "struct S:\n    c: Convert[int]\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    // return type
+    entry_rejects(
+        "fn f() -> Convert[int]:\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    // let-binding annotation
+    entry_rejects(
+        "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn main():\n    x: Convert[int] = Port(n=1)\n    print(x)\nmain()\n",
+        needle,
+    );
+    // bare protocol name (no args) used as a value type
+    entry_rejects(
+        "fn takes(c: Convert):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    // nested inside a container / Option / tuple / type alias — the resolve_type recursion must gate
+    // every position, not just the top-level annotation.
+    entry_rejects(
+        "fn takes(c: List[Convert[int]]):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    entry_rejects(
+        "fn takes(c: Option[Convert[int]]):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    entry_rejects(
+        "fn takes(c: (int, Convert[int])):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    entry_rejects(
+        "type A = Convert[int]\nfn takes(c: A):\n    pass\nfn main():\n    pass\nmain()\n",
+        needle,
+    );
+    // KEEP-WORKING: the legal bound `[T: Convert[int]]` is UNAFFECTED (its args, not the protocol name,
+    // flow through resolve_type).
+    entry_ok(
+        "fn foo[T: Convert[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+    );
+}
+
+#[test]
+fn user_static_ctor_protocol_bound_only_and_instance_regression() {
+    // The gate keys on the STRUCTURAL static-method property, so a USER static-ctor protocol is bound-only
+    // too (closes the background spike: a static-ctor-only protocol used to FALSELY match a VALUE).
+    entry_rejects(
+        "protocol Ctor[S]:\n    fn make(x: S) -> Self\nstruct Port:\n    n: int\n    fn make(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: Ctor[int]):\n    pass\nfn main():\n    pass\nmain()\n",
+        "has a static method",
+    );
+    // REGRESSION GUARD — an ordinary INSTANCE-method parameterized protocol still works as a value
+    // annotation (the bound-only gate must NOT over-reject it).
+    entry_ok(
+        "protocol Container[T]:\n    fn get(self, i: int) -> T\nfn takes2(c: Container[int]):\n    pass\nfn main():\n    pass\nmain()\n",
+    );
+}
+
+#[test]
 fn protocol_bound_and_typeparam_named_protocol_still_ok() {
     // Boundary: the FIX-A reservation must NOT leak into the protocol BOUND or a type PARAM named
     // like a protocol. (a) a user type that satisfies a prebuilt protocol used via its bound; and
