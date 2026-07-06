@@ -47,31 +47,60 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   vm/call.rs arms, `alloc_enum("Result", …)`). Two-engine goldens (serial==M:N) for all three +
   checker type tests + `examples/str_methods.chz` golden extended. Docs: spec.md/stdlib.md/syntax.md/
   future.md §15 updated ("No bool(x)" / "No Result-returning parse" lines removed).
-- **Phase 1 — `From[S]`, single-source.** Parameterized protocol (reuses the just-landed first-class
-  parameterized-protocol machinery above), reserved + file-backed in `prelude.chz` like `Comparable`.
-  Method `fn from(x: S) -> Self` (static — first param not `self`). Make `from` a **contextual keyword**
-  (it's currently reserved for `import`; small parser change) so the method name stays coherent with the
-  protocol name. Call shape `Target.from(x)` — explicit static call, conversion always visible in source;
-  **no `Into`, no implicit coercion sites** (fits bottom-up inference). Fallible = `from(x) -> Result[Self, E]`
-  (no separate `TryFrom`). Structural witnessing via extended `satisfies_args` (static slot). ONE `from`
-  per type this phase. Covers struct↔struct, enum↔enum, newtype, and the generic bound `[T: From[str]]`.
-- **`T.from(x)` construction-through-typevar — RESTRICTED (Java/Go model).** Legal ONLY where `T` is
-  concretely pinned at the call site (checker rewrites `T.from` → concrete slot pre-erasure). Inside a
+- **NAMING (decided 2026-07-06): protocol `Convert[S]`, method `convert` — NOT `from`.** `from` is a
+  **hard keyword** (`src/lexer/mod.rs:216`, the `from X import Y` import syntax), so `fn from(...)` does
+  not even parse (`expected identifier, found 'from'`). Rather than make `from` a contextual keyword
+  (parser risk), use the non-reserved `convert` — which pairs EXACTLY with the protocol name (Rust
+  `From`/`from` coherence, here `Convert`/`convert`), is self-documenting, and matches the existing
+  "Convert/From protocol" naming in `docs/future.md §15`/`docs/spec.md`. The method is **target-keyed**
+  (`Target.convert(source)`), so a `to`/`into`-family name would read backwards — `convert`/`of`/`make`
+  are the right family; `convert` wins on protocol-name match. This makes slice 1a a trivial reserved
+  name, NOT a parser change.
+- **Phase 1 — `Convert[S]`, single-source, INFALLIBLE.** Parameterized protocol (reuses the just-landed
+  first-class parameterized-protocol machinery above), reserved + file-backed in `prelude.chz` like
+  `Comparable`. Method `convert(x: S) -> Self` (static — first param not `self`), **return `-> Self`
+  only** (design A, decided 2026-07-06). Call shape `Target.convert(x)` — explicit static call,
+  conversion always visible in source; **no `Into`, no implicit coercion sites** (fits bottom-up
+  inference). Structural witnessing via extended `satisfies_args` (static slot). ONE `convert` per type
+  this phase. Covers struct↔struct, enum↔enum, newtype, and the generic bound `[T: Convert[str]]`.
+- **FALLIBILITY: infallible protocol; fallible lives OUTSIDE it (corrects the earlier "just return
+  Result, no TryFrom" note).** The earlier note was WRONG for the generic case: return shape only
+  matters at the **generic bound** — `[T: Convert[str]]` calling `T.convert(s)` must know statically
+  whether it yields `T` or `Result[T,E]`; if witnesses could return either, the bound is ambiguous and
+  the whole generic payoff breaks. So the protocol **commits to `-> Self`**. Fallible conversions are
+  ordinary **Result-returning named static ctors** (already work today, e.g. `Email.parse(s) -> Result[Email,str]`
+  in `docs/syntax.md §7a`) — they just don't ride the `Convert` protocol/generic (generic-over-fallible
+  is rare). A `TryConvert[S]: try_convert(x) -> Result[Self,E]` protocol is a **clean additive follow-up**
+  (exactly how Rust shipped `TryFrom` after `From`) — built ONLY if generic-over-fallible proves needed.
+  Design C (Result-only protocol) is REJECTED: forces `Ok(...)` boilerplate on conversions that never fail.
+- **`T.convert(x)` construction-through-typevar — RESTRICTED (Java/Go model).** Legal ONLY where `T` is
+  concretely pinned at the call site (checker rewrites `T.convert` → concrete slot pre-erasure). Inside a
   generic body over an *abstract* `T`, you pass the converter explicitly (`fn parse_all[T](xs, mk: fn(str)->T)`).
-  HONEST LIMITATION: this means the sugar `parse_all[T: From[str]](xs).map(fn(l): T.from(l))` is NOT
-  offered in phase 1 — under pure erasure there is nothing to dispatch `T.from` to on an abstract `T`.
-- **Phase 2 — multi-source (designed now, built later).** A type may witness `From[Celsius]` AND
-  `From[Kelvin]` — separate conformances, **type-argument-keyed** (Rust's coherent model, NOT ad-hoc
-  overloading — general method overloading stays banned). Resolve `Type.from(x)` by `typeof x` → the
-  `From[typeof x]` witness; tie-break rule **exact source beats `int→float` widening**. Additive to
+  HONEST LIMITATION: the sugar `parse_all[T: Convert[str]](xs).map(fn(l): T.convert(l))` is NOT offered
+  in phase 1 — under pure erasure there is nothing to dispatch `T.convert` to on an abstract `T`.
+- **BOUND-ONLY vs value-position (open, resolve in the spec).** A spike showed a static-ctor-only
+  protocol currently "matches" a VALUE annotation (`fn takes(c: Convert[int])` accepted `Port(1)` with
+  no error) — a soundness smell, since a value can't call a static ctor. `Convert[S]` should almost
+  certainly be **bound-only** (`[T: Convert[S]]`), NOT a value-annotation type (unlike the general
+  parameterized protocols above). Decide + enforce this in slice 1c.
+- **Phase 2 — multi-source (designed now, built later).** A type may witness `Convert[Celsius]` AND
+  `Convert[Kelvin]` — separate conformances, **type-argument-keyed** (Rust's coherent model, NOT ad-hoc
+  overloading — general method overloading stays banned). Resolve `Type.convert(x)` by `typeof x` → the
+  `Convert[typeof x]` witness; tie-break rule **exact source beats `int→float` widening**. Additive to
   phase 1.
 - **Witness-passing (Haskell/Swift dictionaries) — DEFERRED escape hatch.** The only erasure-compatible
-  way to make `T.from` work on an *abstract* `T` (thread the concrete `from` in as a hidden arg). Its own
-  scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
+  way to make `T.convert` work on an *abstract* `T` (thread the concrete `convert` in as a hidden arg).
+  Its own scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
   per-call-shape special cases instead — that's the path to inconsistent generics.
+- **SLICES (risk-ranked, for implementation):** 1a `convert`/`Convert[S]` reserved name + prelude decl
+  (LOW, mechanical) · 1b protocol wired like `Comparable` (LOW) · 1c **sound static-slot witnessing +
+  bound-only decision** (HIGH — checker soundness, hand-do + two-engine runtime-verify) · 1d **`T.convert`
+  static-through-bound, concrete-pinned rewrite** (HIGH — generics, hand-do + runtime-verify) · 1e drop
+  (fallible-via-Result-protocol not in phase 1). Memory: auto-task over-reaches on checker soundness →
+  auto-task 1a/1b only, hand-do 1c/1d.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
-  `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`), general
-  method overloading (this is type-keyed witness selection, not that).
+  `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
+  `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
 
 **✅ PARAMETERIZED PROTOCOLS IN VALUE/ANNOTATION POSITION (2026-07-06).** A parameterized protocol is
 now a first-class **value/annotation type** — `c: Container[int]` is valid as a param, return, struct
