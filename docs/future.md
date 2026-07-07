@@ -73,8 +73,9 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
    `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it
    (Rust `std::iter` model — `examples/iter_adapters.chz`). **`yield`/generators have since landed as
-   a complete, VM-only feature** (was a permanent non-goal): a `fn` declaring `-> Iterator[T]`
-   may `yield`; the call returns a suspendable generator (one-shot cooperative coroutine, own private
+   a complete, VM-only feature** (was a permanent non-goal): any `fn` that uses `yield` is a generator
+   (the `-> Iterator[T]` annotation is optional — the element type is inferred from the first `yield`);
+   the call returns a suspendable generator (one-shot cooperative coroutine, own private
    frame/stack swapped into the VM, resumed by an intrinsic `.next()`). Generators run on **both** VM
    engines (serial `--serial` and default M:N); the only caveat is runtime, not a parity waiver — a
    **live** generator holds a VM frame and so is not sendable across a task airlock on the M:N engine

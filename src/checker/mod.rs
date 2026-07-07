@@ -1337,6 +1337,16 @@ struct Checker {
     inferring_ret: bool,
     /// Return types gathered from the body during return-type inference (see `infer_fn_ret`).
     collected_rets: Vec<Ty>,
+    /// True while checking (or inferring the return of) a generator function body — the sole signal
+    /// that a `yield` is in-bounds. Distinct from `yield_ty`: during return inference (`infer_fn_ret`)
+    /// the element type is not yet pinned (`yield_ty` is `None`), yet a `yield` is still legal and must
+    /// be COLLECTED, not diagnosed. Saved/restored across nested fn/closure boundaries; a closure
+    /// resets it to `false` so a (hypothetical) closure `yield` cannot seed the enclosing generator.
+    in_generator: bool,
+    /// Element types gathered from every `yield` during a generator's return-type inference
+    /// (`infer_fn_ret`, `inferring_ret` mode). The FIRST pins the generator's element `T`
+    /// (strict-first-yield); pass-2 `check_yield` validates the rest against it. Drained per-fn.
+    collected_yields: Vec<Ty>,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.

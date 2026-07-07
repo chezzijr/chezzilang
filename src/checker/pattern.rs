@@ -3020,6 +3020,10 @@ impl Checker {
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
         let saved_yield = self.yield_ty.take();
+        // Same for the in-bounds signal: a `yield` inside the closure must be out-of-bounds, and must
+        // not seed the enclosing generator's `collected_yields` during inference. (Defensive — mirrors
+        // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
+        let saved_ig = std::mem::replace(&mut self.in_generator, false);
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
@@ -3111,6 +3115,7 @@ impl Checker {
         self.recover_depth = saved_recover;
         self.current_ret = saved_ret;
         self.yield_ty = saved_yield;
+        self.in_generator = saved_ig;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);

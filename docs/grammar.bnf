@@ -86,8 +86,9 @@
 
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
-# `yield <expr>` (generators) — always carries a value. Legal only inside a
-# function declaring `-> Iterator[T]` (checker-enforced, not grammar). Suspends the generator.
+# `yield <expr>` (generators) — always carries a value. Legal only inside a generator
+# function (one that uses `yield`; the `-> Iterator[T]` return type is optional — inferred from the
+# first yield when omitted). Checker-enforced, not grammar. Suspends the generator.
 <yieldStmt> ::= "YIELD" <expr> "NEWLINE"
 
 # `defer <call>` (form 1) — the call-only restriction is enforced by the checker

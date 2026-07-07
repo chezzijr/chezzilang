@@ -36,6 +36,8 @@ impl Checker {
             expected_hint: None,
             inferring_ret: false,
             collected_rets: Vec::new(),
+            in_generator: false,
+            collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             import_path_heads: HashMap::new(),
