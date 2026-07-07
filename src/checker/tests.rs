@@ -13133,14 +13133,80 @@ fn static_method_param_shadows_enclosing_rejected() {
     );
 }
 
-/// A generic static method called WITHOUT the type-level turbofish must NOT leak a free `Ty::Param`
-/// into the value's type. `Box.empty() -> Box[T]` (no turbofish, no arg binding `T`) degrades `T` to
-/// the refinable `Ty::Unknown` (like the ctor), so downstream use refines cleanly instead of erroring
-/// against the internal param name `T` — same behavior as the `Box([])` ctor path.
+/// A generic static factory called WITHOUT a type-level turbofish AND without an annotation leaves the
+/// ENCLOSING type's param un-inferred — this must be REJECTED, not silently degraded to `Ty::Unknown`
+/// (which swallowed any later argument and defeated homogeneity checking). `Box.empty() -> Box[T]` (no
+/// turbofish, no arg binding `T`, no hint) leaks `T` as a `Ty::Param`; the first mismatching mutating use
+/// (`b.items.push("x")`, element slot `Ty::Param(T)` out of scope) fires the construction-site diagnostic.
+/// Mirrors the already-sound generic FREE-FUNCTION path (`mkbox()` used heterogeneously rejects the same
+/// way). Method-OWN `[U]` params still degrade to `Ty::Unknown` (see `static_own_type_params_no_leak_unknown`).
 #[test]
-fn generic_static_no_turbofish_degrades_param_to_unknown() {
-    ok(
+fn generic_static_no_turbofish_rejects_uninferred_param() {
+    rejects(
         "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    b := Box.empty()\n    b.items.push(\"x\")\n    print(b.items.len())\n",
+        "un-inferred type parameter",
+    );
+}
+
+/// A `let` annotation pins the ENCLOSING type param of an un-turbofished static factory from the
+/// expected type (`b: Box[int] = Box.empty()` seeds `T=int`), then homogeneous use is accepted.
+#[test]
+fn annotation_pins_static_factory_ok() {
+    ok(
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn add(self, x: T):\n        self.items.push(x)\n    fn first(self) -> T:\n        return self.items[0]\nfn main():\n    b: Box[int] = Box.empty()\n    b.add(5)\n    print(b.first())\n",
+    );
+}
+
+/// Same annotation-pinned factory: once `T=int` is fixed from the annotation, a heterogeneous add is
+/// rejected (`b.add(\"hello\")` — expected int).
+#[test]
+fn annotation_pins_static_factory_then_rejects_heterogeneous() {
+    rejects(
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn add(self, x: T):\n        self.items.push(x)\n    fn first(self) -> T:\n        return self.items[0]\nfn main():\n    b: Box[int] = Box.empty()\n    b.add(\"hello\")\n",
+        "expected int",
+    );
+}
+
+/// SAME HOLE in generic ENUMS: an un-turbofished, un-annotated enum static factory (`Wrap.none()` for
+/// `fn none() -> Wrap[T]`) leaks the enclosing `T`; a heterogeneous instance-method use (`w.put(\"s\")`
+/// where `fn put(self, x: T)`) is then rejected. The struct fix (shared degrade loop + `seed_from_hint`)
+/// covers enums with no extra code.
+#[test]
+fn generic_enum_static_factory_rejects_heterogeneous() {
+    rejects(
+        "enum Wrap[T]:\n    Has(T)\n    Empty\n    fn none() -> Wrap[T]:\n        return Wrap.Empty\n    fn put(self, x: T):\n        print(x)\nfn main():\n    w := Wrap.none()\n    w.put(\"s\")\nmain()\n",
+        "expected T",
+    );
+}
+
+/// GRAPH-PATH regression (REPRO A, the full check-ok → runtime-trap program): a static factory called
+/// with no pin, a heterogeneous add, then arithmetic on the read-back value. Proves the fix holds
+/// through `build_graph` → `check_graph` (the real CLI path), not only single-module `check_src`.
+#[test]
+fn graph_static_factory_uninferred_rejects_repro_a() {
+    entry_rejects(
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn add(self, x: T):\n        self.items.push(x)\n    fn first(self) -> T:\n        return self.items[0]\nfn main():\n    b := Box.empty()\n    b.add(\"hello\")\n    x := b.first()\n    print(x + 1)\nmain()\n",
+        "found str",
+    );
+}
+
+/// GRAPH-PATH regression (enum variant of REPRO A): the enum static-factory hole rejects through the
+/// real graph path too.
+#[test]
+fn graph_enum_static_factory_uninferred_rejects() {
+    entry_rejects(
+        "enum Wrap[T]:\n    Has(T)\n    Empty\n    fn none() -> Wrap[T]:\n        return Wrap.Empty\n    fn put(self, x: T):\n        print(x)\nfn main():\n    w := Wrap.none()\n    w.put(1)\n    w.put(\"s\")\nmain()\n",
+        "expected T",
+    );
+}
+
+/// OVER-REJECTION guard: a static factory whose RETURN omits the enclosing param (`fn count() -> int`)
+/// leaves no free param — `subst` is a no-op, so it must NOT falsely reject. Confirms the degrade-drop
+/// was scoped to params that actually appear in the return.
+#[test]
+fn static_factory_return_omits_param_still_ok() {
+    ok(
+        "struct Box[T]:\n    items: List[T]\n    fn count() -> int:\n        return 0\nfn main():\n    n := Box.count()\n    print(n)\n",
     );
 }
 

@@ -136,6 +136,7 @@ impl Checker {
                     &targs,
                     *name_span,
                     span,
+                    expected,
                 );
             }
             // `module.Struct.method(args)` — a QUALIFIED struct STATIC method. The enum arm above
@@ -164,6 +165,7 @@ impl Checker {
                     &targs,
                     *name_span,
                     span,
+                    expected,
                 );
             }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
@@ -227,6 +229,7 @@ impl Checker {
                         &targs,
                         *name_span,
                         span,
+                        expected,
                     );
                 }
             }
@@ -259,6 +262,7 @@ impl Checker {
                     &targs,
                     *name_span,
                     span,
+                    expected,
                 );
             }
             // `Newtype.member(args)` — a bare (unbound) newtype name dotted with a member. Newtypes
@@ -333,7 +337,7 @@ impl Checker {
                 // and the method `[str]` in `targs`. Thread `targs` as the static method's `mtargs` so
                 // the combined form composes (was `&[]`, which dropped the method turbofish).
                 return self.infer_static_call(
-                    &key, &tname, name, args, &resolved, &targs, *name_span, span,
+                    &key, &tname, name, args, &resolved, &targs, *name_span, span, expected,
                 );
             }
             // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
@@ -434,6 +438,7 @@ impl Checker {
                     &[mt_ty],
                     *name_span,
                     span,
+                    expected,
                 );
             }
         }
@@ -755,11 +760,15 @@ impl Checker {
     /// in the struct/enum method maps; rejects calling an INSTANCE method this way, or an unknown
     /// method. The enclosing type's params (`targs`, from `Box[int].empty()`) AND the method's OWN
     /// `[U]` params (`mtargs`, from the combined `Box[int].make[U](x)`) compose into ONE by-name
-    /// substitution map: enclosing seeded from `targs`, method from `mtargs`, the rest inferred by
-    /// unifying the declared param types against the argument types (like a generic free fn). Every
-    /// un-inferred param — enclosing OR method — degrades to `Ty::Unknown` (a free `Ty::Param` must
-    /// never leak). Mirrors the instance-method arms minus the receiver.
-    #[allow(clippy::too_many_arguments)] // enclosing key/name + method + args + enclosing & method targs + span
+    /// substitution map: enclosing seeded from `targs`, method from `mtargs`, then `hint` (a `let`/return
+    /// annotation, `b: Box[int] = Box.empty()`) seeds any still-free ENCLOSING param, the rest inferred by
+    /// unifying the declared param types against the argument types (like a generic free fn). A method-OWN
+    /// `[U]` left un-inferred degrades to `Ty::Unknown` (genuinely unconstrained, refines on use); an
+    /// un-inferred ENCLOSING param (no turbofish, no arg binding, no hint) DELIBERATELY leaks as a
+    /// `Ty::Param` so the first mismatching use routes to the "un-inferred type parameter … bind it at the
+    /// construction site" diagnostic — parity with the generic free-fn path, and closing the soundness hole
+    /// where `Ty::Unknown` swallowed any later argument. Mirrors the instance-method arms minus the receiver.
+    #[allow(clippy::too_many_arguments)] // enclosing key/name + method + args + enclosing & method targs + span + hint
     pub(super) fn infer_static_call(
         &mut self,
         key: &str,
@@ -770,6 +779,7 @@ impl Checker {
         mtargs: &[Ty],
         name_span: Span,
         span: Span,
+        hint: Option<&Ty>,
     ) -> Ty {
         // Resolve the method sig + the enclosing type's params, from either map.
         let resolved = self
@@ -857,6 +867,14 @@ impl Checker {
         self.recover_iter_elems(&tps, &mut sub, span);
         self.recover_iter_elems(&sig.type_params, &mut sub, span);
         self.recover_index_args(&sig.type_params, &mut sub, span);
+        // Expected-type checking-mode: a `let`/return annotation seeds any ENCLOSING type param the
+        // arguments left FREE by unifying the declared RETURN type (already `Ty::Param`-bearing)
+        // against the hint — so `b: Box[int] = Box.empty()` pins the return-only `T`. Runs AFTER
+        // arg-unification + iter/index recovery and BEFORE the per-arg check + bounds enforcement, so
+        // precedence stays turbofish > args > annotation (`seed_from_hint`'s `unify` binds only a param
+        // still FREE) and bounds enforce against the hint-pinned concrete type (mirrors the free-fn
+        // path, `infer_generic_call`).
+        seed_from_hint(hint, &sig.ret, &mut sub);
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             self.check_generic_arg(method, &expected, actual, arg);
@@ -871,11 +889,20 @@ impl Checker {
         // when `where_bounds` is empty. (The non-generic fast path above cannot carry receiver
         // bounds: `where_bounds` non-empty ⟹ the enclosing type has params ⟹ `tps` non-empty.)
         self.enforce_bounds(&sig.where_bounds, &sub, span);
-        // Any param still un-inferred — no turbofish and not bound by an argument, e.g.
-        // `Box.empty() -> Box[T]` or a method `[U]` unbindable from args — degrades to the refinable
-        // `Ty::Unknown`; a free `Ty::Param` must never leak into the value's type (mirrors the ctor's
-        // `unwrap_or(Ty::Unknown)` targs_out).
-        for tp in tps.iter().chain(sig.type_params.iter()) {
+        // A method-OWN `[U]` param still un-inferred (no method turbofish, unbindable from args, e.g.
+        // `make[U]() -> List[U]`) degrades to the refinable `Ty::Unknown` — a method-local `[U]` with
+        // nothing to bind it is genuinely unconstrained, and downstream use refines it cleanly.
+        //
+        // The ENCLOSING type's params (`tps`, the `T` of `Box[T]`) are DELIBERATELY NOT degraded: an
+        // enclosing `T` left un-inferred (no type-level turbofish `Box[int].empty()`, no argument
+        // binding `T`, no annotation/return hint `b: Box[int] = Box.empty()`) is the SAME "you must pin
+        // `T` at the construction site" situation that already rejects bare container ctors (`[]`) and
+        // generic FREE-function returns (`mkbox()`). Leaving it as a leaked `Ty::Param` (via `subst`
+        // below) routes the first mismatching/mutating use to the existing diagnostics — a `List[T]`
+        // field mutator hits the "un-inferred type parameter … bind it at the construction site" hint,
+        // a `T`-param user method gets the base "expected T, found <ty>" — instead of `Ty::Unknown`
+        // silently swallowing any later argument and defeating homogeneity checking (the soundness hole).
+        for tp in sig.type_params.iter() {
             sub.entry(tp.name.clone()).or_insert(Ty::Unknown);
         }
         subst(&sig.ret, &sub)

@@ -484,7 +484,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > **variant** wins over a static-method name on `Enum.x` (variant/static names must be disjoint —
 > enforced at declaration time). Generic statics use the **type-level** turbofish `Box[int].empty()`
 > (the type arg sits on the type); a static method may **also** declare its own `[U]` (PART 2), pinned
-> on the member or inferred (`Box[int].make[str](x)` / `Box.make(5)`). v1 limits: static methods do
+> on the member or inferred (`Box[int].make[str](x)` / `Box.make(5)`). The enclosing type param must be
+> **pinned at the construction site** — by a type-level turbofish (`Box[int].empty()`), an argument
+> (`Box.of(5)` ⇒ `T=int`), or a binding/return annotation (`b: Box[int] = Box.empty()`). An
+> un-turbofished, un-annotated factory whose return leaves `T` free (`b := Box.empty()`) is **rejected**
+> at the first mismatching use with the same "un-inferred type parameter … bind it at the construction
+> site" guidance as a bare container ctor (`[]`) or a generic free-function return — it is **not**
+> silently degraded to `Unknown` (which used to swallow any later argument and defeat homogeneity). A
+> method-**own** `[U]` with nothing to bind it stays refinably `Unknown` (genuinely unconstrained). v1 limits: static methods do
 > **not** participate in protocol conformance (protocols stay instance-only); static methods on
 > `newtype` and **associated protocol requirements** (`T.zero()`) remain follow-ups — the latter
 > **attempted twice and SHELVED** (see `docs/future.md` §3.13; factory-closure is the working alternative).

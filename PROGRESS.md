@@ -3711,6 +3711,19 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
 ### Robustness pass (landed, both engines)
+- **Generic static-factory un-inferred type-param soundness hole (2026-07-07).** A generic struct/enum
+  STATIC (associated) method returning `Type[T]`, called with NO type-level turbofish AND no binding/return
+  annotation, left the enclosing `T` as `Ty::Unknown` un-flagged — which then swallowed any later argument,
+  defeating homogeneity (`b := Box.empty(); b.add("hello"); b.first() + 1` check-ok → runtime trap; and a
+  silent int+str heterogeneous store). Fix (checker-only, `infer_static_call` in `src/checker/expr.rs`): (1)
+  the un-inferred-param degrade loop now iterates only the method's OWN `[U]` params — the ENCLOSING type's
+  params leak as `Ty::Param`, so the first mismatching/mutating use routes to the existing "un-inferred type
+  parameter … bind it at the construction site" / "expected T, found <ty>" diagnostics (parity with the
+  already-sound generic free-fn path); (2) a `seed_from_hint(expected, &sig.ret, …)` seeds a still-free
+  enclosing param from a `let`/return annotation (`b: Box[int] = Box.empty()`), threaded through all 6 static
+  call sites. STILL works: `Box[int].empty()` (turbofish), `b: Box[int] = Box.empty()` (annotation),
+  `Box.of(5)` (arg-inferred). Method-own `[U]` unbindable from args stays refinably `Unknown`. Covers generic
+  enums (`Wrap.none()`) via the shared path. Both engines + graph-path (`entry_rejects`) tested.
 - **Bounded infinite-recursion stack trace (gap #8, 2026-06-23).** At `MAX_CALL_DEPTH` (10_000) a
   recursion fault used to print one `  at <fn> (called at …)` line per frame → ~10_001 lines flooding
   the terminal. `format_trace` (rendered byte-identically in `vm/mod.rs` + `interp/mod.rs`) now (1)
