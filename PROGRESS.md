@@ -7,6 +7,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Mode:** Claude implements directly — working, tested code each session (see `CLAUDE.md`).
 > Full per-milestone detail lives in git history; this file is a forward-looking tracker, not a changelog.
 
+> **Gap backlog:** [`docs/gaps.md`](docs/gaps.md) — catch-all backlog; currently ranked stdlib
+> depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
+> dependency-bump notes. Draw from it when a feature earns its own milestone.
+
 ---
 
 ## Current focus
