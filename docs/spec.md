@@ -153,8 +153,16 @@ pip/wheels) is captured in [`docs/ffi-and-packaging.md`](ffi-and-packaging.md).
 
 **`yield`/generators** were originally a deliberate non-goal (lazy sequences are written as adapter
 structs over `Iterator[T]`, Rust's `Map`/`Take` model). They are now a **complete, VM-only**
-feature: a `fn` declaring `-> Iterator[T]` may `yield` values; calling it returns a
-suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds).
+feature: any `fn` that uses `yield` is a generator; calling it returns a
+suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds). The
+`-> Iterator[T]` return annotation is **optional** — with no return type the element type `T` is
+**inferred from the first `yield`** (strict-first-yield, just like late list `[]` element inference);
+every later `yield` must be assignable to that `T`. Two cases are rejected at check time rather than
+silently laundered: an **un-inferable** element (`yield []` with nothing pinning it, or a generator
+that reaches no `yield`) errors `cannot infer generator element type; annotate the return type as
+Iterator[T]`; and a **numeric mix** (`yield 1` then `yield 2.0`) is rejected — there is no `int`→`float`
+coercion at a `yield`, so the second yield conflicts with the pinned `int` (annotate `-> Iterator[float]`
+to opt in). An explicit `-> Iterator[T]` still overrides inference and validates every yield against `T`.
 Generators run on **both** VM engines (serial `--serial` and the default M:N). The only caveat is a
 runtime one, not a parity waiver: a **live** generator is not sendable across a task airlock on the M:N
 engine (it holds a VM frame), so passing one over a channel/`spawn` faults gracefully. The adapter-struct

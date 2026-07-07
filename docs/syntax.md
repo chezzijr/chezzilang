@@ -804,26 +804,36 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
 # `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
-# `yield` / generators (run on both VM engines; a live generator is just not sendable across a task airlock on M:N). A fn that declares
-# `-> Iterator[T]` and uses `yield` is a generator: calling it returns a suspendable iterator, not a
-# value. It runs lazily, suspending at each `yield` and resuming on the next `.next()`.
-fn count_up(n: int) -> Iterator[int]:
+# `yield` / generators (run on both VM engines; a live generator is just not sendable across a task airlock on M:N). Any fn that
+# uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
+# suspending at each `yield` and resuming on the next `.next()`. The `-> Iterator[T]` annotation is
+# OPTIONAL — with no return type the element type `T` is inferred from the FIRST `yield`
+# (strict-first-yield); every later `yield` must be assignable to that `T`, else a clear error.
+fn count_up(n: int):       # no `-> Iterator[T]`: `T = int` inferred from the first `yield`
     i := 0
     while i < n:
         yield i            # produce a value, suspend until the next .next()
         i = i + 1
 for x in count_up(3):      # drives the generator: prints 0, 1, 2
     print(x)
-# A generator can also be a struct method (`fn m(self) -> Iterator[T]`), and a generator value is a
-# real `Iterator[T]`: drive it by `for`, pass it to an `[S: Iterator[T], T]` bound, or call `.next()`
-# explicitly — it returns `Some(v)` per yield, then `None` once exhausted:
+# An explicit `-> Iterator[T]` still works (and validates every yield against `T`):
+fn count_up2(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i
+        i = i + 1
+# A generator can also be a struct method (`fn m(self)`, annotation optional), and a generator value
+# is a real `Iterator[T]`: drive it by `for`, pass it to an `[S: Iterator[T], T]` bound, or call
+# `.next()` explicitly — it returns `Some(v)` per yield, then `None` once exhausted:
 g := count_up(2)
 match g.next():            # Some(0)
     Some(v): print(v)
     None: print(-1)
 # `return` (bare only) stops a generator early; `defer`/`spawn`/`parallel:`/`wait:` are not allowed
-# inside a generator. `Iterator` is a reserved type name. See examples/generators.chz (full showcase)
-# and examples/generators_basic.chz.
+# inside a generator. Inference REJECTS an un-inferable element (`yield []` alone, or an int-then-float
+# mix — no silent int->float coercion at a `yield`): annotate `-> Iterator[T]` in that case. `Iterator`
+# is a reserved type name. See examples/generators.chz (full showcase), examples/generators_inferred.chz
+# (inference-only), and examples/generators_basic.chz.
 
 while cond:
     cond = step()

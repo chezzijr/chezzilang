@@ -10969,10 +10969,66 @@ fn generator_missing_iterator_return_rejected() {
 }
 
 #[test]
-fn generator_no_return_type_rejected() {
+fn generator_infers_element_type_no_annotation() {
+    // No `-> Iterator[T]`: the element type is inferred from the first yield (strict-first-yield),
+    // and callers see it — `for x in count()` binds `x: int`, so `s + x` type-checks.
+    ok(
+        "fn count():\n    yield 1\n    yield 2\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n",
+    );
+}
+
+#[test]
+fn generator_inferred_element_recovered_not_unknown() {
+    // The inferred element is the CONCRETE first-yield type (int), NOT a permissive `Unknown`:
+    // `x + "a"` (int + str) must be rejected — proves inference pins a real type.
     rejects(
-        "fn g():\n    yield 1\n",
-        "must declare a return type of `Iterator[T]`",
+        "fn count():\n    yield 1\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "",
+    );
+}
+
+#[test]
+fn generator_inferred_int_then_float_rejected() {
+    // CONSTRAINT 1: strict-first-yield pins `T = int` from the first yield; a later `yield 2.0`
+    // (float) must be REJECTED at check time, NOT silently coerced to float. There is no CoerceFloat
+    // plumbed through `yield`, so a silent int->float join would leave a runtime int under a float
+    // type. This program is check-REJECTED, so there is deliberately no runtime arm — accepting it
+    // (the bug) is exactly what this test forbids. Checked via the full module-graph entry path.
+    let errs = check_entry("fn count():\n    yield 1\n    yield 2.0\nfn main():\n    pass\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected yield type int, found float")),
+        "expected int-vs-float yield rejection, got: {errs:?}"
+    );
+}
+
+#[test]
+fn generator_uninferable_element_rejected() {
+    // CONSTRAINT 2: a generator whose only yield is an un-inferable empty `[]` leaves `T`
+    // un-inferable (List[Unknown]). It MUST be a clear error, NOT a silent `Iterator[List[Unknown]]`
+    // leak (the residual-Unknown type-check-bypass class, cf. commit 29513bd).
+    rejects(
+        "fn g():\n    yield []\n",
+        "cannot infer generator element type",
+    );
+}
+
+#[test]
+fn generator_inferred_struct_method_no_annotation() {
+    // The struct/enum-method arm of `infer_returns` also infers a generator's element type: an
+    // un-annotated `each` yields `int`, so `for x in b.each()` binds `x: int`.
+    ok(
+        "struct Box:\n    n: int\n    fn each(self):\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn use() -> int:\n    b := Box(3)\n    s := 0\n    for x in b.each():\n        s = s + x\n    return s\n",
+    );
+}
+
+#[test]
+fn generator_explicit_annotation_still_works() {
+    // The explicit `-> Iterator[T]` path is untouched: annotation still validates yields against T.
+    ok("fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n");
+    rejects(
+        "fn count() -> Iterator[int]:\n    yield \"x\"\n",
+        "expected yield type int",
     );
 }
 

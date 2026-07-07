@@ -2989,6 +2989,33 @@ root marker AND a parsed manifest (see the CLI-cleanup entry above): the toolcha
 prints `Hello from Chezzi!` → `chezzi test <tmp>` reports `2 passed`, and re-`init` refuses with a
 non-zero exit. Docs: `docs/syntax.md` §9b, `docs/spec.md` (module-resolution section), `CLAUDE.md`.
 
+**✅ Generator return-type inference (`-> Iterator[T]` now OPTIONAL) — Q1 (2026-07-07).** A generator
+(a `fn` whose body uses `yield`, auto-detected via `is_generator`) no longer MUST declare `-> Iterator[T]`:
+with no return annotation the element type `T` is **inferred from the FIRST `yield`** (strict-first-yield,
+mirroring late list `[]` element inference), and every later `yield` is validated against it. Wired
+through the EXISTING return-inference machinery so callers SEE the type: `infer_fn_ret`
+(`src/checker/sig.rs`) now, for a generator, routes to a new `infer_generator_ret` that returns
+`Iterator[first_yield]` and writes it back into the stored `FnSig.ret` (via `infer_returns_pass`, the
+fixpoint that also handles forward/mutual refs and the struct/enum-method arms) — so `for x in count()`
+binds `x: int`. A new `in_generator: bool` Checker flag (distinct from `yield_ty`, which is `None` during
+inference) is the sole in-bounds signal for `yield`: `check_yield` COLLECTS yields into `collected_yields`
+while inferring, and validates against the pinned `T` in pass 2 with **plain `assignable`** (no
+`CoerceFloat` at a `yield`). SOUNDNESS: (1) `yield 1` then `yield 2.0` is REJECTED (`expected yield type
+int, found float`) — no silent int→float join that would run int-under-float; (2) an un-inferable element
+(`yield []` alone, or a residual `Unknown`) errors `cannot infer generator element type; annotate the
+return type as Iterator[T]` via `fill_ret`'s `bad` flag — never a silent `Iterator[Unknown]` leak. The
+explicit `-> Iterator[T]` path is untouched (skipped by `infer_returns`, validated in `check_fn_body`), the
+bare-`return`-only restriction stands, and closure boundaries reset `in_generator=false`. **Zero VM/compiler
+change** (the compiler reads only `decl.is_generator`; bytecode is byte-identical to an annotated generator),
+so both engines are parity-clean by construction. Tests: checker `generator_infers_element_type_no_annotation`
+/ `generator_inferred_element_recovered_not_unknown` / `generator_inferred_int_then_float_rejected` /
+`generator_uninferable_element_rejected` / `generator_inferred_struct_method_no_annotation` /
+`generator_explicit_annotation_still_works`; VM (serial + M:N) `vm_generator_inferred_no_annotation` /
+`vm_generator_inferred_struct_method` / `golden_generators_inferred_chz`; golden
+`examples/generators_inferred.chz` (auto-covered by `all_shipped_examples_typecheck`). Docs: `docs/syntax.md`
+(yield block), `docs/spec.md` (generators section). Grammar unchanged (no new syntax; `cargo test
+conformance` green).
+
 **✅ Formal `Iterable[T]` protocol + `.iter()` cursor (owner-requested; the decoupled follow-on the
 constructors work flagged).** Additive — nothing existing changes behavior; 3-engine parity throughout.
 The win: a plain collection now composes into the SAME lazy adapter pipeline as a hand-written struct

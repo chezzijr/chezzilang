@@ -6744,6 +6744,34 @@ fn vm_generator_never_yields() {
     assert_eq!(run(src), "before\nafter\n");
 }
 
+/// Q1: a generator with NO `-> Iterator[T]` annotation — element type inferred by strict-first-yield
+/// — drives a `for` loop and RUNS identically on BOTH engines (serial + M:N), not just type-checks.
+#[test]
+fn vm_generator_inferred_no_annotation() {
+    let src = "fn count():\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
+    assert_eq!(run(src), "1\n2\n3\n");
+    assert_eq!(run_capture_parallel(src).unwrap(), "1\n2\n3\n");
+}
+
+/// Q1: the struct-method arm of generator inference also RUNS on both engines — an un-annotated
+/// `each` generator method infers `Iterator[int]` and drives a `for`.
+#[test]
+fn vm_generator_inferred_struct_method() {
+    let src = "struct Box:\n    n: int\n    fn each(self):\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn main():\n    b := Box(3)\n    for x in b.each():\n        print(x)\nmain()\n";
+    assert_eq!(run(src), "0\n1\n2\n");
+    assert_eq!(run_capture_parallel(src).unwrap(), "0\n1\n2\n");
+}
+
+/// Q1 golden: the inference-only `examples/generators_inferred.chz` showcase (free-fn + struct-method
+/// generators, no `-> Iterator[T]` anywhere) produces exactly this output on BOTH engines.
+#[test]
+fn golden_generators_inferred_chz() {
+    let src = include_str!("../../examples/generators_inferred.chz");
+    let expect = "0\n1\n2\n3\n4\n2\n4\n6\n";
+    assert_eq!(run(src), expect);
+    assert_eq!(run_capture_parallel(src).unwrap(), expect);
+}
+
 // --- Airlock: a frame-holding generator is NOT sendable; crossing ANY task airlock (incl.
 // merely being a module global when a nursery runs) must produce a GRACEFUL, catchable Chezzi
 // RuntimeError with a real spawn/nursery-site span — never a Rust panic/process-abort. A

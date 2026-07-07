@@ -358,6 +358,10 @@ impl Checker {
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
+        // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
+        // during inference; a non-generator resets both so a stray `yield` is diagnosed.
+        let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
+        let saved_yields = std::mem::take(&mut self.collected_yields);
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
             let ty = if param.name == "self" {
@@ -389,6 +393,8 @@ impl Checker {
         };
         self.pop_scope();
         let found = std::mem::replace(&mut self.collected_rets, saved_rets);
+        let found_yields = std::mem::replace(&mut self.collected_yields, saved_yields);
+        self.in_generator = saved_ig;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.exit_type_params(saved_tps);
@@ -397,6 +403,12 @@ impl Checker {
         // genuine un-inferable return — suppress the finalize error to avoid piling on.
         let body_had_err = self.errors.len() > mark;
         self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
+        // A GENERATOR's return type is `Iterator[T]`, `T` inferred by strict-first-yield — NOT the
+        // folded `return` branches (a generator's `return`s are bare, contributing only `Nil`). Route
+        // to the dedicated helper before the value-return fold below.
+        if decl.is_generator {
+            return self.infer_generator_ret(found_yields, decl.name_span, finalize, body_had_err);
+        }
 
         // Collect every return branch: an inline-expr body's single implicit return, else all the
         // `return`s (a bare `return` contributed `Nil`; no returns at all ⇒ an empty set ⇒ void).
@@ -549,6 +561,39 @@ impl Checker {
             .zip(b)
             .map(|(x, y)| Self::join_slot(x, y))
             .collect()
+    }
+
+    /// Infer an un-annotated generator's return type as `Iterator[T]` where `T` is the type of the
+    /// FIRST `yield` (strict-first-yield — chosen over a JOIN so no int->float coercion is silently
+    /// introduced at a `yield`, which has no `CoerceFloat`; pass-2 `check_yield` validates the rest of
+    /// the yields against this `T`). On the FINALIZE pass, a residual un-inferable `Unknown` in the
+    /// element (an empty generator whose only `yield` is `[]`, or one that reached no `yield` at all)
+    /// is a clear ERROR — never a silent `Iterator[Unknown]` leak (the residual-Unknown type-check
+    /// bypass class). A `body_had_err` cascade suppresses that diagnostic (the real error already fired
+    /// in pass 2), mirroring `finalize_ret`.
+    pub(super) fn infer_generator_ret(
+        &mut self,
+        yields: Vec<Ty>,
+        span: Span,
+        finalize: bool,
+        body_had_err: bool,
+    ) -> Ty {
+        let elem = yields.into_iter().next().unwrap_or(Ty::Unknown);
+        if !finalize {
+            // Fixpoint pass: stay permissive — a first yield that is `Unknown` (forward-ref callee /
+            // recursion) resolves on a later pass. Only the finalize pass rejects a residual.
+            return Ty::Struct("Iterator".to_string(), vec![elem]);
+        }
+        let mut bad = false;
+        let filled = self.fill_ret(&elem, &mut bad);
+        if bad && !body_had_err {
+            self.error(
+                span,
+                "cannot infer generator element type; annotate the return type as `Iterator[T]`"
+                    .to_string(),
+            );
+        }
+        Ty::Struct("Iterator".to_string(), vec![filled])
     }
 
     /// FINALIZE a folded return type after the fixpoint converges: default the `Result` E-slot to the
@@ -2744,13 +2789,27 @@ impl Checker {
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     pub(super) fn check_yield(&mut self, e: &Expr, span: Span) {
         let ty = self.infer(e);
-        match self.yield_ty.clone() {
-            Some(elem) => {
-                if !self.assignable(&elem, &ty) {
-                    self.error(e.span, format!("expected yield type {elem}, found {ty}"));
-                }
-            }
-            None => self.error(span, "`yield` can only appear inside a generator function"),
+        // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal: during return-type
+        // inference the element type is not yet pinned (`yield_ty` is `None`) but a `yield` is still
+        // legal and its type must be COLLECTED to seed the inferred `Iterator[T]`.
+        if !self.in_generator {
+            self.error(span, "`yield` can only appear inside a generator function");
+            return;
+        }
+        // Inference mode: gather every yield's type; the first pins `T` (strict-first-yield), the
+        // rest are validated in pass 2 (below) once `yield_ty` is seeded from the inferred sig.
+        if self.inferring_ret {
+            self.collected_yields.push(ty);
+            return;
+        }
+        // Pass 2: validate each yield against the pinned element type `T`. Plain `assignable` (NOT a
+        // widening variant): there is no `CoerceFloat` emitted at a `yield`, so an `int` yielded under
+        // an inferred/annotated `float` `T` would run int-under-float — a strict `assignable` (which
+        // makes `int` vs `float` incompatible) rejects it instead of silently coercing.
+        if let Some(elem) = self.yield_ty.clone()
+            && !self.assignable(&elem, &ty)
+        {
+            self.error(e.span, format!("expected yield type {elem}, found {ty}"));
         }
     }
 
@@ -2779,8 +2838,11 @@ impl Checker {
             }
         }
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
-        // A generator (`is_generator`, i.e. its body contains `yield`) must declare `-> Iterator[T]`.
-        // Recover `T` as the per-yield element type; a wrong/missing return type is an error here.
+        // A generator (`is_generator`, i.e. its body contains `yield`) has return type `Iterator[T]` —
+        // either declared explicitly (`-> Iterator[T]`) or INFERRED by strict-first-yield (stored back
+        // into `sig.ret` by `infer_generator_ret`). Recover `T` as the per-yield element type. The `_`
+        // arm now fires only for a WRONG EXPLICIT annotation (`-> int`): inference always yields an
+        // `Iterator[T]` sig, so an un-annotated generator can no longer reach it.
         let new_yield_ty = if decl.is_generator {
             match &sig.ret {
                 Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
@@ -2804,6 +2866,10 @@ impl Checker {
             self.check_generator_restrictions(&decl.body);
         }
         let saved_yield = std::mem::replace(&mut self.yield_ty, new_yield_ty);
+        // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal for a `yield` — kept in
+        // sync with `yield_ty` here so pass-2 `check_yield` validates a generator's yields (and a
+        // stray `yield` in a non-generator body is diagnosed as out-of-bounds).
+        let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
@@ -2917,6 +2983,7 @@ impl Checker {
         self.pop_scope();
         self.current_ret = saved_ret;
         self.yield_ty = saved_yield;
+        self.in_generator = saved_ig;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
