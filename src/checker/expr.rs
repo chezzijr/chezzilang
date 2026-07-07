@@ -278,6 +278,26 @@ impl Checker {
                 );
                 return Ty::Unknown;
             }
+            // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER (not a concrete type
+            // name). You cannot call a static method / construct THROUGH an erased type parameter: the
+            // body is checked once with `T` abstract and `T` is erased at runtime, so there is no
+            // concrete type to dispatch to (see the Convert/From "restricted construction" note —
+            // `T.convert` on an abstract `T` is deferred pending witness-passing). Give a clear,
+            // actionable message instead of the value path's cryptic "unknown name 'T'". Mirrors the
+            // newtype arm above (a precise diagnostic for an otherwise-cryptic member access).
+            if let ExprKind::Ident(tname) = &obj.kind
+                && !self.is_local_binding(tname)
+                && self.type_params.contains_key(tname)
+            {
+                self.infer_all(args);
+                self.error(
+                    span,
+                    format!(
+                        "cannot call a static method through the generic type parameter '{tname}' (`{tname}.{name}`): generics are erased, so there is no concrete type to construct at runtime — call the concrete type's static method directly (e.g. `SomeType.{name}(...)`) or pass a converter function (a `fn(...) -> {tname}` parameter)"
+                    ),
+                );
+                return Ty::Unknown;
+            }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
             // (`Box[int].empty()`). Two carriers converge here:

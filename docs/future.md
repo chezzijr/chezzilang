@@ -198,12 +198,18 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
       made `is_static`-aware; no nominal trait-impl machinery — fits Chezzi's structural model). **Slices
       1+2 LANDED** (2026-07-07): the protocol is reserved + binds as `[T: Convert[S]]`, sound static-slot
       witnessing (an instance `convert(self,…)` does NOT witness it), and **bound-only** enforcement
-      (rejected as a value-annotation type — a value can't invoke a static ctor). **Slice 3 PENDING:**
-      calling `T.convert(x)` **through** the bound (still `unknown name 'T'`), which is what enables the
-      generic struct↔struct / enum↔enum / newtype ergonomics. A fallible conversion would be
-      `convert(x: S) -> Result[Self, E]` — so **no separate `TryFrom`** is needed. **Skip `Into`**
-      initially: it needs expected-type threading into the receiver (Chezzi infers bottom-up), which is a
-      larger, separate change.
+      (rejected as a value-annotation type — a value can't invoke a static ctor). **Slice 3 (`T.convert`
+      through a bound) ⛔ DEFERRED** (2026-07-07): a spike proved the "restricted construction" model
+      delivers nothing under Chezzi's **erased, single-pass, non-monomorphizing** generics — `T` is never
+      concrete while its body is checked (the same gap hits *every* generic static call, e.g. `T.empty()`,
+      not just `convert`), and the only concrete static call is `Type.convert(x)` written directly (which
+      already works with no protocol). `T.<static>()` on a type param now gives a **clear error** (Option A)
+      instead of `unknown name 'T'`. Making it real needs the deferred **witness-passing** escape hatch
+      (thread the concrete `convert` in as a hidden arg — the only erasure-compatible way); build it only
+      when real code needs generic-over-Convert construction. A fallible conversion is `convert(x: S) ->
+      Result[Self, E]` — **no separate `TryFrom`** needed. **Skip `Into`** (needs expected-type threading;
+      Chezzi infers bottom-up). **Multi-source (Phase 2) also DEFERRED** — needs argument-type overloading
+      (banned invariant) for thin payoff; distinct-named static ctors cover it today.
     - **Cheap scalar fills — ✅ LANDED** (additive, low risk, landed independently ahead of the
       `From` protocol): `bool(x)` truthiness cast (int/float/bool/str, never faults on a scalar) +
       the `Result`-returning `s.parse_int() -> Result[int, str]` / `s.parse_float() -> Result[float,

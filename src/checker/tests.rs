@@ -9965,6 +9965,30 @@ fn convert_bound_only_not_value_type() {
 }
 
 #[test]
+fn static_call_through_type_param_is_clear_error() {
+    // Slice 3 CLOSE-OUT (Option A) — `T.convert(x)` (or any `T.<static>()`) on an in-scope generic type
+    // parameter is NOT supported: generics are erased + the body is checked once abstractly, so there is
+    // no concrete type to construct through at runtime (the "restricted construction" bet delivers nothing
+    // under single-pass erased generics; deferred pending witness-passing). It must give a CLEAR
+    // actionable error, not the cryptic "unknown name 'T'".
+    let needle = "cannot call a static method through the generic type parameter";
+    // `T.convert` — the Convert/From driver.
+    entry_rejects(
+        "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn build[T: Convert[int]](x: int) -> T:\n    return T.convert(x)\nfn main():\n    print(build[Port](5).n)\nmain()\n",
+        needle,
+    );
+    // The SAME gap for any generic static method (not Convert-specific): `T.empty()`.
+    entry_rejects(
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box(items=[])\nfn mk[T]() -> Box[T]:\n    return T.empty()\nfn main():\n    print(1)\nmain()\n",
+        needle,
+    );
+    // KEEP-WORKING: a CONCRETE turbofish static call `Box[int].empty()` is fine (a real type, not a param).
+    entry_ok(
+        "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box(items=[])\nfn main():\n    b := Box[int].empty()\n    print(1)\nmain()\n",
+    );
+}
+
+#[test]
 fn user_static_ctor_protocol_bound_only_and_instance_regression() {
     // The gate keys on the STRUCTURAL static-method property, so a USER static-ctor protocol is bound-only
     // too (closes the background spike: a static-ctor-only protocol used to FALSELY match a VALUE).

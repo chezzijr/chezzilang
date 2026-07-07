@@ -751,10 +751,15 @@ is usable **only as a generic bound** `[T: Convert[S]]`; because a static ctor c
 value, `Convert[S]` is **rejected as a value-annotation type** (param/field/return/binding, including
 nested `List[Convert[int]]`/`Option[…]`/tuple, a same- or cross-module type alias, and a protocol that
 *embeds* a static-ctor protocol) — bound-only by the same static-slot rule that applies to any
-static-ctor protocol. NOT yet available: calling `T.convert(x)` **through** the bound (a
-separate pending slice — still errors `unknown name 'T'`), so generic construction over the bound is not
-claimed. The cheap scalar fills (`bool(x)` truthiness cast + `Result`-returning
-`parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.
+static-ctor protocol. NOT available: calling `T.convert(x)` **through** the bound — generics are erased
+and a generic body is checked once with `T` abstract, so there is no concrete type to construct at
+runtime (this affects *every* generic static call, e.g. `T.empty()`, not just `convert`). `T.<static>()`
+on a type parameter is a clear error ("cannot call a static method through the generic type parameter
+'T' … call the concrete type's static method directly or pass a `fn(...) -> T`"), and generic
+construction over the bound is **deferred** pending witness-passing (`docs/future.md §15`). Use direct
+`Type.convert(x)` (which needs no protocol) or a passed converter function. The cheap scalar fills
+(`bool(x)` truthiness cast + `Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded in
+`docs/future.md §3`.
 
 ## Architecture — pipeline
 

@@ -11,11 +11,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
-**🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS (DESIGN DECIDED 2026-07-06, not started).**
+**🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS.** **STATUS (2026-07-07): Phase 0 ✅ +
+Phase 1 slices 1–2 ✅ SHIPPED; slice 3 (`T.convert`) ⛔ deferred (Option A clear-error landed); Phase 2
+(multi-source) ⛔ deferred — both revisit-later, see below.** What works now: scalar fills (`bool(x)`,
+`parse_int`/`parse_float`); a reserved bound-only `Convert[S]` protocol with SOUND structural witnessing;
+direct `Type.convert(x)` conversion (struct↔struct/enum/newtype). What's deferred: generic construction
+`T.convert` through a bound (needs witness-passing) and multi-source (needs overloading). This is a
+coherent stopping point — the Convert track is PAUSED here pending real demand for the deferred pieces.
+
 Closes the documented gap in `docs/spec.md` "Type conversions & casting" / `docs/future.md §15`: today
 conversion is a fixed builtin set (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`) + one-way
 `int→float` widening + one-way newtype wrap/unwrap — **no extensible mechanism**. Brainstorm outcome:
-build a structural `From[S]` protocol, **phased**, anchored on a reference generics model so it stays
+build a structural `Convert[S]` protocol, **phased**, anchored on a reference generics model so it stays
 consistent (this lang's generics are the buggy-if-improvised part — anchor or bust).
 
 - **Reference model = Java (erased) generics.** Chezzi generics are **erased** (`docs/future.md §14`
@@ -73,11 +80,22 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   is rare). A `TryConvert[S]: try_convert(x) -> Result[Self,E]` protocol is a **clean additive follow-up**
   (exactly how Rust shipped `TryFrom` after `From`) — built ONLY if generic-over-fallible proves needed.
   Design C (Result-only protocol) is REJECTED: forces `Ok(...)` boilerplate on conversions that never fail.
-- **`T.convert(x)` construction-through-typevar — RESTRICTED (Java/Go model).** Legal ONLY where `T` is
-  concretely pinned at the call site (checker rewrites `T.convert` → concrete slot pre-erasure). Inside a
-  generic body over an *abstract* `T`, you pass the converter explicitly (`fn parse_all[T](xs, mk: fn(str)->T)`).
-  HONEST LIMITATION: the sugar `parse_all[T: Convert[str]](xs).map(fn(l): T.convert(l))` is NOT offered
-  in phase 1 — under pure erasure there is nothing to dispatch `T.convert` to on an abstract `T`.
+- **`T.convert(x)` construction-through-typevar — ⛔ SLICE 3 DEFERRED (2026-07-07); spike proved the
+  "restricted" model delivers NOTHING here.** The Q4-C plan assumed `T.convert` would appear at
+  *concrete-pinned* sites the checker could rewrite. A spike disproved it: (a) `T.convert` inside a
+  generic body sees `T` **abstract** (`unknown name 'T'`); (b) the SAME gap hits every generic static
+  method — existing `T.empty()` fails identically, it's not Convert-specific; (c) concrete turbofish
+  `Box[int].empty()` **works**; (d) there is **NO monomorphization** — generic bodies are checked once,
+  abstractly (grep-confirmed, `src/checker/proto.rs`). So `T` (spelled `T`) is NEVER concrete while its
+  body is checked; the only concrete static call is `Type.convert(x)` written directly — which already
+  works today with no protocol. Restricted `T.convert` therefore has no valid call site.
+  **Option A landed instead (2026-07-07):** `T.<static>()` on an in-scope type param now gives a CLEAR
+  actionable error ("cannot call a static method through the generic type parameter 'T' … call the
+  concrete type's static method directly or pass a `fn(...) -> T`") instead of cryptic `unknown name 'T'`
+  (`src/checker/expr.rs`, mirrors the newtype-member arm; test `static_call_through_type_param_is_clear_error`).
+  **REVISIT LATER** via the deferred **witness-passing** escape hatch below (the only erasure-compatible
+  way to make `T.convert` on an abstract `T` real) — build it only when real code needs generic-over-Convert
+  construction; distinct-named static ctors + direct `Type.convert` cover the common case until then.
 - **BOUND-ONLY vs value-position — ✅ RESOLVED (slice 2, 2026-07-07).** The spike showed a static-ctor-
   only protocol "matched" a VALUE annotation (`fn takes(c: Convert[int])` accepted `Port(1)` with no
   error) — unsound, since a value can't call a static ctor. **Decided + enforced bound-only:** ANY
@@ -85,11 +103,17 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   now usable ONLY as a generic bound `[T: Convert[S]]` and REJECTED in every value-annotation position
   (keyed on the structural static-slot property, gated at `resolve_type`; instance-method parameterized
   protocols stay value-usable). See the slice-2 landed note below.
-- **Phase 2 — multi-source (designed now, built later).** A type may witness `Convert[Celsius]` AND
-  `Convert[Kelvin]` — separate conformances, **type-argument-keyed** (Rust's coherent model, NOT ad-hoc
-  overloading — general method overloading stays banned). Resolve `Type.convert(x)` by `typeof x` → the
-  `Convert[typeof x]` witness; tie-break rule **exact source beats `int→float` widening**. Additive to
-  phase 1.
+- **Phase 2 — multi-source — ⛔ DEFERRED / REVISIT LATER (2026-07-07); needs OVERLOADING, thin payoff.**
+  A type witnessing `Convert[Celsius]` AND `Convert[Kelvin]` = two `convert` methods on one type — but
+  Chezzi has **no overloading** (`method 'convert' is already defined`; hit in a spike). So Phase 2
+  REQUIRES introducing argument-type overload resolution (the "type-argument-keyed witness selection"
+  framing: resolve `Type.convert(x)` by `typeof x` → the `Convert[typeof x]` witness, tie-break **exact
+  source beats `int→float` widening**). Coherent (Rust's model, not ad-hoc), but it BREAKS the no-overload
+  invariant, and the payoff is thin: it only helps **direct** multi-source calls, and distinct-named
+  static ctors (`Fahrenheit.from_celsius`/`from_kelvin`) already do that today with zero new machinery.
+  It does NOT unblock the generic payoff (that's slice 3 / witness-passing). **Decision (2026-07-07): not
+  worth the overloading cost now** — revisit together with witness-passing when real code demands
+  multi-source; until then use distinct-named static ctors. General method overloading stays banned.
 - **Witness-passing (Haskell/Swift dictionaries) — DEFERRED escape hatch.** The only erasure-compatible
   way to make `T.convert` work on an *abstract* `T` (thread the concrete `convert` in as a hidden arg).
   Its own scoped milestone, built ONLY if the restricted-construction DX proves too weak. Do NOT bolt on
