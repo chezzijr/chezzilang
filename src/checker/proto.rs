@@ -371,13 +371,20 @@ impl Checker {
             // witness is shared by every value write-site (param/return/field/reassign) since they all
             // route assignment through `assignable`.
             (Protocol(p, pargs), a) => self.satisfies_args(a, p, pargs).is_ok(),
-            (List(e), List(a)) | (Option(e), Option(a)) | (Set(e), Set(a)) => self.assignable(e, a),
+            // `Option`/`Result` are IMMUTABLE carriers — covariant element assignment stays sound
+            // (no write-through alias), so they keep recursing via `assignable`. `List`/`Set`/`Map`
+            // and user generic `Struct`/`Enum` are MUTABLE, by-reference containers: covariant type
+            // args are a soundness hole (a `G[Sub]` bound aliased as `G[Super]` can have a Super value
+            // written back into it — see `invariance_rejects_*` tests). Their type ARGUMENTS are
+            // therefore compared with the context-free structural-equality primitive `compatible`
+            // (= strict INVARIANCE), mirroring the M14 `compatible` Protocol/Struct/Enum arms and
+            // `bound_args_match`. Docs: spec.md "strictly invariant"; future.md "no covariance holes".
+            (Option(e), Option(a)) => self.assignable(e, a),
+            (List(e), List(a)) | (Set(e), Set(a)) => compatible(e, a),
             (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
-            (Map(ek, ev), Map(ak, av)) => self.assignable(ek, ak) && self.assignable(ev, av),
+            (Map(ek, ev), Map(ak, av)) => compatible(ek, ak) && compatible(ev, av),
             (Struct(n, ea), Struct(m, aa)) | (Enum(n, ea), Enum(m, aa)) => {
-                n == m
-                    && ea.len() == aa.len()
-                    && ea.iter().zip(aa).all(|(x, y)| self.assignable(x, y))
+                n == m && ea.len() == aa.len() && ea.iter().zip(aa).all(|(x, y)| compatible(x, y))
             }
             (Tuple(e), Tuple(a)) => {
                 e.len() == a.len() && e.iter().zip(a).all(|(x, y)| self.assignable(x, y))

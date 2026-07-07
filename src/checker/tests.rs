@@ -15878,3 +15878,91 @@ fn param_protocol_nesting_accepts_and_wrong_rejects() {
         "expected List[Container[str]], found List[Bag]",
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MUTABLE-CONTAINER GENERIC INVARIANCE (soundness hole): a `G[Sub]` value must
+// NOT be assignable where `G[Super]` is expected for a MUTABLE, by-reference
+// container (List/Set/Map, user generic struct). The reverse was already
+// rejected; these lock the covariant direction shut. All use the REAL graph
+// helpers (entry_ok/entry_rejects), NOT single-module check_src.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Repro A (was check-ok → runtime trap): passing a `List[Cat]` VARIABLE where
+/// `List[Any]` is expected must REJECT (the callee can `.push` a non-Cat).
+#[test]
+fn invariance_rejects_list_covariance_launder() {
+    entry_rejects(
+        "struct Cat:\n    name: str\nfn poison(xs: List[Any]):\n    xs.push(123)\nfn main():\n    cats: List[Cat] = [Cat(\"felix\")]\n    poison(cats)\n    for c in cats:\n        print(c.name)\nmain()\n",
+        "expected List[Any], found List[Cat]",
+    );
+}
+
+/// Map VALUE type is invariant: a `Map[str, Cat]` VARIABLE must NOT flow into a
+/// `Map[str, Any]` slot (the callee can insert a non-Cat value).
+#[test]
+fn invariance_rejects_map_value_covariance() {
+    entry_rejects(
+        "struct Cat:\n    name: str\nfn stash(m: Map[str, Any]):\n    m[\"x\"] = 123\nfn main():\n    cats: Map[str, Cat] = {\"felix\": Cat(\"felix\")}\n    stash(cats)\nmain()\n",
+        "expected Map[str, Any], found Map[str, Cat]",
+    );
+}
+
+/// User generic struct field via a mutator `set(self, x: T)` — `Box[Cat]` var
+/// must NOT pass where `Box[Any]` is expected. (Any top-type variant.)
+#[test]
+fn invariance_rejects_user_generic_struct_covariance_any() {
+    entry_rejects(
+        "struct Cat:\n    name: str\nstruct Box[T]:\n    v: T\n    fn set(self, x: T):\n        self.v = x\nfn f(b: Box[Any]):\n    b.set(123)\nfn main():\n    bc: Box[Cat] = Box(Cat(\"felix\"))\n    f(bc)\nmain()\n",
+        "expected Box[Any], found Box[Cat]",
+    );
+}
+
+/// Same, but the supertype is a USER protocol (Cat <: Speaker), not `Any`.
+#[test]
+fn invariance_rejects_user_generic_struct_covariance_protocol() {
+    entry_rejects(
+        "protocol Speaker:\n    fn speak(self) -> str\nstruct Cat:\n    name: str\n    fn speak(self) -> str:\n        return \"meow\"\nstruct Dog:\n    fn speak(self) -> str:\n        return \"woof\"\nstruct Box[T]:\n    v: T\n    fn set(self, x: T):\n        self.v = x\nfn f(b: Box[Speaker]):\n    b.set(Dog())\nfn main():\n    bc: Box[Cat] = Box(Cat(\"felix\"))\n    f(bc)\nmain()\n",
+        "expected Box[Speaker], found Box[Cat]",
+    );
+}
+
+/// Assignment boundary (not a fn-arg): `b: List[Any] = a` where `a: List[Cat]`
+/// must REJECT — the fix covers plain let/`:=` sinks, not just call args.
+#[test]
+fn invariance_rejects_let_assign_container_covariance() {
+    entry_rejects(
+        "struct Cat:\n    name: str\nfn main():\n    a: List[Cat] = [Cat(\"felix\")]\n    b: List[Any] = a\n    print(b)\nmain()\n",
+        "cannot assign List[Cat] to variable of type List[Any]",
+    );
+}
+
+/// BOUNDARY GUARD — legitimate container neighbors that MUST stay check-clean
+/// (no over-rejection). Same-arg containers, nested equal generics, and a
+/// literal `List[Any]` built and used as `List[Any]`.
+#[test]
+fn invariance_preserves_legit_container_neighbors() {
+    // List[int] -> List[int]
+    entry_ok(
+        "fn f(xs: List[int]) -> int:\n    return xs[0]\nfn main():\n    ys: List[int] = [1, 2]\n    print(f(ys))\nmain()\n",
+    );
+    // List[Cat] -> List[Cat]
+    entry_ok(
+        "struct Cat:\n    name: str\nfn f(xs: List[Cat]) -> str:\n    return xs[0].name\nfn main():\n    cs: List[Cat] = [Cat(\"felix\")]\n    print(f(cs))\nmain()\n",
+    );
+    // Map[str, int] -> Map[str, int]
+    entry_ok(
+        "fn f(m: Map[str, int]) -> int:\n    return m[\"a\"]\nfn main():\n    d: Map[str, int] = {\"a\": 1}\n    print(f(d))\nmain()\n",
+    );
+    // Box[Cat] -> Box[Cat]
+    entry_ok(
+        "struct Cat:\n    name: str\nstruct Box[T]:\n    v: T\nfn f(b: Box[Cat]) -> str:\n    return b.v.name\nfn main():\n    bc: Box[Cat] = Box(Cat(\"felix\"))\n    print(f(bc))\nmain()\n",
+    );
+    // nested Map[str, List[int]] -> same
+    entry_ok(
+        "fn f(m: Map[str, List[int]]) -> int:\n    return m[\"a\"][0]\nfn main():\n    d: Map[str, List[int]] = {\"a\": [1, 2]}\n    print(f(d))\nmain()\n",
+    );
+    // a literal List[Any] built and used as List[Any]
+    entry_ok(
+        "fn f(xs: List[Any]):\n    xs.push(1)\nfn main():\n    ys: List[Any] = [1, \"a\", true]\n    f(ys)\nmain()\n",
+    );
+}

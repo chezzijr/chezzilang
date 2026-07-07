@@ -191,6 +191,31 @@ protocols are not exported as value types (rejected at the annotation, not silen
 three write-site rejects/nesting) + 3 two-engine goldens (`vm::tests`, byte-identical serial-VM == M:N).
 Docs: `docs/syntax.md` (limitation lifted), `docs/spec.md` (M14 rows).
 
+**✅ MUTABLE-CONTAINER GENERIC INVARIANCE — covariance soundness hole closed (2026-07-07).**
+(HIGH — checker soundness.) The M14 "strictly invariant" guarantee (parameterized protocols) now also
+holds for the built-in MUTABLE containers + user generic structs/enums. Before: `Checker::assignable`
+compared List/Set/Map/Struct/Enum type ARGUMENTS covariantly (`self.assignable(e, a)`, protocol-aware),
+so `assignable(List[Any], List[Cat])` reduced to `assignable(Any, Cat)`=true — a `List[Cat]` VARIABLE
+flowed into a `List[Any]` slot, and the callee could `.push` a non-Cat back through the shared alias
+(check-ok → runtime `cannot read field 'x' of int`, or a SILENT wrong answer). The reverse direction was
+already correctly rejected — a one-directional covariance bug. Fix (checker-only, `src/checker/proto.rs`
+~374): the MUTABLE, by-reference containers `List`/`Set`/`Map` and user generic `Struct`/`Enum` now
+compare type args with the context-free structural-equality primitive `compatible` (= strict
+INVARIANCE), mirroring the M14 `compatible` Protocol/Struct/Enum arms + `bound_args_match`. The IMMUTABLE
+carriers `Option`/`Result` keep covariant element assignment (no write-through alias → sound; preserves
+`?`/Result/Option plumbing). Covers List element, Map value/key, and user generic struct fields (mutated
+via a `set(self, x: T)` method), through BOTH the `Any` top type AND a user protocol supertype, at BOTH
+the fn-arg and let/`:=`/return boundaries. Literals stay clean: an annotated/expected-directed literal
+(`xs: List[Any] = [1, "a", true]`) is built AS `List[Any]` by `infer_list`'s expected-directed path
+(pattern.rs:1646), so only container VARIABLES flowing container→container are newly rejected. Iterator[T]
+is unaffected (all use flows through generic BOUNDS `[S: Iterator[T], T]` / generator yield-validation,
+never a direct `assignable(Iterator[Sub], Iterator[Super])`). Tests: 6 checker units (repro A launder,
+Map value, user-generic-struct via Any AND user-protocol, let/`:=` boundary, + a neighbor-preservation
+battery), all on the REAL graph path (`entry_ok`/`entry_rejects`). Full checker suite (incl.
+`all_shipped_examples_typecheck` + the M14 nesting/invariance tests) green — no over-rejection. Aligns
+impl with the already-documented contract (spec.md "strictly invariant", future.md "no covariance holes")
+— no spec change. Checker-only; VM/runtime dispatch untouched.
+
 **✅ SCALARS INTRINSICALLY SATISFY `Stringable` (2026-07-06).** `int`/`float`/`bool`/`str` now satisfy
 the prebuilt `Stringable` protocol (sole method `str(self) -> str`) intrinsically, so a
 `fn show[T: Stringable](v: T)` generic accepts them — closing the last inconsistency where every other
