@@ -317,7 +317,15 @@ fn as_float(j: Json) -> Option[float]:
 
 fn as_int(j: Json) -> Option[int]:
     match j:
-        Json.Num(n): return Some(int(n))
+        Json.Num(n):
+            # JSON stores every number as f64; `int()` faults on out-of-range/non-finite. Keep
+            # this a total function: gate on the i64 window and return None when unrepresentable.
+            # `n == 2^63` (== i64::MAX after f64 rounding) is special-cased since int(2^63) faults.
+            if n == 9223372036854775808.0:
+                return Some(9223372036854775807)
+            if n >= -9223372036854775808.0 and n < 9223372036854775808.0:
+                return Some(int(n))
+            return None
         _: return None
 
 fn as_str(j: Json) -> Option[str]:

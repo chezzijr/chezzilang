@@ -568,6 +568,14 @@ impl Vm {
                 if f.fract() != 0.0 || !f.is_finite() {
                     return Err(format!("decode: expected an integer at {path}, found {f}"));
                 }
+                // `f as i64` saturates, so range-check first. Use a strict `> 2^63` upper bound so
+                // i64::MAX (which f64-rounds to exactly 2^63) still round-trips via the saturating
+                // cast, while everything strictly above 2^63 / below -2^63 is rejected.
+                if f < i64::MIN as f64 || f > 9_223_372_036_854_775_808.0 {
+                    return Err(format!(
+                        "decode: integer {f} at {path} is out of range for int"
+                    ));
+                }
                 Ok(Value::Int(f as i64))
             }
             D::Float => {

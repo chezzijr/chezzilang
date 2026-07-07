@@ -695,6 +695,12 @@ enum Json:
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
 
+Every JSON number is stored as an f64, so `as_int` and `decode[int]` are total at the float→int
+boundary: a number outside the `int` (i64) range or non-finite yields `None` from `as_int` and an
+`Err` from `decode[int]` (never a silent saturation or an uncaught fault); the exact `i64::MAX` /
+`i64::MIN` boundaries still round-trip. `as_int` truncates a fractional number (`as_int(2.5)` →
+`Some(2)`).
+
 For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
 struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
 ignored, and recursive/generic struct targets are rejected (use the `Json` enum for those).

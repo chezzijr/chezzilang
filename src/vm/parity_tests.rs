@@ -1188,6 +1188,43 @@ fn json_decode_error_parity() {
     assert_eq!(out, "decode: missing key 'x' at $\n");
 }
 
+/// `json.as_int` is a total `-> Option[int]`: out-of-range / non-finite JSON numbers return
+/// `None` (never fault), in-range values (incl. i64::MAX/MIN boundaries) return `Some`, and a
+/// fractional number still truncates.
+#[test]
+fn json_as_int_out_of_range_parity() {
+    let out = parity_entry(
+        "import std.json\nfn a(s: str) -> str:\n    match json.parse(s):\n        Ok(j):\n            match json.as_int(j):\n                Some(v): return \"SOME \" + str(v)\n                None: return \"NONE\"\n        Err(e): return \"PARSEERR\"\nprint(a(\"9999999999999999999\"))\nprint(a(\"42\"))\nprint(a(\"9223372036854775807\"))\nprint(a(\"-9223372036854775808\"))\nprint(a(\"2.5\"))\nprint(a(\"1e400\"))\n",
+    );
+    assert_eq!(
+        out,
+        "NONE\nSOME 42\nSOME 9223372036854775807\nSOME -9223372036854775808\nSOME 2\nNONE\n"
+    );
+}
+
+/// `json.decode[int]` rejects out-of-range integers with `Err` (never silently saturates), while
+/// the exact i64::MAX / i64::MIN boundaries still decode to `Ok`.
+#[test]
+fn json_decode_int_out_of_range_parity() {
+    let out = parity_entry(
+        "import std.json\nfn d(s: str) -> str:\n    match json.decode[int](s):\n        Ok(v): return \"OK \" + str(v)\n        Err(e): return \"ERR\"\nprint(d(\"1000000000000000000000000000000\"))\nprint(d(\"-1000000000000000000000000000000\"))\nprint(d(\"18446744073709551615\"))\nprint(d(\"9223372036854775807\"))\nprint(d(\"-9223372036854775808\"))\nprint(d(\"42\"))\n",
+    );
+    assert_eq!(
+        out,
+        "ERR\nERR\nERR\nOK 9223372036854775807\nOK -9223372036854775808\nOK 42\n"
+    );
+}
+
+/// Cross-site consistency: for the identical strictly-out-of-range input, `decode[int]` returns
+/// `Err` and `as_int` returns `None` — both total, neither saturates, neither faults.
+#[test]
+fn json_int_boundary_consistency_parity() {
+    let out = parity_entry(
+        "import std.json\ns := \"9999999999999999999\"\nmatch json.decode[int](s):\n    Ok(v): print(\"decode OK\")\n    Err(e): print(\"decode ERR\")\nmatch json.parse(s):\n    Ok(j):\n        match json.as_int(j):\n            Some(v): print(\"as_int SOME\")\n            None: print(\"as_int NONE\")\n    Err(e): print(\"parse ERR\")\n",
+    );
+    assert_eq!(out, "decode ERR\nas_int NONE\n");
+}
+
 #[test]
 fn process_cmd_ok_and_err_parity() {
     let out = parity_entry(
