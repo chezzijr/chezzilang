@@ -4284,6 +4284,111 @@ fn checker_named_stdlib_factory_resolves_method() {
     );
 }
 
+// ----- named-factory-import PROTOCOL SATISFACTION (gap #4, satisfies path) -----
+
+/// A named-fn-imported factory result that STRUCTURALLY SATISFIES a protocol must pass a
+/// protocol-bounded generic exactly like a whole-module/type-name import. Pre-fix: `satisfies`
+/// resolved the method table off the CURRENT module's imported-type tables, so the value was
+/// spuriously rejected ("type Widget does not satisfy Describable") under the named-fn form only.
+#[test]
+fn named_fn_import_satisfies_protocol_struct_all_forms() {
+    let lib = "struct Widget:\n    n: int\n    fn describe(self) -> str:\n        return \"W{self.n}\"\nfn make() -> Widget:\n    return Widget(10)\n";
+    let proto_show = "protocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\n";
+    for (label, mainsrc) in [
+        (
+            "whole-module",
+            format!("import lib\n{proto_show}fn main():\n    show(lib.make())\n"),
+        ),
+        (
+            "import-type",
+            format!("import make, Widget from lib\n{proto_show}fn main():\n    show(make())\n"),
+        ),
+        (
+            "named-fn-only",
+            format!("import make from lib\n{proto_show}fn main():\n    show(make())\n"),
+        ),
+    ] {
+        let t = TmpDir::new();
+        t.write("lib.chz", lib);
+        let entry = t.write("main.chz", &mainsrc);
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        let errs = match check_graph(&graph) {
+            Ok(()) => Vec::new(),
+            Err(e) => e,
+        };
+        assert!(
+            errs.is_empty(),
+            "{label} form: expected no type errors, got: {errs:?}"
+        );
+    }
+}
+
+/// Same, ENUM: a named-fn-imported enum value whose method satisfies the protocol is accepted at a
+/// protocol bound.
+#[test]
+fn named_fn_import_satisfies_protocol_enum() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "enum Shape:\n    Circle(int)\n    fn describe(self) -> str:\n        match self:\n            Shape.Circle(r): return \"C{r}\"\nfn mk() -> Shape:\n    return Shape.Circle(3)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(mk())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Same, NEWTYPE: a named-fn-imported newtype value whose own method satisfies the protocol is
+/// accepted at a protocol bound.
+#[test]
+fn named_fn_import_satisfies_protocol_newtype() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "newtype Meters = int:\n    fn describe(self) -> str:\n        return \"M{int(self)}\"\nfn mk() -> Meters:\n    return Meters(5)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(mk())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// NEGATIVE: the fallback resolves the REAL method table, so a named-fn-imported value whose type
+/// does NOT provide the required protocol method is STILL rejected — no laundering.
+#[test]
+fn named_fn_import_missing_protocol_method_still_rejected() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Widget:\n    n: int\nfn make() -> Widget:\n    return Widget(10)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import make from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(make())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter().any(|e| e.message.contains("does not satisfy")),
+        "expected 'does not satisfy Describable', got: {errs:?}"
+    );
+}
+
 /// BLOCKER 1 (match errors) — non-exhaustive / literal-against-enum match errors on a cross-module
 /// enum must render the BARE enum name (`Color`), not the qualified identity key (`a::Color`). These
 /// errors interpolate the `MatchKind` label (the enum key) directly, so they bypassed the

@@ -125,6 +125,13 @@ impl Checker {
     // (`resolve_type` stays gated) and a same-named LOCAL type is unaffected (distinct keys; the local
     // table hits first). Aligns the impl with docs/spec.md's "reading their fields off a returned value
     // works import-free".
+    //
+    // ASSUMPTION (identity-key uniqueness): the scan resolves the FIRST `ModuleSig` def whose
+    // `type_key(mid, name)` matches. User types are always module-qualified, so their keys are unique.
+    // Native/std-owned types keep the BARE name as their key, so two DISTINCT std modules each exporting
+    // a bare-keyed type of the SAME name would resolve by iteration order — a latent edge that does not
+    // arise today (no two std modules share a bare type name) and is inherited unchanged from the
+    // member-access fix these helpers back; the protocol-satisfaction path adds no new exposure.
 
     /// A struct's shape looked up by identity key in the OWNING module's `ModuleSig` (miss-only
     /// fallback for [`Checker::struct_shape`]).

@@ -303,6 +303,27 @@ fn named_fn_import_stdlib_collections_runtime() {
     assert_eq!(out, "1\n");
 }
 
+/// gap #4 (satisfies path): a named-fn-imported factory result passed through a protocol-bounded
+/// generic constructs and dispatches on both engines → `W10`. The checker gate is covered in
+/// `checker::tests::named_fn_import_satisfies_protocol_*`; this locks the RUNTIME output byte-identical.
+#[test]
+fn named_fn_import_protocol_bound_runtime() {
+    let out = assert_parity_file(
+        &[
+            (
+                "lib.chz",
+                "struct Widget:\n    n: int\n    fn describe(self) -> str:\n        return \"W{self.n}\"\nfn make() -> Widget:\n    return Widget(10)\n",
+            ),
+            (
+                "main.chz",
+                "import make from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nshow(make())\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "W10\n");
+}
+
 // ----- module-scoped user types: cross-module construction parity -----
 
 /// `import geo; geo.Point(1,2)` constructs and prints `Point(x=1, y=2)` (BARE name, no `::`),
