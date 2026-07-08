@@ -7184,6 +7184,183 @@ fn nested_nursery_outer_reads_global_no_generator_ok_both() {
     );
 }
 
+/// Option B — EXECUTOR task-entry path (adversarial-review charge): an `Executor` job that READS a
+/// generator module-global must be gated IDENTICALLY to a nursery spawn. The submit-site gate
+/// (`executor_method` → `check_task_generator_reach`, the same choke the nursery's `register_task`
+/// uses) fires on BOTH engines during body execution, so serial and M:N raise the same graceful,
+/// `recover:`-catchable `a generator cannot be sent across tasks` error — instead of the pre-fix
+/// divergence (serial ran the real generator; M:N replayed the poisoned global as Nil and faulted
+/// with a misleading `cannot iterate over nil`).
+#[test]
+fn generator_module_global_executor_reads_it_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 42\n",
+        "    yield 43\n",
+        "g := gen()\n",
+        "fn job():\n",
+        "    total := 0\n",
+        "    for x in g:\n",
+        "        total = total + x\n",
+        "    print(\"job sum={total}\")\n",
+        "fn main():\n",
+        "    ex := Executor()\n",
+        "    ex.submit(job)\n",
+        "    ex.shutdown()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (Executor reach), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "{engine}: needs a real span, got line {}",
+            err.span.line
+        );
+    }
+    // The same hazard wrapped in `recover:` is catchable on BOTH engines (identical marker output).
+    let recovered = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 42\n",
+        "g := gen()\n",
+        "fn job():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn run():\n",
+        "    ex := Executor()\n",
+        "    ex.submit(job)\n",
+        "    ex.shutdown()\n",
+        "fn main():\n",
+        "    r := recover:\n",
+        "        run()\n",
+        "        \"ok\"\n",
+        "    match r:\n",
+        "        Ok(v): print(\"ok: {v}\")\n",
+        "        Err(e): print(\"caught: {e.message()}\")\n",
+        "main()\n"
+    );
+    let expect = "caught: a generator cannot be sent across tasks\n";
+    assert_eq!(run_capture(recovered).expect("serial recover"), expect);
+    assert_eq!(
+        run_capture_parallel(recovered).expect("M:N recover"),
+        expect
+    );
+}
+
+/// Option B — an `Executor` job that references NO generator global runs clean on BOTH engines, even
+/// with a generator global present (untouched). The reach scan distinguishes the read slot, so the
+/// gate never over-fires on an innocent job (`print("hi")` reads no global at all).
+#[test]
+fn generator_module_global_executor_untouched_runs_clean_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn job():\n",
+        "    print(\"hi\")\n",
+        "fn main():\n",
+        "    ex := Executor()\n",
+        "    ex.submit(job)\n",
+        "    ex.shutdown()\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    let expect = "hi\ndone\n";
+    assert_eq!(
+        run_capture(src).expect("serial: untouched generator global must run clean"),
+        expect
+    );
+    assert_eq!(
+        run_capture_parallel(src).expect("M:N: untouched generator global must run clean"),
+        expect
+    );
+}
+
+/// Option B — TRANSITIVE reach through an `Executor` job: the job body has no `GetGlobalSlot(g)`, it
+/// calls a helper that reads `g`. The job's `Op::Call` is OPAQUE to the straight-line scan, so the
+/// conservative gate faults on BOTH engines (over-approximation — matches the nursery transitive case).
+#[test]
+fn generator_module_global_executor_transitive_helper_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn helper():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn job():\n",
+        "    helper()\n",
+        "fn main():\n",
+        "    ex := Executor()\n",
+        "    ex.submit(job)\n",
+        "    ex.shutdown()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r.err().unwrap_or_else(|| {
+            panic!("{engine}: expected a fault (Executor transitive reach), got Ok")
+        });
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// Option B TOCTOU — an `Executor` module global that is a NON-generator (`[7].iter()`) when the job
+/// is `submit`ted but is REASSIGNED to a live generator BEFORE `shutdown`. The submit-site gate sees a
+/// cursor and passes; the DRAIN-time re-gate (`gate_executor_queue`, the `Executor` analogue of the
+/// lazy-nursery join re-gate) reads the globals as they stand at shutdown and faults. Without it,
+/// serial would run the real reassigned generator while an M:N worker replays the poisoned global as
+/// Nil — a divergence. Both engines must fault IDENTICALLY.
+#[test]
+fn generator_module_global_executor_reassigned_before_shutdown_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "    yield 2\n",
+        "g := [7].iter()\n",
+        "fn job():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn main():\n",
+        "    ex := Executor()\n",
+        "    ex.submit(job)\n",
+        "    g = gen()\n",
+        "    ex.shutdown()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r.err().unwrap_or_else(|| {
+            panic!("{engine}: expected a fault (Executor submit→shutdown TOCTOU), got Ok")
+        });
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
 /// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
 /// PANICKED at deep_clone's `.expect`; now a graceful error with a real span.
 #[test]

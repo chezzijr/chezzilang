@@ -195,8 +195,10 @@ is made during body execution on **both** engines — at the spawn site, re-chec
 nursery join (so a global reassigned to a generator between `spawn` and the join is still caught), and
 re-checked conservatively over any still-pending **outer** nursery at a **nested** nursery's join (a
 generator reassigned across nested nurseries, where M:N early-enlists the outer task against a frozen
-snapshot, is caught too) — so the serial and M:N engines agree by construction: an untouched generator
-global runs clean on both, a reached one faults identically on both. (Earlier, the M:N engine
+snapshot, is caught too), and — via the same gate — at the `Executor` task-entry path (`submit` is the
+spawn-site check, `shutdown`/drain the join re-check, closing the submit→shutdown TOCTOU) — so the
+serial and M:N engines agree by construction: an untouched generator global runs clean on both, a
+reached one faults identically on both. (Earlier, the M:N engine
 eagerly snapshotted every module global and faulted on the generator even when no task touched it,
 diverging from the serial engine, which never snapshots; the reach gate + a poisoned snapshot leaf,
 which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.) There is **no** compile-time

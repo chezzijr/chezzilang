@@ -358,7 +358,7 @@ impl Vm {
 
     /// Option B (b) — does ANY module global (deep, cycle-guarded) embed a live generator? Walks only
     /// the real module namespace objects (`module_objs`); a worker shell's empty modules embed nothing.
-    fn any_module_global_embeds_generator(&self) -> bool {
+    pub(super) fn any_module_global_embeds_generator(&self) -> bool {
         for &pm in &self.module_objs {
             if let Obj::Module { slots, .. } = self.heap.get(pm) {
                 for &v in slots {

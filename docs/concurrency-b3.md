@@ -279,11 +279,17 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
      **any** op that can transfer control into an unscanned proto — a call, an operator overload, a
      protocol/`str` hook, a nested spawn/defer, a `GetCaptured` home-global read — treated as OPAQUE).
-     The gate runs at **three** choke points to keep serial == M:N: (a) `register_task` (the single
+     The gate runs at **four** choke points to keep serial == M:N: (a) `register_task` (the single
      common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)
      the **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the
-     module globals as they stand at join time; and (c) a **conservative outer-nursery re-check** at the
-     same join (`Vm::check_outer_pending_generator_reach`), covering **NESTED** nurseries. Point (b)
+     module globals as they stand at join time; (c) a **conservative outer-nursery re-check** at the
+     same join (`Vm::check_outer_pending_generator_reach`), covering **NESTED** nurseries; and (d) the
+     **Executor task-entry path** — `Executor.submit` gates the submitted job at the submit site (like
+     (a), reusing `check_task_generator_reach`), and `Executor.shutdown` re-gates the whole pending
+     queue at drain (like (b), via `gate_executor_queue`, against the globals as they then stand — before
+     the M:N `drain_executor_on_pool` snapshot freezes them), so an `Executor` job that reaches a
+     generator global faults identically to a nursery spawn on both engines (closing the submit→shutdown
+     TOCTOU). Point (b)
      closes a single-nursery TOCTOU: a lazy nursery's tasks run — and the M:N snapshot is taken — at the
      join, so a module global **reassigned to a generator between `spawn` and the join** would slip past
      a spawn-time-only gate (serial runs the real generator while M:N replays the poisoned global as

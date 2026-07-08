@@ -3137,8 +3137,22 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   `generator_module_global_nested_nursery_reassign_after_faults_both` (fix iii: cross-nursery TOCTOU,
   reassign before/after the inner block), `nested_nursery_outer_reads_global_no_generator_ok_both` (fix
   iii non-regression: generator-free nested nursery stays clean); the 6 direct-crossing goldens
-  strengthened to assert both engines fault. Docs: `docs/spec.md`, `docs/concurrency.md`,
-  `docs/concurrency-b3.md` §5.1.
+  strengthened to assert both engines fault. **(iv) EXECUTOR task-entry gate** (adversarial-review,
+  2026-07-08): the reach gate was wired into the NURSERY choke points only — an `Executor` job that read
+  a generator module-global slipped through un-gated (serial ran the real generator, M:N replayed the
+  poisoned global as `nil` → the misleading `cannot iterate over nil` + a serial-vs-M:N divergence).
+  Closed by gating `Executor.submit` at the submit site (`executor_method`, the same
+  `check_task_generator_reach` the nursery's `register_task` uses — an `Executor` job is a zero-arg
+  closure, wrapped in a no-arg `PendingCall::Call`) AND re-gating the whole queue at `shutdown`
+  (`gate_executor_queue`, the `Executor` analogue of the lazy-nursery join re-gate: reads globals as
+  they stand at drain, before the M:N `drain_executor_on_pool` snapshot freezes them, closing the
+  submit→shutdown TOCTOU). Both run on the host VM on both engines → parity by construction; `has_generators`
+  + `any_module_global_embeds_generator`-short-circuited (zero cost / no per-job `from_wire` for
+  generator-free programs). Tests: `generator_module_global_executor_reads_it_faults_both` (direct read
+  + `recover:`), `generator_module_global_executor_untouched_runs_clean_both` (innocent job stays clean),
+  `generator_module_global_executor_transitive_helper_faults_both` (transitive/OPAQUE),
+  `generator_module_global_executor_reassigned_before_shutdown_faults_both` (submit→shutdown TOCTOU).
+  Docs: `docs/spec.md`, `docs/concurrency.md`, `docs/concurrency-b3.md` §5.1.
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-

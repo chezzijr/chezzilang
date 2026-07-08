@@ -626,7 +626,10 @@ captured bindings are **read-only inside the task**.
   global reassigned to a generator between `spawn` and the join is still caught), and re-checked
   conservatively over any still-pending **outer** nursery at a **nested** nursery's join (so a global
   reassigned to a generator across nested nurseries, where M:N early-enlists the outer task against a
-  frozen snapshot, is caught too) — so serial and M:N agree by construction, and a poisoned snapshot
+  frozen snapshot, is caught too). The **same** gate covers the `Executor` task-entry path: a job is
+  checked at `Executor.submit` (the spawn-site analogue) and the whole pending queue is re-checked at
+  `Executor.shutdown`/drain (the join analogue, so a global reassigned to a generator between `submit`
+  and `shutdown` is still caught) — so serial and M:N agree by construction, and a poisoned snapshot
   leaf (which replays as `nil`) guarantees an M:N worker can never obtain a real cross-heap generator
   from a module global.
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
