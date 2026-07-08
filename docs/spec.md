@@ -328,7 +328,12 @@ import Point as Pt from core.geo     # rename on import (user types only)
 
 A bare use of a type whose module was imported whole (`import geo`) but not named-imported is a
 **check-time error** (`unknown type 'Point'; import it from geo`). Two modules MAY declare the same
-type name with no collision — each is reachable from its own module.
+type name with no collision — each is reachable from its own module. This gate is only on
+*naming/constructing* the type. **Reading a field or calling a method off a VALUE of that type always
+works, import-free** — member resolution keys off the value's own module-scoped identity, not whether
+the type name is in the current module's scope. So a named import of a factory *function* alone
+(`import make from geo`, `w := make()`) still resolves `w.x` / `w.bump()` even though bare `Point`
+would be an unknown type (matches the module-owned `Match`/`Response`/`ProcResult` rule below).
 
 **Identity is separate from display.** Every user `struct` / `enum` / variant / `type` alias has ONE
 canonical **identity key** — always module-qualified, `<module-key>::Name` (the module key is the

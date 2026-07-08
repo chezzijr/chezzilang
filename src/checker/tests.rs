@@ -4075,6 +4075,320 @@ fn error_messages_render_bare_cross_module_struct() {
     assert_eq!(errs[0].message, "type Point has no field 'nope'");
 }
 
+// ----- named-factory-import member resolution (importing a factory FN, not its return TYPE) -----
+
+/// A named import of a FACTORY FUNCTION only (not its return type) must still let the returned
+/// value's METHODS resolve: member lookup keys off the value's OWN module-scoped identity, not
+/// whether the type name was imported into the current module. Pre-fix: "type Widget has no method
+/// 'bump'".
+#[test]
+fn checker_named_fn_import_resolves_struct_method() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Widget:\n    n: int\n    fn bump(self) -> int:\n        return self.n + 1\nfn make() -> Widget:\n    return Widget(10)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import make from lib\nfn main():\n    w := make()\n    print(w.bump())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Same bug, FIELD access (read + compound-write): a named-imported factory result's fields must
+/// resolve. Pre-fix: "type Box has no field 'data'".
+#[test]
+fn checker_named_fn_import_resolves_struct_field() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Box:\n    data: int\nfn make_box() -> Box:\n    return Box(7)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import make_box from lib\nfn main():\n    b := make_box()\n    print(b.data)\n    b.data = 5\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Same bug, ENUM method: a named-imported factory returning an enum must resolve the enum's method.
+/// Pre-fix: "type Shape has no method 'area'".
+#[test]
+fn checker_named_fn_import_resolves_enum_method() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "enum Shape:\n    Circle(int)\n    fn area(self) -> int:\n        match self:\n            Shape.Circle(r): return r * r\nfn mk() -> Shape:\n    return Shape.Circle(3)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nfn main():\n    print(mk().area())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Same bug, NEWTYPE method: a named-imported factory returning a newtype must resolve its method.
+#[test]
+fn checker_named_fn_import_resolves_newtype_method() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "newtype Meters = int:\n    fn doubled(self) -> int:\n        return int(self) * 2\nfn mk() -> Meters:\n    return Meters(21)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nfn main():\n    print(mk().doubled())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Boundary: the fix does NOT over-open. Importing only the factory still leaves the type NAME
+/// out of scope — naming/constructing it must STILL error "unknown type Widget".
+#[test]
+fn named_fn_import_does_not_license_type_name() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Widget:\n    n: int\nfn make() -> Widget:\n    return Widget(1)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import make from lib\nfn main():\n    w := Widget(1)\n    print(w.n)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'Widget'")),
+        "expected 'unknown type Widget', got: {errs:?}"
+    );
+}
+
+/// Boundary: a same-named LOCAL struct (no import of lib's Widget) is the user's OWN type — the
+/// factory-import fallback must not hijack it (distinct identity keys; local table hits first).
+#[test]
+fn named_fn_import_does_not_hijack_local_same_name() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Widget:\n    n: int\n    fn bump(self) -> int:\n        return self.n\nfn make() -> Widget:\n    return Widget(1)\n",
+    );
+    // main declares its OWN Widget with a DIFFERENT shape; lib's `bump` must NOT resolve on it.
+    let entry = t.write(
+        "main.chz",
+        "struct Widget:\n    q: str\nfn main():\n    w := Widget(\"hi\")\n    print(w.q)\n    w.bump()\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter().any(|e| e.message.contains("no method 'bump'")),
+        "expected local Widget to lack 'bump', got: {errs:?}"
+    );
+}
+
+/// The documented equivalence: all THREE import forms of the SAME factory type-check clean — whole
+/// module, import-the-type, and (the previously-broken) named-function-only.
+#[test]
+fn three_import_forms_all_check_ok() {
+    let lib = "struct Widget:\n    n: int\n    fn bump(self) -> int:\n        return self.n + 1\nfn make() -> Widget:\n    return Widget(10)\n";
+    // whole-module import
+    {
+        let t = TmpDir::new();
+        t.write("lib.chz", lib);
+        let entry = t.write(
+            "main.chz",
+            "import lib\nfn main():\n    print(lib.make().bump())\n",
+        );
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        assert!(check_graph(&graph).is_ok(), "whole-module import failed");
+    }
+    // import the type too
+    {
+        let t = TmpDir::new();
+        t.write("lib.chz", lib);
+        let entry = t.write(
+            "main.chz",
+            "import make, Widget from lib\nfn main():\n    w := make()\n    print(w.bump())\n",
+        );
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        assert!(check_graph(&graph).is_ok(), "import-type form failed");
+    }
+    // named function only (the fix)
+    {
+        let t = TmpDir::new();
+        t.write("lib.chz", lib);
+        let entry = t.write(
+            "main.chz",
+            "import make from lib\nfn main():\n    w := make()\n    print(w.bump())\n",
+        );
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        assert!(check_graph(&graph).is_ok(), "named-fn-only form failed");
+    }
+}
+
+/// Cross-module transitive: `helper` returns a `cancel.Token`; `main` imports ONLY `helper` and
+/// calls `.cancelled()` on the result. The Token's owning module (`std.cancel`) is a transitive
+/// graph dep — the fallback reaches it by identity key. Pre-fix: "type Token has no method".
+#[test]
+fn checker_named_fn_import_resolves_transitive_stdlib_method() {
+    let t = TmpDir::new();
+    t.write(
+        "helper.chz",
+        "import std.cancel\nfn tok() -> cancel.Token:\n    return cancel.manual()\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import helper\nfn main():\n    print(helper.tok().cancelled())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Stdlib gate: `import manual from std.cancel; manual().cancelled()` must type-check (checker gate;
+/// the runtime arm lives in vm parity_tests). Pre-fix: "type Token has no method 'cancelled'".
+#[test]
+fn checker_named_stdlib_factory_resolves_method() {
+    entry_ok("import manual from std.cancel\nfn main():\n    print(manual().cancelled())\n");
+    entry_ok(
+        "import min_heap from std.collections\nfn main():\n    h := min_heap()\n    h.push(3)\n    print(h.len())\n",
+    );
+}
+
+// ----- named-factory-import PROTOCOL SATISFACTION (gap #4, satisfies path) -----
+
+/// A named-fn-imported factory result that STRUCTURALLY SATISFIES a protocol must pass a
+/// protocol-bounded generic exactly like a whole-module/type-name import. Pre-fix: `satisfies`
+/// resolved the method table off the CURRENT module's imported-type tables, so the value was
+/// spuriously rejected ("type Widget does not satisfy Describable") under the named-fn form only.
+#[test]
+fn named_fn_import_satisfies_protocol_struct_all_forms() {
+    let lib = "struct Widget:\n    n: int\n    fn describe(self) -> str:\n        return \"W{self.n}\"\nfn make() -> Widget:\n    return Widget(10)\n";
+    let proto_show = "protocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\n";
+    for (label, mainsrc) in [
+        (
+            "whole-module",
+            format!("import lib\n{proto_show}fn main():\n    show(lib.make())\n"),
+        ),
+        (
+            "import-type",
+            format!("import make, Widget from lib\n{proto_show}fn main():\n    show(make())\n"),
+        ),
+        (
+            "named-fn-only",
+            format!("import make from lib\n{proto_show}fn main():\n    show(make())\n"),
+        ),
+    ] {
+        let t = TmpDir::new();
+        t.write("lib.chz", lib);
+        let entry = t.write("main.chz", &mainsrc);
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        let errs = match check_graph(&graph) {
+            Ok(()) => Vec::new(),
+            Err(e) => e,
+        };
+        assert!(
+            errs.is_empty(),
+            "{label} form: expected no type errors, got: {errs:?}"
+        );
+    }
+}
+
+/// Same, ENUM: a named-fn-imported enum value whose method satisfies the protocol is accepted at a
+/// protocol bound.
+#[test]
+fn named_fn_import_satisfies_protocol_enum() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "enum Shape:\n    Circle(int)\n    fn describe(self) -> str:\n        match self:\n            Shape.Circle(r): return \"C{r}\"\nfn mk() -> Shape:\n    return Shape.Circle(3)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(mk())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Same, NEWTYPE: a named-fn-imported newtype value whose own method satisfies the protocol is
+/// accepted at a protocol bound.
+#[test]
+fn named_fn_import_satisfies_protocol_newtype() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "newtype Meters = int:\n    fn describe(self) -> str:\n        return \"M{int(self)}\"\nfn mk() -> Meters:\n    return Meters(5)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import mk from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(mk())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// NEGATIVE: the fallback resolves the REAL method table, so a named-fn-imported value whose type
+/// does NOT provide the required protocol method is STILL rejected — no laundering.
+#[test]
+fn named_fn_import_missing_protocol_method_still_rejected() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "struct Widget:\n    n: int\nfn make() -> Widget:\n    return Widget(10)\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import make from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(make())\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert!(
+        errs.iter().any(|e| e.message.contains("does not satisfy")),
+        "expected 'does not satisfy Describable', got: {errs:?}"
+    );
+}
+
 /// BLOCKER 1 (match errors) — non-exhaustive / literal-against-enum match errors on a cross-module
 /// enum must render the BARE enum name (`Color`), not the qualified identity key (`a::Color`). These
 /// errors interpolate the `MatchKind` label (the enum key) directly, so they bypassed the

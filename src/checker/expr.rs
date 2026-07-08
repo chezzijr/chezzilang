@@ -1991,7 +1991,7 @@ impl Checker {
             Ty::Struct(sname, targs) => {
                 // Substitute the struct's type arguments into the method signature, so calling
                 // `Stack[int].push(x)` checks `x` against `int`, not the parameter `T`.
-                let resolved = self.structs.get(sname).and_then(|info| {
+                let resolved = self.struct_shape(sname).and_then(|info| {
                     info.methods.get(method).map(|sig| {
                         let map = struct_param_map(info, targs);
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
@@ -2073,7 +2073,7 @@ impl Checker {
                 // `recv.f(x)` where `f: fn(T) -> U` is field-access-then-call. (Parsed as a method
                 // call; the desugar pass leaves fn-field names un-normalized so no method default is
                 // injected here.) Mirrors `infer_field`'s field lookup + type-arg substitution.
-                let field_fn = self.structs.get(sname).and_then(|info| {
+                let field_fn = self.struct_shape(sname).and_then(|info| {
                     let map = struct_param_map(info, targs);
                     info.fields
                         .iter()
@@ -2097,11 +2097,10 @@ impl Checker {
             Ty::NewType(ntkey, targs) => {
                 // Substitute the newtype's own type arguments into the method signature, so
                 // `Stack[int].peek()` returns `Option[int]`, not `Option[T]` (mirrors the enum arm).
-                let resolved = self.newtype_defs.get(ntkey).and_then(|(_, ms)| {
+                let resolved = self.newtype_methods_of(ntkey).and_then(|ms| {
                     ms.get(method).map(|sig| {
                         let map: HashMap<String, Ty> = self
-                            .newtype_type_params
-                            .get(ntkey)
+                            .newtype_type_params_of(ntkey)
                             .map(|tps| {
                                 tps.iter()
                                     .map(|tp| tp.name.clone())
@@ -2164,11 +2163,10 @@ impl Checker {
                 Ty::Unknown
             }
             Ty::Enum(ename, targs) => {
-                let resolved = self.enum_methods.get(ename).and_then(|ms| {
+                let resolved = self.enum_methods_of(ename).and_then(|ms| {
                     ms.get(method).map(|sig| {
                         let map: HashMap<String, Ty> = self
-                            .enum_type_params
-                            .get(ename)
+                            .enum_type_params_of(ename)
                             .map(|tps| {
                                 tps.iter()
                                     .map(|tp| tp.name.clone())

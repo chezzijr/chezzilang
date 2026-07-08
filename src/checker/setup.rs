@@ -107,6 +107,97 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
+    // --- member-resolution fallback by the value's OWN module-scoped identity key ---
+    //
+    // User types are MODULE-SCOPED: their per-module shape tables (`self.structs` / `self.enums` +
+    // `enum_methods`/`enum_type_params` / `newtype_defs`+`newtype_type_params`) are populated ONLY
+    // when the WHOLE module OR the type NAME is imported. A named FUNCTION import injects nothing, so a
+    // factory result's value — correctly typed `Ty::Struct`/`Enum`/`NewType` carrying its owning
+    // module's IDENTITY KEY (`type_key(mid, name)`) — misses the local table and its fields/methods
+    // wrongly fail to resolve (gap #4). These helpers add a LAZY, MISS-ONLY fallback: on a local-table
+    // miss, resolve the shape from the OWNING module's `ModuleSig` by scanning `module_sigs` for the
+    // def whose `type_key(mid, name)` equals the value's key. The deps-first graph pass inserts every
+    // dependency's sig into `module_sigs` before an importer's bodies are checked, so any legitimately
+    // produced value's owning type is present (including transitive deps). Purely additive: fires only
+    // on a MISS, so it never shadows the globally-seeded `Match`/`Response`/`ProcResult` (always in
+    // `self.structs`) and costs nothing on the local-hit path; it reads `module_sigs` only — it does
+    // NOT touch `struct_names`/`bare_types`, so NAMING/CONSTRUCTING an un-imported type still errors
+    // (`resolve_type` stays gated) and a same-named LOCAL type is unaffected (distinct keys; the local
+    // table hits first). Aligns the impl with docs/spec.md's "reading their fields off a returned value
+    // works import-free".
+    //
+    // ASSUMPTION (identity-key uniqueness): the scan resolves the FIRST `ModuleSig` def whose
+    // `type_key(mid, name)` matches. User types are always module-qualified, so their keys are unique.
+    // Native/std-owned types keep the BARE name as their key, so two DISTINCT std modules each exporting
+    // a bare-keyed type of the SAME name would resolve by iteration order — a latent edge that does not
+    // arise today (no two std modules share a bare type name) and is inherited unchanged from the
+    // member-access fix these helpers back; the protocol-satisfaction path adds no new exposure.
+
+    /// A struct's shape looked up by identity key in the OWNING module's `ModuleSig` (miss-only
+    /// fallback for [`Checker::struct_shape`]).
+    pub(super) fn owning_struct_def(&self, key: &str) -> Option<&StructInfo> {
+        self.module_sigs.iter().find_map(|(mid, sig)| {
+            sig.struct_defs
+                .iter()
+                .find_map(|(name, info)| (self.type_key(mid, name) == key).then_some(info))
+        })
+    }
+
+    /// A struct's shape by its value's identity key: the local per-module table first, else the
+    /// owning module's `ModuleSig` (so a named-factory-import result resolves its fields/methods).
+    pub(super) fn struct_shape(&self, key: &str) -> Option<&StructInfo> {
+        self.structs
+            .get(key)
+            .or_else(|| self.owning_struct_def(key))
+    }
+
+    /// An enum's shape looked up by identity key in the owning module's `ModuleSig` (miss-only).
+    pub(super) fn owning_enum_def(&self, key: &str) -> Option<&EnumSigInfo> {
+        self.module_sigs.iter().find_map(|(mid, sig)| {
+            sig.enum_defs
+                .iter()
+                .find_map(|(name, info)| (self.type_key(mid, name) == key).then_some(info))
+        })
+    }
+
+    /// An enum's method table by identity key: local table first, else the owning `ModuleSig`.
+    pub(super) fn enum_methods_of(&self, key: &str) -> Option<&HashMap<String, FnSig>> {
+        self.enum_methods
+            .get(key)
+            .or_else(|| self.owning_enum_def(key).map(|e| &e.methods))
+    }
+
+    /// An enum's type params by identity key: local table first, else the owning `ModuleSig`.
+    pub(super) fn enum_type_params_of(&self, key: &str) -> Option<&Vec<TypeParam>> {
+        self.enum_type_params
+            .get(key)
+            .or_else(|| self.owning_enum_def(key).map(|e| &e.type_params))
+    }
+
+    /// A newtype's shape looked up by identity key in the owning module's `ModuleSig` (miss-only).
+    pub(super) fn owning_newtype_def(&self, key: &str) -> Option<&NewTypeSigInfo> {
+        self.module_sigs.iter().find_map(|(mid, sig)| {
+            sig.newtype_defs
+                .iter()
+                .find_map(|(name, info)| (self.type_key(mid, name) == key).then_some(info))
+        })
+    }
+
+    /// A newtype's method table by identity key: local table first, else the owning `ModuleSig`.
+    pub(super) fn newtype_methods_of(&self, key: &str) -> Option<&HashMap<String, FnSig>> {
+        self.newtype_defs
+            .get(key)
+            .map(|(_, ms)| ms)
+            .or_else(|| self.owning_newtype_def(key).map(|nt| &nt.methods))
+    }
+
+    /// A newtype's type params by identity key: local table first, else the owning `ModuleSig`.
+    pub(super) fn newtype_type_params_of(&self, key: &str) -> Option<&Vec<TypeParam>> {
+        self.newtype_type_params
+            .get(key)
+            .or_else(|| self.owning_newtype_def(key).map(|nt| &nt.type_params))
+    }
+
     /// Register the synthetic struct shapes that native std modules return (M9): `Match`
     /// (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`). They have no
     /// AST, so their field layouts are seeded here; `infer_field` then types `m.text`, `resp.status`,

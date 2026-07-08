@@ -1024,7 +1024,12 @@ impl Checker {
         }
         match ty {
             Ty::Struct(sname, _) => {
-                let Some(info) = self.structs.get(sname) else {
+                // MISS-ONLY identity-key fallback (gap #4): a named-fn-imported factory result carries
+                // its owning module's `Ty::Struct` key but injects nothing into the local `self.structs`
+                // table, so resolve the shape from the owning `ModuleSig` on a local miss — otherwise a
+                // structurally-conforming value is spuriously rejected at a protocol bound (the same
+                // three-import-forms inconsistency the member-access fix already closed).
+                let Some(info) = self.struct_shape(sname) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, &info.methods)
@@ -1033,7 +1038,9 @@ impl Checker {
             // iff its `methods` map carries every protocol method with a matching signature. This
             // unlocks Stringable/Hashable/Add/Sub/Mul/Comparable for enums and protocol-bound generics.
             Ty::Enum(ename, _) => {
-                let Some(methods) = self.enum_methods.get(ename) else {
+                // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported enum value's
+                // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
+                let Some(methods) = self.enum_methods_of(ename) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
@@ -1079,7 +1086,9 @@ impl Checker {
                 ) {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 }
-                let Some((_, methods)) = self.newtype_defs.get(ntkey) else {
+                // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported newtype value's
+                // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
+                let Some(methods) = self.newtype_methods_of(ntkey) else {
                     return Err(format!("type {ty} does not satisfy {protocol}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
@@ -1114,16 +1123,17 @@ impl Checker {
         // operator method is rejected as "wrong signature". Non-generic types yield an empty map (no
         // params), and checking inside the generic's own def (`ty = Box[T]`) yields an identity map
         // `{T→T}` — both are no-op substitutions, so this only ever binds concrete args.
+        // Each arm resolves the receiving type's params through the miss-only identity-key helpers
+        // (gap #4), so a generic named-fn-imported instantiation (`Box[int]` from a factory whose TYPE
+        // name is not imported) binds its params here identically to a whole-module import.
         let tymap: HashMap<String, Ty> = match ty {
             Ty::Struct(name, targs) => self
-                .structs
-                .get(name)
+                .struct_shape(name)
                 .map(|info| struct_param_map(info, targs))
                 .unwrap_or_default(),
             Ty::Enum(name, targs) => self.enum_param_map(name, targs),
             Ty::NewType(key, targs) => self
-                .newtype_type_params
-                .get(key)
+                .newtype_type_params_of(key)
                 .map(|tps| {
                     tps.iter()
                         .map(|tp| tp.name.clone())
@@ -1245,18 +1255,30 @@ impl Checker {
         }
     }
 
-    /// The resolved underlying `Ty` of a newtype (by runtime key), if known.
+    /// The resolved underlying `Ty` of a newtype (by runtime key), if known. Falls back to the owning
+    /// module's `ModuleSig` on a local-table miss (gap #4), so a named-fn-imported newtype value's
+    /// numeric auto-flow / operator satisfaction is decided identically to a whole-module import.
     pub(super) fn newtype_underlying(&self, key: &str) -> Option<Ty> {
-        self.newtype_defs.get(key).map(|(u, _)| u.clone())
+        self.newtype_defs
+            .get(key)
+            .map(|(u, _)| u.clone())
+            .or_else(|| self.owning_newtype_def(key).map(|nt| nt.underlying.clone()))
     }
 
     /// Is the newtype (by runtime key) type-parameterized? A generic newtype is METHODS-ONLY — it
     /// gets no native operator auto-flow (even over a numeric/`T` underlying); operators come strictly
     /// from its own methods + protocol satisfaction. Gates the scalar-newtype auto-flow paths.
     pub(super) fn newtype_is_generic(&self, key: &str) -> bool {
+        // MISS-ONLY identity-key fallback (gap #4): a named-fn-imported newtype value injects nothing
+        // into the local `newtype_type_params` table, so consult the owning `ModuleSig` on a miss.
         self.newtype_type_params
             .get(key)
-            .is_some_and(|t| !t.is_empty())
+            .map(|t| !t.is_empty())
+            .or_else(|| {
+                self.owning_newtype_def(key)
+                    .map(|nt| !nt.type_params.is_empty())
+            })
+            .unwrap_or(false)
     }
 
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs

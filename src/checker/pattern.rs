@@ -2304,7 +2304,7 @@ impl Checker {
                 }
             },
             Ty::Struct(sname, targs) => {
-                if let Some(info) = self.structs.get(sname) {
+                if let Some(info) = self.struct_shape(sname) {
                     let map = struct_param_map(info, targs);
                     if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
                         return subst(ty, &map);

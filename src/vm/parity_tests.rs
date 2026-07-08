@@ -261,6 +261,69 @@ fn parity_entry(src: &str) -> String {
     assert_parity_file(&[("main.chz", src)], "main.chz")
 }
 
+// ----- named-factory-import member resolution: RUNTIME unaffected (gap #4) -----
+// These runs bypass the checker (compile+run directly), so they pass pre- AND post-fix — they lock
+// that the checker-only member-resolution fix leaves the runtime output byte-identical on both
+// engines. The checker gate itself is covered by the `checker::tests::checker_named_*` battery.
+
+/// A named import of a factory FUNCTION (not its return type) still constructs and dispatches the
+/// returned struct's method at runtime → `11`, byte-identical on both engines.
+#[test]
+fn named_fn_import_factory_struct_method_runtime() {
+    let out = assert_parity_file(
+        &[
+            (
+                "lib.chz",
+                "struct Widget:\n    n: int\n    fn bump(self) -> int:\n        return self.n + 1\nfn make() -> Widget:\n    return Widget(10)\n",
+            ),
+            (
+                "main.chz",
+                "import make from lib\nw := make()\nprint(w.bump())\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "11\n");
+}
+
+/// Stdlib: `import manual from std.cancel; manual().cancelled()` runs on both engines (documented
+/// Token API reachable off a named-imported factory result).
+#[test]
+fn named_fn_import_stdlib_cancel_runtime() {
+    let out = parity_entry("import manual from std.cancel\nt := manual()\nprint(t.cancelled())\n");
+    assert_eq!(out, "false\n");
+}
+
+/// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs on both engines.
+#[test]
+fn named_fn_import_stdlib_collections_runtime() {
+    let out = parity_entry(
+        "import min_heap from std.collections\nh := min_heap()\nh.push(3)\nprint(h.len())\n",
+    );
+    assert_eq!(out, "1\n");
+}
+
+/// gap #4 (satisfies path): a named-fn-imported factory result passed through a protocol-bounded
+/// generic constructs and dispatches on both engines → `W10`. The checker gate is covered in
+/// `checker::tests::named_fn_import_satisfies_protocol_*`; this locks the RUNTIME output byte-identical.
+#[test]
+fn named_fn_import_protocol_bound_runtime() {
+    let out = assert_parity_file(
+        &[
+            (
+                "lib.chz",
+                "struct Widget:\n    n: int\n    fn describe(self) -> str:\n        return \"W{self.n}\"\nfn make() -> Widget:\n    return Widget(10)\n",
+            ),
+            (
+                "main.chz",
+                "import make from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nshow(make())\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "W10\n");
+}
+
 // ----- module-scoped user types: cross-module construction parity -----
 
 /// `import geo; geo.Point(1,2)` constructs and prints `Point(x=1, y=2)` (BARE name, no `::`),

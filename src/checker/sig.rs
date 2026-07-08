@@ -2435,7 +2435,7 @@ impl Checker {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
-                        let field_ty = self.structs.get(sname).and_then(|info| {
+                        let field_ty = self.struct_shape(sname).and_then(|info| {
                             info.fields
                                 .iter()
                                 .find(|(f, _)| f == name)
@@ -3440,8 +3440,9 @@ impl Checker {
     /// The substitution from a generic enum's type parameters to a concrete instantiation's type
     /// arguments (`Tree[int]` ⇒ `{T: int}`). Empty for a non-generic enum.
     pub(super) fn enum_param_map(&self, name: &str, targs: &[Ty]) -> HashMap<String, Ty> {
-        self.enum_type_params
-            .get(name)
+        // `enum_type_params_of` adds the miss-only owning-module fallback (gap #4) so a named-fn-
+        // imported enum value binds its params identically to a whole-module import.
+        self.enum_type_params_of(name)
             .map(|tps| {
                 tps.iter()
                     .map(|tp| tp.name.clone())
