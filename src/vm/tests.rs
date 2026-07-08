@@ -6772,21 +6772,24 @@ fn golden_generators_inferred_chz() {
     assert_eq!(run_capture_parallel(src).unwrap(), expect);
 }
 
-// --- Airlock: a frame-holding generator is NOT sendable; crossing ANY task airlock (incl.
-// merely being a module global when a nursery runs) must produce a GRACEFUL, catchable Chezzi
-// RuntimeError with a real spawn/nursery-site span — never a Rust panic/process-abort. A
-// snapshot cursor (`.iter()`, `Obj::Iter`) stays sendable (see cursor_crosses_* tests).
+// --- Airlock: a frame-holding generator is NOT sendable. A generator crossing a task airlock as
+// DATA (a `spawn` arg, a `Channel.send`, a `Shared`/`Atomic`, an executor task capture/return) must
+// produce a GRACEFUL, catchable Chezzi RuntimeError with a real spawn/nursery-site span — never a
+// Rust panic/process-abort. A snapshot cursor (`.iter()`, `Obj::Iter`) stays sendable (see
+// cursor_crosses_* tests).
 //
-// Note: only the M:N engine snapshots module globals, so a module-global generator faults only
-// under `run_capture_parallel` ("a generator cannot be sent across tasks"); the cooperative engine
-// never snapshots and runs unaffected. These assert PER-ENGINE, NOT via assert_parity.
+// Option B (module-global generators): a live generator held as a MODULE GLOBAL is gated IFF a
+// spawned task can actually REACH it — a direct home-global read, or ANY call/operator/hook that
+// can transitively reach it (the conservative `check_task_generator_reach` gate at `register_task`).
+// The gate runs during body execution on BOTH engines, so serial and M:N agree by construction: an
+// UNTOUCHED generator global runs clean on both; a REACHED one faults on both. (Memory safety is
+// independently guaranteed by the `SnapValue::Poison` snapshot — an M:N worker never obtains a real
+// cross-heap generator from a module global; it replays as Nil.)
 
-/// VERIFIED REPRO: a module-level generator global plus ANY nursery. `snapshot_modules` eagerly
-/// lowers EVERY module global, so the worker need NOT touch the generator. Only the M:N engine
-/// snapshots module globals — the cooperative VM (`run_capture`) never does, so it prints
-/// normally (asserted below). On M:N (`run_capture_parallel`, and the CLI default `chezzi run`)
-/// this previously PANICKED at `to_snap`'s `unreachable!`; it must now fault gracefully with a
-/// real (line >= 1) span.
+/// Option B SAFE case: a module-level generator global that NO spawned task references. The
+/// `spawn worker()` task only prints a literal — it never reads `g` — so BOTH engines run clean.
+/// (Previously the M:N engine eagerly snapshotted every module global and faulted on `g` even
+/// though no task touched it; that eager fault is gone.)
 #[test]
 fn generator_module_global_with_nursery_is_graceful_vm() {
     let src = concat!(
@@ -6802,24 +6805,153 @@ fn generator_module_global_with_nursery_is_graceful_vm() {
         "    print(\"done\")\n",
         "main()\n"
     );
-    let err = run_capture_parallel(src).expect_err("M:N VM must reject a module-global generator");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
-    // The cooperative engine never snapshots module globals, so it is unaffected (no nursery
-    // global lowering) and runs to completion.
+    let expect = "in worker\ndone\n";
     assert_eq!(
         run_capture(src).expect("cooperative VM ignores the unused module global"),
-        "in worker\ndone\n"
+        expect
     );
+    assert_eq!(
+        run_capture_parallel(src)
+            .expect("M:N VM must NOT fault on an unreached module-global generator (Option B)"),
+        expect
+    );
+}
+
+/// Option B HAZARD case: a spawned task that DIRECTLY reads the generator global (`for x in g`).
+/// The reachability gate fires at the spawn site on BOTH engines with the same graceful,
+/// `recover:`-catchable error and a real (line >= 1) span.
+#[test]
+fn generator_module_global_hazard_reads_it_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn use_it():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn use_it()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault, got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "{engine}: needs a real span, got line {}",
+            err.span.line
+        );
+    }
+    // The same hazard wrapped in `recover:` is catchable on BOTH engines (identical marker output).
+    let recovered = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn use_it():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn main():\n",
+        "    r := recover:\n",
+        "        parallel:\n",
+        "            spawn use_it()\n",
+        "        \"ok\"\n",
+        "    match r:\n",
+        "        Ok(v): print(\"ok: {v}\")\n",
+        "        Err(e): print(\"caught: {e.message()}\")\n",
+        "main()\n"
+    );
+    let expect = "caught: a generator cannot be sent across tasks\n";
+    assert_eq!(run_capture(recovered).expect("serial recover"), expect);
+    assert_eq!(
+        run_capture_parallel(recovered).expect("M:N recover"),
+        expect
+    );
+}
+
+/// Option B TRANSITIVE hazard: the spawned task does NOT read `g` directly — it calls a helper
+/// that does. The task body has no `GetGlobalSlot(g)`, but it has an `Op::Call` (an unresolvable
+/// dispatch) so the conservative gate treats it as OPAQUE and faults on BOTH engines.
+#[test]
+fn generator_module_global_transitive_helper_reads_it_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn helper():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn task():\n",
+        "    helper()\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn task()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (transitive reach), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// Option B over-gate regression guards: (a) a NON-generator module global read by a spawned task
+/// while a generator global is ALSO present (untouched) must NOT fault — the gate distinguishes the
+/// read slot; (b) a generator held in a frame LOCAL (not a module global) with an untouching task
+/// must NOT fault — the presence scan inspects module globals only, never frame locals.
+#[test]
+fn generator_module_global_over_gate_guards() {
+    // (a) non-generator global read while a generator global is present and untouched.
+    let non_gen = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "n := 5\n",
+        "fn work():\n",
+        "    print(n)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn work()\n",
+        "main()\n"
+    );
+    let expect_a = "5\n";
+    assert_eq!(run_capture(non_gen).expect("serial (a)"), expect_a);
+    assert_eq!(run_capture_parallel(non_gen).expect("M:N (a)"), expect_a);
+    // (b) generator in a frame LOCAL, untouched by the spawned task.
+    let gen_local = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "fn worker():\n",
+        "    print(\"in worker\")\n",
+        "fn main():\n",
+        "    local_g := gen()\n",
+        "    parallel:\n",
+        "        spawn worker()\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    let expect_b = "in worker\ndone\n";
+    assert_eq!(run_capture(gen_local).expect("serial (b)"), expect_b);
+    assert_eq!(run_capture_parallel(gen_local).expect("M:N (b)"), expect_b);
 }
 
 /// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
@@ -6836,18 +6968,28 @@ fn generator_passed_to_spawn_is_graceful_vm() {
         "        spawn work(gen())\n",
         "main()\n"
     );
-    let err = run_capture_parallel(src).expect_err("M:N VM must reject a spawned generator arg");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    // A generator crossing DIRECTLY as a spawn arg faults on BOTH engines (the `deep_clone` airlock
+    // copy hits `to_wire`'s Generator arm on serial and M:N alike) — this is a real crossing, gated
+    // exactly as before Option B (only an UNTOUCHED module-global generator changed behaviour).
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: must reject a spawned generator arg"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "{engine}: needs a real span, got line {}",
+            err.span.line
+        );
+    }
 }
 
 /// A generator embedded inside a LIST spawn arg — the nested-position guard. The recursive `?`
@@ -6864,19 +7006,27 @@ fn generator_in_list_arg_to_spawn_is_graceful_vm() {
         "        spawn work([gen()])\n",
         "main()\n"
     );
-    let err =
-        run_capture_parallel(src).expect_err("M:N VM must reject a generator nested in a list arg");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    // A generator nested in a list spawn arg faults on BOTH engines (the container recursion in
+    // `deep_clone`/`to_wire` reaches the leaf generator on serial and M:N alike).
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: must reject a generator nested in a list arg"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "{engine}: needs a real span, got line {}",
+            err.span.line
+        );
+    }
 }
 
 /// A generator into `Shared(...)` — the Op::NewShared airlock-out. Previously PANICKED.

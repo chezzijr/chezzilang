@@ -268,6 +268,25 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
    *closure* used as a `spawn` target, and method-mediated call chains — indirect dispatch the static call
    graph can't follow. The *runtime* reconstruction handles these correctly; the gap is purely the
    *checker's* G1 reachability analysis.
+   - **Generator module-global sendability (Option B).** A live (frame-holding) generator resident in a
+     module global is not sendable, but the eager module-global snapshot must **not** fault on an
+     UNTOUCHED one (that faulted only on M:N — which snapshots — and not on serial, a divergence). Fix
+     (`src/vm/sched.rs`): (1) the snapshot lowers a generator global to `SnapValue::Poison`, which
+     replays as `nil` — an M:N worker can therefore **never** obtain a real cross-heap generator from a
+     module global (memory safety, independent of the gate); (2) a conservative reach gate
+     (`Vm::check_task_generator_reach`) at `register_task` — the single common spawn choke, run on
+     **both** engines during body execution — faults with the graceful `a generator cannot be sent
+     across tasks` error IFF a spawned task can reach a generator-embedding module global (a direct
+     `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or **any** op that can transfer control into an
+     unscanned proto — a call, an operator overload, a protocol/`str` hook, a nested spawn/defer, a
+     `GetCaptured` home-global read — treated as OPAQUE). It is `has_generators`-gated (zero cost for
+     generator-free programs) and a further presence scan (`any_module_global_embeds_generator`)
+     short-circuits when no generator is actually resident in a global. Conservative by design:
+     over-gates (e.g. a spawned task doing unrelated work via a call while a generator global is live is
+     gated), never under-gates. A future precision refinement is a callee-provenance-paired transitive
+     scan; the residual known-limit is a `str`/Display hook reached via `print` (allowlisted for the
+     primary safe case) that itself reads a generator global — memory-safe via the poison leaf, an
+     exotic parity precision gap only.
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; resolved via the `wait_timeout` re-check loop.
 3. **Pool starvation** (G3) — parent-participates + documented "don't out-block the pool" rule for v1.
 4. **Output contract** (G4) — settled (decision F) but pervasive; threaded through B3.2/B3.3.

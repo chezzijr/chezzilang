@@ -567,6 +567,11 @@ pub struct Vm {
     fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
+    /// Option B — cached `program.protos.iter().any(|p| p.is_generator)`: does this program contain
+    /// ANY generator body? Read once per spawn by the module-global generator reachability gate
+    /// ([`Vm::check_task_generator_reach`]) so a generator-free program pays ZERO gate overhead
+    /// (M19: the whole feature short-circuits). Program-derived (heap-independent), so never swapped.
+    has_generators: bool,
     /// B3.3-threads: `--parallel` engine selected. When set, `join_nursery` runs a nursery's tasks
     /// on the real OS-thread pool (each in its own worker `Vm`) instead of cooperative fibers, and a
     /// blocking `recv` on an empty channel waits on the channel's `Condvar` rather than parking a
@@ -1136,6 +1141,14 @@ enum SnapValue {
     Map(Vec<(u64, SnapValue, SnapValue)>),
     /// `(cached hash, element)` pairs.
     Set(Vec<(u64, SnapValue)>),
+    /// Option B — a live (frame-holding) generator resident in a module global. It CANNOT cross to an
+    /// M:N worker (its parked frames reference the parent heap), so the snapshot encodes it as a poison
+    /// leaf instead of faulting eagerly (the old behavior faulted even for an UNTOUCHED generator
+    /// global, diverging from the serial engine, which never snapshots). Replayed as `Value::Nil`: the
+    /// conservative `check_task_generator_reach` gate at `register_task` guarantees no spawned task ever
+    /// reaches this slot on EITHER engine, so a correct program never observes the Nil — but if one ever
+    /// did, a harmless Nil is produced, never a fabricated cross-heap generator (never UB).
+    Poison,
 }
 
 /// B3.4 — how a `--parallel` task ended, recorded in its slot. The join (`run_parallel_nursery`)

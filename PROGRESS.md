@@ -3086,12 +3086,31 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   smuggle sites (`deep_clone` for `spawn` args/`spawn:` captures, `Op::NewShared`, `new_atomic`,
   `Channel.send`/`try_send`, `Shared.set`/`update`, `Atomic.store`/`exchange`/`cas`, plus `wire_args` /
   `wire_callable` for spawn-method args + `Executor.submit` closure captures) re-stamp via a shared
-  `to_wire_at` helper. The **module-global** path was the missed-critical site: the M:N engine eagerly
-  snapshots EVERY module global at the first nursery, so a module-level generator + any `parallel:` block
-  previously aborted via `to_snap`'s `unreachable!` even when no task touched it — now graceful. (Parity is
-  per-engine, NOT `assert_parity`: interp rejects `yield` EARLIER at gen() with a different message; both
-  engines still reject the program. Tests `generator_module_global_with_nursery_is_graceful_vm` +
-  siblings.)
+  `to_wire_at` helper. These are all DIRECT crossings (a generator moving across the airlock as data);
+  they fault on **both** engines and are unchanged.
+- **Module-global generator = Option B "gated iff reachable" (2026-07-08).** A generator held as a
+  module GLOBAL is a special case: the M:N engine eagerly snapshots EVERY module global at the first
+  nursery, so a module-level generator + any `parallel:` previously faulted even when **no task touched
+  it** — a serial-vs-M:N divergence (serial never snapshots, ran clean). Fixed with two coordinated
+  `src/vm/sched.rs` changes: (1) `to_snap`'s Generator arm now yields `SnapValue::Poison` (replays as
+  `nil`) instead of erroring — an M:N worker can never obtain a real cross-heap generator from a module
+  global (memory safety, gate-independent); (2) a conservative reach gate
+  `Vm::check_task_generator_reach` at `register_task` (the single common spawn choke, run on **both**
+  engines during body execution) faults with the graceful `a generator cannot be sent across tasks`
+  error IFF a spawned task can reach a generator-embedding global — a direct
+  `GetGlobalSlot`/`SetGlobalSlot` of that slot, or **any** op that transfers control into an unscanned
+  proto (a call / operator overload / protocol-`str` hook / nested spawn-defer / `GetCaptured`
+  home-global read) treated as OPAQUE. `has_generators`-gated (zero cost when the program has no
+  generator) + an `any_module_global_embeds_generator` presence short-circuit. An **untouched**
+  generator global now runs clean on both engines; a **reached** one faults identically on both — parity
+  by construction. Conservative (over-gates, never under-gates); a callee-provenance-paired transitive
+  scan is a documented future precision refinement. Tests (serial + M:N):
+  `generator_module_global_with_nursery_is_graceful_vm` (SAFE, both clean),
+  `generator_module_global_hazard_reads_it_faults_both` (direct read + `recover:`),
+  `generator_module_global_transitive_helper_reads_it_faults_both` (transitive/OPAQUE),
+  `generator_module_global_over_gate_guards` (non-gen global read + generator LOCAL both stay clean);
+  the 6 direct-crossing goldens strengthened to assert both engines fault. Docs: `docs/spec.md`,
+  `docs/concurrency.md`, `docs/concurrency-b3.md` §5.1.
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-

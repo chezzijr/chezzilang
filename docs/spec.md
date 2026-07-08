@@ -183,10 +183,19 @@ snapshot + position on the receiver), exactly like a `list`. A frame-holding **g
 returned by calling a generator `fn`) shares the same `Iterator[T]` existential but is **not**
 sendable — its parked frames reference the producing heap. The checker cannot distinguish the two
 (both are `Iterator[T]`), so the runtime is the enforcement point: a generator crossing **any** task
-airlock — passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`RwShared`/`Atomic`, or **merely being
-a module global while a nursery runs** (the M:N engine snapshots all module globals) — raises a
-**graceful, catchable** runtime error (`a generator cannot be sent across tasks`) with the real
-spawn/nursery-site location, **never** a panic. There is **no** compile-time
+airlock as data — passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic` —
+raises a **graceful, catchable** runtime error (`a generator cannot be sent across tasks`) with the real
+spawn-site location, **never** a panic. A generator held as a **module global** is handled by **Option
+B — gated iff reachable**: it is faulted with the *same* graceful error **only when a spawned task can
+actually reach it** — a direct home-global read, or *any* call / operator overload / protocol hook /
+unresolvable dispatch through which it could transitively be reached (a conservative
+reach analysis at the spawn site: if it cannot prove the task never reaches the generator, it gates).
+An **untouched** generator global does **not** fault. Crucially this decision is made during body
+execution on **both** engines, so the serial and M:N engines agree by construction — an untouched
+generator global runs clean on both, a reached one faults identically on both. (Earlier, the M:N engine
+eagerly snapshotted every module global and faulted on the generator even when no task touched it,
+diverging from the serial engine, which never snapshots; the reach gate + a poisoned snapshot leaf,
+which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.) There is **no** compile-time
 multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
 reusing an exhausted one yields nothing.
 

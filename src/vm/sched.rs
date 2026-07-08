@@ -84,6 +84,203 @@ impl Vm {
         )
     }
 
+    /// Option B — the graceful, `recover:`-catchable fault raised when a spawned task could reach a
+    /// live generator held as a module global. Same message as the direct-crossing airlock faults
+    /// (`to_wire`'s Generator arm), carrying the real spawn-site `span` (line >= 1).
+    pub(super) fn generator_airlock_err(&self, span: Span) -> RuntimeError {
+        self.err("a generator cannot be sent across tasks".to_string(), span)
+    }
+
+    /// Option B — conservative reachability gate: fault IFF this spawned `task` could reach a live
+    /// generator held in a module global. Called at [`Vm::register_task`] (the single common spawn
+    /// choke) during body execution on BOTH engines, so serial and M:N agree by construction.
+    ///
+    /// Layered short-circuits keep the common case free and the analysis SOUND-CONSERVATIVE (if it
+    /// cannot PROVE the task never reaches the generator, it gates — over-gating is acceptable,
+    /// under-gating is not):
+    /// - (a) the program has NO generator body at all → nothing to protect (zero-overhead M19 gate);
+    /// - (b) no module global (deep, cycle-guarded) embeds a live generator → nothing resident to
+    ///   reach (covers a generator held only in a frame LOCAL, and every non-generator global);
+    /// - (c) resolve the task callee to a scannable `(proto, home)`; a builtin/native callee reads no
+    ///   module global (OK), any other unresolvable callee (a `spawn recv.method()`, a non-callable) is
+    ///   OPAQUE → gate;
+    /// - (d) scan the callee proto's code ([`Vm::scan_proto_reaches_generator`]): a home-global
+    ///   read/write of a generator-embedding slot is a real reach → gate; any op that can transfer
+    ///   control into an UNSCANNED proto (a call, an operator overload, a protocol/`str` hook, a nested
+    ///   spawn/defer, a closure-capture of a home global via the `GetCaptured` cold path, …) is OPAQUE
+    ///   → gate; only provably-inert leaf/control ops keep scanning.
+    ///
+    /// Memory safety is independently guaranteed by [`SnapValue::Poison`] (an M:N worker never obtains
+    /// a real cross-heap generator from a module global — it replays as Nil); this gate exists to keep
+    /// the two engines' OBSERVABLE behaviour identical (both run an untouched generator global, both
+    /// fault the same way on a reached one).
+    pub(super) fn check_task_generator_reach(
+        &self,
+        task: &PendingCall,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        // (a) No generator body anywhere → the whole feature is inert.
+        if !self.has_generators {
+            return Ok(());
+        }
+        // (b) No live generator resident in any module global → nothing a task could reach.
+        if !self.any_module_global_embeds_generator() {
+            return Ok(());
+        }
+        // (c) Resolve the task's callee to a scannable proto + its home module.
+        let (proto, home) = match task {
+            PendingCall::Call { callee, .. } => match callee {
+                Value::Obj(h) => match self.heap.get(*h) {
+                    Obj::Func { proto, home } => (*proto, *home),
+                    Obj::Closure { proto, home, .. } => (*proto, *home),
+                    // A builtin / native callee runs pure Rust — it reads no module global.
+                    Obj::Builtin(_) | Obj::Native { .. } => return Ok(()),
+                    // Any other callee object is not a scannable body → OPAQUE, conservatively gate.
+                    _ => return Err(self.generator_airlock_err(span)),
+                },
+                // A non-object callee is never a valid spawn target → gate defensively.
+                _ => return Err(self.generator_airlock_err(span)),
+            },
+            // `spawn recv.method(args)` — the method proto can't be paired statically (dynamic
+            // dispatch on the receiver's runtime type) → OPAQUE, conservatively gate.
+            PendingCall::Method { .. } => return Err(self.generator_airlock_err(span)),
+        };
+        // (d) Scan the callee proto's code for a reach.
+        self.scan_proto_reaches_generator(proto, home, span)
+    }
+
+    /// Option B (d) — scan one proto's code for a reach to a live generator held in a module global.
+    /// Reads/writes of a `home`-module global slot that embeds a generator are a direct reach; any op
+    /// that can transfer control into an unscanned proto is OPAQUE (we cannot prove it never reaches
+    /// the generator) and gates. Only a small allowlist of provably-inert leaf/control ops keeps
+    /// scanning — every other op (calls, operator overloads, protocol/`str` hooks, nested spawn/defer,
+    /// closure-capture of a home global via the `GetCaptured` cold path, constructors that run `hash`,
+    /// …) conservatively gates. Straight-line, no dataflow — over-gates by design (acceptable), never
+    /// under-gates.
+    fn scan_proto_reaches_generator(
+        &self,
+        proto: ProtoId,
+        home: GcRef,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        for op in &self.program.protos[proto].code {
+            match op {
+                // A home-global read/write whose slot embeds a generator is a real reach.
+                Op::GetGlobalSlot(s) | Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
+                    if self.module_slot_embeds_generator(home, *s as usize) {
+                        return Err(self.generator_airlock_err(span));
+                    }
+                }
+                // Provably-inert leaf / control ops: they touch no module global and transfer control
+                // to no unscanned proto, so they cannot reach the generator — keep scanning.
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::Pop
+                | Op::PopExprStmt
+                | Op::LoadBuiltin(_)
+                | Op::GetLocal(_)
+                | Op::SetLocal(_)
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::Return
+                | Op::PushHandler(_)
+                | Op::PopHandler
+                | Op::CallPrint(_)
+                | Op::CallPrintSep { .. }
+                | Op::AsBool
+                | Op::AsInt
+                | Op::CoerceFloat
+                | Op::Dup
+                | Op::Dup2 => {}
+                // Everything else can transfer control into an unscanned proto (a call, an operator
+                // overload, an index/field/`str`/hash hook, a nested spawn/defer, a home-global read via
+                // the `GetCaptured` cold path, …). We cannot PROVE it never reaches the generator, so
+                // conservatively gate.
+                _ => return Err(self.generator_airlock_err(span)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Option B (b) — does ANY module global (deep, cycle-guarded) embed a live generator? Walks only
+    /// the real module namespace objects (`module_objs`); a worker shell's empty modules embed nothing.
+    fn any_module_global_embeds_generator(&self) -> bool {
+        for &pm in &self.module_objs {
+            if let Obj::Module { slots, .. } = self.heap.get(pm) {
+                for &v in slots {
+                    if self.value_embeds_generator(v, 0) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Option B (d) — does `home`-module global slot `slot` embed a live generator (deep,
+    /// cycle-guarded)? A missing slot / non-module `home` embeds nothing.
+    fn module_slot_embeds_generator(&self, home: GcRef, slot: usize) -> bool {
+        if let Obj::Module { slots, .. } = self.heap.get(home)
+            && let Some(&v) = slots.get(slot)
+        {
+            return self.value_embeds_generator(v, 0);
+        }
+        false
+    }
+
+    /// Option B — structural (cycle-guarded) test: does `v` embed an `Obj::Generator`? Recurses the
+    /// data-container shapes a generator can hide in (list/tuple/set/map/struct/enum/newtype/cursor)
+    /// plus a closure's captured environment; a `Module`/`Func` home is NOT followed (a generator only
+    /// escapes as data, and following module refs would cycle). Bounded by [`MAX_STRUCTURAL_DEPTH`] —
+    /// a cyclic global returns `false` at the cap, which is safe: a real generator at any finite depth
+    /// is found before the cap, and the cap is only reached by a pure-data cycle (no generator on the
+    /// path).
+    fn value_embeds_generator(&self, v: Value, depth: usize) -> bool {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return false;
+        }
+        let Value::Obj(h) = v else {
+            return false;
+        };
+        match self.heap.get(h) {
+            Obj::Generator(_) => true,
+            Obj::List(items) | Obj::Tuple(items) => items
+                .iter()
+                .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            Obj::Set(s) => s
+                .entries
+                .iter()
+                .any(|(_, e)| self.value_embeds_generator(*e, depth + 1)),
+            Obj::Map(m) => m.entries.iter().any(|(_, k, val)| {
+                self.value_embeds_generator(*k, depth + 1)
+                    || self.value_embeds_generator(*val, depth + 1)
+            }),
+            Obj::Struct { fields, .. } => fields
+                .iter()
+                .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            Obj::Enum { payload, .. } => payload
+                .iter()
+                .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            Obj::NewType { inner, .. } => self.value_embeds_generator(*inner, depth + 1),
+            Obj::Iter { items, .. } => items
+                .iter()
+                .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            // A closure captured environment can hold a generator (captured across the airlock as a
+            // poison leaf); follow the captures (but never the home module).
+            Obj::Closure { captured, .. } => captured
+                .iter()
+                .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            _ => false,
+        }
+    }
+
     /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
     /// EAGER, build the handler into a live [`Fiber`] (serializing its args out of THIS fiber's heap,
     /// the same airlock copy `do_spawn`'s `deep_clone` does) and [`MnSched::inject`] it straight into
@@ -96,6 +293,12 @@ impl Vm {
         task: PendingCall,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        // Option B — the SINGLE common choke for every spawn path (do_spawn / do_spawn_block /
+        // eager-inject / lazy-queue). Conservatively fault here, at the spawn site, if this task could
+        // reach a live generator held as a module global. This runs during body execution on BOTH
+        // engines (the serial-vs-M:N divergence is only later, at the nursery join), so serial and M:N
+        // agree by construction. A generator-free program short-circuits at zero cost.
+        self.check_task_generator_reach(&task, span)?;
         // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
         // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
         // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
@@ -2674,14 +2877,17 @@ impl Vm {
             | Obj::Ptr(_) => {
                 SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket / ptr is always sendable"))
             }
-            // A frame-holding generator is not sendable and is never legal as a module global crossing
-            // to an M:N worker. Reaching here means one was smuggled past the permissive `Iterator[T]`
-            // checker branch (a cursor and a generator share that existential type). Fault gracefully
-            // with the same message as `to_wire`'s Generator arm — `ensure_snapshot` re-stamps the
-            // placeholder span with the real nursery/spawn site.
-            Obj::Generator(_) => {
-                return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
-            }
+            // Option B — a frame-holding generator resident in a module global is NOT sendable (its
+            // parked frames reference the parent heap), but the eager module-global snapshot must NOT
+            // fault here: an UNTOUCHED generator global is legal (the serial engine, which never
+            // snapshots, runs it fine, so faulting only on M:N diverged). Encode it as a poison leaf;
+            // it replays as `Value::Nil`. The conservative `check_task_generator_reach` gate at
+            // `register_task` guarantees no spawned task ever REACHES this slot on either engine (both
+            // fault at the spawn site if it could), so a correct program never observes the Nil — and
+            // even under a gate miss the worst case is a harmless Nil, never a fabricated cross-heap
+            // generator (never UB). A generator crossing DIRECTLY (spawn arg / channel / shared) still
+            // faults via `to_wire`'s Generator arm, which is unchanged.
+            Obj::Generator(_) => SnapValue::Poison,
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {
@@ -2863,6 +3069,13 @@ impl Vm {
                 }
                 Value::Obj(self.heap.alloc(Obj::Set(out)))
             }
+            // Option B — a poisoned generator global replays as Nil. `fault_module` replays ALL of a
+            // module's globals the first time ANY of them is read, so a poisoned slot is legitimately
+            // replayed (as Nil) whenever a spawned task reads a SIBLING global of the same module — this
+            // is normal, not an error. The reachability gate guarantees the task never READS (uses) the
+            // poisoned slot itself; the Nil it replays to is a harmless, memory-safe placeholder, never
+            // a fabricated cross-heap generator.
+            SnapValue::Poison => Value::Nil,
         }
     }
 }

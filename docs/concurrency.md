@@ -614,10 +614,16 @@ captured bindings are **read-only inside the task**.
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
   over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a
   silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). The checker
-  cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing **any**
-  task airlock — including merely being a **module global while a nursery runs** — is reported at
-  **runtime** as a **graceful, catchable** error (`a generator cannot be sent across tasks`) carrying
-  the real spawn/nursery-site location, **never** a panic.
+  cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing a task
+  airlock **as data** (passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic`)
+  is reported at **runtime** as a **graceful, catchable** error (`a generator cannot be sent across
+  tasks`) carrying the real spawn-site location, **never** a panic. A generator held as a **module
+  global** follows **Option B — gated iff reachable**: it faults with the *same* error only when a
+  spawned task can actually reach it (a direct home-global read, or *any* call / operator / hook /
+  unresolvable dispatch it could transitively reach — a conservative reach analysis at the spawn site;
+  an untouched generator global does **not** fault). The gate runs during body execution on **both**
+  engines, so serial and M:N agree by construction, and a poisoned snapshot leaf (which replays as
+  `nil`) guarantees an M:N worker can never obtain a real cross-heap generator from a module global.
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
   so the copy semantics are obvious: read captured config freely, but produce output only via a
   `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.
