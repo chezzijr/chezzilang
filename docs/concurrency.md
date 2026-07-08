@@ -622,10 +622,13 @@ captured bindings are **read-only inside the task**.
   spawned task can actually reach it (a direct home-global read, or *any* call / operator / hook /
   `print` of a value whose `str` hook reads it / unresolvable dispatch it could transitively reach — a
   conservative reach analysis; an untouched generator global does **not** fault). The gate runs during
-  body execution on **both** engines — at the spawn site *and* re-checked at the lazy nursery join (so a
-  global reassigned to a generator between `spawn` and the join is still caught) — so serial and M:N
-  agree by construction, and a poisoned snapshot leaf (which replays as `nil`) guarantees an M:N worker
-  can never obtain a real cross-heap generator from a module global.
+  body execution on **both** engines — at the spawn site, re-checked at the lazy nursery join (so a
+  global reassigned to a generator between `spawn` and the join is still caught), and re-checked
+  conservatively over any still-pending **outer** nursery at a **nested** nursery's join (so a global
+  reassigned to a generator across nested nurseries, where M:N early-enlists the outer task against a
+  frozen snapshot, is caught too) — so serial and M:N agree by construction, and a poisoned snapshot
+  leaf (which replays as `nil`) guarantees an M:N worker can never obtain a real cross-heap generator
+  from a module global.
 - **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
   so the copy semantics are obvious: read captured config freely, but produce output only via a
   `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.

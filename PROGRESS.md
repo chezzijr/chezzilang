@@ -3114,15 +3114,31 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   re-gate** — the gate also runs at the LAZY nursery join (`join_nursery`, before the serial-coop vs M:N
   split), closing a TOCTOU: a lazy nursery's tasks run — and the M:N snapshot is taken — at the join, so
   a module global **reassigned to a generator between `spawn` and the join** slipped past a spawn-time-
-  only gate (serial ran the real generator, M:N read Poison→Nil → diverged). Tests (serial + M:N, all
-  assert parity): `generator_module_global_with_nursery_is_graceful_vm` (SAFE, both clean),
-  `generator_module_global_hazard_reads_it_faults_both` (direct read + `recover:`),
+  only gate (serial ran the real generator, M:N read Poison→Nil → diverged). **(iii) nested-nursery
+  conservative re-gate** (adversarial-review charges #1/#2/#3, 2026-07-08): the join-time re-check in
+  fix (ii) only covered the LAZY fall-through of `join_nursery` (this nursery's OWN tasks), not the
+  early-enlisted OUTER nursery path (`early_enlist_outer` → `join_enlisted_scope`). When an INNER
+  nursery joins while an OUTER nursery is pending, M:N EARLY-ENLISTS the outer task against the frozen
+  module snapshot (taken at the inner join) while serial runs it at its own later join against LIVE
+  globals — so a generator reassigned across the nested nurseries diverged (serial faults, M:N reads a
+  stale frozen value: `nil` if it was a generator at snapshot time, or the wrong non-generator value if
+  reassigned after). Closed by `Vm::check_outer_pending_generator_reach` (called at the top of
+  `join_nursery`, on **both** engines): a still-pending outer task reaching **any** module global — or
+  an OPAQUE callee, or any `print` — faults NOW. The verdict is purely STATIC (proto code +
+  `has_generators`), so it is identical at every join on both engines → parity by construction
+  (over-gates an outer task reaching a non-generator global when any generator body exists; never
+  under-gates). Tests (serial + M:N, all assert parity): `generator_module_global_with_nursery_is_graceful_vm`
+  (SAFE, both clean), `generator_module_global_hazard_reads_it_faults_both` (direct read + `recover:`),
   `generator_module_global_transitive_helper_reads_it_faults_both` (transitive/OPAQUE),
   `generator_module_global_over_gate_guards` (non-gen global read + generator LOCAL both stay clean),
   `generator_module_global_str_hook_print_faults_both` (fix i: hook reach via `print` + innocent-hook
-  clean), `generator_module_global_reassigned_after_spawn_faults_both` (fix ii: TOCTOU reassign); the 6
-  direct-crossing goldens strengthened to assert both engines fault. Docs: `docs/spec.md`,
-  `docs/concurrency.md`, `docs/concurrency-b3.md` §5.1.
+  clean), `generator_module_global_reassigned_after_spawn_faults_both` (fix ii: single-nursery TOCTOU),
+  `generator_module_global_nested_nursery_reassign_before_faults_both` +
+  `generator_module_global_nested_nursery_reassign_after_faults_both` (fix iii: cross-nursery TOCTOU,
+  reassign before/after the inner block), `nested_nursery_outer_reads_global_no_generator_ok_both` (fix
+  iii non-regression: generator-free nested nursery stays clean); the 6 direct-crossing goldens
+  strengthened to assert both engines fault. Docs: `docs/spec.md`, `docs/concurrency.md`,
+  `docs/concurrency-b3.md` §5.1.
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-

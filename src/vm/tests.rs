@@ -7069,6 +7069,121 @@ fn generator_module_global_reassigned_after_spawn_faults_both() {
     }
 }
 
+/// Option B TOCTOU across NESTED nurseries (adversarial-review charge #1/#2): a module global
+/// reassigned to a generator BEFORE an inner `parallel:` block, while an OUTER nursery task reads it.
+/// On M:N the OUTER task is EARLY-ENLISTED at the inner nursery's join (against the frozen module
+/// snapshot) — the spawn-time gate saw a cursor and passed, and the lazy-join re-gate only re-checks
+/// the outer nursery's OWN (by-then-drained) task list — so without the nested-nursery conservative
+/// gate serial faults on the live generator (`g = gen()`) while M:N reads the poisoned global as Nil
+/// (`cannot iterate over nil`). Both engines must fault IDENTICALLY with the generator-crossing error.
+#[test]
+fn generator_module_global_nested_nursery_reassign_before_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := [7].iter()\n",
+        "fn outer():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn inner():\n",
+        "    print(\"inner\")\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn outer()\n",
+        "        g = gen()\n",
+        "        parallel:\n",
+        "            spawn inner()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (nested TOCTOU), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// Option B TOCTOU across NESTED nurseries (adversarial-review charge #3): the OUTER nursery task reads
+/// a module global that is a NON-generator (`[7].iter()`) at the inner nursery's snapshot-freeze time
+/// but is reassigned to a live generator AFTER the inner block, BEFORE the outer join. On M:N the
+/// early-enlisted outer task runs against the FROZEN cursor (would print `7`); on serial it runs at its
+/// own join against the LIVE generator (faults) — a silent divergence. Because the reassignment is
+/// unbounded, the nested-nursery gate is CONSERVATIVE (a purely static verdict: an outer task reaching
+/// ANY module global while a generator body exists faults NOW on BOTH engines — parity by construction).
+#[test]
+fn generator_module_global_nested_nursery_reassign_after_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "    yield 2\n",
+        "g := [7].iter()\n",
+        "fn use_it():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn other():\n",
+        "    print(\"other\")\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn use_it()\n",
+        "        parallel:\n",
+        "            spawn other()\n",
+        "        g = gen()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r.err().unwrap_or_else(|| {
+            panic!("{engine}: expected a fault (nested TOCTOU after-reassign), got Ok")
+        });
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// Option B non-regression: a NESTED nursery whose OUTER task reads a module global, with NO generator
+/// body anywhere in the program. `has_generators` is false, so the conservative nested-nursery gate is
+/// fully inert — both engines run clean (the gate must never fault generator-free concurrent code, even
+/// the exact nested-nursery-with-outer-global-read shape the gate keys on when generators ARE present).
+#[test]
+fn nested_nursery_outer_reads_global_no_generator_ok_both() {
+    let src = concat!(
+        "n := 5\n",
+        "fn outer():\n",
+        "    print(n)\n",
+        "fn inner():\n",
+        "    print(\"inner\")\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn outer()\n",
+        "        parallel:\n",
+        "            spawn inner()\n",
+        "main()\n"
+    );
+    let out_serial =
+        run_capture(src).expect("serial: generator-free nested nursery must run clean");
+    let out_mn =
+        run_capture_parallel(src).expect("M:N: generator-free nested nursery must run clean");
+    assert_same_lines(&out_serial, &out_mn);
+    assert!(
+        out_serial.contains("inner") && out_serial.contains('5'),
+        "expected both prints, got: {out_serial}"
+    );
+}
+
 /// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
 /// PANICKED at deep_clone's `.expect`; now a graceful error with a real span.
 #[test]

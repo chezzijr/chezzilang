@@ -279,13 +279,25 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
      **any** op that can transfer control into an unscanned proto — a call, an operator overload, a
      protocol/`str` hook, a nested spawn/defer, a `GetCaptured` home-global read — treated as OPAQUE).
-     The gate runs at **two** choke points to keep serial == M:N: (a) `register_task` (the single common
-     spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time), and (b) the
-     **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the
-     module globals as they stand at join time. Point (b) closes a TOCTOU: a lazy nursery's tasks run —
-     and the M:N snapshot is taken — at the join, so a module global **reassigned to a generator between
-     `spawn` and the join** would slip past a spawn-time-only gate (serial runs the real generator while
-     M:N replays the poisoned global as `nil`, diverging). It is `has_generators`-gated (zero cost for
+     The gate runs at **three** choke points to keep serial == M:N: (a) `register_task` (the single
+     common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)
+     the **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the
+     module globals as they stand at join time; and (c) a **conservative outer-nursery re-check** at the
+     same join (`Vm::check_outer_pending_generator_reach`), covering **NESTED** nurseries. Point (b)
+     closes a single-nursery TOCTOU: a lazy nursery's tasks run — and the M:N snapshot is taken — at the
+     join, so a module global **reassigned to a generator between `spawn` and the join** would slip past
+     a spawn-time-only gate (serial runs the real generator while M:N replays the poisoned global as
+     `nil`, diverging). Point (c) closes the **cross-nursery** TOCTOU: when an INNER nursery joins while
+     an OUTER nursery is still pending, the outer task is EARLY-ENLISTED against the frozen module
+     snapshot on M:N but runs at its own later join against live globals on serial — so a global
+     reassigned to a generator anywhere in that window diverges. Because the reassignment is
+     unbounded/undecidable, the outer-pending re-check is **conservative**: an outer task reaching **any**
+     module global (regardless of the slot's current value) — or an OPAQUE callee, or any `print` — faults
+     NOW, on both engines, at the inner join. That verdict is purely STATIC (proto code + `has_generators`),
+     so it is identical at every join on both engines: if it faults it faults at the first inner join on
+     both; if it passes it passes on both (M:N then drains the enlisted tasks, serial keeps them, neither
+     faults). Over-gates a nested-nursery outer task that reaches a *non*-generator global while any
+     generator body exists (acceptable per the soundness-paramount contract); never under-gates. It is `has_generators`-gated (zero cost for
      generator-free programs) and a further presence scan (`any_module_global_embeds_generator`)
      short-circuits when no generator is actually resident in a global. `print` (`CallPrint`/
      `CallPrintSep`) is **not** a blanket-inert op: it stringifies its operands, and a struct/enum/

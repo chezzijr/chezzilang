@@ -149,6 +149,67 @@ impl Vm {
         self.scan_proto_reaches_generator(proto, home, span)
     }
 
+    /// Option B (TOCTOU across NESTED nurseries) — when an INNER nursery joins while OUTER nurseries are
+    /// still pending, each OUTER task may run against a FROZEN module snapshot on M:N (it is
+    /// EARLY-ENLISTED at THIS join by [`Vm::early_enlist_outer`]) but against LIVE globals on serial (it
+    /// runs at its OWN later join). A module global reassigned to a generator anywhere in that window
+    /// diverges: serial faults on the live generator, M:N reads the stale frozen value. Neither the
+    /// spawn-time gate ([`Vm::register_task`]) nor the lazy-join re-gate ([`Vm::join_nursery`], which only
+    /// re-checks THIS nursery's own tasks) closes it. Because the reassignment is unbounded/undecidable,
+    /// gate the still-pending OUTER tasks CONSERVATIVELY here, on BOTH engines, at the inner join.
+    ///
+    /// The verdict is purely STATIC (proto code + `has_generators`), so it is identical at every join on
+    /// both engines: if it faults it faults at the FIRST inner join on both (same point, same message);
+    /// if it passes it passes at every join on both (M:N then drains the enlisted tasks, serial keeps them
+    /// — but neither faults). Parity by construction. Only ever fires with a generator body present AND a
+    /// genuinely nested nursery, so generator-free / single-nursery programs are completely unaffected
+    /// (the `has_generators` short-circuit makes it zero-cost).
+    pub(super) fn check_outer_pending_generator_reach(&self) -> Result<(), RuntimeError> {
+        // No generator body anywhere → nothing an early-enlisted outer task could ever reach.
+        if !self.has_generators {
+            return Ok(());
+        }
+        // `self.nurseries` holds the still-open OUTER nurseries (the inner one being joined was already
+        // popped). Conservatively gate every pending outer task against its own spawn-site span.
+        for nursery in &self.nurseries {
+            for task in nursery {
+                self.check_task_reach_conservative(task, task.span())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Option B (TOCTOU across nested nurseries) — the CONSERVATIVE analogue of
+    /// [`Vm::check_task_generator_reach`] for an early-enlisted OUTER task: resolve the callee to a
+    /// scannable `(proto, home)` (a builtin/native callee reads no module global → OK; anything else
+    /// unresolvable is OPAQUE → gate) and scan its code with `conservative = true`, so a home-global
+    /// read/write faults regardless of the slot's CURRENT value (its frozen-snapshot value may diverge
+    /// from serial's live read). `has_generators` is guaranteed true by the sole caller.
+    fn check_task_reach_conservative(
+        &self,
+        task: &PendingCall,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let (proto, home) = match task {
+            PendingCall::Call { callee, .. } => match callee {
+                Value::Obj(h) => match self.heap.get(*h) {
+                    Obj::Func { proto, home } => (*proto, *home),
+                    Obj::Closure { proto, home, .. } => (*proto, *home),
+                    Obj::Builtin(_) | Obj::Native { .. } => return Ok(()),
+                    _ => return Err(self.generator_airlock_err(span)),
+                },
+                _ => return Err(self.generator_airlock_err(span)),
+            },
+            PendingCall::Method { .. } => return Err(self.generator_airlock_err(span)),
+        };
+        // `print_hazard = true` + `conservative = true`: a home-global access OR any print (a hidden
+        // `str`-hook re-entry) OR any OPAQUE op faults — the frozen-vs-live snapshot cannot be trusted.
+        if self.proto_reaches_generator(proto, home, true, true) {
+            return Err(self.generator_airlock_err(span));
+        }
+        Ok(())
+    }
+
     /// Option B (d) — scan one proto's code for a reach to a live generator held in a module global,
     /// faulting (with the spawn-site `span`) if one is found. Wraps the boolean core
     /// [`Vm::proto_reaches_generator`]; the `print_hazard` it threads in is `true` iff SOME user
@@ -163,7 +224,7 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let print_hazard = self.any_str_hook_reaches_generator();
-        if self.proto_reaches_generator(proto, home, print_hazard) {
+        if self.proto_reaches_generator(proto, home, print_hazard, false) {
             return Err(self.generator_airlock_err(span));
         }
         Ok(())
@@ -182,12 +243,25 @@ impl Vm {
     /// generator module-global — so a print is a HIDDEN call. When `print_hazard` is set (some `str`
     /// hook could reach a generator global) a print is a reach; otherwise no hook can reach a generator,
     /// so a print cannot either and keeps scanning (keeps the SAFE `print("literal")` case un-gated).
-    fn proto_reaches_generator(&self, proto: ProtoId, home: GcRef, print_hazard: bool) -> bool {
+    ///
+    /// `conservative` (the nested-nursery TOCTOU path): treat ANY home-global read/write as a reach,
+    /// regardless of the slot's CURRENT value. An early-enlisted outer task runs against a FROZEN module
+    /// snapshot on M:N but against LIVE globals on serial, and the slot may be reassigned to a generator
+    /// in that window — so its present value cannot be trusted. The verdict is then purely STATIC (proto
+    /// code + `has_generators`), identical at every join on both engines.
+    fn proto_reaches_generator(
+        &self,
+        proto: ProtoId,
+        home: GcRef,
+        print_hazard: bool,
+        conservative: bool,
+    ) -> bool {
         for op in &self.program.protos[proto].code {
             match op {
-                // A home-global read/write whose slot embeds a generator is a real reach.
+                // A home-global read/write is a reach: in `conservative` mode UNCONDITIONALLY (the frozen
+                // snapshot may diverge from the live slot); otherwise only when the slot embeds a generator.
                 Op::GetGlobalSlot(s) | Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
-                    if self.module_slot_embeds_generator(home, *s as usize) {
+                    if conservative || self.module_slot_embeds_generator(home, *s as usize) {
                         return true;
                     }
                 }
@@ -247,7 +321,12 @@ impl Vm {
             if let Some(&proto) = def.methods.get("str")
                 && self.program.protos[proto].arity == 1
                 && def.module_idx < self.module_objs.len()
-                && self.proto_reaches_generator(proto, self.module_objs[def.module_idx], true)
+                && self.proto_reaches_generator(
+                    proto,
+                    self.module_objs[def.module_idx],
+                    true,
+                    false,
+                )
             {
                 return true;
             }
@@ -258,7 +337,7 @@ impl Vm {
                 && self.program.protos[proto].arity == 1
                 && let Some(&idx) = self.program.enum_home.get(key)
                 && idx < self.module_objs.len()
-                && self.proto_reaches_generator(proto, self.module_objs[idx], true)
+                && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
             {
                 return true;
             }
@@ -269,7 +348,7 @@ impl Vm {
                 && self.program.protos[proto].arity == 1
                 && let Some(&idx) = self.program.newtype_home.get(key)
                 && idx < self.module_objs.len()
-                && self.proto_reaches_generator(proto, self.module_objs[idx], true)
+                && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
             {
                 return true;
             }
@@ -448,6 +527,14 @@ impl Vm {
         self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
         let mn_scope = self.mn_scopes.pop().flatten(); // lockstep — Some if early-enlisted
         let tasks = self.nurseries.pop().unwrap_or_default();
+        // Option B (TOCTOU across NESTED nurseries) — with THIS (inner) nursery popped, `self.nurseries`
+        // now holds the still-pending OUTER nurseries. On M:N those outer tasks are about to be
+        // EARLY-ENLISTED against a frozen module snapshot (in `run_mn_nursery_outermost`); on serial they
+        // run at their own later join against live globals. Conservatively gate them HERE, before either
+        // engine proceeds, so a generator reassigned into a module global they reach faults identically on
+        // both (a purely static verdict — see `check_outer_pending_generator_reach`). Runs on BOTH engines
+        // at this single choke, and is zero-cost for generator-free programs.
+        self.check_outer_pending_generator_reach()?;
         // Per-connection spawn — pop the eager scope in lockstep. An eager nursery injected its tasks
         // live (so `tasks` is empty); its join drains the handlers it spawned, not a queued list.
         if let Some(Some(scope)) = self.eager_scheds.pop() {
