@@ -6954,6 +6954,121 @@ fn generator_module_global_over_gate_guards() {
     assert_eq!(run_capture_parallel(gen_local).expect("M:N (b)"), expect_b);
 }
 
+/// Option B HAZARD via a `str` HOOK (adversarial-review charge #1): a spawned task that only
+/// `print(s)`s a struct whose `str(self)` hook reads the generator global. The task body has NO
+/// `GetGlobalSlot(g)` — the reach is HIDDEN inside the `str` hook that `CallPrint` re-enters — so an
+/// allowlist that trusts `CallPrint` as inert would UNDER-gate: serial would run the hook (printing
+/// the real generator output) while an M:N worker replays the poisoned global as Nil and faults,
+/// diverging. The gate must therefore treat a print as a reach whenever a `str` hook can reach a
+/// generator global, faulting IDENTICALLY on both engines. Enum + newtype `str` hooks route through
+/// the same stringify path and are covered too.
+#[test]
+fn generator_module_global_str_hook_print_faults_both() {
+    let struct_hook = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "struct S:\n",
+        "    x: int\n",
+        "    fn str(self) -> str:\n",
+        "        for v in g:\n",
+        "            return \"got {v}\"\n",
+        "        return \"empty\"\n",
+        "fn work(s: S):\n",
+        "    print(s)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn work(S(1))\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(struct_hook)),
+        ("M:N", run_capture_parallel(struct_hook)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (str-hook reach), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+    // A `str` hook that does NOT touch the generator must NOT gate an unrelated `print("literal")`
+    // in a spawned task (precision: the print-hazard flag is set only by a generator-reaching hook —
+    // but note interpolation inside a hook is conservatively a reach, so this hook returns a plain
+    // constant to stay provably inert).
+    let innocent_hook = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "struct S:\n",
+        "    x: int\n",
+        "    fn str(self) -> str:\n",
+        "        return \"an S\"\n",
+        "fn work():\n",
+        "    print(\"worked\")\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn work()\n",
+        "main()\n"
+    );
+    assert_eq!(
+        run_capture(innocent_hook).expect("serial: innocent hook must not gate"),
+        "worked\n"
+    );
+    assert_eq!(
+        run_capture_parallel(innocent_hook).expect("M:N: innocent hook must not gate"),
+        "worked\n"
+    );
+}
+
+/// Option B TOCTOU (adversarial-review charges #2/#3): a module global that is NOT a generator when
+/// `spawn` registers but BECOMES one before the nursery joins. The reach gate reads global slot
+/// VALUES, and a LAZY nursery's tasks run — and the M:N snapshot is taken — at the JOIN, not at
+/// `spawn`. `g` starts as a cursor (`.iter()`), a `spawn use_it()` that reads `g` registers (spawn-
+/// time gate sees a non-generator, passes), then `g = gen()` reassigns it before the join. The
+/// spawn-time gate alone under-gates: serial runs the real reassigned generator (prints its values)
+/// while the M:N worker replays the poisoned global as Nil and faults — a divergence. The JOIN-time
+/// gate closes it: both engines fault identically at the join.
+#[test]
+fn generator_module_global_reassigned_after_spawn_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "    yield 2\n",
+        "g := [7].iter()\n",
+        "fn use_it():\n",
+        "    for x in g:\n",
+        "        print(x)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn use_it()\n",
+        "        g = gen()\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (TOCTOU reassign), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+        assert!(
+            err.span.line >= 1,
+            "{engine}: needs a real span, got line {}",
+            err.span.line
+        );
+    }
+}
+
 /// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
 /// PANICKED at deep_clone's `.expect`; now a graceful error with a real span.
 #[test]

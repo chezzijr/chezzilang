@@ -274,19 +274,28 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      (`src/vm/sched.rs`): (1) the snapshot lowers a generator global to `SnapValue::Poison`, which
      replays as `nil` — an M:N worker can therefore **never** obtain a real cross-heap generator from a
      module global (memory safety, independent of the gate); (2) a conservative reach gate
-     (`Vm::check_task_generator_reach`) at `register_task` — the single common spawn choke, run on
-     **both** engines during body execution — faults with the graceful `a generator cannot be sent
-     across tasks` error IFF a spawned task can reach a generator-embedding module global (a direct
-     `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or **any** op that can transfer control into an
-     unscanned proto — a call, an operator overload, a protocol/`str` hook, a nested spawn/defer, a
-     `GetCaptured` home-global read — treated as OPAQUE). It is `has_generators`-gated (zero cost for
+     (`Vm::check_task_generator_reach`) — run on **both** engines during body execution — faults with
+     the graceful `a generator cannot be sent across tasks` error IFF a spawned task can reach a
+     generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
+     **any** op that can transfer control into an unscanned proto — a call, an operator overload, a
+     protocol/`str` hook, a nested spawn/defer, a `GetCaptured` home-global read — treated as OPAQUE).
+     The gate runs at **two** choke points to keep serial == M:N: (a) `register_task` (the single common
+     spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time), and (b) the
+     **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the
+     module globals as they stand at join time. Point (b) closes a TOCTOU: a lazy nursery's tasks run —
+     and the M:N snapshot is taken — at the join, so a module global **reassigned to a generator between
+     `spawn` and the join** would slip past a spawn-time-only gate (serial runs the real generator while
+     M:N replays the poisoned global as `nil`, diverging). It is `has_generators`-gated (zero cost for
      generator-free programs) and a further presence scan (`any_module_global_embeds_generator`)
-     short-circuits when no generator is actually resident in a global. Conservative by design:
-     over-gates (e.g. a spawned task doing unrelated work via a call while a generator global is live is
-     gated), never under-gates. A future precision refinement is a callee-provenance-paired transitive
-     scan; the residual known-limit is a `str`/Display hook reached via `print` (allowlisted for the
-     primary safe case) that itself reads a generator global — memory-safe via the poison leaf, an
-     exotic parity precision gap only.
+     short-circuits when no generator is actually resident in a global. `print` (`CallPrint`/
+     `CallPrintSep`) is **not** a blanket-inert op: it stringifies its operands, and a struct/enum/
+     newtype `str(self)` hook runs arbitrary code (a hidden call) that can read a generator global — so
+     a print is treated as a reach whenever some `str` hook could reach a generator global
+     (`any_str_hook_reaches_generator`), while a print with no generator-reaching hook in the program
+     stays inert (keeps the primary `print("literal")` safe case un-gated). Conservative by design:
+     over-gates (e.g. a spawned task doing unrelated work via a call — or any print, when a
+     generator-reaching `str` hook exists — while a generator global is live is gated), never
+     under-gates. A future precision refinement is a callee-provenance-paired transitive scan.
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; resolved via the `wait_timeout` re-check loop.
 3. **Pool starvation** (G3) — parent-participates + documented "don't out-block the pool" rule for v1.
 4. **Output contract** (G4) — settled (decision F) but pervasive; threaded through B3.2/B3.3.

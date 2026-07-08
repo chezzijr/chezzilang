@@ -3104,12 +3104,24 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   generator) + an `any_module_global_embeds_generator` presence short-circuit. An **untouched**
   generator global now runs clean on both engines; a **reached** one faults identically on both — parity
   by construction. Conservative (over-gates, never under-gates); a callee-provenance-paired transitive
-  scan is a documented future precision refinement. Tests (serial + M:N):
-  `generator_module_global_with_nursery_is_graceful_vm` (SAFE, both clean),
+  scan is a documented future precision refinement. Two soundness fixes over the first cut
+  (adversarial-review, 2026-07-08): **(i) `print` is not blanket-inert** — `CallPrint`/`CallPrintSep`
+  stringify their operands and a struct/enum/newtype `str(self)` hook runs arbitrary code (a hidden
+  call) that can read a generator global, so a print is a reach whenever some `str` hook could reach one
+  (`any_str_hook_reaches_generator`), while a print with no generator-reaching hook stays inert (keeps
+  the `print("literal")` SAFE case un-gated); the first cut allowlisted print and UNDER-gated a
+  str-hook-printing task (serial ran the hook, M:N read Poison→Nil → diverged). **(ii) join-time
+  re-gate** — the gate also runs at the LAZY nursery join (`join_nursery`, before the serial-coop vs M:N
+  split), closing a TOCTOU: a lazy nursery's tasks run — and the M:N snapshot is taken — at the join, so
+  a module global **reassigned to a generator between `spawn` and the join** slipped past a spawn-time-
+  only gate (serial ran the real generator, M:N read Poison→Nil → diverged). Tests (serial + M:N, all
+  assert parity): `generator_module_global_with_nursery_is_graceful_vm` (SAFE, both clean),
   `generator_module_global_hazard_reads_it_faults_both` (direct read + `recover:`),
   `generator_module_global_transitive_helper_reads_it_faults_both` (transitive/OPAQUE),
-  `generator_module_global_over_gate_guards` (non-gen global read + generator LOCAL both stay clean);
-  the 6 direct-crossing goldens strengthened to assert both engines fault. Docs: `docs/spec.md`,
+  `generator_module_global_over_gate_guards` (non-gen global read + generator LOCAL both stay clean),
+  `generator_module_global_str_hook_print_faults_both` (fix i: hook reach via `print` + innocent-hook
+  clean), `generator_module_global_reassigned_after_spawn_faults_both` (fix ii: TOCTOU reassign); the 6
+  direct-crossing goldens strengthened to assert both engines fault. Docs: `docs/spec.md`,
   `docs/concurrency.md`, `docs/concurrency-b3.md` §5.1.
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==

@@ -149,26 +149,52 @@ impl Vm {
         self.scan_proto_reaches_generator(proto, home, span)
     }
 
-    /// Option B (d) — scan one proto's code for a reach to a live generator held in a module global.
-    /// Reads/writes of a `home`-module global slot that embeds a generator are a direct reach; any op
-    /// that can transfer control into an unscanned proto is OPAQUE (we cannot prove it never reaches
-    /// the generator) and gates. Only a small allowlist of provably-inert leaf/control ops keeps
-    /// scanning — every other op (calls, operator overloads, protocol/`str` hooks, nested spawn/defer,
-    /// closure-capture of a home global via the `GetCaptured` cold path, constructors that run `hash`,
-    /// …) conservatively gates. Straight-line, no dataflow — over-gates by design (acceptable), never
-    /// under-gates.
+    /// Option B (d) — scan one proto's code for a reach to a live generator held in a module global,
+    /// faulting (with the spawn-site `span`) if one is found. Wraps the boolean core
+    /// [`Vm::proto_reaches_generator`]; the `print_hazard` it threads in is `true` iff SOME user
+    /// `str(self)` hook could itself reach a generator global ([`Vm::any_str_hook_reaches_generator`]),
+    /// because `CallPrint`/`CallPrintSep` re-enter the VM through that hook (a hidden call). When no
+    /// hook can reach a generator, a print is provably inert (a plain string/scalar has no hook), so
+    /// the common `print("literal")` in a spawned task stays un-gated (the Option B SAFE case).
     fn scan_proto_reaches_generator(
         &self,
         proto: ProtoId,
         home: GcRef,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        let print_hazard = self.any_str_hook_reaches_generator();
+        if self.proto_reaches_generator(proto, home, print_hazard) {
+            return Err(self.generator_airlock_err(span));
+        }
+        Ok(())
+    }
+
+    /// Option B (d) — boolean core of the reach scan. Reads/writes of a `home`-module global slot that
+    /// embeds a generator are a direct reach; any op that can transfer control into an unscanned proto
+    /// is OPAQUE (we cannot prove it never reaches the generator) → reach. Only a small allowlist of
+    /// provably-inert leaf/control ops keeps scanning — every other op (calls, operator overloads,
+    /// index/field/hash hooks, nested spawn/defer, closure-capture of a home global via the
+    /// `GetCaptured` cold path, …) is a reach. Straight-line, no dataflow — over-approximates by design
+    /// (acceptable), never under-approximates.
+    ///
+    /// `print_hazard`: `CallPrint`/`CallPrintSep` STRINGIFY their operands, and a struct/enum/newtype
+    /// `str(self)` hook runs arbitrary user code (`stmt.rs` stringify → `run_proto`) that can read a
+    /// generator module-global — so a print is a HIDDEN call. When `print_hazard` is set (some `str`
+    /// hook could reach a generator global) a print is a reach; otherwise no hook can reach a generator,
+    /// so a print cannot either and keeps scanning (keeps the SAFE `print("literal")` case un-gated).
+    fn proto_reaches_generator(&self, proto: ProtoId, home: GcRef, print_hazard: bool) -> bool {
         for op in &self.program.protos[proto].code {
             match op {
                 // A home-global read/write whose slot embeds a generator is a real reach.
                 Op::GetGlobalSlot(s) | Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
                     if self.module_slot_embeds_generator(home, *s as usize) {
-                        return Err(self.generator_airlock_err(span));
+                        return true;
+                    }
+                }
+                // A print re-enters a user `str` hook — a reach IFF some hook could reach a generator.
+                Op::CallPrint(_) | Op::CallPrintSep { .. } => {
+                    if print_hazard {
+                        return true;
                     }
                 }
                 // Provably-inert leaf / control ops: they touch no module global and transfer control
@@ -192,8 +218,6 @@ impl Vm {
                 | Op::Return
                 | Op::PushHandler(_)
                 | Op::PopHandler
-                | Op::CallPrint(_)
-                | Op::CallPrintSep { .. }
                 | Op::AsBool
                 | Op::AsInt
                 | Op::CoerceFloat
@@ -202,11 +226,55 @@ impl Vm {
                 // Everything else can transfer control into an unscanned proto (a call, an operator
                 // overload, an index/field/`str`/hash hook, a nested spawn/defer, a home-global read via
                 // the `GetCaptured` cold path, …). We cannot PROVE it never reaches the generator, so
-                // conservatively gate.
-                _ => return Err(self.generator_airlock_err(span)),
+                // conservatively treat it as a reach.
+                _ => return true,
             }
         }
-        Ok(())
+        false
+    }
+
+    /// Option B (bug-fix) — could printing a value inside a spawned task re-enter the VM through a user
+    /// `str(self)` hook that reaches a live generator module-global? A struct/enum/newtype `str` hook
+    /// runs arbitrary code when a value of its type is stringified (`CallPrint`, interpolation), so it
+    /// is a hidden call the straight-line scan cannot pair to a printed value. Conservatively scan
+    /// EVERY 1-arg `str` hook (with `print_hazard = true`, so a hook printing another hooked value is
+    /// itself a reach — this also breaks any print→hook→print recursion): if ANY could reach a
+    /// generator global, every print in a spawned task is a potential reach. Only consulted on the cold
+    /// gate path (a live generator global is already present), so its `O(#str-hooks)` cost is not hot.
+    fn any_str_hook_reaches_generator(&self) -> bool {
+        // Struct `str` hooks.
+        for def in self.program.structs.values() {
+            if let Some(&proto) = def.methods.get("str")
+                && self.program.protos[proto].arity == 1
+                && def.module_idx < self.module_objs.len()
+                && self.proto_reaches_generator(proto, self.module_objs[def.module_idx], true)
+            {
+                return true;
+            }
+        }
+        // Enum `str` hooks.
+        for (key, methods) in &self.program.enum_methods {
+            if let Some(&proto) = methods.get("str")
+                && self.program.protos[proto].arity == 1
+                && let Some(&idx) = self.program.enum_home.get(key)
+                && idx < self.module_objs.len()
+                && self.proto_reaches_generator(proto, self.module_objs[idx], true)
+            {
+                return true;
+            }
+        }
+        // Newtype `str` hooks.
+        for (key, methods) in &self.program.newtype_methods {
+            if let Some(&proto) = methods.get("str")
+                && self.program.protos[proto].arity == 1
+                && let Some(&idx) = self.program.newtype_home.get(key)
+                && idx < self.module_objs.len()
+                && self.proto_reaches_generator(proto, self.module_objs[idx], true)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Option B (b) — does ANY module global (deep, cycle-guarded) embed a live generator? Walks only
@@ -408,6 +476,18 @@ impl Vm {
         }
         if tasks.is_empty() {
             return Ok(());
+        }
+        // Option B (TOCTOU fix) — re-run the conservative reachability gate HERE, at the LAZY nursery
+        // join, against the module globals as they stand NOW. `register_task`'s gate reads spawn-time
+        // globals, but a lazy nursery's tasks only run — and the M:N snapshot is only taken — at this
+        // join, so a module global reassigned to a generator BETWEEN `spawn` and the join would slip
+        // past the spawn-time gate (serial then runs the real generator while M:N snapshots it to a
+        // Poison→Nil, diverging). Both engines pass through this exact point with the same join-time
+        // global state (serial runs the cooperative children below; M:N snapshots in `run_mn_nursery`),
+        // so gating here keeps serial == M:N by construction. A generator-free program short-circuits
+        // at zero cost inside `check_task_generator_reach`.
+        for t in &tasks {
+            self.check_task_generator_reach(t, t.span())?;
         }
         // D2b: under `--parallel`, run the tasks as lightweight M:N fibers on the OS-thread pool
         // (park-on-`recv`), instead of cooperative fibers (decision A keeps the cooperative path the

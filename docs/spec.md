@@ -188,11 +188,13 @@ raises a **graceful, catchable** runtime error (`a generator cannot be sent acro
 spawn-site location, **never** a panic. A generator held as a **module global** is handled by **Option
 B — gated iff reachable**: it is faulted with the *same* graceful error **only when a spawned task can
 actually reach it** — a direct home-global read, or *any* call / operator overload / protocol hook /
-unresolvable dispatch through which it could transitively be reached (a conservative
-reach analysis at the spawn site: if it cannot prove the task never reaches the generator, it gates).
-An **untouched** generator global does **not** fault. Crucially this decision is made during body
-execution on **both** engines, so the serial and M:N engines agree by construction — an untouched
-generator global runs clean on both, a reached one faults identically on both. (Earlier, the M:N engine
+`print` of a value whose `str(self)` hook reads the generator / unresolvable dispatch through which it
+could transitively be reached (a conservative reach analysis: if it cannot prove the task never reaches
+the generator, it gates). An **untouched** generator global does **not** fault. Crucially this decision
+is made during body execution on **both** engines — at the spawn site *and* re-checked at the lazy
+nursery join (so a global reassigned to a generator between `spawn` and the join is still caught) — so
+the serial and M:N engines agree by construction: an untouched generator global runs clean on both, a
+reached one faults identically on both. (Earlier, the M:N engine
 eagerly snapshotted every module global and faulted on the generator even when no task touched it,
 diverging from the serial engine, which never snapshots; the reach gate + a poisoned snapshot leaf,
 which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.) There is **no** compile-time
