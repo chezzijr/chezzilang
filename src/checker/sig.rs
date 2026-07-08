@@ -2435,7 +2435,7 @@ impl Checker {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
-                        let field_ty = self.structs.get(sname).and_then(|info| {
+                        let field_ty = self.struct_shape(sname).and_then(|info| {
                             info.fields
                                 .iter()
                                 .find(|(f, _)| f == name)
