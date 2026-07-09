@@ -1,9 +1,9 @@
 # examples/ref.chz — Ref[T]: a one-field mutable box (std.ref).
 #
 # Types defined in any imported module are program-global, so `import std.ref` makes `Ref` usable
-# by its bare name. A bare local `int` is captured by value (snapshot), so a closure can't
-# accumulate into it — but a `Ref[T]` is a shared struct, so a closure that closes over it and
-# mutates it through a method persists the change for the caller.
+# by its bare name. Capture is by reference now, so a closure over a bare local `int` can already
+# accumulate into it — `Ref[T]` is the *explicit* first-class box for the cases a bare local can't
+# cover: storing the box in a struct field or collection, or passing it around as a value.
 
 import std.ref
 
@@ -17,7 +17,8 @@ print(r.get())          # 42
 r.update(fn(x: int) -> int: x + 1)
 print(r.get())          # 43
 
-# closure capture: a captured bare `int` would snapshot at 0; the shared Ref accumulates
+# closure capture: a bare captured `int` would also accumulate now (capture is by reference); here
+# the value lives in an explicit first-class `Ref` box
 counter := Ref(0)
 add1 := fn(x: int) -> int: x + 1
 bump := fn(): counter.update(add1)

@@ -1,12 +1,12 @@
 # examples/closure_capture.chz — closure capture showcase (M19 lever #3: positional captures).
 #
-# Capture rule (by binding kind): a LOCAL is captured by value — a snapshot at closure creation,
-# read positionally (a compile-time slot per captured name, resolved like struct fields); a GLOBAL
-# is NOT captured, it is referenced live; a `ref` local is captured by reference (a shared box).
-# (See examples/closure_capture_scopes.chz for the local-vs-global-vs-ref contrast.) This file
-# exercises every LOCAL capture shape so the VM, the interpreter, and `--parallel` stay byte-identical:
+# Capture rule (uniform): every captured name is shared by reference — the closure shares the closest
+# binding and sees/makes writes to it (a captured name is read positionally, a compile-time slot per
+# name resolved like struct fields; a boxed slot indirects through a heap cell so the sharing is live).
+# (See examples/closure_capture_scopes.chz for the by-reference rule end to end.) This file exercises
+# every LOCAL capture shape so the serial VM and the M:N `--parallel` engine stay byte-identical:
 #   - one captured var
-#   - several captured vars (distinct slots, snapshot order)
+#   - several captured vars (distinct slots)
 #   - a nested closure capturing an enclosing closure's capture (CapSrc::Captured)
 #   - a captured mutable heap box (list) mutated through two closures sharing the same handle
 #   - capturing closures as map / filter / fold callbacks

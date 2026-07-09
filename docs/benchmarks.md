@@ -815,3 +815,18 @@ match-with-binding, guard, `==` equal/ne-by-variant/ne-by-enum-type, Display + i
 enums, `?`, and an enum crossing `spawn`+`Channel`) byte-identical on VM / interp / `--parallel`. Full
 suite **1985 green**, conformance **7/7**, clippy `--all-targets -D warnings` clean. VM-only; the frozen
 interp (name-keyed enums) is untouched — parity holds by identical observable output.
+
+## Uniform by-reference capture — 2026-07-09 (perf-neutral by construction)
+
+The capture-by-reference milestone boxes a local into a heap `Obj::Cell` **only when it is captured**
+by a nested closure/`spawn:`/`defer:` — a local no capturing construct closes over stays a plain
+positional slot with zero added cost. **No tracked bench captures anything**, so none box and the
+headline numbers are unmoved: `fib`/`str`/`list`/`primes`/`loop` are recursion / f-strings / list
+push / integer arithmetic (no capturing closures), and the current `run.chz` set (`poly_method` method
+dispatch, `map` = **hashmap** ops not `.map`, `empty` startup) likewise captures nothing. Spot re-run
+this milestone (same machine, `hyperfine`): `poly_method` 1.371 s (4.52× CPython), `map` 168 ms
+(1.98×), `empty`/startup 1.8 ms (**4.95× faster** than CPython) — all consistent with the standing
+gaps, no regression. The cell cost lands **only on captured locals** (one heap alloc + one indirection
+per captured local); a capture-heavy workload would pay it, but the suite has no such bench to isolate
+the delta. A later escape-analysis lever could unbox a cell that provably never escapes its frame.
+Full `--lib` **3221 green**, both-engine parity clean, conformance **7/7**, clippy `-D warnings` clean.

@@ -56,8 +56,8 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
 > chaining, tuple-destructuring `for`, match guards, `std.os.exit`, and runtime stack traces have all
-> landed. Mutable closure capture was **resolved by decision** (kept snapshot-by-value by design, with
-> `std.ref` `Ref[T]` as the idiomatic mutable box). Nothing in this list is still open — see
+> landed. Mutable closure capture **landed as uniform by-reference capture** (2026-07-09, reversing the
+> earlier snapshot-by-value decision; `std.ref` `Ref[T]` stays as the explicit box). Nothing in this list is still open — see
 > [`PROGRESS.md`](../PROGRESS.md).
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
@@ -91,11 +91,13 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in List[(A,B)]`
    (N-var over `List[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.
    `enumerate`/`zip` shipped as pure-Chezzi `std/iter.chz`. `examples/for_tuple.chz`.
-8. ~~**Mutable closure capture**~~ — **RESOLVED by decision.** Capture stays **snapshot-by-value**
-   *intentionally* (a bare scalar is copied when a closure closes over it); the idiomatic mutable box
-   is `std.ref` `Ref[T]` (a one-field struct, shared by reference, mutated through a method). Documented
-   loudly in `std/ref.chz`. So closure counters / accumulators *are* expressible — via `Ref[T]`, not a
-   raw captured `int`.
+8. ~~**Mutable closure capture**~~ — **DONE (reversed 2026-07-09):** capture is now **uniformly by
+   reference** (a closure shares & can edit the closest binding of a captured name), superseding the
+   earlier snapshot-by-value decision. A closure counter / accumulator is now a raw captured local
+   (`n := 0; inc := fn(): n = n + 1`); `Ref[T]` stays for the explicit first-class box and `ref` for
+   by-reference params. Cross-task mutation still requires `Shared[T]` et al. (a plain capture into a
+   `spawn` is an isolated per-task copy — the one deliberate divergence from Go). See
+   [`PROGRESS.md`](../PROGRESS.md) "Uniform by-reference capture".
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
 10. ~~**`std.os.exit(code)` + real exit codes**~~ — **DONE.** `std.os.exit(code)` is a hard, uncatchable
     halt (unwinds past `recover:`, bypasses `defer`), with the code threaded through both run drivers +

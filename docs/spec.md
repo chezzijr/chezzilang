@@ -205,6 +205,18 @@ which replays as `nil` and can never fabricate a cross-heap generator, close tha
 multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
 reusing an exhausted one yields nothing.
 
+> **Migration — capture is now by reference (2026-07-09).** Closure/`defer:`/`spawn:` capture is
+> **uniformly by reference**: a capturing frame shares the closest binding of a captured name and both
+> reads and writes are live (was: a plain local snapshotted by value; a global was already live). A
+> captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). The one place sharing stops is
+> the **task boundary**: a plain captured local sent across `spawn`/`parallel:` is snapshot-copied into
+> an independent per-task cell (F1 — the sole deliberate divergence from Go, byte-identical serial vs
+> M:N), so cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
+> boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`); `ref`/`Ref[T]`
+> stay for by-reference params and the explicit first-class box. This reverses the earlier
+> snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`
+> "Closure capture".
+
 ### Syntax sketch
 
 ```chezzi

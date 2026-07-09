@@ -45,7 +45,8 @@ print(r)                 # 17  (unchanged)
 
 # --- inner-fn capture by reference persists through the box --------------------------------------
 # A nested fn that closes over a `ref` local mutates the SHARED box, so the change is visible to the
-# enclosing scope (a plain `int` local would be captured by value and the writes would be invisible).
+# enclosing scope. (A plain `int` local is now captured by reference too, so its writes would also be
+# visible — `ref` here is about the by-reference *param* below, not about making capture work.)
 counter: ref int = 0
 fn bump_counter():
     counter += 1

@@ -245,8 +245,9 @@ print(r + 100)     # 106 — usable anywhere its value is
   parameter, so it works uniformly through a local fn-value (`g := bump; g(r)`), a **closure** `ref`
   param (`fn(x: ref int)` — a `ref` arg aliases, a by-value arg is the same error as a named fn), and
   a method name shared by structs that disagree on ref-ness (the receiver's type picks the method).
-- **Capture.** An inner fn / closure that closes over a `ref` local shares the box, so mutations
-  through it persist (a plain non-`ref` local is still captured by value).
+- **Capture.** Capture is by reference for every binding now (see "Closure capture" below), so a
+  plain local shares its binding with a closure just like a `ref` local shares its box — you no longer
+  need `ref` to make a closure see or make outer writes. `ref` is still for by-reference **params**.
 - **One transparency gap — string interpolation.** Inside a `"{ ... }"` interpolation, a bare `ref`
   binding is **not** auto-dereferenced (interpolation fragments are parsed out-of-band, after the
   desugar pass), so `"{r}"` prints the underlying box (`Ref(value=…)`), exactly as an explicit
@@ -262,24 +263,36 @@ print(r + 100)     # 106 — usable anywhere its value is
   `Channel` airlock is **rejected** by the checker. To move a value across, deref the ref into a plain
   copy first; for genuine cross-task shared mutation use `Shared[T]`, never `ref`.
 
-### Closure capture — by binding kind
+### Closure capture — uniformly by reference
 
-A closure's capture semantics depend on **what kind of binding** the captured name is. The rule is
-consistency-by-rule, not by uniformity: a *local* dies with its frame, so it is **copied** (snapshot
-at closure creation); a *global* never dies, so it is **referenced live**. Opt a local into
-by-reference sharing with `ref T` (above).
+Capture is **by reference, always**. A closure (and a `spawn:` / `parallel:` / `defer:` block)
+shares the *closest binding* of each captured name: reads see later writes, and a write through the
+capture is visible in the defining scope and across sibling closures. There is no by-binding-kind
+distinction any more — plain local, global, and `ref` local all share the live binding.
 
 | binding | captured as | `x := 10; f := fn() -> int: x; x = 20; f()` |
 |---|---|---|
-| plain local | snapshot at creation | `10` |
-| global | live reference | `20` |
+| plain local | shared (live) | `20` |
+| global | shared (live) | `20` |
 | `ref` local | shared box | `20` |
 
-So a closure over a plain local sees the value *as of* the closure's creation (later writes to the
-local are invisible); a closure over a global reads the module binding's *current* value each call
-(later writes are visible); a closure over a `ref` local shares the box, so writes are visible both
-ways. Across tasks use `Shared[T]` (a `ref`/`Ref` box is non-sendable). Runnable contrast:
-[`examples/closure_capture_scopes.chz`](../examples/closure_capture_scopes.chz).
+Two rules cover everything:
+
+1. **Capture is by reference.** `n := 0; inc := fn(): n = n + 1; inc(); inc(); n` → `2` — the closure
+   mutates the outer binding. A captured **loop variable** rebinds into a **fresh** cell each
+   iteration (matches Go ≥1.22), so `for i in [0,1,2]: fns.push(fn() -> int: i)` yields closures that
+   return `0`, `1`, `2` — not three `2`s. A variable declared *outside* the loop stays one shared cell.
+2. **The task boundary is the one place sharing stops.** Across `spawn` / `parallel:` (a real OS
+   thread) a plain captured local is **snapshot-copied** into an independent per-task cell — writes in
+   the task are **not** visible to the parent. This is the one deliberate divergence from Go
+   (`x := 0; parallel: spawn: x = x + 1; print(x)` → `0`, not `1`); it is the memory-safety line.
+   For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`,
+   which cross the airlock by reference.
+
+If you relied on the old snapshot-at-creation behaviour, take an explicit copy: `snap := x` and
+capture `snap` (a fresh binding nothing else writes is effectively frozen). `ref T` / `Ref[T]` still
+work but are rarely needed for capture now — `ref` remains for by-reference **params** (above).
+Runnable demo: [`examples/closure_capture_scopes.chz`](../examples/closure_capture_scopes.chz).
 
 ### Built-in types
 
@@ -1912,14 +1925,13 @@ top-level error). `std.os.exit` is a hard halt and does **not** run deferred cal
 **Block form `defer:`** — to group several cleanup actions, give `defer` an indented block instead
 of a single call (mirrors `spawn`'s dual form). The body runs **top-to-bottom** at scope exit, but
 is **LIFO as a unit** relative to other `defer`s. Unlike the call form (which has no call-only
-restriction inside the block) the body is ordinary statements — built-ins are fine. Free variables
-are **snapshotted by value at the `defer` point** (consistent with the call form's eager argument
-evaluation), and the block runs in the **same task** — so reads of enclosing locals (even
-non-sendable ones, unlike a `spawn:` block) are allowed. Two rules follow from the by-value snapshot:
-**reassigning** an enclosing local inside the block is an error (it can't be written back through the
-snapshot — declare a fresh binding with `:=`, or use a `Shared[T]`); and a `?` short-circuit inside
-the block is **discarded** (a cleanup body has no error-return contract, like a deferred call whose
-`Err` result is dropped).
+restriction inside the block) the body is ordinary statements — built-ins are fine. The block runs
+in the **same task** and **captures its free variables by reference** (like any closure), so it sees
+their **latest** values when it runs at scope exit — `x := 1; defer: print(x); x = 99` prints `99` —
+and **reassigning** an enclosing local inside the block mutates the shared binding. (This differs from
+the call form `defer f(x)`, whose *arguments* are still evaluated eagerly at the `defer` point.) One
+rule remains: a `?` short-circuit inside the block is **discarded** (a cleanup body has no
+error-return contract, like a deferred call whose `Err` result is dropped).
 
 ```chezzi
 fn handle(conn: Conn):
@@ -2368,9 +2380,11 @@ fn fetch_all(urls: List[str]):
   loops). See [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
-- **Sendability:** captures are copies, **read-only** inside a task (reassign = error); only sendable
-  types (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
-  cross — not closures, native handles, or `Ref`.
+- **Sendability:** a captured local crosses into a task as an **independent per-task copy** (writes
+  in the task stay local — the F1 divergence); reassigning that captured local is fine, but a captured
+  **module global** is frozen and reassigning it is rejected. Only sendable types
+  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
+  cross by reference — not closures, native handles, or `Ref`.
 
 ## 12. Imports & modules  (M4.5)
 
