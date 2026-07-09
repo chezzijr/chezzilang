@@ -6131,7 +6131,7 @@ fn if_elif_else() {
 fn classify(n: int) -> str:
     if n < 0:
         return \"neg\"
-    else if n == 0:
+    elif n == 0:
         return \"zero\"
     else:
         return \"pos\"
@@ -7972,8 +7972,8 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
     assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
 }
 
-/// Chained `else if` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
-/// `if p: a else if q: b else: c` chain (right-associative nesting) selecting each branch.
+/// Chained `elif` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
+/// `if p: a elif q: b else: c` chain (right-associative nesting) selecting each branch.
 /// Byte-identical on VM, interp, and the checked-in `.expected` is the parity gate.
 #[test]
 fn golden_expr_else_if_chz_matches_expected_and_interp() {

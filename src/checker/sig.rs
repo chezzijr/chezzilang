@@ -1540,7 +1540,7 @@ impl Checker {
 
     pub(super) fn check_block(&mut self, block: &Block) {
         // PERSISTENT refine-on-first-use (scope-wide first-use pinning): `check_block` runs every
-        // CONDITIONALLY-executed STATEMENT body (an `if`/`else if`/`else` branch, a `while` body, a
+        // CONDITIONALLY-executed STATEMENT body (an `if`/`elif`/`else` branch, a `while` body, a
         // `defer:` block). A refine-on-first-use narrowing of an OUTER binding performed inside this
         // body PERSISTS — the first mutating op that fixes an empty collection's element/key/value
         // type pins it for the binding's whole scope, even across sibling branches and past the

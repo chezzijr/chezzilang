@@ -12853,7 +12853,7 @@ fn flow_sensitive_map_if_elif_rejects() {
     // The first arm pins cfg to Map[str,int]; the else-if writes a float value. float→int is the
     // LOSSY direction (NOT widened — consistent with one-way int→float widening) → rejected.
     rejects(
-        "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n else if c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
+        "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n elif c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
         "cannot assign float to int",
     );
 }
@@ -12904,7 +12904,7 @@ fn refine_single_arm_then_concrete_use_rejects() {
 fn refine_conflict_in_second_arm_rejects() {
     // Homogeneous first arm pins List[int]; the conflict lands in the SECOND (else-if) arm.
     rejects(
-        "fn main():\n c := 1\n xs := []\n if c == 1:\n  xs.push(1)\n else if c == 2:\n  xs.push(\"s\")\nmain()",
+        "fn main():\n c := 1\n xs := []\n if c == 1:\n  xs.push(1)\n elif c == 2:\n  xs.push(\"s\")\nmain()",
         "argument 1 of 'push': expected int, found str",
     );
 }

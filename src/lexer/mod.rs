@@ -34,6 +34,8 @@ pub enum Token {
     Return,
     If,
     Else,
+    /// `elif` — Python-style single-token else-if. NOT `else`+`if`: a bare `else if` no longer parses.
+    Elif,
     For,
     While,
     In,
@@ -190,6 +192,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("return", Token::Return),
     ("if", Token::If),
     ("else", Token::Else),
+    ("elif", Token::Elif),
     ("for", Token::For),
     ("while", Token::While),
     ("in", Token::In),
@@ -2485,6 +2488,21 @@ mod tests {
     }
 
     #[test]
+    fn lexes_elif_keyword() {
+        assert_eq!(keyword("elif"), Some(Token::Elif));
+        assert_eq!(
+            kinds("elif x:"),
+            vec![
+                Token::Elif,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
     fn kw_table_is_single_source() {
         // Every entry in the table must round-trip through keyword(); a non-keyword is None.
         for (w, t) in KEYWORDS {
@@ -2493,10 +2511,10 @@ mod tests {
         assert_eq!(keyword("notakw"), None);
         // The table must cover the full keyword surface the lexer recognizes.
         for w in [
-            "fn", "return", "if", "else", "for", "while", "in", "break", "continue", "pass",
-            "struct", "enum", "protocol", "type", "newtype", "match", "recover", "defer", "assert",
-            "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "ref",
-            "and", "or", "not", "true", "false",
+            "fn", "return", "if", "else", "elif", "for", "while", "in", "break", "continue",
+            "pass", "struct", "enum", "protocol", "type", "newtype", "match", "recover", "defer",
+            "assert", "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from",
+            "as", "ref", "and", "or", "not", "true", "false",
         ] {
             assert!(
                 KEYWORDS.iter().any(|(k, _)| *k == w),

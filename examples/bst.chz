@@ -21,7 +21,7 @@ fn insert(root: Node?, v: int) -> Node?:
         Some(n):
             if v < n.val:
                 n.left = insert(n.left, v)
-            else if v > n.val:
+            elif v > n.val:
                 n.right = insert(n.right, v)
             return Some(n)
 

@@ -1413,21 +1413,20 @@ impl Parser {
         let mut branches = vec![(cond, body)];
         let mut else_block = None;
         loop {
-            // An indented body lands the cursor on `else` directly (the `Dedent` precedes it); an
-            // inline body (`if x: y`) leaves a `Newline` first, so step over newlines before testing.
+            // An indented body lands the cursor on `elif`/`else` directly (the `Dedent` precedes it);
+            // an inline body (`if x: y`) leaves a `Newline` first, so step over newlines before testing.
             self.skip_newlines();
-            if !self.check(&Token::Else) {
-                break;
-            }
-            self.expect(&Token::Else)?;
-            if self.check(&Token::If) {
-                // `else if` → another branch
-                self.expect(&Token::If)?;
+            if self.check(&Token::Elif) {
+                // `elif` → another branch (Python-style single keyword; `else if` no longer parses)
+                self.expect(&Token::Elif)?;
                 let cond = self.parse_expr()?;
                 let body = self.parse_block()?;
                 branches.push((cond, body));
-            } else {
+            } else if self.check(&Token::Else) {
+                self.expect(&Token::Else)?;
                 else_block = Some(self.parse_block()?);
+                break;
+            } else {
                 break;
             }
         }
@@ -1559,15 +1558,15 @@ impl Parser {
         let cond = self.parse_expr()?;
         self.expect(&Token::Colon)?;
         let then = self.parse_expr()?;
-        self.expect(&Token::Else)?;
-        // `else if ...` chains: recurse into another expression-`if` for the else-branch
+        // `elif ...` chains: recurse into another expression-`if` for the else-branch
         // (right-associative nesting), mirroring statement-form `parse_if`. Otherwise the
-        // plain `else: <expr>` tail.
-        let els = if self.check(&Token::If) {
-            let if_span = self.cur_span();
-            self.expect(&Token::If)?;
-            self.parse_if_expr(if_span)?
+        // plain `else: <expr>` tail — `else` is mandatory (no optional-else leak).
+        let els = if self.check(&Token::Elif) {
+            let elif_span = self.cur_span();
+            self.expect(&Token::Elif)?;
+            self.parse_if_expr(elif_span)?
         } else {
+            self.expect(&Token::Else)?;
             self.expect(&Token::Colon)?;
             self.parse_expr()?
         };
@@ -4496,9 +4495,8 @@ mod tests {
     }
 
     #[test]
-    fn if_else_if_else() {
-        match only("if x > 0:\n    print(1)\nelse if x == 0:\n    print(2)\nelse:\n    print(3)\n")
-        {
+    fn if_elif_else() {
+        match only("if x > 0:\n    print(1)\nelif x == 0:\n    print(2)\nelse:\n    print(3)\n") {
             StmtKind::If {
                 branches,
                 else_block,
@@ -4508,6 +4506,17 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `else if` is no longer valid syntax — `elif` is the one obvious way. The else-block's
+    /// `parse_block` expects `:` and hits the `if` keyword instead.
+    #[test]
+    fn rejects_bare_else_if_stmt() {
+        assert!(
+            parse_err("if a:\n    f()\nelse if b:\n    g()\n")
+                .message
+                .contains(':')
+        );
     }
 
     #[test]
@@ -5196,10 +5205,10 @@ mod tests {
         }
     }
 
-    /// `else if` chains longer than one branch must keep every branch.
+    /// `elif` chains longer than one branch must keep every branch.
     #[test]
-    fn else_if_chain_three_branches() {
-        match only("if a:\n    f()\nelse if b:\n    g()\nelse if c:\n    h()\nelse:\n    i()\n") {
+    fn elif_chain_three_branches() {
+        match only("if a:\n    f()\nelif b:\n    g()\nelif c:\n    h()\nelse:\n    i()\n") {
             StmtKind::If {
                 branches,
                 else_block,
@@ -5523,11 +5532,11 @@ mod tests {
         assert!(parse_err("x := if c: 1\n").message.contains("else"));
     }
 
-    /// `if c: 1 else if d: 2 else: 3` chains in expression position, nesting right-associatively:
+    /// `if c: 1 elif d: 2 else: 3` chains in expression position, nesting right-associatively:
     /// the outer `els` is itself an `IfElse` (`then`=2, `els`=3); the outer `then` is 1.
     #[test]
-    fn if_expr_else_if_chain() {
-        let StmtKind::Let { value, .. } = only("x := if c: 1 else if d: 2 else: 3\n") else {
+    fn if_expr_elif_chain() {
+        let StmtKind::Let { value, .. } = only("x := if c: 1 elif d: 2 else: 3\n") else {
             panic!()
         };
         let ExprKind::IfElse { then, els, .. } = value.kind else {
@@ -5541,13 +5550,23 @@ mod tests {
         assert!(matches!(els.kind, ExprKind::Int(3)));
     }
 
-    /// A chained expression `else if` still demands a final `else` (no optional-else leak).
+    /// A chained expression `elif` still demands a final `else` (no optional-else leak).
     #[test]
-    fn if_expr_else_if_still_requires_final_else() {
+    fn if_expr_elif_still_requires_final_else() {
         assert!(
-            parse_err("x := if c: 1 else if d: 2\n")
+            parse_err("x := if c: 1 elif d: 2\n")
                 .message
                 .contains("else")
+        );
+    }
+
+    /// `else if` is no longer valid in expression position either — `elif` is required.
+    #[test]
+    fn if_expr_rejects_bare_else_if() {
+        assert!(
+            parse_err("x := if c: 1 else if d: 2 else: 3\n")
+                .message
+                .contains(':')
         );
     }
 

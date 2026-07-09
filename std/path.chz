@@ -124,7 +124,7 @@ fn normalize(p: str) -> str:
             n := stack.len()
             if n > 0 and stack[n - 1] != "..":
                 stack.pop()                # resolve against a real preceding element
-            else if not abs:
+            elif not abs:
                 stack.push("..")         # relative: leading ".." is preserved
             # absolute && nothing to pop: ".." past root is dropped
             continue

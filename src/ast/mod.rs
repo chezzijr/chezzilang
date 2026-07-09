@@ -132,7 +132,7 @@ pub enum StmtKind {
         /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the newtype name.
         doc: Option<String>,
     },
-    /// `if` / `else if` / `else`. Each `(cond, body)` is one branch; `else if` adds another
+    /// `if` / `elif` / `else`. Each `(cond, body)` is one branch; `elif` adds another
     /// branch; a final bare `else` is `else_block`.
     If {
         branches: Vec<(Expr, Block)>,
@@ -263,7 +263,7 @@ pub fn match_tail_is_value(arms: &[MatchArm]) -> bool {
 }
 
 /// Is a statement-form `if` in `recover:` TAIL position a value expression? True iff it is total
-/// (has an `else`, so control always reaches a branch) AND at least one `if`/`else if` branch, and
+/// (has an `else`, so control always reaches a branch) AND at least one `if`/`elif` branch, and
 /// every branch body AND the `else` body ends in a value-producing trailing statement
 /// (see [`block_produces_value`]).
 pub fn if_tail_is_value(branches: &[(Expr, Block)], else_block: &Option<Block>) -> bool {

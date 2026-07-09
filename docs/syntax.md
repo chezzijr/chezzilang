@@ -723,7 +723,7 @@ rs := ["2"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))   # ? lands in the closur
 ```chezzi
 if x > 0:
     print("pos")
-else if x == 0:        # 'else if', chainable
+elif x == 0:           # 'elif' (Python-style single keyword), chainable
     print("zero")
 else:
     print("neg")
@@ -1720,8 +1720,8 @@ label := match shape:
 
 # if-expression: inline, ternary-style — `else` is REQUIRED
 sign := if n > 0: "pos" else: "neg"
-# chained: `else if` chains without parentheses (the final `else` stays mandatory)
-grade := if s >= 90: "A" else if s >= 80: "B" else: "F"
+# chained: `elif` chains without parentheses (the final `else` stays mandatory)
+grade := if s >= 90: "A" elif s >= 80: "B" else: "F"
 ```
 
 All arms (and both `if` branches) must agree on a type. When every branch is an `Ok(…)` (no `Err`
@@ -1869,7 +1869,7 @@ calls run **LIFO** (last registered, first run); an unwind crossing several bloc
 defers inner-block-first. The receiver and arguments are evaluated **at the `defer` statement** (Go
 semantics); only the call itself is delayed.
 
-Every indented block is a defer scope: the function body, a loop body, an `if`/`else if`/`else` branch,
+Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
 a `recover:` block, a statement-form `match` arm, and the module top level.
 
 ```chezzi
