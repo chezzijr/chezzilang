@@ -93,8 +93,9 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    `enumerate`/`zip` shipped as pure-Chezzi `std/iter.chz`. `examples/for_tuple.chz`.
 8. ~~**Mutable closure capture**~~ — **DONE (reversed 2026-07-09):** capture is now **uniformly by
    reference** (a closure shares & can edit the closest binding of a captured name), superseding the
-   earlier snapshot-by-value decision. A closure counter / accumulator is now a raw captured local
-   (`n := 0; inc := fn(): n = n + 1`); `Ref[T]` stays for the explicit first-class box and `ref` for
+   earlier snapshot-by-value decision. A counter / accumulator is now a raw captured local, mutated
+   through a `defer:` block or a method call (closures are expression-only — `fn(): n = n + 1` is a
+   parse error, so the write goes in a statement position); `Ref[T]` stays for the explicit box and `ref` for
    by-reference params. Cross-task mutation still requires `Shared[T]` et al. (a plain capture into a
    `spawn` is an isolated per-task copy — the one deliberate divergence from Go). See
    [`PROGRESS.md`](../PROGRESS.md) "Uniform by-reference capture".

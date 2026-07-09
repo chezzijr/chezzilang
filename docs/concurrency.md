@@ -71,12 +71,13 @@ That permanently taxes the common case and hands users the entire data-race bug 
 # Go — compiles, runs, WRONG: 1000 goroutines stomp one int → torn writes, data race
 # counter := 0; for i := 0; i < 1000; i++ { go func() { counter++ }() }
 
-# Chezzi — the bug is unrepresentable
+# Chezzi — the shared-mutation race is unrepresentable
 counter := 0
 parallel:
-    spawn fn(): counter += 1     # ✗ checker error: captures mutable `counter`; not sendable.
-                                 #    captured bindings are read-only copies — use a Channel,
-                                 #    or a Shared[int] for shared mutable state.
+    spawn: counter = counter + 1   # compiles, but each task mutates its OWN isolated copy of
+                                    # `counter` (captured locals cross the airlock by deep copy),
+                                    # so the parent's `counter` stays 0 — no shared write, no race.
+print(counter)                     # 0  — to actually share, use a Shared[int] (below)
 ```
 
 **The trade in one line:** Tier D lets you share → fast sends, but races are your problem. A+C
@@ -254,7 +255,8 @@ n := ch.len()              # current queued count
 > §6c. (`std.concurrency` is a file-less native module that exists only to license these four names;
 > the constructors are lowered by the compiler, so there is zero runtime cost to the import.)
 
-Captured values are **copies** ([§7](#7-sendability)), so a task can't mutate the parent's state. When
+Captured locals **cross into a task as copies** ([§7](#7-sendability)) — same-task capture is by
+reference, but the task boundary deep-copies — so a task can't mutate the parent's state. When
 you genuinely need shared mutable state *across* tasks, the sanctioned answer is **`Shared[T]`** — a
 box whose writes are serialised by a single owner (Elixir's `Agent` trick), so the torn-write race is
 unrepresentable.
@@ -599,8 +601,10 @@ once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `cl
 
 ## 7. Sendability
 
-Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**, and
-captured bindings are **read-only inside the task**.
+Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
+captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
+stays on the isolated copy, invisible to the parent); a captured **module global** is **frozen** and
+reassigning it inside a task is a **compile error** (see below).
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
@@ -609,7 +613,11 @@ captured bindings are **read-only inside the task**.
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
   is plain data).
-- **Not sendable:** closures (bound to a heap), native handles (file/regex/HTTP `Response`/etc.), a
+- **Not sendable:** closures (bound to a heap) — as *data*, i.e. captured into a `spawn:` block,
+  stored in a `Channel`/`Shared`, etc. (One exception: a closure may be the direct **callee** of a
+  `spawn f()` — the task *runs* it — in which case it is **deep-copied** to isolate its captured cells,
+  so its per-task copy matches the M:N engine; this is a distinct execution path, not general
+  sendability.) Also not sendable: native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
   over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a
@@ -632,9 +640,12 @@ captured bindings are **read-only inside the task**.
   and `shutdown` is still caught) — so serial and M:N agree by construction, and a poisoned snapshot
   leaf (which replays as `nil`) guarantees an M:N worker can never obtain a real cross-heap generator
   from a module global.
-- **Read-only captures:** reassigning a captured binding inside a task body is a **compile error** —
-  so the copy semantics are obvious: read captured config freely, but produce output only via a
-  `Channel` or a `Shared`. The checker gates capture and `send`, **with the fix in the error message**.
+- **Captured locals are isolated copies; module globals are frozen.** Reassigning a captured **local**
+  inside a task is fine — it mutates that task's own copy, invisible to the parent (so it can't share
+  state by accident). Reassigning a captured **module global** inside a task is a **compile error** (it
+  would diverge — shared on the serial engine, a worker snapshot on M:N), with the fix in the message
+  (`use a Shared or Channel`). Either way, to produce output visible to the parent, use a `Channel` or a
+  `Shared`. (Reads of both are always fine.)
 - **Cyclic sendables degrade gracefully, not copied.** The airlock copies a sendable by a structural
   deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global snapshot),
   so a value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b; b.next = a`)

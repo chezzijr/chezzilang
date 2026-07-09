@@ -278,16 +278,27 @@ distinction any more — plain local, global, and `ref` local all share the live
 
 Two rules cover everything:
 
-1. **Capture is by reference.** `n := 0; inc := fn(): n = n + 1; inc(); inc(); n` → `2` — the closure
-   mutates the outer binding. A captured **loop variable** rebinds into a **fresh** cell each
-   iteration (matches Go ≥1.22), so `for i in [0,1,2]: fns.push(fn() -> int: i)` yields closures that
-   return `0`, `1`, `2` — not three `2`s. A variable declared *outside* the loop stays one shared cell.
+1. **Capture is by reference.** A closure reads a captured name's *current* value, so a write after
+   the closure is created is visible: `x := 10; f := fn() -> int: x; x = 20; f()` → `20`. A captured
+   **loop variable** rebinds into a **fresh** cell each iteration (matches Go ≥1.22), so
+   `for i in [0,1,2]: fns.push(fn() -> int: i)` yields closures that return `0`, `1`, `2` — not three
+   `2`s. A variable declared *outside* the loop stays one shared cell.
 2. **The task boundary is the one place sharing stops.** Across `spawn` / `parallel:` (a real OS
    thread) a plain captured local is **snapshot-copied** into an independent per-task cell — writes in
    the task are **not** visible to the parent. This is the one deliberate divergence from Go
    (`x := 0; parallel: spawn: x = x + 1; print(x)` → `0`, not `1`); it is the memory-safety line.
    For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`,
-   which cross the airlock by reference.
+   which cross the airlock by reference (see [`concurrency.md`](concurrency.md)). The copy is *why*
+   forgetting `Shared` is a harmless logic bug (an isolated stale value) rather than a data race —
+   Chezzi has no borrow checker to prove a shared mutation is locked, so the safe default is to copy.
+
+**Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
+cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Two ways to write
+through a captured binding: (a) a **method call**, which *is* an expression, so a closure can mutate a
+captured heap value — `bump := fn(): xs.push(2)`; or (b) a **`defer:` / `spawn:` block**, whose body
+*is* statements, so a reassignment is fine there — `defer: n = n + 1`. (A bare `n = n + 1` in the
+enclosing scope always works; it's only *inside a closure value* that you need a method call.) This is
+why the counter/accumulator examples use `defer:` blocks or method mutation, not a `fn(): n = n + 1`.
 
 If you relied on the old snapshot-at-creation behaviour, take an explicit copy: `snap := x` and
 capture `snap` (a fresh binding nothing else writes is effectively frozen). `ref T` / `Ref[T]` still
