@@ -1371,18 +1371,40 @@ engines by the existing goldens; value-first runtime stays covered by `examples/
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
 (non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
 
-**🔨 Uniform by-reference capture — Task A groundwork landed (additive + UNWIRED, 2026-07-09).** Two
-strictly-additive commits, no observable behavior change (nothing emits the ops or reads the set yet;
-full `--lib` suite unchanged at 3201 green). (1) VM cell primitive: `Obj::Cell(Value)` heap box +
-operandless `NewCell`/`CellLoad`/`CellStore` ops (`src/vm/{heap,op,exec}.rs`). Pop-order contract:
-operands are pushed value-THEN-handle, so `CellStore` pops the HANDLE first then the value (mirrors
-`set_index`) — the hard contract the later boxing task depends on. Airlock/cold-path `Obj` matches carry
-`TASK9:` `unreachable!` stubs (no boxed value can reach them until wiring). (2) Compile-time capture
-pre-pass: `captured_names_of_body`/`captured_names_of_closure` compute a frame's boxed-name set
-(this-frame binds ∩ the free names of each directly-nested closure/`defer:`/`spawn:` boundary, free-var
-walk descending through nested closures), stored on `FnComp.boxed_names` (+ `is_boxed_slot`). Populated at
-every fn/closure/spawn-block/defer-block construction; unread this task. Emit-routing, boxing-at-decl,
-loop/defer/airlock semantics are the later auto-task (Tasks 3-9 of the plan).
+**✅ Uniform by-reference capture — Task B WIRED (semantics + airlock, 2026-07-09).** Closure/`defer:`/
+`spawn:` capture is now **uniformly by reference**: a capturing frame shares the closest binding of a
+captured name and sees/makes writes to it (was: plain local snapshotted by value). Builds on Task A's
+`Obj::Cell` primitive + capture pre-pass. Full `--lib` 3215 green, both-engine parity clean, clippy clean.
+- **Boxing + routing (`src/compiler/mod.rs`).** A local/param captured by a nested closure/`defer:`/
+  `spawn:` is a BOXED slot: declared with `NewCell`, read via `CellLoad`, written via `CellStore`. B1
+  safety spine: **exactly four emit fns touch a slot** — `emit_hidden_get`/`emit_hidden_set` (raw +
+  debug-assert the slot is unnamed) and `emit_get_named`/`emit_set_named` (cell-aware); ALL named binding
+  sites (`:=`, tuple/field destructure, `match`/`if let` bind, `wait`-assign, loop var, comprehension
+  acc) route through them, so a bare `GetLocal` on a boxed slot (which the peephole fuser would read as
+  an int → crash) is a compile-time impossibility. `emit_store` gained the captured-write branch
+  (`GetCaptured; CellStore`), fixing the old phantom-global write bug (A2). Captured **loop vars** get a
+  FRESH cell per iteration (C1, Go ≥1.22) via a hidden mechanism slot + `emit_loopvar_refresh`. Pre-pass
+  fix: `find_boundary_free`/`collect_frame_binds` now descend into `Str` interpolation exprs AND
+  expression-position `match`/`if`/comprehension bindings (a capture through either was previously
+  unboxed → `CellLoad`-on-raw crash).
+- **Airlock (`src/vm/{wire,sched,core,mod,stmt}.rs`).** `Obj::Cell` crosses the airlock by DEEP COPY to a
+  fresh independent cell on BOTH engines (`WireValue::Cell`/`SnapValue::Cell` + `has_handle`/
+  `collect_core_gcrefs`/`value_embeds_generator` arms), so a plain captured local sent into a `spawn` is
+  an isolated per-task copy — **F1, the one deliberate divergence from Go** (`spawn: x=x+1; print(x)` →
+  `0`, not `1`; the memory-safety line). Cross-task shared mutation still requires `Shared[T]` (F2/F4).
+- **Checker (`src/checker/sig.rs`, minimal).** Lifted the obsolete by-value gates: a `defer:` block may
+  now reassign a captured local (same task, shared cell); a `spawn:` task may reassign a captured LOCAL
+  (isolated per-task copy — F1) but a captured MODULE GLOBAL stays rejected (frozen under `--parallel`,
+  would diverge serial/M:N). No type-system change (cells are type-invisible; a boxed `x:int` still types
+  as `int`).
+- **Acceptance matrix** `examples/capture_*.chz` (A1/A2/A3/B1/C1/E1/F1/F3/G1/G2/F2/F4/B6) + golden +
+  serial==M:N parity twins. NOTE: the design's statement-form rows (A2/A3 `fn():x=x+1`, F3, G1) are
+  re-expressed via `defer:` blocks / reads, because **Chezzi closures are expression-only** — a closure
+  VALUE cannot reassign a captured scalar cell, so the B2 mutation-divergence is not triggerable and
+  `Proto.has_boxed_captures` deep-cross (plan Task 10) was **intentionally not implemented** (it would
+  regress the documented cooperative `Executor.submit` share-by-reference invariant). **Docs migration
+  (`docs/syntax.md`/`docs/spec.md`) is the follow-up Task C** — this task updated only the in-tree
+  examples it broke (`closure_capture_scopes`, `defer`, `edge_cases`) to keep goldens green.
 
 **✅ Closure-capture model documented + golden-locked, pre-JIT (docs + golden only, 2026-06-30).**
 No engine/checker change — the engines already implement the rule (`src/compiler/mod.rs:1604-1620`

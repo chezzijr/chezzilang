@@ -5106,6 +5106,25 @@ fn golden_capture_spawn_isolated() {
     );
 }
 
+/// B8 (defensive tripwire) — a boxed (captured) local must never surface as a raw cell in a
+/// user-visible operation: `==`, string interpolation, and use as a `Map` key all `CellLoad` first,
+/// yielding the VALUE. A missed `CellLoad` anywhere would show a cell handle here (or crash).
+#[test]
+fn capture_boxed_var_never_surfaces_as_cell() {
+    let src = "\
+fn main():
+    x := 1
+    f := fn() -> int: x
+    print(x == 1)
+    print(\"{x}\")
+    m := Map()
+    m[x] = \"a\"
+    print(m[1])
+    print(f())
+main()";
+    assert_parity_out(src, "true\n1\na\n1\n");
+}
+
 /// G1 — rebinding a captured HEAP variable (`xs = [9]`) routes through the shared cell, not a phantom
 /// global, so the rebind is visible in the owner → `[9]`.
 #[test]
