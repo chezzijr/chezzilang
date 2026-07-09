@@ -5062,6 +5062,29 @@ fn golden_capture_match_bind() {
     );
 }
 
+/// F3 / B2 (parity guard) — a closure capturing a by-reference local (a cell), invoked in a `spawn`
+/// task via `spawn f()`, produces the same result on both engines → `7` (post-join, exact-match).
+///
+/// The design's mutation-form F3 (`f := fn(): x = x + 1`) is NOT expressible in Chezzi: closures are
+/// EXPRESSION-only, so a closure value can never reassign a captured scalar cell. Because a closure
+/// cannot mutate its captured cell, the "shared vs isolated cell" distinction across the airlock is
+/// unobservable — so the B2 serial-vs-M:N divergence cannot arise from a cell-bearing closure, and no
+/// `has_boxed_captures` deep-cross is needed (implementing one would instead REGRESS the documented
+/// cooperative `Executor.submit` share-by-reference invariant — see
+/// `executor_cooperative_submit_shares_captures_by_reference`). This test locks the consistency.
+#[test]
+fn golden_capture_cell_closure_into_spawn() {
+    let src = include_str!("../../examples/capture_cell_closure_into_spawn.chz");
+    let expected = include_str!("../../examples/capture_cell_closure_into_spawn.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N (cell-bearing closure crosses consistently)"
+    );
+}
+
 /// F1 — THE ONE DELIBERATE DIVERGENCE FROM GO: a plain captured local sent into a `spawn` is
 /// snapshot-copied into an independent per-task cell (the airlock deep-copies it), so the task's
 /// `x = x + 1` mutates only its OWN copy — the parent's `x` stays `0` (Go shares+races → `1`). The

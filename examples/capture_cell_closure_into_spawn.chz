@@ -1,0 +1,20 @@
+# Uniform by-reference capture (F3 / B2 parity guard). A closure `f` that captures a by-reference
+# local (`x`, a cell) is invoked inside a `spawn` task via the call form `spawn f()`. Whichever way
+# the task's copy of `f` and its cell are reconstructed, BOTH engines must agree — the print is
+# post-join, so serial == M:N == `7` exactly.
+#
+# NOTE (deliberate, do not "fix"): the design's mutation-form F3 (`f := fn(): x = x + 1`) is NOT
+# expressible in Chezzi — closures are EXPRESSION-only, so a closure value can never reassign a
+# captured scalar cell. Because a closure cannot mutate its captured cell, the "shared vs isolated
+# cell" distinction across the airlock is unobservable, so no serial-vs-M:N divergence can arise from
+# a cell-bearing closure. (A captured closure VALUE is otherwise rejected as non-sendable by the
+# checker; only `spawn f()` / `Executor.submit` cross a callable, and those stay consistent.)
+fn main():
+    x := 7
+    ch := Channel[int]()
+    f := fn(): ch.send(x)
+    parallel:
+        spawn f()
+    print(ch.recv())            # 7 — serial == M:N
+
+main()
