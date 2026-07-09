@@ -78,35 +78,17 @@ struct Parser:
                 return Ok(out)
             if c == "\\":
                 e := self.bump()
-                if e == "\"":
-                    out = out + "\""
-                else:
-                    if e == "\\":
-                        out = out + "\\"
-                    else:
-                        if e == "/":
-                            out = out + "/"
-                        else:
-                            if e == "n":
-                                out = out + "\n"
-                            else:
-                                if e == "t":
-                                    out = out + "\t"
-                                else:
-                                    if e == "r":
-                                        out = out + "\r"
-                                    else:
-                                        if e == "b":
-                                            out = out + chr(8)
-                                        else:
-                                            if e == "f":
-                                                out = out + chr(12)
-                                            else:
-                                                if e == "u":
-                                                    u := self.parse_unicode()?
-                                                    out = out + u
-                                                else:
-                                                    return Err("invalid escape '\\" + e + "'")
+                match e:
+                    "\"": out = out + "\""
+                    "\\": out = out + "\\"
+                    "/": out = out + "/"
+                    "n": out = out + "\n"
+                    "t": out = out + "\t"
+                    "r": out = out + "\r"
+                    "b": out = out + chr(8)
+                    "f": out = out + chr(12)
+                    "u": out = out + self.parse_unicode()?
+                    _: return Err("invalid escape '\\" + e + "'")
             else:
                 out = out + c
 
@@ -237,26 +219,20 @@ fn escape(s: str) -> str:
         n := ord(c)
         if c == "\"":
             out = out + "\\\""
+        elif c == "\\":
+            out = out + "\\\\"
+        elif n == 10:
+            out = out + "\\n"
+        elif n == 9:
+            out = out + "\\t"
+        elif n == 13:
+            out = out + "\\r"
+        elif n == 8:
+            out = out + "\\b"
+        elif n == 12:
+            out = out + "\\f"
         else:
-            if c == "\\":
-                out = out + "\\\\"
-            else:
-                if n == 10:
-                    out = out + "\\n"
-                else:
-                    if n == 9:
-                        out = out + "\\t"
-                    else:
-                        if n == 13:
-                            out = out + "\\r"
-                        else:
-                            if n == 8:
-                                out = out + "\\b"
-                            else:
-                                if n == 12:
-                                    out = out + "\\f"
-                                else:
-                                    out = out + c
+            out = out + c
     return out + "\""
 
 # Render a float the way JSON expects: whole numbers print without a trailing ".0". Only round-trip
