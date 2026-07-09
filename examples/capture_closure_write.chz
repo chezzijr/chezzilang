@@ -1,0 +1,11 @@
+# Uniform by-reference capture (A2): a capturing block that WRITES a captured local mutates the
+# shared binding — previously the write silently leaked to a phantom global and the outer var
+# stayed `0`. (Chezzi closures are expression-only, so the same-thread capturing *statement* body
+# here is a `defer:` block; defers run LIFO at frame exit, so the two increments run before the read.)
+fn demo():
+    x := 0
+    defer: print(x)         # registered first → runs LAST → observes the final value: 2
+    defer: x = x + 1        # a deferred write to the captured local
+    defer: x = x + 1        # another deferred write to the same shared cell
+
+demo()

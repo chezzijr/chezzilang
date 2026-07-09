@@ -2040,12 +2040,9 @@ impl Checker {
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 // `defer:` block — an ordinary nested scope checked in place. Unlike a `spawn:` block
                 // it runs in the same task (no thread airlock), so we push NO `capture_floor`: reads
-                // of enclosing locals (even non-sendable ones) are fine. We DO push a `defer_floor`
-                // so the reassign gate rejects writing back through the by-value snapshot — neither
-                // engine can do that (VM has no `SetCaptured`; the interp would write a discarded
-                // copy), so allowing it would crash the VM and silently no-op the interp.
-                let floor = self.scopes.len();
-                self.defer_floors.push(floor);
+                // of enclosing locals (even non-sendable ones) are fine, and — uniform by-reference
+                // capture — the block shares the enclosing binding's cell, so writing back through a
+                // captured local now mutates the shared cell (A2/A3/E1); no reassign gate is needed.
                 // A `defer:` block compiles to a fresh child proto with an empty loop stack, so a
                 // `break`/`continue` lexically nested in an enclosing loop but placed here is illegal
                 // in both engines. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
@@ -2054,7 +2051,6 @@ impl Checker {
                 let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                 self.check_block(body);
                 self.loop_depth = saved_loop_depth;
-                self.defer_floors.pop();
             }
             StmtKind::Parallel { body } => {
                 self.push_scope();
@@ -2323,13 +2319,9 @@ impl Checker {
                     );
                     return;
                 }
-                if self.is_defer_captured(name) {
-                    self.error(
-                        target.span,
-                        format!("cannot reassign captured binding '{name}' inside a defer: block (the block captures its free variables by value at the defer point; declare a new binding with ':=' instead)"),
-                    );
-                    return;
-                }
+                // Uniform by-reference capture: a `defer:` block runs in the SAME task (no airlock),
+                // so it shares the enclosing binding's cell — reassigning a captured local now
+                // mutates the shared cell and is visible in the owner (A2/A3/E1). No reassign gate.
                 // Editor hover (decl-site): a reassignment's LHS `i` is an `Ident` lvalue the probe
                 // does NOT visit via `infer` (it's the assignment TARGET, not an evaluated expr), so
                 // record its type at the target span here. Probe-gated no-op off the probe; mirrors

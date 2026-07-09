@@ -7908,13 +7908,11 @@ fn defer_block_type_errors_still_caught() {
 }
 
 #[test]
-fn defer_block_reassign_capture_rejected() {
-    // Writing back through the by-value snapshot is rejected (the VM has no `SetCaptured` op; the
-    // interp would write a discarded copy — allowing it would crash one engine and no-op the other).
-    rejects(
-        "fn w():\n    x := 1\n    defer:\n        x = 2\n",
-        "cannot reassign captured binding 'x' inside a defer: block",
-    );
+fn defer_block_reassign_capture_ok() {
+    // Uniform by-reference capture: a `defer:` block runs in the same task and shares the enclosing
+    // binding's cell, so reassigning a captured local is now allowed (it mutates the shared cell,
+    // visible in the owner — A2/A3/E1). No reassign gate.
+    ok("fn w():\n    x := 1\n    defer:\n        x = 2\n");
 }
 
 #[test]

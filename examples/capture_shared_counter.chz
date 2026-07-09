@@ -1,0 +1,11 @@
+# Uniform by-reference capture (A3): sibling capturing blocks share one captured local — three write
+# it, one reads it, and the read sees every write through the shared cell. (Same-thread capturing
+# statement bodies are `defer:` blocks here; defers run LIFO, so the three increments precede the read.)
+fn demo():
+    n := 0
+    defer: print(n)         # the "reader" — registered first, runs LAST → 3
+    defer: n = n + 1        # writer #1
+    defer: n = n + 1        # writer #2
+    defer: n = n + 1        # writer #3
+
+demo()

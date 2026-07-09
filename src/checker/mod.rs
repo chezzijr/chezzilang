@@ -1512,14 +1512,6 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
-    /// Like [`Self::capture_floors`] but for `defer:` block bodies. A `defer:` block runs in the
-    /// **same task** (no airlock), so reads of an enclosing local are fine and non-sendable captures
-    /// are legal — it does NOT engage the read sendability gate that `capture_floors` drives.
-    /// However the block captures its free variables **by value** at the defer point, and neither
-    /// engine can write back through that snapshot (the VM has no `SetCaptured` op; the interp would
-    /// write a discarded copy), so *reassigning* an enclosing local is rejected at the reassign gate.
-    /// Empty outside any `defer:` block.
-    defer_floors: Vec<usize>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
     /// The real `StructInfo` for `std.ref`'s `Ref[T]` (layout + get/set/update methods), harvested

@@ -4987,6 +4987,36 @@ fn golden_capture_outer_write() {
     );
 }
 
+/// A2 — a capturing (`defer:`) block WRITES a captured local; the write hits the shared cell (not a
+/// phantom global), so the two increments are observed → `2`. (Fixes the old `emit_store` bug.)
+#[test]
+fn golden_capture_closure_write() {
+    let src = include_str!("../../examples/capture_closure_write.chz");
+    let expected = include_str!("../../examples/capture_closure_write.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// A3 — sibling capturing blocks share one captured local: three write it, one reads it, all through
+/// the same cell → `3`.
+#[test]
+fn golden_capture_shared_counter() {
+    let src = include_str!("../../examples/capture_shared_counter.chz");
+    let expected = include_str!("../../examples/capture_shared_counter.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.

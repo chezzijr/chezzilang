@@ -11049,14 +11049,14 @@ fn defer_block_form_runs_in_order_lifo_as_unit() {
     );
 }
 
-/// `defer:` block captures its free variables by value at the defer point — a later reassignment
-/// of the local is not seen inside the block (matches `defer f(x)` eager arg eval + the VM's
-/// `MakeClosure` capture). Parity-checked across both engines.
+/// Uniform by-reference capture (E1): a `defer:` block shares the enclosing binding's cell (it runs
+/// in the same task), so it sees the LATEST value of a captured local when it runs at frame exit —
+/// `x` is `2` by then, not the `1` it held at the defer point. Parity-checked across both engines.
 #[test]
-fn defer_block_form_snapshots_by_value() {
+fn defer_block_form_shares_latest_value() {
     assert_defer_scope(
         "fn log(s: str):\n    print(s)\nfn main():\n    x := 1\n    defer:\n        log(\"x={x}\")\n    x = 2\n    log(\"now={x}\")\nmain()\n",
-        "now=2\nx=1\n",
+        "now=2\nx=2\n",
     );
 }
 

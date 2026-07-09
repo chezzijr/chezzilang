@@ -1696,6 +1696,20 @@ impl Compiler {
         match fc.resolve_local(name) {
             // A boxed owner-side local writes through its cell (`emit_set_named`).
             Some(slot) => fc.emit_set_named(slot, span),
+            // Uniform by-reference capture: a `defer:`/`spawn:` frame WRITING a captured name mutates
+            // the shared cell. Captures are uniformly cells (spec B4), so this is `GetCaptured; <val
+            // already on stack>; CellStore` (CellStore pops handle-first, then value — the Task-A
+            // operand convention). This REPLACES the old fall-through to `SetGlobalSlot` (the
+            // phantom-global write bug: A2 printed `0`).
+            None if fc.captures(name) => {
+                let slot = fc
+                    .captured_names
+                    .iter()
+                    .position(|n| n == name)
+                    .expect("captures() implies a capture slot") as u32;
+                fc.emit(Op::GetCaptured(slot), span);
+                fc.emit(Op::CellStore, span);
+            }
             None => fc.emit(Op::SetGlobalSlot(self.global_slot(name)), span),
         }
     }
@@ -4343,6 +4357,24 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
     }
 }
 
+/// Best-effort: the interpolation sub-expressions of a string literal (`"a{x}b"` → the `x` expr).
+/// Used by the capture pre-pass so a name referenced ONLY inside a `{…}` interpolation is still seen
+/// as a free variable (and therefore boxed) — the interpolation exprs are embedded in the `Str`
+/// literal and parsed at compile time, so the AST walk would otherwise miss them. A malformed
+/// interpolation yields no exprs here; the real `compile_str` surfaces that error.
+fn interp_exprs(raw: &str) -> Vec<Expr> {
+    match parse_interpolation(raw, Span { line: 1, col: 1 }) {
+        Ok(chunks) => chunks
+            .into_iter()
+            .filter_map(|c| match c {
+                Chunk::Expr(e, _) => Some(e),
+                Chunk::Lit(_) => None,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Walk `e`, and at each closure boundary add its FREE names to `out` (stopping at the closure).
 /// Descends every non-closure sub-expression to find closures nested in them.
 fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
@@ -4351,9 +4383,14 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
             free_names_expr(body, &bound, out);
         }
+        // A string literal may carry `{…}` interpolation exprs (a closure could nest in one).
+        ExprKind::Str(raw) => {
+            for ie in interp_exprs(raw) {
+                find_boundary_free_expr(&ie, out);
+            }
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
@@ -4554,9 +4591,15 @@ fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>)
                 out.insert(n.clone());
             }
         }
+        // A string literal's `{…}` interpolation exprs reference names too (parsed at compile time,
+        // so absent from the AST) — collect their free names or a capture-via-interpolation is missed.
+        ExprKind::Str(raw) => {
+            for ie in interp_exprs(raw) {
+                free_names_expr(&ie, bound, out);
+            }
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)

@@ -65,7 +65,6 @@ impl Checker {
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
-            defer_floors: Vec::new(),
             current_module_is_stdlib: false,
             ref_seed: None,
             net_socket_seed: None,
@@ -1857,20 +1856,6 @@ impl Checker {
     /// task-local binding (declared inside the task) and a global/function are not captures.
     pub(super) fn is_captured(&self, name: &str) -> bool {
         let Some(&floor) = self.capture_floors.last() else {
-            return false;
-        };
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return i < floor;
-            }
-        }
-        false
-    }
-    /// Whether `name` is an enclosing local captured by the innermost `defer:` block (i.e. bound at a
-    /// scope below the block's floor). Drives ONLY the reassign gate — unlike [`Self::is_captured`]
-    /// it does not gate reads, since a same-task `defer:` block reads enclosing locals freely.
-    pub(super) fn is_defer_captured(&self, name: &str) -> bool {
-        let Some(&floor) = self.defer_floors.last() else {
             return false;
         };
         for i in (0..self.scopes.len()).rev() {
