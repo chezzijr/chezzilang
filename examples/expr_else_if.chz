@@ -1,9 +1,9 @@
-# Chained `else if` in expression position: `if p: a else if q: b else: c` selects the right
+# Chained `elif` in expression position: `if p: a elif q: b else: c` selects the right
 # arm and is a value (no parentheses needed). The chain nests right-associatively, so each guard
 # is tested in order and the trailing `else` is mandatory.
 
 fn grade(score: int) -> str:
-    return if score >= 90: "A" else if score >= 80: "B" else if score >= 70: "C" else: "F"
+    return if score >= 90: "A" elif score >= 80: "B" elif score >= 70: "C" else: "F"
 
 print(grade(95))   # first arm
 print(grade(85))   # second arm
@@ -12,6 +12,6 @@ print(grade(40))   # else
 
 # Also works directly in a let-binding and composed with other expressions.
 n := 0
-label := if n > 0: "positive" else if n < 0: "negative" else: "zero"
+label := if n > 0: "positive" elif n < 0: "negative" else: "zero"
 print(label)
 print("len=" + str(label.len()))

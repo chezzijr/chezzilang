@@ -2545,12 +2545,23 @@ operator forms), `docs/grammar.bnf` (bitwise cascade note — same tokens, no gr
 clean), `gaps.md` (gap #3 → RESOLVED log, open DX items renumbered 1..4). Full suite (2517) +
 conformance + `clippy --all-targets -D warnings` clean.
 
-**✅ DX — chained `else if` in expression-`if` (gaps.md DX gap #2) (2026-06-23).** `a := if p: 1
-else if q: 2 else: 3` parses without parentheses. Parser-only (~10 lines): `parse_if_expr`
-(`src/parser/mod.rs`) now branches after consuming `Else` — if the next token is `If` it captures the
-inner `if` span and recurses into `parse_if_expr` for the else-branch (right-associative nested
-`ExprKind::IfElse`), else the existing `else: <expr>` tail. Final `else` stays mandatory (the recursion
-ends in its own `expect(Else)`). No checker/compiler/interp/VM change — the nested `IfElse` is the same
+**✅ SYNTAX — `else if` → `elif` (Python-style single keyword) (2026-07-09).** The two-token `else if`
+chain is REPLACED by a single `elif` keyword (Python "one obvious way"; `else if` no longer parses — a
+hard parse error). Pure front-end change: lexer (`Token::Elif` + `("elif", Token::Elif)` keyword +
+reserved-words coverage), parser (`parse_if` statement + `parse_if_expr` expression forms key on
+`Token::Elif` instead of `Else`+`If`), `docs/grammar.bnf` (`<elseIf> ::= "ELIF" …`, `<ifExprTail>` gains
+the `"ELIF"` arm), conformance `symbol()` (`Token::Elif => "ELIF"`), editor tmLanguage regenerated. No
+checker/compiler/VM edit → serial-VM == M:N-VM parity by construction (both consume the same AST from one
+front-end). Migrated every `.chz` (examples/, std/, corpus) + embedded fixtures + docs. Tests: lexer
+`lexes_elif_keyword`; parser `if_elif_else`/`elif_chain_three_branches`/`rejects_bare_else_if_stmt` +
+`if_expr_elif_chain`/`if_expr_elif_still_requires_final_else`/`if_expr_rejects_bare_else_if`.
+
+**✅ DX — chained `elif` in expression-`if` (gaps.md DX gap #2) (2026-06-23).** `a := if p: 1
+elif q: 2 else: 3` parses without parentheses. Parser-only (~10 lines): `parse_if_expr`
+(`src/parser/mod.rs`) branches after the `then` — if the next token is `Elif` (was `Else`+`If` before
+the 2026-07-09 `elif` rename above) it captures the `elif` span and recurses into `parse_if_expr` for the
+else-branch (right-associative nested `ExprKind::IfElse`), else the existing `else: <expr>` tail. Final
+`else` stays mandatory (the recursion ends in its own `expect(Else)`). No checker/compiler/interp/VM change — the nested `IfElse` is the same
 AST shape the hand-parenthesized workaround produced, so both engines already evaluate it byte-identically.
 **Parity by construction.** Tests: 2 parser unit tests (chain nests right-associatively; chain still
 requires final else) + golden `examples/expr_else_if.chz` (VM == interp == `.expected`). Docs:

@@ -37,6 +37,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Return => "RETURN",
         Token::If => "IF",
         Token::Else => "ELSE",
+        Token::Elif => "ELIF",
         Token::For => "FOR",
         Token::While => "WHILE",
         Token::In => "IN",

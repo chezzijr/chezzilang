@@ -32,25 +32,25 @@ fn tokenize(src: str) -> List[Tok]!:
         c := src[i]
         if c == " ":
             i += 1
-        else if c == "+":
+        elif c == "+":
             toks.push(Tok.Plus)
             i += 1
-        else if c == "-":
+        elif c == "-":
             toks.push(Tok.Minus)
             i += 1
-        else if c == "*":
+        elif c == "*":
             toks.push(Tok.Star)
             i += 1
-        else if c == "/":
+        elif c == "/":
             toks.push(Tok.Slash)
             i += 1
-        else if c == "(":
+        elif c == "(":
             toks.push(Tok.LParen)
             i += 1
-        else if c == ")":
+        elif c == ")":
             toks.push(Tok.RParen)
             i += 1
-        else if is_digit(c):
+        elif is_digit(c):
             val := 0
             while i < n and is_digit(src[i]):
                 val = val * 10 + digit_val(src[i])

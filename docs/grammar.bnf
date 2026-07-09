@@ -335,9 +335,9 @@
 # ===== control flow =====
 <ifStmt> ::= "IF" <expr> <block>
            | "IF" <expr> <block> <elseChain>
-# zero+ `else if` branches, optionally a final `else`; at least one clause here.
+# zero+ `elif` branches, optionally a final `else`; at least one clause here.
 <elseChain> ::= <elseIf> | <elseFinal> | <elseIf> <elseChain>
-<elseIf>    ::= "ELSE" "IF" <expr> <block>
+<elseIf>    ::= "ELIF" <expr> <block>
 <elseFinal> ::= "ELSE" <block>
 
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
@@ -629,13 +629,13 @@
 # `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple
 # statement whose value is a `matchExpr` is terminated by the arm block's DEDENT, not a trailing
 # NEWLINE (see the parser's expect_stmt_end). `ifExpr` is inline and requires `else`; the tail may
-# chain `else if` (right-associative), so the final `else:` stays mandatory at the end of the chain.
+# chain `elif` (right-associative), so the final `else:` stays mandatory at the end of the chain.
 <matchExpr> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <exprArms> "DEDENT"
 <exprArms>  ::= <exprArm> | <exprArm> <exprArms>
 <exprArm>   ::= <pattern> "COLON" <expr> "NEWLINE"
                 | <pattern> "IF" <expr> "COLON" <expr> "NEWLINE"
-<ifExpr>    ::= "IF" <expr> "COLON" <expr> "ELSE" <ifExprTail>
-<ifExprTail> ::= "COLON" <expr> | <ifExpr>
+<ifExpr>    ::= "IF" <expr> "COLON" <expr> <ifExprTail>
+<ifExprTail> ::= "ELSE" "COLON" <expr> | "ELIF" <expr> "COLON" <expr> <ifExprTail>
 # Panic-recovery boundary: runs a block, yields `Result[T, Error]` (Ok = trailing value, Err = a
 # caught runtime fault). Reuses <block> (inline or indented).
 <recoverExpr> ::= "RECOVER" <block>

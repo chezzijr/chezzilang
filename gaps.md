@@ -294,7 +294,7 @@ list `.concat`/`.extend` + map `.merge`/`.update` · hex/bin/oct literals · tup
 bindings (auto-deref, lowers to `Ref[T]`, parser/checker/desugar only; non-sendable) · **`yield`/
 generators** (VM-only; `fn -> Iterator[T]` may `yield`, call returns a suspendable coroutine driven by
 `.next()`; interp rejects `yield` so two-engine parity waived; `examples/generators_basic.chz`) ·
-**chained `else if` in expression-`if`** (DX gap #2; `parse_if_expr` recurses on `else if` →
+**chained `elif` in expression-`if`** (DX gap #2; `parse_if_expr` recurses on `elif` →
 right-associative nested `IfElse`, final `else` still mandatory; both engines + `.expected` parity via
 `examples/expr_else_if.chz`).
 
