@@ -1841,12 +1841,9 @@ impl Vm {
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
                 Obj::Generator(_) => "generator",
-                // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
-                Obj::Cell(_) => {
-                    unreachable!(
-                        "cell only appears for boxed locals; airlock wired in a later task"
-                    )
-                }
+                // A cell is a transparent by-reference box (never a user-visible operand — reads
+                // `CellLoad` first); defensively report its inner value's type.
+                Obj::Cell(v) => self.type_name(*v),
                 Obj::Iter { .. } => "iterator",
             },
         }
@@ -2020,12 +2017,9 @@ impl Vm {
                     }
                 )),
                 Obj::Generator(_) => Ok("<generator>".to_string()),
-                // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
-                Obj::Cell(_) => {
-                    unreachable!(
-                        "cell only appears for boxed locals; airlock wired in a later task"
-                    )
-                }
+                // A cell is a transparent by-reference box (never a user-visible operand — reads
+                // `CellLoad` first); defensively display its inner value.
+                Obj::Cell(v) => self.display_guarded(*v, depth),
                 Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
         }
@@ -2170,6 +2164,8 @@ impl Vm {
             WireValue::Closure { .. } => "<closure>".to_string(),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
             WireValue::Iter { .. } => "<iterator>".to_string(),
+            // A cell is a transparent box — render its inner value (never user-visible in practice).
+            WireValue::Cell(inner) => self.display_wire(inner),
         }
     }
 
@@ -2487,10 +2483,9 @@ impl Vm {
             }
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),
-            // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
-            Obj::Cell(_) => {
-                unreachable!("cell only appears for boxed locals; airlock wired in a later task")
-            }
+            // A cell is a transparent by-reference box (never a user-visible operand — reads
+            // `CellLoad` first); defensively stringify its inner value.
+            Obj::Cell(v) => self.stringify_into(out, v, span, depth)?,
             Obj::Iter { .. } => out.push_str("<iterator>"),
         }
         Ok(())

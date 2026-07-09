@@ -2312,16 +2312,21 @@ impl Checker {
                     );
                     return;
                 }
-                if self.is_captured(name) {
+                // Uniform by-reference capture: a `spawn:` task gets its OWN per-task copy of a
+                // captured LOCAL (the airlock deep-copies its cell), so reassigning it is allowed —
+                // the write mutates the isolated copy and is NOT visible to the parent (design §4 F1,
+                // the one deliberate divergence from Go). A captured MODULE GLOBAL stays rejected: it
+                // is frozen under `--parallel`, and writing it would diverge serial (shared global)
+                // from M:N (worker's snapshot copy).
+                if self.is_captured(name) && !self.is_local_capture(name) {
                     self.error(
                         target.span,
-                        format!("cannot reassign captured binding '{name}' inside a spawned task (captures are read-only — communicate via a Channel or Shared)"),
+                        format!("cannot reassign the captured module global '{name}' inside a spawned task (module globals are frozen under --parallel — use a Shared or Channel)"),
                     );
                     return;
                 }
-                // Uniform by-reference capture: a `defer:` block runs in the SAME task (no airlock),
-                // so it shares the enclosing binding's cell — reassigning a captured local now
-                // mutates the shared cell and is visible in the owner (A2/A3/E1). No reassign gate.
+                // A `defer:` block runs in the SAME task (no airlock), so it shares the enclosing
+                // binding's cell — reassigning a captured local mutates the shared cell (A2/A3/E1).
                 // Editor hover (decl-site): a reassignment's LHS `i` is an `Ident` lvalue the probe
                 // does NOT visit via `infer` (it's the assignment TARGET, not an evaluated expr), so
                 // record its type at the target span here. Probe-gated no-op off the probe; mirrors

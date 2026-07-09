@@ -1137,6 +1137,10 @@ enum SnapValue {
         type_key: Box<str>,
         inner: Box<SnapValue>,
     },
+    /// An `Obj::Cell` (a by-reference-captured local's box) embedding a handle — its inner snapped
+    /// recursively, replayed as a FRESH independent cell on the worker (design §4 F1). A pure-data
+    /// cell takes the `to_wire` fast path above (`SnapValue::Wire(WireValue::Cell(..))`).
+    Cell(Box<SnapValue>),
     /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
     Map(Vec<(u64, SnapValue, SnapValue)>),
     /// `(cached hash, element)` pairs.

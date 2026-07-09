@@ -81,6 +81,12 @@ pub enum WireValue {
         type_key: Box<str>,
         inner: Box<WireValue>,
     },
+    /// An `Obj::Cell` (a by-reference-captured local's heap box) crossing the airlock by value as a
+    /// DEEP COPY: `from_wire` rebuilds a FRESH independent cell wrapping the wired inner value, so a
+    /// plain captured local sent into a `spawn` task is an isolated per-task copy — never a shared
+    /// mutable box across an OS-thread boundary (the memory-safety line, design §4 F1). `has_handle`
+    /// follows the inner value, so a cell over pure data rides the cheap snapshot fast path.
+    Cell(Box<WireValue>),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
     /// same heap). Covers the callables `Func`/`Closure`/`Module`/`Native` (`Str` now crosses by value
     /// — see [`WireValue::Str`]). At B3.3 the handles whose object cannot cross an OS thread (`Module`
@@ -156,6 +162,9 @@ impl WireValue {
             // (e.g. a captured closure crossing as a nested `Closure` whose own captures aren't
             // cross-safe) — recurse so the invariant stays honest.
             WireValue::Closure { captured, .. } => captured.iter().any(|(_, v)| v.has_handle()),
+            // A cell follows its inner value: a cell over pure data stays on the snapshot fast path;
+            // a cell embedding a handle takes the slow path so its handle is deep-copied.
+            WireValue::Cell(inner) => inner.has_handle(),
             _ => false,
         }
     }

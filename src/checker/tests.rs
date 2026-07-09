@@ -8352,10 +8352,22 @@ fn sendable_recursive_struct_ok() {
 }
 
 #[test]
-fn reassign_captured_binding_in_spawn_block_rejected() {
-    rejects(
+fn reassign_captured_local_in_spawn_block_ok() {
+    // Uniform by-reference capture (F1): a `spawn:` task gets its OWN per-task copy of a captured
+    // LOCAL (the airlock deep-copies its cell), so reassigning it is allowed — the write mutates the
+    // isolated copy and is not visible to the parent (the one deliberate divergence from Go).
+    ok(
         "fn main():\n    counter := 0\n    parallel:\n        spawn:\n            counter = counter + 1\nmain()\n",
-        "cannot reassign captured binding 'counter'",
+    );
+}
+
+#[test]
+fn reassign_captured_module_global_in_spawn_block_rejected() {
+    // A captured MODULE GLOBAL stays rejected inside a spawn: globals are frozen under --parallel, and
+    // writing one would diverge serial (shared global) from M:N (worker's snapshot copy).
+    rejects(
+        "g := 0\nfn main():\n    parallel:\n        spawn:\n            g = g + 1\nmain()\n",
+        "cannot reassign the captured module global 'g'",
     );
 }
 

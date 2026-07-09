@@ -5062,6 +5062,27 @@ fn golden_capture_match_bind() {
     );
 }
 
+/// F1 — THE ONE DELIBERATE DIVERGENCE FROM GO: a plain captured local sent into a `spawn` is
+/// snapshot-copied into an independent per-task cell (the airlock deep-copies it), so the task's
+/// `x = x + 1` mutates only its OWN copy — the parent's `x` stays `0` (Go shares+races → `1`). The
+/// print is post-join, so serial == M:N == `0` exactly (not order-sensitive). This is the
+/// memory-safety line; do NOT "fix" toward Go.
+#[test]
+fn golden_capture_spawn_isolated() {
+    let src = include_str!("../../examples/capture_spawn_isolated.chz");
+    let expected = include_str!("../../examples/capture_spawn_isolated.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(
+        out, expected,
+        "serial vs .expected (isolated → 0, NOT Go's 1)"
+    );
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N (both isolate → 0)"
+    );
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.

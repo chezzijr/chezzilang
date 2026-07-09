@@ -424,6 +424,9 @@ impl Vm {
             Obj::Closure { captured, .. } => captured
                 .iter()
                 .any(|&x| self.value_embeds_generator(x, depth + 1)),
+            // A by-reference-captured local's cell can hold a generator — follow the inner value so
+            // the generator-reach gate covers it (else a boxed generator escapes the gate).
+            Obj::Cell(v) => self.value_embeds_generator(*v, depth + 1),
             _ => false,
         }
     }
@@ -2308,10 +2311,10 @@ impl Vm {
                 Obj::Generator(_) => {
                     return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
                 }
-                // TASK9: cell only appears for boxed locals; airlock wired in a later task.
-                Obj::Cell(_) => {
-                    unreachable!("cell only appears for boxed locals; airlock wired in a later task")
-                }
+                // A `Cell` (a by-reference-captured local's box) crosses the airlock by value as a
+                // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell, so a
+                // plain captured local sent into a task is an isolated copy (design §4 F1).
+                Obj::Cell(v) => WireValue::Cell(Box::new(self.to_wire_depth(*v, depth + 1)?)),
                 // A cursor crosses by value as a DEEP COPY (like `List`): wire each snapshot item and
                 // carry `pos`. It is plain data (a `Vec` + index), so — unlike a generator — it is
                 // genuinely sendable, and `from_wire` rebuilds an independent cursor on the other side.
@@ -2428,6 +2431,12 @@ impl Vm {
             WireValue::NewType { type_key, inner } => {
                 let inner = self.from_wire(*inner);
                 Value::Obj(self.heap.alloc(Obj::NewType { type_key, inner }))
+            }
+            // Rebuild a FRESH, independent `Obj::Cell` on this side (deep copy, never a shared box) —
+            // the receiving task owns its own cell (design §4 F1).
+            WireValue::Cell(inner) => {
+                let inner = self.from_wire(*inner);
+                Value::Obj(self.heap.alloc(Obj::Cell(inner)))
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
             // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
@@ -3059,10 +3068,10 @@ impl Vm {
             // generator (never UB). A generator crossing DIRECTLY (spawn arg / channel / shared) still
             // faults via `to_wire`'s Generator arm, which is unchanged.
             Obj::Generator(_) => SnapValue::Poison,
-            // TASK9: cell only appears for boxed locals; airlock wired in a later task.
-            Obj::Cell(_) => {
-                unreachable!("cell only appears for boxed locals; airlock wired in a later task")
-            }
+            // A `Cell` embedding a handle snaps like a 1-field box (its inner recursively snapped) —
+            // replayed as a FRESH independent cell (design §4 F1). A pure-data cell took the `to_wire`
+            // fast path above (`WireValue::Cell`).
+            Obj::Cell(v) => SnapValue::Cell(Box::new(self.to_snap_depth(v, depth + 1)?)),
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {
@@ -3227,6 +3236,11 @@ impl Vm {
                     type_key: type_key.clone(),
                     inner,
                 }))
+            }
+            // Rebuild a FRESH independent cell on the worker (deep copy, never shared) — design §4 F1.
+            SnapValue::Cell(inner) => {
+                let inner = self.replay_snap(inner);
+                Value::Obj(self.heap.alloc(Obj::Cell(inner)))
             }
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();

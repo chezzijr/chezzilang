@@ -1,0 +1,15 @@
+# Uniform by-reference capture (F1) — THE ONE DELIBERATE DIVERGENCE FROM GO.
+# A plain captured local sent into a `spawn` task is snapshot-copied into an INDEPENDENT per-task
+# cell (the airlock deep-copies it), so the task's `x = x + 1` mutates its OWN isolated copy — the
+# parent's `x` is untouched. Output is `0`, NOT `1`. Go shares the variable and prints `1` (with a
+# data race); Chezzi trades that one sharing point for memory safety: forgetting `Shared` yields an
+# isolated stale copy (a logic bug), never corruption. To share across tasks, use `Shared[T]`.
+# DO NOT "fix" this toward Go — the isolation is the memory-safety line (design §4 F1).
+fn main():
+    x := 0
+    parallel:
+        spawn:
+            x = x + 1
+    print(x)                # 0 (Go would print 1)
+
+main()
