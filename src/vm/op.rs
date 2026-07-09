@@ -284,6 +284,16 @@ pub enum Op {
     /// Construct a `newtype` wrapper: pop ONE inner value off the stack, allocate an
     /// `Obj::NewType { type_key, inner }`. The newtype analogue of a single-field `NewStruct`.
     NewType(String),
+    // ----- cells (uniform by-reference capture, Task A — unwired) -----
+    /// Pop a value, allocate an `Obj::Cell(v)` heap box, push the cell handle. The box-at-decl op for
+    /// a by-reference-captured local (emit wired in a later task).
+    NewCell,
+    /// Pop a cell handle, push its inner value (`Obj::Cell(v) => v`). The boxed-local read.
+    CellLoad,
+    /// Pop the cell HANDLE first, then the value (operands left on the stack as `[val, handle]`),
+    /// write the value into the cell in place. The boxed-local write. The handle-first pop-order is a
+    /// HARD contract mirroring `set_index` (val, key, obj).
+    CellStore,
     /// Construct an enum variant from the top `argc` stack values. `variant_id` (M19 lever #2) is the
     /// dense, compile-time id stamped onto the instance — the enum analogue of `NewStruct`'s `tid`;
     /// `variant` is kept only for the cold arity-mismatch error message. `VID_NONE` for an

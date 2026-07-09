@@ -2308,6 +2308,10 @@ impl Vm {
                 Obj::Generator(_) => {
                     return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
                 }
+                // TASK9: cell only appears for boxed locals; airlock wired in a later task.
+                Obj::Cell(_) => {
+                    unreachable!("cell only appears for boxed locals; airlock wired in a later task")
+                }
                 // A cursor crosses by value as a DEEP COPY (like `List`): wire each snapshot item and
                 // carry `pos`. It is plain data (a `Vec` + index), so — unlike a generator — it is
                 // genuinely sendable, and `from_wire` rebuilds an independent cursor on the other side.
@@ -3055,6 +3059,10 @@ impl Vm {
             // generator (never UB). A generator crossing DIRECTLY (spawn arg / channel / shared) still
             // faults via `to_wire`'s Generator arm, which is unchanged.
             Obj::Generator(_) => SnapValue::Poison,
+            // TASK9: cell only appears for boxed locals; airlock wired in a later task.
+            Obj::Cell(_) => {
+                unreachable!("cell only appears for boxed locals; airlock wired in a later task")
+            }
             // A cursor snapshots like a `List`: its items (recursively snapped) + `pos`. Only a
             // handle-bearing cursor reaches here; a pure-data cursor took the `to_wire` fast path.
             Obj::Iter { items, pos } => {

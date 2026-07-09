@@ -1667,7 +1667,7 @@ main()
 
 // ----- M6c: native function values -----
 
-fn empty_program() -> Program {
+pub(crate) fn empty_program() -> Program {
     Program {
         protos: vec![],
         structs: Default::default(),

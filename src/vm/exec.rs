@@ -1491,6 +1491,38 @@ impl Vm {
                 });
                 self.push(Value::Obj(h));
             }
+            // ----- cells (uniform by-reference capture, Task A — unwired) -----
+            Op::NewCell => {
+                // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op,
+                // same profile as `Op::NewType`).
+                let v = self.pop();
+                let h = self.heap.alloc(Obj::Cell(v));
+                self.push(Value::Obj(h));
+            }
+            Op::CellLoad => {
+                let ch = self.pop();
+                let Value::Obj(h) = ch else {
+                    unreachable!("CellLoad on a non-handle value");
+                };
+                let Obj::Cell(v) = self.heap.get(h) else {
+                    unreachable!("CellLoad on a non-cell object");
+                };
+                let v = *v;
+                self.push(v);
+            }
+            Op::CellStore => {
+                // HARD contract: pop the HANDLE first, then the value (operands are `[val, handle]`).
+                let ch = self.pop();
+                let v = self.pop();
+                let Value::Obj(h) = ch else {
+                    unreachable!("CellStore on a non-handle value");
+                };
+                if let Obj::Cell(slot) = self.heap.get_mut(h) {
+                    *slot = v;
+                } else {
+                    unreachable!("CellStore on a non-cell object");
+                }
+            }
             Op::NewEnum {
                 variant,
                 variant_id,
@@ -1869,4 +1901,44 @@ impl Vm {
     }
 
     // ----- arithmetic / comparison -----
+}
+
+#[cfg(test)]
+mod cell_ops_tests {
+    use super::*;
+    use crate::vm::tests::empty_program;
+
+    fn new_vm() -> Vm {
+        Vm::new(Arc::new(empty_program()))
+    }
+
+    /// `NewCell` boxes the popped value on the heap; `CellLoad` reads the inner value back out.
+    #[test]
+    fn newcell_cellload_roundtrips() {
+        let mut vm = new_vm();
+        let span = Span::default();
+        vm.push(Value::Int(7));
+        vm.step(&Op::NewCell, span).unwrap();
+        vm.step(&Op::CellLoad, span).unwrap();
+        assert_eq!(vm.pop(), Value::Int(7));
+    }
+
+    /// HARD contract: operands are pushed value-THEN-handle (stack `[val, handle]`), so `CellStore`
+    /// pops the handle FIRST, then the value, and writes the value into the cell in place.
+    #[test]
+    fn cellstore_pops_handle_first() {
+        let mut vm = new_vm();
+        let span = Span::default();
+        vm.push(Value::Int(7));
+        vm.step(&Op::NewCell, span).unwrap();
+        let h = vm.pop();
+        // Push value THEN handle: [Int(9), handle].
+        vm.push(Value::Int(9));
+        vm.push(h);
+        vm.step(&Op::CellStore, span).unwrap();
+        // Reload through the same handle → observes the stored value.
+        vm.push(h);
+        vm.step(&Op::CellLoad, span).unwrap();
+        assert_eq!(vm.pop(), Value::Int(9));
+    }
 }

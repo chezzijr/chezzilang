@@ -210,6 +210,12 @@ pub enum Obj {
         type_key: Box<str>,
         inner: Value,
     },
+    /// A heap-allocated mutable CELL — a single boxed `Value` behind a `GcRef`, the runtime home of a
+    /// by-reference-captured local (uniform-capture feature, Task A). Two bindings holding the same
+    /// cell handle observe each other's writes (`CellStore`), exactly like `List`/`bytearray` mutate
+    /// through the shared slot. NON-LEAF: the inner value may be a heap object, so `children()` traces
+    /// it (like a 1-field `NewType`). `Value` is 16B, well within the 88B `Obj` cap.
+    Cell(Value),
     /// A named function (top-level `fn` / method) + the module globals it resolves against.
     Func {
         proto: ProtoId,
@@ -418,6 +424,8 @@ impl Heap {
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             // The wrapped inner value may be a heap object — trace it (like a 1-field struct).
             Obj::NewType { inner, .. } => push(inner),
+            // A boxed local's cell: the inner value may be a heap object — trace it (like `NewType`).
+            Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {
                 captured.iter().for_each(&mut push);

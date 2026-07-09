@@ -1841,6 +1841,12 @@ impl Vm {
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
                 Obj::Generator(_) => "generator",
+                // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
+                Obj::Cell(_) => {
+                    unreachable!(
+                        "cell only appears for boxed locals; airlock wired in a later task"
+                    )
+                }
                 Obj::Iter { .. } => "iterator",
             },
         }
@@ -2014,6 +2020,12 @@ impl Vm {
                     }
                 )),
                 Obj::Generator(_) => Ok("<generator>".to_string()),
+                // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
+                Obj::Cell(_) => {
+                    unreachable!(
+                        "cell only appears for boxed locals; airlock wired in a later task"
+                    )
+                }
                 Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
         }
@@ -2475,6 +2487,10 @@ impl Vm {
             }
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),
+            // TASK9: cell only appears for boxed locals; airlock/cold-path wired in a later task.
+            Obj::Cell(_) => {
+                unreachable!("cell only appears for boxed locals; airlock wired in a later task")
+            }
             Obj::Iter { .. } => out.push_str("<iterator>"),
         }
         Ok(())
