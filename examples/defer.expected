@@ -21,7 +21,7 @@ iter 1 cleanup
 loop exited
 == block form ==
 block_form body, x now 2
-snapshot x = 1
+snapshot x = 2
 single B (registered last)
 block step 1
 block step 2

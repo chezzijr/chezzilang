@@ -56,8 +56,9 @@ fn block_scope():
     log("loop exited")
 
 # --- `defer:` block form: a multi-statement cleanup body. Runs top-to-bottom at scope exit, but is
-#     LIFO *as a unit* relative to other `defer`s. Free variables are snapshotted by value at the
-#     `defer` point (just like `defer f(x)` evaluates its args eagerly). ---
+#     LIFO *as a unit* relative to other `defer`s. A `defer:` block runs in the same task and shares
+#     the enclosing binding by reference, so it sees the LATEST value of a captured local (unlike the
+#     `defer f(x)` CALL form, which evaluates its args eagerly at the defer point). ---
 fn block_form():
     defer log("single A (registered first)")
     defer:
@@ -66,7 +67,7 @@ fn block_form():
     defer log("single B (registered last)")
     x := 1
     defer:
-        log("snapshot x = {x}")   # captures x == 1 here, not its later value
+        log("snapshot x = {x}")   # shares x by reference: sees x == 2 when it runs at scope exit
     x = 2
     log("block_form body, x now {x}")
 

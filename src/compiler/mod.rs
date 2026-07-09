@@ -1331,8 +1331,7 @@ impl Compiler {
             // The selected value is on the stack top — deliver it per the arm's target.
             match &arm.target {
                 WaitTarget::Bind(name) => {
-                    let slot = fc.add_local(name.clone());
-                    fc.emit(Op::SetLocal(slot), arm.span);
+                    fc.emit_decl_named(name.clone(), arm.span);
                 }
                 WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
                 WaitTarget::Assign(target) => self.emit_wait_assign(fc, target, arm.span)?,
@@ -1378,9 +1377,9 @@ impl Compiler {
             ExprKind::Ident(name) => self.emit_store(fc, name, span),
             ExprKind::Field { obj, name, .. } => {
                 let tmp = fc.add_hidden();
-                fc.emit(Op::SetLocal(tmp), span);
+                fc.emit_hidden_set(tmp, span);
                 self.compile_expr(fc, obj)?;
-                fc.emit(Op::GetLocal(tmp), span);
+                fc.emit_hidden_get(tmp, span);
                 let ic = self.next_field_ic(name);
                 fc.emit(
                     Op::SetField {
@@ -1392,10 +1391,10 @@ impl Compiler {
             }
             ExprKind::Index { obj, index } => {
                 let tmp = fc.add_hidden();
-                fc.emit(Op::SetLocal(tmp), span);
+                fc.emit_hidden_set(tmp, span);
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
-                fc.emit(Op::GetLocal(tmp), span);
+                fc.emit_hidden_get(tmp, span);
                 fc.emit(Op::SetIndex, span);
             }
             _ => {
@@ -1610,7 +1609,7 @@ impl Compiler {
                 // stack; the checker has verified arity.
                 self.compile_expr(fc, value)?; // builds the full RHS tuple on the stack
                 let tuple_slot = fc.add_hidden();
-                fc.emit(Op::SetLocal(tuple_slot), span);
+                fc.emit_hidden_set(tuple_slot, span);
                 for (i, t) in targets.iter().enumerate() {
                     self.compile_assign_element(fc, t, tuple_slot, i, span)?;
                 }
@@ -1638,7 +1637,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::Ident(name) => {
-                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit_hidden_get(tuple_slot, span);
                 fc.emit(
                     Op::GetField {
                         name: i.to_string(),
@@ -1650,7 +1649,7 @@ impl Compiler {
             }
             ExprKind::Field { obj, name, .. } => {
                 self.compile_expr(fc, obj)?;
-                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit_hidden_get(tuple_slot, span);
                 fc.emit(
                     Op::GetField {
                         name: i.to_string(),
@@ -1670,7 +1669,7 @@ impl Compiler {
             ExprKind::Index { obj, index } => {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
-                fc.emit(Op::GetLocal(tuple_slot), span);
+                fc.emit_hidden_get(tuple_slot, span);
                 fc.emit(
                     Op::GetField {
                         name: i.to_string(),
@@ -1813,25 +1812,30 @@ impl Compiler {
             self.compile_expr(fc, end)?;
             fc.emit(Op::AsInt, end.span);
             let end_slot = fc.add_hidden();
-            fc.emit(Op::SetLocal(end_slot), span);
+            fc.emit_hidden_set(end_slot, span);
             self.compile_expr(fc, start)?;
             fc.emit(Op::AsInt, start.span);
             let i_slot = fc.add_local(vars[0].clone());
-            fc.emit(Op::SetLocal(i_slot), span);
+            // The COUNTER is a plain int mutated in place: the user var's own slot when it isn't
+            // boxed, else a hidden slot (the boxed user cell is refreshed from it each iteration).
+            let counter = fc.loopvar_raw_slot(i_slot);
+            fc.emit_set_local_raw(counter, span);
 
             let loop_start = fc.here();
-            fc.emit(Op::GetLocal(i_slot), span);
-            fc.emit(Op::GetLocal(end_slot), span);
+            fc.emit_get_local_raw(counter, span);
+            fc.emit_hidden_get(end_slot, span);
             fc.emit(Op::Lt, span);
             let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            // Each iteration binds the user var to a fresh cell (when boxed) from the counter's value.
+            fc.emit_loopvar_refresh(i_slot, counter, span);
             self.compile_defer_scoped_block(fc, body)?;
             // `continue` must land HERE — on the increment, not the condition (re-testing without
             // advancing `i` would loop forever) and not after it (skipping the advance also hangs).
             let inc_target = fc.here();
-            fc.emit(Op::GetLocal(i_slot), span);
+            fc.emit_get_local_raw(counter, span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
-            fc.emit(Op::SetLocal(i_slot), span);
+            fc.emit_set_local_raw(counter, span);
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
@@ -1846,44 +1850,47 @@ impl Compiler {
             // decoder — they differ only in how they produce the `Option`.
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
-            fc.emit(Op::SetLocal(iter_slot), span);
+            fc.emit_hidden_set(iter_slot, span);
             // ONE-TIME pure-`Iterable` conversion: a struct with `iter()` but no `next()` becomes its
             // cursor here (then drives via the seq path); every other iterand (struct-with-`next`,
             // generator, collection) passes through unchanged, so their fast paths are byte-identical.
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IterableToCursor, iter.span);
-            fc.emit(Op::SetLocal(iter_slot), span);
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_set(iter_slot, span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IsChannel, span);
             let chan_mode_slot = fc.add_hidden(); // true ⇒ channel path (ChanRecvOrClosed)
-            fc.emit(Op::SetLocal(chan_mode_slot), span);
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_set(chan_mode_slot, span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IsStruct, span);
             let struct_mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path (next())
-            fc.emit(Op::SetLocal(struct_mode_slot), span);
+            fc.emit_hidden_set(struct_mode_slot, span);
             // A generator result (experimental, VM-only) answers `next()` intrinsically, so it rides
             // the exact same lazy step as a struct iterator: force `struct_mode` true when the iterand
             // is a generator. (Kept off the seq path, which would wrongly snapshot it to a list.)
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IsGenerator, span);
             let not_gen = fc.emit_jump(Op::JumpIfFalse(0), span);
             fc.emit(Op::True, span);
-            fc.emit(Op::SetLocal(struct_mode_slot), span);
+            fc.emit_hidden_set(struct_mode_slot, span);
             fc.patch_jump(not_gen);
             // A builtin cursor (`Obj::Iter`, an `.iter()` result — possibly the one just produced by
             // `IterableToCursor`) also answers `next()` intrinsically. Force `struct_mode` true so a
             // NAMED cursor rides the lazy `next()` step and DRIVES the shared heap cursor in place
             // (advancing the original), keeping `for` consistent with `.next()`/`List()`/`Set()` and
             // with struct iterators — instead of the seq path, which would snapshot a private copy.
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IsCursor, span);
             let not_cursor = fc.emit_jump(Op::JumpIfFalse(0), span);
             fc.emit(Op::True, span);
-            fc.emit(Op::SetLocal(struct_mode_slot), span);
+            fc.emit_hidden_set(struct_mode_slot, span);
             fc.patch_jump(not_cursor);
             // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
-            // lazy paths simply never touch them) and the lazy paths' `Option` result slot.
+            // lazy paths simply never touch them) and the lazy paths' `Option` result slot. When the
+            // loop var is boxed (captured), the loop MECHANISM writes a hidden raw slot and the user
+            // cell is refreshed from it per iteration (fresh cell per iteration, C1).
             let item_slot = fc.add_local(vars[0].clone());
+            let item_raw = fc.loopvar_raw_slot(item_slot);
             let lst_slot = fc.add_hidden();
             let len_slot = fc.add_hidden();
             let idx_slot = fc.add_hidden();
@@ -1891,39 +1898,39 @@ impl Compiler {
 
             // Seq init (skipped on BOTH lazy paths): snapshot the iterand to a list, take its length,
             // start the index at 0. Skip when channel OR struct.
-            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            fc.emit_hidden_get(chan_mode_slot, span);
             let chan_to_check_struct = fc.emit_jump(Op::JumpIfFalse(0), span); // not chan ⇒ check struct
             let chan_skip_init = fc.emit_jump(Op::Jump(0), span); // chan ⇒ skip seq init
             fc.patch_jump(chan_to_check_struct);
-            fc.emit(Op::GetLocal(struct_mode_slot), span);
+            fc.emit_hidden_get(struct_mode_slot, span);
             let to_seq_init = fc.emit_jump(Op::JumpIfFalse(0), span); // not struct ⇒ run seq init
             let struct_skip_init = fc.emit_jump(Op::Jump(0), span); // struct ⇒ skip seq init
             fc.patch_jump(to_seq_init);
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::ListClone, iter.span);
-            fc.emit(Op::SetLocal(lst_slot), span);
-            fc.emit(Op::GetLocal(lst_slot), span);
+            fc.emit_hidden_set(lst_slot, span);
+            fc.emit_hidden_get(lst_slot, span);
             fc.emit(Op::ArrLen, span);
-            fc.emit(Op::SetLocal(len_slot), span);
+            fc.emit_hidden_set(len_slot, span);
             fc.emit(Op::ConstInt(0), span);
-            fc.emit(Op::SetLocal(idx_slot), span);
+            fc.emit_hidden_set(idx_slot, span);
             fc.patch_jump(chan_skip_init);
             fc.patch_jump(struct_skip_init);
 
             let loop_head = fc.here();
             // Channel step: `ChanRecvOrClosed` → opt_slot (blocks on empty-open, None on closed+drained).
-            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            fc.emit_hidden_get(chan_mode_slot, span);
             let chan_to_struct = fc.emit_jump(Op::JumpIfFalse(0), span); // not chan ⇒ struct/seq
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::ChanRecvOrClosed, iter.span);
-            fc.emit(Op::SetLocal(opt_slot), span);
+            fc.emit_hidden_set(opt_slot, span);
             let chan_to_opt = fc.emit_jump(Op::Jump(0), span); // ⇒ shared Option decoder
             fc.patch_jump(chan_to_struct);
             // Struct vs seq split.
-            fc.emit(Op::GetLocal(struct_mode_slot), span);
+            fc.emit_hidden_get(struct_mode_slot, span);
             let to_seq_step = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ seq step
             // ----- struct step: call next() → opt_slot -----
-            fc.emit(Op::GetLocal(iter_slot), span);
+            fc.emit_hidden_get(iter_slot, span);
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
@@ -1933,7 +1940,7 @@ impl Compiler {
                 },
                 span,
             );
-            fc.emit(Op::SetLocal(opt_slot), span);
+            fc.emit_hidden_set(opt_slot, span);
             // ----- shared Option decoder (channel + struct): None ⇒ exit, Some(v) ⇒ bind v -----
             fc.patch_jump(chan_to_opt);
             fc.emit(Op::EnsureEnum(opt_slot), iter.span);
@@ -1952,8 +1959,8 @@ impl Compiler {
             );
             let lazy_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
             fc.patch_jump(none_arm); // not None ⇒ try Some here
-            // `Some(v)`: a match binds the payload into the loop variable's slot and falls through to
-            // the body jump; a non-Some jumps to the trap below.
+            // `Some(v)`: a match binds the payload into the loop variable's MECHANISM slot (`item_raw`)
+            // and falls through to the body jump; a non-Some jumps to the trap below.
             let some_arm = fc.emit_jump(
                 Op::MatchArm {
                     scrut: opt_slot,
@@ -1961,7 +1968,7 @@ impl Compiler {
                     variant_id: crate::vm::op::VID_SOME,
                     enum_name: None,
                     nbind: 1,
-                    bind_start: item_slot,
+                    bind_start: item_raw,
                     next: 0,
                 },
                 iter.span,
@@ -1971,32 +1978,34 @@ impl Compiler {
             fc.emit(Op::MatchNoArm(opt_slot), iter.span); // not Option ⇒ runtime trap
             // ----- seq step: bounds-check the index, read the element -----
             fc.patch_jump(to_seq_step);
-            fc.emit(Op::GetLocal(idx_slot), span);
-            fc.emit(Op::GetLocal(len_slot), span);
+            fc.emit_hidden_get(idx_slot, span);
+            fc.emit_hidden_get(len_slot, span);
             fc.emit(Op::Lt, span);
             let seq_exit = fc.emit_jump(Op::JumpIfFalse(0), span);
-            fc.emit(Op::GetLocal(lst_slot), span);
-            fc.emit(Op::GetLocal(idx_slot), span);
+            fc.emit_hidden_get(lst_slot, span);
+            fc.emit_hidden_get(idx_slot, span);
             fc.emit(Op::GetIndex, span);
-            fc.emit(Op::SetLocal(item_slot), span);
+            fc.emit_set_local_raw(item_raw, span);
 
             fc.patch_jump(to_body);
+            // Fresh cell per iteration for a boxed (captured) loop var (C1); no-op when unboxed.
+            fc.emit_loopvar_refresh(item_slot, item_raw, span);
             self.compile_defer_scoped_block(fc, body)?;
             // `continue` lands HERE — the advance step. For a channel/struct, "advance" is just
             // re-looping (the next lazy step); for a sequence, it's the index increment.
             let inc_target = fc.here();
-            fc.emit(Op::GetLocal(chan_mode_slot), span);
+            fc.emit_hidden_get(chan_mode_slot, span);
             let inc_check_struct = fc.emit_jump(Op::JumpIfFalse(0), span);
             fc.emit(Op::Jump(loop_head), span); // channel: re-loop, ChanRecvOrClosed advances
             fc.patch_jump(inc_check_struct);
-            fc.emit(Op::GetLocal(struct_mode_slot), span);
+            fc.emit_hidden_get(struct_mode_slot, span);
             let to_seq_inc = fc.emit_jump(Op::JumpIfFalse(0), span);
             fc.emit(Op::Jump(loop_head), span); // struct: re-loop, next() advances
             fc.patch_jump(to_seq_inc);
-            fc.emit(Op::GetLocal(idx_slot), span);
+            fc.emit_hidden_get(idx_slot, span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
-            fc.emit(Op::SetLocal(idx_slot), span);
+            fc.emit_hidden_set(idx_slot, span);
             fc.emit(Op::Jump(loop_head), span);
             // All exit paths land here (past the back-edge).
             fc.patch_jump(lazy_exit);
@@ -2012,11 +2021,11 @@ impl Compiler {
             //     loop vars via `GetField(j)` (the destructure-`:=` pattern, generalized to N).
             self.compile_expr(fc, iter)?;
             let src_slot = fc.add_hidden();
-            fc.emit(Op::SetLocal(src_slot), span);
-            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit_hidden_set(src_slot, span);
+            fc.emit_hidden_get(src_slot, span);
             fc.emit(Op::IsMap, span);
             let mode_slot = fc.add_hidden(); // true ⇒ map path
-            fc.emit(Op::SetLocal(mode_slot), span);
+            fc.emit_hidden_set(mode_slot, span);
 
             let lst = fc.add_hidden(); // the list we index (map keys, or the list of tuples)
             let vals = fc.add_hidden(); // map values snapshot (map path only)
@@ -2024,15 +2033,18 @@ impl Compiler {
             let idx = fc.add_hidden();
             let elem = fc.add_hidden(); // the element read at lst[idx]
             let var_slots: Vec<usize> = vars.iter().map(|v| fc.add_local(v.clone())).collect();
+            // Each loop var's MECHANISM slot: a hidden raw slot when boxed (its user cell is refreshed
+            // per iteration), else the user slot itself (byte-identical when uncaptured).
+            let var_raws: Vec<usize> = var_slots.iter().map(|&s| fc.loopvar_raw_slot(s)).collect();
 
             // ----- init: branch map vs list -----
-            fc.emit(Op::GetLocal(mode_slot), span);
+            fc.emit_hidden_get(mode_slot, span);
             let to_list_init = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ list init
             // map init: keys snapshot into `lst`, values snapshot into `vals` (same instant/order)
-            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit_hidden_get(src_slot, span);
             fc.emit(Op::ListClone, iter.span);
-            fc.emit(Op::SetLocal(lst), span);
-            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit_hidden_set(lst, span);
+            fc.emit_hidden_get(src_slot, span);
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
@@ -2042,46 +2054,46 @@ impl Compiler {
                 },
                 span,
             );
-            fc.emit(Op::SetLocal(vals), span);
+            fc.emit_hidden_set(vals, span);
             let after_init = fc.emit_jump(Op::Jump(0), span);
             // list init: clone the list of tuples into `lst`
             fc.patch_jump(to_list_init);
-            fc.emit(Op::GetLocal(src_slot), span);
+            fc.emit_hidden_get(src_slot, span);
             fc.emit(Op::ListClone, iter.span);
-            fc.emit(Op::SetLocal(lst), span);
+            fc.emit_hidden_set(lst, span);
             fc.patch_jump(after_init);
             // common: len = lst.len(), idx = 0
-            fc.emit(Op::GetLocal(lst), span);
+            fc.emit_hidden_get(lst, span);
             fc.emit(Op::ArrLen, span);
-            fc.emit(Op::SetLocal(len), span);
+            fc.emit_hidden_set(len, span);
             fc.emit(Op::ConstInt(0), span);
-            fc.emit(Op::SetLocal(idx), span);
+            fc.emit_hidden_set(idx, span);
 
             let loop_start = fc.here();
-            fc.emit(Op::GetLocal(idx), span);
-            fc.emit(Op::GetLocal(len), span);
+            fc.emit_hidden_get(idx, span);
+            fc.emit_hidden_get(len, span);
             fc.emit(Op::Lt, span);
             let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
             // elem = lst[idx]
-            fc.emit(Op::GetLocal(lst), span);
-            fc.emit(Op::GetLocal(idx), span);
+            fc.emit_hidden_get(lst, span);
+            fc.emit_hidden_get(idx, span);
             fc.emit(Op::GetIndex, span);
-            fc.emit(Op::SetLocal(elem), span);
-            // ----- bind: branch map vs list -----
-            fc.emit(Op::GetLocal(mode_slot), span);
+            fc.emit_hidden_set(elem, span);
+            // ----- bind: branch map vs list (into the MECHANISM slots `var_raws`) -----
+            fc.emit_hidden_get(mode_slot, span);
             let to_list_bind = fc.emit_jump(Op::JumpIfFalse(0), span);
             // map bind: var[0] = key (elem), var[1] = vals[idx]
-            fc.emit(Op::GetLocal(elem), span);
-            fc.emit(Op::SetLocal(var_slots[0]), span);
-            fc.emit(Op::GetLocal(vals), span);
-            fc.emit(Op::GetLocal(idx), span);
+            fc.emit_hidden_get(elem, span);
+            fc.emit_set_local_raw(var_raws[0], span);
+            fc.emit_hidden_get(vals, span);
+            fc.emit_hidden_get(idx, span);
             fc.emit(Op::GetIndex, span);
-            fc.emit(Op::SetLocal(var_slots[1]), span);
+            fc.emit_set_local_raw(var_raws[1], span);
             let after_bind = fc.emit_jump(Op::Jump(0), span);
             // list bind: destructure the tuple element into each loop var (var[j] = elem.j)
             fc.patch_jump(to_list_bind);
-            for (j, &vs) in var_slots.iter().enumerate() {
-                fc.emit(Op::GetLocal(elem), span);
+            for (j, &vr) in var_raws.iter().enumerate() {
+                fc.emit_hidden_get(elem, span);
                 fc.emit(
                     Op::GetField {
                         name: j.to_string(),
@@ -2089,17 +2101,21 @@ impl Compiler {
                     },
                     span,
                 ); // tuple element
-                fc.emit(Op::SetLocal(vs), span);
+                fc.emit_set_local_raw(vr, span);
             }
             fc.patch_jump(after_bind);
 
+            // Fresh cell per iteration for each boxed (captured) loop var (C1); no-op when unboxed.
+            for (i, &vs) in var_slots.iter().enumerate() {
+                fc.emit_loopvar_refresh(vs, var_raws[i], span);
+            }
             self.compile_defer_scoped_block(fc, body)?;
             // `continue` lands HERE — the index increment, so the loop advances instead of looping.
             let inc_target = fc.here();
-            fc.emit(Op::GetLocal(idx), span);
+            fc.emit_hidden_get(idx, span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
-            fc.emit(Op::SetLocal(idx), span);
+            fc.emit_hidden_set(idx, span);
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
@@ -2135,8 +2151,9 @@ impl Compiler {
             CompKind::Map => fc.emit(Op::NewMap(0), span),
         }
         let acc_name = "$comp".to_string();
-        let acc_slot = fc.add_local(acc_name.clone());
-        fc.emit(Op::SetLocal(acc_slot), span);
+        // `$comp` is synthesized, never referenced by a user closure, so it is never boxed — the named
+        // emit helpers reduce to plain `SetLocal`/`GetLocal` for it.
+        let acc_slot = fc.emit_decl_named(acc_name.clone(), span);
 
         let acc = Expr {
             kind: ExprKind::Ident(acc_name),
@@ -2209,7 +2226,7 @@ impl Compiler {
         };
         self.compile_for(fc, vars, iter, inner, span)?;
         // The comprehension's value is the finished accumulator.
-        fc.emit(Op::GetLocal(acc_slot), span);
+        fc.emit_get_named(acc_slot, span);
         fc.end_scope();
         Ok(())
     }
@@ -2372,7 +2389,7 @@ impl Compiler {
         fc.begin_scope();
         self.compile_expr(fc, scrutinee)?;
         let scrut = fc.add_hidden();
-        fc.emit(Op::SetLocal(scrut), span);
+        fc.emit_hidden_set(scrut, span);
         // Variant matches keep the `EnsureEnum` guard so a non-enum scrutinee (possible only when
         // the checker couldn't infer the type) is a clean runtime error, not a panic. Tuple matches
         // need no such guard.
@@ -2462,13 +2479,13 @@ impl Compiler {
                     );
                     fails.push(arm_op);
                 } else {
-                    let s = fc.add_local(name.clone());
-                    fc.emit(Op::GetLocal(scrut), span);
-                    fc.emit(Op::SetLocal(s), span);
+                    // Bind the whole scrutinee to `name` (a fresh cell when captured).
+                    fc.emit_hidden_get(scrut, span);
+                    fc.emit_decl_named(name.clone(), span);
                 }
             }
             Pattern::Literal(lit) => {
-                fc.emit(Op::GetLocal(scrut), span);
+                fc.emit_hidden_get(scrut, span);
                 emit_lit_const(fc, lit, span);
                 fc.emit(Op::Eq, span);
                 fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
@@ -2478,7 +2495,7 @@ impl Compiler {
             }
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
-                    fc.emit(Op::GetLocal(scrut), span);
+                    fc.emit_hidden_get(scrut, span);
                     fc.emit(
                         Op::GetField {
                             name: i.to_string(),
@@ -2487,7 +2504,7 @@ impl Compiler {
                         span,
                     ); // tuple element `.i`
                     let elem = fc.add_hidden();
-                    fc.emit(Op::SetLocal(elem), span);
+                    fc.emit_hidden_set(elem, span);
                     self.emit_pattern(fc, sub, elem, fails, span)?;
                 }
             }
@@ -2497,14 +2514,18 @@ impl Compiler {
                 enum_name,
                 ..
             } => {
-                // One slot per payload element. A plain `Ident` *binding* names its slot directly (so
-                // `Some(c)` binds `c` with no copy); a nested nullary-variant `Ident` (e.g. the
-                // `None` in `Some(None)`) and any other sub-pattern get a hidden slot to test/
-                // destructure afterwards.
+                // One slot per payload element, written positionally by `MatchArm`. An UNBOXED plain
+                // `Ident` binding names its slot directly (so `Some(c)` binds `c` with no copy); a
+                // BOXED plain ident (captured by a closure in the arm) needs a cell, but `MatchArm`
+                // writes a raw value — so it gets a hidden RAW slot here and the user cell is bound
+                // from it after the arm. A nested nullary-variant `Ident` (e.g. the `None` in
+                // `Some(None)`) and any other sub-pattern also get a hidden slot to test/destructure.
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
+                        Pattern::Ident(n, _)
+                            if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) =>
+                        {
                             fc.add_local(n.clone());
                         }
                         _ => {
@@ -2530,10 +2551,17 @@ impl Compiler {
                 );
                 fails.push(arm_op);
                 for (i, b) in bindings.iter().enumerate() {
-                    let is_plain_binding =
-                        matches!(b, Pattern::Ident(n, _) if !self.is_nullary_variant(None, n));
-                    if !is_plain_binding {
-                        self.emit_pattern(fc, b, bind_start + i, fails, span)?;
+                    match b {
+                        // Unboxed plain binding — the VM wrote it straight into its user slot.
+                        Pattern::Ident(n, _)
+                            if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) => {}
+                        // Boxed plain binding — bind the user cell from the raw slot the VM wrote.
+                        Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
+                            fc.emit_hidden_get(bind_start + i, span);
+                            fc.emit_decl_named(n.clone(), span);
+                        }
+                        // Nested / nullary-variant sub-pattern: test/destructure the raw slot.
+                        _ => self.emit_pattern(fc, b, bind_start + i, fails, span)?,
                     }
                 }
             }
@@ -2545,7 +2573,17 @@ impl Compiler {
                 let names = self.or_binding_names(alts);
                 let canon: Vec<(String, usize)> = names
                     .iter()
-                    .map(|n| (n.clone(), fc.add_local(n.clone())))
+                    .map(|n| {
+                        let slot = fc.add_local(n.clone());
+                        // A BOXED canonical binding needs its cell allocated up front — each
+                        // alternative `CellStore`s its value into this one shared cell.
+                        if fc.is_boxed_slot(slot) {
+                            fc.emit(Op::Nil, span);
+                            fc.emit(Op::NewCell, span);
+                            fc.emit_set_local_raw(slot, span);
+                        }
+                        (n.clone(), slot)
+                    })
                     .collect();
                 let mut matched_jumps = Vec::new();
                 for (idx, alt) in alts.iter().enumerate() {
@@ -2554,12 +2592,15 @@ impl Compiler {
                     let mut alt_fails = Vec::new();
                     self.emit_pattern(fc, alt, scrut, &mut alt_fails, span)?;
                     // Copy this alternative's bindings into the canonical slots, then jump to the
-                    // shared matched-label (fall-through past the remaining alternatives).
+                    // shared matched-label (fall-through past the remaining alternatives). Reading via
+                    // `emit_get_named` (CellLoad if the alt's binding is boxed) and writing via
+                    // `emit_set_named` (CellStore into the canonical cell) keeps the unboxed case
+                    // byte-identical to a plain `GetLocal`/`SetLocal`.
                     for (name, slot) in &canon {
                         let src = fc.resolve_local(name).expect("alt binds the agreed name");
                         if src != *slot {
-                            fc.emit(Op::GetLocal(src), span);
-                            fc.emit(Op::SetLocal(*slot), span);
+                            fc.emit_get_named(src, span);
+                            fc.emit_set_named(*slot, span);
                         }
                     }
                     matched_jumps.push(fc.emit_jump(Op::Jump(0), span));
@@ -2604,13 +2645,13 @@ impl Compiler {
         fc.begin_scope();
         self.compile_expr(fc, scrutinee)?;
         let scrut = fc.add_hidden();
-        fc.emit(Op::SetLocal(scrut), span);
+        fc.emit_hidden_set(scrut, span);
         let mut end_jumps = Vec::new();
         for arm in arms {
             match arm.pattern() {
                 Pattern::Literal(lit) => {
                     fc.begin_scope();
-                    fc.emit(Op::GetLocal(scrut), scrutinee.span);
+                    fc.emit_hidden_get(scrut, scrutinee.span);
                     emit_lit_const(fc, lit, span);
                     fc.emit(Op::Eq, span);
                     let mut fails = vec![fc.emit_jump(Op::JumpIfFalse(0), span)];
@@ -2655,9 +2696,8 @@ impl Compiler {
                 // capturing the whole scrutinee (irrefutable, like `_` but named).
                 Pattern::Variant { name, bindings, .. } if bindings.is_empty() => {
                     fc.begin_scope();
-                    let s = fc.add_local(name.clone());
-                    fc.emit(Op::GetLocal(scrut), span);
-                    fc.emit(Op::SetLocal(s), span);
+                    fc.emit_hidden_get(scrut, span);
+                    fc.emit_decl_named(name.clone(), span);
                     let mut fails = Vec::new();
                     self.emit_guard(fc, arm.guard(), &mut fails)?;
                     run_body(self, fc, arm.body())?;
@@ -2680,7 +2720,7 @@ impl Compiler {
                         let last = idx + 1 == alts.len();
                         match alt {
                             Pattern::Literal(lit) => {
-                                fc.emit(Op::GetLocal(scrut), scrutinee.span);
+                                fc.emit_hidden_get(scrut, scrutinee.span);
                                 emit_lit_const(fc, lit, span);
                                 fc.emit(Op::Eq, span);
                                 if last {
@@ -4137,12 +4177,12 @@ fn emit_range_test(
     span: Span,
 ) {
     // scrut >= start
-    fc.emit(Op::GetLocal(scrut), span);
+    fc.emit_hidden_get(scrut, span);
     fc.emit(Op::ConstInt(start), span);
     fc.emit(Op::GtEq, span);
     fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
     // scrut < end
-    fc.emit(Op::GetLocal(scrut), span);
+    fc.emit_hidden_get(scrut, span);
     fc.emit(Op::ConstInt(end), span);
     fc.emit(Op::Lt, span);
     fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
@@ -4233,7 +4273,12 @@ fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
 fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
     for s in stmts {
         match &s.kind {
-            StmtKind::Let { names, .. } => out.extend(names.iter().cloned()),
+            StmtKind::Let { names, value, .. } => {
+                out.extend(names.iter().cloned());
+                // A binding inside the VALUE expression (a `match`/`if`/comprehension/`recover`
+                // expression) is a frame-level local too — collect it so it boxes when captured.
+                collect_frame_binds_expr(value, out);
+            }
             // A nested named fn binds its name in this frame (its body is a separate frame).
             StmtKind::Fn(decl) => {
                 out.insert(decl.name.clone());
@@ -4242,28 +4287,44 @@ fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
                 branches,
                 else_block,
             } => {
-                for (_, body) in branches {
+                for (cond, body) in branches {
+                    collect_frame_binds_expr(cond, out);
                     collect_frame_binds(body, out);
                 }
                 if let Some(eb) = else_block {
                     collect_frame_binds(eb, out);
                 }
             }
-            StmtKind::For { vars, body, .. } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
                 out.extend(vars.iter().cloned());
+                collect_frame_binds_expr(iter, out);
                 collect_frame_binds(body, out);
             }
-            StmtKind::While { body, .. } => collect_frame_binds(body, out),
-            StmtKind::Match { arms, .. } => {
+            StmtKind::While { cond, body } => {
+                collect_frame_binds_expr(cond, out);
+                collect_frame_binds(body, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                collect_frame_binds_expr(scrutinee, out);
                 for arm in arms {
                     pattern_binds(&arm.pattern, out);
+                    if let Some(g) = &arm.guard {
+                        collect_frame_binds_expr(g, out);
+                    }
                     collect_frame_binds(&arm.body, out);
                 }
             }
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
-                    if let WaitTarget::Bind(n) = &arm.target {
-                        out.insert(n.clone());
+                    collect_frame_binds_expr(&arm.chan, out);
+                    match &arm.target {
+                        WaitTarget::Bind(n) => {
+                            out.insert(n.clone());
+                        }
+                        WaitTarget::Assign(e) => collect_frame_binds_expr(e, out),
+                        WaitTarget::Discard => {}
                     }
                     collect_frame_binds(&arm.body, out);
                 }
@@ -4272,6 +4333,24 @@ fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
                 }
             }
             StmtKind::Parallel { body } => collect_frame_binds(body, out),
+            StmtKind::Assign { target, value, .. } => {
+                collect_frame_binds_expr(target, out);
+                collect_frame_binds_expr(value, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Yield(e) | StmtKind::Expr(e) => {
+                collect_frame_binds_expr(e, out)
+            }
+            StmtKind::Assert { cond, msg } => {
+                collect_frame_binds_expr(cond, out);
+                if let Some(m) = msg {
+                    collect_frame_binds_expr(m, out);
+                }
+            }
+            // `defer f(x)` / `spawn f(x)` evaluate the call in THIS frame, so a binding inside the
+            // call expression is a frame local. The BLOCK forms are separate frames (skipped).
+            StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
+                collect_frame_binds_expr(e, out)
+            }
             // `defer:` / `spawn:` blocks are SEPARATE frames — their binds are not this frame's.
             // Everything else binds no frame-local name.
             _ => {}
@@ -4719,9 +4798,15 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
     match &e.kind {
         // A nested closure is a separate frame — its binds are not this frame's.
         ExprKind::Closure { .. } => {}
+        // A `{…}` interpolation expr may itself bind (a `match`/comprehension expression); its binds
+        // land in this frame (the interpolation is compiled inline).
+        ExprKind::Str(raw) => {
+            for ie in interp_exprs(raw) {
+                collect_frame_binds_expr(&ie, out);
+            }
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
@@ -5009,6 +5094,13 @@ impl FnComp {
             .is_some_and(|l| self.boxed_names.contains(&l.name))
     }
 
+    /// Will a local NAMED `name` be boxed if declared now? (Same predicate as [`is_boxed_slot`] but by
+    /// name — for deciding a binding's slot strategy BEFORE the slot is allocated, e.g. a `match`
+    /// variant binding the VM writes positionally.)
+    fn is_boxed_name(&self, name: &str) -> bool {
+        self.boxed_names.contains(name)
+    }
+
     // ----- slot emit routing (B1: exactly these are the only ways to touch a slot) -----
     //
     // A boxed slot holds an `Obj::Cell` HANDLE, never the value directly. A bare `GetLocal` on a
@@ -5073,8 +5165,8 @@ impl FnComp {
 
     /// Declare a NEW named local `name` from the value currently on the stack top, returning its
     /// slot. A boxed name wraps the value in a FRESH cell (`NewCell`) and stores the handle; a plain
-    /// name stores the value directly. Used at every named-binding site (`:=`, destructuring, loop
-    /// var, `match`/`if let` bind, wait-assign) — each fresh binding gets its own cell.
+    /// name stores the value directly. Used at every named-binding site (`:=`, destructuring,
+    /// `match`/`if let` bind, wait-assign) — each fresh binding gets its own cell.
     fn emit_decl_named(&mut self, name: String, span: Span) -> usize {
         let slot = self.add_local(name);
         if self.is_boxed_slot(slot) {
@@ -5082,6 +5174,34 @@ impl FnComp {
         }
         self.emit_set_local_raw(slot, span);
         slot
+    }
+
+    /// The MECHANISM slot for a loop variable `user`: a fresh HIDDEN slot when `user` is boxed (the
+    /// loop bookkeeping — `MatchArm` binds / index reads — writes the raw value here, and the user
+    /// cell is refreshed from it per iteration by [`emit_loopvar_refresh`]), else `user` itself
+    /// (byte-identical to before boxing when the loop var isn't captured).
+    fn loopvar_raw_slot(&mut self, user: usize) -> usize {
+        if self.is_boxed_slot(user) {
+            self.add_hidden()
+        } else {
+            user
+        }
+    }
+
+    /// Per-iteration fresh-cell wrap for a boxed loop variable (C1, Go ≥1.22): read the mechanism's
+    /// raw slot, box it in a FRESH cell, store the handle in the user slot — so each iteration's
+    /// closure captures its OWN cell. No-op when `user` isn't boxed (then `raw == user`). Emitted at
+    /// the top of the loop body, after the item value is produced, before the body runs.
+    fn emit_loopvar_refresh(&mut self, user: usize, raw: usize, span: Span) {
+        if self.is_boxed_slot(user) {
+            debug_assert_ne!(
+                user, raw,
+                "boxed loop var needs a separate raw mechanism slot"
+            );
+            self.emit_get_local_raw(raw, span);
+            self.emit(Op::NewCell, span);
+            self.emit_set_local_raw(user, span);
+        }
     }
 
     /// Patch a previously-emitted jump to land at an explicit `target` instruction index (used for

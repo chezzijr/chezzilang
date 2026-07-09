@@ -1,0 +1,10 @@
+# Uniform by-reference capture (B1 coverage): a tuple-destructured local is boxed when captured, so a
+# closure over it shares the binding and sees a later write.
+fn main():
+    a, b := (1, 2)
+    getb := fn() -> int: b
+    b = 20
+    print(a)                # 1
+    print(getb())           # 20
+
+main()

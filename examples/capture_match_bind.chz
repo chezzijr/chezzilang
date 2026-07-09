@@ -1,0 +1,10 @@
+# Uniform by-reference capture (B1 coverage): a `match`-bound payload local is boxed when captured by
+# a closure in the arm, so the closure can carry it out of the arm (escaping capture through a cell).
+fn main():
+    r := Ok(5)
+    f := match r:
+        Ok(v): fn() -> int: v
+        Err(e): fn() -> int: 0
+    print(f())              # 5
+
+main()

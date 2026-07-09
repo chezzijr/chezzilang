@@ -5032,6 +5032,36 @@ fn golden_capture_nested_grandparent() {
     );
 }
 
+/// B1 coverage — a tuple-destructured local is boxed when captured; a closure over it sees a later
+/// write through the shared cell → `1` then `20`.
+#[test]
+fn golden_capture_destructure() {
+    let src = include_str!("../../examples/capture_destructure.chz");
+    let expected = include_str!("../../examples/capture_destructure.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// B1 coverage — a `match`-bound payload local captured by a closure in the arm boxes and escapes the
+/// arm through the cell → `5`.
+#[test]
+fn golden_capture_match_bind() {
+    let src = include_str!("../../examples/capture_match_bind.chz");
+    let expected = include_str!("../../examples/capture_match_bind.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.
