@@ -24,6 +24,7 @@ use crate::vm::op::{
     StructDef, SuiteInfo, VariantDef, WaitMeta,
 };
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 mod peephole;
 
@@ -950,6 +951,8 @@ impl Compiler {
     /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
     fn compile_fn(&mut self, decl: &FnDecl, _is_method: bool) -> Result<ProtoId, CompileError> {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
+        // Uniform by-reference capture (Task A): compute this frame's boxed-name set (unwired).
+        fc.boxed_names = captured_names_of_body(&decl.body, &decl.params);
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         // One-way int→float widening: a `-> float` return type coerces every `return` value.
@@ -1494,6 +1497,8 @@ impl Compiler {
                 let entries = fc.snapshot_entries();
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
+                // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
+                child.boxed_names = captured_names_of_body(body, &[]);
                 child.captured_names = captured_names;
                 // M-C: a `spawn:` block is its own function body — a nested bare `spawn` inside it
                 // binds to the block's *own* implicit nursery, joined when the task returns.
@@ -3315,6 +3320,8 @@ impl Compiler {
                 let entries = fc.snapshot_entries();
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
+                // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
+                child.boxed_names = captured_names_of_body(body, &[]);
                 child.captured_names = captured_names;
                 // M-C: a `defer:` block is its own function body (it runs as a closure in its own
                 // frame at frame exit) — a bare `spawn` inside it binds to the block's own implicit
@@ -3937,6 +3944,8 @@ impl Compiler {
         let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
         let mut child = FnComp::new("<closure>".to_string(), params.len(), false);
+        // Uniform by-reference capture (Task A): this closure's own boxed-name set (unwired).
+        child.boxed_names = captured_names_of_closure(body, params);
         child.captured_names = captured_names;
         for p in params {
             child.add_local(p.name.clone());
@@ -4147,6 +4156,604 @@ fn block_has_defer(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s.kind, StmtKind::Defer(_)))
 }
 
+// ===== Uniform by-reference capture (Task A): the compile-time capture pre-pass. =====
+// Purely syntactic, name-based over-approximation (spec B7). Computes THIS frame's local names that
+// are captured by a directly-nested capture boundary (a closure body, `defer:` block, or `spawn:`
+// block) so their slots must be boxed (`Obj::Cell`). Never DROPS a captured name (the free-var side
+// is conservative); intersects with this frame's binds so only slots that live in this frame box.
+// UNWIRED this task — nothing reads the result yet (emit-routing + boxing land in a later task).
+
+/// Compute this frame's boxed-name set for `body` (its params are `params`). See the section comment.
+fn captured_names_of_body(body: &Block, params: &[crate::ast::Param]) -> HashSet<String> {
+    // 1. Free names of every DIRECTLY-nested capture boundary. The free-var walk descends THROUGH
+    //    inner closures subtracting their binds, so a name captured two levels down still surfaces
+    //    here (via the direct child's free set) — do NOT flat-collect deeper boundaries as direct
+    //    children (that would leak a middle closure's own locals into this frame's set).
+    let mut captured = HashSet::new();
+    find_boundary_free_block(body, &mut captured);
+    // 2. Names bound in THIS frame: params + every binding reachable through this body's control
+    //    flow, but NOT inside a nested capture boundary (those are separate frames).
+    let mut frame_binds: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_frame_binds(body, &mut frame_binds);
+    // 3. A boxed local is a captured name whose slot lives in THIS frame.
+    captured.retain(|n| frame_binds.contains(n));
+    captured
+}
+
+/// Collect the binding names of a `match`/tuple/variant [`Pattern`] into `out`.
+fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
+    match p {
+        Pattern::Ident(n, _) => {
+            out.insert(n.clone());
+        }
+        Pattern::Variant { bindings, .. } => bindings.iter().for_each(|b| pattern_binds(b, out)),
+        Pattern::Tuple(ps) | Pattern::Or(ps) => ps.iter().for_each(|b| pattern_binds(b, out)),
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+    }
+}
+
+/// Names bound in THIS frame reachable through `stmts`'s control flow (descends if/for/while/match/
+/// wait/parallel sub-blocks — those share the frame — but STOPS at capture boundaries, whose bodies
+/// are separate frames). Adds let/for/match/wait/nested-fn binding names to `out`.
+fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let { names, .. } => out.extend(names.iter().cloned()),
+            // A nested named fn binds its name in this frame (its body is a separate frame).
+            StmtKind::Fn(decl) => {
+                out.insert(decl.name.clone());
+            }
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                for (_, body) in branches {
+                    collect_frame_binds(body, out);
+                }
+                if let Some(eb) = else_block {
+                    collect_frame_binds(eb, out);
+                }
+            }
+            StmtKind::For { vars, body, .. } => {
+                out.extend(vars.iter().cloned());
+                collect_frame_binds(body, out);
+            }
+            StmtKind::While { body, .. } => collect_frame_binds(body, out),
+            StmtKind::Match { arms, .. } => {
+                for arm in arms {
+                    pattern_binds(&arm.pattern, out);
+                    collect_frame_binds(&arm.body, out);
+                }
+            }
+            StmtKind::Wait { arms, else_block } => {
+                for arm in arms {
+                    if let WaitTarget::Bind(n) = &arm.target {
+                        out.insert(n.clone());
+                    }
+                    collect_frame_binds(&arm.body, out);
+                }
+                if let Some(eb) = else_block {
+                    collect_frame_binds(eb, out);
+                }
+            }
+            StmtKind::Parallel { body } => collect_frame_binds(body, out),
+            // `defer:` / `spawn:` blocks are SEPARATE frames — their binds are not this frame's.
+            // Everything else binds no frame-local name.
+            _ => {}
+        }
+    }
+}
+
+/// Walk `stmts`, and at each DIRECTLY-nested capture boundary (closure / `defer:` / `spawn:` block)
+/// add that boundary's FREE names to `out`. Descends non-boundary structure to find boundaries, but
+/// does NOT descend past a boundary (its transitive captures are already in its free set).
+fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let { value, .. } => find_boundary_free_expr(value, out),
+            StmtKind::Assign { target, value, .. } => {
+                find_boundary_free_expr(target, out);
+                find_boundary_free_expr(value, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Yield(e) | StmtKind::Expr(e) => {
+                find_boundary_free_expr(e, out)
+            }
+            StmtKind::Assert { cond, msg } => {
+                find_boundary_free_expr(cond, out);
+                if let Some(m) = msg {
+                    find_boundary_free_expr(m, out);
+                }
+            }
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                for (c, body) in branches {
+                    find_boundary_free_expr(c, out);
+                    find_boundary_free_block(body, out);
+                }
+                if let Some(eb) = else_block {
+                    find_boundary_free_block(eb, out);
+                }
+            }
+            StmtKind::For { iter, body, .. } => {
+                find_boundary_free_expr(iter, out);
+                find_boundary_free_block(body, out);
+            }
+            StmtKind::While { cond, body } => {
+                find_boundary_free_expr(cond, out);
+                find_boundary_free_block(body, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                find_boundary_free_expr(scrutinee, out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        find_boundary_free_expr(g, out);
+                    }
+                    find_boundary_free_block(&arm.body, out);
+                }
+            }
+            StmtKind::Parallel { body } => find_boundary_free_block(body, out),
+            StmtKind::Wait { arms, else_block } => {
+                for arm in arms {
+                    find_boundary_free_expr(&arm.chan, out);
+                    if let WaitTarget::Assign(e) = &arm.target {
+                        find_boundary_free_expr(e, out);
+                    }
+                    find_boundary_free_block(&arm.body, out);
+                }
+                if let Some(eb) = else_block {
+                    find_boundary_free_block(eb, out);
+                }
+            }
+            // `defer:` / `spawn:` blocks ARE capture boundaries — collect their free names (relative
+            // to an empty scope) and stop. `defer f(x)` / `spawn f(x)` evaluate the call in THIS
+            // frame, so scan the call expression for closure boundaries instead.
+            StmtKind::Defer(DeferTarget::Block(b)) | StmtKind::Spawn(SpawnTarget::Block(b)) => {
+                free_names_block(b, &HashSet::new(), out)
+            }
+            StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
+                find_boundary_free_expr(e, out)
+            }
+            // A nested named fn's inner boundaries capture ITS frame, not this one — do not descend.
+            // Remaining statements contain no capture boundary.
+            _ => {}
+        }
+    }
+}
+
+/// Walk `e`, and at each closure boundary add its FREE names to `out` (stopping at the closure).
+/// Descends every non-closure sub-expression to find closures nested in them.
+fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
+    match &e.kind {
+        ExprKind::Closure { params, body, .. } => {
+            let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            free_names_expr(body, &bound, out);
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_)
+        | ExprKind::TypeApply { .. } => {}
+        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            es.iter().for_each(|x| find_boundary_free_expr(x, out))
+        }
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            find_boundary_free_expr(k, out);
+            find_boundary_free_expr(v, out);
+        }),
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            for c in clauses {
+                find_boundary_free_expr(&c.iter, out);
+                c.guards
+                    .iter()
+                    .for_each(|g| find_boundary_free_expr(g, out));
+            }
+            if let Some(k) = key {
+                find_boundary_free_expr(k, out);
+            }
+            find_boundary_free_expr(elem, out);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => find_boundary_free_expr(expr, out),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            find_boundary_free_expr(lhs, out);
+            find_boundary_free_expr(rhs, out);
+        }
+        ExprKind::Range { start, end } => {
+            find_boundary_free_expr(start, out);
+            find_boundary_free_expr(end, out);
+        }
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            find_boundary_free_expr(callee, out);
+            args.iter().for_each(|a| find_boundary_free_expr(a, out));
+            named
+                .iter()
+                .for_each(|(_, v)| find_boundary_free_expr(v, out));
+        }
+        ExprKind::Field { obj, .. } => find_boundary_free_expr(obj, out),
+        ExprKind::OptChain { obj, call, .. } => {
+            find_boundary_free_expr(obj, out);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| find_boundary_free_expr(a, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, v)| find_boundary_free_expr(v, out));
+            }
+        }
+        ExprKind::Index { obj, index } => {
+            find_boundary_free_expr(obj, out);
+            find_boundary_free_expr(index, out);
+        }
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            find_boundary_free_expr(obj, out);
+            for o in [start, end, step].into_iter().flatten() {
+                find_boundary_free_expr(o, out);
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            find_boundary_free_expr(obj, out);
+            find_boundary_free_expr(arg, out);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            find_boundary_free_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    find_boundary_free_expr(g, out);
+                }
+                find_boundary_free_expr(&arm.body, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            find_boundary_free_expr(cond, out);
+            find_boundary_free_expr(then, out);
+            find_boundary_free_expr(els, out);
+        }
+        ExprKind::Recover(block) => find_boundary_free_block(block, out),
+    }
+}
+
+/// Free names of a capture-boundary BLOCK body (`defer:`/`spawn:`): names referenced but not bound
+/// within, relative to `bound`. Threads bindings left-to-right (a later stmt sees earlier lets).
+fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut HashSet<String>) {
+    let mut b = bound.clone();
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let { names, value, .. } => {
+                free_names_expr(value, &b, out);
+                b.extend(names.iter().cloned());
+            }
+            StmtKind::Assign { target, value, .. } => {
+                free_names_expr(target, &b, out);
+                free_names_expr(value, &b, out);
+            }
+            StmtKind::Fn(decl) => {
+                // Over-approximate: a nested fn body may reference an outer name → treat as free
+                // (relative to its params + name), so any capture surfaces (never dropped).
+                b.insert(decl.name.clone());
+                let mut inner = b.clone();
+                inner.extend(decl.params.iter().map(|p| p.name.clone()));
+                free_names_block(&decl.body, &inner, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Yield(e) | StmtKind::Expr(e) => {
+                free_names_expr(e, &b, out)
+            }
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::Pass => {}
+            StmtKind::Assert { cond, msg } => {
+                free_names_expr(cond, &b, out);
+                if let Some(m) = msg {
+                    free_names_expr(m, &b, out);
+                }
+            }
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                for (c, body) in branches {
+                    free_names_expr(c, &b, out);
+                    free_names_block(body, &b, out);
+                }
+                if let Some(eb) = else_block {
+                    free_names_block(eb, &b, out);
+                }
+            }
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
+                free_names_expr(iter, &b, out);
+                let mut b2 = b.clone();
+                b2.extend(vars.iter().cloned());
+                free_names_block(body, &b2, out);
+            }
+            StmtKind::While { cond, body } => {
+                free_names_expr(cond, &b, out);
+                free_names_block(body, &b, out);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                free_names_expr(scrutinee, &b, out);
+                for arm in arms {
+                    let mut b2 = b.clone();
+                    pattern_binds(&arm.pattern, &mut b2);
+                    if let Some(g) = &arm.guard {
+                        free_names_expr(g, &b2, out);
+                    }
+                    free_names_block(&arm.body, &b2, out);
+                }
+            }
+            StmtKind::Parallel { body } => free_names_block(body, &b, out),
+            StmtKind::Defer(DeferTarget::Block(blk)) | StmtKind::Spawn(SpawnTarget::Block(blk)) => {
+                free_names_block(blk, &b, out)
+            }
+            StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
+                free_names_expr(e, &b, out)
+            }
+            StmtKind::Wait { arms, else_block } => {
+                for arm in arms {
+                    free_names_expr(&arm.chan, &b, out);
+                    let mut b2 = b.clone();
+                    match &arm.target {
+                        WaitTarget::Bind(n) => {
+                            b2.insert(n.clone());
+                        }
+                        WaitTarget::Assign(e) => free_names_expr(e, &b, out),
+                        WaitTarget::Discard => {}
+                    }
+                    free_names_block(&arm.body, &b2, out);
+                }
+                if let Some(eb) = else_block {
+                    free_names_block(eb, &b, out);
+                }
+            }
+            // Type/import/native/extern decls inside a block reference no frame value.
+            _ => {}
+        }
+    }
+}
+
+/// Free names of an expression relative to `bound`: referenced idents not in `bound`. Descends
+/// THROUGH nested closures/comprehensions/matches, subtracting each inner scope's binds.
+fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+    match &e.kind {
+        ExprKind::Ident(n) => {
+            if !bound.contains(n) {
+                out.insert(n.clone());
+            }
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::TypeApply { .. } => {}
+        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            es.iter().for_each(|x| free_names_expr(x, bound, out))
+        }
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            free_names_expr(k, bound, out);
+            free_names_expr(v, bound, out);
+        }),
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            let mut b = bound.clone();
+            for c in clauses {
+                free_names_expr(&c.iter, &b, out);
+                b.extend(c.vars.iter().cloned());
+                c.guards.iter().for_each(|g| free_names_expr(g, &b, out));
+            }
+            if let Some(k) = key {
+                free_names_expr(k, &b, out);
+            }
+            free_names_expr(elem, &b, out);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => free_names_expr(expr, bound, out),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            free_names_expr(lhs, bound, out);
+            free_names_expr(rhs, bound, out);
+        }
+        ExprKind::Range { start, end } => {
+            free_names_expr(start, bound, out);
+            free_names_expr(end, bound, out);
+        }
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            free_names_expr(callee, bound, out);
+            args.iter().for_each(|a| free_names_expr(a, bound, out));
+            named
+                .iter()
+                .for_each(|(_, v)| free_names_expr(v, bound, out));
+        }
+        ExprKind::Field { obj, .. } => free_names_expr(obj, bound, out),
+        ExprKind::OptChain { obj, call, .. } => {
+            free_names_expr(obj, bound, out);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| free_names_expr(a, bound, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, v)| free_names_expr(v, bound, out));
+            }
+        }
+        ExprKind::Index { obj, index } => {
+            free_names_expr(obj, bound, out);
+            free_names_expr(index, bound, out);
+        }
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            free_names_expr(obj, bound, out);
+            for o in [start, end, step].into_iter().flatten() {
+                free_names_expr(o, bound, out);
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            free_names_expr(obj, bound, out);
+            free_names_expr(arg, bound, out);
+        }
+        ExprKind::Closure { params, body, .. } => {
+            let mut b = bound.clone();
+            b.extend(params.iter().map(|p| p.name.clone()));
+            free_names_expr(body, &b, out);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            free_names_expr(scrutinee, bound, out);
+            for arm in arms {
+                let mut b = bound.clone();
+                pattern_binds(&arm.pattern, &mut b);
+                if let Some(g) = &arm.guard {
+                    free_names_expr(g, &b, out);
+                }
+                free_names_expr(&arm.body, &b, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            free_names_expr(cond, bound, out);
+            free_names_expr(then, bound, out);
+            free_names_expr(els, bound, out);
+        }
+        ExprKind::Recover(block) => free_names_block(block, bound, out),
+    }
+}
+
+/// The closure/expression analogue of [`captured_names_of_body`]: compute the boxed-name set for a
+/// closure whose body is the single expression `body` with parameters `params`. (A `fn(x): expr`
+/// closure has no statement block — its frame binds come from `params` plus any `match`/`recover`/
+/// comprehension binds inside the body expression.)
+fn captured_names_of_closure(body: &Expr, params: &[crate::ast::Param]) -> HashSet<String> {
+    let mut captured = HashSet::new();
+    find_boundary_free_expr(body, &mut captured);
+    let mut frame_binds: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_frame_binds_expr(body, &mut frame_binds);
+    captured.retain(|n| frame_binds.contains(n));
+    captured
+}
+
+/// Names bound in THIS frame by an EXPRESSION body (`match`/`recover`/comprehension/if-else binds),
+/// descending non-closure sub-expressions but STOPPING at a nested closure (a separate frame).
+fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
+    match &e.kind {
+        // A nested closure is a separate frame — its binds are not this frame's.
+        ExprKind::Closure { .. } => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_)
+        | ExprKind::TypeApply { .. } => {}
+        ExprKind::List(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            es.iter().for_each(|x| collect_frame_binds_expr(x, out))
+        }
+        ExprKind::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+            collect_frame_binds_expr(k, out);
+            collect_frame_binds_expr(v, out);
+        }),
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            for c in clauses {
+                collect_frame_binds_expr(&c.iter, out);
+                out.extend(c.vars.iter().cloned());
+                c.guards
+                    .iter()
+                    .for_each(|g| collect_frame_binds_expr(g, out));
+            }
+            if let Some(k) = key {
+                collect_frame_binds_expr(k, out);
+            }
+            collect_frame_binds_expr(elem, out);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => collect_frame_binds_expr(expr, out),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+            collect_frame_binds_expr(lhs, out);
+            collect_frame_binds_expr(rhs, out);
+        }
+        ExprKind::Range { start, end } => {
+            collect_frame_binds_expr(start, out);
+            collect_frame_binds_expr(end, out);
+        }
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_frame_binds_expr(callee, out);
+            args.iter().for_each(|a| collect_frame_binds_expr(a, out));
+            named
+                .iter()
+                .for_each(|(_, v)| collect_frame_binds_expr(v, out));
+        }
+        ExprKind::Field { obj, .. } => collect_frame_binds_expr(obj, out),
+        ExprKind::OptChain { obj, call, .. } => {
+            collect_frame_binds_expr(obj, out);
+            if let Some(c) = call {
+                c.args.iter().for_each(|a| collect_frame_binds_expr(a, out));
+                c.named
+                    .iter()
+                    .for_each(|(_, v)| collect_frame_binds_expr(v, out));
+            }
+        }
+        ExprKind::Index { obj, index } => {
+            collect_frame_binds_expr(obj, out);
+            collect_frame_binds_expr(index, out);
+        }
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            collect_frame_binds_expr(obj, out);
+            for o in [start, end, step].into_iter().flatten() {
+                collect_frame_binds_expr(o, out);
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            collect_frame_binds_expr(obj, out);
+            collect_frame_binds_expr(arg, out);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            collect_frame_binds_expr(scrutinee, out);
+            for arm in arms {
+                pattern_binds(&arm.pattern, out);
+                if let Some(g) = &arm.guard {
+                    collect_frame_binds_expr(g, out);
+                }
+                collect_frame_binds_expr(&arm.body, out);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            collect_frame_binds_expr(cond, out);
+            collect_frame_binds_expr(then, out);
+            collect_frame_binds_expr(els, out);
+        }
+        ExprKind::Recover(block) => collect_frame_binds(block, out),
+    }
+}
+
 /// M-C implicit nurseries: does this body contain a bare `spawn` that is NOT already inside an
 /// explicit `parallel:` (so it would bind to the *implicit* function/module nursery)? Drives the
 /// gate in `compile_fn`/`compile_module` — a body with no such spawn emits byte-identical bytecode to
@@ -4269,6 +4876,12 @@ struct FnComp {
     max_slots: usize,
     /// Names this function captures from an enclosing scope (closures only).
     captured_names: Vec<String>,
+    /// Uniform by-reference capture (Task A) — this frame's local names that are captured by a
+    /// nested closure / `defer:` / `spawn:` body, so their slots must be BOXED (`Obj::Cell`).
+    /// Computed by [`captured_names_of_body`] at each fn/closure body construction. UNWIRED this
+    /// task: nothing reads it yet (emit-routing + boxing land in a later task).
+    #[allow(dead_code)]
+    boxed_names: std::collections::HashSet<String>,
     /// Stack of enclosing loops (innermost last), for `break`/`continue` jump patching. Empty
     /// outside any loop. A closure compiles in its own `FnComp` with an empty stack, so a
     /// `break`/`continue` there has no current loop (the checker rejects it; we defend anyway).
@@ -4309,6 +4922,7 @@ impl FnComp {
             slot_count: 0,
             max_slots: 0,
             captured_names: Vec::new(),
+            boxed_names: std::collections::HashSet::new(),
             loops: Vec::new(),
             defer_scopes: 0,
             nursery_scopes: 0,
@@ -4322,6 +4936,15 @@ impl FnComp {
     /// The innermost loop being compiled, or `None` outside any loop.
     fn current_loop(&mut self) -> Option<&mut LoopCtx> {
         self.loops.last_mut()
+    }
+
+    /// Uniform by-reference capture (Task A) — is local `slot`'s name in this frame's boxed set (so
+    /// reads/writes go through an `Obj::Cell`)? UNWIRED this task (no emit path consults it yet).
+    #[allow(dead_code)]
+    fn is_boxed_slot(&self, slot: usize) -> bool {
+        self.locals
+            .get(slot)
+            .is_some_and(|l| self.boxed_names.contains(&l.name))
     }
 
     /// Patch a previously-emitted jump to land at an explicit `target` instruction index (used for
@@ -4671,5 +5294,77 @@ mod capture_layout_tests {
                 .any(|o| matches!(o, Op::CallBuiltin(n, 0) if n == "List")),
             "List[int]() must lower to CallBuiltin(\"List\", 0); got {ops:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_prepass_tests {
+    //! Uniform by-reference capture, Task A: the compile-time capture pre-pass computes the
+    //! boxed-name set (names of this frame's locals captured by a nested closure/defer/spawn body).
+    //! Unwired this task — nothing reads the set yet; these tests pin the pre-pass computation.
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Parse `src`, return the first top-level `fn`'s [`FnDecl`].
+    fn first_fn(src: &str) -> FnDecl {
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let module = crate::parser::parse(tokens).expect("parse");
+        for s in &module.stmts {
+            if let StmtKind::Fn(decl) = &s.kind {
+                return decl.clone();
+            }
+        }
+        panic!("no top-level fn in source");
+    }
+
+    #[test]
+    fn prepass_boxes_captured_local_not_uncaptured() {
+        // `x` is captured by the nested closure; `y` is not. Only `x` is boxed.
+        let decl =
+            first_fn("fn f():\n    x := 1\n    y := 2\n    g := fn() -> int: x\n    return g()\n");
+        let boxed = captured_names_of_body(&decl.body, &decl.params);
+        assert_eq!(boxed, HashSet::from(["x".to_string()]));
+        assert!(!boxed.contains("y"), "uncaptured local y must not be boxed");
+    }
+
+    #[test]
+    fn prepass_recurses_through_nested_closures() {
+        // A grandparent local captured two closures deep must surface (free-var descent): the inner
+        // closure references `x`, so `x` is free in the outer closure `g`, which is `f`'s direct child.
+        let decl = first_fn(
+            "fn f():\n    x := 1\n    g := fn() -> int: (fn() -> int: x)()\n    return g()\n",
+        );
+        let boxed = captured_names_of_body(&decl.body, &decl.params);
+        assert!(
+            boxed.contains("x"),
+            "grandchild-captured x must be boxed; got {boxed:?}"
+        );
+    }
+
+    #[test]
+    fn prepass_boxes_captured_param() {
+        // A parameter captured by a nested closure is attributed to this frame's slot.
+        let decl = first_fn("fn f(n: int):\n    g := fn() -> int: n\n    return g()\n");
+        let boxed = captured_names_of_body(&decl.body, &decl.params);
+        assert!(
+            boxed.contains("n"),
+            "captured param n must be boxed; got {boxed:?}"
+        );
+    }
+
+    #[test]
+    fn is_boxed_slot_reads_boxed_names() {
+        let mut fc = FnComp::new("f".to_string(), 0, false);
+        fc.locals.push(LocalVar {
+            name: "x".to_string(),
+            depth: 0,
+        });
+        fc.locals.push(LocalVar {
+            name: "y".to_string(),
+            depth: 0,
+        });
+        fc.boxed_names = HashSet::from(["x".to_string()]);
+        assert!(fc.is_boxed_slot(0), "slot 0 (x) is boxed");
+        assert!(!fc.is_boxed_slot(1), "slot 1 (y) is not boxed");
     }
 }
