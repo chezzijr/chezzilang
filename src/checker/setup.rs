@@ -990,13 +990,15 @@ impl Checker {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                // Aliasing a whole-module import TO a reserved builtin callable name (`import std.math
-                // as int`) silently rebinds `int` — the builtin `int()` wins at call sites and this
-                // module binding is dead (it'd otherwise error with the confusing `module int is not
-                // callable`). Reject it as `reserved (builtin)`, consistent with `fn int()` / an
-                // extern named `int`. Gate on the ALIAS only: a real module whose last path segment
-                // coincidentally matched a reserved name (none exists) is unaffected.
-                if alias.as_ref().is_some_and(|a| is_reserved_name(a)) {
+                // Aliasing a whole-module import TO a reserved builtin name (`import std.math as int`,
+                // `import std.math as Result`) silently rebinds it — the builtin `int()`/`Result` wins
+                // at call/type sites and this module binding is dead (it'd otherwise error with the
+                // confusing `module int is not callable`). Reject it as `reserved (builtin)`,
+                // consistent with `fn int()` / an extern named `int`. `is_reserved_alias_target` covers
+                // BOTH reserved CALLABLE and reserved TYPE names (Result/Option/Iterator/…). Gate on
+                // the ALIAS only: a real module whose last path segment coincidentally matched a
+                // reserved name (none exists) is unaffected.
+                if alias.as_ref().is_some_and(|a| is_reserved_alias_target(a)) {
                     self.error(
                         imp.span,
                         format!("import alias '{name}' is reserved (builtin)"),
@@ -1177,10 +1179,12 @@ impl Checker {
                 // anchors the decl-site hover at the bound import name.
                 for ((member, alias), name_span) in names.iter().zip(name_spans.iter()) {
                     let bind = alias.as_ref().unwrap_or(member);
-                    // Aliasing a `from` import TO a reserved builtin callable name (`import sqrt as
-                    // int from std.math`) silently rebinds `int`: the builtin `int()` conversion wins
-                    // at call sites and the `as int` binding is DEAD — a silent wrong result with no
-                    // diagnostic. Reject it as `reserved (builtin)`, like `fn int()`. The `a != member`
+                    // Aliasing a `from` import TO a reserved builtin name (`import sqrt as int from
+                    // std.math`, or a reserved TYPE `import who as Result from lib`) silently rebinds
+                    // it: the builtin `int()` conversion / `Result` type wins at call/type sites and
+                    // the `as int` binding is DEAD — a silent wrong result with no diagnostic. Reject
+                    // it as `reserved (builtin)`, like `fn int()`. `is_reserved_alias_target` covers
+                    // BOTH reserved CALLABLE and reserved TYPE names (mirrors the decl-site guard). The `a != member`
                     // guard is CRITICAL: reserved members that are themselves importable
                     // (`Shared`/`Executor`/`timer`/…) must still import UN-aliased (bind == member) and
                     // via a redundant self-rename (`as Shared`), so only a genuine RENAME to a reserved
@@ -1188,7 +1192,7 @@ impl Checker {
                     // this check and fall through to the specialized rename-rejection arms below.
                     if alias
                         .as_ref()
-                        .is_some_and(|a| a != member && is_reserved_name(a))
+                        .is_some_and(|a| a != member && is_reserved_alias_target(a))
                     {
                         self.error(
                             imp.span,

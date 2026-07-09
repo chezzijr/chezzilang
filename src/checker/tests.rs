@@ -8984,6 +8984,79 @@ fn import_module_as_reserved_int_rejected() {
 }
 
 #[test]
+fn import_alias_to_reserved_type_from_rejected() {
+    // Finding B: `import who as Result from lib` silently rebound a reserved TYPE name (Result/
+    // Option/Iterator/Ref/Socket/Listener/ptr/owned_str) — the alias guard only covered reserved
+    // CALLABLE names, so the type-name case slipped through while `import who as int` was rejected.
+    // Now symmetric with the decl-site guard (`is_reserved_type`): reject as `reserved (builtin)`.
+    for ty in [
+        "Result",
+        "Option",
+        "Iterator",
+        "Ref",
+        "Socket",
+        "Listener",
+        "ptr",
+        "owned_str",
+    ] {
+        entry_rejects(
+            &format!("import sqrt as {ty} from std.math\nfn main():\n    print(1)\nmain()\n"),
+            "reserved",
+        );
+    }
+}
+
+#[test]
+fn import_module_as_reserved_type_rejected() {
+    // Same asymmetry on the whole-module aliased path: `import std.math as Result` silently rebound
+    // the reserved TYPE name. Reject it up front, mirroring `import std.math as int`.
+    entry_rejects(
+        "import std.math as Result\nfn main():\n    print(1)\nmain()\n",
+        "reserved",
+    );
+}
+
+#[test]
+fn import_alias_nil_from_accepted() {
+    // BOUNDARY (carve-out): `nil` is a shadowable value-builtin (`nil := 5` is accepted), NOT a type
+    // name to reject as an alias target. The widened guard must exclude it — a naive
+    // `|| is_reserved_type(a)` would over-reject since `is_reserved_type("nil")` is true.
+    let t = TmpDir::new();
+    t.write("lib.chz", "fn who() -> int:\n    return 1\n");
+    let entry = t.write(
+        "main.chz",
+        "import who as nil from lib\nfn main():\n    print(1)\nmain()\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    // THIS guard must not reject `nil`; if some UNRELATED path errors, at least it's not `reserved`.
+    assert!(
+        !errs.iter().any(|e| e.message.contains("reserved")),
+        "nil alias must not be rejected as reserved, got: {errs:?}"
+    );
+}
+
+#[test]
+fn import_alias_nonreserved_helper_from_accepted_and_usable() {
+    // OVER-REJECT BOUNDARY: a fresh non-reserved alias must still bind and be usable (the widened
+    // guard must not short-circuit the bind logic for a legit alias).
+    let t = TmpDir::new();
+    t.write("lib.chz", "fn who() -> int:\n    return 1\n");
+    let entry = t.write(
+        "main.chz",
+        "import who as Helper from lib\nfn main():\n    print(Helper())\nmain()\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    assert!(
+        check_graph(&graph).is_ok(),
+        "non-reserved alias Helper must check clean and be usable"
+    );
+}
+
+#[test]
 fn reserved_name_local_shadow_still_ok() {
     // BOUNDARY: only the IMPORT-ALIAS binding target is gated. Value-level local shadowing of a
     // reserved name (Python-style) MUST still check clean — it goes through `declare`, not

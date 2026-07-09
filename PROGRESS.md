@@ -3830,6 +3830,19 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
 ### Robustness pass (landed, both engines)
+- **Import-alias guard now symmetric on reserved TYPE names (Finding B, 2026-07-10).** The
+  `import X as ALIAS from M` / `import M as ALIAS` guards rejected reserved CALLABLE aliases
+  (`import who as int` → `reserved (builtin)`) but silently ACCEPTED reserved TYPE names
+  (`import who as Result from lib` was check-ok — likewise Option/Iterator/Ref/Socket/Listener/ptr/
+  owned_str), asymmetric with the struct/enum/type DECL guard which already rejects all of these via
+  `is_reserved_type`. Fix (checker-only name resolution, `src/checker/mod.rs` + two guard sites in
+  `src/checker/setup.rs`): new free helper `is_reserved_alias_target = is_reserved_name(n) ||
+  (is_reserved_type(n) && n != "nil")` reused at both alias sites — reuses the existing predicate (no
+  second list). `nil` is carved out (it is a shadowable value-builtin: `nil := 5` is accepted, so
+  `import x as nil` stays legal). Un-aliased/self-renamed importable reserved types
+  (Socket/Shared/Executor…) still import via the preserved `a != member` clause; fresh non-reserved
+  aliases (`import who as Helper`) still bind and are usable. No VM/runtime change; serial==M:N parity
+  trivially preserved (rejected program never reaches either engine).
 - **Generic static-factory un-inferred type-param soundness hole (2026-07-07).** A generic struct/enum
   STATIC (associated) method returning `Type[T]`, called with NO type-level turbofish AND no binding/return
   annotation, left the enclosing `T` as `Ty::Unknown` un-flagged — which then swallowed any later argument,

@@ -220,6 +220,18 @@ fn is_reserved_name(name: &str) -> bool {
     RESERVED_CALLABLE.contains(&name)
 }
 
+/// True iff `name` may NOT be an import-alias TARGET — a reserved builtin, whether CALLABLE
+/// (`import x as int`) or a pure reserved TYPE name (`import x as Result`). Aliasing TO either
+/// silently rebinds the builtin (the builtin wins at call/type sites, the import binding is dead),
+/// so both are rejected `reserved (builtin)`, symmetric with the struct/enum/type DECL guard which
+/// already rejects all of these via `is_reserved_type`. Reuses that same predicate — no second list.
+/// EXCEPTION: `nil` is a shadowable value-builtin (`nil := 5` is accepted, unlike `true := 5` which
+/// is a parse error), NOT a type, so it is carved out of the type-name reject to avoid over-rejecting
+/// a legit `import x as nil` — the one name `is_reserved_type` lists that is a value, not a type.
+fn is_reserved_alias_target(name: &str) -> bool {
+    is_reserved_name(name) || (is_reserved_type(name) && name != "nil")
+}
+
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
 /// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
 /// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`; `Ctor` → likewise
