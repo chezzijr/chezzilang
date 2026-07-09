@@ -6167,9 +6167,10 @@ fn unary_neg_and_not() {
 // ----- closures -----
 
 #[test]
-fn closure_snapshots_captured_value() {
-    // The closure captures `n` by value at creation; reassigning `n` afterward must NOT be
-    // visible (matches the interpreter's frame snapshot, not by-reference capture).
+fn closure_shares_captured_binding() {
+    // Uniform by-reference capture: the closure shares the binding of `n`, so a reassignment made
+    // after the closure was created IS visible when the closure later runs (`n = 20` → `x + 20`).
+    // (Under the old value-semantics rule this snapshotted `n = 10` and printed `15`.)
     let src = "\
 fn make():
     n := 10
@@ -6180,7 +6181,7 @@ fn main():
     g := make()
     print(g(5))
 main()";
-    assert_eq!(run(src), "15\n");
+    assert_eq!(run(src), "25\n");
 }
 
 #[test]

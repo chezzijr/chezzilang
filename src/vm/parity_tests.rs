@@ -4942,7 +4942,7 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
 }
 
 /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
-/// documented capture rule before the JIT — a plain local snapshots at creation (`10`), a
+/// uniform by-reference capture rule — a plain local is shared and sees later writes (`20`), a
 /// `ref` local is a shared box (`20`), and a global is referenced live (`20`). Byte-identical
 /// on the VM, the interpreter, the `--parallel` engine, and its `.expected`. The example uses
 /// `import std.ref` (the `ref int` annotation resolves to `Ref`), so it runs through the real
@@ -4965,6 +4965,26 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
     assert_eq!(vo, expected, "VM output vs .expected");
     assert_eq!(vo, io, "VM vs interp divergence");
     assert_eq!(vo, po, "VM vs parallel divergence");
+}
+
+// ----- Uniform by-reference closure capture (the acceptance matrix, §4 of the design). Each row is
+// a runnable `examples/capture_*.chz` + `.expected`, asserted `run_capture (serial) ==
+// run_capture_parallel (M:N) == .expected`. Capture is now by REFERENCE: a closure shares the
+// closest binding of a captured name and sees/makes writes to it. The one deliberate divergence from
+// Go is F1 (a plain capture into a `spawn` is an isolated per-task copy, not shared+raced). -----
+
+/// A1 — a closure reads a captured local by reference, seeing a write made after creation → `20`.
+#[test]
+fn golden_capture_outer_write() {
+    let src = include_str!("../../examples/capture_outer_write.chz");
+    let expected = include_str!("../../examples/capture_outer_write.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
 }
 
 #[test]

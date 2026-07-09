@@ -963,6 +963,8 @@ impl Compiler {
         // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
         // int VARIABLE, not just a literal) widens.
         self.emit_float_param_prologue(&mut fc, &decl.params);
+        // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
+        self.emit_box_param_prologue(&mut fc, &decl.params);
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression — exactly
         // like a closure `fn(x): expr` (see `compile_closure`): compile the expr and emit `Return`
         // instead of evaluating-then-discarding it and falling through to `Nil`/`Return`. An inline
@@ -1014,9 +1016,25 @@ impl Compiler {
             if p.ty.as_ref().is_some_and(crate::ast::is_float_ty) {
                 let slot = i;
                 let span = Span { line: 1, col: 1 };
-                fc.emit(Op::GetLocal(slot), span);
+                fc.emit_get_local_raw(slot, span);
                 fc.emit(Op::CoerceFloat, span);
-                fc.emit(Op::SetLocal(slot), span);
+                fc.emit_set_local_raw(slot, span);
+            }
+        }
+    }
+
+    /// Uniform by-reference capture — box every param captured by a nested closure/`spawn`/`defer`.
+    /// After arg binding (and any float coercion), replace the raw arg in the boxed slot with a fresh
+    /// cell wrapping it: `GetLocal(slot); NewCell; SetLocal(slot)`. Runs AFTER
+    /// [`emit_float_param_prologue`] so the value is already coerced before it is boxed. The param
+    /// slots are `0..params.len()` in declaration order. A fn with no captured params emits nothing.
+    fn emit_box_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
+        for i in 0..params.len() {
+            if fc.is_boxed_slot(i) {
+                let span = Span { line: 1, col: 1 };
+                fc.emit_get_local_raw(i, span);
+                fc.emit(Op::NewCell, span);
+                fc.emit_set_local_raw(i, span);
             }
         }
     }
@@ -1140,22 +1158,20 @@ impl Compiler {
                     // each binding load it and read element `.i` (the tuple-aware `GetField`). No new
                     // index op — `GetField("i")` on a tuple is the element access.
                     let tuple_slot = fc.add_hidden();
-                    fc.emit(Op::SetLocal(tuple_slot), stmt.span);
+                    fc.emit_hidden_set(tuple_slot, stmt.span);
                     for (i, name) in names.iter().enumerate() {
-                        fc.emit(Op::GetLocal(tuple_slot), stmt.span);
+                        fc.emit_hidden_get(tuple_slot, stmt.span);
                         fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, stmt.span); // tuple element
                         if fc.is_global_scope() {
                             fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
                         } else {
-                            let slot = fc.add_local(name.clone());
-                            fc.emit(Op::SetLocal(slot), stmt.span);
+                            fc.emit_decl_named(name.clone(), stmt.span);
                         }
                     }
                 } else if fc.is_global_scope() {
                     fc.emit(Op::DefineGlobalSlot(self.global_slot(&names[0])), stmt.span);
                 } else {
-                    let slot = fc.add_local(names[0].clone());
-                    fc.emit(Op::SetLocal(slot), stmt.span);
+                    fc.emit_decl_named(names[0].clone(), stmt.span);
                 }
                 Ok(())
             }
@@ -1176,8 +1192,7 @@ impl Compiler {
                 } else {
                     let pid = self.compile_fn(decl, false)?;
                     fc.emit(Op::MakeFunc(pid), stmt.span);
-                    let slot = fc.add_local(decl.name.clone());
-                    fc.emit(Op::SetLocal(slot), stmt.span);
+                    fc.emit_decl_named(decl.name.clone(), stmt.span);
                     Ok(())
                 }
             }
@@ -1679,7 +1694,8 @@ impl Compiler {
     /// never creates — a global that doesn't exist is a runtime error).
     fn emit_store(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
-            Some(slot) => fc.emit(Op::SetLocal(slot), span),
+            // A boxed owner-side local writes through its cell (`emit_set_named`).
+            Some(slot) => fc.emit_set_named(slot, span),
             None => fc.emit(Op::SetGlobalSlot(self.global_slot(name)), span),
         }
     }
@@ -1687,17 +1703,20 @@ impl Compiler {
     /// Load a name's value (local → captured → global), mirroring the interpreter's lookup order.
     fn emit_load(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
-            Some(slot) => fc.emit(Op::GetLocal(slot), span),
+            // A boxed owner-side local dereferences its cell (`emit_get_named`).
+            Some(slot) => fc.emit_get_named(slot, span),
             None if fc.captures(name) => {
                 // Positional capture (lever #3): the slot is the name's index in this closure's
                 // `captured_names` (the snapshot order `MakeClosure` populated). `captures` just
-                // confirmed membership, so `position` always finds it.
+                // confirmed membership, so `position` always finds it. Captures are uniformly cells
+                // (spec B4), so every captured read dereferences the handle with a trailing `CellLoad`.
                 let slot = fc
                     .captured_names
                     .iter()
                     .position(|n| n == name)
                     .expect("captures() implies a capture slot") as u32;
                 fc.emit(Op::GetCaptured(slot), span);
+                fc.emit(Op::CellLoad, span);
             }
             None => fc.emit(Op::GetGlobalSlot(self.global_slot(name)), span),
         }
@@ -3953,6 +3972,8 @@ impl Compiler {
         // A `float`-typed closure param coerces at the prologue, like a named-fn param. (A closure
         // declares no return type, so there is no return-coercion here.)
         self.emit_float_param_prologue(&mut child, params);
+        // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
+        self.emit_box_param_prologue(&mut child, params);
         self.compile_expr(&mut child, body)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
@@ -4876,11 +4897,10 @@ struct FnComp {
     max_slots: usize,
     /// Names this function captures from an enclosing scope (closures only).
     captured_names: Vec<String>,
-    /// Uniform by-reference capture (Task A) — this frame's local names that are captured by a
-    /// nested closure / `defer:` / `spawn:` body, so their slots must be BOXED (`Obj::Cell`).
-    /// Computed by [`captured_names_of_body`] at each fn/closure body construction. UNWIRED this
-    /// task: nothing reads it yet (emit-routing + boxing land in a later task).
-    #[allow(dead_code)]
+    /// Uniform by-reference capture — this frame's local names that are captured by a nested
+    /// closure / `defer:` / `spawn:` body, so their slots are BOXED (`Obj::Cell`): declared with a
+    /// `NewCell`, read via `CellLoad`, written via `CellStore` (see [`emit_get_named`]/
+    /// [`emit_set_named`]). Computed by [`captured_names_of_body`] at each fn/closure body construction.
     boxed_names: std::collections::HashSet<String>,
     /// Stack of enclosing loops (innermost last), for `break`/`continue` jump patching. Empty
     /// outside any loop. A closure compiles in its own `FnComp` with an empty stack, so a
@@ -4938,13 +4958,87 @@ impl FnComp {
         self.loops.last_mut()
     }
 
-    /// Uniform by-reference capture (Task A) — is local `slot`'s name in this frame's boxed set (so
-    /// reads/writes go through an `Obj::Cell`)? UNWIRED this task (no emit path consults it yet).
-    #[allow(dead_code)]
+    /// Uniform by-reference capture — is local `slot`'s name in this frame's boxed set (so
+    /// reads/writes go through an `Obj::Cell`)? Consulted by [`emit_get_named`]/[`emit_set_named`].
     fn is_boxed_slot(&self, slot: usize) -> bool {
         self.locals
             .get(slot)
             .is_some_and(|l| self.boxed_names.contains(&l.name))
+    }
+
+    // ----- slot emit routing (B1: exactly these are the only ways to touch a slot) -----
+    //
+    // A boxed slot holds an `Obj::Cell` HANDLE, never the value directly. A bare `GetLocal` on a
+    // boxed slot would leave a raw cell handle on the stack — and the peephole fuser can then fold it
+    // into an int superinstruction (pointer-as-int → crash). So every named user local read/write
+    // routes through `emit_get_named`/`emit_set_named` (cell-aware), and every hidden compiler temp
+    // routes through `emit_hidden_get`/`emit_hidden_set` (raw + a debug-assert that the slot is
+    // genuinely unnamed). Param prologues, which legitimately move a boxed slot's handle before the
+    // box exists, use the private raw helpers.
+
+    /// Raw `GetLocal` — no cell-awareness, no assert. For the named/prologue paths that deliberately
+    /// touch a boxed slot to move its handle.
+    fn emit_get_local_raw(&mut self, slot: usize, span: Span) {
+        self.emit(Op::GetLocal(slot), span);
+    }
+
+    /// Raw `SetLocal` — no cell-awareness, no assert. See [`emit_get_local_raw`].
+    fn emit_set_local_raw(&mut self, slot: usize, span: Span) {
+        self.emit(Op::SetLocal(slot), span);
+    }
+
+    /// Read a HIDDEN compiler temp (loop bookkeeping, match scrutinee, …). Debug-asserts the slot is
+    /// unnamed so a misrouted named slot (which might be boxed) panics loudly instead of leaking a
+    /// raw cell handle.
+    fn emit_hidden_get(&mut self, slot: usize, span: Span) {
+        debug_assert!(
+            self.locals.get(slot).is_none_or(|l| l.name.is_empty()),
+            "hidden get on a NAMED slot {slot}"
+        );
+        self.emit(Op::GetLocal(slot), span);
+    }
+
+    /// Write a HIDDEN compiler temp. See [`emit_hidden_get`].
+    fn emit_hidden_set(&mut self, slot: usize, span: Span) {
+        debug_assert!(
+            self.locals.get(slot).is_none_or(|l| l.name.is_empty()),
+            "hidden set on a NAMED slot {slot}"
+        );
+        self.emit(Op::SetLocal(slot), span);
+    }
+
+    /// Read a NAMED user local. A boxed slot dereferences its cell (`GetLocal; CellLoad`); a plain
+    /// slot is a bare `GetLocal` (byte-identical to before boxing existed).
+    fn emit_get_named(&mut self, slot: usize, span: Span) {
+        self.emit_get_local_raw(slot, span);
+        if self.is_boxed_slot(slot) {
+            self.emit(Op::CellLoad, span);
+        }
+    }
+
+    /// Store to a NAMED user local — the value is already on the stack top. A boxed slot pushes the
+    /// cell handle on top (stack `[val, handle]`) and `CellStore`s (which pops handle-first, then
+    /// value); a plain slot is a bare `SetLocal`.
+    fn emit_set_named(&mut self, slot: usize, span: Span) {
+        if self.is_boxed_slot(slot) {
+            self.emit_get_local_raw(slot, span);
+            self.emit(Op::CellStore, span);
+        } else {
+            self.emit_set_local_raw(slot, span);
+        }
+    }
+
+    /// Declare a NEW named local `name` from the value currently on the stack top, returning its
+    /// slot. A boxed name wraps the value in a FRESH cell (`NewCell`) and stores the handle; a plain
+    /// name stores the value directly. Used at every named-binding site (`:=`, destructuring, loop
+    /// var, `match`/`if let` bind, wait-assign) — each fresh binding gets its own cell.
+    fn emit_decl_named(&mut self, name: String, span: Span) -> usize {
+        let slot = self.add_local(name);
+        if self.is_boxed_slot(slot) {
+            self.emit(Op::NewCell, span);
+        }
+        self.emit_set_local_raw(slot, span);
+        slot
     }
 
     /// Patch a previously-emitted jump to land at an explicit `target` instruction index (used for
