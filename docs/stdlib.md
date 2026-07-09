@@ -706,6 +706,13 @@ decodes to `i64::MAX`/`i64::MIN` rather than `Err`/`None`. This residual is inhe
 number model, not a saturation of arbitrary large values. `as_int` truncates a fractional number
 (`as_int(2.5)` → `Some(2)`).
 
+**Non-finite floats:** standard JSON has no `NaN`/`Infinity`, so `stringify` **faults** — recoverable,
+catchable under `recover:` — with the message `cannot serialize non-finite float to JSON` when a
+`Json.Num` holds a non-finite float (`NaN`, `+inf`, `-inf`). This is the Go
+`encoding/json` policy (error out) rather than Python's non-standard `NaN`/`Infinity` tokens: it never
+emits malformed output that Chezzi's own `parse` would reject. Finite floats of any magnitude
+(including e.g. `1e300`, far outside the int-collapse range) stringify normally and round-trip.
+
 For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
 struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
 ignored, and recursive/generic struct targets are rejected (use the `Json` enum for those).

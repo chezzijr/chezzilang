@@ -239,6 +239,13 @@ fn escape(s: str) -> str:
 # through `int` for magnitudes safely inside i64 AND the exact-integer float range (~2^53); larger
 # values (or non-integers) print via `str(f)` directly, so `int(f)` can never overflow and abort.
 fn num_str(f: float) -> str:
+    # Standard JSON has no NaN/Infinity. A non-finite float (NaN / +inf / -inf) can never round-trip
+    # through valid JSON (Chezzi's own `json.parse` rejects the bare tokens), so FAULT loudly rather
+    # than emit malformed output. `f - f` is `0.0` for every finite `f` and NaN for non-finite `f`
+    # (inf-inf, -inf - -inf and NaN-NaN are all NaN), and NaN != 0.0 — so this fires iff `f` is
+    # non-finite, independently of the ±9e15 int-collapse range below (1e300 is finite and passes).
+    if f - f != 0.0:
+        panic("cannot serialize non-finite float to JSON")
     if f > -9000000000000000.0 and f < 9000000000000000.0:
         i := int(f)
         if float(i) == f:
