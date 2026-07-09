@@ -1235,6 +1235,37 @@ fn json_malformed_numbers_are_errors_parity() {
     assert_eq!(out, "ERR\nERR\nOK 100000000000000000000.0\n");
 }
 
+/// Finding C: `json.stringify` FAULTS (recoverable, Go-style) on a non-finite `Json.Num`
+/// (NaN / +inf / -inf) instead of emitting the invalid bare tokens `NaN`/`inf`/`-inf` — which are
+/// not valid JSON and are rejected by Chezzi's own `json.parse`. The fault is catchable under
+/// `recover:` with a byte-identical message on both engines.
+#[test]
+fn json_stringify_non_finite_faults_parity() {
+    let out = parity_entry(
+        "import std.json\nfn tp(x: float) -> str:\n    doc := Json.Obj({\"v\": Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        Ok(s): return \"OK \" + s\n        Err(e): return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
+    );
+    assert_eq!(
+        out,
+        "cannot serialize non-finite float to JSON\ncannot serialize non-finite float to JSON\ncannot serialize non-finite float to JSON\n"
+    );
+}
+
+/// Finding C regression guard: FINITE floats (including large magnitudes OUTSIDE the ±9e15
+/// int-collapse range like 1e300), whole-number floats, negatives, ints, strings and nested
+/// Arr/Obj are COMPLETELY unaffected — they stringify byte-identically and round-trip through
+/// `json.parse`. Proves the non-finite guard does NOT reuse the ±9e15 range check.
+#[test]
+fn json_stringify_finite_roundtrip_unchanged_parity() {
+    let out = parity_entry(
+        "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    Ok(v): print(\"roundtrip \" + json.stringify(v))\n    Err(e): print(\"ERR \" + e.message())\n",
+    );
+    // 1e300 is FINITE but far outside the ±9e15 int-collapse range: it must stringify normally
+    // (expanded via `str(f)`), NOT fault. `str(1e300)` renders as `1` + 300 zeros + `.0`.
+    let big = format!("1{}.0", "0".repeat(300));
+    let line = format!("[3,1.5,{big},-2.5,\"hi\",{{\"k\":42}}]");
+    assert_eq!(out, format!("{line}\nroundtrip {line}\n"));
+}
+
 #[test]
 fn json_decode_struct_parity() {
     let out = parity_entry(
