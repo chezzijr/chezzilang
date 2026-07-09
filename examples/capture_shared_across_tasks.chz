@@ -1,0 +1,14 @@
+# Retained feature (F2): CROSS-TASK shared mutation uses `Shared[T]` (it crosses the airlock by
+# reference as a shared Arc), so N tasks over one `Shared` all accumulate — the sanctioned way to
+# share mutable state across tasks (a plain captured local would be isolated per task; see F1).
+import std.concurrency
+
+fn main():
+    c := Shared(0)
+    parallel:
+        spawn: c.update(fn(v: int) -> int: v + 1)
+        spawn: c.update(fn(v: int) -> int: v + 1)
+        spawn: c.update(fn(v: int) -> int: v + 1)
+    print(c.get())              # 3
+
+main()

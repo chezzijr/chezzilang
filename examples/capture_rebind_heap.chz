@@ -1,0 +1,9 @@
+# Uniform by-reference capture (G1): REBINDING a captured heap variable routes through the shared
+# cell (not a phantom global), so the new binding is visible in the owner. (The rebind `xs = [9]` is
+# a statement, so — closures being expression-only — the capturing frame here is a `defer:` block.)
+fn main():
+    xs := [1, 2, 3]
+    defer: print(xs)        # runs LAST → observes the rebind: [9]
+    defer: xs = [9]         # rebind the captured heap var through the shared cell
+
+main()

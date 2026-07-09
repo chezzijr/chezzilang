@@ -1,0 +1,12 @@
+# Retained feature (F4): two tasks both capture the SAME `Shared` counter and each bump it — confirms
+# N-tasks-over-one-`Shared` genuinely shares (crosses by reference), unlike a plain captured local.
+import std.concurrency
+
+fn main():
+    c := Shared(0)
+    parallel:
+        spawn: c.update(fn(v: int) -> int: v + 1)
+        spawn: c.update(fn(v: int) -> int: v + 1)
+    print(c.get())              # 2
+
+main()

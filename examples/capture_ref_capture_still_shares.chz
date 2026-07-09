@@ -1,0 +1,11 @@
+# Retained feature (B6): a `ref` local captured by a closure still shares by reference (the closure
+# sees a later write) — boxing a `ref` binding is harmless (the Ref struct handle rides inside a cell).
+import std.ref
+
+fn main():
+    r: ref int = 0
+    f := fn() -> int: r
+    r = 5
+    print(f())              # 5
+
+main()

@@ -5106,6 +5106,61 @@ fn golden_capture_spawn_isolated() {
     );
 }
 
+/// G1 — rebinding a captured HEAP variable (`xs = [9]`) routes through the shared cell, not a phantom
+/// global, so the rebind is visible in the owner → `[9]`.
+#[test]
+fn golden_capture_rebind_heap() {
+    let src = include_str!("../../examples/capture_rebind_heap.chz");
+    let expected = include_str!("../../examples/capture_rebind_heap.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// G2 — a `ref` PARAM (pass-by-reference into a callee) still mutates the caller's binding, unchanged
+/// by uniform-capture boxing. Uses `std.ref`, so it runs through the module graph.
+#[test]
+fn golden_capture_ref_param() {
+    let src = include_str!("../../examples/capture_ref_param.chz");
+    let expected = include_str!("../../examples/capture_ref_param.expected");
+    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
+    assert_eq!(out, expected, "serial == M:N == .expected");
+}
+
+/// B6 — a `ref` local captured by a closure still shares by reference (sees a later write); confirms
+/// boxing a `ref` binding is harmless (the Ref struct handle rides inside the cell).
+#[test]
+fn golden_capture_ref_capture_still_shares() {
+    let src = include_str!("../../examples/capture_ref_capture_still_shares.chz");
+    let expected = include_str!("../../examples/capture_ref_capture_still_shares.expected");
+    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
+    assert_eq!(out, expected, "serial == M:N == .expected");
+}
+
+/// F2 — cross-task shared mutation uses `Shared[T]` (crosses by reference); N tasks over one `Shared`
+/// all accumulate. Uses `std.concurrency`, so it runs through the module graph.
+#[test]
+fn golden_capture_shared_across_tasks() {
+    let src = include_str!("../../examples/capture_shared_across_tasks.chz");
+    let expected = include_str!("../../examples/capture_shared_across_tasks.expected");
+    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
+    assert_eq!(out, expected, "serial == M:N == .expected");
+}
+
+/// F4 — two tasks capture the SAME `Shared` counter and each bump it; confirms N-tasks-1-Shared
+/// genuinely shares (unlike a plain captured local, which isolates — F1).
+#[test]
+fn golden_capture_shared_across_tasks_two() {
+    let src = include_str!("../../examples/capture_shared_across_tasks_two.chz");
+    let expected = include_str!("../../examples/capture_shared_across_tasks_two.expected");
+    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
+    assert_eq!(out, expected, "serial == M:N == .expected");
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.
