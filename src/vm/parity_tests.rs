@@ -5266,6 +5266,36 @@ fn golden_capture_shared_across_tasks_two() {
     assert_eq!(out, expected, "serial == M:N == .expected");
 }
 
+/// D2 — recursion: each frame captures its OWN local into a fresh cell; the closure per frame reads
+/// that frame's value, printed deepest-first as the recursion unwinds → `0\n1\n2\n3`. Matches Go.
+#[test]
+fn golden_capture_recursion_percall() {
+    let src = include_str!("../../examples/capture_recursion_percall.chz");
+    let expected = include_str!("../../examples/capture_recursion_percall.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// D1 — a captured local ESCAPES its defining frame: the heap cell outlives the frame, so a returned
+/// closure still reads it; each factory call gets a fresh cell → `42\n7`. Matches Go's escaping upvalue.
+#[test]
+fn golden_capture_escape_reader() {
+    let src = include_str!("../../examples/capture_escape_reader.chz");
+    let expected = include_str!("../../examples/capture_escape_reader.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.

@@ -1408,12 +1408,15 @@ captured name and sees/makes writes to it (was: plain local snapshotted by value
   `capture_spawn_closure_owner_write_isolated` (the latter nested to force the M:N eager path). The
   cooperative `Executor.submit` share-by-reference invariant is UNCHANGED — this fix is confined to the
   `spawn` task boundary (`do_spawn`), not the shared `to_wire` path Executor uses.
-- **Acceptance matrix** `examples/capture_*.chz` (A1/A2/A3/B1/C1/E1/F1/F3/G1/G2/F2/F4/B6) + golden +
-  serial==M:N parity twins. NOTE: the design's owner-write A2/A3 rows are also re-expressed via `defer:`
-  blocks / reads, because **Chezzi closures are expression-only** — a closure VALUE cannot *reassign* a
-  captured scalar cell (only mutate its inner heap value or read it). **Docs migration
-  (`docs/syntax.md`/`docs/spec.md`) is the follow-up Task C** — this task updated only the in-tree
-  examples it broke (`closure_capture_scopes`, `defer`, `edge_cases`) to keep goldens green.
+- **Acceptance matrix** `examples/capture_*.chz` (A1/A2/A3/B1/C1/C2/D1/D2/E1/F1/F3/G1/G2/F2/F4/B6) +
+  golden + serial==M:N parity twins. D1 (`capture_escape_reader` → `42\n7`, escaping capture outlives
+  the frame) and D2 (`capture_recursion_percall` → `0\n1\n2\n3`, per-call fresh cell) close the last two
+  §4 rows. NOTE: the design's owner-write A2/A3 rows are also re-expressed via `defer:` blocks / reads,
+  because **Chezzi closures are expression-only** — a closure VALUE cannot *reassign* a captured scalar
+  cell (only mutate its inner heap value via a method call, or read it); D1's Go increment-and-return
+  counter is likewise inexpressible (only the escape property ships). **Docs migration (Task C) landed**
+  (`docs/syntax.md` capture section rewritten, `docs/spec.md` migration note, `future.md`/`bug-discovery.md`/
+  `benchmarks.md` + example comments; stale-claim grep clean).
 
 **✅ Closure-capture model documented + golden-locked, pre-JIT (docs + golden only, 2026-06-30).**
 No engine/checker change — the engines already implement the rule (`src/compiler/mod.rs:1604-1620`
