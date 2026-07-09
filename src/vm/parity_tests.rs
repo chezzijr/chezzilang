@@ -5017,6 +5017,21 @@ fn golden_capture_shared_counter() {
     );
 }
 
+/// B1 — a two-level nested closure shares a grandparent local (transitive capture via
+/// `CapSrc::Captured`); reading it sees a later grandparent write through the shared cell → `11`.
+#[test]
+fn golden_capture_nested_grandparent() {
+    let src = include_str!("../../examples/capture_nested_grandparent.chz");
+    let expected = include_str!("../../examples/capture_nested_grandparent.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
 #[test]
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.

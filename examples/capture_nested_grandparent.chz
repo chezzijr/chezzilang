@@ -1,0 +1,13 @@
+# Uniform by-reference capture (B1): a two-level nested closure shares a grandparent local. `inner`
+# captures `x` through `make` (CapSrc::Captured), and reading it sees a write made in the grandparent
+# scope AFTER both closures were created — proving the cell aliases across two capture levels.
+# (Chezzi closures are expression-only, so the inner closure READS `x` rather than the design's
+# statement-form `x = x + 10`; the transitive-capture cell path is what B1 exercises.)
+fn main():
+    x := 1
+    make := fn() -> fn() -> int: fn() -> int: x
+    inner := make()
+    x = 11
+    print(inner())          # 11
+
+main()
