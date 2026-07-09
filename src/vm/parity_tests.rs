@@ -5062,6 +5062,51 @@ fn golden_capture_match_bind() {
     );
 }
 
+/// C1 — a captured loop variable rebinds into a FRESH cell each iteration (Go >=1.22), so the three
+/// pushed closures capture distinct values → `0`, `1`, `2` (not `2`, `2`, `2`).
+#[test]
+fn golden_capture_loop_var_fresh() {
+    let src = include_str!("../../examples/capture_loop_var_fresh.chz");
+    let expected = include_str!("../../examples/capture_loop_var_fresh.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// C2 — an accumulator declared OUTSIDE the loop is ONE shared cell (unlike the fresh-per-iteration
+/// loop var), so per-iteration `defer:` writes accumulate → `6`.
+#[test]
+fn golden_capture_loop_accumulator() {
+    let src = include_str!("../../examples/capture_loop_accumulator.chz");
+    let expected = include_str!("../../examples/capture_loop_accumulator.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
+/// E1 — a `defer:` block shares the enclosing binding by reference and runs at frame exit, so it
+/// observes the LATEST value of a captured local, not its value at the defer point → `99`.
+#[test]
+fn golden_capture_defer_latest() {
+    let src = include_str!("../../examples/capture_defer_latest.chz");
+    let expected = include_str!("../../examples/capture_defer_latest.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N"
+    );
+}
+
 /// F3 / B2 (parity guard) — a closure capturing a by-reference local (a cell), invoked in a `spawn`
 /// task via `spawn f()`, produces the same result on both engines → `7` (post-join, exact-match).
 ///

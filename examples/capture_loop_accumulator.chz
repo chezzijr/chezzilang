@@ -1,0 +1,11 @@
+# Uniform by-reference capture (C2): an accumulator declared OUTSIDE the loop is ONE shared cell, so
+# writes from each iteration accumulate — unlike the loop variable, which is fresh per iteration (C1).
+# (The write `sum = sum + i` is a statement, so — closures being expression-only — the per-iteration
+# capturing frame is a `defer:` block, which runs at each iteration's end with that iteration's `i`.)
+fn main():
+    sum := 0
+    for i in [1, 2, 3]:
+        defer: sum = sum + i    # shared `sum` cell; fresh `i` cell per iteration
+    print(sum)                  # 6
+
+main()

@@ -1,0 +1,10 @@
+# Uniform by-reference capture (C1): a captured LOOP VARIABLE rebinds into a FRESH cell each
+# iteration (Go >=1.22), so each closure captures its OWN value — printing 0, 1, 2, not 2, 2, 2.
+fn main():
+    fns := []
+    for i in [0, 1, 2]:
+        fns.push(fn() -> int: i)
+    for f in fns:
+        print(f())              # 0 then 1 then 2
+
+main()

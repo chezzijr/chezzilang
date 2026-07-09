@@ -1,0 +1,9 @@
+# Uniform by-reference capture (E1): a `defer:` block shares the enclosing binding by reference and
+# runs at frame exit, so it observes the LATEST value of a captured local, not its value at the
+# defer point. (The CALL form `defer f(x)` still evaluates its args eagerly — only the block shares.)
+fn demo():
+    x := 1
+    defer: print(x)             # runs at exit → sees x == 99
+    x = 99
+
+demo()
