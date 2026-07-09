@@ -1,0 +1,16 @@
+# Uniform by-reference capture (F3 — the mutation form, parity guard for the closure airlock arm).
+# A closure `f` captures a by-reference local `xs` (a cell holding a list) and MUTATES its inner heap
+# value through a method call (`xs.push(2)`) — the cell is not rebound, but its contents change. When
+# `f` crosses a `spawn` task boundary via the call form `spawn f()`, the task must receive an ISOLATED
+# deep copy of the cell (and its list) on BOTH engines — otherwise the task would push into the
+# parent's shared list. Output is `[1]` (the parent's `xs` is untouched by the task's push), the same
+# on serial and M:N. DO NOT "fix" toward sharing — the isolation IS the memory-safety line (design §4
+# F1/F3): a plain capture into a task is snapshot-copied; use `Shared[T]` to share across tasks.
+fn main():
+    xs := [1]
+    f := fn(): xs.push(2)
+    parallel:
+        spawn f()
+    print(xs)                   # [1] — serial == M:N (task pushed into its own isolated copy)
+
+main()

@@ -3,12 +3,12 @@
 # the task's copy of `f` and its cell are reconstructed, BOTH engines must agree — the print is
 # post-join, so serial == M:N == `7` exactly.
 #
-# NOTE (deliberate, do not "fix"): the design's mutation-form F3 (`f := fn(): x = x + 1`) is NOT
-# expressible in Chezzi — closures are EXPRESSION-only, so a closure value can never reassign a
-# captured scalar cell. Because a closure cannot mutate its captured cell, the "shared vs isolated
-# cell" distinction across the airlock is unobservable, so no serial-vs-M:N divergence can arise from
-# a cell-bearing closure. (A captured closure VALUE is otherwise rejected as non-sendable by the
-# checker; only `spawn f()` / `Executor.submit` cross a callable, and those stay consistent.)
+# A capture-bearing closure crosses the `spawn` task boundary by DEEP value on BOTH engines
+# (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), so the task's `f` and its captured
+# cell are an isolated per-task copy — matching the M:N engine's `prepare_worker`/`to_snap` deep-copy.
+# This read-only case prints `7` either way; the mutation forms that make the deep-cross load-bearing
+# (a closure mutating a captured cell's inner heap value, or reading a cell the owner writes after
+# spawn) are in `capture_spawn_closure_mutates_isolated.chz` / `capture_spawn_closure_owner_write_isolated.chz`.
 fn main():
     x := 7
     ch := Channel[int]()

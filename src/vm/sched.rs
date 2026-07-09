@@ -32,12 +32,38 @@ impl Vm {
                 }
             }
             None => PendingCall::Call {
-                callee: head,
+                callee: self.cross_spawn_callee(head, span)?,
                 args,
                 span,
             },
         };
         self.register_task(task, span)
+    }
+
+    /// Cross a `spawn f()` **callee** over the task boundary. A closure that captures locals holds them
+    /// (uniformly) as `Obj::Cell` handles; sharing that closure by handle would let the task alias the
+    /// parent's cells — a serial-vs-M:N divergence, since the M:N engine's `prepare_worker`/`to_snap`
+    /// path already deep-copies a task closure's captures into fresh cells. So a *capture-bearing*
+    /// closure crosses by DEEP value here too (via the existing `wire_callable` → `from_wire`
+    /// round-trip, the same serializer M:N uses), snapshotting its cells at spawn time on BOTH engines.
+    /// A capture-free callable (plain `Obj::Func`, a builtin, or a closure with no captures) keeps the
+    /// cheap shared handle — it holds no mutable captured state, so sharing is observationally identical
+    /// to copying (and preserves the closure hot path). `Shared`/`RwShared`/`Atomic`/`Channel` captures
+    /// still cross by reference (their `Arc` core is deep-copied as the same `Arc`), so `Shared`-based
+    /// cross-task sharing is unaffected.
+    fn cross_spawn_callee(&mut self, callee: Value, span: Span) -> Result<Value, RuntimeError> {
+        let deep = match callee {
+            Value::Obj(h) => {
+                matches!(self.heap.get(h), Obj::Closure { captured, .. } if !captured.is_empty())
+            }
+            _ => false,
+        };
+        if deep {
+            let w = self.wire_callable(callee, span)?;
+            Ok(self.from_wire(w))
+        } else {
+            Ok(callee)
+        }
     }
 
     /// `spawn:` block — snapshot the captured bindings from the current frame (like `MakeClosure`),

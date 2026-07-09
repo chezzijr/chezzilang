@@ -5109,14 +5109,12 @@ fn golden_capture_defer_latest() {
 
 /// F3 / B2 (parity guard) — a closure capturing a by-reference local (a cell), invoked in a `spawn`
 /// task via `spawn f()`, produces the same result on both engines → `7` (post-join, exact-match).
-///
-/// The design's mutation-form F3 (`f := fn(): x = x + 1`) is NOT expressible in Chezzi: closures are
-/// EXPRESSION-only, so a closure value can never reassign a captured scalar cell. Because a closure
-/// cannot mutate its captured cell, the "shared vs isolated cell" distinction across the airlock is
-/// unobservable — so the B2 serial-vs-M:N divergence cannot arise from a cell-bearing closure, and no
-/// `has_boxed_captures` deep-cross is needed (implementing one would instead REGRESS the documented
-/// cooperative `Executor.submit` share-by-reference invariant — see
-/// `executor_cooperative_submit_shares_captures_by_reference`). This test locks the consistency.
+/// A capture-bearing closure crosses the task boundary by DEEP value on BOTH engines
+/// (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), matching the M:N
+/// `prepare_worker`/`to_snap` deep-copy — so the task's `f` and its cells are isolated from the
+/// parent's. See `golden_capture_spawn_closure_mutates_isolated` /
+/// `golden_capture_spawn_closure_owner_write_isolated` for the mutation forms that make this
+/// deep-cross load-bearing.
 #[test]
 fn golden_capture_cell_closure_into_spawn() {
     let src = include_str!("../../examples/capture_cell_closure_into_spawn.chz");
@@ -5127,6 +5125,49 @@ fn golden_capture_cell_closure_into_spawn() {
         out,
         run_capture_parallel(src).expect("parallel run"),
         "serial vs M:N (cell-bearing closure crosses consistently)"
+    );
+}
+
+/// F3 (mutation form) — the MEDIUM parity bug the first draft's F3 docstring wrongly declared
+/// impossible. A closure `f := fn(): xs.push(2)` mutates its captured cell's INNER heap value (the
+/// list) via a method call — the cell is never rebound, so "closures are expression-only" does not
+/// save you. When `f` crosses `spawn f()` it must be a deep isolated copy on BOTH engines → the
+/// parent's `xs` stays `[1]`. Before the `cross_spawn_callee` deep-cross, serial shared `f` by handle
+/// and printed `[1, 2]` while M:N isolated and printed `[1]` (a real serial-vs-M:N divergence). The
+/// print is post-join → exact-match.
+#[test]
+fn golden_capture_spawn_closure_mutates_isolated() {
+    let src = include_str!("../../examples/capture_spawn_closure_mutates_isolated.chz");
+    let expected = include_str!("../../examples/capture_spawn_closure_mutates_isolated.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(out, expected, "serial vs .expected (isolated push → [1])");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N (capture-bearing closure crosses by deep value on both engines)"
+    );
+}
+
+/// F3 (owner-write form) — the CRITICAL parity bug: a closure `f` READS a captured cell that the owner
+/// MUTATES after `spawn f()`. Nesting `work()` under `main`'s `parallel:` forces the M:N eager
+/// nested-nursery path (wires the task at spawn time). Before the fix, serial shared `f` and read the
+/// post-write value (`5`) at join while M:N read the spawn-time snapshot (`0`); now `cross_spawn_callee`
+/// snapshots the cell at spawn time on BOTH engines → `0`. `result` is a `Shared[int]` (crosses by
+/// reference) so the task reports what it observed. Print is post-join → exact-match.
+#[test]
+fn golden_capture_spawn_closure_owner_write_isolated() {
+    let src = include_str!("../../examples/capture_spawn_closure_owner_write_isolated.chz");
+    let expected =
+        include_str!("../../examples/capture_spawn_closure_owner_write_isolated.expected");
+    let out = run_capture(src).expect("vm run");
+    assert_eq!(
+        out, expected,
+        "serial vs .expected (spawn-time snapshot → 0)"
+    );
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N (owner write after spawn is invisible to the task's isolated cell)"
     );
 }
 

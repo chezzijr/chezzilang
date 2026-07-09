@@ -1,0 +1,24 @@
+# Uniform by-reference capture (F3 — owner-write form, nested-nursery parity guard).
+# The critical serial-vs-M:N case: a closure `f` captures a by-reference local `x` (a cell) and READS
+# it; the owner MUTATES that cell (`x[0] = 5`) AFTER `spawn f()`. The task's copy of `f` must snapshot
+# `x` at SPAWN time (value `0`), independent of the later owner write, on BOTH engines. `result` is a
+# `Shared[int]` (crosses by reference, an Arc), so the task writes the value it observed back to the
+# parent. Nesting `work()` under `main`'s `parallel:` forces the M:N eager nested-nursery path (which
+# wires the task at spawn time) — the exact path where a shared-callee serial engine used to read the
+# post-write value `5` while M:N read the snapshot `0`. After uniform deep-cross both print `0`.
+import std.concurrency
+
+fn work():
+    x := [0]
+    result := Shared(0)
+    f := fn(): result.set(x[0])
+    parallel:
+        spawn f()
+        x[0] = 5
+    print(result.get())         # 0 — task snapshotted x=[0] at spawn; serial == M:N
+
+fn main():
+    parallel:
+        spawn work()
+
+main()
