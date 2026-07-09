@@ -1371,6 +1371,19 @@ engines by the existing goldens; value-first runtime stays covered by `examples/
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
 (non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
 
+**🔨 Uniform by-reference capture — Task A groundwork landed (additive + UNWIRED, 2026-07-09).** Two
+strictly-additive commits, no observable behavior change (nothing emits the ops or reads the set yet;
+full `--lib` suite unchanged at 3201 green). (1) VM cell primitive: `Obj::Cell(Value)` heap box +
+operandless `NewCell`/`CellLoad`/`CellStore` ops (`src/vm/{heap,op,exec}.rs`). Pop-order contract:
+operands are pushed value-THEN-handle, so `CellStore` pops the HANDLE first then the value (mirrors
+`set_index`) — the hard contract the later boxing task depends on. Airlock/cold-path `Obj` matches carry
+`TASK9:` `unreachable!` stubs (no boxed value can reach them until wiring). (2) Compile-time capture
+pre-pass: `captured_names_of_body`/`captured_names_of_closure` compute a frame's boxed-name set
+(this-frame binds ∩ the free names of each directly-nested closure/`defer:`/`spawn:` boundary, free-var
+walk descending through nested closures), stored on `FnComp.boxed_names` (+ `is_boxed_slot`). Populated at
+every fn/closure/spawn-block/defer-block construction; unread this task. Emit-routing, boxing-at-decl,
+loop/defer/airlock semantics are the later auto-task (Tasks 3-9 of the plan).
+
 **✅ Closure-capture model documented + golden-locked, pre-JIT (docs + golden only, 2026-06-30).**
 No engine/checker change — the engines already implement the rule (`src/compiler/mod.rs:1604-1620`
 `emit_load`: a local → `GetCaptured` snapshot, a global → `GetGlobalSlot` live read). Pinned the
