@@ -62,8 +62,8 @@ struct Parser:
         return Err("unexpected character '" + c + "'")
 
     fn parse_lit(self, word: str, val: Json) -> Result[Json]:
-        for i in 0..word.len():
-            if self.bump() != word[i]:
+        for expected in word:
+            if self.bump() != expected:
                 return Err("invalid literal, expected '" + word + "'")
         return Ok(val)
 
