@@ -1411,6 +1411,27 @@ that check-passed then run-faulted). Now a nested `fn` is a **closure-with-a-nam
   in-fn + top-level ×2, spawn-airlock-isolated). Full `cargo test` (3247 lib + integration + conformance)
   green, clippy clean, serial==M:N. Docs: `docs/syntax.md` new "Nested function declarations" section.
 
+**✅ Finding D — free-variable capture (over-capture soundness fix, 2026-07-10).** Every `MakeClosure`
+site captured via `fc.snapshot_entries()` = ALL locals visible in the enclosing frame, so an unused
+non-sendable sibling (a closure value / live generator the task never touches) was dragged across the
+`spawn` airlock (`prepare_worker`→`ensure_crossable`) and faulted with "spawn: this task value can't
+cross a worker boundary yet" — even though the body never referenced it (`chezzi check` OK, `chezzi run`
++ `--serial` fault). Fix: each `MakeClosure` site now captures **only the body's free-variable set**,
+computed by the existing trusted over-approximation (`free_names_expr` for closure-expr bodies,
+`free_names_block` for statement bodies — the same analysis that drives cell-boxing), via a new
+`filter_entries_free_block` helper. All five sites converted (compile_closure, both nested-fn arms,
+`spawn:` block, `defer:` block); `entries` and `captured_names` derive from the SAME filtered vec so
+positional `GetCaptured` slots stay aligned. Behavior-identical + strictly smaller capture: a global
+free name is still read live via its global slot (never in `snapshot_entries`); the LETREC recursive
+self-name is free in a recursive body → stays captured → self-call resolves. User-visible semantics
+UNCHANGED (still uniform by-reference) — it just no longer drags unused siblings. 13 new both-engine
+parity tests (`vm::parity_tests::d_*`): #D repro (unused sibling closure-value + generator variants,
+nested-fn + closure-value spawn), used-sibling-still-faults (no over-narrow), spawn:/defer: block, and
+a no-under-capture battery (method call on captured receiver, interpolation-only ref, grandparent
+through two frames, recursion self-ref, ref-capture mutate, match+comprehension, non-recursive nested
+fn). Full `cargo test` green, clippy clean, serial==M:N. Bench-neutral (benches don't stress capture).
+Docs: `docs/syntax.md` capture section, `src/vm/op.rs` CapSrc comment.
+
 **✅ Uniform by-reference capture — Task B WIRED (semantics + airlock, 2026-07-09).** Closure/`defer:`/
 `spawn:` capture is now **uniformly by reference**: a capturing frame shares the closest binding of a
 captured name and sees/makes writes to it (was: plain local snapshotted by value). Builds on Task A's

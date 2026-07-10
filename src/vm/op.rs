@@ -16,9 +16,9 @@ use std::collections::HashMap;
 /// Index of a `Proto` in `Program::protos`.
 pub type ProtoId = usize;
 
-/// Where one snapshotted name's value comes from in the *enclosing* frame, at the moment a closure
-/// is created. The interpreter snapshots all in-scope locals by value; we mirror that — a closure
-/// captures every visible enclosing binding by name (snapshot-by-value, not by reference).
+/// Where one captured name's value comes from in the *enclosing* frame, at the moment a closure
+/// is created. A closure captures only the names its body actually references (its free-variable
+/// set — Finding D), by reference (uniform cell model: a boxed name indirects through a heap cell).
 #[derive(Debug, Clone, Copy)]
 pub enum CapSrc {
     /// Read the enclosing frame's local slot.
