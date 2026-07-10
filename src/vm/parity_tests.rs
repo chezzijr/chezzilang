@@ -6277,17 +6277,16 @@ fn d_repro_unused_generator_sibling_parity() {
 }
 
 #[test]
-fn d_used_non_sendable_still_faults() {
-    // Negative test: task ACTUALLY uses the non-sendable sibling → the airlock fault must STAY (the
-    // filter must be exactly the free set, not empty / over-narrow). Both engines must Err.
-    let src = "g := 7\nfn main():\n    inc := fn(x: int): x + 1\n    fn task():\n        print(inc(g))\n    parallel:\n        spawn task()\nmain()\n";
-    assert!(
-        vm_outcome(src).is_err(),
-        "serial: used sibling must still fault"
-    );
-    assert!(
-        parallel_outcome(src).is_err(),
-        "M:N: used sibling must still fault"
+fn d_used_sibling_closure_crosses_by_value_parity() {
+    // B3.3: the task ACTUALLY captures + uses a sibling CLOSURE (`inc`). This used to fault at the
+    // airlock (a closure lowered to a by-reference `Handle`); as of B3.3 closures cross the airlock BY
+    // VALUE, so the captured `inc` is deep-copied into the task and `inc(7)` runs → prints 8 on both
+    // engines. (The Finding-D free-var filter is still exercised: only `inc` is captured.) A residual
+    // non-sendable value (a live generator) still faults — see
+    // `generator_captured_into_spawn_callee_still_faults`.
+    assert_parity_out(
+        "g := 7\nfn main():\n    inc := fn(x: int): x + 1\n    fn task():\n        print(inc(g))\n    parallel:\n        spawn task()\nmain()\n",
+        "8\n",
     );
 }
 
@@ -6372,4 +6371,92 @@ fn d_no_undercapture_nonrecursive_nested_fn_parity() {
         "fn main():\n    fn greet():\n        print(\"hi\")\n    greet()\nmain()\n",
         "hi\n",
     );
+}
+
+// ===== B3.3 (runtime) — closures / bare funcs cross the spawn/Channel airlock BY VALUE =====
+// The generic `to_wire`/`to_snap` lowering crosses a closure/nested-fn/bare-func as data (its proto
+// + wired captures + home index), never a by-reference `Handle`. A `spawn f()` callee whose captured
+// environment contains a NESTED closure (or is a bare fn) now runs on both engines identically,
+// instead of the old "task value can't cross a worker boundary" airlock fault. The checker's
+// Func-non-sendable gate on Channel ELEMENT types is a separate follow-up and still stands.
+
+#[test]
+fn closure_as_data_into_spawn_callee_parity() {
+    // `work` is a closure whose captured env holds another closure (`double`). Crossing the spawn
+    // callee airlock used to fault (the nested closure lowered to a `Handle`); it now crosses by value.
+    let src = "\
+fn main():
+    double := fn(x: int) -> int: x * 2
+    ch := Channel[int]()
+    work := fn(): ch.send(double(21))
+    parallel:
+        spawn work()
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "42\n");
+}
+
+#[test]
+fn nestedfn_as_data_into_spawn_callee_parity() {
+    // Same shape, but with nested `fn` declarations rather than closure values.
+    let src = "\
+fn main():
+    fn double(x: int) -> int:
+        return x * 2
+    ch := Channel[int]()
+    fn work():
+        ch.send(double(21))
+    parallel:
+        spawn work()
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "42\n");
+}
+
+#[test]
+fn generator_captured_into_spawn_callee_still_faults() {
+    // Regression pin: a spawn callee that REACHES a live generator still faults identically on BOTH
+    // engines — closures crossing by value must not open a hole for a frame-holding generator.
+    let src = "\
+g := 7
+fn gen() -> Iterator[int]:
+    yield 1
+fn main():
+    it := gen()
+    fn task():
+        for x in it:
+            print(x)
+    parallel:
+        spawn task()
+main()";
+    let ve = vm_outcome(src).expect_err("serial: captured generator must fault");
+    let pe = parallel_outcome(src).expect_err("M:N: captured generator must fault");
+    assert!(
+        ve.contains("a generator cannot be sent across tasks"),
+        "serial fault msg: {ve}"
+    );
+    assert!(
+        pe.contains("a generator cannot be sent across tasks"),
+        "M:N fault msg: {pe}"
+    );
+}
+
+#[test]
+fn bare_func_crosses_spawn_callee_renders_fn_name_parity() {
+    // A bare top-level fn captured into a spawn callee crosses as a distinct `WireValue::Func` (not a
+    // Closure), so `str()` still renders `<fn NAME>` — identical serial vs M:N. Proves the distinct
+    // Func variant preserves bare-func identity across the airlock.
+    let src = "\
+fn helper(x: int) -> int:
+    return x + 1
+fn main():
+    ch := Channel[str]()
+    f := helper
+    fn task():
+        ch.send(str(f))
+    parallel:
+        spawn task()
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "<fn helper>\n");
 }
