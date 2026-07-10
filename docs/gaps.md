@@ -6,7 +6,7 @@ other categories (language, tooling, perf) here as they surface.
 
 ## Language / concurrency
 
-### 1. Spawn-callee sendability gate is incomplete — `spawn f()` callee captures are checked at RUNTIME, not compile time (soundness)
+### 1. Spawn-callee sendability gate — **RESOLVED at check for spawn callee/arg sites** (Task 2a, 2026-07-10)
 
 Spawned tasks **are** usable today: a nested `fn` or closure works as the direct callee of `spawn f()`
 (the task runs it; its captured cells are **deep-copied** to isolate them — see
@@ -15,29 +15,20 @@ Spawned tasks **are** usable today: a nested `fn` or closure works as the direct
 `std.cancel` `Token`, a `.iter()` cursor, and (read-only) module globals. Verified: a task capturing a
 `List` or a `Shared` runs fine.
 
-The **gap**: the checker's spawn-sendability gate covers `spawn:` / `parallel:` **block** bodies but
-**NOT the free captures of a `spawn f()` callee** (closure or nested fn). So when such a callee
-captures a **non-sendable** binding, the block form rejects it at **check** time but the callee form
-is not caught until run time — or worse, not at all:
+**Was the gap:** the checker's spawn-sendability gate covered `spawn:` / `parallel:` **block** bodies but
+**NOT the free captures of a `spawn f()` callee** (closure or nested fn). A callee capturing a `ref T` /
+`Ref[T]` and mutating it checked OK yet **ran and silently isolated the write** (a stale-value soundness
+bug), contradicting `concurrency.md §7`.
 
-- callee captures a **closure-as-data** (another closure value) → as of the B3.3 runtime (see #2) this
-  now **crosses by value and runs** on both engines (was previously a runtime airlock fault). So this is
-  no longer a soundness *hole* — the runtime copy is correct — but the checker asymmetry with the
-  `spawn:` block form (which still rejects it at `check`) remains a consistency wart to reconcile.
-- callee captures a **`ref T` / `Ref[T]`** and mutates it → `check` OK, **runs and silently isolates
-  the write** (prints the stale value), directly contradicting `concurrency.md §7` ("capturing/passing
-  a `ref` across the airlock is a **compile error, not a silent copy**"). The `spawn:` block form
-  rejects it at `check` (`2 type errors`).
+**Fixed (Task 2a):** the checker now records each closure/nested-fn value's non-sendable **local**
+captures at its decl site (keyed by binding, using the same `free_names_*` over-approximation the runtime
+uses to build captures) and, at a `spawn <name>()` **callee** or `spawn f(<name>)` **arg** site, emits
+the verbatim block-form error per captured non-sendable local. A captured **`ref`** is now a clean
+compile error at both the callee and the arg site, consistent with the block form. A **module-global**
+`ref` is a read-only global (scope-0 exclusion), **not** a capture — never gated. Paired with the
+permissive `sendable(Func)` flip (#2), closures-as-data type-check while a captured `ref` is rejected.
 
-Exposed by the first-class-nested-fn work (2026-07-10, merge `f8c3c60`) — nested fns made `spawn f()`
-callees common. **Fix direction:** run the same check-time captured-non-sendable analysis the `spawn:`
-block form uses over a spawned callee closure/nested-fn's **free** captures (the free set is already
-computed at each MakeClosure site by the free-variable-capture work, merge `0d40fca`), so a captured
-closure/`ref`/generator in a `spawn f()` callee is a **clean compile error**, consistent with blocks.
-Checker-only; no new feature. This makes the *existing* limit sound; it does **not** make closures
-sendable-as-data.
-
-### 2. Closures as data — **RUNTIME half landed (B3.3); checker gate still pending**
+### 2. Closures as data — **RUNTIME (B3.3) + checker gate (Task 2a) landed; struct-field/opaque storage of a ref-capturing closure deferred to a runtime backstop (Task 2b)**
 
 **Runtime (DONE):** the airlock lowers a closure/bare-`fn` **by value** everywhere — its `proto`
 (immutable → shared) + its captures deep-copied recursively into fresh per-task cells + its home-module
@@ -46,12 +37,17 @@ index, never a by-reference heap handle — on **both** engines identically (`Wi
 callee whose captured environment contains a **nested** closure/`fn` (or is itself a bare `fn`) now runs
 cleanly instead of faulting at the airlock.
 
-**Checker (STILL PENDING — follow-up):** the type checker still treats a function type as *non-sendable*
-for a **`Channel`/`Shared` element type** (`Channel[fn(int)->int]` is rejected at check), so *storing* a
-closure in a channel/box is not yet reachable — only the runtime half exists. Lifting that gate (and
-proving the by-value copy is safe in the checker) is the remaining work. `ref T`/`Ref[T]` stays
-non-sendable regardless (use `Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation) — a separate
-checker follow-up handles `ref` safety.
+**Checker (DONE — Task 2a):** `sendable(Ty::Func)` is now **permissive** (a closure crosses by value),
+so a **`Channel`/`Shared` element type** of `fn(...)->...` type-checks (`Channel[fn(int)->int]` is
+accepted; `channel_of_closures` and a factory closure sent over a channel both run). The per-closure
+capture check moved to the airlock **sites** (#1). `ref T`/`Ref[T]` stays non-sendable regardless (use
+`Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation).
+
+**Still pending (Task 2b — runtime backstop):** the bare `fn` type cannot carry its captures, so a
+closure whose captures include a `ref` that reaches the airlock **indirectly** — inside a struct field
+(`Channel[Holder]` where `Holder` has a `fn` field), or through a channel/opaque value — is no longer
+caught at check (it type-checks). A small **runtime** guard on the channel/opaque/struct-field paths is
+the remaining work to fault such a case deterministically on both engines.
 
 ## Stdlib
 

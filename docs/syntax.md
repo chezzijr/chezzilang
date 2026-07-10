@@ -260,8 +260,12 @@ print(r + 100)     # 106 — usable anywhere its value is
   — use a first-class `Ref[T]` there.
 - **Concurrency (important).** `ref`/`Ref` are **same-task** aliasing only. A `ref T` is a `Ref[T]`
   box, which is **non-sendable**: capturing or passing the box across the `spawn` / `parallel:` /
-  `Channel` airlock is **rejected** by the checker. To move a value across, deref the ref into a plain
-  copy first; for genuine cross-task shared mutation use `Shared[T]`, never `ref`.
+  `Channel` airlock is **rejected** by the checker — whether the `ref` is captured by a `spawn:` block
+  or by a **closure/nested-fn used as a `spawn f()` callee/arg** (the capture crosses as a silent copy,
+  so it is a compile error either way). To move a value across, deref the ref into a plain copy first;
+  for genuine cross-task shared mutation use `Shared[T]`, never `ref`. A **module-global** `ref` is the
+  exception: it is a **read-only global** resolvable in every task (not a per-task capture), so reading
+  it inside a task is fine and it is never gated.
 
 ### Closure capture — uniformly by reference
 

@@ -613,20 +613,29 @@ reassigning it inside a task is a **compile error** (see below).
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
   is plain data).
-- **Closures / functions cross by value (B3.3 runtime).** At runtime the airlock lowers a closure or
+- **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
   home module index, never a by-reference heap handle — on **both** engines identically. So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
-  cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker note
-  (follow-up pending):** the type checker still treats a function type as *non-sendable* for a
-  **`Channel`/`Shared` element type** (`Channel[fn(int)->int]` is rejected at check), so storing a
-  closure in a channel/box is not yet reachable — only the runtime half has landed. A bare **native**
-  handle is a different case and stays non-sendable (below).
+  cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
+  (landed, Task 2a):** the function type is **sendable**, so a closure crosses as data —
+  `Channel[fn(int)->int]` type-checks and a closure sent over a channel or returned from a factory runs.
+  The rule is: **a closure crosses iff its captures are sendable.** The bare `fn` type cannot carry its
+  captures, so that per-closure check runs at the airlock **sites**: a closure/nested-fn value whose
+  captures include a **non-sendable local** (a `ref` — see below) at a `spawn f()` **callee** or
+  `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. (Storage of a
+  ref-capturing closure *inside a struct field / channel value* is not caught at check — a runtime
+  backstop, Task 2b, covers it.) A bare **native** handle is a different case and stays non-sendable (below).
 - **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
   over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a
-  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). The checker
+  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). This holds whether
+  the `ref` is captured directly by a `spawn:` block, or by a closure/nested-fn used as a `spawn f()`
+  **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global** `ref`, by contrast, is
+  a **read-only global** resolvable in every task (like a free fn), **not** a per-task capture — reading
+  it inside a task is fine and it is never gated (only *reassigning* a module global inside a task is the
+  error, below). The checker
   cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing a task
   airlock **as data** (passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic`)
   is reported at **runtime** as a **graceful, catchable** error (`a generator cannot be sent across
@@ -854,7 +863,7 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 | # | Item | Status |
 |---|------|--------|
 | **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
-| **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **already enforced** — emergent from the persistent `capture_floors` + the `infer_ident` read gate; pinned by a regression test (`read_captured_closure_through_nested_closure_in_spawn_block_rejected`). |
+| **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable `ref` etc.** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`; a nested closure that itself captures a `ref` is caught by the runtime backstop (Task 2b). |
 | **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
 > *Dropped from Group A:* **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the

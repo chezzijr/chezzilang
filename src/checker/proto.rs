@@ -1369,7 +1369,14 @@ impl Checker {
             Ty::Map(k, v) => self.sendable_rec(k, stack) && self.sendable_rec(v, stack),
             Ty::Result(t, e) => self.sendable_rec(t, stack) && self.sendable_rec(e, stack),
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
-            Ty::Func { .. } | Ty::Module(_) | Ty::Protocol(_, _) => false,
+            // B3.3 (Task 2a) — a user `Func` (closure / nested fn / bare fn) crosses the airlock BY
+            // VALUE now (the runtime `to_wire`/`to_snap` lowering carries its proto + wired captures),
+            // so the bare `fn` type is sendable. The bare type cannot carry its captures, so the
+            // per-closure capture-sendability check is done at the airlock SITES (the `spawn:` block
+            // read gate + the spawn callee/arg gate in `sig.rs`), NOT here. `Ty::Module`/`Ty::Protocol`
+            // stay non-sendable (a module namespace / protocol witness never crosses).
+            Ty::Func { .. } => true,
+            Ty::Module(_) | Ty::Protocol(_, _) => false,
             // A first-class builtin fn value is pure code (no captured environment) — always
             // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
             // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable

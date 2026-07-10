@@ -8238,8 +8238,11 @@ fn channel_needs_element_type() {
 
 #[test]
 fn channel_non_sendable_element_rejected() {
-    rejects(
-        "fn main():\n    ch := Channel[fn() -> int]()\n    print(ch.len())\nmain()\n",
+    // A still-non-sendable element type (a `Ref[int]` in-task box) is rejected as a `Channel`
+    // element. (B3.3 Task 2a: a `fn`-typed element is now SENDABLE — closures cross by value — so the
+    // gate keys on a genuinely non-sendable box; the closure case is `channel_of_closures_typechecks`.)
+    entry_rejects(
+        "import std.ref\nfn main():\n    ch := Channel[Ref[int]]()\n    print(ch.len())\nmain()\n",
         "Channel element type must be sendable",
     );
 }
@@ -8360,27 +8363,39 @@ fn comprehension_over_channel_rejected() {
 }
 
 #[test]
-fn spawn_non_sendable_arg_rejected() {
-    rejects(
-        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    g := fn(): 1\n    parallel:\n        spawn run(g)\nmain()\n",
-        "non-sendable value of type fn() -> int",
+fn spawn_capture_free_closure_arg_ok() {
+    // B3.3 (Task 2a): a CAPTURE-FREE closure passed as a spawn arg is sendable — it crosses the
+    // airlock by value — so it is accepted (was rejected under the old "Func non-sendable" rule).
+    ok(
+        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn run(g)\nmain()\n",
     );
 }
 
 #[test]
-fn spawn_non_sendable_keyword_arg_rejected() {
-    // The spawn airlock gate must reject a non-sendable value whether it crosses positionally OR by
-    // LABEL through a function VALUE. Regression guard: the gate iterated only positional `args`, so
-    // `spawn h(f=g)` smuggled a non-sendable closure across the airlock while the positional
-    // `spawn h(g)` was correctly rejected — a checker-accepts / runtime-diverges hole.
-    rejects(
-        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(f=g)\nmain()\n",
-        "non-sendable value of type fn() -> int",
+fn spawn_arg_closure_capturing_ref_rejected() {
+    // B3.3 (Task 2a): a closure ARG whose captures include a local `ref` is rejected — via the
+    // capture gate, not the bare-type sendability check (a `fn` value is now sendable). The captured
+    // `ref` crosses the airlock as a silent deep copy, so it must be a compile error.
+    entry_rejects(
+        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn run(g)\nmain()\n",
+        "non-sendable captured binding 'r'",
+    );
+}
+
+#[test]
+fn spawn_keyword_arg_closure_capturing_ref_rejected() {
+    // The capture gate must fire whether the ref-capturing closure crosses positionally OR by LABEL
+    // through a function VALUE. Regression guard: the gate must iterate keyword args too, so
+    // `spawn h(f=g)` cannot smuggle a ref-capturing closure past the airlock while `spawn h(g)` is
+    // rejected — the checker-accepts / runtime-diverges hole (kept from the old non-sendable-value gate).
+    entry_rejects(
+        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn h(f=g)\nmain()\n",
+        "non-sendable captured binding 'r'",
     );
     // The positional form of the SAME call is (and stays) rejected — parity of the two spellings.
-    rejects(
-        "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    g := fn(): 1\n    parallel:\n        spawn h(g)\nmain()\n",
-        "non-sendable value of type fn() -> int",
+    entry_rejects(
+        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn h(g)\nmain()\n",
+        "non-sendable captured binding 'r'",
     );
 }
 
@@ -8448,17 +8463,22 @@ fn spawn_bad_arg_reports_one_error() {
 
 #[test]
 fn channel_non_sendable_struct_field_rejected() {
-    // A closure smuggled inside a struct field must be caught (deep field sendability).
-    rejects(
-        "struct Holder:\n    f: fn() -> int\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
+    // A non-sendable value smuggled inside a struct field must be caught (deep field sendability). The
+    // field is a `Ref[int]` box — still non-sendable after B3.3 (a `fn` field would now be sendable,
+    // as closures cross by value; that path is deferred to the runtime backstop, Task 2b).
+    entry_rejects(
+        "import std.ref\nstruct Holder:\n    f: Ref[int]\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
         "Channel element type must be sendable",
     );
 }
 
 #[test]
 fn spawn_non_sendable_struct_field_arg_rejected() {
-    rejects(
-        "struct Holder:\n    f: fn() -> int\nfn run_it(h: Holder):\n    print(h.f())\nfn main():\n    bump := fn() -> int: 99\n    h := Holder(bump)\n    parallel:\n        spawn run_it(h)\nmain()\n",
+    // A struct carrying a still-non-sendable field (a `Ref[int]` box) is a non-sendable spawn arg
+    // (deep field sendability). (B3.3 Task 2a: a `fn` field is now sendable — closures cross by value
+    // — so the coverage uses a box that stays non-sendable; the closure case is deferred to Task 2b.)
+    entry_rejects(
+        "import std.ref\nstruct Holder:\n    f: Ref[int]\nfn run_it(h: Holder):\n    h.f.set(1)\nfn main():\n    h := Holder(Ref(0))\n    parallel:\n        spawn run_it(h)\nmain()\n",
         "non-sendable value of type Holder",
     );
 }
@@ -9676,12 +9696,13 @@ fn net_type_rename_rejected() {
 // ----- C5 refinement #1: a non-sendable value merely *read* inside a `spawn:` block -----
 
 #[test]
-fn read_captured_closure_in_spawn_block_rejected() {
-    // Capturing a closure (non-sendable) and *calling* it inside a task is a read across the
-    // airlock — rejected even though it's never reassigned (the gap closed in this milestone).
-    rejects(
+fn read_captured_capturefree_closure_in_spawn_block_ok() {
+    // B3.3 (Task 2a): capturing a CAPTURE-FREE closure and calling it inside a task is now ACCEPTED —
+    // `sendable(Func)` is permissive because a closure crosses the airlock BY VALUE (runs on both
+    // engines). A closure that ITSELF captures a `ref` is a runtime-backstop concern (Task 2b); a
+    // directly-captured `ref` is still rejected (`ref_binding_captured_in_spawn_rejected`).
+    ok(
         "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            print(g())\nmain()\n",
-        "non-sendable captured binding 'g'",
     );
 }
 
@@ -9719,17 +9740,13 @@ fn top_level_closure_used_in_spawn_block_ok() {
 }
 
 #[test]
-fn read_captured_closure_through_nested_closure_in_spawn_block_rejected() {
-    // (C5 / A2-session regression pin.) A non-sendable function-local closure smuggled into a
-    // `spawn:` block through a *nested* closure must still be rejected. This is currently an
-    // EMERGENT property, not a dedicated nested-closure walk: `capture_floors` is pushed only at the
-    // `spawn:` boundary and is NOT reset by `infer_closure`, so the read gate in `infer_ident`
-    // (`is_local_capture` + `!sendable`) fires at any closure-nesting depth. This test locks that
-    // behavior so a future refactor of the capture machinery can't silently reopen the hole — see
-    // `docs/concurrency.md` §9 (Group A / A3a).
-    rejects(
+fn read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok() {
+    // B3.3 (Task 2a): a capture-free function-local closure reached through a NESTED closure inside a
+    // `spawn:` block is now ACCEPTED — both closures are sendable (they cross by value; runs on both
+    // engines). Previously rejected under the old "Func non-sendable" rule. The only remaining hole —
+    // a nested closure that ITSELF captures a `ref` — is caught by the runtime backstop (Task 2b).
+    ok(
         "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            h := fn() -> int: g()\n            print(h())\nmain()\n",
-        "non-sendable captured binding 'g'",
     );
 }
 
@@ -9746,11 +9763,12 @@ fn submit_non_sendable_capture_rejected() {
 }
 
 #[test]
-fn submit_captured_closure_rejected() {
-    // Capturing a function-local closure (non-sendable) and calling it inside the submitted task.
-    entry_rejects(
+fn submit_capturefree_closure_ok() {
+    // B3.3 (Task 2a): submitting a closure that captures a CAPTURE-FREE sibling closure is now
+    // ACCEPTED — closures cross the airlock by value (runs on both engines). A submitted closure that
+    // captures a `ref` is still rejected (`submit_non_sendable_capture_rejected`).
+    entry_ok(
         "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
-        "non-sendable captured binding 'g'",
     );
 }
 
@@ -9771,14 +9789,12 @@ fn submit_captured_int_ok() {
 }
 
 #[test]
-fn submit_captured_closure_through_nested_closure_rejected() {
-    // Regression pin (mirrors `read_captured_closure_through_nested_closure_in_spawn_block_rejected`):
-    // a non-sendable function-local closure smuggled into a submitted task through a *nested* closure
-    // must still be rejected. Emergent from `capture_floors` not being reset by `infer_closure` — pin
-    // it so a future refactor of the capture machinery can't silently reopen the hole.
-    entry_rejects(
+fn submit_capturefree_closure_through_nested_closure_ok() {
+    // B3.3 (Task 2a): a capture-free closure reached through a NESTED closure inside a submitted task
+    // is now ACCEPTED (both closures cross by value; runs on both engines). Previously rejected under
+    // the old "Func non-sendable" rule; a nested closure that captures a `ref` is Task 2b's backstop.
+    entry_ok(
         "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
-        "non-sendable captured binding 'g'",
     );
 }
 
@@ -9790,6 +9806,92 @@ fn top_level_closure_submitted_ok() {
     // tightening of the gate can't silently flip it without a test failing.
     entry_ok(
         "import std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+    );
+}
+
+// ----- B3.3 (Task 2a): capture-sendability gate at the spawn CALLEE + ARG sites -----
+// A closure/nested-fn value crosses the airlock BY VALUE (`sendable(Func)` is permissive), so the
+// bare `fn` type type-checks; the per-closure capture check moves to the airlock SITES. A captured
+// NON-SENDABLE LOCAL (a `ref` etc.) at a spawn callee/arg is a clean compile error, matching the
+// `spawn:` block form. A MODULE-GLOBAL `ref` is a read-only global, NOT a capture — never gated.
+
+#[test]
+fn ref_captured_by_spawn_callee_closure_rejected() {
+    // A function-local `ref` captured by a closure VALUE that is the spawn CALLEE crosses the airlock
+    // as a silent deep copy (the write vanishes) — now a compile error, exactly like the block form.
+    let errs = check_entry(
+        "import std.ref\nfn main():\n    r: ref int = 0\n    bump := fn() -> int: r\n    parallel:\n        spawn bump()\n    print(r)\nmain()\n",
+    );
+    assert_eq!(errs.len(), 1, "expected exactly 1 error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("non-sendable captured binding 'r'")
+            && errs[0].message.contains("ref int"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn ref_captured_by_nested_fn_spawn_callee_rejected() {
+    // Same gate for a NESTED `fn` value (statement body, so it can WRITE the ref) as the callee.
+    let errs = check_entry(
+        "import std.ref\nfn main():\n    r: ref int = 0\n    fn bump():\n        r = 5\n    parallel:\n        spawn bump()\n    print(r)\nmain()\n",
+    );
+    assert_eq!(errs.len(), 1, "expected exactly 1 error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("non-sendable captured binding 'r'")
+            && errs[0].message.contains("ref int"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn ref_captured_by_inline_closure_spawn_arg_rejected() {
+    // An INLINE closure passed as a spawn ARG whose captures include a local `ref` is gated on the
+    // spot (the arg-Closure path), not only the recorded-binding (Ident) path.
+    entry_rejects(
+        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    r: ref int = 0\n    parallel:\n        spawn run(fn() -> int: r)\nmain()\n",
+        "non-sendable captured binding 'r'",
+    );
+}
+
+#[test]
+fn module_global_ref_spawn_callee_ok() {
+    // CRITICAL NON-REGRESSION: a `ref` declared at MODULE scope is a read-only global resolvable in
+    // every task (like a free fn), NOT a per-task local capture — the scope-0 exclusion must keep it
+    // out of the gate. Checks clean (and runs 42 on both engines — see the parity test).
+    entry_ok(
+        "import std.ref\ncounter: ref int = 0\nfn work(ch: Channel[int]):\n    ch.send(42)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
+    );
+}
+
+#[test]
+fn spawn_callee_capturing_sendable_closure_ok() {
+    // A callee whose captured environment holds a CAPTURE-FREE sibling closure (`double`) is sendable
+    // (it crosses by value) — must NOT be gated (example #1, already runs; pin the check side).
+    ok(
+        "fn main():\n    double := fn(x: int) -> int: x * 2\n    ch := Channel[int]()\n    work := fn(): ch.send(double(21))\n    parallel:\n        spawn work()\n    print(ch.recv())\nmain()\n",
+    );
+}
+
+#[test]
+fn channel_of_closures_typechecks() {
+    // `sendable(Func)` permissive → a `Channel[fn() -> int]` (closures as data) now type-checks; the
+    // producer sends a capture-free closure and the consumer calls it (runs 42 — see parity test).
+    ok(
+        "fn producer(ch: Channel[fn() -> int]):\n    ch.send(fn() -> int: 42)\nfn main():\n    ch := Channel[fn() -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv()\n    print(f())\nmain()\n",
+    );
+}
+
+#[test]
+fn closure_returned_across_task_typechecks() {
+    // A capturing closure returned from a factory and sent over a `Channel[fn(int) -> int]` — the
+    // closure carries a SENDABLE capture (an int `n`), so it crosses by value (runs 105 — parity test).
+    ok(
+        "fn adder(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nfn producer(ch: Channel[fn(int) -> int]):\n    ch.send(adder(100))\nfn main():\n    ch := Channel[fn(int) -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv()\n    print(f(5))\nmain()\n",
     );
 }
 

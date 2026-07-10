@@ -6460,3 +6460,55 @@ fn main():
 main()";
     assert_parity_out(src, "<fn helper>\n");
 }
+
+// ===== B3.3 (Task 2a) — closures-as-data at spawn/Channel sites RUN on both engines =====
+// The checker half (permissive `sendable(Func)` + capture gate) makes these type-check; here we pin
+// that they actually RUN identically on the serial + M:N engines (the by-value airlock crossing).
+
+#[test]
+fn channel_of_closures_runs_parity() {
+    // A `Channel[fn() -> int]`: a capture-free closure is sent over the channel and called by the
+    // consumer — crosses by value, runs 42 on both engines.
+    let src = "\
+fn producer(ch: Channel[fn() -> int]):
+    ch.send(fn() -> int: 42)
+fn main():
+    ch := Channel[fn() -> int]()
+    parallel:
+        spawn producer(ch)
+    f := ch.recv()
+    print(f())
+main()";
+    assert_parity_out(src, "42\n");
+}
+
+#[test]
+fn closure_returned_across_task_runs_parity() {
+    // A CAPTURING closure (`adder(100)` closes over the int `n=100`) returned from a factory and sent
+    // over a `Channel[fn(int) -> int]` — its capture is sendable, so it crosses by value; `f(5)` = 105
+    // on both engines.
+    let src = "\
+fn adder(n: int) -> fn(int) -> int:
+    return fn(x: int) -> int: x + n
+fn producer(ch: Channel[fn(int) -> int]):
+    ch.send(adder(100))
+fn main():
+    ch := Channel[fn(int) -> int]()
+    parallel:
+        spawn producer(ch)
+    f := ch.recv()
+    print(f(5))
+main()";
+    assert_parity_out(src, "105\n");
+}
+
+#[test]
+fn module_global_ref_spawn_callee_runs_parity() {
+    // The checker non-regression's RUN side: a MODULE-GLOBAL `ref` is a read-only global (not a
+    // per-task capture) reachable from a `spawn`ed function; the program runs 42 on both engines. A
+    // `ref` import needs the graph path, so this uses `parity_entry`.
+    let out = parity_entry(
+        "import std.ref\ncounter: ref int = 0\nfn work(ch: Channel[int]):\n    ch.send(42)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
+    );
+    assert_eq!(out, "42\n");
+}

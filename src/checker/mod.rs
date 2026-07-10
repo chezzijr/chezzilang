@@ -1259,6 +1259,16 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// B3.3 (Task 2a) — one non-sendable LOCAL capture of a closure/nested-fn value: the captured
+/// binding's name, its checker type, and whether it is a `ref` binding (for the `ref T` display).
+/// Recorded at the value's decl site and replayed as a compile error at a spawn callee/arg site.
+#[derive(Clone)]
+struct Capture {
+    name: String,
+    ty: Ty,
+    is_ref: bool,
+}
+
 struct Checker {
     errors: Vec<CheckError>,
     scopes: Vec<HashMap<String, Ty>>,
@@ -1524,6 +1534,16 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
+    /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
+    /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
+    /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
+    /// DECL site (a `let name := fn(...)` RHS or a nested `fn name(...)` body) using the SAME free-var
+    /// over-approximation (`free_names_*`) the runtime uses to build the closure's captures — so the
+    /// gate matches exactly what actually crosses the airlock. Consulted at a `spawn <name>()` callee /
+    /// `spawn f(<name>)` arg site to reject a captured `ref` (or other non-sendable local) at compile
+    /// time, mirroring the `spawn:` block form. A module-global (scope 0) capture is EXCLUDED at record
+    /// time (a read-only global, not a per-task capture — never gated).
+    capture_table: Vec<HashMap<String, Vec<Capture>>>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
     /// The real `StructInfo` for `std.ref`'s `Ref[T]` (layout + get/set/update methods), harvested

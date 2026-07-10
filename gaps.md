@@ -301,7 +301,12 @@ right-associative nested `IfElse`, final `else` still mandatory; both engines + 
 **Concurrency ✅** · pending-spawn drop on early `parallel:` escape · VM nursery-leak on `?`/return
 escape · Path C recv-in-native-callback thread-demotion (`f828ef7`, D complete) · `std.cancel`
 Token/timeout + tree propagation (`Token.derive()`, transitive cancel/`done()`, `examples/cancel_tree`) ·
-cross-nursery M:N flat scheduler · `Channel.close()` · per-socket `timeout_ms` (D6c) · per-connection spawn.
+cross-nursery M:N flat scheduler · `Channel.close()` · per-socket `timeout_ms` (D6c) · per-connection spawn ·
+**closures-as-data B3.3** (closures/`fn` cross the airlock **by value** — runtime + checker;
+`sendable(Func)` permissive so `Channel[fn]` type-checks; Task 2a: a captured non-sendable **local**
+`ref` at a `spawn f()` **callee**/**arg** is a compile error — matching the block form — while a
+**module-global** `ref` is a read-only global, not gated. Struct-field/opaque storage of a
+ref-capturing closure deferred to a runtime backstop, Task 2b — see `docs/gaps.md` #1/#2).
 
 **Memory-layout levers ✅** · #1 positional struct layout (flat `Vec<Value>`, names in `StructDef`;
 2026-06-16) · #2 enum `variant_id: u32` (`Program::variants_by_id`, pure-int dispatch/eq/`?`; native

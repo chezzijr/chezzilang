@@ -1685,6 +1685,18 @@ impl Checker {
                 if is_ref {
                     self.declare_ref(name);
                 }
+                // B3.3 (Task 2a): a closure bound to a name records its non-sendable LOCAL captures
+                // keyed by the binding, so a later `spawn <name>()` (or `spawn f(<name>)`) rejects a
+                // captured `ref` at compile time. Uses the SAME free-var over-approximation the runtime
+                // uses to build the closure's captures. Module globals (scope 0) are excluded at record
+                // time (see `local_captures_of`), so a module-global `ref` is never gated.
+                if let ExprKind::Closure { params, body, .. } = &value.kind {
+                    let bound: std::collections::HashSet<String> =
+                        params.iter().map(|p| p.name.clone()).collect();
+                    let mut free = std::collections::HashSet::new();
+                    crate::compiler::free_names_expr(body, &bound, &mut free);
+                    self.record_closure_captures(name, &free);
+                }
             }
             StmtKind::Assign { target, op, value } => {
                 // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
@@ -1785,6 +1797,16 @@ impl Checker {
                             labels: crate::checker::FnLabels(sig.labels.clone()),
                         },
                     );
+                    // B3.3 (Task 2a): record the nested fn's non-sendable LOCAL captures keyed by its
+                    // name (same free-var over-approximation as the runtime), so `spawn <name>()`
+                    // rejects a captured `ref` at compile time. `decl.name` is bound BEFORE this so a
+                    // self-recursive reference resolves; it (and the params) are subtracted as binds.
+                    let mut bound: std::collections::HashSet<String> =
+                        decl.params.iter().map(|p| p.name.clone()).collect();
+                    bound.insert(decl.name.clone());
+                    let mut free = std::collections::HashSet::new();
+                    crate::compiler::free_names_block(&decl.body, &bound, &mut free);
+                    self.record_closure_captures(&decl.name, &free);
                     self.check_fn_body(decl, None, sig);
                     return;
                 }
@@ -2218,6 +2240,24 @@ impl Checker {
                             self.errors.truncate(checkpoint);
                             for (sp, msg) in bad {
                                 self.error(sp, msg);
+                            }
+                            // B3.3 (Task 2a): a closure/nested-fn VALUE at the callee or an arg crosses
+                            // the airlock by value — reject each of its non-sendable LOCAL captures (a
+                            // captured `ref` etc.) at compile time, matching the `spawn:` block form.
+                            // The callee `f` in `spawn f()` and every positional/keyword arg are
+                            // checked; a module-global capture is already excluded at record time.
+                            let mut cap_errs: Vec<(Span, Vec<Capture>)> = Vec::new();
+                            for ex in std::iter::once(&**callee)
+                                .chain(args.iter())
+                                .chain(named.iter().map(|(_, v)| v))
+                            {
+                                let caps = self.spawn_value_captures(ex);
+                                if !caps.is_empty() {
+                                    cap_errs.push((ex.span, caps));
+                                }
+                            }
+                            for (sp, caps) in cap_errs {
+                                self.emit_capture_errors(&caps, sp);
                             }
                         }
                     }

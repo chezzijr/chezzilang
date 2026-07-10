@@ -1371,6 +1371,37 @@ engines by the existing goldens; value-first runtime stays covered by `examples/
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
 (non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
 
+**✅ Capture-sendability gate + permissive `Func` — B3.3 checker half (Task 2a, 2026-07-10, `b33-checker-gate`).**
+Makes the checker consistent with the by-value airlock runtime (B3.3e, below). Two changes, checker-only
+(+ one `pub(crate)` in `src/compiler/mod.rs`):
+- **`sendable(Ty::Func)` flipped `false → true`** (`src/checker/proto.rs`) — a closure crosses by value,
+  so the bare `fn` type is sendable. Effect: `Channel[fn(int)->int]` type-checks; a closure stored in a
+  channel / returned from a factory / sent across a task now checks AND runs (verified 42 / 105 on both
+  engines). `Ty::Module`/`Ty::Protocol` stay non-sendable; `Ref` (std.ref box) stays non-sendable.
+- **Capture-sendability gate at spawn CALLEE + ARG sites** (`src/checker/sig.rs`) — the bare `fn` type
+  can't carry its captures, so the per-closure check moved to the airlock sites. A scoped side-table
+  (`capture_table`, mirrors `scopes`; `Capture{name,ty,is_ref}` in `src/checker/mod.rs`) records each
+  closure/nested-fn's non-sendable **local** captures at its decl site (a `let name := fn…` RHS or a
+  nested `fn name…` body), keyed by binding, using the SAME `free_names_*` over-approximation the runtime
+  uses to build captures (now `pub(crate)`). At a `spawn <name>()` callee or `spawn f(<name>)` arg (Ident
+  → side-table, inline Closure → analyzed on the spot) it emits the verbatim block-form error per captured
+  non-sendable local. So a captured `ref` at a `spawn f()` callee/arg is now a **compile error** (was:
+  check-OK + silent stale-value bug), matching the `spawn:` block form.
+- **PITFALL guarded:** a **module-global** `ref` is a read-only global (scope-0 exclusion in
+  `local_captures_of`), NOT a per-task capture — never gated (`module_global_ref_spawn_callee_ok` +
+  runtime 42 both engines locks it; `all_shipped_examples_typecheck` incl. `examples/ref_binding.chz`
+  stays green).
+- **Deferred to Task 2b (runtime backstop):** a closure whose captures include a `ref` that reaches the
+  airlock INDIRECTLY (inside a struct field / channel / opaque value) is no longer caught at check.
+- **Tests:** 7 new checker tests + 3 new both-engine parity run tests. Updated 9 existing checker tests
+  that encoded the old "Func non-sendable" rule: `channel_non_sendable_element/struct_field_rejected` +
+  `spawn_non_sendable_struct_field_arg_rejected` re-pointed at a still-non-sendable `Ref` field/element
+  (the deep-sendability mechanism, not the now-sendable closure); the two `spawn_non_sendable_arg/keyword`
+  tests re-pointed at ref-capturing closures (now caught by the capture gate); four block/submit
+  capture-free-closure tests flipped to `_ok` (closures cross by value — verified run). Full `cargo test`
+  green, clippy clean. Docs: `docs/concurrency.md §7` + A3a row, `docs/syntax.md`, `docs/gaps.md` #1/#2,
+  `gaps.md`.
+
 **✅ Closures / bare `fn`s cross the airlock BY VALUE — B3.3e runtime (2026-07-10, `b33-closures-by-value`).**
 The GENERIC airlock lowering (`to_wire`/`to_snap`, not just `Executor.submit`) now crosses a closure or
 bare `fn` **by value** on BOTH engines identically: `WireValue::Closure { proto, captured, home }`

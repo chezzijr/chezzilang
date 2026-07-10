@@ -4663,7 +4663,7 @@ fn filter_entries_free_block(
 
 /// Free names of a capture-boundary BLOCK body (`defer:`/`spawn:`): names referenced but not bound
 /// within, relative to `bound`. Threads bindings left-to-right (a later stmt sees earlier lets).
-fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut HashSet<String>) {
+pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut HashSet<String>) {
     let mut b = bound.clone();
     for s in stmts {
         match &s.kind {
@@ -4760,7 +4760,7 @@ fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mut HashSet<S
 
 /// Free names of an expression relative to `bound`: referenced idents not in `bound`. Descends
 /// THROUGH nested closures/comprehensions/matches, subtracting each inner scope's binds.
-fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>) {
     match &e.kind {
         ExprKind::Ident(n) => {
             if !bound.contains(n) {

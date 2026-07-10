@@ -10,6 +10,7 @@ impl Checker {
             scopes: Vec::new(),
             ref_decls: Vec::new(),
             loop_vars: Vec::new(),
+            capture_table: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
             local_fn_names: std::collections::HashSet::new(),
@@ -1656,11 +1657,13 @@ impl Checker {
         self.scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.ref_decls.push(std::collections::HashSet::new());
+        self.capture_table.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         self.scopes.pop();
         self.loop_vars.pop();
         self.ref_decls.pop();
+        self.capture_table.pop();
     }
     /// Record `name` (already declared in the current scope) as a `ref T` binding/param.
     pub(super) fn declare_ref(&mut self, name: &str) {
@@ -1884,6 +1887,109 @@ impl Checker {
             }
         }
         false
+    }
+
+    // ===== B3.3 (Task 2a): capture-sendability gate at spawn callee/arg sites =====
+
+    /// The non-sendable LOCAL captures among the free-variable set `free`, resolved against the
+    /// CURRENT scope stack. A name resolving at scope index **0** (a module global — a read-only
+    /// namespace resolvable in every task, like a free fn) is EXCLUDED: this is the invariant that
+    /// keeps a MODULE-GLOBAL `ref` out of the gate. A name that resolves in no scope (a free fn /
+    /// import / builtin) is likewise excluded. Only a name at scope index `> 0` (an enclosing local —
+    /// the closure's own param scope is already popped by the time this runs, mirroring
+    /// [`is_local_capture`]) whose type is `!sendable` is a capture. Sorted by name for deterministic
+    /// diagnostics (HashSet iteration order is nondeterministic).
+    pub(super) fn local_captures_of(
+        &self,
+        free: &std::collections::HashSet<String>,
+    ) -> Vec<Capture> {
+        let mut caps = Vec::new();
+        for name in free {
+            let mut resolved = None;
+            for i in (0..self.scopes.len()).rev() {
+                if let Some(ty) = self.scopes[i].get(name) {
+                    resolved = Some((i, ty.clone()));
+                    break;
+                }
+            }
+            let Some((i, ty)) = resolved else { continue };
+            // Scope 0 = module globals: read-only across tasks, NOT a per-task capture (PITFALL —
+            // a module-global `ref` must never be gated).
+            if i == 0 || self.sendable(&ty) {
+                continue;
+            }
+            caps.push(Capture {
+                name: name.clone(),
+                is_ref: self.is_ref_decl(name),
+                ty,
+            });
+        }
+        caps.sort_by(|a, b| a.name.cmp(&b.name));
+        caps
+    }
+
+    /// Record (keyed by the bound `name`) the non-sendable local captures of a just-declared
+    /// closure/nested-fn whose free-variable set is `free`. No-op when there are none.
+    pub(super) fn record_closure_captures(
+        &mut self,
+        name: &str,
+        free: &std::collections::HashSet<String>,
+    ) {
+        let caps = self.local_captures_of(free);
+        if !caps.is_empty()
+            && let Some(tbl) = self.capture_table.last_mut()
+        {
+            tbl.insert(name.to_string(), caps);
+        }
+    }
+
+    /// The recorded non-sendable captures of a named closure/nested-fn binding (innermost scope wins,
+    /// mirroring `lookup`). Empty when `name` is not a recorded capturing value (a sendable closure, a
+    /// free fn, a builtin, …).
+    pub(super) fn lookup_captures(&self, name: &str) -> Vec<Capture> {
+        for tbl in self.capture_table.iter().rev() {
+            if let Some(caps) = tbl.get(name) {
+                return caps.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    /// The non-sendable local captures of a closure VALUE appearing at a spawn callee/arg site: an
+    /// `Ident` resolves through the recorded side-table; an INLINE `Closure` is analyzed on the spot
+    /// (its free-var set minus its params). Any other expression carries no capturing closure value.
+    pub(super) fn spawn_value_captures(&self, ex: &crate::ast::Expr) -> Vec<Capture> {
+        match &ex.kind {
+            ExprKind::Ident(name) => self.lookup_captures(name),
+            ExprKind::Closure { params, body, .. } => {
+                let bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                let mut free = std::collections::HashSet::new();
+                crate::compiler::free_names_expr(body, &bound, &mut free);
+                self.local_captures_of(&free)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Emit the block-form diagnostic (verbatim, so `spawn:` block ≡ callee/arg) at `span` for each
+    /// non-sendable capture — a `ref` binding renders `ref T`, an explicit box renders its own type.
+    pub(super) fn emit_capture_errors(&mut self, caps: &[Capture], span: Span) {
+        for c in caps {
+            let disp = if c.is_ref {
+                ref_display(&c.ty)
+            } else {
+                c.ty.to_string()
+            };
+            self.error(
+                span,
+                format!(
+                    "cannot use non-sendable captured binding '{name}' of type {disp} inside a \
+                     spawned task (captures cross the airlock — communicate via a Channel or Shared)",
+                    name = c.name
+                ),
+            );
+        }
     }
 
     // ===== pass 1: hoist declarations =====
