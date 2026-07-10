@@ -2715,6 +2715,77 @@ fn inferred_nested_fn_does_not_pollute_outer() {
     );
 }
 
+// ----- Nested `fn` decls are first-class local functions (lexical nearest-scope, body-checked,
+// recursive, uniform by-reference capture). These lock the checker half of that behavior on the
+// real entry/graph path. -----
+
+/// Symptom 1 — a nested `fn f(x:int)` shadowing a top-level `fn f()` must resolve NEAREST-scope:
+/// a 0-arg call `f()` inside its scope is a CHECK-TIME arity error (was validated against the
+/// global 0-arg `f` → check-OK then run-fault "expects 1 argument, got 0").
+#[test]
+fn nested_fn_shadows_global_arity_checked() {
+    entry_rejects(
+        "fn f():\n    print(\"g\")\nfn outer():\n    fn f(x: int):\n        print(x + 1)\n    f()\nfn main():\n    outer()\nmain()\n",
+        "'closure' expects",
+    );
+}
+
+/// Symptom 1 (positive) — the same shadowing nested `fn f(x:int)` called CORRECTLY (`f(5)`) checks.
+#[test]
+fn nested_fn_shadows_global_called_right_ok() {
+    entry_ok(
+        "fn f():\n    print(\"g\")\nfn outer():\n    fn f(x: int):\n        print(x + 1)\n    f(5)\nfn main():\n    outer()\nmain()\n",
+    );
+}
+
+/// Symptom 2 — a no-collision nested fn that is called resolves to itself (was a false
+/// `unknown name`).
+#[test]
+fn nested_fn_no_collision_call_ok() {
+    entry_ok(
+        "fn outer():\n    fn helper(x: int) -> int:\n        return x + 1\n    print(helper(4))\nfn main():\n    outer()\nmain()\n",
+    );
+}
+
+/// Symptom 3 — a no-collision nested fn's BODY is type-checked: a wrong-typed return is rejected
+/// (was never checked → check-OK).
+#[test]
+fn nested_fn_body_return_type_checked() {
+    entry_rejects(
+        "fn outer():\n    fn bad() -> int:\n        return \"x\"\n    print(bad())\nfn main():\n    outer()\nmain()\n",
+        "expected return type int, found str",
+    );
+}
+
+/// Recursion — a nested fn may call itself (letrec via cell); the self-call type-checks against the
+/// nested sig.
+#[test]
+fn nested_fn_recursion_type_checks() {
+    entry_ok(
+        "fn outer() -> int:\n    fn fact(n: int) -> int:\n        if n <= 1:\n            return 1\n        return n * fact(n - 1)\n    return fact(5)\nfn main():\n    print(outer())\nmain()\n",
+    );
+}
+
+/// Mutual recursion between SIBLING nested fns is OUT OF SCOPE for v1: `a` referencing a
+/// later-declared `b` (no global `b`) is a CLEAN forward-reference error, not check-OK/run-fault or
+/// a host panic.
+#[test]
+fn nested_fn_mutual_recursion_clean_reject() {
+    entry_rejects(
+        "fn outer() -> int:\n    fn a() -> int:\n        return b()\n    fn b() -> int:\n        return 1\n    return a()\nfn main():\n    print(outer())\nmain()\n",
+        "unknown name 'b'",
+    );
+}
+
+/// Nested GENERIC fns are OUT OF SCOPE for v1: a clean reject, not a panic or a silent accept.
+#[test]
+fn nested_generic_fn_clean_reject() {
+    entry_rejects(
+        "fn outer():\n    fn id[T](x: T) -> T:\n        return x\n    print(id(5))\nfn main():\n    outer()\nmain()\n",
+        "nested generic functions are not supported",
+    );
+}
+
 #[test]
 fn inferred_method_return() {
     // The un-annotated method infers from `return self.v` (int) and `return "x"` (str); the two

@@ -950,7 +950,21 @@ impl Compiler {
 
     /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
     fn compile_fn(&mut self, decl: &FnDecl, _is_method: bool) -> Result<ProtoId, CompileError> {
+        self.compile_fn_captured(decl, Vec::new())
+    }
+
+    /// Compile a function body to a child proto. `captured_names` is empty for a top-level/method fn
+    /// (a plain `MakeFunc` proto — byte-identical to the pre-nested-fn path) and NON-empty for a
+    /// NESTED fn compiled as a closure-with-a-name (the enclosing-frame binding snapshot, in slot
+    /// order), so the body's free names (captured outer locals AND the recursive self-name) resolve
+    /// via `GetCaptured` against the cells `MakeClosure` populates.
+    fn compile_fn_captured(
+        &mut self,
+        decl: &FnDecl,
+        captured_names: Vec<String>,
+    ) -> Result<ProtoId, CompileError> {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
+        fc.captured_names = captured_names;
         // Uniform by-reference capture (Task A): compute this frame's boxed-name set (unwired).
         fc.boxed_names = captured_names_of_body(&decl.body, &decl.params);
         fc.is_generator = decl.is_generator;
@@ -1185,13 +1199,43 @@ impl Compiler {
                 Ok(())
             }
             // Top-level fns are hoisted; struct/enum/import are no-ops at execution time. A `fn`
-            // statement nested in a block defines a local function value.
+            // statement nested in a block is a FIRST-CLASS LOCAL function — a closure-with-a-name:
+            // it captures outer bindings by reference (uniform cell model, like a closure expression)
+            // and may RECURSE (letrec: its name is bound into its own cell BEFORE the body captures
+            // it). Routed through `MakeClosure`, NOT the non-capturing `MakeFunc` path.
             StmtKind::Fn(decl) => {
                 if fc.is_global_scope() {
                     Ok(()) // already hoisted
+                } else if fc.is_boxed_name(&decl.name) {
+                    // The name is captured (recursive self-reference and/or captured by a deeper
+                    // sibling closure), so it lives in a CELL. LETREC: create the empty cell in the
+                    // name's slot FIRST, snapshot it into the child's capture env, build the closure,
+                    // then store the finished closure back INTO that same cell. Ordering is
+                    // load-bearing — the cell handle captured by the body must be the same handle the
+                    // closure is stored into, so a self-call resolves to this very closure.
+                    let slot = fc.add_local(decl.name.clone());
+                    fc.emit(Op::Nil, stmt.span);
+                    fc.emit(Op::NewCell, stmt.span);
+                    fc.emit_set_local_raw(slot, stmt.span);
+                    let entries = fc.snapshot_entries();
+                    let captured_names: Vec<String> =
+                        entries.iter().map(|e| e.name.clone()).collect();
+                    let pid = self.compile_fn_captured(decl, captured_names)?;
+                    fc.emit(Op::MakeClosure(pid, entries), stmt.span);
+                    // Stack: [closure]; push the cell handle → [closure, handle]; `CellStore` pops
+                    // handle-first then value → cell := closure. Stack drained.
+                    fc.emit_get_local_raw(slot, stmt.span);
+                    fc.emit(Op::CellStore, stmt.span);
+                    Ok(())
                 } else {
-                    let pid = self.compile_fn(decl, false)?;
-                    fc.emit(Op::MakeFunc(pid), stmt.span);
+                    // Not captured: snapshot the enclosing bindings BEFORE declaring the name, build
+                    // the closure, and bind it plainly. (Still a closure so it can capture outer
+                    // locals — it just needs no self-cell because nothing captures it.)
+                    let entries = fc.snapshot_entries();
+                    let captured_names: Vec<String> =
+                        entries.iter().map(|e| e.name.clone()).collect();
+                    let pid = self.compile_fn_captured(decl, captured_names)?;
+                    fc.emit(Op::MakeClosure(pid, entries), stmt.span);
                     fc.emit_decl_named(decl.name.clone(), stmt.span);
                     Ok(())
                 }
@@ -4429,7 +4473,16 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
             StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
                 find_boundary_free_expr(e, out)
             }
-            // A nested named fn's inner boundaries capture ITS frame, not this one — do not descend.
+            // A nested named fn IS a capture boundary (a closure-with-a-name): collect its body's
+            // free names relative to its PARAMS ONLY — NOT its own name — so BOTH captured outer
+            // locals AND the recursive self-name surface as free here. Intersected with this frame's
+            // binds (which include the fn's name, via `collect_frame_binds`) → the captured names box
+            // in THIS frame, exactly like a closure's captures. (Descending no further: the fn's own
+            // inner boundaries capture ITS frame, already folded into its free set.)
+            StmtKind::Fn(decl) => {
+                let params: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+                free_names_block(&decl.body, &params, out);
+            }
             // Remaining statements contain no capture boundary.
             _ => {}
         }
