@@ -261,6 +261,21 @@ fn parity_entry(src: &str) -> String {
     assert_parity_file(&[("main.chz", src)], "main.chz")
 }
 
+/// Like [`parity_entry`], but for a program that must FAULT on BOTH engines: runs the graph path
+/// (needed to link `std.ref` for `ref`/`Ref`) on the serial + M:N engines, asserts both error with
+/// an identical message, and returns that message so the caller can assert its content.
+#[cfg(test)]
+fn parity_entry_fault(src: &str) -> String {
+    let t = TmpDir::new();
+    let p = t.write("main.chz", src);
+    let (_io, _ie, ir, _) = run_file_p(&p);
+    let (_vo, _ve, vr, _) = run_file(&p);
+    let ie = ir.expect_err("M:N engine must fault");
+    let ve = vr.expect_err("serial engine must fault");
+    assert_eq!(ve.to_string(), ie.to_string(), "serial == M:N fault");
+    ve.to_string()
+}
+
 // ----- named-factory-import member resolution: RUNTIME unaffected (gap #4) -----
 // These runs bypass the checker (compile+run directly), so they pass pre- AND post-fix — they lock
 // that the checker-only member-resolution fix leaves the runtime output byte-identical on both
@@ -6511,4 +6526,113 @@ fn module_global_ref_spawn_callee_runs_parity() {
         "import std.ref\ncounter: ref int = 0\nfn work(ch: Channel[int]):\n    ch.send(42)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
     );
     assert_eq!(out, "42\n");
+}
+
+// ===== Task 2b — runtime backstop: a `ref`/`Ref` captured by a CROSSING closure faults =====
+// The Task-2a checker gate rejects a captured-local `ref` at DIRECT spawn callee/arg sites; a
+// `ref`-capturing closure that reaches the airlock INDIRECTLY (as a `Channel[fn]` value, or inside a
+// struct field crossing a spawn arg) used to type-check and then SILENTLY deep-copy the ref — the
+// write vanished (parity-consistent serial == M:N, but a WRONG answer). These pin the loud runtime
+// fault, identical on both engines, so NO silent `ref` path remains. (`ref`/`Ref` need `std.ref`
+// linked, which only happens on the module-graph path, so both the fault cases and the module-global
+// regression pins run through the graph helpers.)
+
+#[test]
+fn ref_capturing_closure_through_channel_faults() {
+    // indirect_chan: a nested fn writes a captured LOCAL `ref`, sent over a `Channel[fn() -> int]` and
+    // invoked by the receiver. WAS: ran silently, mutating an isolated copy (`f()`=99, parent `r`=0).
+    // NOW: faults on BOTH engines (the `Channel.send` `to_wire` closure-arm scan).
+    let src = "\
+import std.ref
+fn main():
+    r: ref int = 0
+    ch := Channel[fn() -> int]()
+    fn bump() -> int:
+        r = 99
+        return r
+    ch.send(bump)
+    f := ch.recv()
+    print(f())
+    print(r)
+main()";
+    let e = parity_entry_fault(src);
+    assert!(e.contains("ref/Ref"), "fault msg: {e}");
+}
+
+#[test]
+fn ref_capturing_closure_in_struct_field_spawn_arg_faults() {
+    // indirect_struct: a `ref`-capturing nested fn stored in a struct field, the struct passed as a
+    // `spawn` arg. WAS: parent `r` silently unchanged. NOW: faults on both engines (the struct-field
+    // recursion reaches the closure arm's scan on the spawn-arg crossing).
+    let src = "\
+import std.ref
+struct Holder:
+    f: fn() -> int
+fn worker(h: Holder):
+    print(h.f())
+fn main():
+    r: ref int = 0
+    fn bump() -> int:
+        r = 99
+        return r
+    h := Holder(bump)
+    parallel:
+        spawn worker(h)
+    print(r)
+main()";
+    let e = parity_entry_fault(src);
+    assert!(e.contains("ref/Ref"), "fault msg: {e}");
+}
+
+#[test]
+fn ref_nested_in_captured_list_faults() {
+    // Proves the scan is DEEP, not just top-level: a closure captures a `List[Ref[int]]` (an explicit
+    // `Ref` box nested one container deep). Crossing the airlock over a `Channel[fn]` faults on both
+    // engines — the wire walk descends the captured list and finds the `Ref` inside.
+    let src = "\
+import std.ref
+fn main():
+    box := [Ref(0)]
+    ch := Channel[fn() -> int]()
+    fn readit() -> int:
+        return box[0].get()
+    ch.send(readit)
+    f := ch.recv()
+    print(f())
+main()";
+    let e = parity_entry_fault(src);
+    assert!(e.contains("ref/Ref"), "fault msg: {e}");
+}
+
+// ----- REGRESSION PINS (the whole safety story): a module-global `ref` and a sendable capture must
+// NOT be caught by the closure-capture scan. -----
+
+#[test]
+fn module_global_ref_read_in_task_still_ok() {
+    // A task that actually READS a module-global `ref` (through the global slot, not a closure
+    // capture) still runs on both engines — the ref crosses via the module-globals deep-copy snapshot,
+    // NEVER the closure-capture scan, so no fault. (Complements `module_global_ref_spawn_callee_runs_parity`,
+    // which pins the write side.) Prints the global's value, 42, both engines.
+    let out = parity_entry(
+        "import std.ref\ncounter: ref int = 42\nfn work(ch: Channel[int]):\n    ch.send(counter)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
+    );
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn sendable_capturing_closure_through_channel_still_runs() {
+    // A closure capturing ONLY sendable data (an int + a `List[int]`) sent over a `Channel[fn() -> int]`
+    // still crosses by value and runs — no false fault from the ref scan. `21*2 + 1` = 43, both engines.
+    let src = "\
+fn main():
+    n := 21
+    nums := [1, 2, 3]
+    ch := Channel[fn() -> int]()
+    fn calc() -> int:
+        return n * 2 + nums[0]
+    ch.send(calc)
+    f := ch.recv()
+    print(f())
+main()";
+    assert_parity_out(src, "43\n");
 }

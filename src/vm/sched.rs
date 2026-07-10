@@ -2186,6 +2186,67 @@ impl Vm {
         self.to_wire(v).map_err(|e| self.err(e.message, span))
     }
 
+    /// Task 2b — true iff the value graph reachable from `v` contains a runtime `Ref[T]` box
+    /// (`Obj::Struct { name: "Ref", .. }`). `"Ref"` is a RESERVED type name — the compiler guarantees
+    /// no user `struct Ref` can exist (`src/compiler/mod.rs`: "Ref is reserved, so there can be no user
+    /// struct Ref to disambiguate"), so a bare `name == "Ref"` match is exact.
+    ///
+    /// Descends the SAME container/closure/cell arms `to_wire_depth`/`to_snap_depth` descend, so a
+    /// `ref`/`Ref` embedded ANYWHERE in a crossing closure's captures — top-level OR nested inside a
+    /// captured `List`/`Tuple`/`Map`/`Set`/struct/enum/newtype/`Cell`/nested closure/`Iter` — is
+    /// detected. Bounded by `MAX_STRUCTURAL_DEPTH` (matching the wire walk); a cycle degrades to `false`
+    /// here and trips the wire path's own recoverable cyclic-data guard. Read-only (`&self`), allocates
+    /// nothing.
+    ///
+    /// Fired ONLY from the two `Obj::Closure` serialization arms: a `ref`/`Ref` captured by a closure
+    /// that reaches the airlock indirectly (as a `Channel[fn]` value, a struct field crossing a spawn
+    /// arg, …) is non-sendable and must fault, not silently deep-copy (the write would vanish). A
+    /// MODULE-GLOBAL `ref` is NOT a closure capture (it resolves via a global slot, not `captured`), so
+    /// it never reaches this scan and continues to cross the module-globals snapshot by deep-copy.
+    fn captured_graph_embeds_ref(&self, v: Value) -> bool {
+        self.graph_embeds_ref_depth(v, 0)
+    }
+
+    fn graph_embeds_ref_depth(&self, v: Value, depth: usize) -> bool {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return false;
+        }
+        let Value::Obj(h) = v else {
+            return false;
+        };
+        match self.heap.get(h) {
+            Obj::Struct { name, fields, .. } => {
+                name.as_ref() == "Ref"
+                    || fields
+                        .iter()
+                        .any(|f| self.graph_embeds_ref_depth(*f, depth + 1))
+            }
+            Obj::List(items) | Obj::Tuple(items) => items
+                .iter()
+                .any(|x| self.graph_embeds_ref_depth(*x, depth + 1)),
+            Obj::Iter { items, .. } => items
+                .iter()
+                .any(|x| self.graph_embeds_ref_depth(*x, depth + 1)),
+            Obj::Map(m) => m.entries.iter().any(|(_, k, val)| {
+                self.graph_embeds_ref_depth(*k, depth + 1)
+                    || self.graph_embeds_ref_depth(*val, depth + 1)
+            }),
+            Obj::Set(s) => s
+                .entries
+                .iter()
+                .any(|(_, e)| self.graph_embeds_ref_depth(*e, depth + 1)),
+            Obj::Enum { payload, .. } => payload
+                .iter()
+                .any(|x| self.graph_embeds_ref_depth(*x, depth + 1)),
+            Obj::NewType { inner, .. } => self.graph_embeds_ref_depth(*inner, depth + 1),
+            Obj::Cell(inner) => self.graph_embeds_ref_depth(*inner, depth + 1),
+            Obj::Closure { captured, .. } => captured
+                .iter()
+                .any(|cv| self.graph_embeds_ref_depth(*cv, depth + 1)),
+            _ => false,
+        }
+    }
+
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
     /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
     /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
@@ -2254,6 +2315,15 @@ impl Vm {
                     let names = &self.program.protos[*proto].capture_names;
                     let mut wcap = Vec::with_capacity(captured.len());
                     for (i, cv) in captured.iter().enumerate() {
+                        // Task 2b — a `ref`/`Ref` captured (top-level or nested) by a closure crossing
+                        // the airlock is non-sendable: deep-copying it would silently drop the write.
+                        // Fault loudly (placeholder span re-stamped by `to_wire_at`).
+                        if self.captured_graph_embeds_ref(*cv) {
+                            return Err(self.err(
+                                "cannot send a non-sendable ref/Ref captured by a closure across tasks — use Shared/Atomic/Channel".to_string(),
+                                Span { line: 0, col: 0 },
+                            ));
+                        }
                         let w = self.to_wire_depth(*cv, depth + 1)?;
                         let name = names.get(i).cloned().unwrap_or_default();
                         wcap.push((name.into_boxed_str(), w));
@@ -3001,6 +3071,14 @@ impl Vm {
                 let names = &self.program.protos[proto].capture_names;
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {
+                    // Task 2b — identical fault on the M:N snapshot path (parity with `to_wire_depth`):
+                    // a captured `ref`/`Ref` reaching the airlock is non-sendable, not a silent copy.
+                    if self.captured_graph_embeds_ref(*cv) {
+                        return Err(self.err(
+                            "cannot send a non-sendable ref/Ref captured by a closure across tasks — use Shared/Atomic/Channel".to_string(),
+                            Span { line: 0, col: 0 },
+                        ));
+                    }
                     snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1)?));
                 }
                 SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }

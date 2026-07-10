@@ -623,14 +623,23 @@ reassigning it inside a task is a **compile error** (see below).
   The rule is: **a closure crosses iff its captures are sendable.** The bare `fn` type cannot carry its
   captures, so that per-closure check runs at the airlock **sites**: a closure/nested-fn value whose
   captures include a **non-sendable local** (a `ref` — see below) at a `spawn f()` **callee** or
-  `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. (Storage of a
-  ref-capturing closure *inside a struct field / channel value* is not caught at check — a runtime
-  backstop, Task 2b, covers it.) A bare **native** handle is a different case and stays non-sendable (below).
+  `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. A ref-capturing closure
+  that reaches the airlock **indirectly** — stored *inside a struct field or a `Channel[fn]` value* —
+  slips past the checker, so a **runtime backstop (Task 2b, landed)** closes it: when the airlock
+  serializes a crossing closure it scans the closure's **entire capture graph** (top-level or nested
+  inside a captured `List`/`Tuple`/`Map`/`Set`/struct/enum/newtype/`Cell`/nested closure), and a `Ref`
+  anywhere in it raises the **recoverable** error `cannot send a non-sendable ref/Ref captured by a
+  closure across tasks — use Shared/Atomic/Channel` — **byte-identical on both engines**, never a
+  silent deep-copy that drops the write. Together with the Task-2a gate, **no silent `ref` path
+  remains**. A bare **native** handle is a different case and stays non-sendable (below).
 - **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
-  over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a
-  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). This holds whether
+  over it (an in-task-only box; capturing/passing it across the airlock is an **error**, not a
+  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). At a **direct**
+  spawn site it is a **compile error**; when it crosses **indirectly** (inside a struct field or a
+  `Channel[fn]` value) it is a **recoverable runtime fault** (Task 2b) — either way, never a silent
+  write-dropping copy. This holds whether
   the `ref` is captured directly by a `spawn:` block, or by a closure/nested-fn used as a `spawn f()`
   **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global** `ref`, by contrast, is
   a **read-only global** resolvable in every task (like a free fn), **not** a per-task capture — reading

@@ -305,8 +305,10 @@ cross-nursery M:N flat scheduler · `Channel.close()` · per-socket `timeout_ms`
 **closures-as-data B3.3** (closures/`fn` cross the airlock **by value** — runtime + checker;
 `sendable(Func)` permissive so `Channel[fn]` type-checks; Task 2a: a captured non-sendable **local**
 `ref` at a `spawn f()` **callee**/**arg** is a compile error — matching the block form — while a
-**module-global** `ref` is a read-only global, not gated. Struct-field/opaque storage of a
-ref-capturing closure deferred to a runtime backstop, Task 2b — see `docs/gaps.md` #1/#2).
+**module-global** `ref` is a read-only global, not gated. Task 2b (2026-07-11): a ref-capturing closure
+reaching the airlock **indirectly** (struct field / `Channel[fn]` value) now **faults at runtime** on
+both engines — the two closure-serialization arms scan the whole capture graph for a `Ref`; module-global
+refs are never scanned. No silent `ref` path remains — see `docs/gaps.md` #1/#2).
 
 **Memory-layout levers ✅** · #1 positional struct layout (flat `Vec<Value>`, names in `StructDef`;
 2026-06-16) · #2 enum `variant_id: u32` (`Program::variants_by_id`, pure-int dispatch/eq/`?`; native

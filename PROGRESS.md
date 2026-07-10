@@ -1391,8 +1391,22 @@ Makes the checker consistent with the by-value airlock runtime (B3.3e, below). T
   `local_captures_of`), NOT a per-task capture — never gated (`module_global_ref_spawn_callee_ok` +
   runtime 42 both engines locks it; `all_shipped_examples_typecheck` incl. `examples/ref_binding.chz`
   stays green).
-- **Deferred to Task 2b (runtime backstop):** a closure whose captures include a `ref` that reaches the
-  airlock INDIRECTLY (inside a struct field / channel / opaque value) is no longer caught at check.
+- **Task 2b — indirect ref-capture runtime backstop (✅ 2026-07-11, same branch):** the check-site gate
+  can't see a ref-capturing closure that reaches the airlock INDIRECTLY (inside a struct field / a
+  `Channel[fn]` value) — it type-checks, and used to **silently deep-copy** the ref (the write vanished).
+  A VM-only backstop closes it: both closure-serialization arms (`to_wire_depth` for
+  `Channel.send`/spawn args, `to_snap_depth` for the M:N module snapshot) now scan a crossing closure's
+  ENTIRE capture graph via `captured_graph_embeds_ref` (`src/vm/sched.rs`) — top-level OR nested inside a
+  captured `List`/`Tuple`/`Map`/`Set`/struct/enum/newtype/`Cell`/nested closure/`Iter`, `MAX_STRUCTURAL_DEPTH`-bounded
+  — and a `Ref` (`Obj::Struct{name:"Ref"}`, a reserved name) anywhere in it raises the **recoverable**
+  `cannot send a non-sendable ref/Ref captured by a closure across tasks — use Shared/Atomic/Channel`,
+  BYTE-IDENTICAL on both engines. Scoped to the closure arms ONLY (HARD non-regression): a **module-global**
+  `ref` crosses via the module-globals snapshot, not a closure capture, so it is never scanned and keeps
+  deep-copying (never faults). No checker change. Together with Task 2a, **no silent `ref` path remains**.
+  Tests: 3 new both-engine fault parity tests (`ref_capturing_closure_through_channel_faults`,
+  `..._in_struct_field_spawn_arg_faults`, `ref_nested_in_captured_list_faults`) + 2 regression pins
+  (`module_global_ref_read_in_task_still_ok`, `sendable_capturing_closure_through_channel_still_runs`).
+  Full `cargo test` green, clippy clean. Docs: `docs/concurrency.md §7`, `docs/gaps.md` #1/#2, `gaps.md`.
 - **Tests:** 7 new checker tests + 3 new both-engine parity run tests. Updated 9 existing checker tests
   that encoded the old "Func non-sendable" rule: `channel_non_sendable_element/struct_field_rejected` +
   `spawn_non_sendable_struct_field_arg_rejected` re-pointed at a still-non-sendable `Ref` field/element

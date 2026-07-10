@@ -27,8 +27,10 @@ the verbatim block-form error per captured non-sendable local. A captured **`ref
 compile error at both the callee and the arg site, consistent with the block form. A **module-global**
 `ref` is a read-only global (scope-0 exclusion), **not** a capture — never gated. Paired with the
 permissive `sendable(Func)` flip (#2), closures-as-data type-check while a captured `ref` is rejected.
+An **indirectly**-crossing ref-capture (inside a struct field / `Channel[fn]` value) slips this
+check-site gate but is caught by the Task-2b runtime backstop (#2) — no silent `ref` path remains.
 
-### 2. Closures as data — **RUNTIME (B3.3) + checker gate (Task 2a) landed; struct-field/opaque storage of a ref-capturing closure deferred to a runtime backstop (Task 2b)**
+### 2. Closures as data — **RESOLVED: RUNTIME (B3.3) + checker gate (Task 2a) + indirect ref-capture runtime backstop (Task 2b, 2026-07-11) all landed**
 
 **Runtime (DONE):** the airlock lowers a closure/bare-`fn` **by value** everywhere — its `proto`
 (immutable → shared) + its captures deep-copied recursively into fresh per-task cells + its home-module
@@ -43,11 +45,18 @@ accepted; `channel_of_closures` and a factory closure sent over a channel both r
 capture check moved to the airlock **sites** (#1). `ref T`/`Ref[T]` stays non-sendable regardless (use
 `Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation).
 
-**Still pending (Task 2b — runtime backstop):** the bare `fn` type cannot carry its captures, so a
-closure whose captures include a `ref` that reaches the airlock **indirectly** — inside a struct field
-(`Channel[Holder]` where `Holder` has a `fn` field), or through a channel/opaque value — is no longer
-caught at check (it type-checks). A small **runtime** guard on the channel/opaque/struct-field paths is
-the remaining work to fault such a case deterministically on both engines.
+**Runtime backstop (DONE — Task 2b):** the bare `fn` type cannot carry its captures, so a closure
+whose captures include a `ref`/`Ref` that reaches the airlock **indirectly** — inside a struct field
+(`Channel[Holder]` where `Holder` has a `fn` field), or through a `Channel[fn]` value — type-checks and
+used to **silently deep-copy** the ref (the write vanished). The airlock's two closure-serialization
+arms (`to_wire_depth` for `Channel.send`/spawn args, `to_snap_depth` for the M:N snapshot) now scan a
+crossing closure's **entire capture graph** (top-level or nested inside a captured
+`List`/`Tuple`/`Map`/`Set`/struct/enum/newtype/`Cell`/nested closure), and a `Ref` anywhere in it
+raises the **recoverable** runtime error `cannot send a non-sendable ref/Ref captured by a closure
+across tasks — use Shared/Atomic/Channel` — **byte-identical on both engines**. Scoped to the closure
+arms ONLY: a **module-global** `ref` crosses via the module-globals snapshot (not a closure capture), so
+it is never scanned and continues to deep-copy. Together with the Task-2a checker gate, **no silent
+`ref` path remains**.
 
 ## Stdlib
 
