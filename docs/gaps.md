@@ -4,6 +4,48 @@ Catch-all backlog of missing / shallow surface. **Not a commitment** — draw fr
 earns its own milestone. Currently all entries are **stdlib + deps** (first audit 2026-07-07); add
 other categories (language, tooling, perf) here as they surface.
 
+## Language / concurrency
+
+### 1. Spawn-callee sendability gate is incomplete — `spawn f()` callee captures are checked at RUNTIME, not compile time (soundness)
+
+Spawned tasks **are** usable today: a nested `fn` or closure works as the direct callee of `spawn f()`
+(the task runs it; its captured cells are **deep-copied** to isolate them — see
+[`concurrency.md §7`](concurrency.md)), and it may capture anything **sendable**: scalars, `str`,
+`List`/`Map`/`Set`/`tuple`/structs of sendables, `Channel`/`Shared`/`RwShared`/`Atomic` handles, a
+`std.cancel` `Token`, a `.iter()` cursor, and (read-only) module globals. Verified: a task capturing a
+`List` or a `Shared` runs fine.
+
+The **gap**: the checker's spawn-sendability gate covers `spawn:` / `parallel:` **block** bodies but
+**NOT the free captures of a `spawn f()` callee** (closure or nested fn). So when such a callee
+captures a **non-sendable** binding, the block form rejects it at **check** time but the callee form
+is not caught until run time — or worse, not at all:
+
+- callee captures a **closure-as-data** (another closure value) → `check` OK, both engines **fault at
+  run time** ("this task value can't cross a worker boundary"). The `spawn:` block form rejects the
+  same program at `check` (`1 type error`).
+- callee captures a **`ref T` / `Ref[T]`** and mutates it → `check` OK, **runs and silently isolates
+  the write** (prints the stale value), directly contradicting `concurrency.md §7` ("capturing/passing
+  a `ref` across the airlock is a **compile error, not a silent copy**"). The `spawn:` block form
+  rejects it at `check` (`2 type errors`).
+
+Exposed by the first-class-nested-fn work (2026-07-10, merge `f8c3c60`) — nested fns made `spawn f()`
+callees common. **Fix direction:** run the same check-time captured-non-sendable analysis the `spawn:`
+block form uses over a spawned callee closure/nested-fn's **free** captures (the free set is already
+computed at each MakeClosure site by the free-variable-capture work, merge `0d40fca`), so a captured
+closure/`ref`/generator in a `spawn f()` callee is a **clean compile error**, consistent with blocks.
+Checker-only; no new feature. This makes the *existing* limit sound; it does **not** make closures
+sendable-as-data.
+
+### 2. Closures are not sendable **as data** (B3.3, future feature)
+
+A closure captured into a `spawn:` block, stored in a `Channel`/`Shared`, etc. is non-sendable (the
+airlock deep-copies plain data; a closure's captured cells may alias parent state — the memory-safety
+line, no borrow checker to prove otherwise). Making closures cross **by value** — deep-copy the whole
+captured environment into fresh per-task cells (the proto/bytecode is immutable → shared; captures
+copied → isolated) — is the planned **B3.3** item. Then an outer closure could be captured/stored, not
+just used as a direct `spawn f()` callee. `ref T`/`Ref[T]` would stay non-sendable regardless (use
+`Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation).
+
 ## Stdlib
 
 Coverage today is *broad* (math, fs, os, time,
