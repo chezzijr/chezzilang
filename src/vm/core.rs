@@ -252,6 +252,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
         // An opaque `ptr` crosses by value (a raw address) — it roots no heap object.
         // A first-class builtin fn crosses by value (its name) — pure code, roots no heap object.
+        // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
         WireValue::Str(_)
         | WireValue::Bytes(_)
         | WireValue::ByteArray(_)
@@ -262,6 +263,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         | WireValue::Listener(_)
         | WireValue::Ptr(_)
         | WireValue::Builtin(_)
+        | WireValue::Func { .. }
         | WireValue::Nil => {}
     }
 }

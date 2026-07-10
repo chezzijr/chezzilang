@@ -1382,13 +1382,19 @@ impl Vm {
                     // — proto + wire'd captures + home index) so a pool-thread drain can rebuild and run
                     // it; queued captures stay rooted via the executor handle's `children()` (the
                     // `Closure` arm of `collect_core_gcrefs`). On the cooperative default engine it crosses
-                    // **by handle** (`to_wire` → `Handle`) exactly as before B3.6 — the drain runs on this
-                    // same heap, so captures must stay *shared by reference* (a mutation between `submit`
-                    // and drain is observable, matching the interp oracle); a by-value snapshot here would
-                    // break `VM == interp` for the sequential subset (decision A). The engine flag is fixed
-                    // for a VM's lifetime, so submit-time and drain-time agree on which form was queued.
+                    // **by handle** — the drain runs on this same heap, so captures must stay *shared by
+                    // reference* (a mutation between `submit` and drain is observable, matching the interp
+                    // oracle); a by-value snapshot here would break `VM == interp` for the sequential subset
+                    // (decision A). NB: as of B3.3 the generic `to_wire` deep-copies a closure's captures
+                    // (by-value airlock everywhere), so the cooperative branch must NOT route through it —
+                    // it queues the callable's own `Handle` directly (same heap, same as pre-B3.3). The
+                    // engine flag is fixed for a VM's lifetime, so submit-time and drain-time agree.
                     let w = if self.parallel {
                         self.wire_callable(args[0], span)?
+                    } else if let Value::Obj(hc) = args[0]
+                        && matches!(self.heap.get(hc), Obj::Func { .. } | Obj::Closure { .. })
+                    {
+                        WireValue::Handle(hc)
                     } else {
                         self.to_wire_at(args[0], span)?
                     };

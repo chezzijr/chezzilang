@@ -2242,14 +2242,38 @@ impl Vm {
                 // builtins are name-compared, so that is observationally identical. Works on the M:N
                 // engine (this path) and the serial engine (`SnapValue::Builtin`) alike.
                 Obj::Builtin(name) => WireValue::Builtin(name.clone()),
-                // By-reference callables: cross as the existing handle (matches the old deep_clone arm).
-                Obj::Func { .. }
-                | Obj::Closure { .. }
-                | Obj::Module { .. }
-                | Obj::Native { .. }
-                // A Cffi handle crosses as the existing handle — same shared heap (B3.0); under the
-                // M:N engine the worker shares the parent address space, so the symbol stays valid.
-                | Obj::Cffi(_) => WireValue::Handle(h),
+                // B3.3: a closure crosses the airlock BY VALUE — its `proto` (shared via `Arc<Program>`),
+                // its captures wired recursively in slot order (paired with the proto's `capture_names`),
+                // and its `home` as an index into `module_objs` — never a heap-local `GcRef`. Mirrors the
+                // slot-order/home logic in `to_snap_depth`'s Closure arm and the old `wire_callable`.
+                Obj::Closure {
+                    proto,
+                    captured,
+                    home,
+                } => {
+                    let names = &self.program.protos[*proto].capture_names;
+                    let mut wcap = Vec::with_capacity(captured.len());
+                    for (i, cv) in captured.iter().enumerate() {
+                        let w = self.to_wire_depth(*cv, depth + 1)?;
+                        let name = names.get(i).cloned().unwrap_or_default();
+                        wcap.push((name.into_boxed_str(), w));
+                    }
+                    WireValue::Closure {
+                        proto: *proto,
+                        captured: wcap,
+                        home: self.home_index(*home),
+                    }
+                }
+                // B3.3: a bare fn crosses BY VALUE as its own distinct `Func` arm (NOT an empty-capture
+                // `Closure`), so it keeps rendering `<fn NAME>` after a round-trip (a `Closure` renders
+                // `<closure>` — collapsing them would diverge the M:N snapshot rebuild from serial).
+                Obj::Func { proto, home } => WireValue::Func {
+                    proto: *proto,
+                    home: self.home_index(*home),
+                },
+                // A module's mutable globals can't cross an OS-thread heap boundary; native/cffi share
+                // the parent address space (so the handle stays valid, same shared heap / address space).
+                Obj::Module { .. } | Obj::Native { .. } | Obj::Cffi(_) => WireValue::Handle(h),
                 // B3.1: the shared cores cross as the `Arc` itself (clone = refcount bump), so a
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
@@ -2305,17 +2329,28 @@ impl Vm {
                         .program
                         .structs
                         .get(name.as_ref())
-                        .map(|d| d.fields.iter().map(|f| f.clone().into_boxed_str()).collect())
+                        .map(|d| {
+                            d.fields
+                                .iter()
+                                .map(|f| f.clone().into_boxed_str())
+                                .collect()
+                        })
                         .unwrap_or_default();
                     let vals: Vec<Value> = fields.clone();
                     let mut out = Vec::with_capacity(vals.len());
                     for (i, val) in vals.iter().enumerate() {
-                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
+                        let k = names
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| i.to_string().into_boxed_str());
                         out.push((k, self.to_wire_depth(*val, depth + 1)?));
                     }
                     WireValue::Struct { name, fields: out }
                 }
-                Obj::Enum { variant_id, payload } => {
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } => {
                     let mut out = Vec::with_capacity(payload.len());
                     for x in payload {
                         out.push(self.to_wire_depth(*x, depth + 1)?);
@@ -2323,7 +2358,10 @@ impl Vm {
                     // M19 lever #2 — carry the dense `variant_id` directly on the COLD wire path. All
                     // workers share one `Arc<Program>`, so the id is meaningful on both sides; carrying
                     // it (not the name) preserves native-vs-user identity under variant-name shadowing.
-                    WireValue::Enum { variant_id: *variant_id, payload: out }
+                    WireValue::Enum {
+                        variant_id: *variant_id,
+                        payload: out,
+                    }
                 }
                 // A newtype crosses by value (deep copy), like a 1-field struct: carry its key + the
                 // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
@@ -2335,7 +2373,10 @@ impl Vm {
                 // frames reference this heap. The checker marks them non-sendable, so this is a
                 // defensive fault (an erased path that smuggled one into a `spawn`/channel).
                 Obj::Generator(_) => {
-                    return Err(self.err("a generator cannot be sent across tasks".to_string(), Span { line: 0, col: 0 }));
+                    return Err(self.err(
+                        "a generator cannot be sent across tasks".to_string(),
+                        Span { line: 0, col: 0 },
+                    ));
                 }
                 // A `Cell` (a by-reference-captured local's box) crosses the airlock by value as a
                 // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell, so a
@@ -2485,6 +2526,12 @@ impl Vm {
                     captured: cap,
                     home,
                 }))
+            }
+            // B3.3: rebuild a bare fn by value over the worker's reconstructed home module (the `proto`
+            // is shared via `Arc<Program>`; `worker_home` resolves the home index like the Closure arm).
+            WireValue::Func { proto, home } => {
+                let home = self.worker_home(home);
+                Value::Obj(self.heap.alloc(Obj::Func { proto, home }))
             }
         }
     }
@@ -2754,13 +2801,15 @@ impl Vm {
     }
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
-    /// heap-local `GcRef` that cannot cross into another heap as-is (B3.2). `str`/closure crossing by
-    /// value lands in B3.3; until then this converts a would-be dangling handle into a clean fault.
+    /// heap-local `GcRef` that cannot cross into another heap as-is. As of B3.3 plain data, `str`/bytes,
+    /// closures/functions, and the `Channel`/`Shared`/`Executor`/socket handles all cross by value (or
+    /// as a shared `Arc` core), so the only remaining non-crossable value is a module / native / FFI
+    /// handle — a module's mutable globals can't be shared across an OS-thread heap boundary.
     pub(super) fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
         if w.has_handle() {
             return Err(self.err(
-                "spawn: this task value can't cross a worker boundary yet — only plain data and \
-                 Channel/Shared/Executor handles are sendable in B3.2 (str/closure cross by value in B3.3)"
+                "spawn: this task value can't cross a worker boundary — plain data, closures/functions, \
+                 and Channel/Shared/Executor handles are sendable, but a module/native/FFI handle cannot cross"
                     .to_string(),
                 span,
             ));
@@ -2785,47 +2834,22 @@ impl Vm {
             .collect()
     }
 
-    /// B3.6 — serialize a callable (`Executor.submit`'s argument) across the airlock **by value** as a
-    /// [`WireValue::Closure`], so a submitted task can be reconstructed and run on a pool thread. Unlike
-    /// the generic `to_wire` (which crosses a closure as a by-reference `Handle`), this lowers the
-    /// callee to its `proto` (shared via `Arc<Program>`) + wire'd captures + a `home` *index* — no
-    /// heap-local `GcRef` survives. A captured value is itself `to_wire`d (so a `Channel`/`Shared`
-    /// capture crosses as its shared `Arc`); the A3b checker gate already rejected a non-sendable
-    /// capture, so [`ensure_crossable`] here is the defensive backstop. A bare `Func` (no captures) is a
-    /// degenerate closure with an empty capture set.
+    /// B3.6 — serialize a callable (`Executor.submit`'s argument) across the airlock **by value**, so a
+    /// submitted task can be reconstructed and run on a pool thread. As of B3.3 the GENERIC `to_wire`
+    /// already lowers a closure/bare-fn by value (a [`WireValue::Closure`]/[`WireValue::Func`], proto +
+    /// wired captures + home index — no heap-local `GcRef`), so this is now a thin delegate that reuses
+    /// that path and applies the [`ensure_crossable`] backstop. It still rejects a non-callable
+    /// argument with the `submit`-specific message (a plain value / handle would `ensure_crossable`-pass
+    /// or produce a less specific fault otherwise). A captured `Channel`/`Shared` crosses as its shared
+    /// `Arc` (via `to_wire`), unchanged.
     pub(super) fn wire_callable(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
-        if let Value::Obj(h) = v {
-            match self.heap.get(h) {
-                Obj::Closure {
-                    proto,
-                    captured,
-                    home,
-                } => {
-                    // Lever #3: positional captures — carry names from the proto in slot order.
-                    let names = &self.program.protos[*proto].capture_names;
-                    let mut wcap = Vec::with_capacity(captured.len());
-                    for (i, cv) in captured.iter().enumerate() {
-                        // `to_wire_at` re-stamps a generator capture's placeholder span with `span`.
-                        let w = self.to_wire_at(*cv, span)?;
-                        self.ensure_crossable(&w, span)?;
-                        let name = names.get(i).cloned().unwrap_or_default();
-                        wcap.push((name.into_boxed_str(), w));
-                    }
-                    return Ok(WireValue::Closure {
-                        proto: *proto,
-                        captured: wcap,
-                        home: self.home_index(*home),
-                    });
-                }
-                Obj::Func { proto, home } => {
-                    return Ok(WireValue::Closure {
-                        proto: *proto,
-                        captured: Vec::new(),
-                        home: self.home_index(*home),
-                    });
-                }
-                _ => {}
-            }
+        if let Value::Obj(h) = v
+            && matches!(self.heap.get(h), Obj::Func { .. } | Obj::Closure { .. })
+        {
+            // `to_wire_at` re-stamps a generator capture's placeholder span with `span`.
+            let w = self.to_wire_at(v, span)?;
+            self.ensure_crossable(&w, span)?;
+            return Ok(w);
         }
         Err(self.err("submit requires a function or closure".to_string(), span))
     }

@@ -19,8 +19,9 @@ use std::sync::Arc;
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
 /// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`) own their contents recursively; `Str`
-/// crosses **by value** (owned bytes — [`WireValue::Str`]). By-reference callables (`Func`/`Closure`/
-/// `Module`/`Native`) cross as [`WireValue::Handle`] — the existing heap handle (same heap). The
+/// crosses **by value** (owned bytes — [`WireValue::Str`]). Callables cross **by value** too — a
+/// closure as [`WireValue::Closure`] (proto + wired captures + home index), a bare fn as
+/// [`WireValue::Func`]. Only `Module`/`Native`/`Cffi` stay by-reference as [`WireValue::Handle`]. The
 /// `Channel`/`Shared`/`Executor` handles cross as their shared `Arc<…Core>` (B3.1). `Map`/`Set` carry
 /// their cached `u64` hashes so reconstruction never re-hashes (byte-identical iteration order +
 /// index — see [`super::heap::MapData`]).
@@ -88,9 +89,11 @@ pub enum WireValue {
     /// follows the inner value, so a cell over pure data rides the cheap snapshot fast path.
     Cell(Box<WireValue>),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
-    /// same heap). Covers the callables `Func`/`Closure`/`Module`/`Native` (`Str` now crosses by value
-    /// — see [`WireValue::Str`]). At B3.3 the handles whose object cannot cross an OS thread (`Module`
-    /// with mutable globals, `Func`/`Closure`) gain real `Err` arms in `to_wire`.
+    /// same heap). As of B3.3 this wraps only the objects that genuinely CANNOT cross an OS-thread
+    /// heap boundary: `Module` (mutable globals), `Native`, and `Cffi` (both share the parent address
+    /// space). Closures/funcs now cross by value ([`Closure`](WireValue::Closure)/[`Func`](WireValue::Func)),
+    /// and `Str`/`bytes`/… have always crossed by value. `has_handle` flags this arm, so the worker
+    /// airlock rejects a `Module`/`Native`/`Cffi` handle that would try to cross into another heap.
     Handle(GcRef),
     /// A `Channel` handle crossing the airlock as its shared [`ChannelCore`] (B3.1). `from_wire`
     /// allocates a *fresh* heap handle wrapping this same `Arc`, so two tasks reach one mailbox — the
@@ -123,16 +126,27 @@ pub enum WireValue {
     /// OS-thread boundary — cross-safe (`has_handle` leaves it `false` via the `_` arm), so a builtin
     /// captured into a spawned task works on the serial AND the M:N engine alike.
     Builtin(Box<str>),
-    /// B3.6 — a closure carried across the airlock **by value**: its `proto` (which lives in the shared
-    /// `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and its
-    /// `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire time,
-    /// `None` for a home not in the table) — never a heap-local `GcRef`. Produced **only** by
-    /// `Executor.submit` (`Vm::wire_callable`); the generic `to_wire` still crosses a closure as a
-    /// by-reference [`Handle`]. This is the arm that lets a submitted task run on a pool thread (B3.6) —
+    /// B3.6 / B3.3 — a closure carried across the airlock **by value**: its `proto` (which lives in the
+    /// shared `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and
+    /// its `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire
+    /// time, `None` for a home not in the table) — never a heap-local `GcRef`. As of B3.3 the GENERIC
+    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data on
+    /// every airlock (spawn args/callees, Channel/Shared, module snapshot) on both engines identically.
     /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
     Closure {
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
+        home: Option<usize>,
+    },
+    /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
+    /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.
+    /// Kept DISTINCT from `Closure` on purpose — a bare fn and a closure are observationally different
+    /// (`str(func)` renders `<fn NAME>`, `str(closure)` renders `<closure>`), so collapsing a func into
+    /// an empty-capture `Closure` would render `<closure>` on the M:N snapshot rebuild path while the
+    /// serial engine's live `Obj::Func` renders `<fn NAME>` — a parity divergence. Holds no `GcRef`
+    /// (`has_handle` leaves it `false`), so a bare fn crosses an OS-thread boundary cleanly.
+    Func {
+        proto: ProtoId,
         home: Option<usize>,
     },
 }
@@ -141,10 +155,14 @@ impl WireValue {
     /// B3.2 — does this value graph carry a by-reference [`Handle`](WireValue::Handle), i.e. a
     /// heap-local `GcRef`? Such a value cannot cross into another heap as-is — the slot index is
     /// meaningless there — so the worker airlock ([`Vm::run_task_isolated`](super::Vm)) rejects it
-    /// with a clean fault. As of B3.3a `Str` crosses by value (it is no longer a `Handle`), so the
-    /// remaining flagged leaves are the callables (`Func`/`Closure`/`Module`/`Native`), which cross by
-    /// value only once G1/B3.3 lands. The shared-core arms (`Channel`/`Shared`/`Executor`) are
-    /// cross-safe — they carry an `Arc`, not a `GcRef` — so they are *not* flagged.
+    /// with a clean fault. As of B3.3 `Str`, closures ([`Closure`](WireValue::Closure)) and bare funcs
+    /// ([`Func`](WireValue::Func)) all cross by value (none is a `Handle`), so the only flagged leaf is
+    /// [`Handle`](WireValue::Handle) itself — which now wraps only `Module`/`Native`/`Cffi` (a module's
+    /// mutable globals genuinely can't cross; native/cffi share the parent address space). `Func`
+    /// carries no captures and no `GcRef`, so it is always `false` (via the `_` arm); a `Closure`
+    /// recurses through its captures (one could embed a residual `Module`/`Native` handle). The
+    /// shared-core arms (`Channel`/`Shared`/`Executor`) are cross-safe — they carry an `Arc`, not a
+    /// `GcRef` — so they are *not* flagged.
     pub fn has_handle(&self) -> bool {
         match self {
             WireValue::Handle(_) => true,

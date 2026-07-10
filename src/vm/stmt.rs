@@ -2162,6 +2162,9 @@ impl Vm {
             WireValue::Builtin(name) => format!("<builtin fn {name}>"),
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
+            // B3.3: a wired bare fn renders like its heap counterpart (`Obj::Func` → "<fn NAME>"),
+            // DISTINCT from a closure — this is why `WireValue::Func` is kept separate from `Closure`.
+            WireValue::Func { proto, .. } => format!("<fn {}>", self.program.protos[*proto].name),
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
             WireValue::Iter { .. } => "<iterator>".to_string(),
             // A cell is a transparent box — render its inner value (never user-visible in practice).
