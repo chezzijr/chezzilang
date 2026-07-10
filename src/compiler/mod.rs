@@ -829,6 +829,14 @@ impl Compiler {
         }
         // The synthetic toplevel function: top-level `fn`s are hoisted as globals before the body.
         let mut fc = FnComp::new("<toplevel>".to_string(), 0, true);
+        // Uniform by-reference capture: the module top level is a real frame too. A top-level
+        // `for`-loop variable (or a block-local inside a top-level `if`/`for`/`while`) captured by a
+        // nested fn / closure must box into a cell — otherwise the captured raw value hits
+        // `CellLoad on a non-handle value` at runtime (check-OK / host-panic on BOTH engines). Its
+        // boxed-name set is computed exactly like every other fn body (`compile_fn_captured`). Names
+        // that resolve as GLOBALS here (top-level `let`s / hoisted fns) are never `add_local`'d, so
+        // `is_boxed_slot` never fires for them — only genuine frame locals (loop vars, block-lets) box.
+        fc.boxed_names = captured_names_of_body(&module.stmts, &[]);
         for stmt in &module.stmts {
             if let StmtKind::Fn(decl) = &stmt.kind {
                 let pid = self.compile_fn(decl, false)?;

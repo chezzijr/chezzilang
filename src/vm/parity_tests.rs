@@ -5405,6 +5405,36 @@ main()";
     );
 }
 
+/// NF#7b — loop-variable capture at MODULE TOP LEVEL (not inside a `fn`): a nested fn defined in a
+/// top-level `for` loop capturing the loop var gets a FRESH cell per iteration, exactly like the
+/// in-function NF#7 case. The synthetic `<toplevel>` proto must compute its own boxed-name set (base
+/// branch left it empty → the loop var stayed a raw int, and the captured `CellLoad` hit
+/// `unreachable!("CellLoad on a non-handle value")`, panicking BOTH engines / check-OK-run-crash).
+#[test]
+fn nested_fn_toplevel_loopvar_fresh_cell_parity() {
+    let src = "\
+fns := []
+for i in [0, 1, 2]:
+    fn geti() -> int:
+        return i
+    fns.push(geti)
+for f in fns:
+    print(f())";
+    assert_parity_out(src, "0\n1\n2\n");
+}
+
+/// NF#7c — the immediate-call top-level form (the minimal base-branch panic repro): a nested fn that
+/// reads the top-level loop var and is CALLED in the same iteration. Must run, not crash.
+#[test]
+fn nested_fn_toplevel_loopvar_immediate_parity() {
+    let src = "\
+for i in [0, 1, 2]:
+    fn geti() -> int:
+        return i
+    print(geti())";
+    assert_parity_out(src, "0\n1\n2\n");
+}
+
 /// D1 — a captured local ESCAPES its defining frame: the heap cell outlives the frame, so a returned
 /// closure still reads it; each factory call gets a fresh cell → `42\n7`. Matches Go's escaping upvalue.
 #[test]

@@ -1394,11 +1394,22 @@ that check-passed then run-faulted). Now a nested `fn` is a **closure-with-a-nam
   a statement body can reassign a captured local (visible in the defining scope), a captured loop var
   gets a fresh cell per iteration, and across the `spawn`/`parallel:` airlock a capture-bearing nested
   fn (an `Obj::Closure`) is deep-copied/isolated — identical to closures. **v1 limits:** no nested
-  generics + no sibling mutual recursion (both clean compile-time rejects, never check-OK/run-fault).
-- Tests: 7 checker (`nested_fn_*`/`nested_generic_fn_clean_reject`, entry/graph path) + 5 runtime parity
-  (`nested_fn_recursion_parity`, capture read/write, loopvar-fresh, spawn-airlock-isolated). Full `cargo
-  test` (3241 lib + integration + conformance) green, clippy clean, serial==M:N. Docs: `docs/syntax.md`
-  new "Nested function declarations" section.
+  generics + no sibling mutual recursion + a nested fn may not shadow a builtin/ctor name (all clean
+  compile-time rejects, never check-OK/run-fault).
+- **Adversarial-review fixes (2026-07-10, same branch).** Two confirmed check-OK/run-divergent holes
+  the first cut introduced: (1) the synthetic `<toplevel>` proto never computed `boxed_names`, so a
+  nested fn/closure capturing a **module-top-level** `for`-loop variable snapshotted a raw int and hit
+  `unreachable!("CellLoad on a non-handle value")` — panicking BOTH engines (`src/compiler/mod.rs`, the
+  toplevel `fc.boxed_names = captured_names_of_body(&module.stmts, &[])`; also fixes the identical
+  pre-existing top-level-closure panic). (2) the nested-fn checker branch had no reserved-name guard, so
+  a nested fn named after a builtin/ctor (`print`/`range`/a struct/newtype ctor/`Ok`/`Err`/`Some`/`None`)
+  was declared as a shadowing local while the backend resolved the builtin — reintroducing the exact
+  divergence (`src/checker/sig.rs`, guard on `is_reserved_name`/`struct_names`/`newtype_names`/builtin
+  variants; user-enum variants excluded — not bare-callable, no divergence).
+- Tests: 11 checker (`nested_fn_*`/`nested_generic_fn_clean_reject` + 4 `nested_fn_shadows_*_rejected`,
+  entry/graph path) + 7 runtime parity (`nested_fn_recursion_parity`, capture read/write, loopvar-fresh
+  in-fn + top-level ×2, spawn-airlock-isolated). Full `cargo test` (3247 lib + integration + conformance)
+  green, clippy clean, serial==M:N. Docs: `docs/syntax.md` new "Nested function declarations" section.
 
 **✅ Uniform by-reference capture — Task B WIRED (semantics + airlock, 2026-07-09).** Closure/`defer:`/
 `spawn:` capture is now **uniformly by reference**: a capturing frame shares the closest binding of a

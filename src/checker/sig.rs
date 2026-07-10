@@ -1733,6 +1733,30 @@ impl Checker {
                         );
                         return;
                     }
+                    // Name-resolution parity guard: the compiler resolves reserved builtins /
+                    // container-runtime ctors (`print`/`range`/`List`/`Channel`/…), bare struct &
+                    // newtype constructors, and the bare BUILTIN variant ctors (`Ok`/`Err`/`Some`/
+                    // `None`) BEFORE a local value-call (`compile_call`). Declaring a nested fn with
+                    // one of those names would type calls to the nested fn while the VM runs the
+                    // builtin/ctor — the exact check-OK/run-divergent hole this feature exists to
+                    // close. Reject cleanly (mirrors the top-level `is_reserved_name` hoist guard,
+                    // extended to the ctor families a nearest-scope local can shadow but the backend
+                    // can't). User-enum variants are NOT bare-callable, so they aren't guarded (no
+                    // divergence + a nested fn may legitimately share a user variant's name).
+                    let nm = decl.name.as_str();
+                    if crate::checker::is_reserved_name(nm)
+                        || self.struct_names.contains(nm)
+                        || self.newtype_names.contains(nm)
+                        || matches!(nm, "Ok" | "Err" | "Some" | "None")
+                    {
+                        self.error(
+                            decl.name_span,
+                            format!(
+                                "nested function name '{nm}' is reserved (a builtin or constructor the runtime resolves before a local)"
+                            ),
+                        );
+                        return;
+                    }
                     let mut sig = self.fn_sig(decl, decl.name_span);
                     // No `-> T`: infer the return from the body (mirrors the top-level single-fn
                     // inference). Declare a PROVISIONAL `Ty::Func` first so a self-recursive call
