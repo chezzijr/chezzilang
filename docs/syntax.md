@@ -293,17 +293,65 @@ Two rules cover everything:
    Chezzi has no borrow checker to prove a shared mutation is locked, so the safe default is to copy.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
-cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Two ways to write
+cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write
 through a captured binding: (a) a **method call**, which *is* an expression, so a closure can mutate a
-captured heap value — `bump := fn(): xs.push(2)`; or (b) a **`defer:` / `spawn:` block**, whose body
-*is* statements, so a reassignment is fine there — `defer: n = n + 1`. (A bare `n = n + 1` in the
-enclosing scope always works; it's only *inside a closure value* that you need a method call.) This is
-why the counter/accumulator examples use `defer:` blocks or method mutation, not a `fn(): n = n + 1`.
+captured heap value — `bump := fn(): xs.push(2)`; (b) a **`defer:` / `spawn:` block**, whose body
+*is* statements, so a reassignment is fine there — `defer: n = n + 1`; or (c) a **nested `fn`
+declaration** (below), which also has a statement body — `fn bump(): n = n + 1`. (A bare `n = n + 1`
+in the enclosing scope always works; it's only *inside a closure value* that you need a method call.)
 
 If you relied on the old snapshot-at-creation behaviour, take an explicit copy: `snap := x` and
 capture `snap` (a fresh binding nothing else writes is effectively frozen). `ref T` / `Ref[T]` still
 work but are rarely needed for capture now — `ref` remains for by-reference **params** (above).
 Runnable demo: [`examples/closure_capture_scopes.chz`](../examples/closure_capture_scopes.chz).
+
+### Nested function declarations
+
+A `fn` statement written **inside** another function body (or any block) is a **first-class local
+function** — a closure with a name and a multi-statement body. It is not just sugar for a top-level
+fn; it captures the enclosing scope exactly like a closure value:
+
+- **Lexical nearest-scope.** The name resolves to the *nearest* binding in both the type-checker and
+  the runtime, so a nested `fn f(x: int)` **shadows** a top-level `fn f()`. Its body is fully
+  type-checked (a wrong-typed `return` is a compile error), and a call site is checked against the
+  *nested* signature — `f()` with zero args against the shadowing `fn f(x: int)` is a **check-time**
+  arity error, not a run-time fault.
+- **Recursion.** A nested fn may call **itself** (`fn fact(n: int) -> int: … fact(n - 1)`), just like
+  a top-level fn.
+- **Uniform by-reference capture.** It captures outer bindings **by reference** under the same cell
+  model as any closure — reads see later writes, and because its body *is* statements it can
+  **reassign** a captured local (`fn bump(): x = x + 1`), with the write visible in the defining scope.
+  A captured loop variable rebinds into a fresh cell each iteration (Go ≥1.22), and across the
+  `spawn` / `parallel:` airlock a plain captured local is snapshot-copied (isolated), identical to a
+  closure's capture — see the two rules above.
+
+```chezzi
+fn main():
+    n := 0
+    fn fact(k: int) -> int:          # recursive nested fn
+        if k <= 1:
+            return 1
+        return k * fact(k - 1)
+    fn bump():                       # statement body → can reassign a captured local
+        n = n + 1
+    bump()
+    bump()
+    print(fact(5))                   # 120
+    print(n)                         # 2 (write is visible in the enclosing scope)
+
+main()
+```
+
+**v1 limits.** A nested fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
+it at the top level), and **mutual recursion** between two sibling nested fns is unsupported: a nested
+fn is only in scope *after* its own declaration, so `a` referencing a later-declared sibling `b` is a
+`unknown name 'b'` error (declare such a pair at the top level instead). A nested fn may **not** be
+named after a **builtin / constructor** the runtime resolves before a local — a reserved builtin
+(`print`/`range`/`int`/`List`/`Channel`/…), a same-module **struct** or **newtype** constructor, or a
+builtin **variant** ctor (`Ok`/`Err`/`Some`/`None`) — because the backend would run the builtin while
+the checker saw the local; it is a `nested function name '…' is reserved` compile error (a nested fn
+*may* share a **user enum variant's** name — those aren't bare-callable, so there is no divergence).
+All of these are clean compile-time rejects, never a check-OK/run-fault.
 
 ### Built-in types
 

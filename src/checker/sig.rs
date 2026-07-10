@@ -1716,6 +1716,79 @@ impl Checker {
                 if decl.is_test {
                     self.validate_test_fn_shape(decl, false);
                 }
+                // A NESTED `fn` (declared inside any block / fn body — `scopes.len() > 1`; the module
+                // top level is exactly ONE scope, so a top-level fn sees `len == 1`) is a FIRST-CLASS
+                // LOCAL function: lexical nearest-scope, body-checked, recursive (letrec). A TOP-LEVEL
+                // fn keeps the hoisted-global path below (checked against `self.functions`).
+                if self.scopes.len() > 1 {
+                    // v1 limit: nested GENERIC fns are unsupported (monomorphic only). Clean reject
+                    // BEFORE any generic machinery runs (`fn_sig` would emit reserved-type-param
+                    // diagnostics and enter the params). Mutual recursion between siblings is likewise
+                    // out of scope — it surfaces as a plain forward-reference `unknown name` because a
+                    // sibling is only declared AFTER its own body is checked (single-cell letrec).
+                    if !decl.type_params.is_empty() {
+                        self.error(
+                            decl.name_span,
+                            "nested generic functions are not supported".to_string(),
+                        );
+                        return;
+                    }
+                    // Name-resolution parity guard: the compiler resolves reserved builtins /
+                    // container-runtime ctors (`print`/`range`/`List`/`Channel`/…), bare struct &
+                    // newtype constructors, and the bare BUILTIN variant ctors (`Ok`/`Err`/`Some`/
+                    // `None`) BEFORE a local value-call (`compile_call`). Declaring a nested fn with
+                    // one of those names would type calls to the nested fn while the VM runs the
+                    // builtin/ctor — the exact check-OK/run-divergent hole this feature exists to
+                    // close. Reject cleanly (mirrors the top-level `is_reserved_name` hoist guard,
+                    // extended to the ctor families a nearest-scope local can shadow but the backend
+                    // can't). User-enum variants are NOT bare-callable, so they aren't guarded (no
+                    // divergence + a nested fn may legitimately share a user variant's name).
+                    let nm = decl.name.as_str();
+                    if crate::checker::is_reserved_name(nm)
+                        || self.struct_names.contains(nm)
+                        || self.newtype_names.contains(nm)
+                        || matches!(nm, "Ok" | "Err" | "Some" | "None")
+                    {
+                        self.error(
+                            decl.name_span,
+                            format!(
+                                "nested function name '{nm}' is reserved (a builtin or constructor the runtime resolves before a local)"
+                            ),
+                        );
+                        return;
+                    }
+                    let mut sig = self.fn_sig(decl, decl.name_span);
+                    // No `-> T`: infer the return from the body (mirrors the top-level single-fn
+                    // inference). Declare a PROVISIONAL `Ty::Func` first so a self-recursive call
+                    // inside inference resolves as an arity-checked value-call (not a global namesake
+                    // / `unknown name`). A residual `Unknown` for a purely-recursive un-annotated
+                    // nested fn stays permissive — a v1 limit, only its own call sites degrade.
+                    if decl.ret.is_none() && matches!(sig.ret, Ty::Unknown) {
+                        self.declare(
+                            &decl.name,
+                            Ty::Func {
+                                params: sig.params.clone(),
+                                ret: Box::new(Ty::Unknown),
+                                labels: crate::checker::FnLabels(sig.labels.clone()),
+                            },
+                        );
+                        sig.ret = self.infer_fn_ret(decl, None, &sig.params, true);
+                    }
+                    // Nearest-scope binding: the name resolves to THIS nested fn (not a global
+                    // namesake) at every call site, and recursion type-checks. Declared BEFORE
+                    // `check_fn_body`.
+                    self.declare(
+                        &decl.name,
+                        Ty::Func {
+                            params: sig.params.clone(),
+                            ret: Box::new(sig.ret.clone()),
+                            labels: crate::checker::FnLabels(sig.labels.clone()),
+                        },
+                    );
+                    self.check_fn_body(decl, None, sig);
+                    return;
+                }
+                // Top-level fn: checked against its hoisted global sig.
                 // `.get` (not index) is panic-safe even when a redeclaration left a different sig.
                 if let Some(sig) = self.functions.get(&decl.name).cloned() {
                     self.check_fn_body(decl, None, sig);

@@ -1371,6 +1371,46 @@ engines by the existing goldens; value-first runtime stays covered by `examples/
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
 (non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
 
+**✅ Nested `fn` decls are first-class local functions (2026-07-10, `auto-task/nested-fn-firstclass`).**
+Closed a checker/compiler soundness divergence: a `fn` declared inside a body was compiled to a
+NON-capturing local (`MakeFunc`, couldn't recurse or capture) while the checker only ran its body when a
+GLOBAL namesake existed (else: unchecked body, false `unknown name`, or a wrong-arity global validation
+that check-passed then run-faulted). Now a nested `fn` is a **closure-with-a-name**, reusing the existing
+`Obj::Cell` / `MakeClosure` machinery (no new ops):
+- **Compiler (`src/compiler/mod.rs`).** The nested `StmtKind::Fn` arm routes through `MakeClosure` (was
+  `MakeFunc`): a **letrec cell** for the name (`Nil; NewCell; SetLocal` → snapshot → `MakeClosure` →
+  `CellStore` the finished closure) when the name is boxed (recursive / captured by a deeper sibling),
+  else a plain post-snapshot `emit_decl_named`. `compile_fn` grew a `compile_fn_captured(decl,
+  captured_names)` seam (top-level/method callers pass `Vec::new()` → byte-identical `MakeFunc` path).
+  `find_boundary_free_block` gained a `StmtKind::Fn` arm collecting the body's free names relative to
+  PARAMS-ONLY, so BOTH captured outer locals AND the self-name box in the enclosing frame (the boxing-
+  completeness fix that keeps `GetCaptured`+`CellLoad` from hitting a raw non-cell).
+- **Checker (`src/checker/sig.rs`).** The `StmtKind::Fn` arm now branches on `scopes.len() > 1` (nested;
+  module top level is exactly one scope): build the sig via `fn_sig`, infer an omitted `-> T` via
+  `infer_fn_ret` (provisional `Ty::Func` declared first so a recursive call resolves as an arity-checked
+  value-call), `declare` the name into the current scope BEFORE `check_fn_body` (nearest-scope resolution
+  + recursion type-check). Top-level path unchanged.
+- **Capture semantics inherited unchanged** from the uniform by-reference model: reads see later writes,
+  a statement body can reassign a captured local (visible in the defining scope), a captured loop var
+  gets a fresh cell per iteration, and across the `spawn`/`parallel:` airlock a capture-bearing nested
+  fn (an `Obj::Closure`) is deep-copied/isolated — identical to closures. **v1 limits:** no nested
+  generics + no sibling mutual recursion + a nested fn may not shadow a builtin/ctor name (all clean
+  compile-time rejects, never check-OK/run-fault).
+- **Adversarial-review fixes (2026-07-10, same branch).** Two confirmed check-OK/run-divergent holes
+  the first cut introduced: (1) the synthetic `<toplevel>` proto never computed `boxed_names`, so a
+  nested fn/closure capturing a **module-top-level** `for`-loop variable snapshotted a raw int and hit
+  `unreachable!("CellLoad on a non-handle value")` — panicking BOTH engines (`src/compiler/mod.rs`, the
+  toplevel `fc.boxed_names = captured_names_of_body(&module.stmts, &[])`; also fixes the identical
+  pre-existing top-level-closure panic). (2) the nested-fn checker branch had no reserved-name guard, so
+  a nested fn named after a builtin/ctor (`print`/`range`/a struct/newtype ctor/`Ok`/`Err`/`Some`/`None`)
+  was declared as a shadowing local while the backend resolved the builtin — reintroducing the exact
+  divergence (`src/checker/sig.rs`, guard on `is_reserved_name`/`struct_names`/`newtype_names`/builtin
+  variants; user-enum variants excluded — not bare-callable, no divergence).
+- Tests: 11 checker (`nested_fn_*`/`nested_generic_fn_clean_reject` + 4 `nested_fn_shadows_*_rejected`,
+  entry/graph path) + 7 runtime parity (`nested_fn_recursion_parity`, capture read/write, loopvar-fresh
+  in-fn + top-level ×2, spawn-airlock-isolated). Full `cargo test` (3247 lib + integration + conformance)
+  green, clippy clean, serial==M:N. Docs: `docs/syntax.md` new "Nested function declarations" section.
+
 **✅ Uniform by-reference capture — Task B WIRED (semantics + airlock, 2026-07-09).** Closure/`defer:`/
 `spawn:` capture is now **uniformly by reference**: a capturing frame shares the closest binding of a
 captured name and sees/makes writes to it (was: plain local snapshotted by value). Builds on Task A's

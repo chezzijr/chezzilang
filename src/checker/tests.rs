@@ -2715,6 +2715,126 @@ fn inferred_nested_fn_does_not_pollute_outer() {
     );
 }
 
+// ----- Nested `fn` decls are first-class local functions (lexical nearest-scope, body-checked,
+// recursive, uniform by-reference capture). These lock the checker half of that behavior on the
+// real entry/graph path. -----
+
+/// Symptom 1 — a nested `fn f(x:int)` shadowing a top-level `fn f()` must resolve NEAREST-scope:
+/// a 0-arg call `f()` inside its scope is a CHECK-TIME arity error (was validated against the
+/// global 0-arg `f` → check-OK then run-fault "expects 1 argument, got 0").
+#[test]
+fn nested_fn_shadows_global_arity_checked() {
+    entry_rejects(
+        "fn f():\n    print(\"g\")\nfn outer():\n    fn f(x: int):\n        print(x + 1)\n    f()\nfn main():\n    outer()\nmain()\n",
+        "'closure' expects",
+    );
+}
+
+/// Symptom 1 (positive) — the same shadowing nested `fn f(x:int)` called CORRECTLY (`f(5)`) checks.
+#[test]
+fn nested_fn_shadows_global_called_right_ok() {
+    entry_ok(
+        "fn f():\n    print(\"g\")\nfn outer():\n    fn f(x: int):\n        print(x + 1)\n    f(5)\nfn main():\n    outer()\nmain()\n",
+    );
+}
+
+/// Symptom 2 — a no-collision nested fn that is called resolves to itself (was a false
+/// `unknown name`).
+#[test]
+fn nested_fn_no_collision_call_ok() {
+    entry_ok(
+        "fn outer():\n    fn helper(x: int) -> int:\n        return x + 1\n    print(helper(4))\nfn main():\n    outer()\nmain()\n",
+    );
+}
+
+/// Symptom 3 — a no-collision nested fn's BODY is type-checked: a wrong-typed return is rejected
+/// (was never checked → check-OK).
+#[test]
+fn nested_fn_body_return_type_checked() {
+    entry_rejects(
+        "fn outer():\n    fn bad() -> int:\n        return \"x\"\n    print(bad())\nfn main():\n    outer()\nmain()\n",
+        "expected return type int, found str",
+    );
+}
+
+/// Recursion — a nested fn may call itself (letrec via cell); the self-call type-checks against the
+/// nested sig.
+#[test]
+fn nested_fn_recursion_type_checks() {
+    entry_ok(
+        "fn outer() -> int:\n    fn fact(n: int) -> int:\n        if n <= 1:\n            return 1\n        return n * fact(n - 1)\n    return fact(5)\nfn main():\n    print(outer())\nmain()\n",
+    );
+}
+
+/// Mutual recursion between SIBLING nested fns is OUT OF SCOPE for v1: `a` referencing a
+/// later-declared `b` (no global `b`) is a CLEAN forward-reference error, not check-OK/run-fault or
+/// a host panic.
+#[test]
+fn nested_fn_mutual_recursion_clean_reject() {
+    entry_rejects(
+        "fn outer() -> int:\n    fn a() -> int:\n        return b()\n    fn b() -> int:\n        return 1\n    return a()\nfn main():\n    print(outer())\nmain()\n",
+        "unknown name 'b'",
+    );
+}
+
+/// Nested GENERIC fns are OUT OF SCOPE for v1: a clean reject, not a panic or a silent accept.
+#[test]
+fn nested_generic_fn_clean_reject() {
+    entry_rejects(
+        "fn outer():\n    fn id[T](x: T) -> T:\n        return x\n    print(id(5))\nfn main():\n    outer()\nmain()\n",
+        "nested generic functions are not supported",
+    );
+}
+
+/// A nested fn named after a RESERVED builtin/ctor (`print`, `range`, `int`, `List`, `Channel`, …)
+/// must be REJECTED, not declared as a shadowing local: the compiler resolves the builtin BEFORE a
+/// local value-call, so binding it would type calls to the nested fn while the VM runs the builtin —
+/// the exact check-OK/run-divergent hole this task exists to close. (Base branch bug 2.)
+#[test]
+fn nested_fn_shadows_reserved_builtin_rejected() {
+    // `fn print(...)` inside a wrapper: checker typed `print(5)` as the nested int fn, VM ran the
+    // builtin print → `v` nil → run-fault. Now a clean check-time reject.
+    entry_rejects(
+        "fn wrapper() -> int:\n    fn print(x: int) -> int:\n        return x + 1\n    return print(5)\nv := wrapper()\nprint(v)\n",
+        "reserved",
+    );
+    // `fn range(...)` — same family, silent wrong value on base.
+    entry_rejects(
+        "fn wrapper() -> int:\n    fn range(x: int) -> int:\n        return x\n    return range(5)\nprint(wrapper())\n",
+        "reserved",
+    );
+}
+
+/// A nested fn named after a same-module STRUCT constructor is REJECTED (the compiler resolves the
+/// bare struct ctor before a local → check-OK/run-fault on base).
+#[test]
+fn nested_fn_shadows_struct_ctor_rejected() {
+    entry_rejects(
+        "struct P:\n    x: int\nfn outer() -> int:\n    fn P() -> int:\n        return 99\n    return P()\nprint(outer())\n",
+        "reserved",
+    );
+}
+
+/// A nested fn named after a same-module NEWTYPE constructor is REJECTED (bare newtype ctor wins in
+/// the compiler → check-OK/run-divergent on base, printed `UserId(<closure>)`).
+#[test]
+fn nested_fn_shadows_newtype_ctor_rejected() {
+    entry_rejects(
+        "newtype UserId = int\nfn outer() -> int:\n    fn UserId() -> int:\n        return 99\n    return UserId()\nprint(outer())\n",
+        "reserved",
+    );
+}
+
+/// A nested fn named after a BUILTIN variant ctor (`Ok`/`Err`/`Some`/`None`) is REJECTED (the
+/// compiler resolves the bare builtin variant before a local → check-OK/run-fault on base).
+#[test]
+fn nested_fn_shadows_builtin_variant_rejected() {
+    entry_rejects(
+        "fn outer() -> int:\n    fn Ok() -> int:\n        return 99\n    return Ok()\nprint(outer())\n",
+        "reserved",
+    );
+}
+
 #[test]
 fn inferred_method_return() {
     // The un-annotated method infers from `return self.v` (int) and `return "x"` (str); the two

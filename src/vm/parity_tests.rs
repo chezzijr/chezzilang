@@ -5312,6 +5312,129 @@ fn golden_capture_recursion_percall() {
     );
 }
 
+// ----- Nested `fn` decls are first-class local closures-with-a-name: lexical nearest-scope,
+// recursive (letrec via cell), uniform by-reference capture — identical cell model to closures. -----
+
+/// NF#4 — recursion: a nested fn calls ITSELF (letrec: its name is bound into its own cell before
+/// the body captures it). `fact(5)` == `120` on both engines.
+#[test]
+fn nested_fn_recursion_parity() {
+    let src = "\
+fn main():
+    fn fact(n: int) -> int:
+        if n <= 1:
+            return 1
+        return n * fact(n - 1)
+    print(fact(5))
+main()";
+    assert_parity_out(src, "120\n");
+}
+
+/// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that
+/// local AFTER the fn is defined is visible when the fn is later called (shared cell) — matches
+/// closure semantics → `42`.
+#[test]
+fn nested_fn_capture_read_sees_later_write_parity() {
+    let src = "\
+fn main():
+    x := 10
+    fn show():
+        print(x)
+    x = 42
+    show()
+main()";
+    assert_parity_out(src, "42\n");
+}
+
+/// NF#6 — capture WRITE (same task): a nested fn body reassigns a captured outer local (`x = x + 1`);
+/// the write is visible in the DEFINING scope (shared cell). Statement bodies make this expressible
+/// (unlike expression-only closures) → `2`.
+#[test]
+fn nested_fn_capture_write_visible_in_owner_parity() {
+    let src = "\
+fn main():
+    x := 0
+    fn bump():
+        x = x + 1
+    bump()
+    bump()
+    print(x)
+main()";
+    assert_parity_out(src, "2\n");
+}
+
+/// NF#7 — loop-variable: a nested fn defined inside a `for` loop capturing the loop var gets a FRESH
+/// cell per iteration (Go ≥1.22), exactly like a closure → `0\n1\n2`.
+#[test]
+fn nested_fn_loopvar_fresh_cell_parity() {
+    let src = "\
+fn main():
+    fns := []
+    for i in [0, 1, 2]:
+        fn geti() -> int:
+            return i
+        fns.push(geti)
+    for f in fns:
+        print(f())
+main()";
+    assert_parity_out(src, "0\n1\n2\n");
+}
+
+/// NF#8 — spawn airlock (F1 shape): a nested fn capturing an outer local, invoked via `spawn bump()`
+/// inside `parallel:`, is a capture-bearing `Obj::Closure` that crosses the airlock by DEEP value
+/// (`cross_spawn_callee` on serial, `to_snap` on M:N) — its captured `x`-cell is snapshot-copied, so
+/// the task's `x = x + 1` mutates its OWN isolated copy and the parent's `x` stays `0`. Identical to
+/// the closure airlock isolation (F1). Print is post-join → exact-match, serial == M:N.
+#[test]
+fn nested_fn_spawn_airlock_isolated_parity() {
+    let src = "\
+fn main():
+    x := 0
+    fn bump():
+        x = x + 1
+    parallel:
+        spawn bump()
+    print(x)
+main()";
+    let out = run_capture(src).expect("serial run");
+    assert_eq!(out, "0\n", "serial: nested fn capture isolated at airlock");
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("parallel run"),
+        "serial vs M:N (nested-fn closure crosses the airlock by deep value)"
+    );
+}
+
+/// NF#7b — loop-variable capture at MODULE TOP LEVEL (not inside a `fn`): a nested fn defined in a
+/// top-level `for` loop capturing the loop var gets a FRESH cell per iteration, exactly like the
+/// in-function NF#7 case. The synthetic `<toplevel>` proto must compute its own boxed-name set (base
+/// branch left it empty → the loop var stayed a raw int, and the captured `CellLoad` hit
+/// `unreachable!("CellLoad on a non-handle value")`, panicking BOTH engines / check-OK-run-crash).
+#[test]
+fn nested_fn_toplevel_loopvar_fresh_cell_parity() {
+    let src = "\
+fns := []
+for i in [0, 1, 2]:
+    fn geti() -> int:
+        return i
+    fns.push(geti)
+for f in fns:
+    print(f())";
+    assert_parity_out(src, "0\n1\n2\n");
+}
+
+/// NF#7c — the immediate-call top-level form (the minimal base-branch panic repro): a nested fn that
+/// reads the top-level loop var and is CALLED in the same iteration. Must run, not crash.
+#[test]
+fn nested_fn_toplevel_loopvar_immediate_parity() {
+    let src = "\
+for i in [0, 1, 2]:
+    fn geti() -> int:
+        return i
+    print(geti())";
+    assert_parity_out(src, "0\n1\n2\n");
+}
+
 /// D1 — a captured local ESCAPES its defining frame: the heap cell outlives the frame, so a returned
 /// closure still reads it; each factory call gets a fresh cell → `42\n7`. Matches Go's escaping upvalue.
 #[test]
