@@ -1371,6 +1371,33 @@ engines by the existing goldens; value-first runtime stays covered by `examples/
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
 (non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
 
+**✅ Closures / bare `fn`s cross the airlock BY VALUE — B3.3e runtime (2026-07-10, `b33-closures-by-value`).**
+The GENERIC airlock lowering (`to_wire`/`to_snap`, not just `Executor.submit`) now crosses a closure or
+bare `fn` **by value** on BOTH engines identically: `WireValue::Closure { proto, captured, home }`
+(captures wired recursively in slot order, home as a `module_objs` index) and a NEW distinct
+`WireValue::Func { proto, home }`. Kept separate on purpose — a bare fn renders `<fn NAME>`, a closure
+`<closure>`, so collapsing Func into an empty-capture Closure would diverge the M:N snapshot-rebuild
+render from the serial engine's live `Obj::Func`. Only `Module`/`Native`/`Cffi` still cross as
+`WireValue::Handle` (a module's mutable globals can't cross; native/cffi share the address space).
+- **Effect:** a `spawn f()` callee whose captured environment contains a NESTED closure/`fn` (or is
+  itself a bare fn) now RUNS instead of faulting at the airlock ("can't cross a worker boundary"). The
+  captured plain data is deep-copied/isolated per task, matching every other sendable.
+- **Touch points (VM-only):** `src/vm/wire.rs` (new `Func` variant + `has_handle`/doc), `src/vm/sched.rs`
+  (`to_wire_depth` split Closure/Func/Handle arms, `from_wire` Func arm, `wire_callable` collapsed to a
+  thin delegate over the generic path, `ensure_crossable` message), `src/vm/stmt.rs` (`display_wire` Func
+  arm → `<fn NAME>`), `src/vm/core.rs` (`collect_core_gcrefs` Func no-op). `to_snap`/`from_snap` already
+  had Func/Closure-by-value arms (M:N module snapshot) — now reached via the shared fast path too.
+- **Preserved:** the cooperative `Executor.submit` still crosses its closure **by handle** (same heap,
+  captures shared by reference — decision A `VM==interp`); since the generic `to_wire` now deep-copies,
+  the cooperative submit branch (`src/vm/netio.rs`) queues the callable's own `Handle` explicitly.
+- **Checker gate NOT touched (follow-up):** a function type is still non-sendable as a `Channel`/`Shared`
+  ELEMENT type (`Channel[fn(int)->int]` rejected at check), and `ref`/`Ref[T]` runtime handling is
+  untouched. Runtime half only. Tests: 5 new both-engine parity (`closure_as_data_into_spawn_callee_parity`,
+  `nestedfn_...`, `generator_captured_...still_faults` regression pin, `bare_func_crosses_...renders_fn_name`,
+  + `d_used_sibling_closure_crosses_by_value_parity` replacing the now-obsolete `d_used_non_sendable_still_faults`).
+  Full `cargo test` green (3264 lib + integration + conformance), clippy clean. Docs: `docs/concurrency.md §7`,
+  `docs/concurrency-b3.md` (B3.3e row), `docs/gaps.md` #1/#2.
+
 **✅ Nested `fn` decls are first-class local functions (2026-07-10, `auto-task/nested-fn-firstclass`).**
 Closed a checker/compiler soundness divergence: a `fn` declared inside a body was compiled to a
 NON-capturing local (`MakeFunc`, couldn't recurse or capture) while the checker only ran its body when a

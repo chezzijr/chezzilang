@@ -20,9 +20,10 @@ The **gap**: the checker's spawn-sendability gate covers `spawn:` / `parallel:` 
 captures a **non-sendable** binding, the block form rejects it at **check** time but the callee form
 is not caught until run time — or worse, not at all:
 
-- callee captures a **closure-as-data** (another closure value) → `check` OK, both engines **fault at
-  run time** ("this task value can't cross a worker boundary"). The `spawn:` block form rejects the
-  same program at `check` (`1 type error`).
+- callee captures a **closure-as-data** (another closure value) → as of the B3.3 runtime (see #2) this
+  now **crosses by value and runs** on both engines (was previously a runtime airlock fault). So this is
+  no longer a soundness *hole* — the runtime copy is correct — but the checker asymmetry with the
+  `spawn:` block form (which still rejects it at `check`) remains a consistency wart to reconcile.
 - callee captures a **`ref T` / `Ref[T]`** and mutates it → `check` OK, **runs and silently isolates
   the write** (prints the stale value), directly contradicting `concurrency.md §7` ("capturing/passing
   a `ref` across the airlock is a **compile error, not a silent copy**"). The `spawn:` block form
@@ -36,15 +37,21 @@ closure/`ref`/generator in a `spawn f()` callee is a **clean compile error**, co
 Checker-only; no new feature. This makes the *existing* limit sound; it does **not** make closures
 sendable-as-data.
 
-### 2. Closures are not sendable **as data** (B3.3, future feature)
+### 2. Closures as data — **RUNTIME half landed (B3.3); checker gate still pending**
 
-A closure captured into a `spawn:` block, stored in a `Channel`/`Shared`, etc. is non-sendable (the
-airlock deep-copies plain data; a closure's captured cells may alias parent state — the memory-safety
-line, no borrow checker to prove otherwise). Making closures cross **by value** — deep-copy the whole
-captured environment into fresh per-task cells (the proto/bytecode is immutable → shared; captures
-copied → isolated) — is the planned **B3.3** item. Then an outer closure could be captured/stored, not
-just used as a direct `spawn f()` callee. `ref T`/`Ref[T]` would stay non-sendable regardless (use
-`Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation).
+**Runtime (DONE):** the airlock lowers a closure/bare-`fn` **by value** everywhere — its `proto`
+(immutable → shared) + its captures deep-copied recursively into fresh per-task cells + its home-module
+index, never a by-reference heap handle — on **both** engines identically (`WireValue::Closure`/
+`WireValue::Func`, kept distinct so `str` still renders `<fn NAME>` vs `<closure>`). So a `spawn f()`
+callee whose captured environment contains a **nested** closure/`fn` (or is itself a bare `fn`) now runs
+cleanly instead of faulting at the airlock.
+
+**Checker (STILL PENDING — follow-up):** the type checker still treats a function type as *non-sendable*
+for a **`Channel`/`Shared` element type** (`Channel[fn(int)->int]` is rejected at check), so *storing* a
+closure in a channel/box is not yet reachable — only the runtime half exists. Lifting that gate (and
+proving the by-value copy is safe in the checker) is the remaining work. `ref T`/`Ref[T]` stays
+non-sendable regardless (use `Shared[T]`/`Atomic`/`Channel` for cross-task shared mutation) — a separate
+checker follow-up handles `ref` safety.
 
 ## Stdlib
 

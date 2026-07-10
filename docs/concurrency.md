@@ -613,11 +613,16 @@ reassigning it inside a task is a **compile error** (see below).
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
   is plain data).
-- **Not sendable:** closures (bound to a heap) — as *data*, i.e. captured into a `spawn:` block,
-  stored in a `Channel`/`Shared`, etc. (One exception: a closure may be the direct **callee** of a
-  `spawn f()` — the task *runs* it — in which case it is **deep-copied** to isolate its captured cells,
-  so its per-task copy matches the M:N engine; this is a distinct execution path, not general
-  sendability.) Also not sendable: native handles (file/regex/HTTP `Response`/etc.), a
+- **Closures / functions cross by value (B3.3 runtime).** At runtime the airlock lowers a closure or
+  bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
+  home module index, never a by-reference heap handle — on **both** engines identically. So a `spawn f()`
+  callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
+  cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker note
+  (follow-up pending):** the type checker still treats a function type as *non-sendable* for a
+  **`Channel`/`Shared` element type** (`Channel[fn(int)->int]` is rejected at check), so storing a
+  closure in a channel/box is not yet reachable — only the runtime half has landed. A bare **native**
+  handle is a different case and stays non-sendable (below).
+- **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
   over it (an in-task-only box; capturing/passing it across the airlock is a **compile error**, not a

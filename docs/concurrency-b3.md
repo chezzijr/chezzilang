@@ -110,8 +110,10 @@ that's only reachable once `WireValue` is fully `GcRef`-free — not until B3.3 
 `Handle(GcRef)`s: a `Channel[str]` queues `Str` handles, an `Executor` queues `Handle(closure)`). So **at
 B3.1 the `children()` arms are REWRITTEN, not dropped**: for `Obj::Channel/Shared/Executor(Arc<…Core>)`,
 `children()` locks the core and walks its `WireValue`s via `collect_gcrefs`, yielding embedded `Handle`
-GcRefs (stopping at a nested core, rooted via its own handle). B3.3 later lets `str` and closures cross by
-value, after which the arms could be dropped. **Known leak — do NOT claim "no cycles":** reply-channel `Arc`
+GcRefs (stopping at a nested core, rooted via its own handle). B3.3 lets `str` cross by value (B3.3a) and
+closures/`fn`s cross by value (B3.3e — `WireValue::Closure`/`WireValue::Func`, no `GcRef`), so a queued
+`Handle(closure)` is gone; a `Channel[str]`/`Executor` queue can still embed a residual
+`Module`/`Native`/`Cffi` `Handle`, so the arms stay. **Known leak — do NOT claim "no cycles":** reply-channel `Arc`
 cycles are reachable (core A's queue holds `Arc<B>`, B's holds `Arc<A>`); drop both handles and the pair
 leaks for the program's lifetime (`Arc` is refcounted, not cycle-collected; a cross-thread cycle collector
 would contradict shared-nothing). **Documented limitation** matching Go/Rust `Arc` — an unbounded leak, not
@@ -177,9 +179,10 @@ spawned*. `--parallel` (and any nondeterminism) appears only at **B3.3-threads**
 | **B3.4** | Cancellation + cross-thread `os.exit`: per-nursery `cancel: Arc<AtomicBool>` (C), exit-code propagation up the join. | `--parallel` |
 | **B3.5** | Nursery-local deadlock detection under threads (blocked-count vs live-count, D). | `--parallel` |
 | **B3.6** | `Executor` / B5 on the pool + A3b submit-capture sendability gate. | `--parallel` |
+| **B3.3e** | Closures + bare `fn`s cross the airlock **by value** in the GENERIC lowering (not just `Executor.submit`): `to_wire`/`to_snap` emit `WireValue::Closure` (proto + wired captures + home index) / a distinct `WireValue::Func` (proto + home), so a `spawn f()` callee capturing a nested closure/`fn` runs on both engines. Runtime half only — the checker's Func-non-sendable gate on `Channel`/`Shared` element types is a separate follow-up. | unchanged |
 
-**Status checklist:** all landed ✅ — B3.0, B3.1, B3.2, B3.3a, B3.3b, B3.3c, B3.3d, B3.3-threads, B3.4,
-B3.5, B3.6. **B3 epic complete.**
+**Status checklist:** all landed ✅ — B3.0, B3.1, B3.2, B3.3a, B3.3b, B3.3c, B3.3d, B3.3e, B3.3-threads,
+B3.4, B3.5, B3.6. **B3 epic complete.**
 
 ### Landed notes (condensed — key files + deviations per phase)
 
