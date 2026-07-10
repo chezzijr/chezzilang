@@ -1225,7 +1225,10 @@ impl Compiler {
                     fc.emit(Op::Nil, stmt.span);
                     fc.emit(Op::NewCell, stmt.span);
                     fc.emit_set_local_raw(slot, stmt.span);
-                    let entries = fc.snapshot_entries();
+                    // Free-variable capture (Finding D): keep only the names the body references
+                    // (relative to its own params). The recursive self-name is free in a recursive
+                    // body → stays captured → the self-call resolves through the cell above.
+                    let entries = filter_entries_free_block(&fc.snapshot_entries(), &decl.body, &decl.params);
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -1239,7 +1242,8 @@ impl Compiler {
                     // Not captured: snapshot the enclosing bindings BEFORE declaring the name, build
                     // the closure, and bind it plainly. (Still a closure so it can capture outer
                     // locals — it just needs no self-cell because nothing captures it.)
-                    let entries = fc.snapshot_entries();
+                    // Free-variable capture (Finding D): keep only referenced names.
+                    let entries = filter_entries_free_block(&fc.snapshot_entries(), &decl.body, &decl.params);
                     let captured_names: Vec<String> =
                         entries.iter().map(|e| e.name.clone()).collect();
                     let pid = self.compile_fn_captured(decl, captured_names)?;
@@ -1557,10 +1561,11 @@ impl Compiler {
                 Ok(())
             }
             SpawnTarget::Block(body) => {
-                // Capture every visible enclosing binding (like a closure); the values are
-                // deep-copied across the airlock at `SpawnBlock`. The block becomes a synthetic
-                // zero-arg proto whose free names resolve via `GetCaptured`.
-                let entries = fc.snapshot_entries();
+                // Capture only the names this block references (its free-variable set); the values
+                // are deep-copied across the airlock at `SpawnBlock`. The block becomes a synthetic
+                // zero-arg proto whose free names resolve via `GetCaptured`. Free-variable capture
+                // (Finding D) avoids dragging unused non-sendable siblings across the airlock.
+                let entries = filter_entries_free_block(&fc.snapshot_entries(), body, &[]);
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<spawned task>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -3439,10 +3444,11 @@ impl Compiler {
         let call = match target {
             DeferTarget::Call(call) => call,
             DeferTarget::Block(body) => {
-                // `defer:` block → a synthetic zero-arg closure capturing the visible bindings by
-                // value at the defer point (exactly `compile_spawn`'s Block arm, minus the airlock),
-                // then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no new op.
-                let entries = fc.snapshot_entries();
+                // `defer:` block → a synthetic zero-arg closure capturing the referenced bindings by
+                // reference at the defer point (exactly `compile_spawn`'s Block arm, minus the
+                // airlock), then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
+                // new op. Free-variable capture (Finding D): only names the block references.
+                let entries = filter_entries_free_block(&fc.snapshot_entries(), body, &[]);
                 let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
                 let mut child = FnComp::new("<deferred block>".to_string(), 0, false);
                 // Uniform by-reference capture (Task A): the block's own boxed-name set (unwired).
@@ -4063,9 +4069,19 @@ impl Compiler {
         body: &Expr,
         span: Span,
     ) -> Result<(), CompileError> {
-        // Snapshot every binding currently visible in the enclosing frame (matches the interpreter
-        // capturing all in-scope local frames).
-        let entries = fc.snapshot_entries();
+        // Capture ONLY the names this body actually references from the enclosing frame (its
+        // free-variable set), not every visible local. Capturing all visible locals (the old model)
+        // dragged unused non-sendable siblings (a closure value / live generator) across the spawn
+        // airlock → check-OK/run-fault (Finding D). `free_names_expr` is a trusted over-approximation
+        // (it also drives cell-boxing), so this is behavior-identical and strictly smaller.
+        let mut free: HashSet<String> = HashSet::new();
+        let params_set: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        free_names_expr(body, &params_set, &mut free);
+        let entries: Vec<CapEntry> = fc
+            .snapshot_entries()
+            .into_iter()
+            .filter(|e| free.contains(&e.name))
+            .collect();
         let captured_names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
 
         let mut child = FnComp::new("<closure>".to_string(), params.len(), false);
@@ -4623,6 +4639,26 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         }
         ExprKind::Recover(block) => find_boundary_free_block(block, out),
     }
+}
+
+/// Keep only the capture entries whose name is FREE in a statement-block body (`bound` = the body's
+/// own params). Used at the nested-fn / `spawn:` / `defer:` MakeClosure sites so a closure captures
+/// only the names it references — not every visible local (Finding D: over-capture dragged unused
+/// non-sendable siblings across the spawn airlock). Positional GetCaptured slot indices stay aligned
+/// because both `MakeClosure`'s entries and the child's `captured_names` derive from THIS filtered vec.
+fn filter_entries_free_block(
+    entries: &[CapEntry],
+    stmts: &[Stmt],
+    params: &[crate::ast::Param],
+) -> Vec<CapEntry> {
+    let mut free: HashSet<String> = HashSet::new();
+    let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    free_names_block(stmts, &bound, &mut free);
+    entries
+        .iter()
+        .filter(|e| free.contains(&e.name))
+        .cloned()
+        .collect()
 }
 
 /// Free names of a capture-boundary BLOCK body (`defer:`/`spawn:`): names referenced but not bound

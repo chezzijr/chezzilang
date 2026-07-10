@@ -6242,3 +6242,134 @@ fn generic_fn_name_shadowed_local_index_parity() {
         "20\n",
     );
 }
+
+// ===== Finding D — free-variable capture (closures/nested-fns capture only referenced names) =====
+// Pre-fix bug: every MakeClosure site captured ALL visible locals via snapshot_entries(), dragging an
+// unused non-sendable sibling (a closure value / live generator) across the spawn airlock → check-OK
+// but run-fault ("spawn: this task value can't cross a worker boundary yet"). Fix: capture only the
+// body's free-variable set. These parity tests prove the fix AND no under-capture (both engines).
+
+#[test]
+fn d_repro_unused_sibling_nested_fn_parity() {
+    // The exact #D repro: unused non-sendable sibling closure value; task is a nested fn using only g.
+    assert_parity_out(
+        "g := 7\nfn main():\n    sibling := fn(x: int): x + 1\n    fn task():\n        print(g)\n    parallel:\n        spawn task()\nmain()\n",
+        "7\n",
+    );
+}
+
+#[test]
+fn d_repro_unused_sibling_closure_value_parity() {
+    // Same, but the spawned task is a CLOSURE VALUE (site 1: compile_closure).
+    assert_parity_out(
+        "g := 7\nfn main():\n    sibling := fn(x: int): x + 1\n    task := fn(): print(g)\n    parallel:\n        spawn task()\nmain()\n",
+        "7\n",
+    );
+}
+
+#[test]
+fn d_repro_unused_generator_sibling_parity() {
+    // The unused non-sendable sibling is a live GENERATOR (frame-holding, non-sendable); task uses only g.
+    assert_parity_out(
+        "g := 7\nfn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen()\n    fn task():\n        print(g)\n    parallel:\n        spawn task()\nmain()\n",
+        "7\n",
+    );
+}
+
+#[test]
+fn d_used_non_sendable_still_faults() {
+    // Negative test: task ACTUALLY uses the non-sendable sibling → the airlock fault must STAY (the
+    // filter must be exactly the free set, not empty / over-narrow). Both engines must Err.
+    let src = "g := 7\nfn main():\n    inc := fn(x: int): x + 1\n    fn task():\n        print(inc(g))\n    parallel:\n        spawn task()\nmain()\n";
+    assert!(
+        vm_outcome(src).is_err(),
+        "serial: used sibling must still fault"
+    );
+    assert!(
+        parallel_outcome(src).is_err(),
+        "M:N: used sibling must still fault"
+    );
+}
+
+#[test]
+fn d_spawn_block_free_capture_parity() {
+    // Site 4: `spawn:` block references one outer local while an unused non-sendable sibling is in scope.
+    assert_parity_out(
+        "fn main():\n    sibling := fn(x: int): x + 1\n    n := 5\n    parallel:\n        spawn:\n            print(n)\nmain()\n",
+        "5\n",
+    );
+}
+
+#[test]
+fn d_defer_block_free_capture_parity() {
+    // Site 5: `defer:` block references one outer local while an unused non-sendable sibling is in scope.
+    assert_parity_out(
+        "fn main():\n    sibling := fn(x: int): x + 1\n    n := 9\n    defer:\n        print(n)\n    print(\"body\")\nmain()\n",
+        "body\n9\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_method_call_on_captured_receiver_parity() {
+    // A method call on a captured receiver (outer local `xs`) inside a nested fn.
+    assert_parity_out(
+        "fn main():\n    xs := [1, 2]\n    fn add():\n        xs.push(3)\n    add()\n    print(xs)\nmain()\n",
+        "[1, 2, 3]\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_interpolation_ref_parity() {
+    // A local referenced ONLY inside string interpolation must still be captured.
+    assert_parity_out(
+        "fn main():\n    n := 42\n    f := fn(): print(\"n={n}\")\n    f()\nmain()\n",
+        "n=42\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_grandparent_through_two_closures_parity() {
+    // Transitive capture: a grandparent local referenced only by an inner nested fn (two levels
+    // deep) must surface through the middle frame's free set.
+    assert_parity_out(
+        "fn main():\n    g := 100\n    fn outer():\n        fn inner():\n            print(g)\n        inner()\n    outer()\nmain()\n",
+        "100\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_recursion_self_ref_parity() {
+    // LETREC: the recursive self-name is free in its own body → stays captured → self-call resolves.
+    assert_parity_out(
+        "fn main():\n    fn fact(n: int) -> int:\n        if n <= 1:\n            return 1\n        return n * fact(n - 1)\n    print(fact(5))\nmain()\n",
+        "120\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_ref_capture_mutate_parity() {
+    // A nested fn that reads AND mutates a captured local by reference.
+    assert_parity_out(
+        "fn main():\n    c := 0\n    fn bump():\n        c = c + 1\n    bump()\n    bump()\n    print(c)\nmain()\n",
+        "2\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_match_and_comprehension_parity() {
+    // A match-bind and a comprehension over a captured collection inside a nested fn.
+    assert_parity_out(
+        "fn main():\n    xs := [1, 2, 3]\n    fn work():\n        doubled := [x * 2 for x in xs]\n        print(doubled)\n    work()\nmain()\n",
+        "[2, 4, 6]\n",
+    );
+}
+
+#[test]
+fn d_no_undercapture_nonrecursive_nested_fn_parity() {
+    // A NON-recursive nested fn: its own name is NOT free in its body → dropped from captures
+    // harmlessly; must still bind and run.
+    assert_parity_out(
+        "fn main():\n    fn greet():\n        print(\"hi\")\n    greet()\nmain()\n",
+        "hi\n",
+    );
+}

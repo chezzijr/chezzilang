@@ -276,6 +276,11 @@ distinction any more — plain local, global, and `ref` local all share the live
 | global | shared (live) | `20` |
 | `ref` local | shared box | `20` |
 
+A closure captures **only the names its body actually references** (its free variables) — not every
+local visible in the enclosing scope. So an unrelated non-sendable sibling in scope (another closure
+value, a live generator) that the task never touches does **not** block a `spawn` / `parallel:`
+airlock crossing; only names the task really uses are checked for sendability.
+
 Two rules cover everything:
 
 1. **Capture is by reference.** A closure reads a captured name's *current* value, so a write after
