@@ -1225,6 +1225,13 @@ dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not 
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.
 
+`Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
+(param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
+Self` inside `struct P` returns a `P`, and for a generic `Box[T]` it carries the receiver's own type
+args. It resolves to the concrete enclosing type, so a `-> Self` method returning a different type is
+a type error. `Self` is meaningful only inside a method; naming it as a free-fn parameter, a struct
+field, or a top-level annotation is `unknown type 'Self'`.
+
 ```chezzi
 protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
     fn compare(self, other: Self) -> int

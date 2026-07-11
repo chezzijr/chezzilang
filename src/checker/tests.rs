@@ -16712,3 +16712,75 @@ fn invariance_preserves_legit_container_neighbors() {
         "fn f(xs: List[Any]):\n    xs.push(1)\nfn main():\n    ys: List[Any] = [1, \"a\", true]\n    f(ys)\nmain()\n",
     );
 }
+
+// ============================================================================
+// FIX A — `Self` usable in struct/enum/newtype inherent-method signatures/bodies
+// ============================================================================
+
+#[test]
+fn self_type_in_struct_method_sig() {
+    // `-> Self` and a `Self` param resolve to the enclosing struct.
+    entry_ok(
+        "struct P:\n    x: int\n    fn dup(self) -> Self:\n        return self\n    fn add(self, o: Self) -> Self:\n        return P(self.x + o.x)\nfn main():\n    print(P(5).dup().x)\n    print(P(1).add(P(2)).x)\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_in_enum_method_sig() {
+    // An enum method returning `Self` resolves to the enclosing enum.
+    entry_ok(
+        "enum Money:\n    Cents(int)\n    fn double(self) -> Self:\n        match self:\n            Money.Cents(c): return Money.Cents(c * 2)\nfn main():\n    m := Money.Cents(50).double()\n    match m:\n        Money.Cents(c): print(c)\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_in_newtype_method_sig() {
+    // A newtype method returning `Self` resolves to the enclosing newtype.
+    entry_ok(
+        "newtype Meters = float:\n    fn twice(self) -> Self:\n        return Meters(float(self) * 2.0)\nfn main():\n    print(float(Meters(3.0).twice()))\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_rejected_outside_method() {
+    // Free-fn param `Self` — no enclosing type → still unknown.
+    entry_rejects(
+        "fn f(x: Self) -> int:\n    return 0\nfn main():\n    pass\nmain()\n",
+        "unknown type 'Self'",
+    );
+    // Struct field typed `Self` — a field is not a method sig → still unknown.
+    entry_rejects(
+        "struct P:\n    y: Self\nfn main():\n    pass\nmain()\n",
+        "unknown type 'Self'",
+    );
+    // Top-level variable annotation `Self`.
+    entry_rejects(
+        "fn main():\n    x: Self = 0\nmain()\n",
+        "unknown type 'Self'",
+    );
+}
+
+#[test]
+fn self_type_enforced_as_concrete_enclosing_type() {
+    // `-> Self` is the concrete enclosing struct; returning a different struct is a type error.
+    entry_rejects(
+        "struct A:\n    x: int\nstruct B:\n    y: int\n    fn make(self) -> Self:\n        return A(1)\nfn main():\n    pass\nmain()\n",
+        "return",
+    );
+}
+
+#[test]
+fn self_type_protocol_behavior_unchanged() {
+    // A protocol method using `Self` still checks (its `Self` is `Ty::Param`, unchanged path).
+    entry_ok(
+        "protocol Dottable:\n    fn dot(self, o: Self) -> int\nstruct V:\n    x: int\n    fn dot(self, o: Self) -> int:\n        return self.x * o.x\nfn main():\n    print(V(2).dot(V(3)))\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_generic_struct_method() {
+    // Generic struct: `-> Self` carries the struct's own type args, so `return self` type-checks.
+    entry_ok(
+        "struct Box[T]:\n    v: T\n    fn same(self) -> Self:\n        return self\nfn main():\n    b := Box(5).same()\n    print(b.v)\nmain()\n",
+    );
+}

@@ -1346,6 +1346,14 @@ struct Checker {
     ffi_alias_ok: std::collections::HashSet<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
+    /// `Some(T)` while resolving a struct/enum/newtype method's SIGNATURE or BODY — the concrete
+    /// enclosing type `Self` names (e.g. `fn dup(self) -> Self` inside `struct P`). `None` at top
+    /// level, inside a free fn, or a nested fn/closure (reset like `current_ret`), so `Self` outside
+    /// a method stays `unknown type 'Self'`. A PROTOCOL method keeps `None` here: its `Self` is
+    /// already in `type_params` as `Ty::Param("Self")` (resolved by the earlier type-param arm), so
+    /// this concrete binding never fires for it. Saved/restored via `mem::replace` at the method-sig
+    /// hoist sites and at `infer_fn_ret`/`check_fn_body` entry (from their `self_ty` argument).
+    current_self_ty: Option<Ty>,
     /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
     /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
     /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.

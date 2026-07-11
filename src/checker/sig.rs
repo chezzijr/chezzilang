@@ -355,6 +355,9 @@ impl Checker {
     ) -> Ty {
         let mark = self.errors.len();
         let saved_tps = self.enter_type_params(&decl.type_params);
+        // `Self` in this body/inline-expr resolves to the enclosing type (`None` for a free fn, which
+        // correctly resets an enclosing method's binding when a nested fn is inference-checked).
+        let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
@@ -397,6 +400,7 @@ impl Checker {
         self.in_generator = saved_ig;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
+        self.current_self_ty = saved_self;
         self.exit_type_params(saved_tps);
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
@@ -913,6 +917,17 @@ impl Checker {
                     // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
                     // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
                     _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
+                    // `Self` inside a struct/enum/newtype method's signature or body → the concrete
+                    // ENCLOSING type (`fn dup(self) -> Self` in `struct P` ⇒ `Ty::Struct("P", …)`).
+                    // Placed AFTER the type-param arm above so a PROTOCOL method's `Self` (which is in
+                    // `type_params` as `Ty::Param("Self")`, with `current_self_ty` left `None`) keeps
+                    // its existential param binding — this concrete arm fires only for inherent
+                    // methods, where `current_self_ty` is set. Resolving to the concrete type (not a
+                    // `Ty::Param`) makes `-> Self` enforce the real enclosing type. Outside any method
+                    // `current_self_ty` is `None`, so `Self` falls through to `unknown type 'Self'`.
+                    "Self" if self.current_self_ty.is_some() => {
+                        self.current_self_ty.clone().unwrap()
+                    }
                     // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
                     // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
                     // builtin: it resolves only in a module that imported `std.ffi` (whole-module
@@ -2948,6 +2963,9 @@ impl Checker {
             }
         }
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
+        // which resets an enclosing method's binding). Restored below beside `current_ret`.
+        let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
         // A generator (`is_generator`, i.e. its body contains `yield`) has return type `Iterator[T]` —
         // either declared explicitly (`-> Iterator[T]`) or INFERRED by strict-first-yield (stored back
         // into `sig.ret` by `infer_generator_ret`). Recover `T` as the per-yield element type. The `_`
@@ -3092,6 +3110,7 @@ impl Checker {
         self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.current_self_ty = saved_self;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         self.inferring_ret = saved_inferring;
