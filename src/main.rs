@@ -148,7 +148,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    match type_check(&path) {
+    // `chezzi check` is file-only (no bare/manifest mode), so the root is the nearest marker walking
+    // up from the file — pass `None`.
+    match type_check(&path, None) {
         CheckOutcome::Ok => {
             println!("{}", if json { "[]" } else { "ok: no type errors" });
             ExitCode::SUCCESS
@@ -236,16 +238,23 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // An explicit `chezzi run <file>` is script-mode (run the file's top-level, no entry fn). The
     // bare `chezzi run` resolves the manifest entrypoint, which MAY name a function to call
     // (`module:function`) — `entry_fn` is `Some` only in that case.
-    let (path, entry_fn): (String, Option<String>) = match path {
-        Some(p) => (p, None),
-        None => match resolve_entrypoint() {
-            Ok(pair) => pair,
-            Err(msg) => {
-                eprintln!("{msg}");
-                return ExitCode::FAILURE;
-            }
-        },
-    };
+    // `root_override` enforces the "one root per run" invariant. Bare `chezzi run` (no file) pins the
+    // module-graph root to the manifest that declared the entrypoint (found by walking up from the
+    // cwd) — computed ONCE here and reused for BOTH the pre-run type check AND the VM run, so every
+    // `import` resolves against the SAME root that located the entry file (never a nested chezzi.toml
+    // the entry sits under). An explicit `chezzi run <file>` keeps `None` → the graph builders derive
+    // the root by walking up from the file (nearest marker, the conventional file-run behavior).
+    let (path, entry_fn, root_override): (String, Option<String>, Option<std::path::PathBuf>) =
+        match path {
+            Some(p) => (p, None, None),
+            None => match resolve_entrypoint() {
+                Ok((p, f, root)) => (p, f, Some(root)),
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    return ExitCode::FAILURE;
+                }
+            },
+        };
 
     // Resolve the M:N worker count. An explicit `--threads` wins and errors if the parallel engine
     // won't run (contradiction); otherwise `CHEZZI_THREADS` applies only when it actually will, so a
@@ -275,8 +284,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Pre-run type check: type errors block execution (no partial output).
-    match type_check(&path) {
+    // Pre-run type check: type errors block execution (no partial output). Pins the SAME root the VM
+    // will run (below), so the checker and the VM never disagree on which same-named module to load.
+    match type_check(&path, root_override.as_deref()) {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
             report_check_errors(&errs, json);
@@ -299,7 +309,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let cfg = native::HostConfig::from_process(prog_args);
     let (output, errout, errored, exit_code) = {
         let (out, err, result, code) =
-            vm::run_file_with_entry(p, cfg, parallel, entry_fn.as_deref());
+            vm::run_file_with_entry(p, cfg, parallel, entry_fn.as_deref(), root_override.clone());
         (
             out,
             err,
@@ -329,9 +339,12 @@ fn cmd_run(args: &[String]) -> ExitCode {
 /// up from the cwd for `chezzi.toml`, parse the manifest, require a `[project] entrypoint`, and map
 /// it to a file root-relatively. The entrypoint is a dotted module path optionally suffixed with
 /// `:function` (e.g. `"src.main:main"`) — when a function is named, the VM calls it after the
-/// module's top-level runs. Returns `(resolved .chz path, Some(function))`, or a ready-to-print
-/// error message. A bare `"src.main"` (no `:function`) yields `None` → run the module top-level only.
-fn resolve_entrypoint() -> Result<(String, Option<String>), String> {
+/// module's top-level runs. Returns `(resolved .chz path, Some(function), project_root)`, or a
+/// ready-to-print error message. A bare `"src.main"` (no `:function`) yields `None` → run the module
+/// top-level only. The `project_root` (the dir holding the manifest, found by walking up from the
+/// cwd) is returned so the caller can pin it as the ONE module-graph root for the whole run — the
+/// entry file was located relative to it, so every `import` must resolve relative to it too.
+fn resolve_entrypoint() -> Result<(String, Option<String>, std::path::PathBuf), String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("chezzi run: cannot read current directory: {e}"))?;
     let root = resolver::find_root_from_dir(&cwd).ok_or_else(|| {
@@ -355,6 +368,7 @@ fn resolve_entrypoint() -> Result<(String, Option<String>), String> {
     Ok((
         file.to_string_lossy().into_owned(),
         entry_fn.map(str::to_string),
+        root,
     ))
 }
 
@@ -672,8 +686,17 @@ enum CheckOutcome {
 
 /// Resolve the module graph, then type-check it, normalizing each failure mode. A resolve, lex, or
 /// parse failure (in the entry or any imported module) is `Fatal`; type errors are `Errors`.
-fn type_check(path: &str) -> CheckOutcome {
-    let graph = match resolver::build_graph(std::path::Path::new(path)) {
+///
+/// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
+/// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
+/// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
+fn type_check(path: &str, root: Option<&std::path::Path>) -> CheckOutcome {
+    let entry = std::path::Path::new(path);
+    let build = match root {
+        Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
+        None => resolver::build_graph(entry),
+    };
+    let graph = match build {
         Ok(g) => g,
         Err(e) => {
             return CheckOutcome::Fatal {
@@ -852,8 +875,13 @@ mod init_tests {
         // The scaffolded main.chz no longer self-calls `main` — the manifest's `:main` entrypoint
         // does. Running the FILE directly is scripting-mode (top-level only): it defines `main` but
         // prints nothing.
-        let (stdout, stderr, result, _exit) =
-            vm::run_file_with_entry(&main, native::HostConfig::from_process(vec![]), false, None);
+        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
+            &main,
+            native::HostConfig::from_process(vec![]),
+            false,
+            None,
+            None,
+        );
         assert!(
             result.is_ok(),
             "scaffolded main.chz must load; stderr:\n{stderr}"
@@ -869,6 +897,7 @@ mod init_tests {
             native::HostConfig::from_process(vec![]),
             false,
             Some("main"),
+            None,
         );
         assert!(
             result.is_ok(),
@@ -932,6 +961,7 @@ mod init_tests {
             native::HostConfig::from_process(vec![]),
             false,
             Some(entry_fn.unwrap()),
+            None,
         );
         assert!(result.is_ok(), "entrypoint must run; stderr:\n{stderr}");
         assert!(
@@ -945,6 +975,7 @@ mod init_tests {
             native::HostConfig::from_process(vec![]),
             false,
             Some("nope"),
+            None,
         );
         let err = result.expect_err("missing entry function must error");
         let msg = vm::format_trace(&err.message, err.span, &err.trace);
