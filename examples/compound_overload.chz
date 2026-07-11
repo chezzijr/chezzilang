@@ -1,0 +1,31 @@
+# Compound assignment (`+= -= *= /= %=`) honors operator overloading.
+# `x OP= v` is exactly `x = x OP v`, so a struct/enum/newtype whose operator overload makes
+# `a = a OP b` type-check also accepts `a OP= b` (same runtime opcode path).
+
+struct V:
+    x: int
+    fn add(self, o: V) -> V:
+        return V(self.x + o.x)
+    fn str(self) -> str:
+        return "V({self.x})"
+
+# A numeric newtype: `+=` via the underlying-numeric auto-flow.
+newtype Meters = float:
+    fn str(self) -> str:
+        return "{float(self)}m"
+
+fn main():
+    # struct: the compound form equals the explicit form.
+    a := V(1)
+    a = a + V(10)
+    b := V(1)
+    b += V(10)
+    print(a)          # V(11)
+    print(b)          # V(11)
+
+    # numeric newtype
+    m := Meters(1.0)
+    m += Meters(2.5)
+    print(m)          # 3.5m
+
+main()

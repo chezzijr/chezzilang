@@ -16784,3 +16784,57 @@ fn self_type_generic_struct_method() {
         "struct Box[T]:\n    v: T\n    fn same(self) -> Self:\n        return self\nfn main():\n    b := Box(5).same()\n    print(b.v)\nmain()\n",
     );
 }
+
+// ============================================================================
+// FIX B — compound assignment honors struct/enum/newtype operator overloading
+// ============================================================================
+
+#[test]
+fn compound_assign_struct_overload() {
+    // `a += V(10)` accepted exactly when `a = a + V(10)` is (V has an `add` overload).
+    entry_ok(
+        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn str(self) -> str:\n        return \"V({self.x})\"\nfn main():\n    a := V(1)\n    a = a + V(10)\n    a += V(10)\n    print(a)\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_newtype_numeric() {
+    // A numeric newtype supports `+=` via its underlying-numeric auto-flow.
+    entry_ok(
+        "newtype Meters = float\nfn main():\n    m := Meters(1.0)\n    m += Meters(2.0)\n    print(float(m))\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_enum_sub_overload() {
+    // `-=` on an enum with a matching `sub` overload.
+    entry_ok(
+        "enum Cnt:\n    N(int)\n    fn amt(self) -> int:\n        match self:\n            Cnt.N(a): return a\n    fn sub(self, o: Cnt) -> Cnt:\n        return Cnt.N(self.amt() - o.amt())\nfn main():\n    c := Cnt.N(10)\n    c -= Cnt.N(3)\n    print(c.amt())\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_rejected_no_overload() {
+    // Struct with no `add` → `a += W(..)` rejected (mirrors `a = a + W(..)` failing).
+    entry_rejects(
+        "struct W:\n    x: int\nfn main():\n    a := W(1)\n    a += W(2)\nmain()\n",
+        "cannot apply +=",
+    );
+}
+
+#[test]
+fn compound_assign_rejected_heterogeneous() {
+    // `V += int` where `V + int` is a type error → still rejected.
+    entry_rejects(
+        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn main():\n    a := V(1)\n    a += 5\nmain()\n",
+        "cannot apply +=",
+    );
+}
+
+#[test]
+fn compound_assign_existing_forms_still_work() {
+    // Regression: the pre-existing accepted forms must all still check.
+    entry_ok(
+        "fn main():\n    i := 1\n    i += 1\n    s := \"a\"\n    s += \"b\"\n    l := [1]\n    l += [2]\n    l *= 3\n    st := {1, 2}\n    st -= {1}\n    print(i)\nmain()\n",
+    );
+}

@@ -182,7 +182,11 @@ a, b = b, a            # tuple swap — multi-target assignment, see below
 
 **Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
 fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
-and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). No implicit widening — `int /=
+and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). Because `x OP= v` is `x = x OP
+v`, it also accepts a **struct/enum/newtype whose operator overload** (an `add`/`sub`/`mul`/… method,
+or a numeric newtype's auto-flow) makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
+with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
+overload, or a mismatched operand). No implicit widening — `int /=
 float` is a type error (the result would be a float, which can't flow back into an `int` slot).
 (`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
 

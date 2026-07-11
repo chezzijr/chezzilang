@@ -2655,8 +2655,27 @@ impl Checker {
                     (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => compatible(a, b),
                     _ => false,
                 };
+                // A struct/enum/newtype whose matching operator overload makes the binary `a OP b`
+                // type-check must accept `a OP= b` too — `x OP= v` is defined as `x = x OP v`, and the
+                // runtime already lowers both through the same `Op::Add`/`Sub`/… opcodes. Reuse the
+                // SAME `op_overload_result` the binary-operator checker (`infer_binary`) consults, then
+                // require the result be assignable back to the target (mirrors `a = a OP b` failing if
+                // the result type can't flow into `a`). `op_overload_result` returns `Some` only for
+                // same-typed operands satisfying the operator protocol (or same numeric-newtype
+                // auto-flow), so a no-overload struct / `V += int` / `Box[int] += Box[str]` stay
+                // rejected — no blanket compound-assign acceptance.
+                let proto = match op {
+                    AssignOp::PlusEq => "Add",
+                    AssignOp::MinusEq => "Sub",
+                    AssignOp::StarEq => "Mul",
+                    AssignOp::SlashEq => "Div",
+                    _ => "Mod",
+                };
+                let overload_ok = self
+                    .op_overload_result(target_ty, val_ty, proto)
+                    .is_some_and(|res| self.assignable(target_ty, &res));
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !str_ok && !num_ok && !coll_ok {
+                if known && !str_ok && !num_ok && !coll_ok && !overload_ok {
                     let sym = match op {
                         AssignOp::PlusEq => "+=",
                         AssignOp::MinusEq => "-=",

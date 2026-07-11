@@ -3536,6 +3536,19 @@ fn golden_self_method_via_run_file() {
     assert_file_parity("examples/self_method.chz");
 }
 
+/// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum/newtype operator overloading —
+/// `a += V(10)` produces the same value as `a = a + V(10)`. Byte-matches the `.expected` file and
+/// the M:N engine (parity via `assert_file_parity`).
+#[test]
+fn golden_compound_overload_via_run_file() {
+    let path = fixture("examples/compound_overload.chz");
+    let expected = std::fs::read_to_string(fixture("examples/compound_overload.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/compound_overload.chz");
+}
+
 /// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.str) runs end-to-end on
 /// the VM and byte-matches both the `.expected` file and the interpreter.
 #[test]
