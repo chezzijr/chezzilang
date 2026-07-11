@@ -48,7 +48,7 @@ Conventions used below:
 | `len` | `() -> int` | Character (codepoint) count. |
 | `upper` / `lower` | `() -> str` | Case-mapped copy. |
 | `trim` | `() -> str` | Strip leading/trailing whitespace. |
-| `split` | `(sep: str) -> List[str]` | Split on `sep`. |
+| `split` | `(sep: str) -> List[str]` | Split on `sep`. Yields `separators + 1` pieces, so the empty string splits to a one-element list holding `""` (`"".split(",")` → `[""]`, length 1), matching Python/Go/Rust/JS. |
 | `chars` | `() -> List[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
 | `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
@@ -710,8 +710,13 @@ number model, not a saturation of arbitrary large values. `as_int` truncates a f
 catchable under `recover:` — with the message `cannot serialize non-finite float to JSON` when a
 `Json.Num` holds a non-finite float (`NaN`, `+inf`, `-inf`). This is the Go
 `encoding/json` policy (error out) rather than Python's non-standard `NaN`/`Infinity` tokens: it never
-emits malformed output that Chezzi's own `parse` would reject. Finite floats of any magnitude
-(including e.g. `1e300`, far outside the int-collapse range) stringify normally and round-trip.
+emits malformed output that Chezzi's own `parse` would reject. Symmetrically, `parse` **rejects at
+decode** any numeral whose magnitude overflows f64 to a non-finite value (`1e400` → +inf,
+`-1e400` → -inf): it returns `Err("invalid number: value out of range")` rather than manufacturing a
+`Json.Num(inf)` that `stringify` would then refuse — so `parse`→`stringify` round-trips for every
+value `parse` accepts. Finite floats of any magnitude (including e.g. `1e300`, far outside the
+int-collapse range) parse and stringify normally and round-trip; underflow to `0.0` (`1e-400`) is
+finite and stays accepted.
 
 For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
 struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are

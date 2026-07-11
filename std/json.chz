@@ -147,7 +147,14 @@ struct Parser:
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
-        return Ok(Json.Num(float(raw)))
+        f := float(raw)
+        # Go's `encoding/json` rejects a numeral that overflows f64 (`1e400` → +inf) AT DECODE, so we
+        # never manufacture a `Json.Num(inf/-inf/NaN)` that our own `stringify` (num_str) would then
+        # refuse to serialize. `f - f` is `0.0` for every finite `f` and NaN for a non-finite one.
+        # (Underflow like `1e-400` → `0.0` is finite and stays accepted.)
+        if f - f != 0.0:
+            return Err("invalid number: value out of range")
+        return Ok(Json.Num(f))
 
     fn parse_array(self) -> Result[Json]:
         self.pos += 1                       # consume '['

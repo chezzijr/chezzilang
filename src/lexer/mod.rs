@@ -17,6 +17,12 @@ use std::{collections::VecDeque, fmt};
 pub enum Token {
     // --- literals ---
     Int(i64),
+    /// The bare decimal magnitude `9223372036854775808` (== `i64::MAX + 1` == `-i64::MIN`), which
+    /// does NOT fit in an `i64`. It is legal ONLY when immediately negated: the parser folds
+    /// `-9223372036854775808` into `Int(i64::MIN)`. A bare, un-negated occurrence is a parse error
+    /// ("number too large to fit in target type"), so this value can never leak as a positive int.
+    /// Larger magnitudes (`9223372036854775809`+) still error at lex time and never reach here.
+    IntMinMagnitude,
     Float(f64),
     Str(String), // contents only, quotes stripped. Interpolation handled later, not in M1.
     /// A `b"..."` byte-string literal: the resolved raw bytes (escapes applied, quotes stripped).
@@ -1055,8 +1061,20 @@ impl Lexer {
             let v = num.parse::<f64>().map_err(|e| self.error(&e.to_string()))?;
             Ok(Token::Float(v))
         } else {
-            let v = num.parse::<i64>().map_err(|e| self.error(&e.to_string()))?;
-            Ok(Token::Int(v))
+            match num.parse::<i64>() {
+                Ok(v) => Ok(Token::Int(v)),
+                // `9223372036854775808` (== i64::MAX + 1 == -i64::MIN) overflows i64 as a positive
+                // value, but it is the magnitude of i64::MIN. Emit a distinct token so the parser can
+                // fold a leading unary minus into `Int(i64::MIN)`; a bare occurrence errors there.
+                // Any larger magnitude is unrepresentable even negated, so keep the original error.
+                Err(e) => {
+                    if num.parse::<u64>() == Ok(9_223_372_036_854_775_808) {
+                        Ok(Token::IntMinMagnitude)
+                    } else {
+                        Err(self.error(&e.to_string()))
+                    }
+                }
+            }
         }
     }
 
@@ -2080,6 +2098,38 @@ mod tests {
         assert_eq!(
             kinds("0O777"),
             vec![Token::Int(511), Token::Newline, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_i64_min_magnitude() {
+        // 2^63 == i64::MAX + 1 overflows i64, but instead of a lex error it becomes a distinct
+        // token so the parser can fold `-9223372036854775808` into i64::MIN.
+        assert_eq!(
+            kinds("9223372036854775808"),
+            vec![Token::IntMinMagnitude, Token::Newline, Token::Eof]
+        );
+        // The neighbour that DOES fit stays a normal Int(i64::MAX).
+        assert_eq!(
+            kinds("9223372036854775807"),
+            vec![Token::Int(i64::MAX), Token::Newline, Token::Eof]
+        );
+        // Preceded by a minus: the lexer still emits [Minus, IntMinMagnitude]; the fold is the parser's job.
+        assert_eq!(
+            kinds("-9223372036854775808"),
+            vec![
+                Token::Minus,
+                Token::IntMinMagnitude,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        // 2^63 + 1 and beyond are genuinely unrepresentable even when negated → still a lex error.
+        assert!(tokenize("9223372036854775809").is_err());
+        // Underscored form of exactly 2^63 also folds.
+        assert_eq!(
+            kinds("9_223_372_036_854_775_808"),
+            vec![Token::IntMinMagnitude, Token::Newline, Token::Eof]
         );
     }
 

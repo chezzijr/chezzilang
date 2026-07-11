@@ -28,6 +28,9 @@ fn read(rel: &str) -> String {
 fn symbol(tok: &Token) -> &'static str {
     match tok {
         Token::Int(_) => "INT",
+        // Same grammar terminal as a normal integer literal — the i64::MIN-magnitude carve-out is a
+        // lexer/parser value concern, not a distinct grammar production, so it maps to INT (no drift).
+        Token::IntMinMagnitude => "INT",
         Token::Float(_) => "FLOAT",
         Token::Str(_) => "STR",
         Token::Bytes(_) => "BYTES",
@@ -194,6 +197,12 @@ fn token_classes_from_source() -> BTreeSet<String> {
             continue;
         }
         let name: String = t.chars().take_while(|c| c.is_alphanumeric()).collect();
+        // `IntMinMagnitude` is a value carve-out for the i64::MIN literal, not a distinct grammar
+        // terminal — `symbol()` folds it into `INT`, so it never appears as its own terminal in
+        // grammar.bnf. Skip it here so the bidirectional terminals⇔classes check stays exact.
+        if name == "IntMinMagnitude" {
+            continue;
+        }
         if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             out.insert(name.to_uppercase());
         }

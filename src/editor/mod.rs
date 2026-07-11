@@ -171,7 +171,9 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(usize, usize
             line_starts.get(tok.span.line - 1).copied().unwrap_or(0) + (tok.span.col - 1);
         let char_len = match &tok.kind {
             Token::Ident(name) => name.chars().count(),
-            Token::Int(_) | Token::Float(_) => measure_number(&chars, start_abs),
+            Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
+                measure_number(&chars, start_abs)
+            }
             Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => measure_string(&chars, start_abs),
             other => match other.lexeme() {
                 Some(lex) => lex.chars().count(),
@@ -262,7 +264,9 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
                 overlay.get(&(line, col)).copied().unwrap_or(VARIABLE),
                 name.chars().count(),
             ),
-            Token::Int(_) | Token::Float(_) => (NUMBER, measure_number(&chars, start_abs)),
+            Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
+                (NUMBER, measure_number(&chars, start_abs))
+            }
             Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => {
                 let l = measure_string(&chars, start_abs);
                 string_extents.push((start_abs, start_abs + l));
@@ -1996,6 +2000,16 @@ mod tests {
                 st(0, 1, 1, OPERATOR),
                 st(0, 2, 1, VARIABLE)
             ]
+        );
+    }
+
+    #[test]
+    fn semtok_i64_min_magnitude_is_number() {
+        // `-9223372036854775808`: the minus is an OPERATOR, the 2^63 magnitude (an IntMinMagnitude
+        // token) still highlights as a NUMBER (19 digit chars), same as any int literal.
+        assert_eq!(
+            semantic_tokens("-9223372036854775808"),
+            vec![st(0, 0, 1, OPERATOR), st(0, 1, 19, NUMBER)]
         );
     }
 

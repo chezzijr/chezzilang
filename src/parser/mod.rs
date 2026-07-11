@@ -207,6 +207,11 @@ impl Parser {
                     unreachable!()
                 }
             }
+            // A bare 2^63 in integer position (range bound etc.) is out of i64 range. (The negated
+            // i64::MIN form is folded upstream in `expect_pattern_int`, never reaching here.)
+            Token::IntMinMagnitude => {
+                Err(self.err("number too large to fit in target type".to_string()))
+            }
             _ => Err(self.err(format!("expected integer, found {}", describe(self.peek())))),
         }
     }
@@ -216,6 +221,12 @@ impl Parser {
     /// `expect_int`, which rejects with "expected integer, found float"; no float pattern is added).
     fn expect_pattern_int(&mut self) -> PResult<i64> {
         if self.eat(&Token::Minus) {
+            // i64::MIN carve-out in pattern/range position: `-9223372036854775808` folds to i64::MIN
+            // directly (negating the 2^63 magnitude would overflow).
+            if matches!(self.peek(), Token::IntMinMagnitude) {
+                self.advance();
+                return Ok(i64::MIN);
+            }
             Ok(-self.expect_int()?)
         } else {
             self.expect_int()
@@ -2264,14 +2275,25 @@ impl Parser {
         };
         let result = if let Some(op) = op {
             self.advance();
-            let expr = self.parse_unary()?;
-            Ok(Expr {
-                kind: ExprKind::Unary {
-                    op,
-                    expr: Box::new(expr),
-                },
-                span,
-            })
+            // i64::MIN carve-out: `-9223372036854775808` folds straight to Int(i64::MIN). The lexer
+            // emits the 2^63 magnitude as IntMinMagnitude (it does not fit i64 as a positive value);
+            // runtime-negating it would overflow, so emit the literal directly here.
+            if matches!(op, UnaryOp::Neg) && matches!(self.peek(), Token::IntMinMagnitude) {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Int(i64::MIN),
+                    span,
+                })
+            } else {
+                let expr = self.parse_unary()?;
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                })
+            }
         } else {
             self.parse_postfix()
         };
@@ -2652,6 +2674,14 @@ impl Parser {
         let span = tok.span;
         let kind = match tok.kind {
             Token::Int(n) => ExprKind::Int(n),
+            // Bare (un-negated) 2^63: legal ONLY as the operand of a unary minus (folded in
+            // `parse_unary`). Reaching here means it stands alone → out of i64 range.
+            Token::IntMinMagnitude => {
+                return Err(ParseError {
+                    message: "number too large to fit in target type".to_string(),
+                    span,
+                });
+            }
             Token::Float(f) => ExprKind::Float(f),
             Token::Str(s) => ExprKind::Str(s),
             Token::Bytes(b) => ExprKind::Bytes(b),
@@ -2898,6 +2928,7 @@ fn describe(tok: &Token) -> String {
         Eof => "end of input",
         Ident(name) => return format!("identifier '{name}'"),
         Int(n) => return format!("integer {n}"),
+        IntMinMagnitude => return "integer 9223372036854775808".to_string(),
         Float(f) => return format!("float {f}"),
         Str(_) => "a string literal",
         Bytes(_) => "a byte-string literal",
@@ -3760,6 +3791,38 @@ mod tests {
         match only("a, b := pair()\n") {
             StmtKind::Let { names, .. } => assert_eq!(names.len(), 2),
             other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn i64_min_literal_folds_to_int_min() {
+        // `-9223372036854775808` is the ONE case where the magnitude 2^63 is legal: the leading
+        // minus folds it straight into ExprKind::Int(i64::MIN) — NOT Unary(Neg, ...) (runtime-negating
+        // the magnitude would overflow).
+        match only("x := -9223372036854775808\n") {
+            StmtKind::Let { value, .. } => match value.kind {
+                ExprKind::Int(n) => assert_eq!(n, i64::MIN),
+                other => panic!("expected Int(i64::MIN), got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        // A bare (un-negated) 2^63 is out of i64 range → a clear parse error.
+        assert!(
+            parse_err("x := 9223372036854775808\n")
+                .to_string()
+                .contains("number too large")
+        );
+        // 2^63 + 1 is unrepresentable even negated → still errors at lex time.
+        assert!(lexer::tokenize("x := -9223372036854775809\n").is_err());
+        // The i64::MIN-magnitude fold also works in match-pattern position.
+        match only("match x:\n    -9223372036854775808: pass\n    _: pass\n") {
+            StmtKind::Match { arms, .. } => {
+                assert!(matches!(
+                    arms[0].pattern,
+                    Pattern::Literal(LitPattern::Int(n)) if n == i64::MIN
+                ));
+            }
+            other => panic!("expected Match, got {other:?}"),
         }
     }
 

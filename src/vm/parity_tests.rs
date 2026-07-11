@@ -1368,9 +1368,10 @@ fn json_decode_error_parity() {
     assert_eq!(out, "decode: missing key 'x' at $\n");
 }
 
-/// `json.as_int` is a total `-> Option[int]`: out-of-range / non-finite JSON numbers return
-/// `None` (never fault), in-range values (incl. i64::MAX/MIN boundaries) return `Some`, and a
-/// fractional number still truncates.
+/// `json.as_int` is a total `-> Option[int]`: an in-range finite value (incl. the i64::MAX/MIN
+/// boundaries) returns `Some`, an out-of-i64-range-but-finite number returns `None` (never faults),
+/// and a fractional number still truncates. (Non-finite numbers can no longer arrive here — `parse`
+/// rejects `1e400` at the source, so that input takes the `PARSEERR` arm below.)
 #[test]
 fn json_as_int_out_of_range_parity() {
     let out = parity_entry(
@@ -1378,7 +1379,48 @@ fn json_as_int_out_of_range_parity() {
     );
     assert_eq!(
         out,
-        "NONE\nSOME 42\nSOME 9223372036854775807\nSOME -9223372036854775808\nSOME 2\nNONE\n"
+        "NONE\nSOME 42\nSOME 9223372036854775807\nSOME -9223372036854775808\nSOME 2\nPARSEERR\n"
+    );
+}
+
+/// `json.parse` follows the Go `encoding/json` decode policy: a numeral whose magnitude overflows
+/// f64 to a non-finite value (`1e400` → +inf, `-1e400` → -inf, and the same inside an array) is
+/// REJECTED with `Err` at parse time — parse never manufactures a `Json.Num(inf/-inf/NaN)` that its
+/// own `stringify` would then refuse to serialize. Finite numbers (incl. underflow-to-0 `1e-400`)
+/// still parse `Ok`.
+#[test]
+fn json_parse_rejects_non_finite_parity() {
+    let out = parity_entry(
+        "import std.json\nfn p(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK\"\n        Err(e): return \"PARSEERR\"\nprint(p(\"1e400\"))\nprint(p(\"-1e400\"))\nprint(p(\"[1e400]\"))\nprint(p(\"1.5\"))\nprint(p(\"123\"))\nprint(p(\"1e-400\"))\n",
+    );
+    assert_eq!(out, "PARSEERR\nPARSEERR\nPARSEERR\nOK\nOK\nOK\n");
+}
+
+/// `str.split` honours the `pieces == separators + 1` invariant at *every* input including the
+/// empty string: `"".split(",")` has zero separators, so it yields a one-element list holding the
+/// empty string (length 1, `x[0] == ""`) — matching Python/Go/Rust/JS, never `[]`. (An empty list
+/// and a list holding a single empty string both *render* as `[]` because `""` prints as nothing,
+/// so this asserts the length + element rather than the debug rendering.)
+#[test]
+fn str_empty_split_returns_single_empty_element_parity() {
+    let out = parity_entry(
+        "x := \"\".split(\",\")\nprint(x.len())\nprint(x[0] == \"\")\nprint(\"\".split(\",\").len() == 1)\nprint(\"a,\".split(\",\").len())\n",
+    );
+    assert_eq!(out, "1\ntrue\ntrue\n2\n");
+}
+
+/// The i64::MIN boundary literal `-9223372036854775808` (previously unreachable — it lex-errored as
+/// "number too large" because the positive magnitude 2^63 overflows i64 before the minus applies)
+/// now evaluates to i64::MIN and behaves as an ordinary int under arithmetic and `match`, byte-
+/// identically on the serial and M:N engines.
+#[test]
+fn i64_min_literal_runs_parity() {
+    let out = parity_entry(
+        "print(-9223372036854775808)\nprint(-9223372036854775808 + 1)\nprint(-9223372036854775807 - 1 == -9223372036854775808)\nmatch -9223372036854775808:\n    -9223372036854775808: print(\"min\")\n    _: print(\"other\")\n",
+    );
+    assert_eq!(
+        out,
+        "-9223372036854775808\n-9223372036854775807\ntrue\nmin\n"
     );
 }
 

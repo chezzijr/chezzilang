@@ -49,6 +49,8 @@ struct Point:
 42            # int   (i64)
 1_000_000     # int   — '_' is a digit-group separator (only between digits)
 0xFF 0b1010 0o17   # int — hex / binary / octal literals ('_' ok between digits)
+-9223372036854775808   # int — the i64::MIN boundary literal (the magnitude 2^63 is legal ONLY when
+              #       immediately negated; a bare `9223372036854775808` is "number too large")
 3.14          # float (f64)
 1_234.567_8   # float — '_' works in both parts
 6.022e23  1e3  1.5e-9  2E10  1e+5   # float — scientific notation (any exponent ⇒ float, so 1e3 = 1000.0)
