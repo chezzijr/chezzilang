@@ -31,6 +31,7 @@ impl Checker {
             alias_resolving: Vec::new(),
             ffi_alias_ok: std::collections::HashSet::new(),
             current_ret: Ty::Nil,
+            current_self_ty: None,
             yield_ty: None,
             recover_depth: 0,
             generic_arg_prepass: false,
@@ -2302,10 +2303,22 @@ impl Checker {
                         .iter()
                         .map(|f| (f.name.clone(), self.resolve_type(&f.ty, s.span)))
                         .collect();
+                    // `Self` in a method sig resolves to this concrete struct (parameterized by its
+                    // own type params — the layout isn't inserted yet, so build the self-ty directly
+                    // from the in-scope `type_params`, matching `struct_self_ty`'s shape).
+                    let self_ty = Ty::Struct(
+                        self.bare_key(name),
+                        type_params
+                            .iter()
+                            .map(|tp| Ty::Param(tp.name.clone()))
+                            .collect(),
+                    );
+                    let saved_self = self.current_self_ty.replace(self_ty);
                     let methods = methods
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
+                    self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
                     let origin = if self.current_module_is_stdlib {
                         StructOrigin::Builtin
@@ -2394,10 +2407,22 @@ impl Checker {
                         methods.iter().map(|m| (m.name.as_str(), m.name_span)),
                         "method",
                     );
+                    // `Self` in a method sig resolves to this concrete enum (parameterized by its own
+                    // type params — the `enum_type_params` table isn't inserted yet, so build the
+                    // self-ty from the in-scope `type_params`, matching `enum_self_ty`'s shape).
+                    let self_ty = Ty::Enum(
+                        key.clone(),
+                        type_params
+                            .iter()
+                            .map(|tp| Ty::Param(tp.name.clone()))
+                            .collect(),
+                    );
+                    let saved_self = self.current_self_ty.replace(self_ty);
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
+                    self.current_self_ty = saved_self;
                     // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always
                     // resolves the variant first (see `infer_call`), so a static method named after a
                     // variant could never be reached — a collision is an error, not a silent shadow.
@@ -2463,10 +2488,22 @@ impl Checker {
                             );
                         }
                     }
+                    // `Self` in a method sig resolves to this concrete newtype (parameterized by its
+                    // own type params — `newtype_type_params` isn't inserted yet, so build the self-ty
+                    // from the in-scope `type_params`, matching `newtype_self_ty`'s shape).
+                    let self_ty = Ty::NewType(
+                        key.clone(),
+                        type_params
+                            .iter()
+                            .map(|tp| Ty::Param(tp.name.clone()))
+                            .collect(),
+                    );
+                    let saved_self = self.current_self_ty.replace(self_ty);
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
                         .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
                         .collect();
+                    self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
                     self.newtype_type_params
                         .insert(key.clone(), type_params.clone());

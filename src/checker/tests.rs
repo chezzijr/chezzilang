@@ -16712,3 +16712,129 @@ fn invariance_preserves_legit_container_neighbors() {
         "fn f(xs: List[Any]):\n    xs.push(1)\nfn main():\n    ys: List[Any] = [1, \"a\", true]\n    f(ys)\nmain()\n",
     );
 }
+
+// ============================================================================
+// FIX A — `Self` usable in struct/enum/newtype inherent-method signatures/bodies
+// ============================================================================
+
+#[test]
+fn self_type_in_struct_method_sig() {
+    // `-> Self` and a `Self` param resolve to the enclosing struct.
+    entry_ok(
+        "struct P:\n    x: int\n    fn dup(self) -> Self:\n        return self\n    fn add(self, o: Self) -> Self:\n        return P(self.x + o.x)\nfn main():\n    print(P(5).dup().x)\n    print(P(1).add(P(2)).x)\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_in_enum_method_sig() {
+    // An enum method returning `Self` resolves to the enclosing enum.
+    entry_ok(
+        "enum Money:\n    Cents(int)\n    fn double(self) -> Self:\n        match self:\n            Money.Cents(c): return Money.Cents(c * 2)\nfn main():\n    m := Money.Cents(50).double()\n    match m:\n        Money.Cents(c): print(c)\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_in_newtype_method_sig() {
+    // A newtype method returning `Self` resolves to the enclosing newtype.
+    entry_ok(
+        "newtype Meters = float:\n    fn twice(self) -> Self:\n        return Meters(float(self) * 2.0)\nfn main():\n    print(float(Meters(3.0).twice()))\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_rejected_outside_method() {
+    // Free-fn param `Self` — no enclosing type → still unknown.
+    entry_rejects(
+        "fn f(x: Self) -> int:\n    return 0\nfn main():\n    pass\nmain()\n",
+        "unknown type 'Self'",
+    );
+    // Struct field typed `Self` — a field is not a method sig → still unknown.
+    entry_rejects(
+        "struct P:\n    y: Self\nfn main():\n    pass\nmain()\n",
+        "unknown type 'Self'",
+    );
+    // Top-level variable annotation `Self`.
+    entry_rejects(
+        "fn main():\n    x: Self = 0\nmain()\n",
+        "unknown type 'Self'",
+    );
+}
+
+#[test]
+fn self_type_enforced_as_concrete_enclosing_type() {
+    // `-> Self` is the concrete enclosing struct; returning a different struct is a type error.
+    entry_rejects(
+        "struct A:\n    x: int\nstruct B:\n    y: int\n    fn make(self) -> Self:\n        return A(1)\nfn main():\n    pass\nmain()\n",
+        "return",
+    );
+}
+
+#[test]
+fn self_type_protocol_behavior_unchanged() {
+    // A protocol method using `Self` still checks (its `Self` is `Ty::Param`, unchanged path).
+    entry_ok(
+        "protocol Dottable:\n    fn dot(self, o: Self) -> int\nstruct V:\n    x: int\n    fn dot(self, o: Self) -> int:\n        return self.x * o.x\nfn main():\n    print(V(2).dot(V(3)))\nmain()\n",
+    );
+}
+
+#[test]
+fn self_type_generic_struct_method() {
+    // Generic struct: `-> Self` carries the struct's own type args, so `return self` type-checks.
+    entry_ok(
+        "struct Box[T]:\n    v: T\n    fn same(self) -> Self:\n        return self\nfn main():\n    b := Box(5).same()\n    print(b.v)\nmain()\n",
+    );
+}
+
+// ============================================================================
+// FIX B — compound assignment honors struct/enum/newtype operator overloading
+// ============================================================================
+
+#[test]
+fn compound_assign_struct_overload() {
+    // `a += V(10)` accepted exactly when `a = a + V(10)` is (V has an `add` overload).
+    entry_ok(
+        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn str(self) -> str:\n        return \"V({self.x})\"\nfn main():\n    a := V(1)\n    a = a + V(10)\n    a += V(10)\n    print(a)\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_newtype_numeric() {
+    // A numeric newtype supports `+=` via its underlying-numeric auto-flow.
+    entry_ok(
+        "newtype Meters = float\nfn main():\n    m := Meters(1.0)\n    m += Meters(2.0)\n    print(float(m))\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_enum_sub_overload() {
+    // `-=` on an enum with a matching `sub` overload.
+    entry_ok(
+        "enum Cnt:\n    N(int)\n    fn amt(self) -> int:\n        match self:\n            Cnt.N(a): return a\n    fn sub(self, o: Cnt) -> Cnt:\n        return Cnt.N(self.amt() - o.amt())\nfn main():\n    c := Cnt.N(10)\n    c -= Cnt.N(3)\n    print(c.amt())\nmain()\n",
+    );
+}
+
+#[test]
+fn compound_assign_rejected_no_overload() {
+    // Struct with no `add` → `a += W(..)` rejected (mirrors `a = a + W(..)` failing).
+    entry_rejects(
+        "struct W:\n    x: int\nfn main():\n    a := W(1)\n    a += W(2)\nmain()\n",
+        "cannot apply +=",
+    );
+}
+
+#[test]
+fn compound_assign_rejected_heterogeneous() {
+    // `V += int` where `V + int` is a type error → still rejected.
+    entry_rejects(
+        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn main():\n    a := V(1)\n    a += 5\nmain()\n",
+        "cannot apply +=",
+    );
+}
+
+#[test]
+fn compound_assign_existing_forms_still_work() {
+    // Regression: the pre-existing accepted forms must all still check.
+    entry_ok(
+        "fn main():\n    i := 1\n    i += 1\n    s := \"a\"\n    s += \"b\"\n    l := [1]\n    l += [2]\n    l *= 3\n    st := {1, 2}\n    st -= {1}\n    print(i)\nmain()\n",
+    );
+}

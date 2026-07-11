@@ -1,0 +1,40 @@
+# `Self` in inherent struct/enum/newtype method signatures + bodies (not protocols-only).
+# `Self` names the enclosing type: a param type, a return type, or a body annotation.
+
+struct P:
+    x: int
+    # `-> Self` returns the enclosing struct.
+    fn dup(self) -> Self:
+        return self
+    # `Self` as a parameter type.
+    fn add(self, o: Self) -> Self:
+        return P(self.x + o.x)
+
+# Generic struct: `Self` carries the struct's own type args.
+struct Box[T]:
+    v: T
+    fn same(self) -> Self:
+        return self
+
+# Enum method returning a NEW variant typed `Self`.
+enum Money:
+    Cents(int)
+    fn amount(self) -> int:
+        match self:
+            Money.Cents(c): return c
+    fn double(self) -> Self:
+        return Money.Cents(self.amount() * 2)
+
+# Newtype method returning `Self`.
+newtype Meters = float:
+    fn twice(self) -> Self:
+        return Meters(float(self) * 2.0)
+
+fn main():
+    print(P(5).dup().x)              # 5
+    print(P(1).add(P(2)).x)         # 3
+    print(Box(7).same().v)          # 7
+    print(Money.Cents(50).double().amount())  # 100
+    print(float(Meters(3.0).twice()))         # 6.0
+
+main()

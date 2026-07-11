@@ -184,7 +184,11 @@ a, b = b, a            # tuple swap — multi-target assignment, see below
 
 **Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
 fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
-and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). No implicit widening — `int /=
+and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). Because `x OP= v` is `x = x OP
+v`, it also accepts a **struct/enum/newtype whose operator overload** (an `add`/`sub`/`mul`/… method,
+or a numeric newtype's auto-flow) makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
+with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
+overload, or a mismatched operand). No implicit widening — `int /=
 float` is a type error (the result would be a float, which can't flow back into an `int` slot).
 (`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
 
@@ -1226,6 +1230,13 @@ dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not 
 **Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.
+
+`Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
+(param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
+Self` inside `struct P` returns a `P`, and for a generic `Box[T]` it carries the receiver's own type
+args. It resolves to the concrete enclosing type, so a `-> Self` method returning a different type is
+a type error. `Self` is meaningful only inside a method; naming it as a free-fn parameter, a struct
+field, or a top-level annotation is `unknown type 'Self'`.
 
 ```chezzi
 protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
