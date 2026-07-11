@@ -167,6 +167,28 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
 
+**✅ MODULE-ROOT "ONE ROOT PER RUN" — silent-wrong-module fix + spec correction (2026-07-11).** A bare
+`chezzi run` derived the module-graph root **twice** from different origins: `main::resolve_entrypoint`
+found the manifest by walking up from the **cwd** (→ located the entry file), then both graph builders
+(`main::type_check` + `vm::run_file_inner`) re-derived a *second* root by walking up from the **entry
+file** (`resolver::find_root`), which stops at a **nested** `chezzi.toml`. When both roots held a
+same-named module, imports silently resolved against the inner one — **wrong module, exit 0, no
+diagnostic** (repro: outer `shared.chz` + nested `services/chezzi.toml` + `services/shared.chz`; bare
+run printed `INNER shared` instead of `OUTER shared`). FIX: thread the already-computed manifest root
+into BOTH builders so the root is computed **exactly once per run** and reused for entry-location AND
+every import. `resolver::build_graph_with_root(entry, root)` (routes through the same
+`build_graph_impl`/`Builder`, so cycle-detection + `MAX_IMPORT_DEPTH=256` are unchanged);
+`vm::run_file_with_entry`/`run_file_engine`/`run_file_inner` gained a `root: Option<PathBuf>`;
+`main::resolve_entrypoint` now returns the root and `run()` pins it into `type_check` **and**
+`run_file_with_entry` (both — else checker/VM disagree). Explicit `chezzi run <file>` is unchanged
+(`root=None` → walk up from the file = nearest marker, the correct Go/Cargo/npm sub-package behavior).
+Both engines identical (serial + M:N route through `run_file_inner`). Tests: new `tests/module_root.rs`
+(CLI-level, real on-disk trees — the bug is invisible to the library `build_graph` helpers): bare run
+(both engines) → OUTER, explicit file-run → INNER, single-root bare/file/cwd-invariance agree. SPEC:
+`docs/spec.md` "One root governs the whole graph" rewrote the false "nested `chezzi.toml` is silently
+ignored" claim to the actual **nearest-marker-from-origin** rule (origin = entry file for `run FILE`,
+cwd/manifest for bare run) + the fixed-once invariant.
+
 **✅ PARAMETERIZED PROTOCOLS IN VALUE/ANNOTATION POSITION (2026-07-06).** A parameterized protocol is
 now a first-class **value/annotation type** — `c: Container[int]` is valid as a param, return, struct
 field, and reassignment slot (was a hard "parameterized protocol N can only be used as a bound, not as
@@ -1593,7 +1615,10 @@ scientific notation** — a plain `print`/`str`/`{x}` always renders the full de
 an intended Python-feel divergence, with `:e` available when an exponent is wanted (`docs/syntax.md`).
 (b) **single project root** — `find_root` runs once on the entry and governs every import in the graph;
 a nested `chezzi.toml` in a subdirectory is silently ignored (not a second root), so a root-level file
-silently shadows a same-named subdir file (`docs/spec.md`).
+silently shadows a same-named subdir file (`docs/spec.md`). *(Correction — the nested-marker claim was
+wrong: `find_root` DOES stop at the nearest `chezzi.toml`, and bare `chezzi run` re-derived a second
+root from the entry file, which could silently disagree. Both fixed in the root-disagreement entry at
+the top of this file.)*
 
 **✅ Import-alias reserved-name gate + entrypoint-segment trim (diagnostic-only, 2026-07-01).** Two
 disjoint checker/CLI-only fixes; no engine code, so VM↔interp parity holds by construction.

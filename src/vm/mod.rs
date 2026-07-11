@@ -3552,6 +3552,7 @@ pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
         crate::native::HostConfig::default(),
         false,
         Some(entry_fn),
+        None,
     )
 }
 
@@ -3565,7 +3566,7 @@ pub type RunOutput = (String, String, Result<(), RunError>, Option<i32>);
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, false, None)
+    run_file_engine(entry, cfg, false, None, None)
 }
 
 /// Like [`run_file_with`], but runs on the **B3.3-threads `--parallel` engine** (real OS-thread
@@ -3573,20 +3574,27 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
 /// it to exercise the OS-thread engine.
 #[cfg(test)]
 pub fn run_file_parallel(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    run_file_engine(entry, cfg, true, None)
+    run_file_engine(entry, cfg, true, None, None)
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
 /// `entry_fn` is `Some` — invoke that named top-level function of the entry module (the
 /// `module:function` manifest entrypoint). `None` runs the module top-level only (scripting model).
 /// `parallel` selects the OS-thread engine. This is the single entry the CLI's `chezzi run` uses.
+///
+/// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
+/// manifest path passes `Some(root)` — the manifest that declared the entrypoint, computed ONCE by
+/// the CLI — so every `import` resolves against the SAME root that located the entry file. `None`
+/// (the explicit `chezzi run FILE` path) derives the root by walking up from the entry file (nearest
+/// marker, unchanged). Both the serial and M:N engines route through here, so one root pins both.
 pub fn run_file_with_entry(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
     parallel: bool,
     entry_fn: Option<&str>,
+    root: Option<std::path::PathBuf>,
 ) -> RunOutput {
-    run_file_engine(entry, cfg, parallel, entry_fn.map(str::to_string))
+    run_file_engine(entry, cfg, parallel, entry_fn.map(str::to_string), root)
 }
 
 fn run_file_engine(
@@ -3594,11 +3602,12 @@ fn run_file_engine(
     cfg: crate::native::HostConfig,
     parallel: bool,
     entry_fn: Option<String>,
+    root: Option<std::path::PathBuf>,
 ) -> RunOutput {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref()))
+        .spawn(move || run_file_inner(&entry, cfg, parallel, entry_fn.as_deref(), root))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -3609,8 +3618,13 @@ fn run_file_inner(
     cfg: crate::native::HostConfig,
     parallel: bool,
     entry_fn: Option<&str>,
+    root: Option<std::path::PathBuf>,
 ) -> RunOutput {
-    let graph = match crate::resolver::build_graph(entry) {
+    let build = match root {
+        Some(r) => crate::resolver::build_graph_with_root(entry, r),
+        None => crate::resolver::build_graph(entry),
+    };
+    let graph = match build {
         Ok(g) => g,
         Err(e) => {
             return (

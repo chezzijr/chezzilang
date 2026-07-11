@@ -212,7 +212,19 @@ pub fn module_file(path: &[String], project_root: &Path, std_root: &Path) -> Pat
 /// transitively imported module; detect cycles; return modules in a stable load order
 /// (dependencies before dependents — reverse-postorder DFS, entry last).
 pub fn build_graph(entry: &Path) -> Result<ModuleGraph, ResolveError> {
-    build_graph_with_entry_source(entry, None)
+    build_graph_impl(entry, None, None)
+}
+
+/// Like [`build_graph`], but the module-graph **root** is supplied explicitly instead of being
+/// derived by walking up from the entry file. This enforces the "one root per run" invariant for the
+/// bare-`chezzi run` manifest-entrypoint path: the CLI computes the root ONCE (the manifest that
+/// declared the entrypoint, found by walking up from the cwd) and reuses it here so every `import`
+/// resolves against the SAME root that located the entry file — never a nested `chezzi.toml` the
+/// entry file happens to sit under. The explicit `chezzi run FILE` path passes `None` (unchanged:
+/// root = nearest marker walking up from the file). `std.*` still resolves under [`std_root`]
+/// regardless of the project root.
+pub fn build_graph_with_root(entry: &Path, root: PathBuf) -> Result<ModuleGraph, ResolveError> {
+    build_graph_impl(entry, None, Some(root))
 }
 
 /// Like [`build_graph`], but the **entry** module's source may be supplied directly (`Some`) instead
@@ -225,8 +237,21 @@ pub fn build_graph_with_entry_source(
     entry: &Path,
     entry_source: Option<String>,
 ) -> Result<ModuleGraph, ResolveError> {
+    build_graph_impl(entry, entry_source, None)
+}
+
+/// Shared body of [`build_graph`], [`build_graph_with_entry_source`], and [`build_graph_with_root`].
+/// `root_override` pins the project root (the "one root per run" invariant); `None` derives it by
+/// walking up from the entry file ([`find_root`], nearest-marker — the correct/conventional file-run
+/// behavior). Every caller routes through the SAME [`Builder`], so cycle detection and
+/// `MAX_IMPORT_DEPTH` apply identically no matter how the root was chosen.
+fn build_graph_impl(
+    entry: &Path,
+    entry_source: Option<String>,
+    root_override: Option<PathBuf>,
+) -> Result<ModuleGraph, ResolveError> {
     let entry_abs = abs(entry);
-    let project_root = find_root(&entry_abs);
+    let project_root = root_override.unwrap_or_else(|| find_root(&entry_abs));
     let std_root = std_root();
     let entry_id = ModuleId(canonical_or_abs(&entry_abs));
     let entry_override = entry_source.map(|s| (entry_id.clone(), s));

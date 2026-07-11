@@ -297,8 +297,10 @@ import read as r from std.io        # named + alias
 
 Resolution — **optional root marker**, kills Python's run-relative footgun:
 
-1. Take the `.chz` being run.
-2. Walk *up* for `chezzi.toml`. Found → that dir is root. **Not found → script's own dir is root.**
+1. Pick the run's **origin**. For `chezzi run <file>` it's that file. For a bare `chezzi run` (no file
+   → the manifest entrypoint) it's the *cwd* — the directory you launched from.
+2. Walk *up* from the origin for the **nearest** `chezzi.toml`. Found → that dir is root. **Not found
+   → the script's own dir is root** (`run <file>`) / an error (bare `run` needs a manifest).
 3. `std.*` is reserved → always resolves to the stdlib dir.
 4. `a.b.c` → `<root>/a/b/c.chz`. **No `./` relative imports.**
 
@@ -312,16 +314,31 @@ the host stack overflows. The limit is a pathological-depth backstop far above a
 (diamond re-imports dedupe and do **not** count toward depth); tens/hundreds of modules are entirely
 unaffected.
 
-**One root governs the whole graph.** The root is found **once** — by walking up from the *entry*
-file (step 2) — and that single root resolves **every** import in the program (`a.b.c` → `<root>/a/b/c.chz`,
-step 4), no matter which module the `import` appears in. There are **no per-directory roots**: a
-*nested* `chezzi.toml` placed in a subdirectory is **silently ignored** (it is neither a second root
-nor consulted for that subtree's imports). So if you vendor a sub-package under, say, `vendor/lib/`,
-its internal `import util` does **not** resolve to `vendor/lib/util.chz` — it resolves to
-`<root>/util.chz`, and a root-level `util.chz` therefore **silently shadows** a same-named file in the
-subdirectory. This is a deliberate single-root design (one unambiguous resolution per dotted path),
-but the shadowing is a footgun: keep module paths unique across the whole tree, and don't rely on a
-nested `chezzi.toml` to scope a vendored subtree.
+**One root governs the whole graph, and it is computed exactly once per run.** A single `chezzi` run
+derives its module-graph root **once** — the nearest `chezzi.toml` walking up from the run's origin
+(step 1–2) — and that same root resolves **every** import in the program (`a.b.c` → `<root>/a/b/c.chz`,
+step 4), no matter which module the `import` appears in. Crucially, the *same* root that locates the
+entry file also resolves its imports; the two can never disagree (an earlier bug where a bare
+`chezzi run` re-derived a *second* root from the entry file — and so could silently load the wrong
+same-named module — is fixed).
+
+The origin differs by how you launch:
+
+- `chezzi run <file>` → origin is the file; root = nearest `chezzi.toml` **above the file**.
+- bare `chezzi run` (manifest entrypoint) → origin is the **cwd**; root = nearest `chezzi.toml`
+  **above the cwd** (the manifest that declares the `[project] entrypoint`). Both the entry file and
+  its imports resolve against *that* manifest's dir, so a bare run is **cwd-invariant** across any
+  subdirectory that shares the same nearest manifest.
+
+**Nearest-marker wins (sub-packages).** Because the root is the *nearest* marker, a **nested**
+`chezzi.toml` in a subdirectory *is* a real boundary: it becomes the root for any file **run from
+beneath it** — exactly Go's `go.mod`, Cargo's `Cargo.toml`, and npm's `package.json` sub-package
+semantics. So `chezzi run vendor/lib/tool.chz` treats `vendor/lib/` as its root (if it holds a
+`chezzi.toml`) and its `import util` resolves to `vendor/lib/util.chz`. A bare `chezzi run` from the
+*outer* project, by contrast, is one run rooted at the outer manifest: it does **not** consult a
+nested marker for that run's graph (just as `cargo run` at a workspace member uses that member's
+manifest, not a nested one it happens to contain). Keep this in mind when vendoring: a subtree is a
+sub-package only for runs that originate inside it.
 
 **Types are module-scoped (Python-style).** A `struct` / `enum` / `type` alias is private to its
 declaring module — every top-level type is exported by default (like functions; no `pub`), and is
