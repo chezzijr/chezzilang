@@ -25,6 +25,18 @@ impl Checker {
             }
             return;
         }
+        // A protocol may not shadow a reserved builtin TYPE name either (`protocol List` / `protocol
+        // int`). Sibling struct/enum/newtype/type-alias decl guards all reject `is_reserved_type`;
+        // protocol was the sole decl path that omitted it. Ordered AFTER the reserved-protocol arm so
+        // `Iterator` (both a reserved protocol AND type) is caught once, above, keeping its protocol
+        // wording. The stdlib carve-out mirrors the reserved-protocol arm (no native protocol is named
+        // after a reserved type, so it never fires there, but preserves symmetry).
+        if is_reserved_type(name) {
+            if !self.current_module_is_stdlib {
+                self.error(span, format!("type '{name}' is reserved (builtin)"));
+            }
+            return;
+        }
         if self.protocols.contains_key(name) {
             self.error(span, format!("protocol '{name}' is already defined"));
         }

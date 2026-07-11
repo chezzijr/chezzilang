@@ -1805,6 +1805,21 @@ CLI via `cargo run --bin chezzi` not a hardcoded `target/` path; an `ok()` unit 
 is correct; adversarially verify every fix) — is now the **"Manual feature-audit playbook"** in
 [`docs/bug-discovery.md`](docs/bug-discovery.md) (lever #9). Run it every pre-freeze session.
 
+**✅ Checker — reserved-type-name `protocol` decl hole closed (2026-07-11).** Checker-only, parity-safe
+by construction (rejected programs never reach the VM; accepted programs byte-identical — NO runtime/opcode
+change). The SYMMETRIC mirror of the 2026-06-28 fix below: `hoist_protocol` (src/checker/proto.rs) guarded
+only with `is_reserved_protocol`, never `is_reserved_type` — so `protocol List`/`protocol int`/`protocol
+Result` (18 of 19 reserved TYPE names; only `Iterator` was caught incidentally, being also a reserved
+protocol) type-checked clean, then a `struct`/`enum` decl of the same name was correctly rejected while the
+protocol shadowed the builtin and surfaced as a self-contradictory `type int does not satisfy int` at a
+generic bound (`fn g[T: int]`). Added one guard arm — `if is_reserved_type(name) { if
+!self.current_module_is_stdlib { error "type 'X' is reserved (builtin)" } return; }` — ordered AFTER the
+reserved-protocol early-return so `Iterator` stays a single error with protocol wording. Stdlib carve-out
+reused verbatim (no native protocol is named after a reserved type). Test:
+`protocol_named_reserved_type_rejected_at_decl` (19-name graph-path sweep + `Drawable`/`Eqz` non-regression
++ `Iterator` single-error). (Note: FFI `int32`/`ffi::TYPE_NAMES` deliberately NOT added to the protocol
+guard — an asymmetry with the struct/enum guards, in-scope per task.)
+
 **✅ Checker — namespace/import-gating, two more holes closed (2026-06-28).** Checker-only, parity-safe
 by construction (rejected programs never reach the VM/interp; accepted programs are byte-identical — NO
 runtime/opcode change). **HOLE A — protocol-name type decls:** the 15 prebuilt PROTOCOL names

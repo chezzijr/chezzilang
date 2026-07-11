@@ -9614,6 +9614,67 @@ fn reserved_builtin_type_names_rejected_at_decl() {
 }
 
 #[test]
+fn protocol_named_reserved_type_rejected_at_decl() {
+    // A `protocol X` whose name is a reserved builtin TYPE must be rejected at the DECL site, exactly
+    // like `struct X` / `enum X`. Previously the protocol guard only checked `is_reserved_protocol`,
+    // so `protocol List` / `protocol int` type-checked clean then surfaced as a self-contradictory
+    // `type int does not satisfy int` when used as a generic bound.
+    for name in [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "bytes",
+        "bytearray",
+        "nil",
+        "List",
+        "Set",
+        "Map",
+        "Channel",
+        "range",
+        "Result",
+        "Option",
+        "Ref",
+        "Socket",
+        "Shared",
+        "Executor",
+        "Atomic",
+    ] {
+        let src = format!(
+            "protocol {name}:\n    fn foo(self) -> int\nfn main():\n    print(1)\nmain()\n"
+        );
+        let errs = check_entry(&src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
+            "protocol {name} must be rejected as reserved, got: {errs:?}"
+        );
+    }
+    // Boundary #2 — a NON-reserved protocol name still type-checks clean (guard is not over-broad).
+    entry_ok("protocol Drawable:\n    fn draw(self)\nfn main():\n    print(1)\nmain()\n");
+    entry_ok("protocol Eqz:\n    fn eqz(self) -> bool\nfn main():\n    print(1)\nmain()\n");
+    // Boundary #3 — `Iterator` is BOTH a reserved protocol and a reserved type; the reserved-protocol
+    // arm wins by ordering, so exactly ONE error fires, keeping the `protocol ...` wording (no double
+    // diagnostic).
+    let errs =
+        check_entry("protocol Iterator:\n    fn next(self)\nfn main():\n    print(1)\nmain()\n");
+    let reserved: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("reserved (builtin)"))
+        .collect();
+    assert_eq!(
+        reserved.len(),
+        1,
+        "protocol Iterator must give exactly one reserved error, got: {errs:?}"
+    );
+    assert!(
+        reserved[0].message.contains("protocol"),
+        "Iterator keeps protocol wording, got: {:?}",
+        reserved[0].message
+    );
+}
+
+#[test]
 fn bare_net_type_without_import_hints_import() {
     // HOLE B — bare `Socket` / `Listener` annotations require `import std.net` (mirrors the
     // Executor/Shared/ptr gates). Without the import, the use must emit the import hint, not resolve
