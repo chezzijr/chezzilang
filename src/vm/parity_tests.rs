@@ -922,6 +922,77 @@ fn executor_autodrain_skipped_on_os_exit() {
     assert_eq!(out, "before exit\n");
 }
 
+// ----- Executor.submit crosses a submitted closure BY VALUE on BOTH engines (serial == M:N) -----
+// The cooperative engine used to queue the submitted closure's own heap Handle (captures shared by
+// reference, bypassing the airlock), while M:N wired it by value. That broke serial==M:N. Now both
+// route through `wire_callable`/`to_wire`, so the ref/generator airlock enforcement runs and captures
+// isolate identically on both engines.
+
+#[test]
+fn executor_submit_ref_capturing_closure_faults_both_engines() {
+    // Repro #1: a submitted closure indirectly captures a local `ref` (via a nested fn). WAS:
+    // serial ran silently (`done`), M:N faulted. NOW: BOTH fault via the closure-capture ref scan.
+    let src = "\
+import std.ref
+fn main():
+    r: ref int = 0
+    fn getr() -> int:
+        return r
+    ex := Executor()
+    ex.submit(fn(): getr())
+    ex.shutdown()
+    print(\"done\")
+main()";
+    let e = parity_entry_fault(src);
+    assert!(e.contains("ref/Ref"), "fault msg: {e}");
+}
+
+#[test]
+fn executor_submit_generator_capturing_closure_faults_both_engines() {
+    // Repro #2: a submitted closure captures a LIVE local generator (`it`). The generator lives in a
+    // local, not a module global, so the submit-time reach-gate does not fire — only the by-value
+    // airlock (`to_wire`) catches it. WAS: serial ran (bypassed to_wire), M:N faulted. NOW: BOTH fault.
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+fn main():
+    it := gen()
+    fn task():
+        for x in it:
+            print(x)
+    ex := Executor()
+    ex.submit(task)
+    ex.shutdown()
+main()";
+    let e = parity_entry_fault(src);
+    assert!(
+        e.contains("a generator cannot be sent across tasks"),
+        "fault msg: {e}"
+    );
+}
+
+#[test]
+fn executor_submit_mutating_closure_isolated_parity() {
+    // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. WAS a
+    // SILENT value divergence: serial shared by reference (prints `2`), M:N isolated by value
+    // (prints `1`). NOW both isolate at submit → both print `1`, byte-identical.
+    let out = parity_entry(
+        "fn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): box.push(1))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+    );
+    assert_eq!(out, "1\n");
+}
+
+#[test]
+fn executor_submit_sendable_closure_runs_parity() {
+    // Control: a captured `Channel` is a genuinely-shared handle (crosses as its shared Arc, NOT
+    // deep-copied), so a value sent from inside the submitted job is visible to the parent's `recv`.
+    // Must stay `7` on both engines — the by-value collapse must not over-isolate a shared handle.
+    let out = parity_entry(
+        "fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(7))\n    ex.shutdown()\n    print(ch.recv())\nmain()\n",
+    );
+    assert_eq!(out, "7\n");
+}
+
 // ----- M9: std.regex parity (exercises NativeRet::Struct lowering on both engines) -----
 
 #[test]

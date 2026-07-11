@@ -731,10 +731,11 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > registry that doubles as a GC root reaps each live executor FIFO in creation order — its submitted
 > work runs instead of silently vanishing). A hard `std.os.exit` skips it (consistent with how it
 > skips `defer`); a faulting program is not auto-drained (it is already erroring).
-> **One piece is still deferred to real-C5:** **sendability-gating of the submitted closure's
-> captures** — `submit` takes the closure by handle and runs it in-heap at the drain (consistent with
-> `Shared.update` / list HOFs), so a non-sendable capture is benign now and the gate lands with real
-> parallelism.
+> **Captures cross by value on both engines:** `submit` wires the closure through the same by-value
+> airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
+> at submit time and the ref/Ref + generator sendability enforcement runs — identically on the
+> cooperative default and `--parallel` (serial == M:N for every submitted closure). A mutation of a
+> captured collection between `submit` and the drain is NOT observed by the job.
 
 The sanctioned tool for "a task that **outlives its scope** / runs in the background" is **not** a
 nursery and **not** an unscoped `spawn` — it is a distinct, **explicitly-owned `Executor`**: a
@@ -875,9 +876,10 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable `ref` etc.** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`; a nested closure that itself captures a `ref` is caught by the runtime backstop (Task 2b). |
 | **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
-> *Dropped from Group A:* **A3b** (`Executor.submit` capture sendability gate) — `submit` runs the
-> closure in-heap at the drain, so a non-sendable capture is *benign today*; gating it now would
-> wrongly reject valid programs. It belongs with Group B.
+> *Dropped from Group A, shipped in B3.6:* **A3b** (`Executor.submit` capture sendability gate). The
+> submitted closure now crosses **by value on both engines** (`wire_callable` → `to_wire`), so a
+> non-sendable capture (`ref`/`Ref`, a live generator) faults at submit — identically on the
+> cooperative default and `--parallel`.
 
 **Group B — the real engine (deferred epic)**
 

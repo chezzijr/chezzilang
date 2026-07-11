@@ -58,6 +58,27 @@ arms ONLY: a **module-global** `ref` crosses via the module-globals snapshot (no
 it is never scanned and continues to deep-copy. Together with the Task-2a checker gate, **no silent
 `ref` path remains**.
 
+### 3. `Executor.submit` coop-vs-M:N capture-sharing divergence — **RESOLVED (2026-07-11)**
+
+**Was the gap (B3.3 follow-up):** on the cooperative engine `Executor.submit` queued the submitted
+closure's own heap `Handle` (captures **shared by reference**, same heap, bypassing `to_wire`), while
+`--parallel` wired it **by value** (`WireValue::Closure`). This broke the sacred serial==M:N invariant:
+a submitted closure capturing a non-sendable `ref`/`Ref` (directly or via a nested closure) or a live
+generator ran silently on serial but faulted on M:N, and a submitted closure mutating a captured
+collection observed the mutation on serial but was isolated on M:N (a silent value divergence). The
+by-handle branch had been kept deliberately to mirror the tree-walk `interp` oracle.
+
+**Fixed:** `src/vm/netio.rs` now routes **both** engines through `wire_callable` → `to_wire`, exactly
+like plain `spawn`. The submitted closure crosses **by value** on the cooperative engine too — captures
+deep-copied + isolated at submit time, and the ref/Ref + generator airlock enforcement runs — so serial
+and M:N behave identically for every submitted closure. The `interp` oracle was removed, so the by-handle
+preservation was pure divergence and is retired. The submit-time generator reach-gate and the drain-time
+re-gate (`gate_executor_queue`) are unchanged (reachability is proto-based over the shared `Arc<Program>`,
+so switching the queued kind `Handle`→`Closure` leaves verdicts unchanged). Tests:
+`executor_submit_{ref,generator}_capturing_closure_faults_both_engines`,
+`executor_submit_mutating_closure_isolated_parity`, `executor_submit_sendable_closure_runs_parity`
+(`src/vm/parity_tests.rs`), and the rewritten `executor_cooperative_submit_isolates_captures_by_value`.
+
 ## Stdlib
 
 Coverage today is *broad* (math, fs, os, time,

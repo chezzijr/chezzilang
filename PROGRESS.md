@@ -1416,6 +1416,27 @@ Makes the checker consistent with the by-value airlock runtime (B3.3e, below). T
   green, clippy clean. Docs: `docs/concurrency.md §7` + A3a row, `docs/syntax.md`, `docs/gaps.md` #1/#2,
   `gaps.md`.
 
+**✅ Executor.submit coop==M:N by value — serial-vs-M:N parity divergence FIXED (2026-07-11, `executor-submit-parity`).**
+The cooperative `Executor.submit` now crosses its submitted closure **by value**, exactly like `--parallel`
+and plain `spawn`. Root cause: `src/vm/netio.rs` had a coop special-case that queued the closure's own heap
+`Handle` (captures shared by reference, **bypassing `to_wire`** and thus the whole airlock), while M:N used
+`wire_callable`. That broke serial==M:N three ways — a submitted closure capturing a non-sendable `ref`/`Ref`
+(directly or via a nested closure) or a live generator ran silently on serial but faulted on M:N, and one
+mutating a captured collection observed the mutation on serial but was isolated on M:N (silent value
+divergence). Fix: collapse the three-way engine-gated branch to an unconditional
+`let w = self.wire_callable(args[0], span)?;` so **both** engines wire the closure by value — captures
+deep-copied + isolated at submit, and the ref/generator airlock enforcement runs on the cooperative engine
+too. The by-handle branch had been kept to mirror the tree-walk `interp` oracle; that oracle was removed, so
+it was pure divergence. Submit-time generator reach-gate + drain-time re-gate (`gate_executor_queue`)
+unchanged — reachability is proto-based over the shared `Arc<Program>`, so the queued-kind switch
+`Handle`→`Closure` leaves verdicts identical; the coop inline drain already `from_wire`s each queued job, so
+per-job isolation falls out. Tests (all serial==M:N): `executor_submit_ref_capturing_closure_faults_both_engines`,
+`executor_submit_generator_capturing_closure_faults_both_engines`,
+`executor_submit_mutating_closure_isolated_parity`, `executor_submit_sendable_closure_runs_parity` (control,
+`Channel` still shared by Arc → `7`), + the rewritten `executor_cooperative_submit_isolates_captures_by_value`.
+Docs: `docs/concurrency.md`, `docs/concurrency-b3.md` (C-01 superseded), `docs/gaps.md` #3 (RESOLVED),
+`src/vm/netio.rs` submit comment. VM-only; checker untouched.
+
 **✅ Closures / bare `fn`s cross the airlock BY VALUE — B3.3e runtime (2026-07-10, `b33-closures-by-value`).**
 The GENERIC airlock lowering (`to_wire`/`to_snap`, not just `Executor.submit`) now crosses a closure or
 bare `fn` **by value** on BOTH engines identically: `WireValue::Closure { proto, captured, home }`
@@ -1432,9 +1453,11 @@ render from the serial engine's live `Obj::Func`. Only `Module`/`Native`/`Cffi` 
   thin delegate over the generic path, `ensure_crossable` message), `src/vm/stmt.rs` (`display_wire` Func
   arm → `<fn NAME>`), `src/vm/core.rs` (`collect_core_gcrefs` Func no-op). `to_snap`/`from_snap` already
   had Func/Closure-by-value arms (M:N module snapshot) — now reached via the shared fast path too.
-- **Preserved:** the cooperative `Executor.submit` still crosses its closure **by handle** (same heap,
-  captures shared by reference — decision A `VM==interp`); since the generic `to_wire` now deep-copies,
-  the cooperative submit branch (`src/vm/netio.rs`) queues the callable's own `Handle` explicitly.
+- **~~Preserved: cooperative `Executor.submit` by handle~~ → RESOLVED (serial==M:N by value):** the
+  cooperative `Executor.submit` now crosses its closure **by value** like `--parallel` and plain `spawn`
+  (`src/vm/netio.rs` routes BOTH engines through `wire_callable`; the old by-handle branch mirrored the
+  now-removed `interp` oracle and was pure serial-vs-M:N divergence). Captures isolate at submit + the
+  ref/generator airlock enforcement runs on both engines. See "Executor.submit coop==M:N by value" below.
 - **Checker gate NOT touched (follow-up):** a function type is still non-sendable as a `Channel`/`Shared`
   ELEMENT type (`Channel[fn(int)->int]` rejected at check), and `ref`/`Ref[T]` runtime handling is
   untouched. Runtime half only. Tests: 5 new both-engine parity (`closure_as_data_into_spawn_callee_parity`,
@@ -1538,9 +1561,9 @@ captured name and sees/makes writes to it (was: plain local snapshotted by value
   first cut missed: a closure that MUTATES a captured cell's inner heap value via a method call
   (`f := fn(): xs.push(2)`) or READS a cell the owner writes after `spawn` printed `[1, 2]`/`5` on serial
   (shared handle) vs `[1]`/`0` on M:N — now both engines isolate. Guards: `capture_spawn_closure_mutates_isolated`,
-  `capture_spawn_closure_owner_write_isolated` (the latter nested to force the M:N eager path). The
-  cooperative `Executor.submit` share-by-reference invariant is UNCHANGED — this fix is confined to the
-  `spawn` task boundary (`do_spawn`), not the shared `to_wire` path Executor uses.
+  `capture_spawn_closure_owner_write_isolated` (the latter nested to force the M:N eager path). (The
+  cooperative `Executor.submit` was later brought to the same by-value semantics — see "Executor.submit
+  coop==M:N by value" below — so submit now isolates captures at submit time on both engines too.)
 - **Acceptance matrix** `examples/capture_*.chz` (A1/A2/A3/B1/C1/C2/D1/D2/E1/F1/F3/G1/G2/F2/F4/B6) +
   golden + serial==M:N parity twins. D1 (`capture_escape_reader` → `42\n7`, escaping capture outlives
   the frame) and D2 (`capture_recursion_percall` → `0\n1\n2\n3`, per-call fresh cell) close the last two
@@ -4311,10 +4334,12 @@ shared-nothing architecture, decisions A–G, risk register). Summary of the lan
   `defer`s). Single-level only — nested-nursery cancel propagation is documented/deferred.
 - **B3.5** — nursery-local **deadlock detection** under threads (barrier-confirm detector; later retired
   in favour of D2b's exact single-coordinator predicate).
-- **B3.6** — `Executor` on the pool + the **A3b `submit`-capture sendability gate** (checker). Under
-  `--parallel` a submitted closure crosses by value (`WireValue::Closure`); the cooperative default
-  engine keeps crossing it by handle so its same-heap drain shares captures by reference (matching the
-  interp oracle — a by-value snapshot would break parity for the sequential subset).
+- **B3.6** — `Executor` on the pool + the **A3b `submit`-capture sendability gate** (checker). A
+  submitted closure crosses **by value on BOTH engines** (`WireValue::Closure` via `wire_callable`),
+  isolating captures at submit + running the ref/generator airlock enforcement identically on serial and
+  M:N. (Originally the cooperative engine crossed by handle to mirror the tree-walk `interp` oracle;
+  that oracle was removed and the by-handle branch was pure serial-vs-M:N divergence — retired, see
+  "Executor.submit coop==M:N by value".)
 
 ### M-C — implicit nurseries (shipped 2026-06-12)
 
@@ -4911,7 +4936,8 @@ branch names) is in the git log.
 - ✅ **Pending-`spawn`-drop on early `parallel:` escape** — unstarted tasks cancel-and-report on
   `?`/`return`/`break`/`continue` before the join (both engines, parity-restored).
 - ✅ **B3.6 — `Executor` on the pool + A3b `submit`-capture gate** — submitted closure crosses by value
-  under `--parallel` (`WireValue::Closure`), by handle on the cooperative oracle (parity).
+  on BOTH engines (`WireValue::Closure` via `wire_callable`; the cooperative by-handle path was retired
+  once the `interp` oracle was removed — see "Executor.submit coop==M:N by value").
 - ✅ **B3.4/B3.5 — cancellation + cross-thread `os.exit` + thread deadlock detection** — per-nursery
   `cancel` flag (first fault/exit trips it; `os.exit` wins; cancel bypasses `recover:` but runs `defer`s).
   Single-level cancel only (nested propagation deferred).

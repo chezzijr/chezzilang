@@ -253,10 +253,13 @@ flatten is a separate, later commit. See `docs/concurrency-tier-d.md` "Open / de
 `capture_floor` so a submitted closure's captures are gated exactly like a `spawn:` block's. **VM —
 `WireValue::Closure` (the arm B3.3 deferred):** a submitted closure crosses **by value**
 (`{ proto, captured, home }`, all `GcRef`-free since `home` is a `module_objs` index). `Vm::wire_callable`
-produces it, but `submit` calls it **only under `--parallel`**; on the cooperative default engine `submit`
-crosses by handle so its same-heap drain shares captures by reference — matching the same-heap sequential semantics
-(**Review C-01:** an unconditional `wire_callable` broke sequential-subset parity; fixed by
-the engine gate). **Drain:** under `--parallel`, `shutdown` marks `shut`, drains under the core lock (guard
+produces it, and `submit` calls it on **BOTH** engines — the submitted closure crosses **by value**
+identically on the cooperative default and `--parallel`, isolating its captures at submit time and running
+the ref/Ref + generator airlock enforcement on both. (**Review C-01** originally gated `wire_callable` to
+`--parallel` only, keeping the cooperative branch by-handle to mirror the tree-walk `interp` oracle; that
+oracle has since been removed and `serial == M:N` is the sole invariant, so the by-handle branch was pure
+serial-vs-M:N divergence — the closure now crosses by value unconditionally, superseding C-01.) **Drain:**
+under `--parallel`, `shutdown` marks `shut`, drains under the core lock (guard
 dropped before invoke), then farms tasks to the pool via **`run_workers_on_pool`** — the farm/inline/join/
 flush core **extracted verbatim** from `run_parallel_nursery` (a pure refactor; that path stays byte-identical).
 The cooperative engine keeps the inline FIFO drain, byte-identical. (`parallel_defer_runs_on_cancelled_sibling`

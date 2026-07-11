@@ -9770,21 +9770,25 @@ fn executor_submitted_closure_captures_by_value() {
     assert_eq!(run_capture_parallel(src).expect("parallel run"), "7\n");
 }
 
-/// B3.6 regression (review C-01): on the **cooperative default engine** a submitted closure must
-/// cross **by handle** (captures shared by reference, same heap), NOT by a value snapshot — a
-/// mutation of a captured collection *between* `submit` and the program-exit drain is observable,
-/// matching the interp oracle (decision A: `VM == interp` for the sequential subset). An unconditional
-/// `wire_callable` (by value) printed `[1]` here; sharing by reference prints `[1, 2]`.
+/// A submitted closure crosses the airlock **by value** on BOTH engines: it isolates its captures at
+/// `submit` time (`wire_callable` → `to_wire` deep-copies), so a mutation of a captured collection
+/// *between* `submit` and the program-exit drain is NOT observed by the job. The cooperative engine
+/// used to share captures by reference (queuing the closure's own `Handle`) to mirror the tree-walk
+/// `interp` oracle; that oracle has been removed and serial==M:N is now the sole invariant, so coop
+/// isolates identically to M:N — both print `[1]` here (not `[1, 2]`).
 #[test]
-fn executor_cooperative_submit_shares_captures_by_reference() {
+fn executor_cooperative_submit_isolates_captures_by_value() {
     let src = "fn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
-    let vm_out = run_capture(src).expect("vm run");
     assert_eq!(
-        vm_out, "[1, 2]\n",
-        "cooperative submit shares the captured list by reference"
+        run_capture(src).expect("vm run"),
+        "[1]\n",
+        "cooperative submit isolates the captured list by value at submit time"
     );
-    // NB: cooperative-only invariant. The M:N engine copies the submitted closure's captures across
-    // the airlock (by value), so it intentionally prints `[1]` here — not a parity comparison.
+    assert_eq!(
+        run_capture_parallel(src).expect("parallel run"),
+        "[1]\n",
+        "M:N submit isolates the captured list by value — parity with serial"
+    );
 }
 
 /// B3.3-threads: a nested `parallel:` runs on the same bounded pool without exploding the thread

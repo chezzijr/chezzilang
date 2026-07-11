@@ -1378,28 +1378,20 @@ impl Vm {
                         },
                         span,
                     )?;
-                    // B3.6: under `--parallel` the task closure crosses **by value** (`WireValue::Closure`
-                    // — proto + wire'd captures + home index) so a pool-thread drain can rebuild and run
-                    // it; queued captures stay rooted via the executor handle's `children()` (the
-                    // `Closure` arm of `collect_core_gcrefs`). On the cooperative default engine it crosses
-                    // **by handle** — the drain runs on this same heap, so captures stay *shared by
-                    // reference* (a mutation between `submit` and drain is observable). NB this is a KNOWN
-                    // pre-existing serial-vs-M:N divergence (coop observes a post-submit mutation while
-                    // `--parallel` snapshots at submit — true on base too), tracked as its own
-                    // Executor-semantics follow-up, NOT introduced here. As of B3.3 the generic `to_wire`
-                    // deep-copies a closure's captures (by-value airlock everywhere), so the cooperative
-                    // branch must NOT route through it — it queues the callable's own `Handle` directly
-                    // (same heap, same as pre-B3.3), keeping coop behavior-preserving. The engine flag is
-                    // fixed for a VM's lifetime, so submit-time and drain-time agree.
-                    let w = if self.parallel {
-                        self.wire_callable(args[0], span)?
-                    } else if let Value::Obj(hc) = args[0]
-                        && matches!(self.heap.get(hc), Obj::Func { .. } | Obj::Closure { .. })
-                    {
-                        WireValue::Handle(hc)
-                    } else {
-                        self.to_wire_at(args[0], span)?
-                    };
+                    // The task closure crosses the airlock **by value** on BOTH engines
+                    // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
+                    // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
+                    // routing coop through the SAME wire path runs the ref/Ref + generator airlock
+                    // enforcement on the cooperative engine too, and isolates captures at submit time, so
+                    // serial and M:N behave identically for every submitted closure. (Earlier the coop
+                    // branch queued the callable's own `Handle` — captures shared by reference, bypassing
+                    // `to_wire` — to mirror the tree-walk `interp` oracle; that oracle has been removed, so
+                    // the by-handle preservation was pure serial-vs-M:N divergence and is retired.)
+                    // Under `--parallel` a pool-thread drain rebuilds the closure from the wire value;
+                    // under the cooperative engine the inline drain (`from_wire` at `shutdown`) rebuilds an
+                    // isolated closure over this same heap home. Queued captures stay rooted via the
+                    // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`).
+                    let w = self.wire_callable(args[0], span)?;
                     g.queue.push_back(w);
                 }
                 Ok(Value::Nil)
