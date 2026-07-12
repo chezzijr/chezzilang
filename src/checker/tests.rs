@@ -12515,6 +12515,22 @@ fn panic_arity_is_exactly_one() {
 }
 
 #[test]
+fn inline_diverging_body_infers_nil() {
+    // L3-1: a fn whose SOLE body is a diverging call (`fn f(): panic(...)`) has no annotation and
+    // no `return` — its inline-expr type is bottom (Unknown). It must default to `-> nil` (matching
+    // a void body), NOT trip "cannot infer return type". The caller can't use a value anyway.
+    ok("fn boom(): panic(\"x\")\nfn main():\n    boom()\nmain()\n");
+    // Regression: a void body still infers nil; an annotated diverging body still ok.
+    ok("fn v(): print(\"x\")\nfn main():\n    v()\nmain()\n");
+    ok("fn b() -> int: panic(\"x\")\nfn main():\n    print(\"ok\")\nmain()\n");
+    // panic's arg checks still fire through the inline body (Unknown-default doesn't skip pass 2).
+    rejects(
+        "fn boom(): panic(123)\nfn main():\n    boom()\nmain()\n",
+        "panic() expects a str",
+    );
+}
+
+#[test]
 fn panic_is_reserved_against_extern_shadowing() {
     assert!(is_reserved_name("panic"));
 }

@@ -387,7 +387,17 @@ impl Checker {
                 },
             ] = decl.body.as_slice()
         {
-            Some(self.infer(e))
+            // A sole diverging call (`fn f(): panic(...)`/`exit(...)`) is bottom-typed (`Unknown`),
+            // which would trip the "cannot infer return type" finalizer. It never returns a value
+            // normally, so default it to `Nil` (like a void body) — the caller can't use a value
+            // anyway. Gated on `is_unknown()` so a diverging call that somehow typed concrete is
+            // untouched; `self.infer(e)` still runs so panic's arg checks fire in pass 2.
+            let t = self.infer(e);
+            Some(if t.is_unknown() && Self::expr_is_diverging_call(e) {
+                Ty::Nil
+            } else {
+                t
+            })
         } else {
             for stmt in &decl.body {
                 self.check_stmt(stmt);
