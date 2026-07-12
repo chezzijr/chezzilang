@@ -1583,6 +1583,11 @@ structural-depth cap (`MAX_STRUCTURAL_DEPTH`, 10000) — is stored *by reference
 cycle can't compare equal to the original, and a too-deep snapshot would alias its tail then miss on
 lookup / overflow the host stack), so mutating it after insert can still corrupt the collection —
 use shallow acyclic keys if you need the isolation.
+One more residual: a key handed back by **`keys()` / iterating a `map`/`set`** is the *stored* key
+by reference, not a fresh copy — mutating it in place (`for k in m.keys(): k.x = 9`) corrupts the
+collection exactly as mutating a pre-insert original used to. The snapshot protects against mutating
+*your* original after insert; it does not freeze a key you deliberately reach back into. Don't mutate
+keys you get from iteration.
 
 ```chezzi
 struct Point:
