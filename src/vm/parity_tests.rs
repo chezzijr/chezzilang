@@ -6961,3 +6961,133 @@ fn qualified_combined_turbofish_runs() {
     );
     assert_eq!(out, "7\n");
 }
+
+// ----- Map/Set snapshot a struct/enum/newtype key on INSERT (Go value-key model) -----
+// A struct/enum/newtype key/element is deep-copied when STORED, so a later mutation of the
+// caller's original value cannot reach (corrupt) the stored key. Scalars pass through unchanged;
+// map VALUES are never copied; the transient lookup key is never snapshotted.
+
+/// Test A — a struct key is snapshotted on insert: mutating the original after `m[a]=..` leaves
+/// the stored key intact (probe by an equal fresh key), and `m.keys()` shows the PRE-mutation key.
+#[test]
+fn map_struct_key_snapshot_on_insert() {
+    let src = r#"
+struct K:
+    x: int
+    fn hash(self) -> int: return self.x
+fn main():
+    a := K(1)
+    m: Map[K, str] = {}
+    m[a] = "one"
+    a.x = 2                    # mutate the live key in place
+    print(m[K(1)])             # still resolves — stored key was snapshotted at x=1
+    print(m.has(a))            # a is now K(2), not a stored key -> false (no fault)
+    print(m.get(a))            # None (no fault)
+    ks := m.keys()
+    print(ks[0].x)             # 1 — the snapshot, not the mutated original
+main()
+"#;
+    assert_parity_out(src, "one\nfalse\nNone\n1\n");
+}
+
+/// Test B — a set element is snapshotted, so mutating the original after `{a, ..}` cannot break
+/// the set invariant; difference/intersection/union/== stay correct.
+#[test]
+fn set_element_snapshot_algebra() {
+    let src = r#"
+struct K:
+    x: int
+    fn hash(self) -> int: return self.x
+fn main():
+    a := K(1)
+    s := {a, K(2)}
+    a.x = 2                              # would corrupt s if elements aliased
+    print(s.len())                       # 2 (snapshots {x=1, x=2})
+    print(s.difference({K(2)}).len())    # 1
+    print(s.intersection({K(1)}).len())  # 1
+    print(s.union({K(2)}).len())         # 2
+    print(s == {K(1), K(2)})             # true
+main()
+"#;
+    assert_parity_out(src, "2\n1\n1\n2\ntrue\n");
+}
+
+/// Test C — scalar keys (int/str) are unchanged (regression guard for the zero-clone hot path).
+#[test]
+fn scalar_keys_unchanged() {
+    let src = r#"
+fn main():
+    m := {1: "a"}
+    m[1] = "b"
+    print(m[1])
+    c: Map[str, int] = {}
+    c["x"] = 1
+    c["x"] = c["x"] + 1
+    print(c["x"])
+    print(Set([3, 1, 3, 2]).len())
+main()
+"#;
+    assert_parity_out(src, "b\n2\n3\n");
+}
+
+/// Test D — map VALUES are NOT snapshotted: mutating a stored value in place is intended.
+#[test]
+fn map_value_not_snapshotted() {
+    let src = r#"
+struct V:
+    n: int
+fn main():
+    m: Map[int, V] = {}
+    m[1] = V(5)
+    m[1].n = 9                 # mutate the stored value in place
+    print(m[1].n)              # 9 — value held by reference
+main()
+"#;
+    assert_parity_out(src, "9\n");
+}
+
+/// Test — every insert entry point snapshots uniformly (map literal, set literal, set.add,
+/// Map(iterable), Set(iterable), map index-set). Mutate an original inserted via each path.
+#[test]
+fn all_insert_paths_snapshot() {
+    let src = r#"
+struct K:
+    x: int
+    fn hash(self) -> int: return self.x
+fn main():
+    # map literal
+    a := K(1)
+    ml := {a: "v"}
+    a.x = 9
+    print(ml.keys()[0].x)
+    # set literal
+    b := K(2)
+    sl := {b}
+    b.x = 9
+    print(sl.difference({K(2)}).len())
+    # set.add
+    c := K(3)
+    sa := {K(0)}
+    sa.add(c)
+    c.x = 9
+    print(sa.difference({K(3)}).len())
+    # Map(iterable)
+    d := K(4)
+    mi := Map([(d, "v")])
+    d.x = 9
+    print(mi.keys()[0].x)
+    # Set(iterable)
+    e := K(5)
+    si := Set([e])
+    e.x = 9
+    print(si.difference({K(5)}).len())
+    # map index-set (general struct-key path)
+    f := K(6)
+    ms: Map[K, str] = {}
+    ms[f] = "v"
+    f.x = 9
+    print(ms.keys()[0].x)
+main()
+"#;
+    assert_parity_out(src, "1\n0\n1\n4\n0\n6\n");
+}

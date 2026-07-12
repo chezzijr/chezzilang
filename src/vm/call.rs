@@ -2370,6 +2370,11 @@ impl Vm {
                         .iter()
                         .any(|&p| self.values_equal(s.entries[p].1, x));
                     if !present {
+                        // Snapshot a struct/enum/newtype element on insert (Go value-key model) so a
+                        // later mutation of the caller's live value can't corrupt the set. The set
+                        // obj is rooted across the re-entrant deep_clone; the snapshot lands in the
+                        // rooted set before the next alloc.
+                        let x = self.snapshot_key_rooted(x, &[Value::Obj(h)], span)?;
                         let Obj::Set(s) = self.heap.get_mut(h) else {
                             unreachable!()
                         };

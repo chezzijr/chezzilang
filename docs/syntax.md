@@ -1568,6 +1568,14 @@ element** — a struct key is hashed via its `hash()` and the probe confirmed by
 `float` is rejected (NaN footgun). Contract: two structurally-equal structs must return the same
 `hash()` (the implementor owns this, like Rust's `Hash`/`Eq`).
 
+**Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
+(deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach
+— and corrupt — the stored key. This applies to every insert path: `m[k] = v`, the `{k: v}` and
+`{a, b}` literals, `set.add`, and the `Map(it)` / `Set(it)` constructors. **Map values are *not*
+copied** (mutating a stored value in place is intended); the transient lookup key in `m[k]` / `k in
+m` / `s.has(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`) are already immutable
+value-copies, so they take no extra clone.
+
 ```chezzi
 struct Point:
     x: int
@@ -1578,6 +1586,11 @@ struct Point:
 label: Map[Point, str] = {}
 label[Point(1, 2)] = "here"      # struct key — hashed via Point.hash
 print(label[Point(1, 2)])        # here
+
+p := Point(1, 2)
+label[p] = "again"
+p.x = 9                          # mutating the original can't touch the stored key
+print(label[Point(1, 2)])        # still "again" — the stored key was snapshotted
 ```
 
 **Generic structs** carry type parameters after the name; their fields and methods may use them.

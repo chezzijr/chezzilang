@@ -1439,6 +1439,12 @@ impl Vm {
                 for j in 0..count {
                     let k = self.stack[at + 2 * j];
                     hashes.push(self.hash_value(k, span)?);
+                    // Snapshot a struct/enum/newtype key (Go value-key model) and overwrite its
+                    // still-rooted stack slot, so phase 2 stores the snapshot (a later mutation of
+                    // the caller's original can't corrupt the map). The snapshot lands in the rooted
+                    // slot before the next alloc; values (odd slots) are left by-reference.
+                    let snap = self.snapshot_key_rooted(k, &[], span)?;
+                    self.stack[at + 2 * j] = snap;
                 }
                 let mut map = MapData::default();
                 for (j, &hk) in hashes.iter().enumerate() {
@@ -1465,6 +1471,10 @@ impl Vm {
                 let mut hashes = Vec::with_capacity(count);
                 for j in 0..count {
                     hashes.push(self.hash_value(self.stack[at + j], span)?);
+                    // Snapshot a struct/enum/newtype element (Go value-key model) into its still-
+                    // rooted stack slot, so phase 2 stores the snapshot.
+                    let snap = self.snapshot_key_rooted(self.stack[at + j], &[], span)?;
+                    self.stack[at + j] = snap;
                 }
                 let mut set = SetData::default();
                 for (j, &he) in hashes.iter().enumerate() {

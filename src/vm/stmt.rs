@@ -832,12 +832,24 @@ impl Vm {
                 .iter()
                 .copied()
                 .find(|&p| self.values_equal(m.entries[p].1, key));
-            let Obj::Map(m) = self.heap.get_mut(h) else {
-                unreachable!()
-            };
+            // On INSERT only, snapshot a struct/enum/newtype key so a later mutation of the
+            // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
+            // stored key and pays no clone. `obj`/`val` are rooted across the re-entrant deep_clone;
+            // the returned snapshot lands in an already-rooted slot (the map) before the next alloc.
             match pos {
-                Some(i) => m.entries[i].2 = val,
-                None => m.push(hk, key, val),
+                Some(i) => {
+                    let Obj::Map(m) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
+                    m.entries[i].2 = val;
+                }
+                None => {
+                    let key = self.snapshot_key_rooted(key, &[obj, val], span)?;
+                    let Obj::Map(m) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
+                    m.push(hk, key, val);
+                }
             }
             return Ok(());
         }
@@ -1299,18 +1311,45 @@ impl Vm {
                 ));
             }
         };
-        // Root the source elements (as a fresh heap list) so they survive a struct element's
-        // re-entrant hash() GC; hash every element first (phase 1, rooted), then build GC-free.
-        let list_obj = Value::Obj(self.heap.alloc(Obj::List(src.clone())));
-        self.push(list_obj);
+        // Root the source elements (as a fresh PRIVATE heap list) so they survive a struct
+        // element's re-entrant hash()/deep_clone() GC. Phase 0 snapshots each struct/enum/newtype
+        // element IN PLACE in that rooted list (Go value-key model — a later mutation of the
+        // caller's original can't corrupt the set); the list is ours, so overwriting is safe. Then
+        // hash (phase 1, rooted) and build GC-free (phase 2), reading the snapshots from the list.
+        let lh = self.heap.alloc(Obj::List(src.clone()));
+        self.push(Value::Obj(lh));
+        let n = src.len();
         let built = (|| {
-            let mut hashes = Vec::with_capacity(src.len());
-            for &v in &src {
+            for i in 0..n {
+                let orig = {
+                    let Obj::List(b) = self.heap.get(lh) else {
+                        unreachable!()
+                    };
+                    b[i]
+                };
+                let snap = self.snapshot_key_rooted(orig, &[], span)?;
+                if let Obj::List(b) = self.heap.get_mut(lh) {
+                    b[i] = snap;
+                }
+            }
+            let mut hashes = Vec::with_capacity(n);
+            for i in 0..n {
+                let v = {
+                    let Obj::List(b) = self.heap.get(lh) else {
+                        unreachable!()
+                    };
+                    b[i]
+                };
                 hashes.push(self.hash_value(v, span)?);
             }
             let mut set = SetData::default();
-            for (i, &v) in src.iter().enumerate() {
-                let he = hashes[i];
+            for (i, &he) in hashes.iter().enumerate() {
+                let v = {
+                    let Obj::List(b) = self.heap.get(lh) else {
+                        unreachable!()
+                    };
+                    b[i]
+                };
                 if !set
                     .candidates(he)
                     .iter()
@@ -1392,6 +1431,10 @@ impl Vm {
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
         let src_obj = Value::Obj(self.heap.alloc(Obj::List(drained.clone())));
         self.push(src_obj);
+        // Snapshot keys are rooted by pushing them onto the operand stack (the drained tuples may
+        // ALIAS caller-held tuples, so they cannot be mutated in place). Everything above this base
+        // is popped after the build, on both the Ok and Err path.
+        let stack_base = self.stack.len();
         let built = (|| {
             let mut map = MapData::default();
             for elem in &drained {
@@ -1417,6 +1460,11 @@ impl Vm {
                             ));
                         }
                     };
+                // Snapshot a struct/enum/newtype KEY on insert (Go value-key model); root it on the
+                // operand stack for the rest of the build. Values stay by-reference (rooted via
+                // src_obj). The snapshot is `==` the original, so its hash is unchanged.
+                let k = self.snapshot_key_rooted(k, &[v], span)?;
+                self.push(k);
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
                 let pos = map
@@ -1431,6 +1479,7 @@ impl Vm {
             }
             Ok(map)
         })();
+        self.stack.truncate(stack_base); // unroot the snapshot keys (Ok or Err)
         self.pop(); // unroot the source list
         Ok(Value::Obj(self.heap.alloc(Obj::Map(built?))))
     }

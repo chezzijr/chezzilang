@@ -372,3 +372,38 @@ main()";
     // order-insensitively (the exact cooperative order is pinned above).
     assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
 }
+
+/// The insert-path key/element snapshot (deep_clone) allocates → GC can fire mid-snapshot. Every
+/// snapshot must be rooted (stack slot for NewMap/NewSet + map/set index-set; operand stack for
+/// Map()/Set() ctors) before the next allocation, else it is collected and reads/algebra go wrong.
+/// Mutate the originals after insert to prove the collection holds SNAPSHOTS, not aliases.
+#[test]
+fn map_struct_key_snapshot_survives_gc_stress() {
+    let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        junk := [str(self.n), str(self.n + 1)]
+        return self.n
+fn main():
+    a := K(1)
+    b := K(2)
+    m: Map[K, str] = {a: str(1), b: str(2)}   # NewMap literal
+    s := {a, b, K(3)}                          # NewSet literal
+    a.n = 90                                   # mutate originals AFTER insert
+    b.n = 91
+    mi := Map([(K(4), str(4)), (K(5), str(5))])  # Map(iterable)
+    si := Set([K(6), K(7), K(6)])                # Set(iterable)
+    c := K(8)
+    s.add(c)
+    c.n = 92
+    ks := \"\"
+    for k in m:
+        ks = ks + str(k.n)
+    print(ks)                                  # 12 (snapshots, not 90/91)
+    print(s.difference({K(1), K(2), K(3), K(8)}).len())   # 0 (all present as snapshots)
+    print(mi.keys()[0].n)                      # 4
+    print(si.len())                            # 2
+main()";
+    assert_eq!(run_capture_stress(src), "12\n0\n4\n2\n");
+}

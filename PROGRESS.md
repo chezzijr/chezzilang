@@ -4108,6 +4108,25 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   #4 is the stepping stone). 7. NaN-boxing (BLOCKED, above). 8. register VM / generational GC (low ROI).
 
 ### Robustness pass (landed, both engines)
+- **Map/Set now snapshot a struct/enum/newtype key on INSERT (Go value-key model, 2026-07-12).**
+  A `struct`/`enum`/`newtype` key/element was stored BY REFERENCE (aliased to the caller's live
+  value). Because structs are mutable, mutating the value AFTER using it as a key/element silently
+  corrupted the collection (`m[a]="x"; a.x=2; m[a]` → `key not found` on the object you hold; Set
+  dedup/algebra broke without a fault). Fix: one reused helper `snapshot_key_rooted` (`vm/arith.rs`,
+  beside `hash_key_rooted`) deep-copies the key **only** for the three heap-aggregate arms
+  `hash_value` dispatches (`Obj::Struct|Enum|NewType`) via the EXISTING airlock `deep_clone`
+  machinery (`sched.rs`), and passes scalars / immutable `Obj::Str`/`Obj::Bytes` through unchanged
+  (zero-clone hot path — no M19 scalar-key regression). Wired at all six insert sites: map index-set
+  (`stmt.rs`, insert branch only — an UPDATE reuses the stored key, no clone), `set.add` (`call.rs`),
+  `Op::NewMap`/`Op::NewSet` phase-1 (`exec.rs`, snapshot into the still-rooted stack slot),
+  `Set(iterable)` and `Map(iterable)` (`stmt.rs`). **Values are never copied** (mutating a stored
+  value in place stays intended); the transient lookup key (`m[k]`, `k in m`, `s.has(k)`) is never
+  snapshotted. GC-rooted at every site (gc-stress test proves it). Behavior change: a key that
+  embeds a frame-holding generator / self-cycle / captured `ref` now FAULTS on insert (both engines
+  identically) where it previously aliased — such values are already dubious keys; silent-corrupt →
+  hard-fault is a net win. Tests: `map_struct_key_snapshot_on_insert`, `set_element_snapshot_algebra`,
+  `all_insert_paths_snapshot`, `scalar_keys_unchanged`, `map_value_not_snapshotted` (parity_tests),
+  `map_struct_key_snapshot_survives_gc_stress` (gc_tests). Docs: `docs/syntax.md` Hashable section.
 - **Import-alias guard now symmetric on reserved TYPE names (Finding B, 2026-07-10).** The
   `import X as ALIAS from M` / `import M as ALIAS` guards rejected reserved CALLABLE aliases
   (`import who as int` → `reserved (builtin)`) but silently ACCEPTED reserved TYPE names

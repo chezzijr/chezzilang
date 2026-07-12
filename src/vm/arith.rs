@@ -1079,6 +1079,40 @@ impl Vm {
         res
     }
 
+    /// Snapshot (deep-copy) a struct/enum/newtype key/element on the STORE path (Go value-key
+    /// model): mutating the caller's original value AFTER it is stored can no longer reach the
+    /// stored key, so the collection can't be silently corrupted. Scalars and immutable
+    /// `Obj::Str`/`Obj::Bytes` pass through UNCHANGED (zero-clone hot path — mirrors the
+    /// `hash_value` dispatch triple). `deep_clone` re-enters the wire machinery and allocates → may
+    /// GC; `roots` are kept on the operand stack across it (like `hash_key_rooted`). The caller must
+    /// root the returned snapshot before its next allocation. A snapshot is structurally `==` the
+    /// original, so a hash computed on either is valid for the other.
+    pub(super) fn snapshot_key_rooted(
+        &mut self,
+        key: Value,
+        roots: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let needs = matches!(
+            key,
+            Value::Obj(h) if matches!(
+                self.heap.get(h),
+                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
+            )
+        );
+        if !needs {
+            return Ok(key);
+        }
+        for &r in roots {
+            self.push(r);
+        }
+        let res = self.deep_clone(key, span);
+        for _ in roots {
+            self.pop();
+        }
+        res
+    }
+
     /// `xs.sort()` over a list of Comparable structs, ordering via each struct's `compare`. Because
     /// `compare` re-enters the VM (and may allocate / trigger GC), this mirrors `list_sort_by`
     /// exactly: snapshot the elements into a heap list ROOTED on the operand stack, permute
