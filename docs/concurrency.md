@@ -964,7 +964,10 @@ SIBLINGS in ONE nursery (the doc case C pattern).
     still cancels-and-reports that inner nursery (unchanged) while joining the function's implicit one.
     An uncaught **fault** propagating out of a body cancels-and-reports the implicit nursery's
     unstarted tasks (abnormal exit, not a join). `defer`s run *after* the implicit join (tasks
-    complete, then cleanup). The report is emitted **per nursery** (innermost-first — two stacked
+    complete, then cleanup) — and identically for an **explicit** `parallel:` block: a `defer`
+    directly inside the block flushes *after* the block's dedent join (its spawned children run to
+    completion first, then the block's deferred cleanup), same order as the implicit body nursery.
+    The report is emitted **per nursery** (innermost-first — two stacked
     nurseries print two lines), identically on both engines (serial `--serial` and default M:N). The
     **module** top-level nursery is the one exception: an uncaught *top-level* fault leaves it silent
     (it joins only on a clean run to program end). [resolved 2026-06-12 — see PROGRESS.md; previously

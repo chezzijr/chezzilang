@@ -11,6 +11,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **✅ BUGFIX — `parallel:` block defer/join order (2026-07-12, `auto-task/parallel-defer-join-order`).**
+> A `defer` directly inside an explicit `parallel:` block flushed *before* the block's spawned children
+> joined (violating the documented "defers run after the join" invariant that already held for the
+> implicit function-body nursery). Pure compiler emission-order fix in `compile_parallel`
+> (`src/compiler/mod.rs`): the closing `LeaveDeferScope` now lands *after* `JoinNursery`
+> (EnterNursery, [EnterDeferScope], body, JoinNursery, [LeaveDeferScope]). Defer-free blocks stay
+> byte-identical; the break/continue jump-out drain path is unchanged (each marker still pops once). 3
+> parity tests in `src/vm/parity_tests.rs` (ordering, deferred-`ch.close()`-after-join, break-once).
+> Docs: `docs/concurrency.md` join-semantics bullet.
+>
 > **✅ BUGFIX — `std.json` RFC-8259 conformance (2026-07-12, `auto-task/json-escape-leading-zero`).**
 > Three same-file fixes in `std/json.chz`: (1) `stringify` now `\u00XX`-escapes control chars
 > `U+0000..U+001F` (Go `encoding/json` policy) instead of emitting raw bytes → always-valid JSON;

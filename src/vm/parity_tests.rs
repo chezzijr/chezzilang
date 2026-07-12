@@ -6813,3 +6813,61 @@ fn main():
 main()";
     assert_parity_out(src, "43\n");
 }
+
+#[test]
+fn parallel_block_defer_flushes_after_join_parity() {
+    // A `defer` inside an explicit `parallel:` block flushes AFTER the block's children join at the
+    // dedent — same order as the implicit function-body nursery. Pre-fix the defer fired BEFORE the
+    // spawned child joined (block-defer/child-body/after); now: child-body/block-defer/after.
+    let src = "\
+fn log(m: str): print(m)
+fn child(): log(\"child-body\")
+fn main():
+    parallel:
+        spawn child()
+        defer log(\"block-defer\")
+    log(\"after\")
+main()";
+    assert_parity_out(src, "child-body\nblock-defer\nafter\n");
+}
+
+#[test]
+fn parallel_block_defer_close_after_join_parity() {
+    // A deferred channel close inside `parallel:` must run AFTER the spawned send joins — the natural
+    // cleanup pattern. Pre-fix the close raced ahead of the send ("send on a closed channel"); now the
+    // send buffers before close, so `ch.len()` is 1.
+    let src = "\
+fn snd(ch: Channel[int]): ch.send(1)
+fn main():
+    ch := Channel[int]()
+    r := recover:
+        parallel:
+            spawn snd(ch)
+            defer ch.close()
+        1
+    match r:
+        Ok(v): print(\"ok, len={ch.len()}\")
+        Err(e): print(\"err: {e.message()}\")
+main()";
+    assert_parity_out(src, "ok, len=1\n");
+}
+
+#[test]
+fn parallel_block_defer_break_flushes_once_parity() {
+    // Regression for the break/early-jump path: a loop whose body is a `parallel:` block with a
+    // `defer` then a `break` still flushes the block's defer EXACTLY once (the jump path drains it;
+    // the fall-through JoinNursery+LeaveDeferScope is skipped). Guards that the reorder didn't botch
+    // the defer_scopes/nursery_scopes counter bracketing.
+    let src = "\
+fn log(m: str): print(m)
+fn main():
+    i := 0
+    while i < 3:
+        parallel:
+            defer log(\"d\")
+            break
+        i = i + 1
+    log(\"done\")
+main()";
+    assert_parity_out(src, "d\ndone\n");
+}
