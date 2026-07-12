@@ -1080,37 +1080,237 @@ impl Vm {
     }
 
     /// Snapshot (deep-copy) a struct/enum/newtype key/element on the STORE path (Go value-key
-    /// model): mutating the caller's original value AFTER it is stored can no longer reach the
-    /// stored key, so the collection can't be silently corrupted. Scalars and immutable
-    /// `Obj::Str`/`Obj::Bytes` pass through UNCHANGED (zero-clone hot path — mirrors the
-    /// `hash_value` dispatch triple). `deep_clone` re-enters the wire machinery and allocates → may
-    /// GC; `roots` are kept on the operand stack across it (like `hash_key_rooted`). The caller must
-    /// root the returned snapshot before its next allocation. A snapshot is structurally `==` the
-    /// original, so a hash computed on either is valid for the other.
-    pub(super) fn snapshot_key_rooted(
+    /// model): after the key is stored, mutating the caller's original value can no longer reach the
+    /// stored key, so the collection can't be silently corrupted. Only the three heap-aggregate arms
+    /// `hash_value` dispatches (`Struct`/`Enum`/`NewType`) are copied — scalars and every immutable /
+    /// by-reference object pass through UNCHANGED (zero-clone hot path). Infallible + pure-alloc (no
+    /// VM re-entry ⇒ no GC fires mid-copy), so it needs no rooting; a caller that then re-enters the
+    /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
+    ///
+    /// Deliberately NOT `deep_clone` (the concurrency airlock's `to_wire`/`from_wire`): that
+    /// serializer (a) FAULTS on a generator / captured `ref` / cyclic key — nonsensical for a plain
+    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilds
+    /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
+    /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of
+    /// the same key misses. [`Vm::snapshot_value`] instead copies only the mutable, structurally-
+    /// compared arms and keeps identity/by-reference sub-values by handle, so the snapshot stays
+    /// `values_equal` to the original (its cached hash is therefore still valid).
+    pub(super) fn snapshot_key(&mut self, key: Value) -> Value {
+        match key {
+            Value::Obj(h)
+                if matches!(
+                    self.heap.get(h),
+                    Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
+                ) =>
+            {
+                // A CYCLIC key is stored BY REFERENCE (base behavior): a structural snapshot of a
+                // cycle can't be `values_equal` to the original — `values_equal` itself bails on a
+                // cycle (`MAX_STRUCTURAL_DEPTH`) — so a snapshotted cyclic key would never resolve on
+                // lookup (a silent true→false regression). The snapshot's whole point (value-key
+                // isolation) is anyway unattainable for a self-referential mutable value.
+                // ponytail: cyclic struct/enum keys keep the pre-existing mutate-after-store aliasing
+                // ceiling — use acyclic/immutable keys if you need value-key isolation.
+                if self.graph_is_cyclic(key) {
+                    return key;
+                }
+                let mut visited = super::fxhash::FxHashMap::default();
+                self.snapshot_value(key, &mut visited, 0)
+            }
+            _ => key,
+        }
+    }
+
+    /// True iff the value graph reachable from `v` (through the SAME mutable-aggregate arms
+    /// [`Vm::snapshot_value`] copies) contains a cycle. Read-only, allocates only two small work
+    /// sets; runs on the cold struct/enum/newtype key-insert path. `on_path` holds the DFS recursion
+    /// stack (a back-edge into it = cycle); `done` memoizes fully-cleared nodes so a shared (DAG)
+    /// sub-value isn't re-walked (no exponential blow-up on a diamond).
+    fn graph_is_cyclic(&self, v: Value) -> bool {
+        let mut on_path = super::fxhash::FxHashMap::default();
+        let mut done = super::fxhash::FxHashMap::default();
+        self.cyclic_walk(v, &mut on_path, &mut done)
+    }
+
+    fn cyclic_walk(
+        &self,
+        v: Value,
+        on_path: &mut super::fxhash::FxHashMap<GcRef, ()>,
+        done: &mut super::fxhash::FxHashMap<GcRef, ()>,
+    ) -> bool {
+        let Value::Obj(h) = v else {
+            return false;
+        };
+        if on_path.contains_key(&h) {
+            return true; // back-edge into the active DFS stack → cycle
+        }
+        if done.contains_key(&h) {
+            return false; // already fully cleared (shared DAG node)
+        }
+        let children: Vec<Value> = match self.heap.get(h) {
+            Obj::Struct { fields, .. } => fields.clone(),
+            Obj::Enum { payload, .. } => payload.clone(),
+            Obj::NewType { inner, .. } => vec![*inner],
+            Obj::List(items) | Obj::Tuple(items) => items.clone(),
+            Obj::Map(m) => m
+                .entries
+                .iter()
+                .flat_map(|(_, k, val)| [*k, *val])
+                .collect(),
+            Obj::Set(s) => s.entries.iter().map(|(_, e)| *e).collect(),
+            _ => {
+                done.insert(h, ()); // leaf / by-reference object: never descended when copying
+                return false;
+            }
+        };
+        on_path.insert(h, ());
+        for c in children {
+            if self.cyclic_walk(c, on_path, done) {
+                return true;
+            }
+        }
+        on_path.remove(&h);
+        done.insert(h, ());
+        false
+    }
+
+    /// Recursive worker for [`Vm::snapshot_key`]. Deep-copies only the MUTABLE, structurally-`==`
+    /// aggregate arms (`Struct`/`Enum`/`NewType`/`List`/`Tuple`/`Map`/`Set`/`ByteArray`) and returns
+    /// every other value (scalars, immutable `Str`/`Bytes`/`Ptr`/`Builtin`, and all identity-compared
+    /// by-reference objects: `Closure`/`Func`/`Channel`/`Shared`/…/`Generator`/`Iter`/`Cell`) BY
+    /// REFERENCE — keeping those handles is what preserves `values_equal` (identity-only for them) and
+    /// avoids the airlock's non-sendable faults. `visited` maps an original aggregate handle to its
+    /// copy so a cyclic key is copied ONCE (cycle preserved, not overflowed); `depth` caps genuinely
+    /// deep (non-cyclic) keys at `MAX_STRUCTURAL_DEPTH` — the SAME bound `values_equal`/`to_wire` use —
+    /// degrading to by-reference rather than a host-stack overflow. Pure alloc (no VM re-entry) so no
+    /// GC can run mid-walk, hence no rooting: the intermediate handles held in Rust locals stay live.
+    fn snapshot_value(
         &mut self,
-        key: Value,
-        roots: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let needs = matches!(
-            key,
-            Value::Obj(h) if matches!(
-                self.heap.get(h),
-                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
-            )
-        );
-        if !needs {
-            return Ok(key);
+        v: Value,
+        visited: &mut super::fxhash::FxHashMap<GcRef, GcRef>,
+        depth: usize,
+    ) -> Value {
+        let Value::Obj(h) = v else {
+            return v; // scalars
+        };
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return v; // absurdly deep (non-cyclic) key: stop copying, alias the tail (no overflow)
         }
-        for &r in roots {
-            self.push(r);
+        if let Some(&c) = visited.get(&h) {
+            return Value::Obj(c); // already copied (shared sub-value or cycle back-edge)
         }
-        let res = self.deep_clone(key, span);
-        for _ in roots {
-            self.pop();
+        match self.heap.get(h) {
+            Obj::List(items) => {
+                let items = items.clone();
+                let nh = self.heap.alloc(Obj::List(items.clone()));
+                visited.insert(h, nh);
+                let copied: Vec<Value> = items
+                    .iter()
+                    .map(|&x| self.snapshot_value(x, visited, depth + 1))
+                    .collect();
+                if let Obj::List(dst) = self.heap.get_mut(nh) {
+                    *dst = copied;
+                }
+                Value::Obj(nh)
+            }
+            Obj::Tuple(items) => {
+                let items = items.clone();
+                let nh = self.heap.alloc(Obj::Tuple(items.clone()));
+                visited.insert(h, nh);
+                let copied: Vec<Value> = items
+                    .iter()
+                    .map(|&x| self.snapshot_value(x, visited, depth + 1))
+                    .collect();
+                if let Obj::Tuple(dst) = self.heap.get_mut(nh) {
+                    *dst = copied;
+                }
+                Value::Obj(nh)
+            }
+            Obj::Struct { name, tid, fields } => {
+                let (name, tid, fields) = (name.clone(), *tid, fields.clone());
+                let nh = self.heap.alloc(Obj::Struct {
+                    name,
+                    tid,
+                    fields: fields.clone(),
+                });
+                visited.insert(h, nh);
+                let copied: Vec<Value> = fields
+                    .iter()
+                    .map(|&f| self.snapshot_value(f, visited, depth + 1))
+                    .collect();
+                if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
+                    *fields = copied;
+                }
+                Value::Obj(nh)
+            }
+            Obj::Enum {
+                variant_id,
+                payload,
+            } => {
+                let (variant_id, payload) = (*variant_id, payload.clone());
+                let nh = self.heap.alloc(Obj::Enum {
+                    variant_id,
+                    payload: payload.clone(),
+                });
+                visited.insert(h, nh);
+                let copied: Vec<Value> = payload
+                    .iter()
+                    .map(|&p| self.snapshot_value(p, visited, depth + 1))
+                    .collect();
+                if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
+                    *payload = copied;
+                }
+                Value::Obj(nh)
+            }
+            Obj::NewType { type_key, inner } => {
+                let (type_key, inner) = (type_key.clone(), *inner);
+                let nh = self.heap.alloc(Obj::NewType { type_key, inner });
+                visited.insert(h, nh);
+                let ci = self.snapshot_value(inner, visited, depth + 1);
+                if let Obj::NewType { inner, .. } = self.heap.get_mut(nh) {
+                    *inner = ci;
+                }
+                Value::Obj(nh)
+            }
+            Obj::Map(m) => {
+                let entries = m.entries.clone();
+                let nh = self.heap.alloc(Obj::Map(m.clone()));
+                visited.insert(h, nh);
+                let copied: Vec<(u64, Value, Value)> = entries
+                    .iter()
+                    .map(|&(hh, k, val)| {
+                        (
+                            hh,
+                            self.snapshot_value(k, visited, depth + 1),
+                            self.snapshot_value(val, visited, depth + 1),
+                        )
+                    })
+                    .collect();
+                if let Obj::Map(dst) = self.heap.get_mut(nh) {
+                    dst.entries = copied;
+                }
+                Value::Obj(nh)
+            }
+            Obj::Set(s) => {
+                let entries = s.entries.clone();
+                let nh = self.heap.alloc(Obj::Set(s.clone()));
+                visited.insert(h, nh);
+                let copied: Vec<(u64, Value)> = entries
+                    .iter()
+                    .map(|&(hh, e)| (hh, self.snapshot_value(e, visited, depth + 1)))
+                    .collect();
+                if let Obj::Set(dst) = self.heap.get_mut(nh) {
+                    dst.entries = copied;
+                }
+                Value::Obj(nh)
+            }
+            // A `bytearray` is mutable + structurally compared but a GC LEAF (raw bytes, no children):
+            // copy the buffer, no recursion, no visited entry (it can't participate in a cycle).
+            Obj::ByteArray(b) => Value::Obj(self.heap.alloc(Obj::ByteArray(b.clone()))),
+            // Everything else (immutable `Str`/`Bytes`/`Ptr`/`Builtin` + all identity-compared
+            // by-reference objects) is kept BY REFERENCE — a copy would break `values_equal` for the
+            // identity arms and needlessly duplicate the immutable ones.
+            _ => v,
         }
-        res
     }
 
     /// `xs.sort()` over a list of Comparable structs, ordering via each struct's `compare`. Because

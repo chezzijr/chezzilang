@@ -373,10 +373,11 @@ main()";
     assert_same_lines(&normal, &run_capture_parallel(src).expect("M:N run"));
 }
 
-/// The insert-path key/element snapshot (deep_clone) allocates → GC can fire mid-snapshot. Every
-/// snapshot must be rooted (stack slot for NewMap/NewSet + map/set index-set; operand stack for
-/// Map()/Set() ctors) before the next allocation, else it is collected and reads/algebra go wrong.
-/// Mutate the originals after insert to prove the collection holds SNAPSHOTS, not aliases.
+/// `snapshot_value` itself is pure alloc (no GC), but each insert path interleaves snapshots with
+/// the ELEMENTS' re-entrant `hash()` (which allocates junk here → GC can fire). A snapshot made for
+/// one element must be rooted (stack slot for NewMap/NewSet + map/set index-set; operand stack for
+/// Map()/Set() ctors) before the NEXT element's `hash()` runs, else it is collected and reads/algebra
+/// go wrong. Mutate the originals after insert to prove the collection holds SNAPSHOTS, not aliases.
 #[test]
 fn map_struct_key_snapshot_survives_gc_stress() {
     let src = "\

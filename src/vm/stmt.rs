@@ -834,8 +834,7 @@ impl Vm {
                 .find(|&p| self.values_equal(m.entries[p].1, key));
             // On INSERT only, snapshot a struct/enum/newtype key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
-            // stored key and pays no clone. `obj`/`val` are rooted across the re-entrant deep_clone;
-            // the returned snapshot lands in an already-rooted slot (the map) before the next alloc.
+            // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
             match pos {
                 Some(i) => {
                     let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -844,7 +843,9 @@ impl Vm {
                     m.entries[i].2 = val;
                 }
                 None => {
-                    let key = self.snapshot_key_rooted(key, &[obj, val], span)?;
+                    // Snapshot a struct/enum/newtype key on INSERT only (Go value-key model); pure
+                    // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
+                    let key = self.snapshot_key(key);
                     let Obj::Map(m) = self.heap.get_mut(h) else {
                         unreachable!()
                     };
@@ -1312,10 +1313,11 @@ impl Vm {
             }
         };
         // Root the source elements (as a fresh PRIVATE heap list) so they survive a struct
-        // element's re-entrant hash()/deep_clone() GC. Phase 0 snapshots each struct/enum/newtype
-        // element IN PLACE in that rooted list (Go value-key model — a later mutation of the
-        // caller's original can't corrupt the set); the list is ours, so overwriting is safe. Then
-        // hash (phase 1, rooted) and build GC-free (phase 2), reading the snapshots from the list.
+        // element's re-entrant hash() GC. Phase 0 snapshots each struct/enum/newtype element IN
+        // PLACE in that rooted list (Go value-key model — a later mutation of the caller's original
+        // can't corrupt the set); the list is ours, so overwriting is safe, and rooting the
+        // snapshots there keeps them alive across the phase-1 re-entrant hashes. Then hash (phase 1)
+        // and build GC-free (phase 2), reading the snapshots from the list.
         let lh = self.heap.alloc(Obj::List(src.clone()));
         self.push(Value::Obj(lh));
         let n = src.len();
@@ -1327,7 +1329,7 @@ impl Vm {
                     };
                     b[i]
                 };
-                let snap = self.snapshot_key_rooted(orig, &[], span)?;
+                let snap = self.snapshot_key(orig);
                 if let Obj::List(b) = self.heap.get_mut(lh) {
                     b[i] = snap;
                 }
@@ -1461,9 +1463,10 @@ impl Vm {
                         }
                     };
                 // Snapshot a struct/enum/newtype KEY on insert (Go value-key model); root it on the
-                // operand stack for the rest of the build. Values stay by-reference (rooted via
-                // src_obj). The snapshot is `==` the original, so its hash is unchanged.
-                let k = self.snapshot_key_rooted(k, &[v], span)?;
+                // operand stack for the rest of the build (the later `hash_key_rooted` re-enters the
+                // VM → GC). Values stay by-reference (rooted via src_obj). The snapshot is `==` the
+                // original, so its hash is unchanged.
+                let k = self.snapshot_key(k);
                 self.push(k);
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).

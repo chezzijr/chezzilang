@@ -4112,21 +4112,31 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   A `struct`/`enum`/`newtype` key/element was stored BY REFERENCE (aliased to the caller's live
   value). Because structs are mutable, mutating the value AFTER using it as a key/element silently
   corrupted the collection (`m[a]="x"; a.x=2; m[a]` → `key not found` on the object you hold; Set
-  dedup/algebra broke without a fault). Fix: one reused helper `snapshot_key_rooted` (`vm/arith.rs`,
-  beside `hash_key_rooted`) deep-copies the key **only** for the three heap-aggregate arms
-  `hash_value` dispatches (`Obj::Struct|Enum|NewType`) via the EXISTING airlock `deep_clone`
-  machinery (`sched.rs`), and passes scalars / immutable `Obj::Str`/`Obj::Bytes` through unchanged
-  (zero-clone hot path — no M19 scalar-key regression). Wired at all six insert sites: map index-set
-  (`stmt.rs`, insert branch only — an UPDATE reuses the stored key, no clone), `set.add` (`call.rs`),
-  `Op::NewMap`/`Op::NewSet` phase-1 (`exec.rs`, snapshot into the still-rooted stack slot),
-  `Set(iterable)` and `Map(iterable)` (`stmt.rs`). **Values are never copied** (mutating a stored
-  value in place stays intended); the transient lookup key (`m[k]`, `k in m`, `s.has(k)`) is never
-  snapshotted. GC-rooted at every site (gc-stress test proves it). Behavior change: a key that
-  embeds a frame-holding generator / self-cycle / captured `ref` now FAULTS on insert (both engines
-  identically) where it previously aliased — such values are already dubious keys; silent-corrupt →
-  hard-fault is a net win. Tests: `map_struct_key_snapshot_on_insert`, `set_element_snapshot_algebra`,
-  `all_insert_paths_snapshot`, `scalar_keys_unchanged`, `map_value_not_snapshotted` (parity_tests),
-  `map_struct_key_snapshot_survives_gc_stress` (gc_tests). Docs: `docs/syntax.md` Hashable section.
+  dedup/algebra broke without a fault). Fix: `snapshot_key` (`vm/arith.rs`, beside `hash_key_rooted`)
+  deep-copies the key **only** for the three heap-aggregate arms `hash_value` dispatches
+  (`Obj::Struct|Enum|NewType`); scalars / immutable `Str`/`Bytes` pass through unchanged (zero-clone
+  hot path — no M19 scalar-key regression). It does **not** reuse the airlock `deep_clone`
+  (`to_wire`/`from_wire`): that serializer FAULTS on a generator / captured `ref` / cyclic key (all
+  legal, previously-working sequential keys) and re-stamps by-reference sub-values (a closure /
+  `Channel` / `Shared` field) with FRESH handles that `values_equal` — identity-only for those arms —
+  then never matches (a stored-snapshot ≠ live-key lookup miss). Instead a dedicated `snapshot_value`
+  copies only the mutable, structurally-`==` arms (`Struct/Enum/NewType/List/Tuple/Map/Set/ByteArray`)
+  and keeps every identity/by-reference sub-value by handle, so the snapshot stays `values_equal` to
+  the original; it is pure-alloc (no VM re-entry ⇒ no GC mid-copy ⇒ no rooting), visited-map-deduped
+  (no DAG blow-up) and `MAX_STRUCTURAL_DEPTH`-capped. Wired at every insert site: map index-set,
+  `set.add`, `Op::NewMap`/`Op::NewSet` literals, `Set(iterable)`/`Map(iterable)`, and **`Map.update` /
+  `Map.merge`** (the spec-listed paths the first cut left aliasing — `update`/`merge` now snapshot the
+  incoming keys, and `merge` builds fresh instead of `clone()`-aliasing the receiver's keys).
+  **Values are never copied** (mutating a stored value in place stays intended); the transient lookup
+  key (`m[k]`, `k in m`, `s.has(k)`) is never snapshotted. **Ceilings** (both match pre-change
+  behavior, no new fault): a **cyclic** struct/enum key is stored by reference (a value-copy of a
+  cycle can't compare equal to the original), so mutate-after-store can still corrupt it; set-algebra
+  RESULT aliasing (`union`/`intersection`/`difference`) is a distinct out-of-scope surface. Tests:
+  `map_struct_key_snapshot_on_insert`, `set_element_snapshot_algebra`, `all_insert_paths_snapshot`,
+  `scalar_keys_unchanged`, `map_value_not_snapshotted`, `cyclic_struct_key_inserts_and_resolves`,
+  `generator_field_key_inserts_and_resolves`, `closure_field_key_resolves_after_insert`,
+  `map_update_merge_snapshot_keys` (parity_tests), `map_struct_key_snapshot_survives_gc_stress`
+  (gc_tests). Docs: `docs/syntax.md` Hashable section.
 - **Import-alias guard now symmetric on reserved TYPE names (Finding B, 2026-07-10).** The
   `import X as ALIAS from M` / `import M as ALIAS` guards rejected reserved CALLABLE aliases
   (`import who as int` → `reserved (builtin)`) but silently ACCEPTED reserved TYPE names

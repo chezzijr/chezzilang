@@ -1571,10 +1571,16 @@ element** — a struct key is hashed via its `hash()` and the probe confirmed by
 **Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
 (deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach
 — and corrupt — the stored key. This applies to every insert path: `m[k] = v`, the `{k: v}` and
-`{a, b}` literals, `set.add`, and the `Map(it)` / `Set(it)` constructors. **Map values are *not*
-copied** (mutating a stored value in place is intended); the transient lookup key in `m[k]` / `k in
-m` / `s.has(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`) are already immutable
-value-copies, so they take no extra clone.
+`{a, b}` literals, `set.add`, `Map.update` / `Map.merge`, and the `Map(it)` / `Set(it)` constructors.
+**Map values are *not* copied** (mutating a stored value in place is intended); the transient lookup
+key in `m[k]` / `k in m` / `s.has(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`)
+are already immutable value-copies, so they take no extra clone. The snapshot copies only the mutable
+aggregate structure (nested structs/enums/lists/maps/sets); an embedded by-reference sub-value (a
+closure, `Channel`, `Shared`, a live generator, …) stays shared by handle — those are identity-
+compared, so copying them would break lookup, and they have no mutable field that could corrupt the
+key anyway. One ceiling: a **self-referential (cyclic)** struct/enum key is stored *by reference*
+(a value-copy of a cycle can't compare equal to the original), so mutating it after insert can still
+corrupt the collection — use acyclic keys if you need the isolation.
 
 ```chezzi
 struct Point:

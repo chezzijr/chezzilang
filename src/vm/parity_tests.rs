@@ -7091,3 +7091,112 @@ main()
 "#;
     assert_parity_out(src, "1\n0\n1\n4\n0\n6\n");
 }
+
+// ----- Regression: snapshot must NOT reuse the airlock deep_clone (its fault/identity-remap modes)
+// A struct/enum/newtype key that embeds a cyclic back-edge, a live generator, or an identity-typed
+// (closure/channel/…) sub-value used to be stored BY REFERENCE and worked on a plain serial insert.
+// The first cut routed the snapshot through `deep_clone` (to_wire/from_wire), which FAULTED on the
+// first two and gave the identity sub-value a FRESH handle (so `values_equal`, identity-only for it,
+// never matched → lookup miss). `snapshot_value` copies only mutable structural arms + keeps
+// identity/by-ref sub-values by handle, so all three insert AND resolve again.
+
+/// A self-cyclic struct key inserts (cycle preserved by the visited-map, no depth-overflow fault)
+/// and still resolves — regression for the `deep_clone` "maximum structural depth exceeded" fault.
+#[test]
+fn cyclic_struct_key_inserts_and_resolves() {
+    let src = r#"
+struct Node:
+    val: int
+    next: Option[Node]
+    fn hash(self) -> int: return self.val
+fn main():
+    a := Node(1, None)
+    a.next = Some(a)
+    s := {a}
+    print(s.len())          # 1 — built, not a runtime fault
+    m: Map[Node, str] = {}
+    m[a] = "x"
+    print(m.has(a))         # true — same held key still resolves
+main()
+"#;
+    assert_parity_out(src, "1\ntrue\n");
+}
+
+/// A struct key that transitively holds a live generator inserts + resolves — regression for the
+/// `deep_clone` "a generator cannot be sent across tasks" fault on a purely sequential insert.
+#[test]
+fn generator_field_key_inserts_and_resolves() {
+    let src = r#"
+fn gen() -> Iterator[int]:
+    yield 1
+struct K:
+    g: Iterator[int]
+    id: int
+    fn hash(self) -> int: return self.id
+fn main():
+    k := K(gen(), 7)
+    m: Map[K, str] = {}
+    m[k] = "one"
+    print(m.has(k))         # true — was a generator/airlock fault before
+    print(m[k])             # one
+    s := {k}
+    print(s.len())          # 1
+main()
+"#;
+    assert_parity_out(src, "true\none\n1\n");
+}
+
+/// A struct key with an identity-typed (closure) field resolves after insert — regression for the
+/// `deep_clone` "key not found" miss (the cloned closure field got a fresh handle that
+/// `values_equal`, identity-only for closures, could never match against the live key's field).
+#[test]
+fn closure_field_key_resolves_after_insert() {
+    let src = r#"
+struct H:
+    id: int
+    cb: fn() -> int
+    fn hash(self) -> int: return self.id
+fn main():
+    h := H(1, fn() -> int: 1)
+    m: Map[H, str] = {}
+    m[h] = "x"
+    print(m[h])             # x — was "key not found" before (fresh-handle closure field)
+    print(m.has(h))         # true
+    s := {h}
+    print(s.difference({h}).len())   # 0 — same held element compares equal
+main()
+"#;
+    assert_parity_out(src, "x\ntrue\n0\n");
+}
+
+/// `map.update`/`map.merge` also snapshot the incoming key (spec: "cover EVERY insert entry point")
+/// so the merged map does NOT alias the source map's stored key — mutating one via `keys()` cannot
+/// corrupt the other.
+#[test]
+fn map_update_merge_snapshot_keys() {
+    let src = r#"
+struct K:
+    x: int
+    fn hash(self) -> int: return self.x
+fn main():
+    o: Map[K, str] = {}
+    o[K(1)] = "a"
+    # update
+    m: Map[K, str] = {}
+    m.update(o)
+    k := o.keys()[0]
+    k.x = 9                 # mutate the SOURCE's stored key
+    print(m.has(K(1)))      # true — m's key was snapshotted, not aliased
+    print(m.keys()[0].x)    # 1
+    # merge
+    o2: Map[K, str] = {}
+    o2[K(2)] = "b"
+    mm := o2.merge(o2)
+    k2 := o2.keys()[0]
+    k2.x = 8
+    print(mm.has(K(2)))     # true
+    print(mm.keys()[0].x)   # 2
+main()
+"#;
+    assert_parity_out(src, "true\n1\ntrue\n2\n");
+}
