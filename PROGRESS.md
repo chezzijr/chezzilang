@@ -11,6 +11,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **📝 DOCS — pre-freeze Low clarifications (2026-07-12, `docs/low-clarifications`).** Documented four
+> known-and-intended behaviors surfaced by the pre-JIT hunt (no code change): (1) protocols are
+> module-local — not qualified-reachable, bare-importable, or usable as a cross-module bound (a possible
+> future milestone, not a bug); (2) `MIN % -1` faults like `MIN / -1` (i64 checked-op overflow, not
+> Python's `0`); (3) a `panic` inside a `defer` during unwind replaces the in-flight panic (last wins,
+> original dropped); (4) `math.round` is half-away-from-zero while the `:.0f` format spec is banker's.
+
 > **✅ BUGFIX — qualified generic turbofish in expression position (2026-07-12, `auto-task/qualified-turbofish`).**
 > `mod.Type[int].Variant(...)` / `mod.Type[int].staticmethod(...)` on a whole-module-imported generic
 > type was wrongly rejected with a *lying* diagnostic (`module 'mod' has no member 'Type'`, though the

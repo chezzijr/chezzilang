@@ -215,6 +215,9 @@ Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `co
 `abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`. A `float`
 parameter accepts an `int` argument via one-way `int`→`float` widening — `sqrt(16)` / `floor(2)` are
 the same as `sqrt(16.0)` / `floor(2.0)` (the int is converted to a real `f64`; see `syntax.md §3`).
+`math.round` rounds **half away from zero** (`round(2.5)` → `3`, `round(-2.5)` → `-3`), which differs
+from the `:.0f` string-format spec's **banker's rounding** (`"{2.5:.0f}"` → `2`, matching Python) — the
+two rounding conventions coexist by design; pick `math.round` for arithmetic, the format spec for display.
 Math is **total IEEE-754**: out-of-domain inputs return `NaN`/`inf` instead of faulting —
 `sqrt(-1.0)`, `ln(-1.0)`, `asin(2.0)` are all `NaN`; `ln(0.0)` is `-inf`. (`abs` on `int` `MIN`
 still overflow-faults — that's integer.)
