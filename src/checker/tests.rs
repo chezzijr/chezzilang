@@ -4096,6 +4096,29 @@ fn user_struct_named_option_rejected() {
     );
 }
 
+#[test]
+fn user_decl_named_tuple_rejected() {
+    // `tuple` is a reserved global (structural tuple type). No decl form may shadow it — matching its
+    // container siblings (`struct List`/`range`/…). Covers all five decl keywords in one place.
+    rejects(
+        "struct tuple:\n    x: int\n",
+        "type 'tuple' is reserved (builtin)",
+    );
+    rejects("enum tuple:\n    A\n", "type 'tuple' is reserved (builtin)");
+    rejects(
+        "newtype tuple = int\n",
+        "type 'tuple' is reserved (builtin)",
+    );
+    rejects("type tuple = int\n", "type 'tuple' is reserved (builtin)");
+    rejects(
+        "protocol tuple:\n    fn f(self)\n",
+        "type 'tuple' is reserved (builtin)",
+    );
+    // Regression: reserving the NAME must not touch tuple LITERALS (they never route through the
+    // decl-name guard) — a real tuple value + destructure still type-checks.
+    ok("p := (1, 2)\na, b := p\nprint(a + b)\n");
+}
+
 // ===== M6c: native std module signatures =====
 
 use std::path::PathBuf;
