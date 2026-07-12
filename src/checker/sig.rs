@@ -1291,7 +1291,7 @@ impl Checker {
                         if !self.is_hashable_key(&key) {
                             self.error(
                             span,
-                            format!("Map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {key}"),
+                            format!("Map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {key}"),
                         );
                         }
                         Ty::map(key, value)
@@ -1301,7 +1301,7 @@ impl Checker {
                         if !self.is_hashable_key(&elem) {
                             self.error(
                             span,
-                            format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
+                            format!("Set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {elem}"),
                         );
                         }
                         Ty::set(elem)
@@ -2506,7 +2506,7 @@ impl Checker {
                         if !idx_ty.is_unknown() && !self.is_hashable_key(&idx_ty) {
                             self.error(
                                 index.span,
-                                format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {idx_ty}"),
+                                format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {idx_ty}"),
                             );
                         }
                         self.check_assign_value(&v, op, &val_ty, target.span);

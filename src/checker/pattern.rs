@@ -1689,7 +1689,7 @@ impl Checker {
             if !et.is_unknown() && !self.is_hashable_key(&et) {
                 self.error(
                     e.span,
-                    format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
+                    format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {et}"),
                 );
             }
             if elem.is_unknown() {
@@ -1710,7 +1710,7 @@ impl Checker {
             if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                 self.error(
                     k_expr.span,
-                    format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
+                    format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {kt}"),
                 );
             }
             if key.is_unknown() {
@@ -1778,7 +1778,7 @@ impl Checker {
                 if !et.is_unknown() && !self.is_hashable_key(&et) {
                     self.error(
                         elem.span,
-                        format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {et}"),
+                        format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {et}"),
                     );
                 }
                 Ty::set(et)
@@ -1790,7 +1790,7 @@ impl Checker {
                 if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                     self.error(
                         key.span,
-                        format!("map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {kt}"),
+                        format!("map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {kt}"),
                     );
                 }
                 Ty::map(kt, vt)

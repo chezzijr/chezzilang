@@ -1449,7 +1449,7 @@ impl Checker {
                 if !elem.is_unknown() && !self.is_hashable_key(&elem) {
                     self.error(
                         span,
-                        format!("Set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {elem}"),
+                        format!("Set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {elem}"),
                     );
                 }
                 Some(Ty::set(elem))
@@ -1536,7 +1536,7 @@ impl Checker {
                 if !k.is_unknown() && !self.is_hashable_key(&k) {
                     self.error(
                         span,
-                        format!("Map key type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {k}"),
+                        format!("Map key type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {k}"),
                     );
                 }
                 Some(Ty::map(k, v))

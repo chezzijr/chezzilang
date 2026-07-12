@@ -318,7 +318,7 @@ impl Checker {
         {
             self.error(
                 obj.span,
-                format!("set element type must implement Hashable (int, str, bool, or a struct with hash(self) -> int), found {e}"),
+                format!("set element type must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {e}"),
             );
         }
         self.repin(name, merged);
