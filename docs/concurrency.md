@@ -1131,8 +1131,8 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     (`examples/parallel_cross_nursery_ok.chz`, the doc case C pattern).
   - **Inline outer-body *blocking* recv (case B)** — the cross-nursery fix is **wake-side only**. The
     inline `parallel:` builder body runs with no scheduler frame, so a *blocking* `recv`/`for v in ch:`/
-    `wait:` issued directly in the body (not inside a `spawn:`) still faults "sequential executor cannot
-    block." Put blocking work in a `spawn:`.
+    `wait:` issued directly in the body (not inside a `spawn:`) still faults with a "deadlock — no task
+    can ever send". Put blocking work in a `spawn:`.
   - **Eager (per-connection) nurseries** run on their OWN private `MnSched` (`activate_eager_nursery`,
     for liveness — no inline worker between Enter/Join), so a cross-nursery wake INTO or OUT OF an eager
     body is a separate limit, not the flat-scheduler routing class.
