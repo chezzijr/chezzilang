@@ -1321,6 +1321,44 @@ fn json_malformed_numbers_are_errors_parity() {
     assert_eq!(out, "ERR\nERR\nOK 100000000000000000000.0\n");
 }
 
+/// BUG 1: `json.stringify` must `\u00XX`-escape control chars U+0000..U+001F (Go/RFC-8259
+/// policy) instead of emitting the raw byte (invalid JSON). Round-trips back to the original
+/// string via `json.parse`'s `\u` handling.
+#[test]
+fn json_control_char_escape_roundtrip_parity() {
+    let out = parity_entry(
+        "import std.json\ns := \"x\" + chr(1) + chr(31) + chr(0) + \"y\"\nout := json.stringify(Json.Str(s))\ncodes := List[int]()\nfor c in out.chars():\n    codes.push(ord(c))\nprint(codes)\nmatch json.parse(out):\n    Ok(j):\n        match j:\n            Json.Str(back):\n                if back == s:\n                    print(\"RT_OK\")\n                else:\n                    print(\"RT_FAIL\")\n            _: print(\"NOT_STR\")\n    Err(e): print(\"PARSE_ERR\")\n",
+    );
+    assert_eq!(
+        out,
+        "[34, 120, 92, 117, 48, 48, 48, 49, 92, 117, 48, 48, 49, 102, 92, 117, 48, 48, 48, 48, 121, 34]\nRT_OK\n"
+    );
+}
+
+/// BUG 2: `json.parse` rejects leading-zero integers (RFC-8259 / Python `json.loads`): a `0`
+/// immediately followed by another digit is an error. Lone `0`/`-0`/`0.5`/`0e1` stay valid.
+#[test]
+fn json_leading_zero_numbers_are_errors_parity() {
+    let out = parity_entry(
+        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK \" + json.stringify(j)\n        Err(e): return \"ERR\"\nprint(tp(\"01\"))\nprint(tp(\"007\"))\nprint(tp(\"-01\"))\nprint(tp(\"01.5\"))\nprint(tp(\"08\"))\nprint(tp(\"0\"))\nprint(tp(\"-0\"))\nprint(tp(\"0.5\"))\nprint(tp(\"10\"))\nprint(tp(\"0e1\"))\n",
+    );
+    assert_eq!(
+        out,
+        "ERR\nERR\nERR\nERR\nERR\nOK 0\nOK 0\nOK 0.5\nOK 10\nOK 0\n"
+    );
+}
+
+/// OPTIONAL: a RAW control char (e.g. a literal newline, ord 10) inside a JSON string literal is
+/// rejected (RFC/Python); a proper `\n` ESCAPE sequence still parses — proving the `\` arm is
+/// untouched.
+#[test]
+fn json_raw_control_char_in_string_is_error_parity() {
+    let out = parity_entry(
+        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK\"\n        Err(e): return \"ERR\"\nraw := \"\\\"x\" + chr(10) + \"y\\\"\"\nprint(tp(raw))\nprint(tp(\"\\\"a\\\\nb\\\"\"))\n",
+    );
+    assert_eq!(out, "ERR\nOK\n");
+}
+
 /// Finding C: `json.stringify` FAULTS (recoverable, Go-style) on a non-finite `Json.Num`
 /// (NaN / +inf / -inf) instead of emitting the invalid bare tokens `NaN`/`inf`/`-inf` — which are
 /// not valid JSON and are rejected by Chezzi's own `json.parse`. The fault is catchable under

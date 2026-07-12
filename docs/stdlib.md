@@ -718,6 +718,13 @@ value `parse` accepts. Finite floats of any magnitude (including e.g. `1e300`, f
 int-collapse range) parse and stringify normally and round-trip; underflow to `0.0` (`1e-400`) is
 finite and stays accepted.
 
+**Control chars & number grammar (RFC-8259):** `stringify` `\u00XX`-escapes control characters
+`U+0000..U+001F` that lack a shorthand escape (the Go `encoding/json` policy) rather than emitting the
+raw byte, so its output is always valid JSON. Symmetrically `parse` **rejects** a raw control char
+inside a string literal (`Err("invalid control character in string")`) and a leading-zero integer
+(`01`, `007`, `-01`) with `Err("invalid number: leading zero")` — a `0` must be a lone `0`/`-0` or
+followed by `.`/`e`, matching Python's `json.loads`. (`0.5`, `0e1`, `10` stay valid.)
+
 For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
 struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
 ignored, and recursive/generic struct targets are rejected (use the `Json` enum for those).
