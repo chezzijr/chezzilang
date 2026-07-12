@@ -257,9 +257,22 @@ has overflow-checks OFF, so arithmetic-overflow wraps *silently* and is invisibl
 (the bin prints this NOTE). For a full overflow sweep, rebuild with `RUSTFLAGS="-C
 overflow-checks=on"`. Signal / segfault / explicit-panic crashes are caught regardless of profile.
 
+**Grammar-structure blind spot (deeply-nested constructs).** The three generators are byte/token-level:
+they produce random bytes, sample the token alphabet, and mutate the corpus — none *recursively deepen a
+specific grammar production*. So a crash that needs, say, ~10 000 levels of one nested construct is
+statistically unreachable (the token sampler would have to emit thousands of the *same* opening token
+consecutively by chance). The **2026-07-12 manual hunt found exactly such a bug the fuzzer missed**: a
+deeply-nested `match` **pattern** (`Some(Some(…Some(0)…))` / nested tuples) overflowed the host stack
+(SIGABRT, exit 134) because `parse_pattern_impl` was the one recursive-descent entry point with no
+`MAX_DEPTH` guard (fixed — `dcde045`). Lesson: crash-safety over *depth* per grammar production is a
+distinct axis from the byte/token fuzzing here — either add a grammar-aware generator that recursively
+nests each production to `MAX_DEPTH+N`, or (cheaper) assert every recursive-descent parse fn shares the
+one depth guard. Until then, "zero fuzzer crashes" does not certify the deep-nesting axis.
+
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
-front-end is crash-safe over the inputs explored so far.
+front-end is crash-safe over the *byte/token* inputs explored so far (see the deep-nesting blind spot
+above: the deep-pattern SIGABRT was found by manual audit, not the fuzzer, and is now guarded).
 
 ## Differential oracle (`src/difftest/`)
 
