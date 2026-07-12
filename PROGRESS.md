@@ -1361,6 +1361,22 @@ a **type error** (the value form can't carry them) instead of being silently dro
 (checker). **What's next:** unchanged — M19 perf Tier-1 (method-call IC,
 `run_until` trim, `Op::Call` specialization).
 
+**✅ Parser — deep-nested-pattern host-crash backstop (pre-JIT audit, 2026-07-12).** A `match` arm
+with a deeply-nested pattern (`Some(Some(… ))` variant payloads, or `((( … )))` tuple elements)
+recursed `parse_pattern_impl` (`src/parser/mod.rs`) with **no depth guard** → host **stack overflow /
+SIGABRT** (`check`/`ast` exited 134, before either engine — so parity is moot). The pattern parser was
+the un-guarded **fifth** recursive entry point: the other four (`parse_stmt`, `parse_type`, `parse_bp`,
+`parse_unary`) already cap at `MAX_DEPTH` (64). Fix wraps `parse_pattern_impl` — the per-level
+chokepoint both `parse_pattern` and `parse_subpattern` funnel through, so one guard caps every nesting
+axis (variant + tuple + or-alt) — in the same `self.depth += 1; if self.depth > MAX_DEPTH { return
+Err(self.err("pattern nested too deeply")) } … self.depth -= 1` idiom, mirroring `parse_unary` exactly
+(decrement on the success paths, deliberate leak on the early `?`/guard-Err path — the callers never
+backtrack). `MAX_DEPTH` unchanged. Now a pathological pattern prints a clean `pattern nested too deeply`
+parse error and exits 1 (no 134). Regression coverage extended `deep_nesting_errors_not_crash` (now all
+**five** entry points: deep-variant + deep-tuple pattern cases) + a legal depth-30 nested-`Option`
+match VERIFY test (checker exhaustiveness/type-walk + VM matcher stay safe, no over-rejection). No doc
+change — no doc claimed patterns were depth-unbounded.
+
 **✅ Resolver — deep-import-chain host-crash backstop (pre-JIT audit, 2026-07-01).** A pathological
 *acyclic* linear import chain (~8-10k modules deep) recursed the resolver's DFS `Builder::visit`
 (`src/resolver/mod.rs`) with no depth limit → host **stack overflow / SIGABRT** (`check` exited 134;
