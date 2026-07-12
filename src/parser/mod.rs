@@ -1619,15 +1619,27 @@ impl Parser {
     /// returned unchanged (zero AST regression). Works at both top-arm and sub-pattern positions
     /// (the `top` flag flows into each primary so every alternative disambiguates identically).
     fn parse_pattern_impl(&mut self, top: bool) -> PResult<Pattern> {
+        // Depth guard — the fifth recursive entry point (mirrors parse_stmt/parse_type/parse_bp/
+        // parse_unary). Nested variant payloads (`Some(Some(...))`) and tuple elements (`((( ... )))`)
+        // recurse through here per level; without this a deeply-nested pattern overflows the native
+        // stack (SIGABRT) before check/run. Leaks the increment on the `?`/guard-Err paths — the
+        // pattern callers (parse_match/parse_match_expr) call with `?` and never backtrack, so that
+        // matches the four existing sites.
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("pattern nested too deeply".to_string()));
+        }
         let mut alts = vec![self.parse_pattern_primary(top)?];
         while self.eat(&Token::BitOr) {
             alts.push(self.parse_pattern_primary(top)?);
         }
-        if alts.len() == 1 {
-            Ok(alts.pop().expect("one alternative"))
+        let result = if alts.len() == 1 {
+            alts.pop().expect("one alternative")
         } else {
-            Ok(Pattern::Or(alts))
-        }
+            Pattern::Or(alts)
+        };
+        self.depth -= 1;
+        Ok(result)
     }
 
     fn parse_pattern_primary(&mut self, top: bool) -> PResult<Pattern> {
@@ -5674,14 +5686,15 @@ mod tests {
     }
 
     /// Deeply nested input returns a `ParseError` instead of overflowing the native stack —
-    /// across all four recursive entry points: parens (parse_bp), unary chains (parse_unary),
-    /// nested generics (parse_type), and nested blocks (parse_stmt).
+    /// across all five recursive entry points: parens (parse_bp), unary chains (parse_unary),
+    /// nested generics (parse_type), nested blocks (parse_stmt), and nested match patterns
+    /// (parse_pattern_impl — variant payloads + tuple elements).
     #[test]
     fn deep_nesting_errors_not_crash() {
         // `MAX_DEPTH` (64) trips after ~1 MiB of parser frames — well within a *test* thread's
         // default (~2 MiB) stack, so the guard fires cleanly instead of the host stack overflowing.
         // (Was 128, which sat at the stack edge and needed a 64 MiB thread to test; the lower bound
-        // removed that crutch — runs inline now.) Exercises all four recursive entry points.
+        // removed that crutch — runs inline now.) Exercises all five recursive entry points.
         let paren = format!("x := {}1{}\n", "(".repeat(500), ")".repeat(500));
         assert!(
             parse(lexer::tokenize(&paren).unwrap())
@@ -5718,6 +5731,34 @@ mod tests {
         };
         assert!(
             parse(lexer::tokenize(&blocks).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
+
+        // Deeply nested match-arm patterns (the un-guarded fifth entry point): deep VARIANT
+        // payload nesting `Some(Some(...))` and deep TUPLE nesting `((( ... )))`, both inside a
+        // `match` scrutinee context (a bare `(((...)))` would route through parse_bp — the wrong
+        // guard). Before the guard these overflow the native stack (SIGABRT); after, a clean error.
+        let variant_pat = format!(
+            "x := match o:\n    {}0{}: 1\n    _: 0\n",
+            "Some(".repeat(500),
+            ")".repeat(500)
+        );
+        assert!(
+            parse(lexer::tokenize(&variant_pat).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
+
+        let tuple_pat = format!(
+            "x := match o:\n    {}0{}: 1\n    _: 0\n",
+            "(".repeat(500),
+            ")".repeat(500)
+        );
+        assert!(
+            parse(lexer::tokenize(&tuple_pat).unwrap())
                 .unwrap_err()
                 .message
                 .contains("too deeply")

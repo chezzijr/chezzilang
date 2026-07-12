@@ -12424,3 +12424,19 @@ fn convert_witness_runs_two_engine() {
     let src = "struct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Port](5))\nmain()\n";
     assert_mc_parity(src, "5\n");
 }
+
+#[test]
+fn legal_deep_nested_pattern_type_checks_and_runs() {
+    // VERIFY (guards against over-rejection): a legally-nested `Some(...)` value and a matching deep
+    // pattern must NOT be rejected by the new pattern-depth guard — it still type-checks, and the
+    // checker's exhaustiveness + type walk and the VM matcher stay safe recursing to that depth.
+    // Depth is capped at 30 by the VALUE expression itself: each `Some(` nesting costs ~2 of the
+    // shared MAX_DEPTH=64 budget in expression position (parse_expr_bp + parse_unary), so a nested
+    // ctor value maxes out near 31 — the pattern side (1 depth/level) is the looser constraint. 30 is
+    // deep enough to prove the pattern walk is safe and shallow enough to stay legal on both axes.
+    let n = 30;
+    let value = format!("{}0{}", "Some(".repeat(n), ")".repeat(n));
+    let pattern = format!("{}x{}", "Some(".repeat(n), ")".repeat(n));
+    let src = format!("o := {value}\nr := match o:\n    {pattern}: x\n    _: -1\nprint(r)\n");
+    assert_eq!(run_capture(&src).unwrap().trim(), "0");
+}
