@@ -471,6 +471,31 @@ impl Compiler {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// The TYPE name + module-scoped identity key of a QUALIFIED declaration-site turbofish head —
+    /// the `mod.Type[int]` carrier (`Index{obj: Field{Ident(mod), Type}, ..}`) of a
+    /// `mod.Type[int].Variant(args)` / `.staticmethod(args)`. The type args are runtime-erased, so
+    /// only the key is needed. Gated on a non-local, non-captured bound module Ident declaring the
+    /// type (mirrors the bare `type_apply_head_name` but for a whole-module-imported base — B1).
+    /// Multi-arg (`mod.Type[int, str]`) has no qualified parser carrier, so it is not recognized here.
+    fn qualified_turbofish_key(&self, fc: &FnComp, kind: &ExprKind) -> Option<(String, String)> {
+        if let ExprKind::Index { obj, .. } = kind
+            && let ExprKind::Field {
+                obj: mobj, name, ..
+            } = &obj.kind
+            && let ExprKind::Ident(mname) = &mobj.kind
+            && fc.resolve_local(mname).is_none()
+            && !fc.captures(mname)
+            && let Some(&tidx) = self.imported_modules.get(mname)
+            && self
+                .module_types
+                .get(tidx)
+                .is_some_and(|t| t.contains(name))
+        {
+            return Some((name.clone(), self.type_key(tidx, name)));
+        }
+        None
+    }
+
     /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
     /// so `json.decode[T]` resolves its target (and nested field types) to qualified identity keys.
     fn decode_env(&self) -> CompilerDecodeEnv<'_> {
@@ -3794,6 +3819,47 @@ impl Compiler {
                 );
                 return Ok(());
             }
+            // `module.Type[T…].Variant(args)` / `.staticmethod(args)` → QUALIFIED declaration-site
+            // turbofish (B1). The single-arg carrier is `Field{obj: Index{obj: Field{Ident(mod),
+            // Type}, idx}, name}`; `type_apply_head_name` misses it (its Index.obj is a Field, not an
+            // Ident), so recognize the qualified base here. Type args are runtime-erased, so emit the
+            // SAME `Op::NewEnum` (variant-first) / `Op::CallStatic` bytecode as the bare turbofish
+            // forms, keyed by the type's module-scoped runtime key — byte-identical to `mod.Type.X`.
+            if let Some((_, key)) = self.qualified_turbofish_key(fc, &obj.kind) {
+                if self
+                    .program
+                    .variants
+                    .contains_key(&(key.clone(), name.clone()))
+                {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    let variant_id = self.variant_id_of_key(&key, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+                if self.static_methods.contains(&static_key(&key, name)) {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(
+                        Op::CallStatic {
+                            type_key: key,
+                            method: name.clone(),
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+            }
             // `module.Ctor(args)` → a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
             // aliased `c.Shared(0)`, `time.timer(100)`). Lower to the SAME opcode the bare name emits
             // (3387-3429) so the bytecode — and thus the runtime value — is byte-identical regardless
@@ -3856,6 +3922,45 @@ impl Compiler {
                 obj: head, name, ..
             } = &callee_obj.kind
         {
+            // Combined QUALIFIED turbofish `mod.Type[int].member[U](args)` — the checker accepts it
+            // once it recognizes the qualified enclosing head, so lower it the same way (variant-first,
+            // then static), keyed by the type's module-scoped runtime key. Both method + enclosing type
+            // args are runtime-erased (B1).
+            if let Some((_, key)) = self.qualified_turbofish_key(fc, &head.kind) {
+                if self
+                    .program
+                    .variants
+                    .contains_key(&(key.clone(), name.clone()))
+                {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    let variant_id = self.variant_id_of_key(&key, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+                if self.static_methods.contains(&static_key(&key, name)) {
+                    for a in args {
+                        self.compile_expr(fc, a)?;
+                    }
+                    fc.emit(
+                        Op::CallStatic {
+                            type_key: key,
+                            method: name.clone(),
+                            argc: args.len(),
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
+            }
             let tname = type_apply_head_name(&head.kind).or(match &head.kind {
                 ExprKind::Ident(n) => Some(n.as_str()),
                 _ => None,

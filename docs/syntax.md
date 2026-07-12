@@ -1105,6 +1105,13 @@ b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
 The type-level turbofish takes **one or more** type args — multi-param types use the comma form
 (`Pair[K, V].empty()`, `Result[int, str].Ok(5)`).
 
+A **module-qualified** base takes the **single-arg** type-level turbofish too:
+`shapes.Tree[int].Leaf(9)` (qualified enum-variant ctor) and `shapes.Box[int].make(5)` (qualified
+static method) both work in expression position, as does the combined form
+`shapes.Box[int].make[str]("hi")`. (A *multi-arg* qualified turbofish —
+`shapes.Pair[int, str].X` — is not yet supported; write the base same-module, or let the args
+infer from the call: `shapes.Pair.X(...)`.)
+
 A static method may **also declare its OWN `[U]`** type parameters — they sit on the **member**
 (`make[U]`), the **declaration-site rule**: a type argument is written where its parameter is
 declared. Member-level args are **inferred** from the call by default; a **member-level turbofish**

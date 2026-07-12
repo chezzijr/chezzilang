@@ -2256,10 +2256,9 @@ impl Checker {
         // variant: `Box[int].Empty`. Mirrors the bare `Enum.Variant` value form above, but returns
         // the EXPLICIT type args (resolved), not `Unknown`. Both carriers (single-arg `Index`,
         // multi-arg `TypeApply`) converge through `type_apply_head`.
-        if let Some((tname, type_exprs)) = self.type_apply_head(obj)
+        if let Some((tname, ekey, type_exprs)) = self.type_apply_head(obj)
             && self.enum_names.contains(&tname)
         {
-            let ekey = self.bare_key(&tname);
             let resolved: Vec<Ty> = type_exprs
                 .iter()
                 .map(|t| self.resolve_type(t, obj.span))

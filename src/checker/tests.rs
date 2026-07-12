@@ -16861,3 +16861,46 @@ fn compound_assign_existing_forms_still_work() {
         "fn main():\n    i := 1\n    i += 1\n    s := \"a\"\n    s += \"b\"\n    l := [1]\n    l += [2]\n    l *= 3\n    st := {1, 2}\n    st -= {1}\n    print(i)\nmain()\n",
     );
 }
+
+// ----- B1: qualified generic turbofish in expression position -----
+
+const B1_SHAPES: &str = "enum Tree[T]:\n    Leaf(T)\n    Branch(Tree[T], Tree[T])\n    fn first(self) -> T:\n        match self:\n            Tree.Leaf(x): return x\n            Tree.Branch(l, r): return l.first()\n\nstruct Box[T]:\n    v: T\n    fn make(x: T) -> Box[T]:\n        return Box(x)\n";
+
+#[test]
+fn qualified_turbofish_variant_and_static_ok() {
+    files_ok(&[
+        ("shapes.chz", B1_SHAPES),
+        (
+            "main.chz",
+            "import shapes\nfn main():\n    x := shapes.Tree[int].Leaf(9)\n    b := shapes.Box[int].make(5)\n    print(x.first() + b.v)\nmain()\n",
+        ),
+    ]);
+}
+
+#[test]
+fn qualified_turbofish_regressions_ok() {
+    // Must stay working: qualified NO-turbofish variant ctor; annotation form; a real qualified
+    // value-subscript that must NOT be stolen as a turbofish head.
+    files_ok(&[
+        ("shapes.chz", B1_SHAPES),
+        (
+            "main.chz",
+            "import shapes\nfn mk() -> List[int]:\n    return [1, 2, 3]\nfn main():\n    a := shapes.Tree.Leaf(1)\n    y: shapes.Tree[int] = shapes.Tree.Leaf(2)\n    z := mk()[0]\n    print(z)\nmain()\n",
+        ),
+    ]);
+}
+
+#[test]
+fn qualified_not_a_type_turbofish_clean_error() {
+    // `shapes.NotAType[int].X` — NotAType is not a type in `shapes`: a clean, truthful error, no lie.
+    files_reject(
+        &[
+            ("shapes.chz", B1_SHAPES),
+            (
+                "main.chz",
+                "import shapes\nfn main():\n    x := shapes.NotAType[int].Leaf(9)\n    print(x)\nmain()\n",
+            ),
+        ],
+        "no member",
+    );
+}
