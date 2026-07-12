@@ -6871,3 +6871,61 @@ fn main():
 main()";
     assert_parity_out(src, "d\ndone\n");
 }
+
+// ----- B1: qualified generic turbofish in expression position (mod.Type[int].Variant / .static) -----
+
+/// The shared multi-generic fixture: an enum `Tree[T]` (variant + method) and a struct `Box[T]`
+/// (static method), imported whole-module so the base is only reachable qualified (`shapes.Tree`).
+const SHAPES_MOD: &str = "enum Tree[T]:\n    Leaf(T)\n    Branch(Tree[T], Tree[T])\n    fn first(self) -> T:\n        match self:\n            Tree.Leaf(x): return x\n            Tree.Branch(l, r): return l.first()\n\nstruct Box[T]:\n    v: T\n    fn make(x: T) -> Box[T]:\n        return Box(x)\n";
+
+#[test]
+fn qualified_enum_variant_turbofish_runs() {
+    let out = assert_parity_file(
+        &[
+            ("shapes.chz", SHAPES_MOD),
+            (
+                "main.chz",
+                "import shapes\nx := shapes.Tree[int].Leaf(9)\nprint(x.first())\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "9\n");
+}
+
+#[test]
+fn qualified_struct_static_turbofish_runs() {
+    let out = assert_parity_file(
+        &[
+            ("shapes.chz", SHAPES_MOD),
+            (
+                "main.chz",
+                "import shapes\nb := shapes.Box[int].make(5)\nprint(b.v)\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn qualified_combined_turbofish_runs() {
+    // Combined qualified turbofish `mod.Type[int].static[U](args)` — the enclosing `[int]` AND the
+    // method-own `[U]` are both runtime-erased. The checker accepts it (qualified head recognized),
+    // so the compiler must lower it (not fall to CallMethod). Assert VALUE correctness, not just
+    // engine agreement (identical-but-wrong bytecode would still agree).
+    let out = assert_parity_file(
+        &[
+            (
+                "shapes.chz",
+                "struct Box[T]:\n    v: T\n    fn wrap[U](x: T, tag: U) -> Box[T]:\n        return Box(x)\n",
+            ),
+            (
+                "main.chz",
+                "import shapes\nb := shapes.Box[int].wrap[str](7, \"hi\")\nprint(b.v)\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "7\n");
+}

@@ -312,8 +312,7 @@ impl Checker {
             //     real type list because of the disambiguating comma).
             // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
             // no variant matches the member name, fall to the static-method path.
-            if let Some((tname, type_exprs)) = self.type_apply_head(obj) {
-                let key = self.bare_key(&tname);
+            if let Some((tname, key, type_exprs)) = self.type_apply_head(obj) {
                 let resolved: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -406,14 +405,13 @@ impl Checker {
                     if !self.is_local_binding(tn)
                         && (self.struct_names.contains(tn) || self.enum_names.contains(tn)) =>
                 {
-                    Some((tn.clone(), Vec::new()))
+                    Some((tn.clone(), self.bare_key(tn), Vec::new()))
                 }
                 _ => None,
             });
-            if let Some((tname, type_exprs)) = resolved_head
+            if let Some((tname, key, type_exprs)) = resolved_head
                 && let Some(mt_ty) = self.index_as_type(mt).map(|t| self.resolve_type(&t, span))
             {
-                let key = self.bare_key(&tname);
                 let enclosing: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -687,34 +685,63 @@ impl Checker {
     }
 
     /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
-    /// nullary `Type[T…].member` — into `(type-name, type-arg-exprs)` when `obj` is a declaration-site
-    /// turbofish on a KNOWN struct/enum name. Two carriers converge:
-    ///   • `Index{obj: Ident(Type), index}` — the SINGLE-arg form (`Box[int].x`); reinterpret the
-    ///     index expression as one type via `index_as_type`.
-    ///   • `TypeApply{name, args}` — the MULTI-arg form (`Result[int, str].x`); the parser already
-    ///     parsed real `Type`s.
+    /// nullary `Type[T…].member` — into `(type-name, runtime-key, type-arg-exprs)` when `obj` is a
+    /// declaration-site turbofish on a KNOWN struct/enum name. Three carriers converge:
+    ///   • `Index{obj: Ident(Type), index}` — bare SINGLE-arg (`Box[int].x`); reinterpret the index
+    ///     expression as one type via `index_as_type`. Keyed by `bare_key`.
+    ///   • `Index{obj: Field{Ident(mod), Type}, index}` — QUALIFIED single-arg (`mod.Box[int].x`) on a
+    ///     whole-module-imported generic type. Keyed by `type_key(mid, Type)` (B1).
+    ///   • `TypeApply{name, args}` — the (bare) MULTI-arg form (`Result[int, str].x`); the parser
+    ///     already parsed real `Type`s. Keyed by `bare_key`.
     /// Returns `None` when `obj` is not such a head (a real index-then-member, a local binding, an
     /// unknown name, or a non-type index), so the caller falls back to the ordinary method path.
-    pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, Vec<Type>)> {
+    pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, String, Vec<Type>)> {
         match &obj.kind {
             ExprKind::TypeApply { name, args } => {
                 if !self.is_local_binding(name)
                     && (self.struct_names.contains(name) || self.enum_names.contains(name))
                 {
-                    Some((name.clone(), args.clone()))
+                    Some((name.clone(), self.bare_key(name), args.clone()))
                 } else {
                     None
                 }
             }
             ExprKind::Index { obj: tobj, index } => {
+                // Bare `Type[int]` — a bare-visible struct/enum name resolved via `bare_key`.
                 if let ExprKind::Ident(tname) = &tobj.kind
                     && !self.is_local_binding(tname)
                     && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
                 {
-                    Some((tname.clone(), vec![self.index_as_type(index)?]))
-                } else {
-                    None
+                    return Some((
+                        tname.clone(),
+                        self.bare_key(tname),
+                        vec![self.index_as_type(index)?],
+                    ));
                 }
+                // Qualified `mod.Type[int]` — a whole-module-imported generic type reached through a
+                // bound (non-local) module name. Whole-module `import mod` registers the type in
+                // `module_sigs.{struct_defs,enum_defs}` but NOT in the bare gates, so key it by the
+                // owning module's identity key (`type_key`). Downstream variant/static resolution is
+                // already key-driven, so only the head recognition + key were missing (B1).
+                if let ExprKind::Field {
+                    obj: mobj,
+                    name: typename,
+                    ..
+                } = &tobj.kind
+                    && let ExprKind::Ident(m) = &mobj.kind
+                    && !self.is_local_binding(m)
+                    && let Some(mid) = self.imported_modules.get(m)
+                    && let Some(sig) = self.module_sigs.get(mid)
+                    && (sig.struct_defs.contains_key(typename)
+                        || sig.enum_defs.contains_key(typename))
+                {
+                    return Some((
+                        typename.clone(),
+                        self.type_key(mid, typename),
+                        vec![self.index_as_type(index)?],
+                    ));
+                }
+                None
             }
             _ => None,
         }

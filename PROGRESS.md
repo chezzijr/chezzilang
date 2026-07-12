@@ -11,6 +11,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **✅ BUGFIX — qualified generic turbofish in expression position (2026-07-12, `auto-task/qualified-turbofish`).**
+> `mod.Type[int].Variant(...)` / `mod.Type[int].staticmethod(...)` on a whole-module-imported generic
+> type was wrongly rejected with a *lying* diagnostic (`module 'mod' has no member 'Type'`, though the
+> type plainly exists). Root cause: downstream variant/static resolution is fully key-driven and already
+> worked for imported types, but the turbofish-HEAD recognizer (`type_apply_head`) + its key computation
+> were **bare-only** (`struct_names`/`enum_names`/`bare_key`), which whole-module imports don't populate.
+> Fix: `type_apply_head` now returns the resolved runtime key and recognizes a qualified single-arg head
+> (`mod.Type[int]` via `imported_modules` + `module_sigs.{struct_defs,enum_defs}` + `type_key`); the
+> compiler gained a matching `qualified_turbofish_key` and additive `NewEnum`/`CallStatic` lowering blocks
+> (incl. the combined `mod.Box[int].make[str](x)`). Single-arg only — *multi-arg* qualified
+> (`mod.Pair[int,str].X`) stays deferred (no qualified parser carrier; clean parse-error, no panic).
+> 6 tests (checker `entry_ok`/`files_reject` + `src/vm/parity_tests.rs` run-both). Docs: `docs/syntax.md` §7a.
+>
 > **✅ BUGFIX — `parallel:` block defer/join order (2026-07-12, `auto-task/parallel-defer-join-order`).**
 > A `defer` directly inside an explicit `parallel:` block flushed *before* the block's spawned children
 > joined (violating the documented "defers run after the join" invariant that already held for the
