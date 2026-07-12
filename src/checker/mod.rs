@@ -131,6 +131,12 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "Map"
         || name == "Channel"
         || name == "range"
+        // `tuple` is the global structural tuple type (values exist only via `(a, b)` literals /
+        // destructuring, never a from-nothing ctor). It carries no resolvable bare-type or ctor, so a
+        // user `struct tuple` shadows nothing reachable — but it's a documented global (CLAUDE.md's
+        // "global surface", the hover table), and a global reserved name is a one-way ratchet, so it is
+        // reserved at declaration alongside its container siblings for consistency.
+        || name == "tuple"
         // Runtime handle TYPE names: the std.net TCP handles (`Socket`/`Listener`) and the FFI
         // marshalling primitives (`ptr` and the return-only `owned_str`). Reserved at declaration even
         // though their USE is import-gated (std.net / std.ffi) — the two gates are independent, exactly

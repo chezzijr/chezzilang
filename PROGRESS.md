@@ -19,6 +19,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > inside a string literal. Pure-Chezzi, byte-identical serial/M:N parity. 3 parity tests in
 > `src/vm/parity_tests.rs`.
 
+> **✅ BUGFIX — `tuple` reserved at declaration (2026-07-12, `fix/tuple-reserved-name`).**
+> `is_reserved_type` (`src/checker/mod.rs`) omitted `tuple`, so `struct`/`enum`/`newtype`/`type`/
+> `protocol tuple` all slipped the reserved-name gate that rejects every sibling global (`int`, `List`,
+> `range`, …). Low severity (`tuple` carries no reachable bare-type/ctor, so it shadowed nothing) but a
+> one-way-ratchet consistency gap. Added `|| name == "tuple"`; all five decl forms now reject
+> `type 'tuple' is reserved (builtin)`, tuple literals unaffected. Test `user_decl_named_tuple_rejected`.
+
 ---
 
 ## Current focus
