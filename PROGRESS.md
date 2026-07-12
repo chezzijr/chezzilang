@@ -4129,14 +4129,17 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   incoming keys, and `merge` builds fresh instead of `clone()`-aliasing the receiver's keys).
   **Values are never copied** (mutating a stored value in place stays intended); the transient lookup
   key (`m[k]`, `k in m`, `s.has(k)`) is never snapshotted. **Ceilings** (both match pre-change
-  behavior, no new fault): a **cyclic** struct/enum key is stored by reference (a value-copy of a
-  cycle can't compare equal to the original), so mutate-after-store can still corrupt it; set-algebra
+  behavior, no new fault): a **cyclic** struct/enum key — or one nested deeper than
+  `MAX_STRUCTURAL_DEPTH` (10000) — is stored by reference (a value-copy of a cycle can't compare equal
+  to the original; a too-deep snapshot would alias its tail then miss on lookup, and the pre-snapshot
+  cycle/depth check `store_key_by_reference` is itself depth-capped so it can't overflow the host
+  stack → SIGABRT), so mutate-after-store can still corrupt it; set-algebra
   RESULT aliasing (`union`/`intersection`/`difference`) is a distinct out-of-scope surface. Tests:
   `map_struct_key_snapshot_on_insert`, `set_element_snapshot_algebra`, `all_insert_paths_snapshot`,
   `scalar_keys_unchanged`, `map_value_not_snapshotted`, `cyclic_struct_key_inserts_and_resolves`,
   `generator_field_key_inserts_and_resolves`, `closure_field_key_resolves_after_insert`,
-  `map_update_merge_snapshot_keys` (parity_tests), `map_struct_key_snapshot_survives_gc_stress`
-  (gc_tests). Docs: `docs/syntax.md` Hashable section.
+  `map_update_merge_snapshot_keys`, `deep_acyclic_struct_key_inserts_and_resolves` (parity_tests),
+  `map_struct_key_snapshot_survives_gc_stress` (gc_tests). Docs: `docs/syntax.md` Hashable section.
 - **Import-alias guard now symmetric on reserved TYPE names (Finding B, 2026-07-10).** The
   `import X as ALIAS from M` / `import M as ALIAS` guards rejected reserved CALLABLE aliases
   (`import who as int` → `reserved (builtin)`) but silently ACCEPTED reserved TYPE names

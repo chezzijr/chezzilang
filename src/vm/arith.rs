@@ -1103,14 +1103,17 @@ impl Vm {
                     Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
                 ) =>
             {
-                // A CYCLIC key is stored BY REFERENCE (base behavior): a structural snapshot of a
-                // cycle can't be `values_equal` to the original — `values_equal` itself bails on a
-                // cycle (`MAX_STRUCTURAL_DEPTH`) — so a snapshotted cyclic key would never resolve on
-                // lookup (a silent true→false regression). The snapshot's whole point (value-key
-                // isolation) is anyway unattainable for a self-referential mutable value.
-                // ponytail: cyclic struct/enum keys keep the pre-existing mutate-after-store aliasing
-                // ceiling — use acyclic/immutable keys if you need value-key isolation.
-                if self.graph_is_cyclic(key) {
+                // A CYCLIC or OVER-DEEP key is stored BY REFERENCE (base behavior): a structural
+                // snapshot of a cycle can't be `values_equal` to the original — `values_equal` itself
+                // bails on a cycle / past `MAX_STRUCTURAL_DEPTH` — so a snapshotted such key would
+                // never resolve on lookup (a silent true→false regression), and the over-deep walk
+                // would overflow the host stack before `snapshot_value`'s own cap runs. The snapshot's
+                // whole point (value-key isolation) is anyway unattainable for a self-referential
+                // mutable value.
+                // ponytail: cyclic / >MAX_STRUCTURAL_DEPTH struct/enum keys keep the pre-existing
+                // mutate-after-store aliasing ceiling — use shallow acyclic/immutable keys if you need
+                // value-key isolation.
+                if self.store_key_by_reference(key) {
                     return key;
                 }
                 let mut visited = super::fxhash::FxHashMap::default();
@@ -1120,26 +1123,38 @@ impl Vm {
         }
     }
 
-    /// True iff the value graph reachable from `v` (through the SAME mutable-aggregate arms
-    /// [`Vm::snapshot_value`] copies) contains a cycle. Read-only, allocates only two small work
+    /// True iff `v`'s value graph must be stored BY REFERENCE rather than snapshotted — i.e. it
+    /// contains a cycle OR is deeper than [`MAX_STRUCTURAL_DEPTH`]. Both cases are stored by handle
+    /// (base behavior): a cyclic snapshot can't be `values_equal` to the original, and an over-deep
+    /// snapshot's tail is aliased ([`Vm::snapshot_value`] caps there) so a held-key lookup trips the
+    /// same depth guard in `values_equal` and silently misses — whereas a by-reference key resolves
+    /// instantly on the `ha == hb` identity short-circuit. Read-only, allocates only two small work
     /// sets; runs on the cold struct/enum/newtype key-insert path. `on_path` holds the DFS recursion
     /// stack (a back-edge into it = cycle); `done` memoizes fully-cleared nodes so a shared (DAG)
     /// sub-value isn't re-walked (no exponential blow-up on a diamond).
-    fn graph_is_cyclic(&self, v: Value) -> bool {
+    fn store_key_by_reference(&self, v: Value) -> bool {
         let mut on_path = super::fxhash::FxHashMap::default();
         let mut done = super::fxhash::FxHashMap::default();
-        self.cyclic_walk(v, &mut on_path, &mut done)
+        self.cyclic_walk(v, &mut on_path, &mut done, 0)
     }
 
+    /// DFS behind [`Vm::store_key_by_reference`]. `depth` caps host recursion at
+    /// [`MAX_STRUCTURAL_DEPTH`] — the SAME bound every sibling structural walker uses — so an
+    /// over-deep ACYCLIC key returns `true` (store by reference) instead of overflowing the host
+    /// stack (SIGABRT), which this walk would otherwise do BEFORE the capped `snapshot_value` runs.
     fn cyclic_walk(
         &self,
         v: Value,
         on_path: &mut super::fxhash::FxHashMap<GcRef, ()>,
         done: &mut super::fxhash::FxHashMap<GcRef, ()>,
+        depth: usize,
     ) -> bool {
         let Value::Obj(h) = v else {
             return false;
         };
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return true; // over-deep: store by reference (no snapshot, no host-stack overflow)
+        }
         if on_path.contains_key(&h) {
             return true; // back-edge into the active DFS stack → cycle
         }
@@ -1164,7 +1179,7 @@ impl Vm {
         };
         on_path.insert(h, ());
         for c in children {
-            if self.cyclic_walk(c, on_path, done) {
+            if self.cyclic_walk(c, on_path, done, depth + 1) {
                 return true;
             }
         }

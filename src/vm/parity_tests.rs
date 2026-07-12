@@ -7200,3 +7200,31 @@ main()
 "#;
     assert_parity_out(src, "true\n1\ntrue\n2\n");
 }
+
+/// A very deep (acyclic) struct key must still insert AND resolve when looked up with the SAME held
+/// object. Beyond `MAX_STRUCTURAL_DEPTH` the snapshot walk caps and would otherwise store a distinct
+/// tail-aliased handle whose structural `values_equal` trips the same depth guard → a silent
+/// `key not found` on the very object just inserted. The store path degrades an over-deep key to
+/// by-reference (like a cyclic key) so the identity short-circuit resolves it. Same cap prevents the
+/// unbounded `cyclic_walk` host-stack overflow (SIGABRT) on such keys. Both engines identical.
+#[test]
+fn deep_acyclic_struct_key_inserts_and_resolves() {
+    let src = r#"
+struct Node:
+    val: int
+    next: Option[Node]
+    fn hash(self) -> int: return self.val
+fn main():
+    n := Node(0, None)
+    for i in range(10050):
+        n = Node(i, Some(n))
+    m: Map[Node, str] = {}
+    m[n] = "deep"
+    print(m[n])          # deep — held key still resolves past MAX_STRUCTURAL_DEPTH
+    print(m.has(n))      # true
+    s := {n}
+    print(s.len())       # 1
+main()
+"#;
+    assert_parity_out(src, "deep\ntrue\n1\n");
+}

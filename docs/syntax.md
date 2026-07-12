@@ -1578,9 +1578,11 @@ are already immutable value-copies, so they take no extra clone. The snapshot co
 aggregate structure (nested structs/enums/lists/maps/sets); an embedded by-reference sub-value (a
 closure, `Channel`, `Shared`, a live generator, …) stays shared by handle — those are identity-
 compared, so copying them would break lookup, and they have no mutable field that could corrupt the
-key anyway. One ceiling: a **self-referential (cyclic)** struct/enum key is stored *by reference*
-(a value-copy of a cycle can't compare equal to the original), so mutating it after insert can still
-corrupt the collection — use acyclic keys if you need the isolation.
+key anyway. One ceiling: a **self-referential (cyclic)** key — or one nested deeper than the
+structural-depth cap (`MAX_STRUCTURAL_DEPTH`, 10000) — is stored *by reference* (a value-copy of a
+cycle can't compare equal to the original, and a too-deep snapshot would alias its tail then miss on
+lookup / overflow the host stack), so mutating it after insert can still corrupt the collection —
+use shallow acyclic keys if you need the isolation.
 
 ```chezzi
 struct Point:
