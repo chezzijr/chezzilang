@@ -590,6 +590,11 @@ residual un-inferable slot — a `Result`/`Option` value slot, a `List`/`Map`/`S
 return-position analogue of the empty-collection diagnostic) — annotate them (`-> str!`, `-> int?`,
 `-> List[int]`).
 
+A function whose **sole body is a diverging call** — `fn boom(): panic("msg")` (or `exit(...)`) — is
+**not** un-inferable: it never returns a value normally, so its return type defaults to `nil` (like a
+void body), and callers type-check. (An annotated diverging body — `fn b() -> int: panic(...)` — is
+already valid: bottom fits any return position.)
+
 Inference is **order-independent**: a recursive call contributes no type mid-analysis (it is absorbed,
 the concrete branches decide), and forward references / mutual recursion resolve via a fixpoint — so a
 callee defined *after* the caller still yields the caller's precise inferred type. A function that is

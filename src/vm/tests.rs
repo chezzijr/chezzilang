@@ -6259,6 +6259,24 @@ fn top_level_try_err_reports_real_line() {
     assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
 }
 
+/// L3-1: a pure-panic assertion helper with NO return annotation (`fn boom(): panic(...)`) now
+/// type-checks (infers `-> nil`) — verify the CALLER runs and FAULTS with the panic message on
+/// BOTH engines, and that a `recover:`-wrapped call yields `Err("x")`.
+#[test]
+fn inline_panic_body_faults_both_engines() {
+    let src = "fn boom(): panic(\"x\")\nfn main():\n    print(\"start\")\n    boom()\nmain()\n";
+    let (s_out, s_res) = run_program(src);
+    let (m_out, m_res) = run_program_parallel(src);
+    assert_eq!(s_out, "start\n");
+    assert_eq!(m_out, "start\n");
+    assert_eq!(s_res.unwrap_err().message, "x");
+    assert_eq!(m_res.unwrap_err().message, "x");
+    // A `recover:` around the call catches it as `Err("x")` — recoverable, both engines.
+    let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught {e.message()}\")\nmain()\n";
+    assert_eq!(run_capture(rec).unwrap(), "caught x\n");
+    assert_eq!(run_capture_parallel(rec).unwrap(), "caught x\n");
+}
+
 // ----- for loops -----
 
 #[test]
