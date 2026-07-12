@@ -11,6 +11,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **✅ BUGFIX — `std.json` RFC-8259 conformance (2026-07-12, `auto-task/json-escape-leading-zero`).**
+> Three same-file fixes in `std/json.chz`: (1) `stringify` now `\u00XX`-escapes control chars
+> `U+0000..U+001F` (Go `encoding/json` policy) instead of emitting raw bytes → always-valid JSON;
+> (2) `parse` rejects leading-zero integers (`01`/`007`/`-01` → `Err("invalid number: leading zero")`,
+> matching Python `json.loads`; `0`/`-0`/`0.5`/`0e1` stay valid); (3) `parse` rejects raw control chars
+> inside a string literal. Pure-Chezzi, byte-identical serial/M:N parity. 3 parity tests in
+> `src/vm/parity_tests.rs`.
+
 ---
 
 ## Current focus

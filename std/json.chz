@@ -89,6 +89,9 @@ struct Parser:
                     "f": out = out + chr(12)
                     "u": out = out + self.parse_unicode()?
                     _: return Err("invalid escape '\\" + e + "'")
+            elif ord(c) < 32:
+                # RFC-8259: raw control chars U+0000..U+001F must be `\u`-escaped, never literal.
+                return Err("invalid control character in string")
             else:
                 out = out + c
 
@@ -121,11 +124,16 @@ struct Parser:
         if self.peek() == "-":
             self.pos += 1
         int_digits := 0
+        zero_first := (self.peek() == "0")
         while is_digit(self.peek()):
             self.pos += 1
             int_digits += 1
         if int_digits == 0:
             return Err("invalid number: expected a digit")
+        # RFC-8259: the integer part is either a single `0` or a nonzero digit followed by more —
+        # a leading `0` before another digit (`01`, `007`) is invalid.
+        if zero_first and int_digits > 1:
+            return Err("invalid number: leading zero")
         if self.peek() == ".":
             self.pos += 1
             frac := 0
@@ -221,6 +229,10 @@ fn parse(s: str) -> Result[Json]:
 # ----- serializing ---------------------------------------------------------------------------
 
 fn escape(s: str) -> str:
+    # Control chars U+0000..U+001F with no shorthand escape become `\u00XX` (Go `encoding/json`
+    # / RFC-8259 policy); emitting the raw byte would produce invalid JSON that `json.parse`
+    # (and Python) reject as an "invalid control character".
+    hex := "0123456789abcdef"
     out := "\""
     for c in s:
         n := ord(c)
@@ -238,6 +250,8 @@ fn escape(s: str) -> str:
             out = out + "\\b"
         elif n == 12:
             out = out + "\\f"
+        elif n < 32:
+            out = out + "\\u00" + hex[n / 16] + hex[n % 16]
         else:
             out = out + c
     return out + "\""
