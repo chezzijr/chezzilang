@@ -1406,6 +1406,27 @@ a **type error** (the value form can't carry them) instead of being silently dro
 (checker). **What's next:** unchanged — M19 perf Tier-1 (method-call IC,
 `run_until` trim, `Op::Call` specialization).
 
+**✅ Front-end — deep iterative-chain host-crash backstop (pre-JIT audit, 2026-07-12, `fix/frontend-deep-stack`).**
+A *valid, well-typed* program with a long **left-associative binary chain** (`1+1+…`) or **postfix chain**
+(`x.f.f…`, `a[0][0]…`, `f().g()…`) — ~4000+ folds — aborted the host (**SIGABRT, exit 134**) at compile
+time on both `check` and `run`, both engines, uncatchable by `recover:`. Root: these forms parse in the
+**iterative** `while`/`loop` bodies of `parse_bp` / `parse_postfix`, which never bump `self.depth`, so the
+`MAX_DEPTH` guard never fires — yet each fold adds one level to a left-leaning AST that the **post-parse
+recursive walkers** (`desugar::walk_expr`, checker inference, compiler lowering) then overflow on. This is
+the sibling of the deep-*pattern* fix below, but on the *walker* axis (parse succeeded; the `ast` dump
+does not crash). Two-part fix: (1) a `MAX_CHAIN_DEPTH` (500) **per-loop** counter in both iterative loops
+caps a single chain, so the accepted AST depth is bounded (`MAX_DEPTH` × `MAX_CHAIN_DEPTH`) — sibling
+BREADTH (a 5000-element list, a wide arg list) is *not* conflated with chain depth; (2) the whole
+front-end now runs on a dedicated large stack — `chezzi::on_frontend_stack` / `FRONTEND_STACK_BYTES`
+(1 GiB), plus `run`'s build+compile already on the VM's 384 MiB `VM_STACK_BYTES` — so the bounded depth is
+walked with headroom regardless of the caller's stack. A parser cap **alone** cannot fix it: any cap high
+enough for real code still overflows the ~2 MiB LSP tokio-worker walk (the `recursion-guard-smallest-stack`
+rule), so the large stack is load-bearing. `MAX_DEPTH` unchanged. Coverage: parser
+`deep_iterative_chains_error_not_crash` (binary + postfix over-cap reject, under-cap + wide-breadth accept),
+`vm::deep_accepted_chains_run_without_stack_overflow` (a ~12k-deep accepted AST runs on the 384 MiB VM
+debug stack), CLI `deep_chains_never_signal_crash_the_host` (the 6000-fold repro exits with a code, never a
+signal). Docs: `docs/bug-discovery.md` deep-nesting section.
+
 **✅ Parser — deep-nested-pattern host-crash backstop (pre-JIT audit, 2026-07-12).** A `match` arm
 with a deeply-nested pattern (`Some(Some(… ))` variant payloads, or `((( … )))` tuple elements)
 recursed `parse_pattern_impl` (`src/parser/mod.rs`) with **no depth guard** → host **stack overflow /

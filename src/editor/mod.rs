@@ -34,6 +34,15 @@ pub struct Diag {
 /// buffer in for the entry module, so diagnostics reflect unsaved edits while cross-module imports
 /// still resolve against the on-disk project.
 pub fn diagnostics(path: &Path, source: &str) -> Vec<Diag> {
+    // Run resolve+desugar+check on the dedicated front-end stack: this is the ~2 MiB LSP tokio-worker
+    // path, which a deep-but-valid AST would overflow (SIGABRT the language server) — see
+    // `crate::on_frontend_stack`.
+    let path = path.to_path_buf();
+    let source = source.to_string();
+    crate::on_frontend_stack(move || diagnostics_inner(&path, &source))
+}
+
+fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
     use crate::{checker, resolver};
     match resolver::build_graph_with_entry_source(path, Some(source.to_string())) {
         // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import).

@@ -104,3 +104,53 @@ fn resolve_error_plaintext_unchanged_and_attributed() {
         "plain text must name importer + missing module, got: {stderr}"
     );
 }
+
+/// Crash-safety regression: a valid but very long left-associative binary chain or postfix chain
+/// used to build an AST deep enough to overflow the recursive front-end walkers → host stack
+/// overflow (SIGABRT, exit code None). The `MAX_CHAIN_DEPTH` parser cap + the dedicated front-end
+/// stack turn that into either a clean parse diagnostic (over the cap) or a normal run (under it) —
+/// NEVER a signal kill. Drives the real binary end-to-end (a parser unit test cannot observe the
+/// process abort). See docs/bug-discovery.md (post-parse walker depth axis).
+#[test]
+fn deep_chains_never_signal_crash_the_host() {
+    let t = TmpDir::new();
+
+    // (a) A 6000-term `1+1+…` chain (the original repro): `check` must exit with a code (a clean
+    // diagnostic), never be killed by a signal (SIGABRT → code() == None).
+    let big_add = format!("x := 1{}\n", "+1".repeat(6000));
+    let f = t.write("big_add.chz", &big_add);
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", f.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    assert!(
+        out.status.code().is_some(),
+        "deep + chain must not signal-crash the host (got signal kill, no exit code)"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("too deeply"),
+        "over-cap chain should be a clean 'too deeply' diagnostic"
+    );
+
+    // (b) Same for a deep postfix field chain and via `run` (compiler + VM path).
+    let big_field = format!("x := a{}\n", ".f".repeat(6000));
+    let f2 = t.write("big_field.chz", &big_field);
+    let out2 = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", f2.to_str().unwrap()])
+        .output()
+        .expect("run chezzi run");
+    assert!(
+        out2.status.code().is_some(),
+        "deep postfix chain via `run` must not signal-crash the host"
+    );
+
+    // (c) A chain UNDER the cap runs and prints the right value (no over-rejection).
+    let ok = format!("print(1{})\n", "+1".repeat(400));
+    let f3 = t.write("ok_add.chz", &ok);
+    let out3 = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", f3.to_str().unwrap()])
+        .output()
+        .expect("run chezzi run");
+    assert!(out3.status.success(), "under-cap chain must run cleanly");
+    assert_eq!(String::from_utf8_lossy(&out3.stdout).trim(), "401");
+}

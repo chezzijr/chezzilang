@@ -43,3 +43,37 @@ pub mod editor;
 // here in the crate of record — running once via the lib test target (`cargo test conformance`).
 #[cfg(test)]
 mod conformance;
+
+/// Stack size for the front-end (resolve → desugar → check → compile) thread.
+///
+/// The front-end walks the AST with several *recursive* tree-walkers — `desugar::walk_expr`, the
+/// checker's type-inference walk, and the compiler's lowering — each recursing once per AST node.
+/// A **deep-but-valid** AST therefore overflows the host stack (SIGABRT, uncatchable by `recover:`).
+/// The parser's `MAX_DEPTH` recursion guard bounds *recursively*-parsed nesting, but left-associative
+/// binary chains (`a + b + c …`) and postfix chains (`x.f.f…`, `a[0][0]…`, `f().g()…`) parse in
+/// *iterative* loops, so they build a left-leaning AST far deeper than `MAX_DEPTH` without ever
+/// tripping it (the parser's `MAX_CHAIN_DEPTH` cap bounds that depth, but well above a normal stack's
+/// capacity). Running the front-end on its own large stack — mirroring the VM's dedicated
+/// `VM_STACK_BYTES` thread — decouples front-end recursion depth from the *caller's* stack, which may
+/// be small: the ~2 MiB LSP tokio worker (`editor::diagnostics`) or the test-harness worker, not just
+/// the 8 MiB CLI main thread. Sized (1 GiB, virtual/lazily-committed) so the worst parser-accepted AST
+/// depth — `MAX_DEPTH` (64) paren levels each nesting a `MAX_CHAIN_DEPTH` chain — fits with headroom on
+/// a debug build (whose frames are far larger than release).
+pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.
+/// The closure owns its inputs (`'static`) and returns the owned result across the join. A panic in
+/// the pass is transparently re-raised on the caller's thread (never swallowed), so panic-as-bug
+/// behaviour and the panic-fuzz invariant are preserved.
+pub fn on_frontend_stack<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(FRONTEND_STACK_BYTES)
+        .spawn(f)
+        .expect("failed to spawn front-end stack thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+}

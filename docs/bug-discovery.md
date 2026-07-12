@@ -269,6 +269,26 @@ distinct axis from the byte/token fuzzing here — either add a grammar-aware ge
 nests each production to `MAX_DEPTH+N`, or (cheaper) assert every recursive-descent parse fn shares the
 one depth guard. Until then, "zero fuzzer crashes" does not certify the deep-nesting axis.
 
+**Post-parse walker depth axis (iterative chains) — found 2026-07-12, fixed `fix/frontend-deep-stack`.**
+The `dcde045` guard closed deep *recursively-parsed* constructs (patterns, parens, types). But the
+`MAX_DEPTH` guards only bound the parser's *recursion* — and left-associative binary chains (`1+1+…`)
+and postfix chains (`x.f.f…`, `a[0][0]…`, `f().g()…`) parse in the **iterative** `while`/`loop` bodies
+of `parse_bp` / `parse_postfix`, which never bump `self.depth`. So the parser *accepted* a valid but
+thousands-deep left-leaning AST that the **post-parse recursive walkers** — `desugar::walk_expr`, the
+checker's inference walk, the compiler's lowering — then overflowed on (SIGABRT, exit 134, on the CLI
+main thread *and* the ~2 MiB LSP worker; uncatchable by `recover:` — it is a *compile-time* host abort
+on a well-typed program, strictly worse than the malformed-input pattern case). Two-part fix: (1) a
+`MAX_CHAIN_DEPTH` per-loop cap in both iterative loops bounds a single chain's length (so accepted AST
+depth is bounded by `MAX_DEPTH` × `MAX_CHAIN_DEPTH`); (2) the whole front-end (resolve → desugar →
+check, and `run`'s build+compile) runs on a dedicated large stack — `chezzi::on_frontend_stack` /
+`FRONTEND_STACK_BYTES`, mirroring the VM's `VM_STACK_BYTES` thread — so that bounded depth is walked
+with headroom regardless of the caller's stack size. A parser cap **alone** cannot fix it: any cap high
+enough for real code (100+-term chains) still overflows the 2 MiB LSP walker stack, so the large stack
+is load-bearing (this is the `recursion-guard-smallest-stack` rule — a bare depth cap must be sized for
+the *smallest* stack the guarded recursion runs on). Lesson: crash-safety has a **post-parse walker**
+depth axis distinct from parse-time recursion; a recursive AST walker must run on a stack sized for the
+worst parser-accepted depth (or share the depth guard), not just the parser.
+
 Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
 OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
 front-end is crash-safe over the *byte/token* inputs explored so far (see the deep-nesting blind spot

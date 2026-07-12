@@ -12458,3 +12458,32 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
     let src = format!("o := {value}\nr := match o:\n    {pattern}: x\n    _: -1\nprint(r)\n");
     assert_eq!(run_capture(&src).unwrap().trim(), "0");
 }
+
+/// Crash-safety over the ITERATIVE-chain / composed-nesting depth axis: the deepest AST the parser
+/// ACCEPTS (bounded by `MAX_DEPTH` paren nesting × `MAX_CHAIN_DEPTH` per chain ≈ 15 k here) must run
+/// on the VM's dedicated stack without a host stack overflow. This is the regression guard for the
+/// deep-`1+1+…` / `a.f.f…` SIGABRT: the parser cap keeps the depth bounded, and the large VM /
+/// front-end stacks absorb the walk. Runs on the debug test-harness → the 384 MiB `VM_STACK_BYTES`
+/// thread (via `run_capture`), the *smaller* of the two front-end stacks, so debug frames are the
+/// worst case. A single flat chain just under the cap must also run and compute correctly.
+#[test]
+fn deep_accepted_chains_run_without_stack_overflow() {
+    // ~12 k-deep AST: 25 nested parens (comfortably under the MAX_DEPTH paren ceiling), each adding
+    // a near-`MAX_CHAIN_DEPTH` `+0` chain onto the left spine. Value is invariant (all `+0`) so the
+    // result is deterministic; the point is that walking/compiling/running this depth does not abort.
+    // Assign then print separately so the `print(...)` call wrapper doesn't eat into the paren budget.
+    let mut inner = String::from("1");
+    for _ in 0..25 {
+        inner = format!("({inner}{})", "+0".repeat(499));
+    }
+    assert_eq!(
+        run_capture(&format!("x := {inner}\nprint(x)\n"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+
+    // A single flat chain just under the cap runs and computes the right sum.
+    let flat = format!("print(1{})\n", "+1".repeat(400));
+    assert_eq!(run_capture(&flat).unwrap().trim(), "401");
+}

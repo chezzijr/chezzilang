@@ -39,6 +39,26 @@ type PResult<T> = Result<T, ParseError>;
 /// stack edge; see `deep_nesting_errors_not_crash`.)
 const MAX_DEPTH: usize = 64;
 
+/// Cap on the length of a single ITERATIVE chain: a left-associative binary chain (`a + b + c …`) or
+/// a postfix chain (`x.f.f…`, `a[0][0]…`, `f().g()…`). Distinct from `MAX_DEPTH` because these forms
+/// parse in the `while`/`loop` bodies of `parse_bp` / `parse_postfix`, which do NOT recurse per fold,
+/// so the `self.depth` guard never fires — yet each fold adds one level to a LEFT-leaning AST whose
+/// depth == chain length. Without this cap a valid but very long chain builds an AST thousands of
+/// nodes deep that the recursive front-end walkers (desugar/checker/compiler) then overflow on.
+///
+/// This bound only makes the *stack sizing* provable: the walkers run on a large dedicated stack, so
+/// the actual crash-safety comes from that stack; this cap just guarantees the worst parser-accepted
+/// AST depth (`MAX_DEPTH` paren levels each nesting a `MAX_CHAIN_DEPTH` chain = 64 × 500 ≈ 32 k) stays
+/// within it and bounds pathological memory/time. Two stacks must hold that worst case: `chezzi check`
+/// runs the front-end on the 1 GiB [`crate::FRONTEND_STACK_BYTES`] stack, but `chezzi run` re-does
+/// `build_graph` + `compile_graph` on the VM's smaller 384 MiB `VM_STACK_BYTES` thread — so the cap is
+/// sized for the *smaller* of the two in a debug build (larger frames). 500 keeps the 32 k worst case
+/// well inside 384 MiB while staying ≫ any realistic single chain (real code has 100+-term arithmetic
+/// and long builder chains). Enforced by a PER-LOOP LOCAL counter (each `parse_bp`/`parse_postfix`
+/// invocation counts its own chain), so sibling BREADTH (a 5000-element list, a wide arg list) is never
+/// conflated with chain DEPTH.
+const MAX_CHAIN_DEPTH: usize = 500;
+
 /// Parse a full token stream into a `Module`.
 pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
     Parser::new(tokens).parse_module()
@@ -2202,9 +2222,17 @@ impl Parser {
             return Err(self.err("expression nested too deeply".to_string()));
         }
         let mut lhs = self.parse_unary()?;
+        // Bound this chain's length: each fold below adds one level to a left-leaning AST that the
+        // recursive front-end walkers descend. Iterative, so the `self.depth` guard above never sees
+        // it — a separate per-loop counter (see `MAX_CHAIN_DEPTH`).
+        let mut chain = 0usize;
         while let Some((op, l_bp, r_bp)) = infix_op(self.peek()) {
             if l_bp < min_bp {
                 break;
+            }
+            chain += 1;
+            if chain > MAX_CHAIN_DEPTH {
+                return Err(self.err("expression nested too deeply".to_string()));
             }
             self.advance(); // the operator
             let rhs = self.parse_bp(r_bp)?;
@@ -2316,7 +2344,15 @@ impl Parser {
     /// A primary expression followed by any chain of `(call)`, `.field`, `[index]`, `?`.
     fn parse_postfix(&mut self) -> PResult<Expr> {
         let mut e = self.parse_primary()?;
+        // Bound this postfix chain's length for the same reason as the infix loop in `parse_bp`:
+        // `x.f.f…` / `a[0][0]…` / `f().g()…` build a left-leaning AST the walkers descend, and this
+        // loop never bumps `self.depth`. Count every iteration (incl. the turbofish `continue`).
+        let mut chain = 0usize;
         loop {
+            chain += 1;
+            if chain > MAX_CHAIN_DEPTH {
+                return Err(self.err("expression nested too deeply".to_string()));
+            }
             let span = e.span;
             e = match self.peek() {
                 Token::LParen => {
@@ -5763,6 +5799,46 @@ mod tests {
                 .message
                 .contains("too deeply")
         );
+    }
+
+    /// The ITERATIVE sibling of `deep_nesting_errors_not_crash`: a long left-associative binary
+    /// chain (`1+1+…`) and a long postfix chain (`x.f.f…`, `a[0][0]…`) parse in the `parse_bp` /
+    /// `parse_postfix` LOOPS, which never bump `self.depth`, so the `MAX_DEPTH` guard cannot see them.
+    /// The `MAX_CHAIN_DEPTH` per-loop counter must reject a chain past the cap (else the deep left-
+    /// leaning AST overflows the recursive front-end walkers). A chain UNDER the cap must parse fine.
+    #[test]
+    fn deep_iterative_chains_error_not_crash() {
+        // Binary chain over the cap → clean "too deeply", not an accepted N-deep AST.
+        let bin = format!("x := 1{}\n", "+1".repeat(MAX_CHAIN_DEPTH + 5));
+        assert!(
+            parse(lexer::tokenize(&bin).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
+        // Postfix field chain over the cap.
+        let field = format!("x := a{}\n", ".f".repeat(MAX_CHAIN_DEPTH + 5));
+        assert!(
+            parse(lexer::tokenize(&field).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
+        // Postfix index chain over the cap.
+        let index = format!("x := a{}\n", "[0]".repeat(MAX_CHAIN_DEPTH + 5));
+        assert!(
+            parse(lexer::tokenize(&index).unwrap())
+                .unwrap_err()
+                .message
+                .contains("too deeply")
+        );
+        // A chain WELL UNDER the cap parses cleanly (no over-rejection of long-but-legal chains).
+        let ok = format!("x := 1{}\n", "+1".repeat(MAX_CHAIN_DEPTH - 100));
+        assert!(parse(lexer::tokenize(&ok).unwrap()).is_ok());
+        // Sibling BREADTH must NOT be conflated with chain depth: a wide list literal far exceeding
+        // the cap in element count is fine (each element is its own shallow parse_bp).
+        let wide = format!("x := [{}]\n", "1,".repeat(MAX_CHAIN_DEPTH * 3));
+        assert!(parse(lexer::tokenize(&wide).unwrap()).is_ok());
     }
 
     /// A compound statement cannot be the inline body of a block — that would make a trailing

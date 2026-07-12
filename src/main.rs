@@ -698,6 +698,14 @@ enum CheckOutcome {
 /// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
 fn type_check(path: &str, root: Option<&std::path::Path>) -> CheckOutcome {
+    // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
+    // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
+    let path = path.to_string();
+    let root = root.map(|r| r.to_path_buf());
+    chezzi::on_frontend_stack(move || type_check_inner(&path, root.as_deref()))
+}
+
+fn type_check_inner(path: &str, root: Option<&std::path::Path>) -> CheckOutcome {
     let entry = std::path::Path::new(path);
     let build = match root {
         Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
