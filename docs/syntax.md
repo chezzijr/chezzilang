@@ -1260,7 +1260,16 @@ less/equal/greater). `int`, `float`, and `str` satisfy `Comparable` intrinsicall
 print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
 ```
 
-Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type.
+Equality (`==` / `!=`) is **not** affected — it stays structural (field-by-field) for every type,
+**even when the type defines `compare`.** This is a deliberate design choice (structural equality is
+always well-defined and hash-consistent for `Map`/`Set` keys), but note the **caveat**: a `compare`
+that ignores some fields can disagree with `==`. If `Point.compare` keys only on `x`, then
+`Point(1, 7)` and `Point(1, 9)` satisfy `a <= b` **and** `b <= a` yet `a != b` — the total-order
+identity `a <= b ∧ b <= a ⟹ a == b` does **not** hold. When you mix `<=`/`>=` with `==` (binary
+search, dedup, sorted-set membership), make `compare` consistent with all the fields `==` compares,
+or key both on the same fields. (Routing `==` through `compare` was considered and rejected: it cannot
+be made sound for generic `==` on an unbounded type parameter without either runtime type metadata or
+requiring an equality bound — see the known-limitations note.)
 Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
 protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
 other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,
