@@ -1389,8 +1389,14 @@ Value-position parameterized protocols are **strictly invariant**: `Container[in
 and bare `Container` are three distinct, non-interchangeable types (exact-arg match — no
 `Iterator[int]`→`Iterable[int]` value-position subsumption). A **bare generic** protocol used as a
 value type stays an existential with unbound params, so a struct whose method returns a concrete type
-does **not** conform to it — supply the args (`Container[int]`) to use it as a value. (Cross-module
-qualified protocols are not exported as value types.)
+does **not** conform to it — supply the args (`Container[int]`) to use it as a value.
+
+> **Protocols are module-local (by design, pre-freeze).** A `protocol` defined in one module cannot be
+> reached from another in *any* form: not as a qualified type (`mod.Named`), not via bare-import
+> (`import Named from mod` — a `struct`/`enum`/`newtype` bare-imports, a protocol does not), and not as
+> a generic bound (`[T: mod.Named]` — the bound grammar is bare-identifier-only). Use a protocol only
+> within its defining module; share cross-module contracts via a concrete type or a function parameter.
+> (Cross-module protocol *export* is a possible future milestone, not a current feature.)
 
 The prebuilt **`Iterator[T]`** is a parameterized bound with extra magic: `[S: Iterator[T], T]`
 accepts any iterable `S` and **recovers** `T` from the iterand's element (by unifying it), rather
@@ -1963,7 +1969,10 @@ raised by the runtime; `panic(msg)` raises the *same* recoverable fault from you
 **unwinds** — it does not return a value (it is **not** sugar for `return Err(...)`, which already
 exists for *expected* errors). The nearest enclosing `recover:` catches it as `Err(e)` with
 `e.message() == msg`; uncaught, it terminates the program with that message and a non-zero exit code,
-exactly like an integer overflow. `defer`s run as it unwinds, like any panic. Because `panic` never
+exactly like an integer overflow. `defer`s run as it unwinds, like any panic — and if one of those
+`defer`s **itself** panics while the unwind is in flight, the newer panic **replaces** the one in
+progress (the later panic wins; the original message is dropped, matching the last-writer semantics of a
+re-raise). Because `panic` never
 returns, it is *bottom-typed*: it type-checks in any position — as a statement, as the diverging tail
 of a branch (no explicit `return` needed), or in an expression (`x := if ok: v else: panic("no")`
 takes `v`'s type).
