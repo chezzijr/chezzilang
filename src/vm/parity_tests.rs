@@ -2157,6 +2157,38 @@ fn parallel_all_blocked_deadlock_faults() {
     assert!(err.message.contains("deadlock"), "got: {}", err.message);
 }
 
+/// A blocking `for v in ch:` (recv) with no producer and no runnable sibling deadlocks on BOTH
+/// engines with an ENGINE-AGNOSTIC message — the old text hardcoded "sequential executor", which
+/// is misleading under the default M:N (real-thread) engine. Same code path serves both engines.
+#[test]
+fn deadlock_fault_message_is_engine_agnostic() {
+    let msg = parity_entry_fault(
+        "fn main():\n    ch := Channel[int]()\n    for v in ch:\n        print(v)\nmain()\n",
+    );
+    assert!(msg.contains("deadlock"), "got: {msg}");
+    assert!(!msg.contains("sequential executor"), "got: {msg}");
+}
+
+/// The reworded deadlock fault stays catchable by `recover:` on BOTH engines, surfacing the new
+/// engine-agnostic text (catchability is text-independent, but pin it so a future reword can't
+/// silently make it uncatchable).
+#[test]
+fn deadlock_fault_is_recoverable_new_message() {
+    let src = "fn main():\n\
+               \x20   ch := Channel[int]()\n\
+               \x20   r := recover:\n\
+               \x20       for v in ch:\n\
+               \x20           print(v)\n\
+               \x20   match r:\n\
+               \x20       Ok(_): print(\"ok\")\n\
+               \x20       Err(e): print(\"caught: {e.message()}\")\n\
+               main()\n";
+    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
+    assert!(out.contains("caught:"), "got: {out}");
+    assert!(out.contains("deadlock"), "got: {out}");
+    assert!(!out.contains("sequential executor"), "got: {out}");
+}
+
 /// `std.cancel` wakeup regression — a sibling's `cancel()` (which `trip()`s the token's `done()`
 /// channel) must wake a fiber **parked** in `wait: tok.done().recv()` under the OS-thread engine.
 /// The canceller sleeps first so the waiter reliably reaches `park_wait` and blocks; the `trip()`

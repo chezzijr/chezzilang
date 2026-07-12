@@ -395,6 +395,13 @@ fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
 fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path::PathBuf, String> {
     // Trim surrounding whitespace on EACH segment before building the path, so a padded value like
     // `" app "` resolves to `app.chz` rather than the baffling `<root>/ app .chz` ("cannot read").
+    // An embedded path separator would resolve by accident via `PathBuf::push` instead of the
+    // documented dotted form, so reject it up front.
+    if entrypoint.contains('/') || entrypoint.contains('\\') {
+        return Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; the module path must use '.' separators, not '/'"
+        ));
+    }
     let segs: Vec<String> = entrypoint
         .split('.')
         .map(|s| s.trim().to_string())
@@ -1079,6 +1086,15 @@ mod init_tests {
             assert!(
                 entrypoint_file(bad, root).is_err(),
                 "entrypoint {bad:?} should be rejected"
+            );
+        }
+        // An embedded path separator ('/' or '\\') would resolve by accident via PathBuf::push
+        // instead of the documented dotted form — reject it with a clear message.
+        for bad in ["src/main", "src\\main", "a/b.c"] {
+            let e = entrypoint_file(bad, root).unwrap_err();
+            assert!(
+                e.contains("'.' separators"),
+                "entrypoint {bad:?} err should mention '.' separators, got: {e}"
             );
         }
     }
