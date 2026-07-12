@@ -1771,7 +1771,10 @@ impl Vm {
     }
 
     /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins). Used by
-    /// `map.update`. No allocation, so no GC concerns.
+    /// `map.update`. On INSERT it snapshots a struct/enum/newtype key (Go value-key model) so the
+    /// target map does NOT alias the source map's stored key object — otherwise mutating one map's
+    /// key (e.g. via `keys()`) would silently corrupt the other. `snapshot_key` is pure alloc (no
+    /// GC), so `h` stays valid across it.
     pub(super) fn map_upsert_in_heap(&mut self, h: GcRef, hk: u64, key: Value, val: Value) {
         let Obj::Map(m) = self.heap.get(h) else {
             unreachable!()
@@ -1781,12 +1784,20 @@ impl Vm {
             .iter()
             .copied()
             .find(|&p| self.values_equal(m.entries[p].1, key));
-        let Obj::Map(m) = self.heap.get_mut(h) else {
-            unreachable!()
-        };
         match pos {
-            Some(i) => m.entries[i].2 = val,
-            None => m.push(hk, key, val),
+            Some(i) => {
+                let Obj::Map(m) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
+                m.entries[i].2 = val;
+            }
+            None => {
+                let key = self.snapshot_key(key);
+                let Obj::Map(m) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
+                m.push(hk, key, val);
+            }
         }
     }
 
@@ -2314,10 +2325,21 @@ impl Vm {
                         }
                     };
                     if method == "merge" {
-                        let Obj::Map(m) = self.heap.get(h) else {
-                            unreachable!()
+                        // Build the result fresh, snapshotting EVERY struct/enum/newtype key (Go
+                        // value-key model) so the new map aliases neither the receiver's nor the
+                        // argument's stored keys — `m.clone()` would carry the receiver's key handles
+                        // by reference. The receiver's own keys are already unique, so they need no
+                        // dedup; the argument's entries upsert (last-wins). `snapshot_key` is pure
+                        // alloc (no GC), so the local `out`'s contents stay valid across it.
+                        let mine = match self.heap.get(h) {
+                            Obj::Map(m) => m.entries.clone(),
+                            _ => unreachable!(),
                         };
-                        let mut out = m.clone();
+                        let mut out = MapData::default();
+                        for (hk, key, val) in mine {
+                            let key = self.snapshot_key(key);
+                            out.push(hk, key, val);
+                        }
                         for (hk, key, val) in incoming {
                             let pos = out
                                 .candidates(hk)
@@ -2326,7 +2348,10 @@ impl Vm {
                                 .find(|&p| self.values_equal(out.entries[p].1, key));
                             match pos {
                                 Some(i) => out.entries[i].2 = val,
-                                None => out.push(hk, key, val),
+                                None => {
+                                    let key = self.snapshot_key(key);
+                                    out.push(hk, key, val);
+                                }
                             }
                         }
                         // `out` is fully built and moved into the new Obj before any GC can run.
@@ -2370,6 +2395,10 @@ impl Vm {
                         .iter()
                         .any(|&p| self.values_equal(s.entries[p].1, x));
                     if !present {
+                        // Snapshot a struct/enum/newtype element on insert (Go value-key model) so a
+                        // later mutation of the caller's live value can't corrupt the set. Pure alloc
+                        // (no GC), so no rooting needed before the immediately-following push.
+                        let x = self.snapshot_key(x);
                         let Obj::Set(s) = self.heap.get_mut(h) else {
                             unreachable!()
                         };
