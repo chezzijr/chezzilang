@@ -311,7 +311,8 @@ impl HostError {
 pub fn is_blocking(name: &str) -> bool {
     matches!(
         name,
-        // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline)
+        // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline; even under the
+        // streaming CLI a `print` cannot block: it hands the line to `vm::stream`'s writer thread)
         "read_file" | "write_file"
         // std.fs (all members are filesystem syscalls — reads + mutations)
         | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"

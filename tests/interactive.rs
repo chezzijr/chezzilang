@@ -246,24 +246,149 @@ fn input_prompt_roundtrip_serial() {
     input_prompt_roundtrip(true);
 }
 
-/// A closed read end (`chezzi run x.chz | head -1`) must exit cleanly, never panic.
-#[test]
-fn broken_pipe_no_panic() {
+/// `child.wait()` with a deadline: `None` if the child is still running after `secs` (it is killed).
+fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        match child.try_wait().unwrap() {
+            Some(st) => return Some(st),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+/// A closed read end (`chezzi run x.chz | head -1`) must TERMINATE, cleanly and promptly: the writer
+/// sees `BrokenPipe` and halts the process. Rust installs `SIG_IGN` for SIGPIPE, so an ignored EPIPE
+/// would leave this never-ending printer spinning forever on a dead pipe at 100% CPU.
+fn broken_pipe_exits_clean(serial: bool) {
     let t = TmpDir::new();
-    let entry = t.write(
-        "main.chz",
-        "for i in range(200000):\n    print(\"line\", i)\n",
-    );
-    let mut child = spawn(&entry, false);
+    let entry = t.write("main.chz", "while true:\n    print(\"x\")\n");
+    let mut child = spawn(&entry, serial);
     drop(child.stdout.take()); // close the read end immediately
-    let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
-    let status = child.wait().unwrap();
-    assert!(!err.contains("panicked at"), "panicked: {err}");
+    let status =
+        wait_timeout(&mut child, 20).expect("kept printing to a dead pipe (EPIPE ignored)");
     assert!(status.code().is_some(), "killed by a signal: {status:?}");
+    assert!(
+        status.success(),
+        "a closed reader is a clean exit: {status:?}"
+    );
+}
+
+#[test]
+fn broken_pipe_exits_clean_mn() {
+    broken_pipe_exits_clean(false);
+}
+
+#[test]
+fn broken_pipe_exits_clean_serial() {
+    broken_pipe_exits_clean(true);
+}
+
+/// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run
+/// fails loudly (diagnostic + non-zero exit), never "exit 0 with no output". Same policy as
+/// `chezzi docs` (main.rs `write_stdout`): BrokenPipe = clean, any other errno = FAILURE.
+fn write_error_is_reported(serial: bool) {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return; // not Linux — nothing to assert against
+    }
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", "for i in range(100):\n    print(\"line\", i)\n");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    if serial {
+        cmd.arg("--serial");
+    }
+    let out = cmd
+        .arg(&entry)
+        .stdout(std::fs::File::create(full).unwrap())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn chezzi");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked at"), "panicked: {err}");
+    assert!(
+        !out.status.success(),
+        "an unwritable stdout reported SUCCESS: {:?} (stderr: {err})",
+        out.status
+    );
+    assert!(
+        err.contains("cannot write stdout"),
+        "no diagnostic for the failed write: {err}"
+    );
+}
+
+#[test]
+fn write_error_is_reported_mn() {
+    write_error_is_reported(false);
+}
+
+#[test]
+fn write_error_is_reported_serial() {
+    write_error_is_reported(true);
+}
+
+/// A STALLED reader must not stall the engine. A streamed `print` used to be an inline, blocking
+/// `write(2)` on a core worker (holding the process-global stdout lock): once the 64K pipe buffer
+/// filled, every printing fiber pinned a worker in the kernel and an unrelated fiber in the same
+/// nursery starved for as long as the consumer stalled (the D5 invariant: no blocking syscall on a
+/// core worker). Witness: a task that sleeps, then writes a file — it must make progress while
+/// nothing is draining stdout.
+fn stalled_reader_does_not_starve_other_tasks(serial: bool) {
+    let t = TmpDir::new();
+    let witness = t.0.join("witness.txt");
+    let src = format!(
+        "import std.io\nimport std.time\n\n\
+         fn spam():\n    for i in range(20000):\n        io.print(\"{pad}\")\n\n\
+         fn witness():\n    time.sleep_ms(300)\n    io.write_file(\"{w}\", \"done\")\n\n\
+         parallel:\n    for i in range(8):\n        spawn: spam()\n    spawn: witness()\n",
+        pad = "x".repeat(64),
+        w = witness.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    if serial {
+        cmd.arg("--serial");
+    } else {
+        cmd.arg("--threads=2"); // errors with --serial; 8 printers >> workers
+    }
+    let mut child = cmd
+        .arg(&entry)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+    // Deliberately do NOT read the child's stdout: the pipe fills and stays full.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut ok = false;
+    while std::time::Instant::now() < deadline {
+        if witness.exists() {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        ok,
+        "a stalled stdout reader starved an unrelated task (blocking write on a core worker)"
+    );
+}
+
+#[test]
+fn stalled_reader_does_not_starve_other_tasks_mn() {
+    stalled_reader_does_not_starve_other_tasks(false);
+}
+
+#[test]
+fn stalled_reader_does_not_starve_other_tasks_serial() {
+    stalled_reader_does_not_starve_other_tasks(true);
 }

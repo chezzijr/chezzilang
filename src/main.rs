@@ -321,18 +321,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
             code,
         )
     };
-    // Rust's `Stdout` is a `LineWriter`: flush before ANY exit path, so a trailing `print(…, end="")`
-    // or an `os.exit` mid-line does not lose its bytes. `BrokenPipe` is swallowed, never a panic.
-    let flush = || {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-    };
+    // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")` or an
+    // `os.exit` mid-line does not lose its bytes. A failed write is NOT silent: the writer halts the
+    // process with a diagnostic (BrokenPipe = clean exit) — see `vm::stream`.
+    vm::flush_stream();
     // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
     if let Some(code) = exit_code {
-        flush();
         return ExitCode::from(code as u8);
     }
-    flush();
     match errored {
         None => ExitCode::SUCCESS,
         Some(msg) => {

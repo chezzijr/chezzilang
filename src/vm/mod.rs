@@ -2820,6 +2820,9 @@ mod exec;
 mod netio;
 mod sched;
 mod stmt;
+mod stream;
+
+pub use stream::flush_stream;
 
 /// D5 — the off-heap [`crate::native::Host`] for a blocking native run on the dirty pool (no `Vm`,
 /// no heap). It serves the pre-extracted primitive args ([`crate::native::NativeArg`]) and *panics*
@@ -3151,8 +3154,7 @@ impl crate::native::Host for VmHost<'_> {
     }
     fn flush_stdout(&mut self) {
         if self.vm.host.stream {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+            stream::flush_stream();
         }
     }
     fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {

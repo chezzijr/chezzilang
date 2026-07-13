@@ -260,6 +260,13 @@ task's line is visible before its nursery joins). Three rules follow:
   sink the lib helpers use — not a user-facing guarantee.)
 - stdout and stderr are **separately locked**, so a task's `print` and `eprint` may reorder relative to
   each other (Python-identical).
+- A `print` **never blocks the engine**: the line is handed to a background writer thread (one per
+  stream), so a stalled/slow consumer (`chezzi run x.chz | (sleep 60; cat)`) can never pin a core
+  worker and starve the other tasks.
+- A **failed write is not silent**. `BrokenPipe` (`chezzi run x.chz | head -1`) stops the run and exits
+  **0** — the reader went away, that is a clean end, and the program does not spin on a dead pipe. Any
+  other I/O error (`ENOSPC`, `EIO`, a closed fd) prints `chezzi run: cannot write stdout: …` and exits
+  **non-zero** — a truncated redirect never reports success.
 
 A **spawned task's stdin is empty** (a single consumable stream is not shared across workers), so
 `io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` on the M:N engine. Read stdin from

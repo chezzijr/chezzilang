@@ -6,33 +6,26 @@ use super::*;
 impl Vm {
     /// The stdout sink. DEFAULT (`host.stream == false`) = append to the captured `out` buffer:
     /// byte-identical to what every test helper, embedder and the serial-vs-M:N parity oracle has
-    /// always seen. STREAM (`chezzi run` only) = ONE locked write straight to the process's real
-    /// stdout, so output appears when it happens and a `print` is line-atomic across tasks. I/O
-    /// errors (notably `BrokenPipe` — `chezzi run x.chz | head -1`) are swallowed, never a panic
-    /// like `print!`. The caller must have released any GC/stringify borrow first: the lock is held
-    /// only for this write, never across user code.
+    /// always seen. STREAM (`chezzi run` only) = hand the whole `print` to the stdout writer thread
+    /// ([`stream`]), which turns it into ONE `write_all` on the real handle: output appears when it
+    /// happens, a `print` is line-atomic across tasks, and the fiber NEVER blocks in `write(2)` (a
+    /// stalled reader must not pin a core worker — the D5 invariant).
     pub(super) fn emit_out(&mut self, s: &str) {
-        if !self.host.stream {
+        if self.host.stream {
+            stream::write_out(s);
+        } else {
             self.out.push_str(s);
-            return;
         }
-        use std::io::Write;
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        let _ = lock.write_all(s.as_bytes());
     }
 
-    /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE lock (so a task's `print`
-    /// and `eprint` can reorder relative to each other, exactly like Python's).
+    /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's
+    /// `print` and `eprint` can reorder relative to each other, exactly like Python's).
     pub(super) fn emit_err(&mut self, s: &str) {
-        if !self.host.stream {
+        if self.host.stream {
+            stream::write_err(s);
+        } else {
             self.stderr.push_str(s);
-            return;
         }
-        use std::io::Write;
-        let stderr = std::io::stderr();
-        let mut lock = stderr.lock();
-        let _ = lock.write_all(s.as_bytes());
     }
 
     pub(super) fn new(program: Arc<Program>) -> Self {

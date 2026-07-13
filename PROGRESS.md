@@ -4739,16 +4739,24 @@ branch names) is in the git log.
   joined (for a server: never). Now the stdout/stderr sink is selected by `HostConfig::stream` (default
   `false`): **every lib helper, golden and parity test keeps the BUFFERED sink unchanged** (per-task
   buffers + task-order flush → byte-identical serial-VM == M:N-VM; zero test edits), while `chezzi run`
-  sets `stream = true` and each `print` becomes ONE locked write to the real stdout (line-atomic across
-  tasks; `BrokenPipe` swallowed, never a panic). In stream mode the per-task buffers just stay empty, so
-  the scheduler is untouched. `read_line` flushes stdout first (that is what makes a `print(…, end="")`
-  prompt appear). New `std.io` surface: **`flush()`** and **`input(prompt)`** (= print prompt, flush,
-  read line → `Option[str]`). The task-order flush is now documented as a **test-harness** property, not
-  a user guarantee: cross-task print order is nondeterministic on both engines (Python/Go/Rust-identical);
-  join and print the results yourself if you want order. Perf: `benches/run.chz` unmoved (all within
-  noise); an ad-hoc 200k-line print loop goes **0.048 s → 0.078 s** (~1.6×, one write syscall per line —
-  `Stdout` is a `LineWriter`; a `BufWriter` would hide it but break "a killed program retains its
-  output"). New real-binary suite `tests/interactive.rs` (11 tests, both engines).
+  sets `stream = true` and each `print` becomes ONE `write_all` on the real stdout (line-atomic across
+  tasks). In stream mode the per-task buffers just stay empty, so the scheduler is untouched.
+  `read_line` flushes stdout first (that is what makes a `print(…, end="")` prompt appear). New
+  `std.io` surface: **`flush()`** and **`input(prompt)`** (= print prompt, flush, read line →
+  `Option[str]`). The write itself happens on a **background writer thread per stream** (`vm::stream`):
+  a fiber must never sit in `write(2)` — an inline blocking write on a core worker means one stalled
+  reader starves every other task (the D5 `is_blocking` invariant). Write errors are **not swallowed**:
+  `BrokenPipe` (`| head -1`) halts the run with exit 0 (so an endless printer does not spin on a dead
+  pipe), any other errno prints `chezzi run: cannot write stdout: …` and exits non-zero (a `> /dev/full`
+  run can no longer report SUCCESS with no output). The task-order flush is now documented as a
+  **test-harness** property, not a user guarantee: cross-task print order is nondeterministic on both
+  engines (Python/Go/Rust-identical); join and print the results yourself if you want order. Perf:
+  `benches/run.chz` unmoved (all within noise); an ad-hoc 200k-line print loop goes **0.048 s →
+  0.102 s** (~2.1×: one write syscall per line + the queue handoff — a `BufWriter` would hide the
+  syscall but break "a killed program retains its output"). New real-binary suite `tests/interactive.rs`
+  (16 tests, both engines: prompt-before-stdin, killed-program output, spawned-task print before join,
+  order-insensitive concurrent lines, `from std.io import input`, broken-pipe clean exit, unwritable
+  stdout reported, stalled reader does not starve).
 
 - **`regex.Match.start`/`.end` are now CODEPOINT offsets (observable stdlib behavior change).** They
   were the `regex` crate's raw **byte** offsets while Chezzi slicing/indexing is codepoint-based and
