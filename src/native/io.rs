@@ -35,8 +35,10 @@ fn read_line(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-/// Flush this process's stdout (the streaming CLI buffers by line — `Stdout` is a `LineWriter`). A
-/// no-op under the buffered/captured sink (tests, embedders), where nothing is going anywhere yet.
+/// Flush this process's stdout. Effectively a no-op in both sinks — the captured sink has nothing to
+/// flush, and the streaming CLI's stdout is UNBUFFERED (its writer thread flushes every message, see
+/// `vm::stream`). It stays because it is the portable idiom, and it must NEVER wait on stdout's
+/// consumer: a fiber blocked on a stalled reader pins a core worker (the D5 invariant).
 fn flush(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "flush", 0)?;
     h.flush_stdout();

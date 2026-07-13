@@ -853,3 +853,11 @@ actually appears when it happens, from a task that cannot stall the engine. A `B
 the syscall cost — and would also break "a killed/hung program retains the output it already produced",
 which is one of the milestone's acceptance tests. The captured (test/embedder) sink is untouched: it
 still `push_str`s, so the parity suite's cost is unchanged.
+
+**Follow-up fix (same milestone), re-measured.** The writer thread now `flush`es every message (the
+streamed handles are unbuffered, so a `print(x, end="")` partial line appears immediately instead of
+sitting in `Stdout`'s `LineWriter`), and the VM no longer waits on the writer at any seam. Cost: **nil**
+— a newline-terminated `print` already forced a `write` through the `LineWriter`, so the extra `flush`
+is a no-op memcheck. Re-measured on the same machine: print loop **0.101 s** (was 0.102 s), tracked
+suite `fib` 262.0 · `str` 178.7 · `primes` 653.2 · `loop` 992.8 · `list` 406.5 · `struct` 472.6 ·
+`poly_method` 1374 · `map` 156.1 · `empty` 1.9 — all within noise of the numbers above.

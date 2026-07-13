@@ -241,8 +241,8 @@ Constants: `math.pi`, `math.e`.
 |----------|-----------|-------|
 | `print` | `(s: str) -> nil` | stdout + newline. |
 | `eprint` | `(s: str) -> nil` | stderr + newline. |
-| `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). Flushes stdout first, so a `print(…, end="")` prompt is visible before the read. |
-| `flush` | `() -> nil` | Flush this process's stdout. A no-op when output is captured (tests / embedders). |
+| `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
+| `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
@@ -260,17 +260,23 @@ task's line is visible before its nursery joins). Three rules follow:
   sink the lib helpers use — not a user-facing guarantee.)
 - stdout and stderr are **separately locked**, so a task's `print` and `eprint` may reorder relative to
   each other (Python-identical).
-- A `print` **never blocks the engine**: the line is handed to a background writer thread (one per
-  stream), so a stalled/slow consumer (`chezzi run x.chz | (sleep 60; cat)`) can never pin a core
-  worker and starve the other tasks.
-- A **failed write is not silent**. `BrokenPipe` (`chezzi run x.chz | head -1`) stops the run and exits
-  **0** — the reader went away, that is a clean end, and the program does not spin on a dead pipe. Any
-  other I/O error (`ENOSPC`, `EIO`, a closed fd) prints `chezzi run: cannot write stdout: …` and exits
-  **non-zero** — a truncated redirect never reports success.
+- Output is **unbuffered**: a `print(x, end="")` progress marker appears immediately, without an
+  `io.flush()` (that is why `flush` has nothing left to do).
+- **Nothing in the program ever waits on stdout's consumer.** A `print` hands the line to a background
+  writer thread (one per stream) and returns; `flush` / `read_line` / `input` never wait on that thread
+  either. So a stalled/slow consumer (`chezzi run x.chz | (sleep 60; cat)`) can never pin a core worker
+  and starve the other tasks.
+- A **failed write is not silent**, and the writer thread never decides the program's fate. A closed
+  stdout reader (`chezzi run x.chz | head -1`) halts the run at its next `print` — like `os.exit(0)`, so
+  an endless printer does not spin on a dead pipe — and the program's own status stands (a run that
+  faults first still exits non-zero with its trace). Any other stdout I/O error (`ENOSPC`, `EIO`, a
+  closed fd) prints `chezzi run: cannot write stdout: …` and exits **non-zero**: a truncated redirect
+  never reports success. A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead
+  `2>` reader is no reason to kill a healthy program.
 
-A **spawned task's stdin is empty** (a single consumable stream is not shared across workers), so
-`io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` on the M:N engine. Read stdin from
-the entry task.
+A **spawned task's stdin is empty** (a single consumable stream is not shared across tasks), so
+`io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` — on **both** engines. Read stdin
+from the entry task.
 
 ### `std.os`
 | Function | Signature | Notes |

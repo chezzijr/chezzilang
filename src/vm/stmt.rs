@@ -995,6 +995,9 @@ impl Vm {
         let mut line = parts.join(" ");
         line.push('\n');
         self.emit_out(&line);
+        if let Some(halt) = self.stream_halt(span) {
+            return Err(halt); // stdout died (closed reader / unwritable) — halt like `os.exit`
+        }
         self.push(Value::Nil);
         Ok(())
     }
@@ -1018,6 +1021,9 @@ impl Vm {
         let mut line = parts.join(&sep);
         line.push_str(&end);
         self.emit_out(&line);
+        if let Some(halt) = self.stream_halt(span) {
+            return Err(halt);
+        }
         self.push(Value::Nil);
         Ok(())
     }

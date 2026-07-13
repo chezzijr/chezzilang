@@ -1290,7 +1290,7 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "flush",
-                "flush this process's stdout (no-op when output is captured)",
+                "flush this process's stdout (a no-op: streamed output is unbuffered)",
             ),
             (
                 "input",

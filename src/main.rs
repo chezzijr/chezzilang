@@ -321,20 +321,27 @@ fn cmd_run(args: &[String]) -> ExitCode {
             code,
         )
     };
-    // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")` or an
-    // `os.exit` mid-line does not lose its bytes. A failed write is NOT silent: the writer halts the
-    // process with a diagnostic (BrokenPipe = clean exit) — see `vm::stream`.
+    // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")`, an
+    // `os.exit` mid-line or a fatal trace does not lose its bytes.
     vm::flush_stream();
+    // The exit status is decided HERE — the writer threads only record (`vm::stream`).
+    if let Some(msg) = &errored {
+        eprintln!("{msg}");
+    }
+    // A stdout write that failed for anything but a closed reader (`> /dev/full`, a closed fd): the
+    // output is truncated, so the run must not report success. A closed READER (`| head -1`) is a
+    // clean end — the VM halted itself at its next `print` and its own status stands.
+    if let Some(e) = vm::stream_error() {
+        eprintln!("chezzi run: cannot write stdout: {e}");
+        return ExitCode::FAILURE;
+    }
     // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
     if let Some(code) = exit_code {
         return ExitCode::from(code as u8);
     }
     match errored {
         None => ExitCode::SUCCESS,
-        Some(msg) => {
-            eprintln!("{msg}");
-            ExitCode::FAILURE
-        }
+        Some(_) => ExitCode::FAILURE,
     }
 }
 

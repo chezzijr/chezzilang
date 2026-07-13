@@ -10,12 +10,32 @@ impl Vm {
     /// ([`stream`]), which turns it into ONE `write_all` on the real handle: output appears when it
     /// happens, a `print` is line-atomic across tasks, and the fiber NEVER blocks in `write(2)` (a
     /// stalled reader must not pin a core worker — the D5 invariant).
+    ///
+    /// If stdout has DIED (a closed reader, a full disk), the writer thread has marked it and dropped
+    /// the bytes; we halt the run right here — cooperatively, through the very `pending_exit` seam
+    /// `std.os.exit(0)` uses, so the VM (not a detached thread) ends the program: defers/joins unwind,
+    /// the sibling stream drains, and `main` still decides the status (a non-BrokenPipe failure
+    /// becomes a diagnostic + FAILURE via [`stream::stream_error`]; a closed reader is a clean end).
+    /// Without this, `chezzi run x.chz | head -1` would spin forever on a dead pipe — Rust ignores
+    /// SIGPIPE, and restoring it would break `std.net`'s EPIPE-as-an-error contract.
     pub(super) fn emit_out(&mut self, s: &str) {
         if self.host.stream {
-            stream::write_out(s);
+            if !stream::write_out(s) {
+                self.pending_exit.get_or_insert(0);
+            }
         } else {
             self.out.push_str(s);
         }
+    }
+
+    /// `Err`-sentinel for a `pending_exit` set by [`Vm::emit_out`] (dead stdout), if one was: the op
+    /// chain (`step` → `run_until`) recognizes the pending exit and unwinds past every `recover:` to
+    /// the top, exactly like `std.os.exit`.
+    pub(super) fn stream_halt(&self, span: Span) -> Option<RuntimeError> {
+        self.pending_exit.map(|_| RuntimeError {
+            message: "exit".into(),
+            span,
+        })
     }
 
     /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's
@@ -128,6 +148,12 @@ impl Vm {
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
+        // stdin is the ENTRY task's, on BOTH engines. An M:N worker is built with `Stdin::Empty`
+        // (`spawn_worker`) — a spawned task's `read_line`/`input` sees EOF — so the cooperative engine
+        // must agree or the two diverge (same program, different stdout). A fresh `FiberCtx` defaults
+        // to `Stdin::Empty`, so this swap hands the real stdin to the parked parent and leaves the
+        // scheduled-in fiber with EOF; swapping back restores it.
+        std::mem::swap(&mut self.host.stdin, &mut ctx.stdin);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries

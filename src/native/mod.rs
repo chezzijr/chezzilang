@@ -258,8 +258,12 @@ pub trait Host {
     /// Read one line from the injected stdin source; `None` at EOF. The trailing newline is
     /// stripped.
     fn read_line(&mut self) -> Result<Option<String>, HostError>;
-    /// Flush the process's real stdout (streaming CLI). A no-op for a buffered/captured host, which
-    /// is why it is defaulted: the mock hosts need no edit.
+    /// Flush this host's stdout. DEFAULTED to a no-op, and that default is what every host in-tree
+    /// uses: the captured/buffered sink has nothing to flush, and the streaming CLI's stdout is
+    /// UNBUFFERED (its writer thread `flush`es every message — see `vm::stream`), so there is nothing
+    /// left in a buffer to push. It stays on the trait as the seam a buffering embedder would want,
+    /// and as what `io.flush()` calls. It must NEVER wait on stdout's consumer: a fiber blocked on a
+    /// stalled reader pins a core worker (the D5 invariant).
     fn flush_stdout(&mut self) {}
 
     /// The program arguments (injected; defaults to empty).

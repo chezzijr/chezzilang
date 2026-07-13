@@ -263,7 +263,8 @@ fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus
 }
 
 /// A closed read end (`chezzi run x.chz | head -1`) must TERMINATE, cleanly and promptly: the writer
-/// sees `BrokenPipe` and halts the process. Rust installs `SIG_IGN` for SIGPIPE, so an ignored EPIPE
+/// thread marks stdout dead and the VM halts itself at its NEXT `print` (the `os.exit(0)` seam — the
+/// VM ends the run, never a detached thread). Rust installs `SIG_IGN` for SIGPIPE, so an ignored EPIPE
 /// would leave this never-ending printer spinning forever on a dead pipe at 100% CPU.
 fn broken_pipe_exits_clean(serial: bool) {
     let t = TmpDir::new();
@@ -391,4 +392,209 @@ fn stalled_reader_does_not_starve_other_tasks_mn() {
 #[test]
 fn stalled_reader_does_not_starve_other_tasks_serial() {
     stalled_reader_does_not_starve_other_tasks(true);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The writer threads RECORD; they never decide the program's fate. (Regressions for the first cut,
+// where a failed write called `std::process::exit` from a detached thread.)
+// ---------------------------------------------------------------------------------------------
+
+/// stderr is a DIAGNOSTIC channel: an unwritable stderr (`2> /dev/full`, a dead `2> >(head -1)`
+/// reader) must not touch a healthy program. It used to kill the process mid-run — exit 1 for a
+/// program that had no error, with its stdout results truncated.
+fn stderr_failure_does_not_kill_the_run(serial: bool) {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return; // not Linux
+    }
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\nimport std.time\nio.eprint(\"warn one\")\nio.eprint(\"warn two\")\n\
+         time.sleep_ms(200)\nfor i in range(50):\n    print(\"line {i}\")\n",
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    if serial {
+        cmd.arg("--serial");
+    }
+    let out = cmd
+        .arg(&entry)
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(full).unwrap())
+        .output()
+        .expect("spawn chezzi");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "an unwritable stderr killed a healthy program: {:?}",
+        out.status
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        50,
+        "stdout was truncated by a stderr failure: {stdout:?}"
+    );
+}
+
+#[test]
+fn stderr_failure_does_not_kill_the_run_mn() {
+    stderr_failure_does_not_kill_the_run(false);
+}
+
+#[test]
+fn stderr_failure_does_not_kill_the_run_serial() {
+    stderr_failure_does_not_kill_the_run(true);
+}
+
+/// A closed stdout reader must not swallow the program's OUTCOME: a run that faults after the pipe
+/// broke still reports FAILURE with its trace on stderr (it used to exit 0, silently, from the writer
+/// thread — `main`'s exit-status handling never ran).
+fn fault_after_broken_pipe_still_reports_the_fault(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        // One print (the pipe is already closed → the writer takes EPIPE during the sleep), then a
+        // genuine fault, with no further print to halt on: the FAULT must decide the exit status.
+        "import std.time\nprint(\"a\")\ntime.sleep_ms(300)\nxs := [1]\nprint(xs[5])\n",
+    );
+    let mut child = spawn(&entry, serial);
+    drop(child.stdout.take()); // close the read end immediately
+    let err = child.stderr.take().unwrap();
+    let status = wait_timeout(&mut child, 20).expect("never exited");
+    let err = read_line_timeout(err).unwrap_or_default();
+    assert!(
+        !status.success(),
+        "a faulting program reported SUCCESS after a broken pipe: {status:?}"
+    );
+    assert!(
+        err.contains("runtime error"),
+        "the fault trace was lost: {err:?}"
+    );
+}
+
+#[test]
+fn fault_after_broken_pipe_still_reports_the_fault_mn() {
+    fault_after_broken_pipe_still_reports_the_fault(false);
+}
+
+#[test]
+fn fault_after_broken_pipe_still_reports_the_fault_serial() {
+    fault_after_broken_pipe_still_reports_the_fault(true);
+}
+
+/// `2>&1 | head -1` — BOTH writer threads take EPIPE in the same window. Two threads calling libc
+/// `exit(3)` concurrently is undefined (a hang in the exit-handler lock, atexit run twice); no thread
+/// exits the process any more, so this just terminates.
+fn both_streams_broken_terminates(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.io\nwhile true:\n    io.print(\"o\")\n    io.eprint(\"e\")\n",
+    );
+    let mut child = spawn(&entry, serial);
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    let status = wait_timeout(&mut child, 20).expect("did not terminate with both pipes closed");
+    assert!(status.code().is_some(), "killed by a signal: {status:?}");
+}
+
+#[test]
+fn both_streams_broken_terminates_mn() {
+    both_streams_broken_terminates(false);
+}
+
+#[test]
+fn both_streams_broken_terminates_serial() {
+    both_streams_broken_terminates(true);
+}
+
+/// A PARTIAL line (`print(x, end="")`, no newline) must reach the terminal as it is produced — a
+/// progress indicator, and the "a killed program keeps what it printed" contract. `std::io::stdout()`
+/// is a `LineWriter`, so the writer thread must flush every message; otherwise nothing appears until
+/// a newline (or ever, if the program is killed).
+fn partial_line_print_is_visible_without_flush(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "print(\".\", end=\"\")\nwhile true:\n    x := 1\n",
+    );
+    let mut child = spawn(&entry, serial);
+    let out = child.stdout.take().unwrap();
+    let got = read_bytes_timeout(out, 1);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        got.as_deref(),
+        Some("."),
+        "a partial-line print never left the process"
+    );
+}
+
+#[test]
+fn partial_line_print_is_visible_without_flush_mn() {
+    partial_line_print_is_visible_without_flush(false);
+}
+
+#[test]
+fn partial_line_print_is_visible_without_flush_serial() {
+    partial_line_print_is_visible_without_flush(true);
+}
+
+/// D5, the `io.flush()` seam: a stalled stdout consumer must not starve unrelated tasks. `flush`
+/// (and `input`/`read_line`, which used to pre-flush) must never WAIT on the writer thread — that
+/// thread is parked in `write(2)` on the full pipe, so waiting pins the fiber's core worker for as
+/// long as the consumer stalls. Witness: a task that sleeps, then writes a file.
+fn stalled_reader_flush_does_not_starve_other_tasks(serial: bool) {
+    let t = TmpDir::new();
+    let witness = t.0.join("witness_flush.txt");
+    let src = format!(
+        "import std.io\nimport std.time\n\n\
+         fn spam():\n    for i in range(20000):\n        io.print(\"{pad}\")\n        io.flush()\n\n\
+         fn witness():\n    time.sleep_ms(300)\n    io.write_file(\"{w}\", \"done\")\n\n\
+         parallel:\n    for i in range(8):\n        spawn: spam()\n    spawn: witness()\n",
+        pad = "x".repeat(64),
+        w = witness.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run");
+    if serial {
+        cmd.arg("--serial");
+    } else {
+        cmd.arg("--threads=2");
+    }
+    let mut child = cmd
+        .arg(&entry)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+    // Deliberately do NOT read the child's stdout: the pipe fills and stays full.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut ok = false;
+    while std::time::Instant::now() < deadline {
+        if witness.exists() {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        ok,
+        "io.flush() waited on a stalled stdout consumer and starved an unrelated task"
+    );
+}
+
+#[test]
+fn stalled_reader_flush_does_not_starve_other_tasks_mn() {
+    stalled_reader_flush_does_not_starve_other_tasks(false);
+}
+
+#[test]
+fn stalled_reader_flush_does_not_starve_other_tasks_serial() {
+    stalled_reader_flush_does_not_starve_other_tasks(true);
 }
