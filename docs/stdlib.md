@@ -277,9 +277,19 @@ task's line is visible before its nursery joins). Three rules follow:
   A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
   to kill a healthy program.
 
-A **spawned task's stdin is empty** (a single consumable stream is not shared across tasks), so
-`io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` — on **both** engines. Read stdin
-from the entry task.
+**Input contract (`read_line` / `input`).** stdin is **ONE source, shared by every task** — exactly
+Go's `os.Stdin` and Python's `sys.stdin`. Any task may read it (`spawn:`/nursery, `Executor.submit`, the
+entry task); no task is ever handed a false EOF.
+
+- A line goes to **exactly one** task: never duplicated, never dropped.
+- **Which** task gets a given line is **nondeterministic**, on both engines — concurrent readers race
+  for lines, like Go/Python. Want a deterministic distribution? Have the entry task read and fan the
+  lines out over a `Channel[str]` — the same "order it yourself" answer as concurrent `print`.
+- `None` means stdin is **genuinely exhausted** (a real EOF).
+- Concurrent `io.input(prompt)` calls may interleave prompt and answer (Python-identical): the prompt
+  write and the read are not one atomic unit.
+- **v1 limit:** `read_line`/`input` are not offloaded, so a task blocked in a read **pins an M:N core
+  worker** — K blocked readers occupy K workers until stdin produces lines.
 
 ### `std.os`
 | Function | Signature | Notes |

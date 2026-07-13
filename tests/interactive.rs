@@ -246,6 +246,53 @@ fn input_prompt_roundtrip_serial() {
     input_prompt_roundtrip(true);
 }
 
+const STDIN_TASKS_PROG: &str = "\
+import std.io
+fn t():
+    match io.read_line():
+        Some(v): io.print(\"got {v}\")
+        None: io.print(\"eof\")
+
+parallel:
+    spawn: t()
+    spawn: t()
+t()
+";
+
+/// Shared stdin, on the REAL process stdin (`Stdin::Real` — the parity tests only cover the injected
+/// `Lines` variant): three piped lines, two spawned readers + the entry reader ⇒ every line is read
+/// exactly ONCE, by SOME reader, and no reader sees a false EOF. This pins that `std::io::stdin()`'s
+/// internal lock really is line-atomic across the M:N engine's real worker threads.
+fn task_reads_piped_stdin(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", STDIN_TASKS_PROG);
+    let mut child = spawn(&entry, serial);
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"a\nb\nc\n").unwrap();
+    drop(stdin); // real EOF after the three lines
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut got: Vec<&str> = text.lines().collect();
+    got.sort_unstable();
+    // ORDER-INSENSITIVE by design: WHICH task gets which line is nondeterministic (Go/Python).
+    assert_eq!(
+        got,
+        vec!["got a", "got b", "got c"],
+        "no false EOF, no duplicated line; got:\n{text}"
+    );
+}
+
+#[test]
+fn task_reads_piped_stdin_mn() {
+    task_reads_piped_stdin(false);
+}
+
+#[test]
+fn task_reads_piped_stdin_serial() {
+    task_reads_piped_stdin(true);
+}
+
 /// `child.wait()` with a deadline: `None` if the child is still running after `secs` (it is killed).
 fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);

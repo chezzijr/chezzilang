@@ -828,12 +828,6 @@ struct FiberCtx {
     eager_scheds: Vec<Option<EagerScope>>,
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
-    /// The fiber's stdin. `Stdin::Empty` (the default) for every SPAWNED task — matching the M:N
-    /// worker, which is built with `Stdin::Empty` (`spawn_worker`) — so `read_line`/`input` inside a
-    /// task reports EOF on BOTH engines. `swap_ctx` parks the entry task's real stdin here while a
-    /// fiber runs and restores it on the way out; without it the cooperative fibers (which all share
-    /// the one `Vm`) would read the parent's stdin and diverge from the M:N engine.
-    stdin: crate::native::Stdin,
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
     /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for cooperative
     /// fibers, which all alias the single `Vm::heap` (decision A — share-by-ref), so their swap

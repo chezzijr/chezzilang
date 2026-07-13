@@ -158,12 +158,10 @@ impl Vm {
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
-        // stdin is the ENTRY task's, on BOTH engines. An M:N worker is built with `Stdin::Empty`
-        // (`spawn_worker`) — a spawned task's `read_line`/`input` sees EOF — so the cooperative engine
-        // must agree or the two diverge (same program, different stdout). A fresh `FiberCtx` defaults
-        // to `Stdin::Empty`, so this swap hands the real stdin to the parked parent and leaves the
-        // scheduled-in fiber with EOF; swapping back restores it.
-        std::mem::swap(&mut self.host.stdin, &mut ctx.stdin);
+        // stdin is NOT swapped: it is ONE source every task shares (Go/Python), so a cooperative
+        // fiber reads the same `Vm::host.stdin` the entry task does — see `Stdin` and `spawn_worker`,
+        // which hands the M:N worker the same shared handle.
+        //
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
