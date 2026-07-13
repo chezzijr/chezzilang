@@ -3166,7 +3166,10 @@ impl crate::native::Host for VmHost<'_> {
             })
     }
     fn request_exit(&mut self, code: i64) {
-        self.vm.pending_exit = Some(code.clamp(0, 255) as i32);
+        // The LOW 8 BITS of the code, exactly like POSIX `exit(3)` / bash / Python / Go: `-1` → 255,
+        // `300` → 44, `-256` → 0. NOT a clamp — clamping a negative code UP to 0 reported a failure
+        // exit as SUCCESS to the shell/CI, and `os.exit(-1)` is the canonical failure idiom.
+        self.vm.pending_exit = Some((code & 0xff) as i32);
     }
 }
 

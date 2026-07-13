@@ -206,6 +206,13 @@ A `.iter()` cursor and a generator value both expose `next() -> Option[T]` and `
 (idempotent — an iterator is its own iterable). See the `Iterator`/`Iterable` protocols and `yield`
 in `syntax.md`.
 
+**Re-entrancy.** A generator cannot be resumed while it is already running: a `.next()` (or a `for`)
+on the generator that is *currently executing*, reached from inside its own body, is a recoverable
+`generator already running` fault — catchable by `recover:`, never a panic, identical on both engines
+(Python raises `ValueError: generator already executing`). It is a fault rather than an answer because
+a live, non-exhausted generator must never report itself EXHAUSTED (`None`). A generator whose body
+**faulted** is *closed*, like Python's: a later `.next()` answers `None`.
+
 ---
 
 ## 4. Native modules
@@ -244,7 +251,7 @@ Constants: `math.pi`, `math.e`.
 | `args` | `() -> List[str]` | Program args (the positionals after the script path). |
 | `env` | `(key: str) -> Option[str]` | Environment variable. |
 | `getcwd` | `() -> Result[str]` | |
-| `exit` | `(code: int) -> never` | Hard, uncatchable halt (status clamped `0..=255`), unwinding past any `recover:`. **Does NOT run `defer`s.** |
+| `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |
 
 ### `std.fs`
 **Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·
@@ -678,7 +685,10 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 
 ### `std.iter` — list/iterator helpers
 `enumerate(xs) -> List[(int, T)]` · `zip(xs, ys) -> List[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
-`fold(xs, init, f)` · `reduce(xs, f) -> T` (non-empty) · `sum(xs: List[int]) -> int` (empty → `0`;
+`fold(xs, init, f)` · `reduce(xs, f) -> T` (**non-empty**: with no seed there is no accumulator to
+start from, so an empty list faults `reduce: empty list with no initial value` — a recoverable fault,
+catchable by `recover:`; seed it with `fold(xs, init, f)` if the list can be empty) ·
+`sum(xs: List[int]) -> int` (empty → `0`;
 **int-only** — the free-function form of the `xs.sum()` method so it can sit on the right of a pipe;
 for a float list use the method, which is generic) · `take(xs, n)` · `drop(xs, n)` ·
 `any(xs, pred) -> bool` · `all(xs, pred) -> bool` · `find(xs, pred) -> Option[T]` ·

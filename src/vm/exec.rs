@@ -211,6 +211,18 @@ impl Vm {
     /// `gen_host_ctx` (GC-rooted) for the duration. Runs `guarded`, so a would-be blocking op inside a
     /// generator faults `deadlock` rather than parking the host.
     pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+        // A RE-ENTRANT resume — `.next()` (or a `for`) on a generator that is already running, from
+        // inside its own body — is a fault, not an answer. This MUST come before the state take
+        // below: while a generator runs, its heap `state` is parked as the `Done` placeholder, so a
+        // re-entrant call would otherwise hit the `Done` short-circuit and silently report a live
+        // generator as EXHAUSTED (`None`). `active_generators` is the resume path's own root list,
+        // pushed/popped around the run, so it is self-clearing on every unwind path (yield,
+        // exhaustion, an early consumer `break`, a fault in the body, a fault caught by `recover:`)
+        // — a generator can never get poisoned as permanently "running". Python: `ValueError:
+        // generator already executing`.
+        if self.active_generators.contains(&h) {
+            return Err(self.err("generator already running".to_string(), span));
+        }
         // Take the generator's lifecycle state + parked context out of the heap object. `state` is
         // left as `Done` and `ctx` as empty; the real state is written back after the run. An
         // already-`Done` generator short-circuits to `None`.

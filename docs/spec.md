@@ -201,7 +201,18 @@ serial and M:N engines agree by construction: an untouched generator global runs
 reached one faults identically on both. (Earlier, the M:N engine
 eagerly snapshotted every module global and faulted on the generator even when no task touched it,
 diverging from the serial engine, which never snapshots; the reach gate + a poisoned snapshot leaf,
-which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.) There is **no** compile-time
+which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.)
+
+A generator is likewise **not re-entrant**: resuming one that is *already running* — a `.next()` or a
+`for` over the generator currently executing, reached from inside its own body — raises the same shape
+of **graceful, catchable** runtime error (`generator already running`, Python's `ValueError: generator
+already executing`), **never** a panic, identically on both engines. A live generator must never report
+itself EXHAUSTED, so this is a fault, not a `None`. The guard is the resume path's own active-generator
+root list, so it clears on every unwind path (yield, exhaustion, an early consumer `break`, a fault in
+the body, a fault caught by an enclosing `recover:`) — a generator can never be poisoned as permanently
+"running". A generator whose body faulted is **closed** (like Python's): a later `.next()` → `None`.
+
+There is **no** compile-time
 multi-pass/single-pass safety (unfixable without move/ownership): each `.iter()` is a fresh cursor, but
 reusing an exhausted one yields nothing.
 

@@ -2000,6 +2000,170 @@ fn defer_top_level_skipped_by_os_exit() {
 }
 
 #[test]
+fn exit_negative_code_masks_to_255() {
+    // `os.exit(code)` reports the LOW 8 BITS of `code` (POSIX `exit(3)`/bash/Python/Go). A NEGATIVE
+    // code used to be clamped UP to 0 — i.e. `os.exit(-1)`, the canonical failure idiom, reported
+    // SUCCESS to the shell/CI. The process-status side of this rule is pinned by tests/exit_status.rs;
+    // this pins the in-VM code on both engines (including the cross-thread re-store in sched.rs).
+    for (code, want) in [("-1", 255), ("300", 44), ("-256", 0), ("0", 0)] {
+        let src = format!("import std.os\nfn main():\n    os.exit({code})\nmain()");
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", &src);
+        let (_io, _ie, ir, ic) = run_file_p(&entry);
+        let (_vo, _ve, vr, vc) = run_file(&entry);
+        assert_eq!(ic, Some(want), "M:N exit code for os.exit({code})");
+        assert_eq!(vc, Some(want), "serial exit code for os.exit({code})");
+        assert!(
+            ir.is_ok() && vr.is_ok(),
+            "exit is a clean halt, not an error"
+        );
+    }
+}
+
+// ----- re-entrant `.next()` on a currently-running generator -----
+
+#[test]
+fn generator_reentrant_next_faults() {
+    // A `.next()` on a generator that is ALREADY RUNNING (re-entered from inside its own body) used
+    // to hit the `GenState::Done` placeholder the resume path parks in the heap object while the
+    // generator runs, and silently answered `None` — a live, non-exhausted generator reporting
+    // EXHAUSTION, i.e. a silently-wrong `Option`. It must be a clean, recoverable fault instead
+    // (Python: `ValueError: generator already executing`).
+    let src = r#"
+holder: List[Iterator[int]] = []
+
+fn gen():
+    yield 1
+    print("reentrant: {holder[0].next()}")
+    yield 2
+
+fn main():
+    g := gen()
+    holder.push(g)
+    for x in g:
+        print(x)
+main()
+"#;
+    assert_parity(src);
+    let e = vm_outcome(src).expect_err("a re-entrant resume must fault, not answer None");
+    assert!(e.contains("generator already running"), "{e}");
+    // The value the consumer already pulled is neither lost nor duplicated, and the bogus
+    // `reentrant: None` never prints. (`run_program` keeps stdout across the fault.)
+    let (out, res) = run_program(src);
+    assert!(res.is_err(), "the run faults");
+    assert_eq!(
+        out, "1\n",
+        "only the first yielded value, then the fault: {out:?}"
+    );
+}
+
+#[test]
+fn generator_reentrancy_fault_is_recoverable() {
+    // The fault is an ordinary RuntimeError: catchable by `recover:`, never a host panic. Also
+    // fires when the re-entrancy is a `for` over the SAME generator (the for-loop intrinsic routes
+    // through the same resume path as an explicit `.next()`).
+    let src = r#"
+holder: List[Iterator[int]] = []
+
+fn gen():
+    yield 1
+    for y in holder[0]:
+        print("never: {y}")
+    yield 2
+
+fn main():
+    g := gen()
+    holder.push(g)
+    x := recover:
+        for v in g:
+            print(v)
+        0
+    match x:
+        Ok(_): print("no fault")
+        Err(e): print("caught: {e.message()}")
+    print("still alive")
+main()
+"#;
+    assert_parity(src);
+    let out = run_capture(src).expect("the fault is CAUGHT — the program exits Ok, no host panic");
+    assert!(out.contains("caught:"), "the fault is recoverable: {out:?}");
+    assert!(
+        out.contains("generator already running"),
+        "the recovered error names the cause: {out:?}"
+    );
+    assert!(
+        out.ends_with("still alive\n"),
+        "execution continues: {out:?}"
+    );
+    assert!(
+        !out.contains("never:"),
+        "the re-entrant loop never yields: {out:?}"
+    );
+}
+
+#[test]
+fn generator_guard_clears_on_every_unwind_path() {
+    // The guard is the VM's existing `active_generators` root list, pushed on resume and popped on
+    // EVERY exit path — so it is self-clearing and can never poison a generator as permanently
+    // "running". One case per unwind path.
+    // (a) normal exhaustion, (b) an early `break` then a legitimate resume of the SAME generator,
+    // (c) a generator whose body FAULTS inside a `recover:` — after recovery a fresh generator still
+    //     runs to completion (and the faulted one is closed, like a Python generator: `.next()` → None),
+    // (d) a generator driving a DIFFERENT generator (distinct GcRefs) — no over-rejection.
+    let src = r#"
+fn count(n: int):
+    for i in 0..n:
+        yield i
+
+fn boom():
+    yield 1
+    print(1 / 0)
+    yield 2
+
+fn outer():
+    for v in count(2):
+        yield v * 10
+
+fn main():
+    # (a) fully consumed, then a second generator works
+    for x in count(2):
+        print("a {x}")
+    for x in count(2):
+        print("a2 {x}")
+
+    # (b) break mid-`for`, then resume the SAME generator by hand — the guard is not stuck
+    g := count(4)
+    for x in g:
+        print("b {x}")
+        break
+    print("b-resume {g.next()}")
+
+    # (c) a faulting body, recovered — then a FRESH generator still runs; the faulted one is closed
+    bad := boom()
+    r := recover:
+        for x in bad:
+            print("c {x}")
+        0
+    match r:
+        Ok(_): print("c no fault")
+        Err(_): print("c caught")
+    # a generator whose body faulted is CLOSED (like Python) — a later resume answers None
+    print("c closed {bad.next()}")
+    for x in count(2):
+        print("c-after {x}")
+
+    # (d) a generator driving another generator — distinct generators, both resume fine
+    for x in outer():
+        print("d {x}")
+main()
+"#;
+    assert_parity(src);
+    let out = run_capture(src).expect("no path leaves a generator poisoned as running");
+    let want = "a 0\na 1\na2 0\na2 1\nb 0\nb-resume Some(1)\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n";
+    assert_eq!(out, want, "every unwind path clears the running guard");
+}
+
+#[test]
 fn defer_top_level_runs_on_unhandled_error() {
     // An unhandled top-level `?` error still unwinds through the module body's defers (cleanup
     // runs before the program reports the error).
@@ -4093,6 +4257,56 @@ fn golden_str_methods_via_run_file() {
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
     assert_file_parity("examples/str_methods.chz");
+}
+
+/// `iter.reduce` has no seed, so an empty list has no accumulator to start from. It used to leak the
+/// std module's own internal index error (`index 0 out of bounds (len 0)` at a std/iter.chz line
+/// number) — an implementation detail, and a confusing one, since the user never wrote that index.
+/// It faults with a named, user-facing message instead (Python: `TypeError: reduce() of empty
+/// iterable with no initial value`). Still an ordinary recoverable fault, never a host panic.
+#[test]
+fn reduce_empty_list_faults_with_named_message() {
+    let src = "import std.iter as iter\ne: List[int] = []\nprint(iter.reduce(e, fn(a: int, b: int) -> int: a + b))\n";
+    // Faults identically on both engines (`parity_entry_fault` asserts serial == M:N).
+    let e = parity_entry_fault(src);
+    assert!(
+        e.contains("reduce: empty list with no initial value"),
+        "the message names the fn and the cause: {e}"
+    );
+    assert!(
+        !e.contains("index 0 out of bounds"),
+        "the std module's internal index error must not leak: {e}"
+    );
+}
+
+#[test]
+fn reduce_empty_is_recoverable_and_nonempty_still_works() {
+    // The fault is catchable by `recover:` (not a host panic), and the BOUNDARY — an ordinary
+    // non-empty reduce — is unaffected.
+    let src = r#"
+import std.iter as iter
+
+fn main():
+    e: List[int] = []
+    r := recover:
+        iter.reduce(e, fn(a: int, b: int) -> int: a + b)
+    match r:
+        Ok(v): print("no fault {v}")
+        Err(err): print("caught: {err.message()}")
+    print(iter.reduce([1, 2, 3], fn(a: int, b: int) -> int: a + b))
+    print(iter.reduce([7], fn(a: int, b: int) -> int: a + b))
+main()
+"#;
+    // `parity_entry` runs the graph path on BOTH engines and asserts byte-identical stdout.
+    let out = parity_entry(src);
+    assert!(
+        out.contains("caught: reduce: empty list with no initial value"),
+        "{out:?}"
+    );
+    assert!(
+        out.ends_with("6\n7\n"),
+        "non-empty reduce unaffected: {out:?}"
+    );
 }
 
 /// std.iter helpers golden: `examples/iter_more.chz` — the additive take/drop/any/all/find/

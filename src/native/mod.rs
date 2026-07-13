@@ -262,7 +262,9 @@ pub trait Host {
 
     /// Record a cooperative-exit request (`std.os.exit(code)`). The engine stores the code and the
     /// native fn returns an error sentinel that unwinds past any `recover:` to the top level, where
-    /// the driver reports the code as the process exit status. Default: no-op (test hosts).
+    /// the driver reports the code as the process exit status. The status is the LOW 8 BITS of the
+    /// code (`code & 0xff`), like POSIX `exit(3)`/bash/Python/Go: `-1` → 255, `300` → 44, `0` → 0.
+    /// Default: no-op (test hosts).
     fn request_exit(&mut self, _code: i64) {}
 }
 

@@ -102,7 +102,8 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
 10. ~~**`std.os.exit(code)` + real exit codes**~~ — **DONE.** `std.os.exit(code)` is a hard, uncatchable
     halt (unwinds past `recover:`, bypasses `defer`), with the code threaded through both run drivers +
-    the CLI; exit-wins precedence holds under `--parallel`. `examples/exit.chz`.
+    the CLI; exit-wins precedence holds under `--parallel`. The status is the POSIX **low 8 bits** of
+    the code (`-1` → 255, `300` → 44). `examples/exit.chz`.
 11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
     (`37f374a`).
 

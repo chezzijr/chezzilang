@@ -67,8 +67,12 @@ fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A) -> A:
 # threading a dummy accumulator; revisit when void function types land.)
 
 # Left-fold with no seed: the accumulator starts at the first element, `f` combines the rest.
-# `xs` must be non-empty (an empty list faults on the `xs[0]` index, matching no-seed reduce).
+# `xs` must be non-empty — with no seed there is no accumulator to start from, so an empty list
+# faults with `reduce: empty list with no initial value` (recoverable; Python raises the same-shaped
+# TypeError). Seed it with `iter.fold(xs, init, f)` if the list can be empty.
 fn reduce[T](xs: List[T], f: fn(T, T) -> T) -> T:
+    if xs.len() == 0:
+        panic("reduce: empty list with no initial value")
     acc := xs[0]
     for i in 1..xs.len():
         acc = f(acc, xs[i])
