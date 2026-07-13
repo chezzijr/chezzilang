@@ -83,7 +83,7 @@ so switching the queued kind `Handle`→`Closure` leaves verdicts unchanged). Te
 
 Coverage today is *broad* (math, fs, os, time,
 datetime, process, rand, regex, request, net, ffi, encoding, crypto, uuid, json, collections, iter,
-cmp, str, path, ref, cancel, concurrency); the gaps below are **depth / ergonomics**, not missing
+cmp, string, path, ref, cancel, concurrency); the gaps below are **depth / ergonomics**, not missing
 domains. Canonical surface: [`docs/stdlib.md`](stdlib.md).
 
 Discipline reminder (from `CLAUDE.md`): new builtin types/ctors/fns go in their owning `std.*` module
@@ -114,12 +114,13 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   element type (`-> Iterator[T]` optional).
 
 ### 4. IO / files
-- `input(prompt)` (print + `read_line`). Read-all-stdin; char read.
+- **Interactive CLI — a GOAL** (see *Interactive CLI* below). `input(prompt)`, a prompt that actually
+  appears before the blocking read, and incremental output are all wanted. This supersedes the former
+  "`flush` is a permanent non-goal" note, which was wrong: it treated the buffering *mechanism* as the
+  requirement, when the requirement is only *deterministic cross-task ordering*.
+- Read-all-stdin; char read.
 - Files are **whole-string ≤64 MB only** — no file handles, no line-streaming, no `read_bytes` /
   `write_bytes` (binary). New native userdata type = larger change.
-- `flush`: **likely a permanent non-goal** — the VM buffers per-task stdout and flushes in deterministic
-  task-order at join (the serial-VM == M:N-VM parity guarantee). A user-triggered mid-run flush has no
-  clean semantics in that model. (`print(..., end="")` already covers newline-less incremental output.)
 
 ### 5. Numbers / math
 - `divmod`, `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`. `math.inf` / `math.nan` constants (only
@@ -152,6 +153,95 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - **`FromIterable` / `Collect`** (not started): let a *user* collection plug into the `List(xs)`-style
   iterable-conversion surface so `MyColl(xs)` works like `List(xs)`. The one genuine "special ctor" gap —
   worth it only when a user collection type needs it.
+
+## Interactive CLI — a GOAL (blocked on stdout buffering)
+
+**Today an interactive CLI is impossible.** `src/main.rs` captures the *entire* run into a `String` and
+emits it with a single `print!` after the VM returns. So:
+- **A prompt never appears before its read.** `io.print("Name?")` then `io.read_line()` shows the prompt
+  only *after* stdin is answered (verified — both lines arrive with the same timestamp).
+- **All output is lost on a hang / kill.** A livelocking program prints *nothing*. (This is why the
+  `pad_left("")` infinite loop, fixed in wave 5, presented as total silence rather than a partial line.)
+- No incremental output at all: a long-running program is silent until it exits.
+
+**Why it was buffered.** The VM buffers per-task stdout and flushes in deterministic task-order at join.
+That is what makes the **serial-VM == M:N-VM byte-identical parity guarantee** hold: if two concurrent
+tasks could write whenever they liked, their interleaving would differ between the schedulers and parity
+would fail. A previous note in *IO / files* §4 concluded from this that `flush` was "likely a permanent
+non-goal" — **that reasoning was wrong.** It protected the *mechanism* (buffer everything) rather than
+the actual requirement (*deterministic cross-task ordering*). Those only coincide when more than one
+task can write.
+
+**The design that gives both.** Ordering is only ambiguous when **≥2 tasks are live**. So make the
+buffering conditional on that, rather than unconditional:
+
+- **Outside a nursery / `parallel:` region there is exactly one live task** (the entry task). Its output
+  order is trivially deterministic — serial and M:N cannot disagree, because there is nothing to
+  interleave with. Write **straight through, unbuffered** (or line-buffered). This alone makes every
+  ordinary script fully interactive.
+- **Inside a nursery**, keep today's behavior exactly: buffer per task, flush in task-order at join.
+  Parity is preserved by construction, unchanged.
+- **A blocking `io.read_line()` is a serialization point** — flush the current task's buffer before it
+  regardless. It cannot reorder against another task's output, because the read blocks the writer.
+- Then `input(prompt)` (*IO / files* §4) becomes the trivial `print` + `read_line` it should be, and an
+  explicit `io.flush()` is well-defined (flush *this* task's buffer; a no-op when unbuffered).
+
+**Acceptance:** a REPL-style program (prompt → read → respond, in a loop) works; a long-running program
+prints incrementally; a killed/hung program retains the output it already produced; and the full
+two-engine parity suite stays byte-identical green — the concurrency goldens are the real test, since
+they are the only programs where ordering was ever load-bearing.
+
+Own milestone: touches `src/main.rs` (the capture), the VM's per-task stdout buffers, and `std.io`.
+Needs a failing-then-green interactive test (drive the binary with a pipe and assert the prompt arrives
+*before* the answer) plus a full parity re-run.
+
+## Audited residuals — pre-JIT hunt wave 5 (2026-07-13)
+
+Everything below was **found, reproduced on both engines, and deliberately NOT fixed** in the wave-5
+sweep (13 bugs fixed, main `0741a0b`). Each is either an accepted design consequence, a
+documented-but-unusable surface, or a safe over-rejection. Recorded so they are decisions, not
+surprises — **re-read this before the JIT freeze**, since a JIT bakes in whatever is true at freeze time.
+
+### 2. `regex.Match.start` / `.end` are BYTE offsets, but slicing is codepoint-indexed
+`docs/stdlib.md` does say "(byte offsets)", so this is documented — but Chezzi has **no byte-indexed
+slice**, so on non-ASCII input these fields have *no correct use*:
+```chezzi
+s := "héllo"                  # regex.find("l+", s) -> Match{ text:"ll", start:3, end:5 }
+print(s[m.start:m.end])       # -> "lo"   WRONG (want "ll") — silently, no fault
+```
+Documented-but-unusable is worse than absent. Two coherent fixes: expose **codepoint** offsets (matches
+Python's `re`, which the module otherwise mirrors exactly), or drop the fields and keep only `.text`.
+Prefer codepoint offsets. Until then, `.text` is the only safe accessor.
+
+### 3. Three over-rejections introduced by the Go-model int→float fix
+The wave-5 widening fix (untyped **constant** adapts; a typed int **value** never does) rejects three
+constructs that are *not* unsound — it errs safe, but it errs:
+- an aliased-collection annotation,
+- a generic-erased method param,
+- a fn-typed-field call.
+
+All three **reject valid code rather than accept invalid code**, and have **zero in-repo users**. Upgrade
+path recorded in the test doc-comments. Revisit only if a real program hits one.
+
+### 4. A module bind still shadows a same-named USER ctor in expression position
+The wave-5 reserved-module-bind gate (`module name 'int' is reserved (builtin) — alias it: …`) covers
+the **34 reserved/builtin** names. It does **not** cover a *user* `struct`/`enum` ctor: a module named
+`Point` still wins over a user `struct Point` in expression position. Same root cause as the fixed
+`import std.str` bug (the bind lands in the VALUE namespace), just narrower blast radius — it can only
+bite a user who names a module and a type identically. The principled fix is a separate **module
+namespace** (module names are only ever legal in field position), which is a resolver change, not a gate.
+
+### 5. Never-hunted surfaces (the two biggest remaining pre-JIT risks)
+Five hunt waves have now swept the typed feature surface, the stdlib, concurrency, and the front-end.
+**Two surfaces have never been audited at all**, and they are the memory-fragile ones:
+- **GC + `unsafe` under Miri / ASan / TSan** — Tier-1 lever #3 in [`bug-discovery.md`](bug-discovery.md),
+  still **unbuilt**. The GC and the OS-thread engine are the most `unsafe`-dense code in the repo.
+- **FFI** — zero adversarial coverage. Precedent exists: a libffi `Cif` heap-pin bug already caused a
+  **SIGSEGV** (FFI UB is layout-dependent, so it is invisible to the value-level oracles).
+
+Neither is reachable by the panic-fuzzer, the CPython differential, the DSA judge, or two-engine parity
+— all four are *value*-level oracles and cannot see UB or a data race. **This is where I would look next
+before freezing.**
 
 ## Dependency versions (as of 2026-07-07)
 All four are **major (semver-incompatible)** bumps — cargo shows them but won't auto-take. `cargo audit`
