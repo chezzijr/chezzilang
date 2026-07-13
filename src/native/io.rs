@@ -14,21 +14,44 @@ const MAX_READ_FILE_BYTES: u64 = 64 * 1024 * 1024;
 fn print(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "print", 1)?;
     let s = h.arg_str(0)?;
-    h.write_stdout(&s);
-    h.write_stdout("\n");
+    // ONE host write (body + newline): under the streaming CLI that is one locked write → the line
+    // is atomic across tasks. Byte-identical under the buffered sink.
+    h.write_stdout(&format!("{s}\n"));
     Ok(NativeRet::Nil)
 }
 
 fn eprint(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "eprint", 1)?;
     let s = h.arg_str(0)?;
-    h.write_stderr(&s);
-    h.write_stderr("\n");
+    h.write_stderr(&format!("{s}\n"));
     Ok(NativeRet::Nil)
 }
 
 fn read_line(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "read_line", 0)?;
+    match h.read_line()? {
+        Some(line) => Ok(NativeRet::Some(Box::new(NativeRet::Str(line)))),
+        None => Ok(NativeRet::None),
+    }
+}
+
+/// Flush this process's stdout. Effectively a no-op in both sinks — the captured sink has nothing to
+/// flush, and the streaming CLI's stdout is UNBUFFERED (its writer thread flushes every message, see
+/// `vm::stream`). It stays because it is the portable idiom, and it must NEVER wait on stdout's
+/// consumer: a fiber blocked on a stalled reader pins a core worker (the D5 invariant).
+fn flush(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "flush", 0)?;
+    h.flush_stdout();
+    Ok(NativeRet::Nil)
+}
+
+/// `input(prompt)` — write the prompt with NO trailing newline, flush, then read one line. Returns
+/// exactly what `read_line` returns: `Some(line)` (newline stripped), `None` at EOF.
+fn input(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "input", 1)?;
+    let prompt = h.arg_str(0)?;
+    h.write_stdout(&prompt);
+    h.flush_stdout();
     match h.read_line()? {
         Some(line) => Ok(NativeRet::Some(Box::new(NativeRet::Str(line)))),
         None => Ok(NativeRet::None),
@@ -68,6 +91,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("print", print),
     ("eprint", eprint),
     ("read_line", read_line),
+    ("flush", flush),
+    ("input", input),
     ("read_file", read_file),
     ("write_file", write_file),
 ];

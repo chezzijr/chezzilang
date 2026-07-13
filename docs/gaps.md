@@ -114,10 +114,8 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   element type (`-> Iterator[T]` optional).
 
 ### 4. IO / files
-- **Interactive CLI — a GOAL** (see *Interactive CLI* below). `input(prompt)`, a prompt that actually
-  appears before the blocking read, and incremental output are all wanted. This supersedes the former
-  "`flush` is a permanent non-goal" note, which was wrong: it treated the buffering *mechanism* as the
-  requirement, when the requirement is only *deterministic cross-task ordering*.
+- **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`
+  and `io.input(prompt)` exist, and a prompt appears before its blocking read.
 - Read-all-stdin; char read.
 - Files are **whole-string ≤64 MB only** — no file handles, no line-streaming, no `read_bytes` /
   `write_bytes` (binary). New native userdata type = larger change.
@@ -154,46 +152,31 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   iterable-conversion surface so `MyColl(xs)` works like `List(xs)`. The one genuine "special ctor" gap —
   worth it only when a user collection type needs it.
 
-## Interactive CLI — a GOAL (blocked on stdout buffering)
+## Interactive CLI — SHIPPED (the CLI streams; the buffered sink is a test harness)
 
-**Today an interactive CLI is impossible.** `src/main.rs` captures the *entire* run into a `String` and
-emits it with a single `print!` after the VM returns. So:
-- **A prompt never appears before its read.** `io.print("Name?")` then `io.read_line()` shows the prompt
-  only *after* stdin is answered (verified — both lines arrive with the same timestamp).
-- **All output is lost on a hang / kill.** A livelocking program prints *nothing*. (This is why the
-  `pad_left("")` infinite loop, fixed in wave 5, presented as total silence rather than a partial line.)
-- No incremental output at all: a long-running program is silent until it exits.
+**Landed.** `chezzi run` now writes each `print` straight to the process's real stdout as it happens.
+A prompt appears before its `read_line`, a long-running program prints incrementally, a killed/hung
+program retains what it already produced, and a spawned task's log is visible before its nursery joins
+(which for a server is never). `std.io` gained `flush()` and `input(prompt)`.
 
-**Why it was buffered.** The VM buffers per-task stdout and flushes in deterministic task-order at join.
-That is what makes the **serial-VM == M:N-VM byte-identical parity guarantee** hold: if two concurrent
-tasks could write whenever they liked, their interleaving would differ between the schedulers and parity
-would fail. A previous note in *IO / files* §4 concluded from this that `flush` was "likely a permanent
-non-goal" — **that reasoning was wrong.** It protected the *mechanism* (buffer everything) rather than
-the actual requirement (*deterministic cross-task ordering*). Those only coincide when more than one
-task can write.
+**How the parity oracle survives.** The stdout sink is selected by `HostConfig::stream` (default
+`false`): the lib helpers (`run_capture`/`run_file`/… and every golden + parity test) keep the BUFFERED
+sink — per-task buffers, task-order flush at join, byte-identical serial-VM == M:N-VM. Only
+`src/main.rs`'s `chezzi run` sets `stream = true`, and in that mode the per-task buffers simply stay
+empty (the whole buffer/flush machinery degenerates to a no-op with zero scheduler edits).
 
-**The design that gives both.** Ordering is only ambiguous when **≥2 tasks are live**. So make the
-buffering conditional on that, rather than unconditional:
+**The design previously prescribed here — "stream while one task is live, buffer inside a nursery,
+flush at join" — is REJECTED.** A server's nursery never joins, so its task logs would buffer for the
+life of the process: the exact programs that need live logs are the ones it excludes. The deeper point
+is that the task-order flush was never a *user* guarantee: the "order" is task-completion order, a
+scheduler detail no correct program can lean on. Python, Go and Rust all interleave concurrent prints
+nondeterministically and line-atomically, and nobody minds. A concurrent program that wants ordered
+output joins and prints the collected results itself.
 
-- **Outside a nursery / `parallel:` region there is exactly one live task** (the entry task). Its output
-  order is trivially deterministic — serial and M:N cannot disagree, because there is nothing to
-  interleave with. Write **straight through, unbuffered** (or line-buffered). This alone makes every
-  ordinary script fully interactive.
-- **Inside a nursery**, keep today's behavior exactly: buffer per task, flush in task-order at join.
-  Parity is preserved by construction, unchanged.
-- **A blocking `io.read_line()` is a serialization point** — flush the current task's buffer before it
-  regardless. It cannot reorder against another task's output, because the read blocks the writer.
-- Then `input(prompt)` (*IO / files* §4) becomes the trivial `print` + `read_line` it should be, and an
-  explicit `io.flush()` is well-defined (flush *this* task's buffer; a no-op when unbuffered).
-
-**Acceptance:** a REPL-style program (prompt → read → respond, in a loop) works; a long-running program
-prints incrementally; a killed/hung program retains the output it already produced; and the full
-two-engine parity suite stays byte-identical green — the concurrency goldens are the real test, since
-they are the only programs where ordering was ever load-bearing.
-
-Own milestone: touches `src/main.rs` (the capture), the VM's per-task stdout buffers, and `std.io`.
-Needs a failing-then-green interactive test (drive the binary with a pipe and assert the prompt arrives
-*before* the answer) plus a full parity re-run.
+**The user-facing contract** (also in `stdlib.md §std.io`): one `print(...)` = one locked write →
+**line-atomic** (two tasks can never garble a line; `end=""` fragments *can* interleave mid-line, like
+Python); cross-task print order is **nondeterministic** on both engines; stdout and stderr are
+separately locked, so a task's `print` and `eprint` may reorder relative to each other.
 
 ## Audited residuals — pre-JIT hunt wave 5 (2026-07-13)
 

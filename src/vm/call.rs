@@ -180,9 +180,13 @@ impl Vm {
                                 parts.push(self.stringify(v, span, 0)?);
                             }
                             self.stack.truncate(at);
-                            self.out.push_str(&parts.join(" "));
-                            self.out.push('\n');
-                            Ok(Value::Nil)
+                            let mut line = parts.join(" ");
+                            line.push('\n');
+                            self.emit_out(&line);
+                            match self.stream_halt(span) {
+                                Some(halt) => Err(halt), // stdout died — halt like `os.exit`
+                                None => Ok(Value::Nil),
+                            }
                         }
                         "ord" => self.builtin_ord(&args, span),
                         "chr" => self.builtin_chr(&args, span),
@@ -297,6 +301,12 @@ impl Vm {
             message: e.message,
             span,
         })?;
+        // A streamed `io.print` whose stdout died set `pending_exit` ([`Vm::emit_out`]) — turn it into
+        // the same hard-halt sentinel `std.os.exit` returns, so the VM ends the run cleanly. (`os.exit`
+        // itself already returned `Err` above, so this only ever fires for the print natives.)
+        if let Some(halt) = self.stream_halt(span) {
+            return Err(halt);
+        }
         Ok(self.lower_native(ret))
     }
 

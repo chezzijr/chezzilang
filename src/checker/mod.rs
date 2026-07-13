@@ -1288,6 +1288,14 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
                 "read_line",
                 "read one line from stdin, newline stripped (None at EOF)",
             ),
+            (
+                "flush",
+                "flush this process's stdout (a no-op: streamed output is unbuffered)",
+            ),
+            (
+                "input",
+                "input(prompt): print the prompt (no newline), flush, read one line (None at EOF)",
+            ),
             ("read_file", "read a whole file as text (Result)"),
             (
                 "write_file",

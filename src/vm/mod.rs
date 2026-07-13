@@ -828,6 +828,12 @@ struct FiberCtx {
     eager_scheds: Vec<Option<EagerScope>>,
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
+    /// The fiber's stdin. `Stdin::Empty` (the default) for every SPAWNED task — matching the M:N
+    /// worker, which is built with `Stdin::Empty` (`spawn_worker`) — so `read_line`/`input` inside a
+    /// task reports EOF on BOTH engines. `swap_ctx` parks the entry task's real stdin here while a
+    /// fiber runs and restores it on the way out; without it the cooperative fibers (which all share
+    /// the one `Vm`) would read the parent's stdin and diverge from the M:N engine.
+    stdin: crate::native::Stdin,
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
     /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for cooperative
     /// fibers, which all alias the single `Vm::heap` (decision A — share-by-ref), so their swap
@@ -2820,6 +2826,9 @@ mod exec;
 mod netio;
 mod sched;
 mod stmt;
+mod stream;
+
+pub use stream::{flush_stream, stream_error};
 
 /// D5 — the off-heap [`crate::native::Host`] for a blocking native run on the dirty pool (no `Vm`,
 /// no heap). It serves the pre-extracted primitive args ([`crate::native::NativeArg`]) and *panics*
@@ -3144,12 +3153,17 @@ impl crate::native::Host for VmHost<'_> {
         }
     }
     fn write_stdout(&mut self, s: &str) {
-        self.vm.out.push_str(s);
+        self.vm.emit_out(s);
     }
     fn write_stderr(&mut self, s: &str) {
-        self.vm.stderr.push_str(s);
+        self.vm.emit_err(s);
     }
     fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        // No flush seam here BY DESIGN: the streamed handles are unbuffered (one `write_all` + `flush`
+        // per `print`, on the writer thread), so a `print("name? ", end="")` prompt is already on its
+        // way out — and a fiber that WAITED for the writer would block on stdout's consumer, pinning a
+        // core worker (the D5 invariant) for as long as a stalled reader cares to stall. See
+        // [`stream`].
         self.vm.host.stdin.read_line()
     }
     fn os_args(&self) -> Vec<String> {

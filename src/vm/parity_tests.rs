@@ -3287,6 +3287,37 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
     assert_eq!(out, "got alpha\neof\n");
 }
 
+/// `io.input(prompt)` = print the prompt (no newline) + flush + `read_line`. Under the BUFFERED sink
+/// (every test helper + embedder) `flush` is a no-op and the prompt simply lands in the captured
+/// `out` — both engines identical. Also pins that neither fn is in `is_blocking` (an offloaded call
+/// would hit `OffloadHost`'s stdio `unreachable!`).
+#[test]
+fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::Lines(["ada".to_string()].into_iter().collect()),
+        ..Default::default()
+    });
+    assert_eq!(out, "p: got ada\n");
+}
+
+/// stdin belongs to the ENTRY task on BOTH engines: a SPAWNED task's `read_line`/`input` sees EOF.
+/// The M:N worker is built with `Stdin::Empty` (`spawn_worker`); the cooperative fibers share the one
+/// `Vm`, so without `swap_ctx` parking the parent's stdin they would consume it and the two engines
+/// would print different things for the same program.
+#[test]
+fn parity_spawned_task_stdin_is_empty_on_both_engines() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nfn t():\n    match io.input(\"p: \"):\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n    match io.read_line():\n        Some(v): io.print(\"entry {v}\")\n        None: io.print(\"entry eof\")\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::Lines(["a".to_string()].into_iter().collect()),
+        ..Default::default()
+    });
+    // The task gets EOF; the entry task still owns the injected line.
+    assert_eq!(out, "p: eof\nentry a\n");
+}
+
 #[test]
 fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
     let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";

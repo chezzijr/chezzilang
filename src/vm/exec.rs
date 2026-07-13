@@ -4,6 +4,60 @@
 use super::*;
 
 impl Vm {
+    /// The stdout sink. DEFAULT (`host.stream == false`) = append to the captured `out` buffer:
+    /// byte-identical to what every test helper, embedder and the serial-vs-M:N parity oracle has
+    /// always seen. STREAM (`chezzi run` only) = hand the whole `print` to the stdout writer thread
+    /// ([`stream`]), which turns it into ONE `write_all` on the real handle: output appears when it
+    /// happens, a `print` is line-atomic across tasks, and the fiber NEVER blocks in `write(2)` (a
+    /// stalled reader must not pin a core worker — the D5 invariant).
+    ///
+    /// If stdout has DIED (a closed reader, a full disk), the writer thread has marked it and dropped
+    /// the bytes. Writing is then a NO-OP: `emit_out` never touches control flow. The halt is raised
+    /// separately, at the print SITE, by [`Vm::stream_halt`].
+    ///
+    /// It MUST NOT signal the death through `pending_exit`: that is the `std.os.exit` channel, and it
+    /// OUTRANKS a fault everywhere (`run_file_with_entry` returns `Ok(())` + the code and DISCARDS the
+    /// `Err`; `classify_mn_outcome` ranks `Exit` above `Fault` at the join). Routing a dead pipe
+    /// through it turned a genuinely FAULTING run into a silent `exit 0`: `chezzi run x.chz | head -1`
+    /// on a program that then indexes out of bounds reported SUCCESS with no trace — a red CI going
+    /// green. A dead stdout is not an exit request, so it does not borrow the exit channel.
+    pub(super) fn emit_out(&mut self, s: &str) {
+        if self.host.stream {
+            stream::write_out(s);
+        } else {
+            self.out.push_str(s);
+        }
+    }
+
+    /// The fault to raise at a print site once the streamed stdout is dead — an ORDINARY recoverable
+    /// `RuntimeError`, which is what composes correctly with everything the exit channel broke: it
+    /// unwinds through defers, can be caught by `recover:`, loses to nothing at a cross-task join, and
+    /// exits NON-ZERO with a trace on stderr (still live — `| head` closes only stdout). Python raises
+    /// `BrokenPipeError` here for the same reason. Without a halt at all, `chezzi run x.chz | head -1`
+    /// would spin forever on a dead pipe: Rust ignores SIGPIPE, and restoring it would break
+    /// `std.net`'s EPIPE-as-an-error contract.
+    ///
+    /// ponytail: a defer that prints while a REAL fault is unwinding raises this fault too, so its
+    /// message replaces the original's (the run still exits non-zero, with a trace — only the message
+    /// names the pipe instead of the first cause). Threading an `in_unwind` flag through the unwind
+    /// path would preserve it; not worth it until someone is actually confused by it.
+    pub(super) fn stream_halt(&self, span: Span) -> Option<RuntimeError> {
+        if !self.host.stream {
+            return None;
+        }
+        stream::out_dead_reason().map(|why| RuntimeError { message: why, span })
+    }
+
+    /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's
+    /// `print` and `eprint` can reorder relative to each other, exactly like Python's).
+    pub(super) fn emit_err(&mut self, s: &str) {
+        if self.host.stream {
+            stream::write_err(s);
+        } else {
+            self.stderr.push_str(s);
+        }
+    }
+
     pub(super) fn new(program: Arc<Program>) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         let method_ic = vec![MethodIcSite::EMPTY; program.method_ic_sites as usize];
@@ -104,6 +158,12 @@ impl Vm {
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
+        // stdin is the ENTRY task's, on BOTH engines. An M:N worker is built with `Stdin::Empty`
+        // (`spawn_worker`) — a spawned task's `read_line`/`input` sees EOF — so the cooperative engine
+        // must agree or the two diverge (same program, different stdout). A fresh `FiberCtx` defaults
+        // to `Stdin::Empty`, so this swap hands the real stdin to the parked parent and leaves the
+        // scheduled-in fiber with EOF; swapping back restores it.
+        std::mem::swap(&mut self.host.stdin, &mut ctx.stdin);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries

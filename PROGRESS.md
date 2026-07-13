@@ -4732,6 +4732,49 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Interactive CLI — `chezzi run` STREAMS stdout; the buffered sink stays for tests (2026-07-13).**
+  `src/main.rs` used to capture the whole run into a `String` and `print!` it once, after the VM
+  returned: a prompt never appeared before its `read_line`, a hung/killed program printed NOTHING, a
+  long-running program was silent until exit, and a spawned task's log was invisible until its nursery
+  joined (for a server: never). Now the stdout/stderr sink is selected by `HostConfig::stream` (default
+  `false`): **every lib helper, golden and parity test keeps the BUFFERED sink unchanged** (per-task
+  buffers + task-order flush → byte-identical serial-VM == M:N-VM; zero test edits), while `chezzi run`
+  sets `stream = true` and each `print` becomes ONE `write_all` on the real stdout (line-atomic across
+  tasks). In stream mode the per-task buffers just stay empty, so the scheduler is untouched.
+  New `std.io` surface: **`flush()`** and **`input(prompt)`** (= print prompt, flush, read line →
+  `Option[str]`). The write itself happens on a **background writer thread per stream** (`vm::stream`),
+  which `write_all`s + `flush`es each message: a fiber must never sit in `write(2)` — an inline blocking
+  write on a core worker means one stalled reader starves every other task (the D5 `is_blocking`
+  invariant) — and the streamed handles are **unbuffered**, so a `print(x, end="")` progress marker
+  appears (and survives a kill) with no `io.flush()`. Nothing in the VM ever *waits* on a writer thread
+  (`flush`/`read_line`/`input` only queue), so a stalled consumer cannot pin a worker either; `flush()`
+  is consequently a no-op that exists because it is the portable idiom. A writer thread **never calls
+  `std::process::exit`** (this is library code; two threads racing libc `exit(3)` is UB, and a thread
+  that kills the process discards the run's real outcome): it records, and the VM raises an ORDINARY
+  runtime fault at its next `print` (`stdout closed (broken pipe)`). Policy — a closed stdout reader
+  (`| head -1`) fails the run non-zero with a trace on the still-live stderr (Python raises
+  `BrokenPipeError` identically), and an endless printer stops instead of spinning on a dead pipe. The
+  dead pipe must NOT borrow the `os.exit` channel to halt: that channel outranks a fault everywhere
+  (`run_file_with_entry` discards the `Err` when `pending_exit` is set; `classify_mn_outcome` ranks
+  `Exit` above `Fault`), so the first cut of this milestone turned a *faulting* run under `| head -1`
+  into a silent **exit 0 with no trace** — a crashing program reporting SUCCESS to CI. Caught by the
+  review panel, fixed before merge, pinned by `fault_under_broken_pipe_is_not_success_{mn,serial}`; any other stdout errno prints
+  `chezzi run: cannot write stdout: …` and exits non-zero (a `> /dev/full` run can no longer report
+  SUCCESS with no output); a **stderr** write failure is swallowed (diagnostic channel — a dead `2>`
+  reader must not kill a healthy program). A spawned task's stdin is `Empty` on **both** engines now
+  (`swap_ctx` parks the entry task's stdin), closing a serial-vs-M:N divergence `read_line`/`input`
+  inside a `spawn:` would otherwise have. The task-order flush is now documented as a **test-harness**
+  property, not a user guarantee: cross-task print order is nondeterministic on both engines
+  (Python/Go/Rust-identical); join and print the results yourself if you want order. Perf:
+  `benches/run.chz` unmoved (all within noise); an ad-hoc 200k-line print loop goes **0.048 s →
+  0.101 s** (~2.1×: one write syscall per line + the queue handoff — a `BufWriter` would hide the
+  syscall but break "a killed program retains its output"). New real-binary suite `tests/interactive.rs`
+  (26 tests, both engines: prompt-before-stdin, killed-program output, partial line visible with no
+  flush, spawned-task print before join, order-insensitive concurrent lines, `from std.io import input`,
+  broken-pipe clean exit, fault-after-broken-pipe still reported, unwritable stdout reported, unwritable
+  stderr does not kill the run, both pipes closed terminates, stalled reader does not starve — with or
+  without `io.flush()`).
+
 - **`regex.Match.start`/`.end` are now CODEPOINT offsets (observable stdlib behavior change).** They
   were the `regex` crate's raw **byte** offsets while Chezzi slicing/indexing is codepoint-based and
   there is no byte-indexed slice — so on non-ASCII input `s[m.start:m.end]` silently produced the

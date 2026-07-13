@@ -830,3 +830,34 @@ gaps, no regression. The cell cost lands **only on captured locals** (one heap a
 per captured local); a capture-heavy workload would pay it, but the suite has no such bench to isolate
 the delta. A later escape-analysis lever could unbox a cell that provably never escapes its frame.
 Full `--lib` **3221 green**, both-engine parity clean, conformance **7/7**, clippy `-D warnings` clean.
+
+## Interactive CLI — streaming stdout — 2026-07-13 (bench-neutral; print-in-a-loop pays a real cost)
+
+`chezzi run` now hands each `print` to a background writer thread (one per stream) that does the real
+`write_all` on the process's stdout/stderr, instead of accumulating the run into a `String` flushed once
+at exit. Rust's `Stdout` is a `LineWriter`, so that is **one `write` syscall per line** where it used to
+be a `push_str` — plus a channel send. (The writer thread is not decoration: an inline `write(2)` on a
+fiber blocks a core worker in the kernel, so one stalled reader would starve every other task — the D5
+`is_blocking` invariant. See `tests/interactive.rs::stalled_reader_does_not_starve_other_tasks`.)
+
+Tracked suite (same machine, `hyperfine`, `benches/run.chz`, before → after, Chezzi ms):
+`fib` 262.6 → 266.7 · `str` 176.4 → 177.7 · `primes` 658.6 → 649.1 · `loop` 979.8 → 992.1 ·
+`list` 398.5 → 407.9 · `struct` 455.8 → 465.2 · `poly_method` 1335 → 1347 · `map` 153.0 → 156.0 ·
+`empty` 1.9 → 1.9. **All within run-to-run noise** — every bench prints exactly once, so the suite
+cannot see the change.
+
+The cost is real where it exists, and it is not hidden: an ad-hoc **200 000-line print loop**
+(`for i in range(200000): print("line", i)`, stdout → `/dev/null`) goes **0.048 s → 0.102 s (~2.1×
+slower)** — ~270 ns per line for the syscall + the queue handoff. That is the price of output that
+actually appears when it happens, from a task that cannot stall the engine. A `BufWriter` would erase
+the syscall cost — and would also break "a killed/hung program retains the output it already produced",
+which is one of the milestone's acceptance tests. The captured (test/embedder) sink is untouched: it
+still `push_str`s, so the parity suite's cost is unchanged.
+
+**Follow-up fix (same milestone), re-measured.** The writer thread now `flush`es every message (the
+streamed handles are unbuffered, so a `print(x, end="")` partial line appears immediately instead of
+sitting in `Stdout`'s `LineWriter`), and the VM no longer waits on the writer at any seam. Cost: **nil**
+— a newline-terminated `print` already forced a `write` through the `LineWriter`, so the extra `flush`
+is a no-op memcheck. Re-measured on the same machine: print loop **0.101 s** (was 0.102 s), tracked
+suite `fib` 262.0 · `str` 178.7 · `primes` 653.2 · `loop` 992.8 · `list` 406.5 · `struct` 472.6 ·
+`poly_method` 1374 · `map` 156.1 · `empty` 1.9 — all within noise of the numbers above.

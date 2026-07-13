@@ -1056,7 +1056,11 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
 deadlock detection), not hangs; (2) ✅ **per-task overhead dropped** (D1/D2); (3) a still-open
 determinism-contract decision — accept **task-ordered** output (decision F's
 flush-on-join) as the default and demote two-engine (serial-vs-M:N) parity to a *sequential-subset* contract run under
-an explicit `--serial` flag. Serial is **never deleted** — it stays permanently as the deterministic
+an explicit `--serial` flag. **(Settled for the CLI, 2026-07-13 — Interactive CLI milestone:** the
+per-task buffer + task-order flush is a **TEST-harness** property of the captured sink the lib helpers
+run, NOT a user-facing guarantee. `chezzi run` **streams**: prints are line-atomic and cross-task order
+is nondeterministic on both engines, like Python/Go/Rust. Parity is asserted on the buffered sink,
+which every test helper still uses.**)** Serial is **never deleted** — it stays permanently as the deterministic
 parity oracle + reproducible-debug engine. Not a date; a checklist.
 
 - **Reuse map for the implementer:** builtin method dispatch (VM `core_method` — `src/vm/mod.rs`); parameterized

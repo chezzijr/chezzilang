@@ -6384,7 +6384,10 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         io.functions.get("read_line").unwrap().ret,
         Ty::option(Ty::Str)
     );
-    assert_eq!(io.functions.len(), 5);
+    assert_eq!(io.functions.get("input").unwrap().params, vec![Ty::Str]);
+    assert_eq!(io.functions.get("input").unwrap().ret, Ty::option(Ty::Str));
+    assert_eq!(io.functions.get("flush").unwrap().ret, Ty::Nil);
+    assert_eq!(io.functions.len(), 7);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6441,7 +6444,7 @@ fn math_io_os_fn_hover_doc_preserved() {
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 21);
-    assert_eq!(crate::native::native_members("std.io").len(), 5);
+    assert_eq!(crate::native::native_members("std.io").len(), 7);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 12);
