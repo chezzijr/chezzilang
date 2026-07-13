@@ -354,7 +354,7 @@ pub fn expect_args_range(
 }
 
 /// If this dotted import path names a native (virtual, no-file) std module, return its canonical
-/// `'static` name. `std.str` is intentionally absent: it is a real Chezzi file under the stdlib dir.
+/// `'static` name. `std.string` is intentionally absent: it is a real Chezzi file under the stdlib dir.
 pub fn native_name(path: &[String]) -> Option<&'static str> {
     match path {
         [a, b] if a == "std" => match b.as_str() {
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(native_name(&["std".into(), "io".into()]), Some("std.io"));
         assert_eq!(native_name(&["std".into(), "os".into()]), Some("std.os"));
         // str is a real Chezzi file, not virtual.
-        assert_eq!(native_name(&["std".into(), "str".into()]), None);
+        assert_eq!(native_name(&["std".into(), "string".into()]), None);
         // user modules are never native.
         assert_eq!(native_name(&["foo".into(), "math".into()]), None);
         assert_eq!(native_name(&["std".into()]), None);

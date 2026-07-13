@@ -416,7 +416,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `extern`, with the same-scoped relaxation that an unannotated param / missing `-> ret` means the
   dynamic/native type — Chezzi user code stays statically typed (no user-facing `any`/`never`).
 - **Std modules v1 (shipped, M6c):** `std.math`/`std.io`/`std.os` (native-Rust via the FFI seam),
-  `std.str` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
+  `std.string` + `std.cmp` (written in Chezzi; `std.cmp` adds M7-G3). Imported with
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
   `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
@@ -521,7 +521,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
   via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;
   `std.math` trig/exp/log intrinsics (`sin cos tan asin acos atan atan2 exp ln log2 log10 log`);
-  pure-Chezzi `std.str` (`ends_with index_of count replace strip_prefix strip_suffix`) and `std.iter`
+  pure-Chezzi `std.string` (`ends_with index_of count replace strip_prefix strip_suffix`) and `std.iter`
   (`take drop any all find flatten`) helpers.
 - **Shipped:** whole-string `std.regex` (`is_match`, `find`, `find_all`, `replace_all`, `split` —
   each takes the pattern as a string, compiled behind an internal cache). **Later:** a first-class
@@ -905,7 +905,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
 | ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
 | ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the tree-walker; golden + parity tests match |
-| ✅ **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **Done**: str/list methods + pipe chains, plus M6c — the Level-2 native FFI seam (`NativeFn`+`Host`) shipping `std.math`/`io`/`os` (native) and `std.str` (Chezzi), running identically on both engines |
+| ✅ **M6** | Stdlib fill-out + pipe `\|>` operator + core-type methods | **Done**: str/list methods + pipe chains, plus M6c — the Level-2 native FFI seam (`NativeFn`+`Host`) shipping `std.math`/`io`/`os` (native) and `std.string` (Chezzi), running identically on both engines |
 | ✅ **M7** | User-defined generics + structural protocols | Generic fns/structs, `Comparable` bound, `std.cmp` (`min`/`max`/`clamp`); golden tests on both engines |
 | ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
 | ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |

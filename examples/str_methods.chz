@@ -1,4 +1,4 @@
-# gap #1 (minimal subset) + #7 demo: receiver methods on `str` that forward to the std.str free
+# gap #1 (minimal subset) + #7 demo: receiver methods on `str` that forward to the std.string free
 # fns (no import needed), plus the Option-returning safe-parse methods to_int / to_float and their
 # Result-returning siblings parse_int / parse_float (Err carries a parse-error message).
 

@@ -257,6 +257,24 @@ fn is_reserved_alias_target(name: &str) -> bool {
     is_reserved_name(name) || (is_reserved_type(name) && name != "nil")
 }
 
+/// The four BUILT-IN variant constructors of `Result`/`Option`. They are NOT in `is_reserved_type`
+/// (a user may deliberately shadow them at a DECL site — see that fn's doc), so they need their own
+/// predicate for the places that must recognize them as builtin ctors.
+pub(super) fn is_builtin_variant(name: &str) -> bool {
+    matches!(name, "Ok" | "Err" | "Some" | "None")
+}
+
+/// True iff `name` may NOT be the bound name of a module import — ALIASED (`import lib.geo as Ok`)
+/// or UN-aliased (the last path segment: `import lib.int`). A module bind lands in the VALUE
+/// namespace, where it beats the reserved builtin/ctor in EXPRESSION position (`import std.str` used
+/// to make `str(5)` fail with "module str is not callable"). Rejecting the reserved bound name — the
+/// only names that can be beaten — is what makes such shadowing impossible; the module stays usable
+/// under an alias (`import lib.int as ints`). Covers reserved CALLABLES + reserved TYPE names
+/// (`is_reserved_alias_target`, `nil` carved out there) plus the builtin variant ctors.
+pub(super) fn is_reserved_module_bind(name: &str) -> bool {
+    is_reserved_alias_target(name) || is_builtin_variant(name)
+}
+
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
 /// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
 /// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`; `Ctor` → likewise
@@ -1497,6 +1515,12 @@ struct Checker {
     /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
     /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
     imported_poly: std::collections::HashSet<String>,
+    /// `from`-imported module GLOBALS (`import COUNT from lib.st`) → the dotted module path they came
+    /// from. A from-imported global is a SNAPSHOT copy (Python-identical), so REBINDING the bare name
+    /// would write a local alias that is silently lost — rejected in `check_assign`, consistent with
+    /// the qualified form (`st.COUNT = 5`). Mutating THROUGH the binding (`LST.push(7)`) is untouched:
+    /// a container is the same heap object. Per-module: cleared in `begin_module`.
+    imported_values: HashMap<String, String>,
     /// Fixed-width C-ABI integer TYPE names (`int8`..`uint64`) imported into the *current* module from
     /// `std.ffi` (`import int32 from std.ffi`). These are NOT callable values — they only gate
     /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type
@@ -3145,9 +3169,9 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
         // `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out).
         // No encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).
         "encode" => (vec![], Ty::Bytes),
-        // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free fns, so
+        // gap #1 (minimal subset): receiver methods forwarding to the `std.string` free fns, so
         // `s.ends_with(x)` works just like `s.starts_with(x)` (no import needed). Native in both
-        // engines; byte-identical to the std.str codepoint-loop oracle for valid inputs (repeat
+        // engines; byte-identical to the std.string codepoint-loop oracle for valid inputs (repeat
         // raises a recoverable capacity-overflow fault instead of aborting on a huge count).
         "replace" => (vec![Ty::Str, Ty::Str], Ty::Str),
         "repeat" => (vec![Ty::Int], Ty::Str),

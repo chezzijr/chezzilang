@@ -1945,9 +1945,9 @@ impl Vm {
                         }
                         Ok(self.alloc_str(out))
                     }
-                    // gap #1 (minimal subset): receiver methods forwarding to the `std.str` free
-                    // fns. Pure native Rust, byte-identical to the std.str codepoint-loop oracle
-                    // (see std/str.chz) and to the interp arms.
+                    // gap #1 (minimal subset): receiver methods forwarding to the `std.string` free
+                    // fns. Pure native Rust, byte-identical to the std.string codepoint-loop oracle
+                    // (see std/string.chz) and to the interp arms.
                     "ends_with" => {
                         self.arity_err("ends_with", args, 1, span)?;
                         Ok(Value::Bool(s.ends_with(str_arg(self, 0)?.as_str())))
@@ -1956,7 +1956,7 @@ impl Vm {
                         self.arity_err("replace", args, 2, span)?;
                         let old = str_arg(self, 0)?;
                         let new = str_arg(self, 1)?;
-                        // std.str returns `s` unchanged for an empty `old`.
+                        // std.string returns `s` unchanged for an empty `old`.
                         if old.is_empty() {
                             Ok(self.alloc_str(s))
                         } else {
@@ -1966,7 +1966,7 @@ impl Vm {
                     "repeat" => {
                         self.arity_err("repeat", args, 1, span)?;
                         let n = self.int_arg("repeat", &args[0], span)?;
-                        // std.str: n <= 0 yields "".
+                        // std.string: n <= 0 yields "".
                         if n <= 0 {
                             Ok(self.alloc_str(String::new()))
                         } else {
@@ -2018,7 +2018,7 @@ impl Vm {
                                 self.err("pad_left: fill must not be empty".to_string(), span)
                             );
                         }
-                        // std.str: pad to `width` CODEPOINTS; never shrinks (a `width` at or below
+                        // std.string: pad to `width` CODEPOINTS; never shrinks (a `width` at or below
                         // the current length — including `i64::MIN` — returns `s` unchanged). The
                         // early-out comes BEFORE the subtraction, so `need` can never overflow i64
                         // (a `width - len` on a negative `width` would panic in debug and wrap in
@@ -2060,7 +2060,7 @@ impl Vm {
                     "index_of" => {
                         self.arity_err("index_of", args, 1, span)?;
                         let sub = str_arg(self, 0)?;
-                        // std.str: empty -> 0; otherwise the CODEPOINT index (not byte offset).
+                        // std.string: empty -> 0; otherwise the CODEPOINT index (not byte offset).
                         if sub.is_empty() {
                             Ok(Value::Int(0))
                         } else {
@@ -2073,7 +2073,7 @@ impl Vm {
                     "count" => {
                         self.arity_err("count", args, 1, span)?;
                         let sub = str_arg(self, 0)?;
-                        // std.str: empty -> 0; otherwise non-overlapping count.
+                        // std.string: empty -> 0; otherwise non-overlapping count.
                         if sub.is_empty() {
                             Ok(Value::Int(0))
                         } else {

@@ -105,9 +105,9 @@ is a predictable first-hour stumble. Ranked by friction.
    landed; `std.iter`/`std.cmp` half still open). The same conceptual op is a receiver method in one
    place and an import-required free fn in another, with no predictable rule:
    - **str:** ~~`ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/
-     `strip_suffix`/`split_lines` were `std.str`-only~~ — now also **str methods** (thin forwarders, both
+     `strip_suffix`/`split_lines` were `std.string`-only~~ — now also **str methods** (thin forwarders, both
      engines, byte-identical to the free fns), plus `strip` (trim alias). `s.ends_with(x)` works like
-     `s.starts_with(x)`. The `std.str` free fns are untouched and keep working.
+     `s.starts_with(x)`. The `std.string` free fns are untouched and keep working.
    - **list/iter (still open):** `map`/`filter`/`fold`/`sum`/`sort`/`contains`/`index_of`/`concat` are
      **methods**, but `enumerate`/`zip`/`any`/`all`/`find`/`flatten`/`reduce`/`take`/`drop` are **`std.iter`
      free fns**; `min`/`max`/`clamp` are **`std.cmp` free fns**.
@@ -333,7 +333,7 @@ std.request verbs.
 
 **DX (fresh-dev audit) ✅** · #1 (str half) method/free-fn split-brain — `ends_with`/`replace`/`repeat`/
 `reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines` + `strip` (trim
-alias) added as **str methods** (thin native forwarders to the `std.str` free fns, both engines,
+alias) added as **str methods** (thin native forwarders to the `std.string` free fns, both engines,
 byte-identical; free fns kept; `examples/str_methods.chz`); the `std.iter`/`std.cmp` half stays open · #7
 safe numeric parse — `str.to_int() -> int?` / `str.to_float() -> float?` (trim + `parse`, `Some`/`None`,
 no raise; reuse the `int()`/`float()` parse path).

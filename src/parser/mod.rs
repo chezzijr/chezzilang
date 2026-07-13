@@ -349,6 +349,13 @@ impl Parser {
         if matches!(self.peek(), Token::Native) && self.depth > 1 {
             return Err(self.err("native declaration must be a top-level declaration".to_string()));
         }
+        // An `import` is likewise TOP-LEVEL-only: the resolver only scans module-level statements
+        // (`Resolver::scan_imports`), so an import nested in a block parsed + checked clean and was a
+        // complete NO-OP — it never resolved (not even "module not found"), never bound, never ran the
+        // module body. Reject it at parse time (same seam as `extern`/`native`).
+        if matches!(self.peek(), Token::Import) && self.depth > 1 {
+            return Err(self.err("import must be a top-level declaration".to_string()));
+        }
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return/import) must be followed by a line terminator.
         let kind = match self.peek() {
@@ -3336,6 +3343,18 @@ mod tests {
         assert!(
             e.message
                 .contains("native declaration must be a top-level declaration"),
+            "unexpected error: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn import_nested_is_error() {
+        // An `import` is TOP-LEVEL-only: nested inside a fn body/block it is a parse error (it used
+        // to parse + check clean + be a complete no-op — the resolver only scans top-level stmts).
+        let e = parse_err("fn f() -> int:\n    import lib.x\n    return 1\n");
+        assert!(
+            e.message.contains("import must be a top-level declaration"),
             "unexpected error: {}",
             e.message
         );

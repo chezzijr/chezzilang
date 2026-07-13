@@ -1,11 +1,11 @@
 # M6c demo: the standard library — native modules (std.io / std.math / std.os) and Chezzi-written
-# ones (std.str, std.cmp), all in one program, running identically on the interpreter and the VM.
+# ones (std.string, std.cmp), all in one program, running identically on the interpreter and the VM.
 
 import std.io
 import std.math
 import std.cmp
 import std.os
-import std.str as text
+import std.string as text
 
 fn main():
     io.print(text.repeat("=", 10))

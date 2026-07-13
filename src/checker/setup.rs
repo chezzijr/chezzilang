@@ -60,6 +60,7 @@ impl Checker {
             struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
+            imported_values: HashMap::new(),
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
@@ -872,6 +873,7 @@ impl Checker {
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
+        self.imported_values.clear();
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
         self.imported_time.clear();
@@ -993,19 +995,24 @@ impl Checker {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                // Aliasing a whole-module import TO a reserved builtin name (`import std.math as int`,
-                // `import std.math as Result`) silently rebinds it — the builtin `int()`/`Result` wins
-                // at call/type sites and this module binding is dead (it'd otherwise error with the
-                // confusing `module int is not callable`). Reject it as `reserved (builtin)`,
-                // consistent with `fn int()` / an extern named `int`. `is_reserved_alias_target` covers
-                // BOTH reserved CALLABLE and reserved TYPE names (Result/Option/Iterator/…). Gate on
-                // the ALIAS only: a real module whose last path segment coincidentally matched a
-                // reserved name (none exists) is unaffected.
-                if alias.as_ref().is_some_and(|a| is_reserved_alias_target(a)) {
-                    self.error(
-                        imp.span,
-                        format!("import alias '{name}' is reserved (builtin)"),
-                    );
+                // A whole-module bind lands in the VALUE namespace, where it BEATS the reserved
+                // builtin/ctor of the same name in EXPRESSION position (`import std.str` used to make
+                // `str(5)` fail with the confusing `module str is not callable`; `import lib.geo as Ok`
+                // kills the `Ok(...)` variant ctor). So the BOUND name — the alias, or the last path
+                // segment when un-aliased — is rejected when reserved; that is what makes the shadowing
+                // impossible. The module stays usable under a non-reserved alias, which the un-aliased
+                // diagnostic names. `is_reserved_module_bind` = reserved CALLABLE + reserved TYPE names
+                // (`nil` carved out) + the builtin variant ctors (`Ok`/`Err`/`Some`/`None`).
+                if crate::checker::is_reserved_module_bind(&name) {
+                    let msg = if alias.is_some() {
+                        format!("import alias '{name}' is reserved (builtin)")
+                    } else {
+                        let path_str = path.join(".");
+                        format!(
+                            "module name '{name}' is reserved (builtin) — alias it: import {path_str} as {name}s"
+                        )
+                    };
+                    self.error(imp.span, msg);
                     return;
                 }
                 if self.note_import_bind(&name, imp.span) {
@@ -1195,7 +1202,7 @@ impl Checker {
                     // this check and fall through to the specialized rename-rejection arms below.
                     if alias
                         .as_ref()
-                        .is_some_and(|a| a != member && is_reserved_alias_target(a))
+                        .is_some_and(|a| a != member && crate::checker::is_reserved_module_bind(a))
                     {
                         self.error(
                             imp.span,
@@ -1240,6 +1247,9 @@ impl Checker {
                             self.hover_record_at(*name_span, vty, HoverKind::Other, None);
                         }
                         self.declare(bind, vty.clone());
+                        // The bind is a SNAPSHOT copy of the module global — rebinding it is rejected
+                        // in `check_assign` (see `imported_values`).
+                        self.imported_values.insert(bind.clone(), path.join("."));
                     } else if sig.types.contains(member) {
                         // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
                         // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
@@ -1879,6 +1889,17 @@ impl Checker {
     /// per-task value captures. Used by the *read* sendability gate so reading an imported module or
     /// a top-level closure inside a `spawn:` block isn't flagged; the *reassign* gate keeps the
     /// broader [`is_captured`] (writing a copy of any capture, global or not, can't leak out).
+    /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
+    /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`
+    /// shadow of an imported name stays assignable.
+    pub(super) fn resolves_at_module_scope(&self, name: &str) -> bool {
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return i == 0;
+            }
+        }
+        false
+    }
     pub(super) fn is_local_capture(&self, name: &str) -> bool {
         let Some(&floor) = self.capture_floors.last() else {
             return false;

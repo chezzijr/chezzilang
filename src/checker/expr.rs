@@ -378,7 +378,7 @@ impl Checker {
                     return Ty::Unknown;
                 }
             }
-            return self.infer_method_call(obj, name, *name_span, args, &targs, span);
+            return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
         }
         // Combined member-side turbofish — DEFENSIVE FALLBACK. Since the parser steal was broadened to
         // ANY `Field` receiver, the combined `Type[T].member[U](args)` now parses as a `Call{callee:
@@ -1838,6 +1838,15 @@ impl Checker {
                 .get(nkey)
                 .and_then(|(_under, methods)| methods.get(method))
                 .is_some_and(|sig| !sig.type_params.is_empty()),
+            // A module-qualified fn (`geo.empty_list[int]()`): the module's own fns live in the
+            // module sig, not in `structs`/`enums` — without this arm a generic module fn was told it
+            // "declares no own type parameters" and its turbofish was an unreachable feature.
+            Ty::Module(mname) => self
+                .imported_modules
+                .get(mname)
+                .and_then(|id| self.module_sigs.get(id))
+                .and_then(|s| s.functions.get(method))
+                .is_some_and(|sig| !sig.type_params.is_empty()),
             _ => false,
         }
     }
@@ -1883,6 +1892,7 @@ impl Checker {
     /// type list after the `.method`; they seed a generic method's own `[U]` params. A method-level
     /// turbofish on a BUILTIN or non-generic member (no own type params) is rejected — including the
     /// `.iter` fast-path (`xs.iter[int]()`), guarded BEFORE that fast-path runs.
+    #[allow(clippy::too_many_arguments)] // receiver + method + name span + args + targs + span + hint
     pub(super) fn infer_method_call(
         &mut self,
         obj: &Expr,
@@ -1893,6 +1903,10 @@ impl Checker {
         args: &[Expr],
         type_args: &[Ty],
         span: Span,
+        // The expected-type hint of the enclosing `let`/annotation, threaded through to a generic
+        // MODULE fn call so a return-type-only type param can be solved from it. `None` everywhere
+        // else (a struct/enum method call ignores it, as before).
+        hint: Option<&Ty>,
     ) -> Ty {
         let obj_ty = self.infer(obj);
         // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
@@ -1954,9 +1968,11 @@ impl Checker {
                     // A generic module function (`cmp.max`): infer its type parameters from the
                     // arguments, enforce bounds, and substitute into the return type.
                     if !fsig.type_params.is_empty() {
-                        // A module-qualified generic fn call (`m.f(...)`) does not thread the
-                        // expected-type hint (only the 3 primary annotation sites do); pass None.
-                        return self.infer_generic_call(method, &fsig, args, &[], span, None);
+                        // A module-qualified generic fn call (`m.f(...)`): thread BOTH the member-level
+                        // turbofish (`m.f[int]()`) and the expected-type hint — a type param that
+                        // appears ONLY in the return type (`fn empty_list[T]() -> List[T]`) is otherwise
+                        // unsolvable and leaked `List[T]` into a user-facing type.
+                        return self.infer_generic_call(method, &fsig, args, type_args, span, hint);
                     }
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for

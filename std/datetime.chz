@@ -21,7 +21,7 @@
 # See docs/stdlib.md §5 for the full contract.
 
 import std.time as time
-import std.str as s
+import std.string as s
 
 # ---- floor-division helpers (Chezzi /,% truncate toward zero; we need floor for negative epochs) ----
 

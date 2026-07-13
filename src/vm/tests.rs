@@ -5757,7 +5757,7 @@ fn worker_calls_sibling_free_fn() {
 }
 
 /// A spawned task calls a function from an IMPORTED module — proves cross-module `module_objs`
-/// reconstruction (the `text` import alias maps to the worker's std.str module obj, whose own
+/// reconstruction (the `text` import alias maps to the worker's std.string module obj, whose own
 /// globals are reconstructed too).
 #[test]
 fn worker_calls_imported_fn() {
@@ -5772,7 +5772,7 @@ fn worker_calls_imported_fn() {
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "import std.str as text\nfn task() -> str:\n    return text.repeat(\"ab\", 2)\n",
+        "import std.string as text\nfn task() -> str:\n    return text.repeat(\"ab\", 2)\n",
     )
     .unwrap();
     let mut vm = ran_graph(&entry);
@@ -11346,7 +11346,7 @@ fn shift_left_overflow_is_recoverable_fault() {
 /// `pad_left` with an EMPTY `fill` used to LIVELOCK (the pad loop never grew the string), producing
 /// zero output and no diagnostic. It must now raise a RECOVERABLE fault EAGERLY — before the
 /// `width <= len` early-out, so the fault is not input-dependent — on both engines, for both the
-/// native method and the `std.str` free fn.
+/// native method and the `std.string` free fn.
 #[test]
 fn pad_left_empty_fill_is_recoverable_fault() {
     const MSG: &str = "pad_left: fill must not be empty";
@@ -11373,7 +11373,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
         );
     }
 
-    // (The `std.str` free fn's identical fault needs the module-graph runner — it is asserted in
+    // (The `std.string` free fn's identical fault needs the module-graph runner — it is asserted in
     // `parity_tests::parity_std_str_pad_left_empty_fill_faults`.)
 
     // The fault is CATCHABLE by `recover:` (a recoverable fault, not a host panic).
@@ -11419,7 +11419,7 @@ fn pad_left_multi_char_fill_is_exactly_width() {
         );
     }
 
-    // (The `std.str` free fn is a byte-identical alias — asserted in
+    // (The `std.string` free fn is a byte-identical alias — asserted in
     // `parity_tests::parity_std_str_pad_left_matches_native_method`.)
 }
 
@@ -11447,7 +11447,7 @@ fn pad_left_codepoints_not_bytes() {
 }
 
 /// A huge `width` routes through the same capacity guard as `repeat`: a recoverable fault, not an
-/// OOM/abort. (Native only — the `std.str` free fn cannot probe the allocator; that is a documented
+/// OOM/abort. (Native only — the `std.string` free fn cannot probe the allocator; that is a documented
 /// divergence, docs/stdlib.md.)
 #[test]
 fn pad_left_huge_width_is_recoverable_fault() {

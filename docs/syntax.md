@@ -2371,7 +2371,7 @@ s.parse_int()    s.parse_float()  # → Result[int,str] / Result[float,str] (Ok/
 ```
 
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/
-`strip_suffix`/`split_lines` methods forward to the matching `std.str` free fns (no import needed).
+`strip_suffix`/`split_lines` methods forward to the matching `std.string` free fns (no import needed).
 
 A character is just a 1-char `str` (Python-style — there is no `char` type): index with `s[i]`,
 iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
@@ -2636,6 +2636,38 @@ import core.db.pool              # local module → <root>/core/db/pool.chz
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 
+**`import` is TOP-LEVEL only.** An `import` inside a function body or any nested block is a **parse
+error** (`import must be a top-level declaration`) — like `extern`/`native`. (It used to parse and
+check clean while being a complete no-op: the resolver only scans module-level statements, so a nested
+import never resolved, never bound, and never ran the module body.)
+
+**A module's bound name may not be a reserved builtin.** The bound name — the alias, or the last path
+segment when un-aliased — lands in the VALUE namespace, where it would beat the builtin of the same
+name in expression position. So a reserved bound name is **rejected**:
+
+```chezzi
+import lib.int              # error: module name 'int' is reserved (builtin) — alias it: import lib.int as ints
+import lib.geo as Ok        # error: import alias 'Ok' is reserved (builtin)
+import lib.int as ints      # ok — and `int("5")` keeps working
+```
+
+The reserved set is the builtin callables + reserved type names + the builtin variant ctors
+(`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
+reserved scalar/ctor name.)
+
+**`from M import X` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
+time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
+read `M.COUNT` for the live value. A **container** is the same heap object, so mutating *through* the
+binding works; **rebinding** it is rejected (consistent with the qualified form, where `st.COUNT = 5`
+already errors):
+
+```chezzi
+import COUNT, LST from lib.st
+LST.push(7)     # ok — same heap object as lib.st's LST
+COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' (a from-imported
+                #        global is a snapshot copy — assign through the module, or use a Shared/Ref)
+```
+
 **Types are module-scoped** (like functions — exported by default, no `pub`; visible elsewhere only
 via import, under the same bound last-segment name):
 
@@ -2652,6 +2684,15 @@ import Point as Pt from core.geo # rename (user types only; FFI widths can't be 
 
 c0 := geo.Counter.zero()         # qualified type as a STATIC-method receiver
 col := geo.Color.first()         # enum static via the qualified type (variant still wins on a clash)
+```
+
+A **module-qualified generic fn** takes the member-level turbofish and honors the expected-type hint,
+so a type param that appears only in the return type is reachable through `M.f`:
+
+```chezzi
+import lib.geo                       # fn empty_list[T]() -> List[T]
+xs := geo.empty_list[int]()          # turbofish
+ys: List[str] = geo.empty_list()     # …or solved from the annotation
 ```
 
 A **qualified type** may also be the receiver of a **static (associated) method** —
@@ -3098,7 +3139,7 @@ Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
 (`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
 
 Modules are `import std.X` then `X.func(...)`. Importable:
-`std.io`, `std.math`, `std.str`, `std.cmp`, `std.os`, `std.json`, `std.process`, `std.fs`,
+`std.io`, `std.math`, `std.string`, `std.cmp`, `std.os`, `std.json`, `std.process`, `std.fs`,
 `std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.ref`, `std.cancel`.
 
 A few cross-cutting notes (full detail in `stdlib.md`):

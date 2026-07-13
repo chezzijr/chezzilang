@@ -3851,7 +3851,7 @@ fn str_split_arg_must_be_str() {
 
 #[test]
 fn str_new_methods_infer_types_ok() {
-    // gap #1 minimal subset: receiver methods forwarding to std.str free fns.
+    // gap #1 minimal subset: receiver methods forwarding to std.string free fns.
     ok("s := \"hi\"\nb: bool = s.ends_with(\"i\")\nprint(b)\n");
     ok("s := \"aXaX\"\nr: str = s.replace(\"X\", \"y\")\nprint(r)\n");
     ok("s := \"ab\"\nr: str = s.repeat(3)\nprint(r)\n");
@@ -4176,6 +4176,133 @@ fn check_entry(src: &str) -> Vec<CheckError> {
 fn entry_ok(src: &str) {
     let errs = check_entry(src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// Bug 4B — a module bind (aliased OR the un-aliased last path segment) whose name is a reserved
+/// builtin/ctor is REJECTED. That is what makes shadowing the builtin impossible.
+#[test]
+fn reserved_module_bind_rejected() {
+    let int_mod = (
+        "lib/int.chz",
+        "fn twice(n: int) -> int:\n    return n * 2\n",
+    );
+    let geo = ("lib/geo.chz", "struct Point:\n    x: int\n    y: int\n");
+    // un-aliased last path segment == a reserved builtin callable
+    files_reject(
+        &[int_mod, ("main.chz", "import lib.int\nprint(1)\n")],
+        "reserved (builtin)",
+    );
+    files_reject(&[int_mod, ("main.chz", "import lib.int\nprint(1)\n")], "as");
+    // aliased to a builtin VARIANT ctor
+    files_reject(
+        &[geo, ("main.chz", "import lib.geo as Ok\nprint(1)\n")],
+        "import alias 'Ok' is reserved (builtin)",
+    );
+    // un-aliased last path segment == a builtin variant ctor
+    files_reject(
+        &[
+            ("lib/Ok.chz", "fn f() -> int:\n    return 1\n"),
+            ("main.chz", "import lib.Ok\nprint(1)\n"),
+        ],
+        "reserved (builtin)",
+    );
+}
+
+/// The escape hatch + no over-rejection: an aliased reserved-named module works, the builtin it
+/// would have shadowed still works, and a normal module bind is unaffected.
+#[test]
+fn reserved_module_bind_alias_escape_hatch() {
+    files_ok(&[
+        (
+            "lib/int.chz",
+            "fn twice(n: int) -> int:\n    return n * 2\n",
+        ),
+        (
+            "main.chz",
+            "import lib.int as ints\nprint(int(\"5\"))\nprint(ints.twice(2))\n",
+        ),
+    ]);
+    files_ok(&[
+        ("lib/geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+        (
+            "main.chz",
+            "import lib.geo\np := geo.Point(1, 2)\nr: Result[int, str] = Ok(5)\nprint(p.x)\n",
+        ),
+    ]);
+}
+
+/// Bug 2 — a from-imported module global is a SNAPSHOT copy (Python-identical): REBINDING it is
+/// rejected, consistent with the qualified form (`st.COUNT = 5`). Mutating THROUGH a from-imported
+/// container still works (it is the same heap object).
+#[test]
+fn rebinding_from_imported_global_rejected() {
+    let st = (
+        "lib/st.chz",
+        "COUNT := 0\nLST := [1]\nfn bump():\n    print(1)\n",
+    );
+    for (body, needle) in [
+        (
+            "import COUNT from lib.st\nCOUNT = 99\n",
+            "imported from module",
+        ),
+        (
+            "import COUNT from lib.st\nCOUNT += 1\n",
+            "imported from module",
+        ),
+        (
+            "import LST from lib.st\nLST = [2]\n",
+            "imported from module",
+        ),
+        // the qualified form keeps its own existing reject
+        (
+            "import lib.st\nst.COUNT = 5\n",
+            "cannot assign to field 'COUNT' of module st",
+        ),
+        // a from-imported FUNCTION is not a value binding at all
+        (
+            "import bump from lib.st\nbump = 3\n",
+            "cannot assign to undeclared variable",
+        ),
+    ] {
+        files_reject(&[st, ("main.chz", body)], needle);
+    }
+    // no over-rejection: mutation-through, a local shadow, and plain reads all stay legal
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "import COUNT, LST from lib.st\nLST.push(7)\nprint(COUNT)\nfn f():\n    COUNT := 1\n    COUNT = 2\n    print(COUNT)\nf()\n",
+        ),
+    ]);
+}
+
+/// Bug 3 — a module-qualified GENERIC fn whose type param appears only in the return type: the
+/// turbofish (`geo.empty_list[int]()`) and the expected-type hint (`xs: List[int] = geo.empty_list()`)
+/// must both reach it. Boundaries: wrong type-arg count still errors; a non-generic qualified call is
+/// unchanged.
+#[test]
+fn qualified_generic_fn_turbofish_and_hint() {
+    let geo = (
+        "lib/geo.chz",
+        "fn empty_list[T]() -> List[T]:\n    return []\nfn dist(a: int, b: int) -> int:\n    return a - b\n",
+    );
+    files_ok(&[
+        geo,
+        (
+            "main.chz",
+            "import lib.geo\nxs := geo.empty_list[int]()\nxs.push(1)\nys: List[str] = geo.empty_list()\nys.push(\"a\")\nprint(geo.dist(3, 1))\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            geo,
+            (
+                "main.chz",
+                "import lib.geo\nxs := geo.empty_list[int, str]()\n",
+            ),
+        ],
+        "type argument",
+    );
 }
 
 fn entry_rejects(src: &str, needle: &str) {
@@ -13568,6 +13695,11 @@ fn check_files(files: &[(&str, &str)]) -> Vec<CheckError> {
     let t = TmpDir::new();
     let mut entry = None;
     for (rel, src) in files {
+        if let Some(parent) = std::path::Path::new(rel).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(t.0.join(parent)).unwrap();
+        }
         let p = t.write(rel, src);
         if *rel == "main.chz" {
             entry = Some(p);

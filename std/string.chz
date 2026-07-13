@@ -1,4 +1,4 @@
-# std.str — string helpers written in Chezzi (M6c dogfooding).
+# std.string — string helpers written in Chezzi (M6c dogfooding).
 #
 # Built entirely on the core-type str methods (len/split/...) and indexing — no native code. This
 # is the "some written in Chezzi" half of the stdlib: it imports nothing native itself, but proves

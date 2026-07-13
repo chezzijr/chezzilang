@@ -72,12 +72,12 @@ Conventions used below:
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
-methods are receiver-method aliases of the identically-named `std.str` free fns — `s.replace(a, b)` and
-`text.replace(s, a, b)` (after `import std.str as text`) are byte-identical for valid inputs; the free fns
+methods are receiver-method aliases of the identically-named `std.string` free fns — `s.replace(a, b)` and
+`text.replace(s, a, b)` (after `import std.string as text`) are byte-identical for valid inputs; the free fns
 keep working. (Two safety divergences, both because only the native method can probe the allocator:
 `s.repeat(n)` raises a recoverable `string repeat capacity overflow` fault for a huge `n` rather than
 allocating until it aborts; and `s.pad_left(w, f)` likewise raises a recoverable `string pad capacity
-overflow` fault for a huge `w`, while the `std.str` free fn grows until the process dies. The empty-`fill`
+overflow` fault for a huge `w`, while the `std.string` free fn grows until the process dies. The empty-`fill`
 fault, by contrast, is raised identically by both.)
 
 ### `List[T]`
@@ -482,7 +482,7 @@ perturbs a program's `rand` sequence. *Pure CPU draws (no I/O); inline on every 
 
 Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 
-### `std.str` — string helpers
+### `std.string` — string helpers
 `is_empty(s)` · `repeat(s, n)` · `reverse(s)` · `pad_left(s, width, fill)` · `split_lines(s)` ·
 `ends_with(s, suffix)` · `index_of(s, sub) -> int` (or `-1`) · `count(s, sub) -> int` ·
 `replace(s, old, new)` · `strip_prefix(s, p)` · `strip_suffix(s, p)`.

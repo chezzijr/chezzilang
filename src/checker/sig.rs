@@ -1809,7 +1809,7 @@ impl Checker {
                     if crate::checker::is_reserved_name(nm)
                         || self.struct_names.contains(nm)
                         || self.newtype_names.contains(nm)
-                        || matches!(nm, "Ok" | "Err" | "Some" | "None")
+                        || crate::checker::is_builtin_variant(nm)
                     {
                         self.error(
                             decl.name_span,
@@ -2498,6 +2498,24 @@ impl Checker {
                 // the one deliberate divergence from Go). A captured MODULE GLOBAL stays rejected: it
                 // is frozen under `--parallel`, and writing it would diverge serial (shared global)
                 // from M:N (worker's snapshot copy).
+                // A `from`-imported module global is a SNAPSHOT copy of the module's value, so
+                // rebinding the bare name would write a LOCAL alias that is silently lost (the module
+                // global is unchanged, and every other module keeps its own snapshot). Reject it,
+                // consistent with the qualified form (`st.COUNT = 5` → "cannot assign to field"). Gated
+                // on the name resolving at MODULE scope (index 0), so a fn-local `COUNT := 1` shadow
+                // stays assignable. Mutating THROUGH the binding (`LST.push(7)`, `m[k] = v`) is a
+                // different arm and keeps working — a container IS the same heap object.
+                if self.resolves_at_module_scope(name)
+                    && let Some(m) = self.imported_values.get(name).cloned()
+                {
+                    self.error(
+                        target.span,
+                        format!(
+                            "cannot assign to '{name}' imported from module '{m}' (a from-imported global is a snapshot copy — assign through the module, or use a Shared/Ref)"
+                        ),
+                    );
+                    return;
+                }
                 if self.is_captured(name) && !self.is_local_capture(name) {
                     self.error(
                         target.span,
@@ -3660,7 +3678,7 @@ impl Checker {
                     // catch-all binding → not structural.
                     let is_variant = module_name.is_some()
                         || enum_name.is_some()
-                        || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                        || crate::checker::is_builtin_variant(name)
                         || self.variant_owners.contains_key(name)
                         || !bindings.is_empty();
                     if is_variant {

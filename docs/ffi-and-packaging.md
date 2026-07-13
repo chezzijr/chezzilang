@@ -302,7 +302,7 @@ errors are data-dependent — uncheckable without dependent types.
 ## 5. Bootstrapping: won't — and FFI sits below the line either way
 
 There is **no bootstrap/self-host plan** ("std modules *written in Chezzi*" means stdlib like
-`std.str`/`std.cmp`, not the compiler). Structurally it never fully bootstraps:
+`std.string`/`std.cmp`, not the compiler). Structurally it never fully bootstraps:
 
 - The VM is the hot core (all of M19 is squeezing it vs CPython). Rewriting it in Chezzi → it runs *on*
   a VM → catastrophically slow → kills the perf track. Self-defeating.
@@ -327,7 +327,7 @@ different layers.
 
 ### 6.1 Pure-Chezzi packages — easy, do first
 Just `.chz` source. Registry serves source; the resolver imports it. **No recompile, ever.** Already
-proven (`std.str`/`std.cmp` are Chezzi). This is npm-for-source — ship it first, nearly free.
+proven (`std.string`/`std.cmp` are Chezzi). This is npm-for-source — ship it first, nearly free.
 
 ### 6.2 Native packages — the hard part
 **Today: native = edit `src/native/` + `Cargo.toml` + recompile the whole binary.** The Level-2 seam is

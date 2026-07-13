@@ -21,7 +21,7 @@ impl Checker {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
-                let is_builtin_variant = matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                let is_builtin_variant = crate::checker::is_builtin_variant(name);
                 if is_builtin_variant {
                     if let Some(vmap) = self.variants_of(ty)
                         && let Some(payload) = vmap.get(name)
@@ -331,8 +331,7 @@ impl Checker {
         // `Ok`/`Err`/`Some`/`None` or a user enum variant — which binds nothing (see `bind_subpattern`).
         // Mirror that registry here so `(None, None, None)` isn't falsely flagged as a duplicate binding.
         let is_binder = |name: &str| {
-            !(self.variant_owners.contains_key(name)
-                || matches!(name, "Ok" | "Err" | "Some" | "None"))
+            !(self.variant_owners.contains_key(name) || crate::checker::is_builtin_variant(name))
         };
         if let Some(dup) = first_duplicate_binder(pattern, &is_binder) {
             self.error(
@@ -364,7 +363,7 @@ impl Checker {
                         // leave the binding undeclared (`unknown name`) and wrongly report the match
                         // non-exhaustive.
                         let is_known_variant = self.variant_owners.contains_key(name)
-                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None");
+                            || crate::checker::is_builtin_variant(name);
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
@@ -547,7 +546,7 @@ impl Checker {
                         // Match the compiler's variant registry: user enums PLUS the built-in
                         // Result/Option variants (which the checker special-cases elsewhere).
                         if self.variant_owners.contains_key(name)
-                            || matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+                            || crate::checker::is_builtin_variant(name)
                         {
                             self.error(
                                 span,

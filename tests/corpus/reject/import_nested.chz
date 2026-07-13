@@ -1,0 +1,5 @@
+# rule: importStmt
+# expect: top-level
+fn f() -> int:
+    import lib.x
+    return 1

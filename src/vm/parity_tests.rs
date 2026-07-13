@@ -3316,14 +3316,38 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     vm.out
 }
 
+/// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs on both
+/// engines (type args are erased, so this exercises the checker fix end-to-end).
+#[test]
+fn parity_qualified_generic_fn_turbofish() {
+    let geo = ("geo.chz", "fn empty_list[T]() -> List[T]:\n    return []\n");
+    let main = (
+        "main.chz",
+        "import geo\nfn main():\n    xs := geo.empty_list[int]()\n    xs.push(1)\n    print(xs)\n    ys: List[str] = geo.empty_list()\n    print(ys)\nmain()",
+    );
+    assert_eq!(assert_parity_file(&[geo, main], "main.chz"), "[1]\n[]\n");
+}
+
+/// Bug 4 acceptance: the std string module is `std.string`, so importing it UN-aliased does not
+/// bind the reserved name `str` — the global `str()` ctor and the qualified module fn both work in
+/// the SAME module.
+#[test]
+fn parity_import_std_string_and_str_ctor() {
+    let src = "import std.string
+fn main():
+    print(str(5))
+    print(string.pad_left(\"a\", 3, \"-\"))\nmain()";
+    assert_eq!(parity_entry(src), "5\n--a\n");
+}
+
 #[test]
 fn parity_std_str_pure_chezzi_with_mixed_native_import() {
-    // std.str is a real Chezzi file (crate/std/str.chz); std.io is native — both in one program.
-    let src = "import std.io\nimport std.str as text\nfn main():\n    io.print(text.repeat(\"ab\", 3))\n    io.print(text.reverse(\"hello\"))\n    io.print(text.pad_left(\"7\", 3, \"0\"))\n    if text.is_empty(\"\"):\n        io.print(\"empty\")\n    for line in text.split_lines(\"a\\nb\\nc\"):\n        io.print(line)\nmain()";
+    // std.string is a real Chezzi file (crate/std/string.chz); std.io is native — both in one program.
+    let src = "import std.io\nimport std.string as text\nfn main():\n    io.print(text.repeat(\"ab\", 3))\n    io.print(text.reverse(\"hello\"))\n    io.print(text.pad_left(\"7\", 3, \"0\"))\n    if text.is_empty(\"\"):\n        io.print(\"empty\")\n    for line in text.split_lines(\"a\\nb\\nc\"):\n        io.print(line)\nmain()";
     assert_eq!(parity_entry(src), "ababab\nolleh\n007\nempty\na\nb\nc\n");
 }
 
-/// The pure-Chezzi `std.str` free fn is a byte-identical alias of the native `pad_left` METHOD:
+/// The pure-Chezzi `std.string` free fn is a byte-identical alias of the native `pad_left` METHOD:
 /// same never-shrinks rule, and the same truncated-cycle rule for a multi-char fill (it used to
 /// overshoot `width`). Codepoints, not bytes — a non-ASCII fill char counts as 1.
 #[test]
@@ -3340,8 +3364,9 @@ fn parity_std_str_pad_left_matches_native_method() {
         (r#""é", 3, "ü""#, "üüé"),
         (r#""a", 4, "日本""#, "日本日a"),
     ] {
-        let src =
-            format!("import std.str as text\nfn main():\n    print(text.pad_left({args}))\nmain()");
+        let src = format!(
+            "import std.string as text\nfn main():\n    print(text.pad_left({args}))\nmain()"
+        );
         assert_eq!(
             parity_entry(&src),
             format!("{want}\n"),
@@ -3356,8 +3381,9 @@ fn parity_std_str_pad_left_matches_native_method() {
 #[test]
 fn parity_std_str_pad_left_empty_fill_faults() {
     for args in [r#""a", 5, """#, r#""abc", 1, """#] {
-        let src =
-            format!("import std.str as text\nfn main():\n    print(text.pad_left({args}))\nmain()");
+        let src = format!(
+            "import std.string as text\nfn main():\n    print(text.pad_left({args}))\nmain()"
+        );
         let msg = parity_entry_fault(&src);
         assert!(
             msg.contains("pad_left: fill must not be empty"),
@@ -3868,7 +3894,7 @@ fn golden_compound_overload_via_run_file() {
     assert_file_parity("examples/compound_overload.chz");
 }
 
-/// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.str) runs end-to-end on
+/// M6c golden: the std-library demo (native std.io/math/os + Chezzi std.string) runs end-to-end on
 /// the VM and byte-matches both the `.expected` file and the interpreter.
 #[test]
 fn golden_std_demo_via_run_file() {
@@ -4232,7 +4258,7 @@ fn golden_stdlib_cmp_via_run_file() {
     assert_file_parity("examples/stdlib_cmp.chz");
 }
 
-/// std.str helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
+/// std.string helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
 /// replace/strip_prefix/strip_suffix funcs, end-to-end on the VM, byte-identical to `.expected`
 /// and the interpreter.
 #[test]
