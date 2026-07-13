@@ -3,8 +3,11 @@
 //! **Stateless by design.** The native seam (`Host`) only passes int/float/str arguments, so a
 //! compiled `Regex` can never be handed back into a later call as an argument. Every function
 //! therefore takes the *pattern string* plus its subject; a thread-local compile cache keyed by the
-//! pattern keeps repeated calls cheap (the program is single-threaded, so a `thread_local!` is both
-//! safe and contention-free). A bad pattern lowers to a chezzi `Err`.
+//! pattern keeps repeated calls cheap (a `thread_local!` needs no lock and cannot contend). Under the
+//! default M:N engine a program runs on many worker threads, so the cache is PER WORKER: a pattern is
+//! compiled once per worker that touches it, and the memory bound is `workers × CACHE_CAP`, not
+//! `CACHE_CAP`. That is the deliberate trade (no shared lock on a hot path); a single shared cache
+//! behind a lock is the upgrade if compile cost ever shows up. A bad pattern lowers to a chezzi `Err`.
 //!
 //! Offsets (`Match.start`/`Match.end`) are **codepoint** offsets into the subject (Python `re`
 //! semantics; the `regex` crate's native byte spans are converted), so the invariant
@@ -26,8 +29,10 @@ pub struct MatchData {
 }
 
 thread_local! {
-    /// Pattern → compiled regex. Single-threaded program ⇒ a `thread_local!` is safe and avoids
+    /// Pattern → compiled regex, PER WORKER THREAD (see the module doc): lock-free, and avoids
     /// recompiling a pattern reused across calls (e.g. a regex applied inside a loop).
+    /// ponytail: per-worker duplication (≤ `workers × CACHE_CAP` compiled patterns); one shared
+    /// locked cache if compile cost ever shows up in a bench.
     static CACHE: RefCell<HashMap<String, Rc<regex::Regex>>> = RefCell::new(HashMap::new());
 }
 
@@ -56,13 +61,35 @@ fn compiled(pat: &str) -> Result<Rc<regex::Regex>, String> {
     })
 }
 
+/// Ascending byte→codepoint cursor over one subject. The `regex` crate reports BYTE spans; Chezzi
+/// slicing/indexing is CODEPOINT-based (`s[m.start:m.end] == m.text` must hold on non-ASCII too), so
+/// every span is converted here. `captures_iter` yields non-overlapping, monotonically increasing
+/// spans, so one forward-only cursor converts a whole `find_all` in O(subject) total — never rescan
+/// the prefix from byte 0 per match (that is O(n·m): a document scan becomes a hang).
+struct CpCursor {
+    byte: usize,
+    cp: i64,
+}
+
+impl CpCursor {
+    fn new() -> Self {
+        CpCursor { byte: 0, cp: 0 }
+    }
+
+    /// Codepoint index of byte offset `to` (must be ≥ the last one asked for; always a char
+    /// boundary — the `regex` crate's spans over a `&str` are char-aligned).
+    fn at(&mut self, s: &str, to: usize) -> i64 {
+        debug_assert!(to >= self.byte, "CpCursor must advance forward");
+        self.cp += s[self.byte..to].chars().count() as i64;
+        self.byte = to;
+        self.cp
+    }
+}
+
 /// Build a `MatchData` from a `Captures`: group 0 is the whole match (text + span), groups 1..n are
-/// the capture subgroups (a non-participating optional group becomes `""`).
-/// Spans are converted from the `regex` crate's BYTE offsets to CODEPOINT offsets, because Chezzi
-/// slicing/indexing is codepoint-based (`s[m.start:m.end] == m.text` must hold on non-ASCII too).
-/// ponytail: O(n) per offset (O(n·m) across `find_all`); if regex ever shows up in a bench, walk one
-/// ascending byte→codepoint cursor across `captures_iter`'s monotonically increasing spans.
-fn match_from_caps(caps: &regex::Captures, s: &str) -> MatchData {
+/// the capture subgroups (a non-participating optional group becomes `""`). Spans are converted from
+/// bytes to codepoints via the caller's ascending `cur` (see `CpCursor`).
+fn match_from_caps(caps: &regex::Captures, s: &str, cur: &mut CpCursor) -> MatchData {
     let whole = caps.get(0).expect("group 0 always present on a match");
     let groups = (1..caps.len())
         .map(|i| {
@@ -72,8 +99,8 @@ fn match_from_caps(caps: &regex::Captures, s: &str) -> MatchData {
         .collect();
     MatchData {
         text: whole.as_str().to_string(),
-        start: s[..whole.start()].chars().count() as i64,
-        end: s[..whole.end()].chars().count() as i64,
+        start: cur.at(s, whole.start()),
+        end: cur.at(s, whole.end()),
         groups,
     }
 }
@@ -83,16 +110,18 @@ fn do_is_match(pat: &str, s: &str) -> Result<bool, String> {
 }
 
 fn do_find(pat: &str, s: &str) -> Result<Option<MatchData>, String> {
+    let mut cur = CpCursor::new();
     Ok(compiled(pat)?
         .captures(s)
-        .map(|caps| match_from_caps(&caps, s)))
+        .map(|caps| match_from_caps(&caps, s, &mut cur)))
 }
 
 fn do_find_all(pat: &str, s: &str) -> Result<Vec<MatchData>, String> {
     let re = compiled(pat)?;
+    let mut cur = CpCursor::new();
     Ok(re
         .captures_iter(s)
-        .map(|caps| match_from_caps(&caps, s))
+        .map(|caps| match_from_caps(&caps, s, &mut cur))
         .collect())
 }
 
@@ -233,6 +262,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The byte→codepoint conversion must be LINEAR in the subject across a whole `find_all`, not a
+    /// from-zero prefix rescan per match (that is O(n·m) — a document scan turns into a hang).
+    /// 200k matches over a 400k-char subject: ~8e10 byte steps if quadratic (measured 2.9s in a debug
+    /// build, and it grows with the square), ~400k if linear (measured ~0.1s, allocs dominating).
+    #[test]
+    fn find_all_offset_conversion_is_linear() {
+        let subj = "a ".repeat(200_000);
+        let t = std::time::Instant::now();
+        let ms = do_find_all("a", &subj).unwrap();
+        let dt = t.elapsed();
+        assert_eq!(ms.len(), 200_000);
+        assert_eq!((ms[199_999].start, ms[199_999].end), (399_998, 399_999));
+        assert!(
+            dt < std::time::Duration::from_secs(1),
+            "find_all offset conversion looks quadratic: {dt:?}"
+        );
     }
 
     #[test]
