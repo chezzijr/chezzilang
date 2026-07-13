@@ -1625,12 +1625,20 @@ impl Checker {
                         // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
                         // annotation licenses the literal's untyped-int-constant elements to widen —
                         // and it is exactly the annotation the COMPILER reads (`float_elem_hint`) to
-                        // emit `Op::CoerceFloat` for them, so checker and backend agree. Keyed on the
-                        // RESOLVED type, so a `type F = float` alias licenses it exactly like `float`
-                        // (the compiler resolves aliases at its own coercion sites). Set ONLY here
-                        // (never for a call arg / return: the compiler has no annotation there);
-                        // `infer_kind` `take()`s it so nothing nested inherits the license.
-                        self.float_elem_hint = float_elem_hint_ty(&expected);
+                        // emit `Op::CoerceFloat` for them, so checker and backend agree. The backend
+                        // matches the SYNTACTIC `List[…]`/`Map[…]` shape (resolving only the ELEMENT
+                        // through float aliases), so gate on that same shape here: a whole-collection
+                        // alias (`type LF = List[float]`) resolves to `Ty::List(Float)` but is NOT a
+                        // hint the backend can see — licensing it would leave an un-coerced `Int` under
+                        // a static `float`. Set ONLY here (never for a call arg / return: the compiler
+                        // has no annotation there); `infer_kind` `take()`s it so nothing nested
+                        // inherits the license.
+                        self.float_elem_hint = match t {
+                            crate::ast::Type::Generic(n, ..) if n == "List" || n == "Map" => {
+                                float_elem_hint_ty(&expected)
+                            }
+                            _ => None,
+                        };
                         self.expected_hint = Some(expected);
                         let vt = self.infer_value(value);
                         self.float_elem_hint = None;

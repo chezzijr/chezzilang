@@ -17314,3 +17314,53 @@ fn widen_annotated_all_int_collection_adapts() {
     entry_ok("fn main():\n    xs: List[float] = [1, 2]\n    print(xs)\n");
     entry_ok("fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n");
 }
+
+// ===== adversarial-review fixes: generic erasure + collection-alias annotations =====
+
+/// GENERIC ERASURE at a method call: a method param declared as the struct's type VARIABLE `T`,
+/// instantiated at `float`, is NOT a float sink the backend can lower — `emit_float_param_prologue`
+/// keys on the DECLARED syntactic type (`T`), which is erased, so it emits no `Op::CoerceFloat`. The
+/// checker must therefore refuse to widen there (same rule as a call through a fn VALUE), or an `Int`
+/// lands in a slot whose static type is `float`.
+#[test]
+fn widen_generic_method_param_at_float_rejected() {
+    entry_rejects(
+        "struct Box[T]:\n    v: T\n\n    fn set(self, x: T):\n        self.v = x\n\nb := Box[float](1.0)\nb.set(1)\n",
+        "expected float, found int",
+    );
+    // enum method, same shape
+    entry_rejects(
+        "enum Opt[T]:\n    Some(T)\n    None\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[float].Some(1.0)\nprint(o.eq(1))\n",
+        "expected float, found int",
+    );
+}
+
+/// A collection type spelled through an ALIAS (`type LF = List[float]`) is NOT an element-widening
+/// hint: the backend's `float_elem_hint` matches the SYNTACTIC `List[…]`/`Map[…]` shape only, so it
+/// would emit no `Op::CoerceFloat` for the elements. The checker must key its own hint on the same
+/// syntactic shape (an aliased ELEMENT — `List[F]` with `type F = float` — still widens: the backend
+/// resolves float aliases at the element).
+#[test]
+fn widen_collection_alias_annotation_rejected() {
+    entry_rejects("type LF = List[float]\nxs: LF = [1, 2]\n", "cannot assign");
+    entry_rejects(
+        "type MF = Map[str, float]\nm: MF = {\"k\": 1}\n",
+        "cannot assign",
+    );
+    // the ELEMENT spelled through an alias keeps working (the backend's `is_float` is alias-aware)
+    entry_ok("type F = float\nxs: List[F] = [1, 2.5]\nprint(xs)\n");
+}
+
+/// KNOWN LIMIT (pinned): a VARIADIC `float` param adapts an untyped int constant only when an untyped
+/// FLOAT constant sibling is present (the list peephole is the only coercion the type-blind backend
+/// can emit for the synthesized pack — the callee prologue cannot `Op::CoerceFloat` a List slot).
+/// `f(1, 2)` is therefore rejected while the identical scalar sink `fn f(z: float); f(1)` adapts.
+/// Upgrade path: make `Op::CoerceFloat` list-aware and emit the prologue for the variadic slot.
+#[test]
+fn widen_variadic_float_param_all_int_consts_rejected_known_limit() {
+    entry_rejects(
+        "fn f(...zs: float):\n    print(zs)\nf(1, 2)\n",
+        "expected List[float], found List[int]",
+    );
+    entry_ok("fn f(...zs: float):\n    print(zs)\nf(1, 2.5)\n");
+}

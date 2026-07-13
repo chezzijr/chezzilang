@@ -417,11 +417,21 @@ sink like any other. Because the conversion is real, the value behaves as a floa
 `x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
 operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule.
 
-Two boundaries follow from the rule (both are the SAME rule, not exceptions):
+Four boundaries follow from the rule (all are the SAME rule — the sink must be DECLARED `float`, since
+that declaration is what the backend coerces from — not exceptions):
 - A call through a function **VALUE** never widens (`f := id[float]` / `f: fn(float) -> float = h`; write
   `f(1.0)`). The coercion lives in the callee prologue, driven by the callee's DECLARED param type — a
   generic fn instantiated at `float` declares `T` and is generic-erased at runtime, and a `fn(float)`
-  value cannot be told apart from it, so neither adapts.
+  value cannot be told apart from it, so neither adapts. A fn-typed struct FIELD is a fn value too.
+- A **generic-erased** slot never widens: a method param declared as the type variable (`fn set(self, x: T)`
+  on a `Box[float]`) is `T` at runtime, so `b.set(1)` is an error — write `b.set(1.0)`. A param declared
+  `float` on the same generic struct adapts normally.
+- A collection annotation must be SPELLED as one: `xs: List[float] = [1, 2]` adapts, but through a
+  whole-collection alias (`type LF = List[float]`; `xs: LF = [1, 2]`) it does not (write `[1.0, 2.0]`).
+  An aliased ELEMENT is fine — `type F = float`; `xs: List[F] = [1, 2]`.
+- A **variadic** `float` param (`fn f(...zs: float)`) adapts its untyped int constants only when an
+  untyped float constant sibling is present (`f(1, 2.5)` ✓, `f(1, 2)` ✗ — write `f(1.0, 2.0)`): the args
+  are packed into a `List[float]` the callee prologue cannot coerce.
 - The element widening of a mixed-numeric-CONSTANT literal is a property of the LITERAL, so it applies in
   every element context: `xs: List[Any] = [1, -2.5]` and `f(1, -2.5)` for `fn f(...xs: Any)` store
   `1.0`, not `1`. A TYPED int element is never touched (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`).

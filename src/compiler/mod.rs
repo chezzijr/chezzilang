@@ -162,6 +162,16 @@ struct Compiler {
     program: Program,
     /// Struct name → declared fields (with types), kept for building `json.decode` descriptors.
     struct_fields: HashMap<String, Vec<crate::ast::Field>>,
+    /// Struct key → its declared GENERIC type-param names (`struct S[F]` → `{"F"}`). Read by
+    /// `compile_ctor_args`, whose field types are written in the STRUCT's scope, not the caller's:
+    /// a field `v: F` must not be treated as a float alias when `F` is the struct's own type param.
+    struct_generics: HashMap<String, std::collections::HashSet<String>>,
+    /// The GENERIC type-param names currently in scope (enclosing type's `[T]` + the fn's own `[U]`).
+    /// A type param SHADOWS a module-level `type F = float` alias, exactly as it does in the checker's
+    /// scoped `resolve_type` — so every `FloatAliases` lookup below must exclude these names, or the
+    /// backend coerces a value whose static type is the type VARIABLE (a runtime `Float` under a
+    /// static `int`, or a hard fault on a `str` instantiation, on a check-clean program).
+    float_shadow: std::collections::HashSet<String>,
     /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
@@ -259,9 +269,12 @@ struct FloatAliases {
 
 impl FloatAliases {
     /// True iff the type `ty`, as WRITTEN in module `idx`, means `float` (directly or through an alias
-    /// chain). Mirrors `crate::ast::is_float_ty` with alias resolution added.
-    fn is_float(&self, idx: usize, ty: &Type) -> bool {
+    /// chain). Mirrors `crate::ast::is_float_ty` with alias resolution added. `shadow` holds the
+    /// GENERIC type-param names in scope at the site: a type param SHADOWS a same-named module alias
+    /// (the checker resolves it to a `Ty::Param`), so it is never a float sink.
+    fn is_float(&self, idx: usize, ty: &Type, shadow: &std::collections::HashSet<String>) -> bool {
         match ty {
+            Type::Named { name, .. } if shadow.contains(name) => false,
             Type::Named { name, .. } => {
                 name == "float" || self.bare.get(idx).is_some_and(|s| s.contains(name))
             }
@@ -275,17 +288,24 @@ impl FloatAliases {
     }
 
     /// The collection element-widening hint for a `let` annotation written in module `idx`:
-    /// `List[float]` → `Elem`, `Map[_, float]` → `MapValue` (aliases resolved). The compiler twin of
-    /// the checker's `float_elem_hint_ty`.
-    fn elem_hint(&self, idx: usize, ty: &Type) -> Option<crate::ast::ElemFloatHint> {
+    /// `List[float]` → `Elem`, `Map[_, float]` → `MapValue` (float ELEMENT aliases resolved, generic
+    /// type params shadowed). Matches the SYNTACTIC `List[…]`/`Map[…]` shape only — a whole-collection
+    /// alias (`type LF = List[float]`) is NOT a hint here, so the checker (whose twin gate keys on the
+    /// same syntactic shape) must not license the widen for one either.
+    fn elem_hint(
+        &self,
+        idx: usize,
+        ty: &Type,
+        shadow: &std::collections::HashSet<String>,
+    ) -> Option<crate::ast::ElemFloatHint> {
         match ty {
             Type::Generic(n, args, ..)
-                if n == "List" && args.len() == 1 && self.is_float(idx, &args[0]) =>
+                if n == "List" && args.len() == 1 && self.is_float(idx, &args[0], shadow) =>
             {
                 Some(crate::ast::ElemFloatHint::Elem)
             }
             Type::Generic(n, args, ..)
-                if n == "Map" && args.len() == 2 && self.is_float(idx, &args[1]) =>
+                if n == "Map" && args.len() == 2 && self.is_float(idx, &args[1], shadow) =>
             {
                 Some(crate::ast::ElemFloatHint::MapValue)
             }
@@ -551,6 +571,8 @@ impl Compiler {
         Compiler {
             program,
             struct_fields: HashMap::new(),
+            struct_generics: HashMap::new(),
+            float_shadow: std::collections::HashSet::new(),
             globals: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
@@ -782,9 +804,16 @@ impl Compiler {
                     name,
                     fields,
                     methods,
+                    type_params,
                     ..
                 } => {
                     let key = self.type_key(module_idx, name);
+                    // The struct's own generic params — they shadow a module float alias in its FIELD
+                    // types (read by `compile_ctor_args`, which runs in the CALLER's scope).
+                    self.struct_generics.insert(
+                        key.clone(),
+                        type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    );
                     // Record each STATIC method (first param not `self`) so a `Type.method(...)` call
                     // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
                     for m in methods {
@@ -931,10 +960,17 @@ impl Compiler {
                 name,
                 methods,
                 fields,
+                type_params,
                 ..
             } = &stmt.kind
             {
                 let key = self.type_key(module_idx, name);
+                // The struct's `[T]`s are in scope for every method body + field default below (they
+                // shadow a same-named module `type T = float` alias at each coercion site).
+                let prev_shadow = std::mem::replace(
+                    &mut self.float_shadow,
+                    type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
                 let mut test_methods: Vec<String> = Vec::new();
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
@@ -967,21 +1003,33 @@ impl Compiler {
                         });
                     }
                 }
+                self.float_shadow = prev_shadow;
             }
         }
         // Compile enum methods next (type-erased — no `StructDef`/`tid`), recording proto ids under
         // the enum's module-scoped runtime key. Mirrors the struct-method pass above.
         for stmt in &module.stmts {
-            if let StmtKind::Enum { name, methods, .. } = &stmt.kind {
+            if let StmtKind::Enum {
+                name,
+                methods,
+                type_params,
+                ..
+            } = &stmt.kind
+            {
                 if methods.is_empty() {
                     continue;
                 }
                 let key = self.type_key(module_idx, name);
+                let prev_shadow = std::mem::replace(
+                    &mut self.float_shadow,
+                    type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                 }
+                self.float_shadow = prev_shadow;
                 self.program
                     .enum_methods
                     .entry(key.clone())
@@ -994,13 +1042,24 @@ impl Compiler {
         // newtype's module-scoped runtime key. A newtype ALWAYS gets a `newtype_home` entry (even
         // method-less) so the runtime can recognize the key as a newtype.
         for stmt in &module.stmts {
-            if let StmtKind::NewType { name, methods, .. } = &stmt.kind {
+            if let StmtKind::NewType {
+                name,
+                methods,
+                type_params,
+                ..
+            } = &stmt.kind
+            {
                 let key = self.type_key(module_idx, name);
+                let prev_shadow = std::mem::replace(
+                    &mut self.float_shadow,
+                    type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                 }
+                self.float_shadow = prev_shadow;
                 self.program
                     .newtype_methods
                     .entry(key.clone())
@@ -1115,7 +1174,11 @@ impl Compiler {
                     // One-way int→float widening: a `float` suite field coerces its int default, so
                     // the constructed suite instance stores a genuine f64 (the suite thunk bypasses
                     // `compile_ctor_args`, which does this for a regular ctor).
-                    if self.float_aliases.is_float(self.current_module_idx, &f.ty) {
+                    if self.float_aliases.is_float(
+                        self.current_module_idx,
+                        &f.ty,
+                        &self.float_shadow,
+                    ) {
                         fc.emit(Op::CoerceFloat, d.span);
                     }
                 }
@@ -1153,6 +1216,22 @@ impl Compiler {
         decl: &FnDecl,
         captured_names: Vec<String>,
     ) -> Result<ProtoId, CompileError> {
+        // The fn's OWN generic params join the enclosing type's for the duration of this body: they
+        // shadow any same-named module-level float alias at every coercion site below (and inside any
+        // nested closure, which compiles within this same scope).
+        let prev_shadow = self.float_shadow.clone();
+        self.float_shadow
+            .extend(decl.type_params.iter().map(|tp| tp.name.clone()));
+        let r = self.compile_fn_body(decl, captured_names);
+        self.float_shadow = prev_shadow;
+        r
+    }
+
+    fn compile_fn_body(
+        &mut self,
+        decl: &FnDecl,
+        captured_names: Vec<String>,
+    ) -> Result<ProtoId, CompileError> {
         let mut fc = FnComp::new(decl.name.clone(), decl.params.len(), false);
         fc.captured_names = captured_names;
         // Uniform by-reference capture (Task A): compute this frame's boxed-name set (unwired).
@@ -1160,10 +1239,10 @@ impl Compiler {
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         // One-way int→float widening: a `-> float` return type coerces every `return` value.
-        fc.ret_is_float = decl
-            .ret
-            .as_ref()
-            .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t));
+        fc.ret_is_float = decl.ret.as_ref().is_some_and(|t| {
+            self.float_aliases
+                .is_float(self.current_module_idx, t, &self.float_shadow)
+        });
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
@@ -1221,9 +1300,10 @@ impl Compiler {
     fn emit_float_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
         for (i, p) in params.iter().enumerate() {
             if !p.is_variadic
-                && p.ty
-                    .as_ref()
-                    .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t))
+                && p.ty.as_ref().is_some_and(|t| {
+                    self.float_aliases
+                        .is_float(self.current_module_idx, t, &self.float_shadow)
+                })
             {
                 let slot = i;
                 let span = Span { line: 1, col: 1 };
@@ -1357,16 +1437,18 @@ impl Compiler {
                 // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
                 // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
                 // strict assign target — so it needs no runtime coercion.)
-                let elem_hint = ty
-                    .as_ref()
-                    .and_then(|t| self.float_aliases.elem_hint(self.current_module_idx, t));
+                let elem_hint = ty.as_ref().and_then(|t| {
+                    self.float_aliases
+                        .elem_hint(self.current_module_idx, t, &self.float_shadow)
+                });
                 let prev_hint = std::mem::replace(&mut self.float_elem_hint, elem_hint);
                 self.compile_expr(fc, value)?;
                 self.float_elem_hint = prev_hint;
                 if names.len() == 1
-                    && ty
-                        .as_ref()
-                        .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t))
+                    && ty.as_ref().is_some_and(|t| {
+                        self.float_aliases
+                            .is_float(self.current_module_idx, t, &self.float_shadow)
+                    })
                 {
                     fc.emit(Op::CoerceFloat, value.span);
                 }
@@ -3769,13 +3851,17 @@ impl Compiler {
             .get(key)
             .map(|d| d.module_idx)
             .unwrap_or(self.current_module_idx);
+        // …and in the struct's OWN generic scope: a field `v: F` of `struct S[F]` is the type VARIABLE
+        // `F`, never a module `type F = float` alias (the checker resolves it that way too).
+        let empty = std::collections::HashSet::new();
+        let shadow = self.struct_generics.get(key).unwrap_or(&empty);
         let float_field: Vec<bool> = self
             .struct_fields
             .get(key)
             .map(|fields| {
                 fields
                     .iter()
-                    .map(|f| self.float_aliases.is_float(home, &f.ty))
+                    .map(|f| self.float_aliases.is_float(home, &f.ty, shadow))
                     .collect()
             })
             .unwrap_or_default();

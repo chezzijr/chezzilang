@@ -435,8 +435,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   value (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field, native/`extern` `double`
   params, and a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
   infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), or an annotated
-  `xs: List[float] = [1, f]` / `[1, 2]` (the annotation is the type context). A `float` sink spelled
-  through a type ALIAS (`type F = float`) is a float sink like any other (the backend resolves the alias).
+  `xs: List[float] = [1, f]` / `[1, 2]` (the annotation is the type context — spelled as a `List[…]`/
+  `Map[…]`; a whole-collection alias `type LF = List[float]` is not a type context, an aliased ELEMENT
+  `List[F]` is). A scalar `float` sink spelled through a type ALIAS (`type F = float`) is a float sink
+  like any other (the backend resolves the alias, and a generic type param of the same name shadows it).
+  The sink must be DECLARED `float`: a generic-erased slot (a method param declared `T` on a `Box[float]`)
+  and a variadic `float` param's all-int-constant pack (`fn f(...zs: float)`; `f(1, 2)`) do NOT adapt —
+  the backend has no declared `float` to coerce from.
   The element widening belongs to the LITERAL, so it also fires where the element type is not `float`
   (`xs: List[Any] = [1, -2.5]` stores `1.0`) — checker and backend agree there too. The compiler emits a real conversion
   (`Op::CoerceFloat`) so the checked path and the parity harness are byte-identical across both engines.

@@ -7354,3 +7354,40 @@ fn widen_annotated_all_int_collection_runs() {
         "[1.0, 2.0]\n{a: 1.0}\n0.5\n",
     );
 }
+
+// ===== adversarial-review fixes: a generic TYPE PARAM shadows a module float alias =====
+
+/// A generic TYPE PARAMETER shadows a module-level `type F = float` alias. The backend's alias table
+/// is module-scoped; the checker resolves `F` in the DECLARATION's type-param scope (a `Ty::Param`).
+/// So no coercion site (param prologue, `ret_is_float`, ctor field, `let` elem hint) may fire on a
+/// value whose static type is the type VARIABLE — else a runtime `Float` sits under a static `int`
+/// (silent precision loss, no integer-overflow check) and a `str` instantiation hard-faults on a
+/// check-clean program.
+#[test]
+fn float_alias_shadowed_by_type_param_no_coerce() {
+    widen_three_engines(
+        "type F = float\nfn g[F](x: F) -> F:\n    return x\nr := g(5)\nprint(r)\nprint(r % 2)\nprint(g(\"hi\"))\n",
+        "5\n1\nhi\n",
+    );
+    // generic struct: ctor float-field coercion + method return + a `List[F]` annotated `let`
+    widen_three_engines(
+        "type F = float\nstruct S[F]:\n    v: F\n\n    fn get(self) -> F:\n        return self.v\n\nprint(S[int](5).get())\nprint(S[str](\"hi\").get())\nfn h[F](x: F) -> List[F]:\n    xs: List[F] = [x]\n    return xs\nprint(h(5))\n",
+        "5\nhi\n[5]\n",
+    );
+}
+
+/// Over-rejection guard for the generic-method fix: a param DECLARED `float` (on a plain OR a generic
+/// struct) still adapts an untyped int constant — the backend's prologue coerces it, so the checker
+/// must keep accepting it. Only a param declared as the type VARIABLE (`T` instantiated at float) is
+/// rejected (see checker::tests::widen_generic_method_param_at_float_rejected).
+#[test]
+fn widen_method_float_param_still_adapts() {
+    widen_three_engines(
+        "struct P:\n    v: float\n\n    fn set(self, x: float):\n        self.v = x\n\np := P(0.0)\np.set(1)\nprint(p.v)\nprint(p.v / 2)\n",
+        "1.0\n0.5\n",
+    );
+    widen_three_engines(
+        "struct Box[T]:\n    v: T\n\n    fn scale(self, k: float) -> float:\n        return k\n\nb := Box[str](\"s\")\nprint(b.scale(1) / 2)\n",
+        "0.5\n",
+    );
+}

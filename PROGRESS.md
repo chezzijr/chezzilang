@@ -81,6 +81,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (4 checker incl. the fn-value/alias/note/all-int-annotated cases, 4 two-engine parity RUN tests incl.
 > the alias sinks, the variadic param, the `Any` element agreement + its typed-int guard); RED-first
 > (6 of the 8 fail on the pre-fix branch, the other 2 lock in behavior the fix makes principled).
+>
+> **Follow-up 2 (same branch, 2nd adversarial review): the alias table's own scope holes + one more
+> erased sink.** (1) **A generic TYPE PARAM shadows a module float alias.** `FloatAliases::is_float`
+> matched a bare `Type::Named` against a flat per-module alias set with no scope awareness, so
+> `type F = float` + ANY generic decl whose param is also named `F` (`fn g[F](x: F) -> F`, `struct S[F]`)
+> made the BACKEND coerce values whose static type is the type VARIABLE — the mirror bug: a runtime
+> `Float` under a static `int` (`g(5)` printed `5.0`, `S[int](MAX)` destroyed precision) and a check-clean
+> **runtime fault** on a non-numeric instantiation (`g("hi")` → "expected number, found str"). The compiler
+> now carries the generic params in scope (`Compiler::float_shadow`, plus `struct_generics` for the ctor's
+> field types, which are written in the STRUCT's scope) and excludes them at every coercion site — the
+> checker's `resolve_type` already scoped them this way. (2) **A whole-collection ALIAS is not an element
+> hint.** The checker licensed `xs: LF = [1, 2]` (`type LF = List[float]`) off the RESOLVED `Ty::List(Float)`
+> while the backend's `elem_hint` matches the SYNTACTIC `List[…]`/`Map[…]` shape only → no `Op::CoerceFloat`,
+> an `Int` under a static `float` (a NEW leak this branch had introduced with the all-int annotated literal).
+> The checker now gates its hint on the same syntactic shape (an aliased ELEMENT — `List[F]` — still widens).
+> (3) **A generic-ERASED method param no longer widens.** A method declared `fn set(self, x: T)` on a
+> `Box[float]` substitutes `T→float` in the checker, but `emit_float_param_prologue` keys on the DECLARED
+> `T` and emits nothing — so `b.set(1)` landed an `Int` in a `float` field (both PROOF programs reproduced:
+> integer overflow under `float`, unsorted `List[float]`). The arg check for a SUBSTITUTED param list
+> (`check_args_subst`, struct/enum/newtype methods) now keys the widen license on the PRE-substitution
+> declared type; a fn-typed struct FIELD is strict too (it is a fn value). A param DECLARED `float` on a
+> generic struct still adapts. **Known limit (pinned by test):** a variadic `float` param adapts an untyped
+> int constant only with an untyped float constant sibling (`f(1, 2.5)` ✓, `f(1, 2)` ✗) — the packed
+> `List[float]` has no coercion site; upgrade path is a list-aware `Op::CoerceFloat` at the variadic slot.
+> +4 tests (2 checker rejections, 2 two-engine parity RUN incl. an over-rejection guard), all RED first.
 
 > **✅ FEATURE — multi-line pipe chains + `iter.sum` (2026-07-13, `auto-task/pipe-multiline`).** A line whose
 > FIRST token is `|>` now **continues the previous logical line**: the lexer suppresses that line's

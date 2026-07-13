@@ -2033,6 +2033,9 @@ impl Checker {
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
                         (
                             params,
+                            // the DECLARED (pre-substitution) param types — the widen license (a `T`
+                            // slot instantiated at float is erased in the backend, so it cannot widen)
+                            sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
@@ -2042,7 +2045,9 @@ impl Checker {
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static, mdoc, where_bounds, rmap)) = resolved {
+                if let Some((params, declared, ret, mtps, is_static, mdoc, where_bounds, rmap)) =
+                    resolved
+                {
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
@@ -2093,7 +2098,8 @@ impl Checker {
                                     mdoc.clone(),
                                 );
                             }
-                            self.check_args_w(method, expected, args, span)
+                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
+                            self.check_args_subst(method, expected, dec, args, span)
                         }
                         None => {
                             self.error(
@@ -2117,8 +2123,11 @@ impl Checker {
                         .map(|(_, ty)| subst(ty, &map))
                 });
                 if let Some(Ty::Func { params, ret, .. }) = field_fn {
-                    // A fn-typed field is a closure/fn value; its prologue coerces float params.
-                    self.check_args_w(method, &params, args, span);
+                    // STRICT — a fn-typed FIELD holds a function VALUE, and a `Ty::Func` does not say
+                    // which declaration it came from (a generic fn instantiated at float has an erased
+                    // `T` param and coerces nothing). Same rule as the positional/named fn-value call
+                    // paths above: no int→float widening through a function value.
+                    self.check_args(method, &params, args, span);
                     return *ret;
                 }
                 self.infer_all(args);
@@ -2147,6 +2156,8 @@ impl Checker {
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
                         (
                             params,
+                            // the DECLARED (pre-substitution) param types — see the struct arm.
+                            sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
@@ -2155,7 +2166,8 @@ impl Checker {
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
+                if let Some((params, declared, ret, mtps, is_static, where_bounds, rmap)) = resolved
+                {
                     // Static methods on a newtype are DEFERRED (v1 covers struct + enum only). A
                     // no-self newtype method is still classified static, so reject the instance call
                     // with the static-method diagnostic (it is not reachable as `Type.method` yet —
@@ -2182,7 +2194,8 @@ impl Checker {
                     }
                     match params.split_first() {
                         Some((_receiver, expected)) => {
-                            self.check_args_w(method, expected, args, span)
+                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
+                            self.check_args_subst(method, expected, dec, args, span)
                         }
                         None => {
                             self.error(
@@ -2213,6 +2226,8 @@ impl Checker {
                         let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
                         (
                             params,
+                            // the DECLARED (pre-substitution) param types — see the struct arm.
+                            sig.params.clone(),
                             subst(&sig.ret, &map),
                             sig.type_params.clone(),
                             sig.is_static,
@@ -2221,7 +2236,8 @@ impl Checker {
                         )
                     })
                 });
-                if let Some((params, ret, mtps, is_static, where_bounds, rmap)) = resolved {
+                if let Some((params, declared, ret, mtps, is_static, where_bounds, rmap)) = resolved
+                {
                     // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
                     // value with a pointer at the right form (mirrors the struct arm).
                     if is_static {
@@ -2246,7 +2262,8 @@ impl Checker {
                     }
                     match params.split_first() {
                         Some((_receiver, expected)) => {
-                            self.check_args_w(method, expected, args, span)
+                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
+                            self.check_args_subst(method, expected, dec, args, span)
                         }
                         None => {
                             self.error(
@@ -2962,6 +2979,38 @@ impl Checker {
         span: Span,
         widen: bool,
     ) {
+        self.check_args_range_decl(name, params, None, min_params, args, span, widen);
+    }
+
+    /// [`Checker::check_args_w`] for a SUBSTITUTED parameter list (a method of a generic type, whose
+    /// `T`s are already replaced by the receiver's type args). `declared` is the SAME list BEFORE
+    /// substitution — the widen license is keyed on it, because the type-blind backend keys
+    /// `emit_float_param_prologue` on the DECLARED syntactic type: a param written `T` is erased and
+    /// gets NO `Op::CoerceFloat`, even when `T` is instantiated at `float`. Widening there would leave
+    /// a runtime `Int` under a static `float` (the generic-erasure hazard already refused for calls
+    /// through a fn VALUE). A param written `float` (or a float alias) still adapts.
+    pub(super) fn check_args_subst(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        declared: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) {
+        self.check_args_range_decl(name, params, Some(declared), params.len(), args, span, true);
+    }
+
+    #[allow(clippy::too_many_arguments)] // params + their pre-substitution twins + arity + span + flag
+    fn check_args_range_decl(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        declared: Option<&[Ty]>,
+        min_params: usize,
+        args: &[Expr],
+        span: Span,
+        widen: bool,
+    ) {
         if !(min_params..=params.len()).contains(&args.len()) {
             let want = if min_params == params.len() {
                 format!("{}", params.len())
@@ -2975,6 +3024,12 @@ impl Checker {
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_arg(arg, params.get(i));
+            // The widen license: the sink must be an untyped int CONSTANT *and* — for a substituted
+            // param list — the slot must have been DECLARED `float` (not a type param the backend
+            // erased). `declared: None` ⇒ `params` are the declared types (the ordinary case).
+            let widen = widen
+                && crate::ast::untyped_int_const(arg)
+                && declared.is_none_or(|d| d.get(i) == Some(&Ty::Float));
             // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
             // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
             // requirement (the spec's typed-parameter false-positive guard, one binding away from the
@@ -2982,13 +3037,13 @@ impl Checker {
             // un-inferred / generic slot does not spuriously satisfy the requirement.
             if let Some(pt) = params.get(i)
                 && !contains_unknown_in_slot(pt)
-                && self.assignable_w(pt, &at, widen && crate::ast::untyped_int_const(arg))
+                && self.assignable_w(pt, &at, widen)
                 && let ExprKind::Ident(name) = &arg.kind
             {
                 self.drop_empty_site(name);
             }
             if let Some(pt) = params.get(i)
-                && !self.assignable_w(pt, &at, widen && crate::ast::untyped_int_const(arg))
+                && !self.assignable_w(pt, &at, widen)
             {
                 // Transparency: render `ref T` (not the lowered `Ref[T]`) ONLY when the argument is
                 // a `ref` binding — an explicit first-class `Ref[T]` arg keeps its `Ref[T]` spelling.
