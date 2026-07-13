@@ -531,6 +531,27 @@ impl Checker {
                 }
                 Ty::Unknown
             }
+            // A module bind lands in the VALUE namespace, so `import lib.Point` beats a same-named
+            // USER `struct`/`enum` ctor in expression position (`is_reserved_module_bind` gates only
+            // the RESERVED names). The call is a hard error either way — name the collision instead of
+            // leaving the user to wonder where their ctor went.
+            Ty::Module(m)
+                if self.structs.contains_key(&self.bare_key(m.as_str()))
+                    || self.enums.contains_key(&self.bare_key(m.as_str())) =>
+            {
+                let m = m.clone();
+                for a in args {
+                    self.infer(a);
+                }
+                self.error(
+                    span,
+                    format!(
+                        "module bind '{m}' shadows the same-named type '{m}' — alias the import: `import ... as {}`",
+                        m.to_lowercase()
+                    ),
+                );
+                Ty::Unknown
+            }
             other => {
                 for a in args {
                     self.infer(a);

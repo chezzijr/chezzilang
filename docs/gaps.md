@@ -223,13 +223,23 @@ constructs that are *not* unsound — it errs safe, but it errs:
 All three **reject valid code rather than accept invalid code**, and have **zero in-repo users**. Upgrade
 path recorded in the test doc-comments. Revisit only if a real program hits one.
 
-### 4. A module bind still shadows a same-named USER ctor in expression position
+### 4. A module bind shadows a same-named USER ctor — DIAGNOSED, alias is the cure (downgraded)
 The wave-5 reserved-module-bind gate (`module name 'int' is reserved (builtin) — alias it: …`) covers
 the **34 reserved/builtin** names. It does **not** cover a *user* `struct`/`enum` ctor: a module named
-`Point` still wins over a user `struct Point` in expression position. Same root cause as the fixed
-`import std.str` bug (the bind lands in the VALUE namespace), just narrower blast radius — it can only
-bite a user who names a module and a type identically. The principled fix is a separate **module
-namespace** (module names are only ever legal in field position), which is a resolver change, not a gate.
+`Point` still wins over a user `struct Point` in expression position (same root cause as the fixed
+`import std.str` bug — the bind lands in the VALUE namespace).
+
+**But the blast radius is far smaller than first recorded, and this is now a closed decision.** Unlike a
+reserved name — which the module bind *silently destroyed* — a shadowed user ctor is a **hard type error
+at the call**, so no program can run wrong; and `import lib.Point as pt` is the cure, which is exactly
+what Python does. That is normal shadowing with a diagnostic Python doesn't even give you. The only real
+defect was the *message*: the bare `module Point is not callable` never said where your ctor went. Fixed
+— the not-callable arm now names the collision (`module bind 'Point' shadows the same-named type
+'Point' — alias the import: …`); test `module_bind_shadowing_user_type_names_the_collision`.
+
+A separate **module namespace** (module names legal only in field position) remains the principled fix
+and would remove the collision entirely, but it is a resolver change and buys only the loss of an alias
+keystroke. Not planned.
 
 ### 5. Never-hunted surfaces (the two biggest remaining pre-JIT risks)
 Five hunt waves have now swept the typed feature surface, the stdlib, concurrency, and the front-end.

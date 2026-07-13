@@ -4279,6 +4279,56 @@ fn reserved_from_import_member_rejected() {
     )]);
 }
 
+/// Wave-5 residual 4, DIAGNOSTIC-ONLY: `is_reserved_module_bind` gates the 34 reserved names, so a
+/// module bind colliding with a same-named USER `struct`/`enum` ctor is NOT rejected at the import —
+/// the module (a VALUE-namespace bind) simply wins in expression position and the ctor call is a hard
+/// type error. That is the Python-normal outcome and the alias is the cure, so this stays a diagnostic
+/// (not a resolver-level module namespace): NAME the collision instead of the bare, mystifying
+/// `module Point is not callable`.
+#[test]
+fn module_bind_shadowing_user_type_names_the_collision() {
+    let point = ("lib/Point.chz", "x := 1\n");
+    let shape = ("lib/Shape.chz", "y := 2\n");
+    // a struct ctor …
+    files_reject(
+        &[
+            point,
+            (
+                "main.chz",
+                "import lib.Point\n\nstruct Point:\n    a: int\n\np := Point(1)\nprint(p.a)\n",
+            ),
+        ],
+        "shadows the same-named type 'Point'",
+    );
+    // … and an enum ctor: same VALUE-namespace collision, same diagnostic.
+    files_reject(
+        &[
+            shape,
+            (
+                "main.chz",
+                "import lib.Shape\n\nenum Shape:\n    Dot\n\ns := Shape.Dot\nprint(Shape(1))\n",
+            ),
+        ],
+        "shadows the same-named type 'Shape'",
+    );
+    // the escape hatch: alias the import and BOTH the module and the ctor are reachable.
+    files_ok(&[
+        point,
+        (
+            "main.chz",
+            "import lib.Point as pt\n\nstruct Point:\n    a: int\n\np := Point(1)\nprint(p.a)\nprint(pt.x)\n",
+        ),
+    ]);
+    // no over-rejection: a module bind with NO same-named type keeps the generic not-callable error.
+    files_reject(
+        &[
+            ("lib/geo.chz", "z := 3\n"),
+            ("main.chz", "import lib.geo\nprint(geo(1))\n"),
+        ],
+        "is not callable",
+    );
+}
+
 /// Bug 2 — a from-imported module global is a SNAPSHOT copy (Python-identical): REBINDING it is
 /// rejected, consistent with the qualified form (`st.COUNT = 5`). Mutating THROUGH a from-imported
 /// container still works (it is the same heap object).
