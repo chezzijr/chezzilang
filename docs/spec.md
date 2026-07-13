@@ -423,22 +423,29 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   a `NaN` always evaluate to `false` (never a fault), matching IEEE-754 / Python / Rust; equality is
   unchanged (`nan == nan` is `false`, `nan != nan` is `true`). Sorting is deterministic with `NaN`:
   `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end) instead of
-  faulting. **One-way `int`→`float` widening (C-like):** an `int` value flows into a `float` slot and is
-  converted to a real `f64` (the reverse is a lossy type error). It fires at every value-definition
-  boundary: a typed binding (`x: float = 3` so `x / 2 == 1.5`, real float division), a `float`
-  function/method/closure parameter (incl. an `int` *variable*, coerced at the callee prologue), a `float`
-  parameter DEFAULT value (`fn g(a: float = 3)`), a
-  `-> float` return, a `float` struct field, native/`extern` `double` params, and a **mixed-numeric-literal**
-  collection (a list/map literal with ≥1 float literal infers `List[float]`/`Map[_, float]`). The compiler
-  emits a real conversion (`Op::CoerceFloat`) so the checked path
-  and the parity harness are byte-identical across both engines. Lossy conversions stay type errors
-  (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`, `int`→`float` across a **newtype**
-  boundary). Widening is **scalar-at-the-sink**: a compound/nested float annotation is NOT widened —
-  `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int literal `List[float] =
-  [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors (use explicit floats or a
-  mixed literal). Carve-outs: a plain reassignment `x = 3` to a `float` local is rejected (type-blind
-  target), and an un-annotated non-literal mixed collection is inferred `List[float]` but its non-literal
-  `int` element is not widened at runtime (annotate to convert). The same scalar-only rule governs
+  faulting. **One-way `int`→`float` widening — UNTYPED CONSTANTS only (Go's rule):** an untyped int
+  *constant* expression adapts to a `float` context and is converted to a real `f64`; a **typed** `int`
+  *value* never implicitly converts (write `float(x)`), and the reverse is always a lossy type error. An
+  untyped int constant is an int literal, unary `-`, and `+ - * / %` composed over those — anything with
+  a declared type (a name, a CALL RESULT, a field, an index) is typed and is rejected at a `float` sink
+  with a diagnostic naming the fix. It fires at every value-definition boundary: a typed binding
+  (`x: float = 1 + 2` so `x / 2 == 1.5`, real float division), a `float` function/method/closure parameter
+  (coerced at the callee prologue, so fn-values and closures are covered), a `float` parameter DEFAULT
+  value (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field, native/`extern` `double`
+  params, and a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
+  infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), or an annotated
+  `xs: List[float] = [1, f]` (the annotation is the type context). The compiler emits a real conversion
+  (`Op::CoerceFloat`) so the checked path and the parity harness are byte-identical across both engines.
+  The checker's accepted set is a strict SUBSET of what the type-blind compiler can coerce (one shared
+  predicate, `ast::const_num`), so no sink can hold a runtime `Int` under a static `float`. Lossy
+  conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`,
+  `int`→`float` across a **newtype** boundary). Widening is **scalar-at-the-sink**: a compound/nested
+  float annotation is NOT widened — `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an
+  all-int literal `List[float] = [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors
+  (use explicit floats or a mixed literal). An un-annotated mixed collection with a TYPED int element
+  (`a := 1; xs := [a, 2.5]`) is an error — no type context, no adaptation; annotate AND write
+  `float(a)`. One further restriction: a plain reassignment `x = 3` to a `float` local is rejected
+  (type-blind target). The same scalar-only rule governs
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
   **not** widen `int`→`float` across branches — an inferred return is not a widening *sink* (widening
   emits `Op::CoerceFloat` only at an explicit sink), so mixed `if c: return 1 else: return 2.0`
@@ -785,12 +792,14 @@ coercion, and keep newtypes nominally distinct so a conversion is always visible
 (`Ok(n)` or `Err(msg)` with a human-readable parse-error message). Use these over `int()`/`float()`
 when the input is untrusted.
 
-**Implicit coercion — one-way `int` → `float` widening only** (C-like). An `int` value flows into a
-`float` slot and is converted to a real `f64` at every value-definition boundary (typed binding,
-`float` param/default, `-> float` return, `float` struct field, mixed-numeric-literal collection). It
-is **scalar-at-the-sink**: never propagated into a compound (`List[float] = [1, 2]` stays an error),
-and the reverse (`float` → `int`) is always a lossy type error. Emitted as `Op::CoerceFloat` so both
-engines are byte-identical. (Full rules in the numeric-arithmetic section above.)
+**Implicit coercion — one-way `int` → `float` widening of an UNTYPED CONSTANT only** (Go's rule). An
+untyped int *constant* expression (literal / unary `-` / `+ - * / %` over those) adapts to a `float`
+slot and is converted to a real `f64` at every value-definition boundary (typed binding, `float`
+param/default, `-> float` return, `float` struct field, mixed-numeric-constant collection). A **typed**
+`int` value never implicitly converts — write `float(x)`. It is **scalar-at-the-sink**: never propagated
+into a compound (`List[float] = [1, 2]` stays an error), and the reverse (`float` → `int`) is always a
+lossy type error. Emitted as `Op::CoerceFloat` so both engines are byte-identical. (Full rules in the
+numeric-arithmetic section above.)
 
 **Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:
 wrap with `Name(x)`, unwrap with the matching scalar/aggregate cast (`int(n)`, `list(s)`, …; the

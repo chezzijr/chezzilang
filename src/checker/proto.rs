@@ -422,16 +422,23 @@ impl Checker {
         }
     }
 
-    /// Like [`Checker::assignable`], but accepts C-like **one-way int→float widening** at a SCALAR
-    /// value-DEFINITION sink (typed `let`, function/struct/method arg, return, struct-field default):
-    /// `(Float, Int)` only. Widening is deliberately NOT propagated into ANY compound position
-    /// (list/set/option element, map/result value, struct/tuple/func) — only a scalar `float` sink is
-    /// coerced by the compiler (`Op::CoerceFloat`), so widening a compound would accept an int-bearing
-    /// value the runtime never converts (an `Int` left in a `float` slot — the exact hole this design
-    /// avoids; the checker cannot tell a safe literal `[1, 2]` from an unsafe non-literal `f()`).
+    /// Like [`Checker::assignable`], but accepts **one-way int→float widening** (`(Float, Int)` only)
+    /// at a SCALAR value-DEFINITION sink (typed `let`, function/struct/method arg, return,
+    /// param/field default).
+    ///
+    /// `widen` is NOT "this is a float sink" — it is "this expression is an untyped int CONSTANT"
+    /// ([`crate::ast::untyped_int_const`]), which is what every caller must pass. Go's rule: an
+    /// untyped constant adapts to a float context; a TYPED int value never implicitly converts (the
+    /// user writes `float(x)`). That distinction is what the old blanket `widen=true` lacked — it
+    /// accepted `i := 1; x: float = i`, which the type-blind compiler happily lowered as an `Int`
+    /// sitting in a static `float` slot (int overflow under a float type, an unsorted `List[float]`,
+    /// an `f64` load over an int payload once a JIT exists).
+    ///
+    /// Widening is still NOT propagated into ANY compound position (list/set/option element,
+    /// map/result value, struct/tuple/func) — only a scalar `float` sink emits `Op::CoerceFloat`.
     /// Collection floats come instead from mixed-literal element inference (`[1, 2.3]` infers
-    /// `list[float]`) + literal element coercion, which is independently sound. `widen=false` ⇒
-    /// identical to [`Checker::assignable`].
+    /// `list[float]`), whose own widen gate (`Checker::elem_widen_ok`) fires only where the compiler
+    /// is guaranteed to coerce. `widen=false` ⇒ identical to [`Checker::assignable`].
     pub(super) fn assignable_w(&self, expected: &Ty, actual: &Ty, widen: bool) -> bool {
         if widen && matches!((expected, actual), (Ty::Float, Ty::Int)) {
             return true;

@@ -276,12 +276,13 @@ as `assertion failed: boom` (was the raw `boom`), bare `assert false` keeps exac
 and the `msg` is still evaluated lazily on the failing path only. Two fault sites (`vm/mod.rs` Op::Assert
 + `interp/mod.rs` Assert), byte-identical across engines; `examples/assert.chz`.
 
-**Type-system/runtime ✅** · one-way C-like `int`→`float` widening (2026-06-22) — runtime
-`Op::CoerceFloat`/`coerce_float` at every value-def sink (typed `let`, fn/method/closure args incl. int
-var via prologue, float param defaults, `-> float` returns, float struct fields, native/extern float
-params, float/all-literal collection literals); anti-lossy `float`→`int` stays a type error; carve-outs:
-un-annotated non-literal mixed collection, plain reassign to float local, generic `T`, compound/nested
-float annotation · bare-fn misdiagnosis → real fix = missing-return check (Option B) + inline-expr body
+**Type-system/runtime ✅** · one-way `int`→`float` widening of an UNTYPED CONSTANT (2026-06-22; narrowed
+to Go's untyped-constant rule 2026-07-13) — runtime `Op::CoerceFloat`/`coerce_float` at every value-def
+sink (typed `let`, fn/method/closure args via the callee prologue, float param defaults, `-> float`
+returns, float struct fields, native/extern float params, mixed-numeric-constant collection literals); a
+TYPED int value never widens (write `float(x)`); anti-lossy `float`→`int` stays a type error; still
+rejected: plain reassign to a float local, generic `T`, compound/nested float annotation · bare-fn
+misdiagnosis → real fix = missing-return check (Option B) + inline-expr body
 implicit return + nil-in-value-position rejected · non-const default exprs · calling `fn`-typed field ·
 `sort_by_key` · `Ref[T]` box · stack traces · overflow policy · loop-var reassign rejected ·
 break/continue in spawn/defer nested in loop rejected (2026-06-16) · break/continue out of `parallel:`

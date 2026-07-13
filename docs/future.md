@@ -194,7 +194,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 15. **Type conversion protocol (`Convert[S]`) + scalar fills — 🚧 PARTIALLY LANDED (slices 1+2).** Today
     conversion is a fixed set of builtins (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`)
-    plus one-way `int`→`float` widening, and one-way newtype wrap/unwrap. The extensible mechanism is
+    plus one-way `int`→`float` widening of an untyped CONSTANT, and one-way newtype wrap/unwrap. The extensible mechanism is
     the reserved `Convert[S]` protocol (there is still no `as`, no `Into`/`TryFrom`). Full current-state
     inventory in `docs/spec.md` "Type conversions & casting". The intended direction, in leverage order:
     - **`Convert[S]` structural protocol** (the big one) — a type witnesses it with a **static** method

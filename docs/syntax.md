@@ -395,26 +395,40 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 `List[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
 `Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
-**One-way `int`→`float` widening (C-like).** An `int` value flows into a `float` SLOT automatically and
-is converted to a real `f64`; the reverse (`float`→`int`) is always a type error (lossy). Widening
-fires at every value-DEFINITION boundary: a typed binding (`x: float = 3` → `3.0`), a `float` function /
-method / closure parameter (incl. when you pass an `int` *variable*, not just a literal — it is coerced
-at the callee), a `float` parameter DEFAULT value (`fn g(a: float = 3)`), a `-> float` return, a `float`
-struct field (`P(3)` for `v: float`), and a
-**mixed-numeric-literal** collection — a list/map literal with ≥1 float literal infers `List[float]` /
-`Map[_, float]` and coerces its int literals (`xs: List[float] = [1, 2.3]`, a `Map[_, float]` value, or
-a bare `[1, 2.3]`). Because the conversion is real, the stored value behaves as a float everywhere — e.g.
-`x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
-operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule. Anti-lossy cases stay type
-errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a `List[int]`, and an `int`→`float`
-into a **newtype** (a newtype is nominal — no widening across its boundary). Widening is
-**scalar-at-the-sink** — a compound/nested float annotation is NOT widened: `List[List[float]] = [[1]]`,
-`float? = Some(3)`, `float! = Ok(3)`, an all-int literal `List[float] = [1, 2]`, and a non-literal RHS
-(`List[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`)
-or a mixed literal. Two further scoped carve-outs: a plain reassignment `x = 3` to a `float`-declared
-local is rejected (a reassignment target is type-blind, like `p.x = 3`), and an UN-annotated NON-literal
-mixed collection (`xs := [a, b]` with `a:int`, `b:float`) is inferred `List[float]` but its non-literal
-`int` element is not widened at runtime (rare; annotate `xs: List[float] = …` for the conversion).
+**One-way `int`→`float` widening — an UNTYPED CONSTANT only (Go's rule).** An untyped int **constant**
+expression adapts to a `float` context and is converted to a real `f64`. A **typed** `int` **value**
+never implicitly converts — write `float(x)`. The reverse (`float`→`int`) is always a type error (lossy).
+
+An untyped int constant is an int literal, unary `-`, and the arithmetic operators `+ - * / %` composed
+over those (`1`, `-5`, `1 + 2`, `2 * 3`). Anything carrying a declared type is TYPED and does not adapt:
+a name, a call result, a field, an index — so `i := 1; x: float = i`, `x: float = i + 1`, and
+`x: float = cmp.max(1, 2)` (a fn RESULT is a typed int, even with constant args) are all type errors,
+each naming the fix (`a typed int never widens to float — write float(x)`).
+
+An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
+`3.0`), a `float` function / method / closure parameter (coerced at the CALLEE prologue, so it works for
+fn-values and closures too), a `float` parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, a
+`float` struct field (`P(3)` for `v: float`), and a **mixed-numeric** collection literal — a list/map
+literal with ≥1 untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int
+constants (`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), as does an explicitly annotated `xs: List[float] =
+[1, f]` / `m: Map[str, float] = {"a": 1}` (the annotation is the type CONTEXT). Because the conversion is
+real, the value behaves as a float everywhere — `x: float = 3` makes `x / 2 == 1.5` (float division), not
+`1`. The mixed-type arithmetic / comparison operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same
+one-way rule.
+
+Un-annotated, there is no type context, so **no** adaptation: `f := 2.5; xs := [1, f]` is an error
+(`list elements differ: int vs float`) — annotate `xs: List[float] = [1, f]`. Likewise a TYPED int
+element never widens, annotated or not: `a := 1; xs: List[float] = [a, 2.3]` is an error; write
+`[float(a), 2.3]`.
+
+Anti-lossy cases stay type errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a
+`List[int]`, and an `int`→`float` into a **newtype** (nominal — no widening across its boundary).
+Widening is **scalar-at-the-sink** — a compound/nested float annotation is NOT widened:
+`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int literal
+`List[float] = [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors; write explicit
+floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`) or a mixed literal. One further scoped restriction: a plain
+reassignment `x = 3` to a `float`-declared local is rejected (a reassignment target is type-blind, like
+`p.x = 3`).
 
 ## 4. Operators & precedence
 

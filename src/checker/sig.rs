@@ -1623,7 +1623,15 @@ impl Checker {
                     Some(t) if !is_ref && names.len() == 1 => {
                         let expected = self.resolve_type(t, span);
                         self.expected_hint = Some(expected);
+                        // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
+                        // annotation licenses the literal's untyped-int-constant elements to widen —
+                        // and it is exactly the annotation the COMPILER reads (`float_elem_hint`) to
+                        // emit `Op::CoerceFloat` for them, so checker and backend agree. Set ONLY here
+                        // (never for a call arg / return: the compiler has no annotation there);
+                        // `infer_kind` `take()`s it so nothing nested inherits the license.
+                        self.float_elem_hint = crate::ast::float_elem_hint(t);
                         let vt = self.infer_value(value);
+                        self.float_elem_hint = None;
                         self.expected_hint = None;
                         vt
                     }
@@ -1650,7 +1658,11 @@ impl Checker {
                         } else {
                             self.resolve_type(t, span)
                         };
-                        if !self.assignable_w(&expected, &val_ty, true) {
+                        if !self.assignable_w(
+                            &expected,
+                            &val_ty,
+                            crate::ast::untyped_int_const(value),
+                        ) {
                             // Transparency: a `ref T` binding's mismatch renders `ref T`, not `Ref[T]`.
                             let exp = if is_ref {
                                 ref_display(&expected)
@@ -1659,7 +1671,10 @@ impl Checker {
                             };
                             self.error(
                                 value.span,
-                                format!("cannot assign {val_ty} to variable of type {exp}"),
+                                format!(
+                                    "cannot assign {val_ty} to variable of type {exp}{}",
+                                    widen_note(&expected, &val_ty)
+                                ),
                             );
                         }
                         expected
@@ -1876,13 +1891,18 @@ impl Checker {
                         let expected = self.resolve_type(&field.ty, def.span);
                         let actual = self.infer(def);
                         if !matches!(expected, Ty::Unknown)
-                            && !self.assignable_w(&expected, &actual, true)
+                            && !self.assignable_w(
+                                &expected,
+                                &actual,
+                                crate::ast::untyped_int_const(def),
+                            )
                         {
                             self.error(
                                 def.span,
                                 format!(
-                                    "default value for field '{}': expected {expected}, found {actual}",
-                                    field.name
+                                    "default value for field '{}': expected {expected}, found {actual}{}",
+                                    field.name,
+                                    widen_note(&expected, &actual)
                                 ),
                             );
                         }
@@ -2787,8 +2807,14 @@ impl Checker {
                 };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
-                } else if !self.assignable_w(&ret, &ty, true) {
-                    self.error(e.span, format!("expected return type {ret}, found {ty}"));
+                } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                    self.error(
+                        e.span,
+                        format!(
+                            "expected return type {ret}, found {ty}{}",
+                            widen_note(&ret, &ty)
+                        ),
+                    );
                 } else if let ExprKind::Ident(name) = &e.kind
                     && !contains_unknown_in_slot(&ret)
                 {
@@ -3077,12 +3103,15 @@ impl Checker {
                 // One-way int→float widening (scalar sink): a `float` param accepts an int default,
                 // coerced to f64 at the callee prologue (the default is desugar-spliced into the call
                 // when omitted). Mirrors the typed-`let`/arg/return/struct-field sinks.
-                if !matches!(ty, Ty::Unknown) && !self.assignable_w(&ty, &actual, true) {
+                if !matches!(ty, Ty::Unknown)
+                    && !self.assignable_w(&ty, &actual, crate::ast::untyped_int_const(def))
+                {
                     self.error(
                         def.span,
                         format!(
-                            "default value for parameter '{}': expected {ty}, found {actual}",
-                            param.name
+                            "default value for parameter '{}': expected {ty}, found {actual}{}",
+                            param.name,
+                            widen_note(&ty, &actual)
                         ),
                     );
                 }
@@ -3115,8 +3144,14 @@ impl Checker {
                 if ty != Ty::Nil && !ty.is_unknown() {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 }
-            } else if !self.assignable_w(&ret, &ty, true) {
-                self.error(e.span, format!("expected return type {ret}, found {ty}"));
+            } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                self.error(
+                    e.span,
+                    format!(
+                        "expected return type {ret}, found {ty}{}",
+                        widen_note(&ret, &ty)
+                    ),
+                );
             }
         } else {
             for stmt in &decl.body {

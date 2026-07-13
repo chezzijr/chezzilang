@@ -36,6 +36,7 @@ impl Checker {
             recover_depth: 0,
             generic_arg_prepass: false,
             expected_hint: None,
+            float_elem_hint: None,
             inferring_ret: false,
             collected_rets: Vec::new(),
             in_generator: false,

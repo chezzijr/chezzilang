@@ -6342,18 +6342,14 @@ fn generator_iter_returns_self_vm() {
 
 // ===== one-way int→float implicit widening (Architecture C: real runtime coercion) =====
 
-/// Assert all three engines (VM serial default, interp oracle, VM `--parallel`) produce `want`.
+/// Assert BOTH engines (serial VM + M:N VM) produce `want`. (The tree-walk interp is gone; this used
+/// to call the M:N engine twice under a stale "interp" label.)
 fn widen_three_engines(src: &str, want: &str) {
-    assert_eq!(run_capture(src).expect("vm"), want, "vm engine");
-    assert_eq!(
-        run_capture_parallel(src).expect("interp"),
-        want,
-        "interp engine"
-    );
+    assert_eq!(run_capture(src).expect("serial"), want, "serial engine");
     assert_eq!(
         run_capture_parallel(src).expect("parallel"),
         want,
-        "parallel engine"
+        "M:N engine"
     );
 }
 
@@ -6364,18 +6360,31 @@ fn widen_let_display_and_division() {
     widen_three_engines("x: float = 3\nprint(x)\nprint(x / 2)\n", "3.0\n1.5\n");
 }
 
-/// Passing an int VARIABLE into a `float` param coerces at the callee prologue: `z / 2` is float
-/// division. Proves the coercion is at the callee boundary (works for any caller, not just literals).
+/// Passing an untyped int CONSTANT EXPRESSION into a `float` param coerces at the callee PROLOGUE
+/// (nothing folds `1 + 2`, so an `Int` reaches the callee and `Op::CoerceFloat` converts it): `z / 2`
+/// is float division. Proves the coercion is at the callee boundary, not the call site — which is why
+/// it must stay for fn-values/closures/methods. An explicit `float(a)` of a TYPED int (the only way
+/// to pass one now) lands as an f64 too.
 #[test]
 fn widen_param_int_variable_division() {
-    widen_three_engines("fn f(z: float):\n    print(z / 2)\na := 3\nf(a)\n", "1.5\n");
+    widen_three_engines("fn f(z: float):\n    print(z / 2)\nf(1 + 2)\n", "1.5\n");
+    widen_three_engines(
+        "fn f(z: float):\n    print(z / 2)\na := 3\nf(float(a))\n",
+        "1.5\n",
+    );
 }
 
-/// A non-literal int expression returned from a `-> float` function is coerced before `Return`.
+/// An untyped int CONSTANT EXPRESSION returned from a `-> float` function is coerced before `Return`.
+/// (A TYPED int expression — `n + 1` with `n: int` — is now a CHECK ERROR; see
+/// checker::tests::widen_int_return_into_float_ret_accepted.)
 #[test]
 fn widen_return_nonliteral_int_expr() {
     widen_three_engines(
-        "fn g(n: int) -> float:\n    return n + 1\nprint(g(2) / 2)\n",
+        "fn g() -> float:\n    return 1 + 2\nprint(g() / 2)\n",
+        "1.5\n",
+    );
+    widen_three_engines(
+        "fn g(n: int) -> float:\n    return float(n + 1)\nprint(g(2) / 2)\n",
         "1.5\n",
     );
 }
@@ -6399,10 +6408,10 @@ fn widen_default_param_division() {
     );
 }
 
-/// An inline-expr fn body (`fn g(n: int) -> float: n + 1`) coerces its implicit return too.
+/// An inline-expr fn body (`fn g() -> float: 1 + 2`) coerces its implicit return too.
 #[test]
 fn widen_inline_expr_body_return() {
-    widen_three_engines("fn g(n: int) -> float: n + 1\nprint(g(2) / 2)\n", "1.5\n");
+    widen_three_engines("fn g() -> float: 1 + 2\nprint(g() / 2)\n", "1.5\n");
 }
 
 /// A `float`-param closure coerces at its prologue.
@@ -6441,22 +6450,37 @@ fn widen_mixed_comparisons_pinned() {
     widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
 }
 
-/// An ANNOTATED `List[float]` widens a NON-LITERAL int element too (all elements coerced): both
-/// engines must agree (`a` is an int variable, not a literal).
+/// An ANNOTATED `List[float]` licenses an untyped int CONSTANT element even when the float sibling is
+/// a VARIABLE (the literal peephole cannot see it — only the annotation hint can). The element must
+/// land as a genuine f64: `xs[0] / 2 == 0.5`, and `.sort()` sorts as floats.
+/// (A TYPED int element — `xs: List[float] = [a, 2.3]` — is now a CHECK ERROR: an annotation is a
+/// type CONTEXT for a constant, not a conversion for a typed value. See
+/// checker::tests::widen_let_hint_does_not_leak_into_nested_literal / the V1 tests.)
 #[test]
-fn widen_annotated_list_widens_nonliteral_element() {
+fn widen_annotated_list_const_int_float_var_runs() {
     widen_three_engines(
-        "a := 1\nxs: List[float] = [a, 2.3]\nprint(xs[0] / 2)\n",
-        "0.5\n",
+        "f := 2.5\nxs: List[float] = [1, f]\nprint(xs[0] / 2)\nxs.sort()\nprint(xs)\n",
+        "0.5\n[1.0, 2.5]\n",
     );
 }
 
-/// CARVE-OUT pinned: an UN-ANNOTATED non-literal mixed collection (`xs := [a, b]`, a:int, b:float)
-/// is NOT element-widened (the compiler is type-blind about non-literal `a`), so `xs[0]` stays Int
-/// → `xs[0] / 2` is int division (`0`). Both engines must AGREE on this (parity, not correctness).
+/// An untyped int CONSTANT EXPRESSION element (`1 + 1`, not a bare literal) is coerced by the literal
+/// peephole — the checker accepts it, so the compiler MUST widen it (else a fresh Int-under-float).
 #[test]
-fn widen_unannotated_nonliteral_mixed_collection_carveout() {
-    widen_three_engines("a := 1\nb := 2.3\nxs := [a, b]\nprint(xs[0] / 2)\n", "0\n");
+fn widen_const_int_expr_element_coerced() {
+    widen_three_engines("xs := [1 + 1, 2.5]\nprint(xs[0] / 2)\n", "1.0\n");
+}
+
+/// A UNARY / BINARY untyped FLOAT-constant sibling licenses the peephole too (`-2.5`, `2.0 + 0.5` are
+/// not `ExprKind::Float` literals). Both were pre-existing Int-under-float leaks (printed `0`).
+#[test]
+fn widen_unary_float_sibling_coerced() {
+    widen_three_engines("xs := [1, -2.5]\nprint(xs[0] / 2)\n", "0.5\n");
+    widen_three_engines("xs := [1, 2.0 + 0.5]\nprint(xs[0] / 2)\n", "0.5\n");
+    widen_three_engines(
+        "m := {\"a\": 1, \"b\": -2.5}\nprint(m[\"a\"] / 2)\n",
+        "0.5\n",
+    );
 }
 
 // ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so serial == M:N is

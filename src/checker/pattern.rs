@@ -934,6 +934,11 @@ impl Checker {
     }
 
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
+        // One-way int→float ELEMENT-widening license from an annotated `let` — applies to the
+        // IMMEDIATE collection literal only. `take()` it (clearing the field) so a nested element, a
+        // call argument, or any other sub-expression does NOT inherit it. Mirrors the compiler's
+        // identical `take()` at the top of `compile_expr`.
+        let elem_hint = self.float_elem_hint.take();
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
@@ -948,12 +953,19 @@ impl Checker {
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
                 let hint = self.expected_hint.take();
-                self.infer_list(items, hint.as_ref())
+                self.infer_list(
+                    items,
+                    hint.as_ref(),
+                    elem_hint == Some(crate::ast::ElemFloatHint::Elem),
+                )
             }
             ExprKind::Tuple(items) => {
                 Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
             }
-            ExprKind::Map(entries) => self.infer_map(entries),
+            ExprKind::Map(entries) => self.infer_map(
+                entries,
+                elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
+            ),
             ExprKind::Set(elems) => self.infer_set(elems),
             ExprKind::Comprehension {
                 kind,
@@ -1631,7 +1643,34 @@ impl Checker {
         Ty::Unknown
     }
 
-    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
+    /// License to widen the int-typed items of a collection literal to `float` — the SOUNDNESS gate.
+    /// True only when BOTH:
+    ///  - the COMPILER is guaranteed to coerce them: either an untyped-float-constant sibling is
+    ///    present (its literal peephole fires) or the annotated-`let` element hint is active; AND
+    ///  - every int-typed item is an untyped int CONSTANT (a typed int value never widens — the
+    ///    compiler cannot coerce what it cannot see the type of, so accepting it would leave a runtime
+    ///    `Int` under a static `float`).
+    ///
+    /// This is the checker ⊆ compiler subset property, by construction.
+    fn elem_widen_ok<'a>(
+        &self,
+        items: impl Iterator<Item = &'a Expr> + Clone,
+        tys: &[Ty],
+        hint: bool,
+    ) -> bool {
+        let license = hint
+            || items
+                .clone()
+                .any(|e| crate::ast::const_num(e) == Some(crate::ast::ConstNum::Float));
+        license
+            && tys.contains(&Ty::Int)
+            && tys.contains(&Ty::Float)
+            && items
+                .zip(tys)
+                .all(|(e, t)| *t != Ty::Int || crate::ast::untyped_int_const(e))
+    }
+
+    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>, hint: bool) -> Ty {
         // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
         // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
         // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
@@ -1643,37 +1682,29 @@ impl Checker {
         // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
         // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
         // (int→float) widening for a genuinely mistyped literal.
+        let tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
         if let Some(Ty::List(e)) = expected
             && !e.is_unknown()
             && !items.is_empty()
+            && tys.iter().all(|t| t.is_unknown() || self.assignable(e, t))
         {
-            let tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
-            if tys.iter().all(|t| t.is_unknown() || self.assignable(e, t)) {
-                return Ty::list((**e).clone());
-            }
-            // Not all elements fit `E` — re-run the homogeneity check over the ALREADY-inferred
-            // element types (no re-inference) so the usual diagnostics fire against the literal.
-            let mut elem = Ty::Unknown;
-            for (t, item) in tys.iter().zip(items) {
-                if elem.is_unknown() {
-                    elem = t.clone();
-                } else if numeric_mix(&elem, t) {
-                    elem = Ty::Float;
-                } else if !t.is_unknown() && !compatible(&elem, t) {
-                    self.error(item.span, format!("list elements differ: {elem} vs {t}"));
-                }
-            }
-            return Ty::list(elem);
+            return Ty::list((**e).clone());
         }
+        // Bottom-up homogeneity, with one-way int→float widening iff the soundness gate licenses it
+        // (`elem_widen_ok`): an int-typed item then reads as `float`. Otherwise a mixed literal is the
+        // ordinary heterogeneity error — `[a, 2.5]` with a TYPED int `a` has no type context to adapt
+        // to (Go), so it is rejected rather than silently leaving an `Int` under a static `float`.
+        let widen = self.elem_widen_ok(items.iter(), &tys, hint);
         let mut elem = Ty::Unknown;
-        for item in items {
-            let t = self.infer_value(item);
+        for (t, item) in tys.iter().zip(items) {
+            let t = if widen && *t == Ty::Int {
+                &Ty::Float
+            } else {
+                t
+            };
             if elem.is_unknown() {
-                elem = t;
-            } else if numeric_mix(&elem, &t) {
-                // One-way int→float widening: a mixed int/float list literal infers `list[float]`.
-                elem = Ty::Float;
-            } else if !t.is_unknown() && !compatible(&elem, &t) {
+                elem = t.clone();
+            } else if !t.is_unknown() && !compatible(&elem, t) {
                 self.error(item.span, format!("list elements differ: {elem} vs {t}"));
             }
         }
@@ -1701,12 +1732,29 @@ impl Checker {
         Ty::set(elem)
     }
 
-    pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)]) -> Ty {
+    pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)], hint: bool) -> Ty {
+        // Infer keys+values in source order first (so the widen gate can see the whole VALUE column),
+        // then run the homogeneity checks in that same order — diagnostics are unchanged.
+        let tys: Vec<(Ty, Ty)> = entries
+            .iter()
+            .map(|(k, v)| (self.infer_value(k), self.infer_value(v)))
+            .collect();
+        let widen = self.elem_widen_ok(
+            entries.iter().map(|(_, v)| v),
+            &tys.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
+            hint,
+        );
         let mut key = Ty::Unknown;
         let mut value = Ty::Unknown;
-        for (k_expr, v_expr) in entries {
-            let kt = self.infer_value(k_expr);
-            let vt = self.infer_value(v_expr);
+        for ((k_expr, v_expr), (kt, vt)) in entries.iter().zip(&tys) {
+            let (kt, vt) = (
+                kt.clone(),
+                if widen && *vt == Ty::Int {
+                    Ty::Float
+                } else {
+                    vt.clone()
+                },
+            );
             if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                 self.error(
                     k_expr.span,
@@ -1720,10 +1768,6 @@ impl Checker {
             }
             if value.is_unknown() {
                 value = vt;
-            } else if numeric_mix(&value, &vt) {
-                // One-way int→float widening on the VALUE position (keys stay strict — float keys are
-                // banned anyway): a mixed int/float map value infers `map[K, float]`.
-                value = Ty::Float;
             } else if !vt.is_unknown() && !compatible(&value, &vt) {
                 self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
             }

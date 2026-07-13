@@ -65,16 +65,29 @@ fn widen_int_to_float_let_accepted() {
     ok("x: float = 3\nprint(x)\n");
 }
 
-/// Passing an int (literal or variable) into a `float` parameter widens at the callee boundary.
+/// An untyped int CONSTANT passed into a `float` parameter widens at the callee boundary. A TYPED
+/// int variable does NOT (BREAKING, was accepted → left an `Int` under a static `float`): write
+/// `float(a)`.
 #[test]
 fn widen_int_arg_into_float_param_accepted() {
-    ok("fn f(z: float):\n    print(z)\na := 3\nf(a)\nf(7)\n");
+    ok("fn f(z: float):\n    print(z)\nf(7)\nf(1 + 2)\nf(-1)\n");
+    rejects(
+        "fn f(z: float):\n    print(z)\na := 3\nf(a)\n",
+        "a typed int never widens to float — write float(x)",
+    );
+    ok("fn f(z: float):\n    print(z)\na := 3\nf(float(a))\n");
 }
 
-/// A non-literal int expression returned from a `-> float` function widens.
+/// A TYPED int expression returned from a `-> float` function no longer widens (BREAKING): `n + 1`
+/// with `n: int` is a typed int. An untyped int CONSTANT return still widens.
 #[test]
 fn widen_int_return_into_float_ret_accepted() {
-    ok("fn g(n: int) -> float:\n    return n + 1\nprint(g(2))\n");
+    ok("fn g() -> float:\n    return 1 + 2\nprint(g())\n");
+    rejects(
+        "fn g(n: int) -> float:\n    return n + 1\nprint(g(2))\n",
+        "a typed int never widens to float — write float(x)",
+    );
+    ok("fn g(n: int) -> float:\n    return float(n + 1)\nprint(g(2))\n");
 }
 
 /// An int field value widens into a `float` struct field.
@@ -4658,9 +4671,14 @@ fn native_math_abs_float_returns_float() {
 
 #[test]
 fn cmp_max_int_result_widens_into_float_let() {
-    // `cmp.max(3, 5)` instantiates `T = int` and returns `int`; one-way int->float widening then lets
-    // that int flow into a `float`-annotated let (the typed-`let` sink coerces the value at runtime).
-    entry_ok("import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n");
+    // BREAKING (was accepted): `cmp.max(3, 5)` instantiates `T = int` and returns a TYPED int — a fn
+    // RESULT is typed even with constant args (Go). It no longer adapts to a `float` let; the fix is
+    // `float(...)` (or `cmp.max(3.0, 5.0)`).
+    entry_rejects(
+        "import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n",
+        "a typed int never widens to float — write float(x)",
+    );
+    entry_ok("import std.cmp\nfn main():\n    x: float = float(cmp.max(3, 5))\n    print(x)\n");
 }
 
 #[test]
@@ -4685,8 +4703,11 @@ fn cmp_from_import_max_float_returns_float() {
 
 #[test]
 fn cmp_from_import_max_int_widens_into_float_let() {
-    // Same one-way int->float widening through the `from`-import generic-call path.
-    entry_ok("import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n");
+    // BREAKING, same as `cmp_max_int_result_widens_into_float_let` through the `from`-import path.
+    entry_rejects(
+        "import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
+        "a typed int never widens to float — write float(x)",
+    );
 }
 
 #[test]
@@ -17065,5 +17086,170 @@ fn return_in_spawn_nested_in_recover_reports_spawn_only() {
     assert!(
         flow[0].message.contains("spawn block"),
         "the return is lexically in a spawn block: {errs:?}"
+    );
+}
+
+// ===== SOUNDNESS: no runtime Int under a static `float` (untyped-constant widening rule) =====
+//
+// The rule (Go's): an untyped CONSTANT adapts to a float context; a TYPED int value never implicitly
+// converts (write `float(x)`). The checker's accepted set is now a SUBSET of what the type-blind
+// compiler can lower, so no sink can end up holding an `Int` under a static `float`.
+
+const WIDEN_NOTE: &str = "a typed int never widens to float — write float(x)";
+
+/// V1 — a non-const int element in a `List[float]` call-arg slot. Checked clean before, ran as an
+/// `Int` under a static `float` (`xs[0] / 2` → `0.0` instead of `0.5`).
+#[test]
+fn widen_v1_nonconst_int_element_in_float_list_param_rejected() {
+    entry_rejects(
+        "fn f(xs: List[float]) -> float:\n    return xs[0] / 2\nfn main():\n    a := 1\n    print(f([a, 2.5]))\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// V2 — un-annotated mixed literal whose float sibling is a VARIABLE: no type context ⇒ no adaptation.
+#[test]
+fn widen_v2_unannotated_mixed_nonliteral_float_rejected() {
+    entry_rejects(
+        "fn main():\n    f := 2.5\n    xs := [1, f]\n    print(xs[0] / 2)\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// V2 (annotated) — the same literal WITH a `List[float]` annotation stays legal: the annotation is
+/// the type context, and the compiler's element hint coerces the untyped int constant.
+#[test]
+fn widen_annotated_list_const_int_with_float_var_ok() {
+    entry_ok("fn main():\n    f := 2.5\n    xs: List[float] = [1, f]\n    print(xs[0] / 2)\n");
+}
+
+/// V3 — a non-const int in a `Map[str, float]` VALUE position.
+#[test]
+fn widen_v3_nonconst_int_map_value_rejected() {
+    entry_rejects(
+        "fn f(m: Map[str, float]) -> float:\n    return m[\"k\"] / 2\nfn main():\n    a := 1\n    print(f({\"k\": a, \"j\": 2.5}))\n",
+        "map values differ: int vs float",
+    );
+}
+
+/// The `-> List[float]` RETURN slot.
+#[test]
+fn widen_nonconst_int_element_in_float_list_return_rejected() {
+    entry_rejects(
+        "fn mk() -> List[float]:\n    a := 1\n    return [a, 2.5]\nfn main():\n    print(mk())\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// A `List[float]` STRUCT FIELD.
+#[test]
+fn widen_nonconst_int_element_in_float_list_field_rejected() {
+    entry_rejects(
+        "struct P:\n    v: List[float]\nfn main():\n    a := 1\n    p := P([a, 2.5])\n    print(p.v)\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// Across a `Channel[List[float]]` — the poisoned Int used to cross the spawn airlock inside the
+/// payload. (A SCALAR `Channel[float]`'s `send(1)` was already rejected: builtin method args never
+/// widened. Unchanged — only the diagnostic now names the `float(x)` fix.)
+#[test]
+fn widen_nonconst_int_into_float_channel_rejected() {
+    entry_rejects(
+        "fn main():\n    ch := Channel[List[float]]()\n    a := 1\n    ch.send([a, 2.5])\n    print(ch.recv())\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// PROOF 1 — a `float`-typed value raising an INTEGER overflow (floats saturate to inf; they cannot
+/// overflow). Must be a check error now.
+#[test]
+fn widen_proof_int_overflow_under_float_rejected() {
+    entry_rejects(
+        "fn main():\n    a := 9223372036854775807\n    xs := [a, 1.5]\n    print(xs[0] + xs[0])\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// PROOF 2 — `.sort()` on a `List[float]` silently returning an UNSORTED list (Int/Float compare).
+#[test]
+fn widen_proof_unsorted_float_list_rejected() {
+    entry_rejects(
+        "fn mk() -> List[float]:\n    a := 1\n    return [a, 2.5, 0.5]\nfn main():\n    xs := mk()\n    xs.sort()\n    print(xs)\n",
+        "list elements differ: int vs float",
+    );
+}
+
+/// A typed int VALUE never widens at a SCALAR sink either — each of these used to check clean and
+/// leave an `Int` under a `float` (or, for the let/param sinks, silently coerce only by luck).
+#[test]
+fn widen_typed_int_at_scalar_sinks_rejected() {
+    entry_rejects(
+        "fn main():\n    i := 1\n    x: float = i\n    print(x)\n",
+        WIDEN_NOTE,
+    );
+    entry_rejects(
+        "fn main():\n    i := 1\n    x: float = i + 1\n    print(x)\n",
+        WIDEN_NOTE,
+    );
+    // a fn RESULT is a TYPED int, even with constant args (correct Go)
+    entry_rejects(
+        "import std.cmp\nfn main():\n    x: float = cmp.max(1, 2)\n    print(x)\n",
+        WIDEN_NOTE,
+    );
+    // param sink
+    entry_rejects(
+        "fn f(z: float):\n    print(z)\nfn main():\n    a := 3\n    f(a)\n",
+        WIDEN_NOTE,
+    );
+    // return sink
+    entry_rejects(
+        "fn g(n: int) -> float:\n    return n + 1\nfn main():\n    print(g(2))\n",
+        WIDEN_NOTE,
+    );
+    // native float param — the CHECKER rejects an int VARIABLE exactly like a user fn (the runtime
+    // `Host::arg_float` leniency stays as defence-in-depth, but it is no longer reachable this way).
+    entry_rejects(
+        "import std.math\nfn main():\n    i := 4\n    print(math.sqrt(i))\n",
+        WIDEN_NOTE,
+    );
+}
+
+/// OVER-REJECTION GUARD — every untyped-int-CONSTANT case still adapts to a float context.
+#[test]
+fn widen_untyped_int_const_still_adapts() {
+    entry_ok("fn main():\n    x: float = 1\n    print(x)\n");
+    entry_ok("fn main():\n    x: float = -5\n    print(x)\n");
+    entry_ok("fn main():\n    x: float = 1 + 2\n    print(x)\n");
+    entry_ok("fn main():\n    x: float = 2 * 3\n    print(x)\n");
+    entry_ok("fn f(z: float):\n    print(z)\nfn main():\n    f(7)\n    f(1 + 2)\n");
+    entry_ok("fn f() -> float:\n    return 1 + 2\nfn main():\n    print(f())\n");
+    entry_ok("struct P:\n    v: float\nfn main():\n    p := P(3)\n    print(p.v)\n");
+    entry_ok("fn g(a: float = 3) -> float:\n    return a\nfn main():\n    print(g())\n");
+    entry_ok("fn main():\n    xs: List[float] = [1, 2.3]\n    print(xs)\n");
+    entry_ok("fn main():\n    m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\n    print(m)\n");
+    entry_ok("fn main():\n    xs := [1, 2.5]\n    print(xs[0])\n");
+    entry_ok("fn main():\n    xs := [1 + 1, 2.5]\n    print(xs[0])\n");
+    entry_ok("fn main():\n    xs := [1, -2.5]\n    print(xs[0])\n");
+    entry_ok("import std.math\nfn main():\n    print(math.floor(2))\n");
+    entry_ok(
+        "fn main():\n    ch := Channel[List[float]]()\n    ch.send([1, 2.5])\n    print(ch.recv())\n",
+    );
+}
+
+/// HINT-LEAK GUARD — the `List[float]` let annotation licenses THIS literal's elements only; a nested
+/// literal / call argument inside the annotated value does NOT inherit the license.
+#[test]
+fn widen_let_hint_does_not_leak_into_nested_literal() {
+    // the ANNOTATED let licenses `xs`'s own elements — NOT the list literal nested inside a call
+    // argument (the compiler `take()`s its hint at the same point, so it would not coerce there).
+    entry_rejects(
+        "fn g(ys: List[float]) -> float:\n    return ys[0]\nfn main():\n    a := 1\n    xs: List[float] = [g([a, 2.5]), 1.0]\n    print(xs)\n",
+        "list elements differ: int vs float",
+    );
+    // a nested collection literal keeps its own (un-licensed) inference
+    entry_rejects(
+        "fn main():\n    a := 1\n    xs: List[List[float]] = [[a, 2.5]]\n    print(xs)\n",
+        "list elements differ: int vs float",
     );
 }

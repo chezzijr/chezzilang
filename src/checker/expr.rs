@@ -657,7 +657,7 @@ impl Checker {
                 &named[ci - args.len()].1
             };
             let at = self.infer_arg(e, Some(pt));
-            if !self.assignable_w(pt, &at, true) {
+            if !self.assignable_w(pt, &at, crate::ast::untyped_int_const(e)) {
                 let pname = labels
                     .get(i)
                     .and_then(|l| l.as_deref())
@@ -665,7 +665,10 @@ impl Checker {
                     .unwrap_or_else(|| format!("argument {}", i + 1));
                 self.error(
                     e.span,
-                    format!("{pname} of a function-value call: expected {pt}, found {at}"),
+                    format!(
+                        "{pname} of a function-value call: expected {pt}, found {at}{}",
+                        widen_note(pt, &at)
+                    ),
                 );
             }
         }
@@ -2973,13 +2976,13 @@ impl Checker {
             // un-inferred / generic slot does not spuriously satisfy the requirement.
             if let Some(pt) = params.get(i)
                 && !contains_unknown_in_slot(pt)
-                && self.assignable_w(pt, &at, widen)
+                && self.assignable_w(pt, &at, widen && crate::ast::untyped_int_const(arg))
                 && let ExprKind::Ident(name) = &arg.kind
             {
                 self.drop_empty_site(name);
             }
             if let Some(pt) = params.get(i)
-                && !self.assignable_w(pt, &at, widen)
+                && !self.assignable_w(pt, &at, widen && crate::ast::untyped_int_const(arg))
             {
                 // Transparency: render `ref T` (not the lowered `Ref[T]`) ONLY when the argument is
                 // a `ref` binding — an explicit first-class `Ref[T]` arg keeps its `Ref[T]` spelling.
@@ -3015,7 +3018,9 @@ impl Checker {
                         )
                     }
                 } else {
-                    String::new()
+                    // A typed int at a `float` sink is the one-way-widening rule, not a mistype —
+                    // name the fix.
+                    widen_note(pt, &at).to_string()
                 };
                 self.error(
                     arg.span,

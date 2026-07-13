@@ -228,56 +228,28 @@ struct Compiler {
     /// being compiled as a typed `let` value (`xs: List[float] = [..]`). Set transiently by
     /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
     /// of `compile_expr` so int ELEMENTS widen to float. `None` outside an annotated collection let.
-    float_elem_hint: Option<ElemFloatHint>,
+    float_elem_hint: Option<crate::ast::ElemFloatHint>,
 }
 
-/// One-way int→float element-widening hint for a collection literal compiled as a typed `let` value.
-/// `List`/`Set` widen their elements; `MapValue` widens only the value position (map keys stay strict —
-/// a float key is banned anyway).
-#[derive(Clone, Copy, PartialEq)]
-enum ElemFloatHint {
-    /// `List[float]` / (unused for set: float is not Hashable) — widen every element.
-    Elem,
-    /// `Map[_, float]` — widen every VALUE, leave keys untouched.
-    MapValue,
-}
-
-/// All-literal int→float widening peephole: true iff `exprs` contains BOTH at least one float
-/// literal and at least one int literal (the trigger to widen the int LITERAL siblings of an
-/// un-annotated mixed collection like `[1, 2.3]`). Only strict `Int`/`Float` AST literals count — a
-/// non-literal element (variable / call) is neither, so an un-annotated NON-literal mixed collection
-/// (`[a, b]` with `a: int`, `b: float`) does NOT fire here (the documented compiler-type-blind
-/// carve-out: the checker infers `List[float]` but the backend can't widen the non-literal `a`).
+/// All-constant int→float widening peephole: true iff `exprs` contains BOTH an untyped float constant
+/// and an untyped int constant (the trigger to widen the untyped-int-constant siblings of an
+/// un-annotated mixed collection like `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). Only
+/// [`crate::ast::const_num`] expressions count — anything TYPED (a variable, a call) is neither, so a
+/// mixed collection with a typed int element never fires here. That is sound because the CHECKER now
+/// rejects exactly those (`elem_widen_ok` licenses a widen only where this peephole — or the `let`
+/// element hint below — is guaranteed to coerce); the two share `crate::ast::const_num`, so they
+/// cannot drift.
 pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> bool {
     let mut has_int = false;
     let mut has_float = false;
     for e in exprs {
-        match &e.kind {
-            ExprKind::Int(_) => has_int = true,
-            ExprKind::Float(_) => has_float = true,
-            _ => {}
+        match crate::ast::const_num(e) {
+            Some(crate::ast::ConstNum::Int) => has_int = true,
+            Some(crate::ast::ConstNum::Float) => has_float = true,
+            None => {}
         }
     }
     has_int && has_float
-}
-
-/// Derive the collection element-widening hint from a `let` annotation: `List[float]` → `Elem`,
-/// `Map[_, float]` → `MapValue`. A non-collection / non-float-element annotation yields `None`.
-/// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
-fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
-    match ty {
-        Type::Generic(n, args, ..)
-            if n == "List" && args.len() == 1 && crate::ast::is_float_ty(&args[0]) =>
-        {
-            Some(ElemFloatHint::Elem)
-        }
-        Type::Generic(n, args, ..)
-            if n == "Map" && args.len() == 2 && crate::ast::is_float_ty(&args[1]) =>
-        {
-            Some(ElemFloatHint::MapValue)
-        }
-        _ => None,
-    }
 }
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
@@ -1192,8 +1164,8 @@ impl Compiler {
                 // `Map[_, float]`) widens int ELEMENTS at the literal-compile site (hint consumed by
                 // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
                 // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
-                // strict assign target — so it needs no runtime coercion; see gaps.md carve-out.)
-                let elem_hint = ty.as_ref().and_then(float_elem_hint);
+                // strict assign target — so it needs no runtime coercion.)
+                let elem_hint = ty.as_ref().and_then(crate::ast::float_elem_hint);
                 let prev_hint = std::mem::replace(&mut self.float_elem_hint, elem_hint);
                 self.compile_expr(fc, value)?;
                 self.float_elem_hint = prev_hint;
@@ -2906,14 +2878,14 @@ impl Compiler {
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
             ExprKind::List(items) => {
-                // One-way int→float widening for THIS list: widen an int element when the
-                // `List[float]` annotation says so OR the all-literal peephole fires (≥1 float literal
-                // sibling present → widen int LITERAL siblings).
-                let annotated = elem_hint == Some(ElemFloatHint::Elem);
+                // One-way int→float widening for THIS list: widen an element when the `List[float]`
+                // annotation says so OR the constant peephole fires (≥1 untyped float CONSTANT sibling
+                // → widen the untyped int CONSTANT siblings). The checker accepts nothing else.
+                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem);
                 let peephole = literal_numeric_mix(items.iter());
                 for it in items {
                     self.compile_expr(fc, it)?;
-                    if annotated || (peephole && matches!(it.kind, ExprKind::Int(_))) {
+                    if annotated || (peephole && crate::ast::untyped_int_const(it)) {
                         fc.emit(Op::CoerceFloat, it.span);
                     }
                 }
@@ -2929,13 +2901,13 @@ impl Compiler {
             ExprKind::Map(entries) => {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
                 // One-way int→float widening on the VALUE position only (keys are never float): the
-                // `Map[_, float]` annotation, or the all-literal peephole over the value column.
-                let annotated = elem_hint == Some(ElemFloatHint::MapValue);
+                // `Map[_, float]` annotation, or the constant peephole over the value column.
+                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::MapValue);
                 let peephole = literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k, v) in entries {
                     self.compile_expr(fc, k)?;
                     self.compile_expr(fc, v)?;
-                    if annotated || (peephole && matches!(v.kind, ExprKind::Int(_))) {
+                    if annotated || (peephole && crate::ast::untyped_int_const(v)) {
                         fc.emit(Op::CoerceFloat, v.span);
                     }
                 }

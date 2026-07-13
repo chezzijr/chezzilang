@@ -161,10 +161,14 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "timer"
 }
 
-/// True iff `{a, b}` is an `int`/`float` mix in either order — the trigger for one-way int→float
-/// widening when unifying a collection literal's element/value types (`[1, 2.3]` → `list[float]`).
-fn numeric_mix(a: &Ty, b: &Ty) -> bool {
-    matches!((a, b), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int))
+/// The note appended to a `float`-sink mismatch whose actual type is `int` — the rule is Go's: an
+/// untyped int CONSTANT adapts, a typed int VALUE never does. Empty for any other mismatch.
+fn widen_note(expected: &Ty, actual: &Ty) -> &'static str {
+    if matches!((expected, actual), (Ty::Float, Ty::Int)) {
+        " (a typed int never widens to float — write float(x))"
+    } else {
+        ""
+    }
 }
 
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
@@ -1543,6 +1547,14 @@ struct Checker {
     /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
     /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
     expected_hint: Option<Ty>,
+    /// One-way int→float ELEMENT-widening license for the collection literal directly bound to an
+    /// annotated `let` (`xs: List[float] = [1, f]`). SEPARATE from `expected_hint` on purpose:
+    /// `expected_hint` is also set for call arguments, and licensing off it would re-open the hole
+    /// (`f([a, 2.5])` into a `List[float]` param — the compiler has NO annotation there and cannot
+    /// coerce). This mirrors the compiler's own `float_elem_hint` exactly (same `let`-only set site,
+    /// same `take()`-at-expr-entry clear), which is what makes the checker's accepted set a subset of
+    /// what the compiler lowers.
+    float_elem_hint: Option<crate::ast::ElemFloatHint>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).

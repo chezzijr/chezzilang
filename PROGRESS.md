@@ -11,6 +11,45 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **✅ SOUNDNESS FIX + BREAKING LANGUAGE CHANGE — `int`→`float` widening is now UNTYPED-CONSTANT-only
+> (2026-07-13, `auto-task/float-widen-untyped-const`).** A value whose STATIC type was `float` could be a
+> runtime `Int` — a pre-JIT-freeze blocker (a JIT emits an `f64` load over an int payload). ROOT CAUSE: the
+> CHECKER widened an int/float mix to `float` at collection-element and scalar sinks, but the COMPILER is
+> **type-blind** (`compile_graph` sees only the AST) and coerced only two SYNTACTIC subsets — an annotated
+> `let` hint, and an all-literal peephole — so every other path left the `Int` in place. Reproduced (both
+> engines, byte-identical, parity blind to it): `a := 1; f([a, 2.5])` into a `List[float]` param → `0.0`
+> not `0.5`; `f := 2.5; xs := [1, f]` → `0`; a `Map[str, float]` value; a `-> List[float]` return; a
+> `List[float]` field; across a `Channel`. Sharpest proofs: a `float`-typed value raising **integer
+> overflow** (floats saturate), and `.sort()` on a `List[float]` returning an **unsorted** list.
+> **FIX (checker-only narrowing; the compiler stays type-blind):** adopt Go's rule — an untyped int
+> **constant** adapts to a float context; a **typed** int value never implicitly converts (write
+> `float(x)`). One shared predicate, `ast::const_num` / `ast::untyped_int_const` (`src/ast/mod.rs`: int
+> literal / unary `-` / `+ - * / %` over those; a PREDICATE, no i64 folding ⇒ no new overflow semantics),
+> is called by BOTH the checker (which sinks may widen) and the compiler (which expressions get
+> `Op::CoerceFloat`), so the checker's accepted set is a **subset** of what the backend can lower, BY
+> CONSTRUCTION. The 8 `assignable_w(.., widen)` call sites now pass `untyped_int_const(expr)` instead of a
+> blanket `true`; collection widening (`infer_list` / `infer_map`-value, replacing `numeric_mix`) fires only
+> when the compiler is guaranteed to coerce — an untyped-float-constant sibling (its peephole) **or** the
+> annotated-`let` element hint (`ast::ElemFloatHint`, moved out of the compiler and now shared, `take()`-cleared
+> at `infer_kind` exactly like `compile_expr` so a nested literal/call arg cannot inherit the license) — AND
+> every int item is an untyped constant. `Op::CoerceFloat` and every emit site STAY (the callee-side
+> `emit_float_param_prologue` is load-bearing for fn-values/closures/methods). Also fixes two *pre-existing*
+> unreported leaks the old literal-only peephole missed: `[1, -2.5]` and `[1, 2.0 + 0.5]` (float sibling is
+> Unary/Binary ⇒ never fired ⇒ `Int` under float; now `0.5`). `Host::arg_float` keeps its runtime int
+> leniency as defence-in-depth. **BREAKING** (each now a clean error naming the fix — `a typed int never
+> widens to float — write float(x)`): `i := 1; x: float = i`, `x: float = i + 1`, `x: float = cmp.max(1, 2)`
+> (a fn RESULT is a typed int, even with constant args — correct Go), `f(a)` into a `float` param,
+> `fn g(n: int) -> float: return n + 1`, `math.sqrt(i)`, `a := 1; xs: List[float] = [a, 2.3]`, and the
+> un-annotated `xs := [1, f]`. Everything untyped-constant still adapts (`x: float = 1 + 2` → `3.0`, `P(3)`,
+> `fn g(a: float = 3)`, `[1, 2.3]`, `xs: List[float] = [1, f]`). In-repo blast radius: **1 `.chz` file**
+> (`tests/corpus/accept/struct_methods.chz` — `-> float: return self.x * self.x + …` with `int` fields →
+> `float(...)`). Tests: +11 checker (V1/V2/V3, `-> List[float]` return, `List[float]` field,
+> `Channel[List[float]]` airlock, both PROOF programs, the typed-int scalar sinks, an ADAPTS
+> over-rejection guard, a hint-leak guard) + 3 new/4 rewritten two-engine parity RUN tests; 4 pinned tests
+> FLIPPED to rejections and 1 (which pinned the un-annotated leak AS behavior) deleted. `widen_three_engines`
+> lost its stale "interp" label (it called the M:N engine twice). No VM/opcode change ⇒ no perf delta.
+> Docs: `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`, `docs/future.md`, `gaps.md`.
+
 > **✅ FEATURE — multi-line pipe chains + `iter.sum` (2026-07-13, `auto-task/pipe-multiline`).** A line whose
 > FIRST token is `|>` now **continues the previous logical line**: the lexer suppresses that line's
 > Newline/Indent/Dedent (same escape hatch as the existing `bracket_depth` suppression — new non-consuming
@@ -579,8 +618,8 @@ synthetic signature (2026-07-03).** One coherent feature in two phases.
   literal (and any annotated `xs: List[Any] = [1, "a", true]`) is now checked **expected-type-directed** —
   the declared `List[E]` element type is driven onto each element (`Checker::infer_list` takes the
   `expected_hint`; when every element is assignable to `E` it types as `List[E]`, bypassing bottom-up
-  sibling unification). Falls back to the bottom-up "list elements differ" diagnostic + int→float literal
-  widening when `E` is NOT satisfied-by-all (so `List[int] = [1, "a"]` still errors). Golden:
+  sibling unification). Falls back to the bottom-up "list elements differ" diagnostic + untyped-int-CONSTANT
+  →float widening when `E` is NOT satisfied-by-all (so `List[int] = [1, "a"]` still errors). Golden:
   `examples/variadic.chz` (`describe(1,"a",true)` → `3`, `zs: List[Any] = [1,"a",true]` → `3`), byte-
   identical on interp / --serial / default. Tests: checker `variadic_any_accepts_heterogeneous`,
   `list_any_annotation_accepts_heterogeneous`, `list_int_annotation_still_rejects_heterogeneous`.
@@ -3016,11 +3055,12 @@ construction, and `float`-annotated / all-literal collection literals. **Interp*
 tree-walker — no bytecode): an equivalent `coerce_float`/`coerce_value_to_annotation` helper at the
 SAME AST boundaries → parity. **Semantic proof:** `x: float = 3` makes `x / 2 == 1.5` (real float
 division), not `1`. **Anti-lossy negatives stay type errors** (`y: int = 2.3`, `-> int: return 2.3`,
-`float` into `List[int]`, `int`→`float` across a **newtype**, reassign-int-to-float-local). **Scoped
-carve-outs (documented, not holes):** an un-annotated NON-literal mixed collection (`xs := [a, b]`,
-a:int b:float) infers `List[float]` but its non-literal int element isn't widened at runtime; a plain
-reassign `x = 3` to a float local is a strict (rejected) target. Tests: 9 checker + 11 two/three-engine
-runtime (`widen_*`); native `sqrt(16)` / extern `cos(2)` widening confirmed hole-free (host promotes).
+`float` into `List[int]`, `int`→`float` across a **newtype**, reassign-int-to-float-local). **SUPERSEDED (2026-07-13):** the "carve-outs" this entry
+claimed were *documented, not holes* were in fact a **soundness hole** — the checker widened more than
+the type-blind compiler could coerce, leaving a runtime `Int` under a static `float` at the param /
+return / field / collection sinks (no annotation could fix them). Narrowed to Go's untyped-constant
+rule; see the 2026-07-13 entry below. A plain reassign `x = 3` to a float local remains a strict
+(rejected) target. Native `sqrt(16)` / extern `cos(2)` widening confirmed hole-free (host promotes).
 Docs: `gaps.md` → RESOLVED log, `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`.
 
 **✅ Bug fix — `ref` shared-method-name dispatch no longer falsely rejects an EXPRESSION receiver

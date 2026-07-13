@@ -753,6 +753,76 @@ pub fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Named { name, .. } if name == "float")
 }
 
+/// The kind of an UNTYPED numeric constant expression (see [`const_num`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstNum {
+    Int,
+    Float,
+}
+
+/// Classify `e` as an **untyped numeric constant expression** (Go's untyped-constant rule): a numeric
+/// literal, unary `-`, or the arithmetic operators `+ - * / %` composed over such. ANY name, call,
+/// field, index — i.e. anything carrying a declared type — makes it TYPED and yields `None`.
+///
+/// This is a PREDICATE ONLY: it performs no i64 arithmetic, so it introduces no new overflow/wrap
+/// semantics (`x: float = MAX + 1` still raises the existing runtime integer overflow).
+///
+/// It is the single source of truth for one-way int→float widening and is called by BOTH the checker
+/// (which sinks/elements may widen) and the compiler (which int expressions get `Op::CoerceFloat`), so
+/// the two agree BY CONSTRUCTION — the checker never accepts a widen the type-blind compiler cannot
+/// lower. Do not re-inline either caller's copy.
+pub fn const_num(e: &Expr) -> Option<ConstNum> {
+    match &e.kind {
+        ExprKind::Int(_) => Some(ConstNum::Int),
+        ExprKind::Float(_) => Some(ConstNum::Float),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => const_num(expr),
+        ExprKind::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod,
+            lhs,
+            rhs,
+        } => match (const_num(lhs)?, const_num(rhs)?) {
+            (ConstNum::Int, ConstNum::Int) => Some(ConstNum::Int),
+            _ => Some(ConstNum::Float),
+        },
+        _ => None,
+    }
+}
+
+/// True iff `e` is an untyped INT constant expression — the only thing that implicitly adapts to a
+/// `float` context. A typed int value never widens (the user writes `float(x)`).
+pub fn untyped_int_const(e: &Expr) -> bool {
+    const_num(e) == Some(ConstNum::Int)
+}
+
+/// One-way int→float element-widening hint derived from a collection annotation on a `let`:
+/// `List[float]` → `Elem`, `Map[_, float]` → `MapValue`. Shared by the checker (which licenses the
+/// widen) and the compiler (which emits `Op::CoerceFloat` for it) so they cannot drift.
+/// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
+#[derive(Clone, Copy, PartialEq)]
+pub enum ElemFloatHint {
+    /// `List[float]` — widen every element.
+    Elem,
+    /// `Map[_, float]` — widen every VALUE, leave keys untouched.
+    MapValue,
+}
+
+/// Derive the collection element-widening hint from a `let` annotation. A non-collection /
+/// non-float-element annotation yields `None`.
+pub fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
+    match ty {
+        Type::Generic(n, args, ..) if n == "List" && args.len() == 1 && is_float_ty(&args[0]) => {
+            Some(ElemFloatHint::Elem)
+        }
+        Type::Generic(n, args, ..) if n == "Map" && args.len() == 2 && is_float_ty(&args[1]) => {
+            Some(ElemFloatHint::MapValue)
+        }
+        _ => None,
+    }
+}
+
 // ===== expressions =====
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1110,5 +1180,44 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
         StmtKind::Spawn(SpawnTarget::Call(e)) => go(e),
         StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| expr_recover_blocks(&a.chan, out)),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cn(src: &str) -> Option<ConstNum> {
+        let toks = crate::lexer::tokenize(src).expect("lex");
+        let e = crate::parser::parse_expr(toks).expect("parse");
+        const_num(&e)
+    }
+
+    #[test]
+    fn const_num_predicate() {
+        // untyped int constants
+        assert_eq!(cn("1"), Some(ConstNum::Int));
+        assert_eq!(cn("-5"), Some(ConstNum::Int));
+        assert_eq!(cn("1 + 2"), Some(ConstNum::Int));
+        assert_eq!(cn("2 * 3"), Some(ConstNum::Int));
+        assert_eq!(cn("(1 + 2) % 4"), Some(ConstNum::Int));
+        // untyped float constants
+        assert_eq!(cn("2.5"), Some(ConstNum::Float));
+        assert_eq!(cn("-2.5"), Some(ConstNum::Float));
+        assert_eq!(cn("2.0 + 0.5"), Some(ConstNum::Float));
+        assert_eq!(cn("1 + 0.5"), Some(ConstNum::Float));
+        // anything TYPED is not an untyped constant
+        assert_eq!(cn("i"), None);
+        assert_eq!(cn("i + 1"), None);
+        assert_eq!(cn("max(1, 2)"), None);
+        assert_eq!(cn("xs[0]"), None);
+        assert_eq!(cn("p.x"), None);
+        assert_eq!(cn("1 < 2"), None); // not an arithmetic operator
+        assert_eq!(cn("true"), None);
+
+        assert!(untyped_int_const(&{
+            let toks = crate::lexer::tokenize("1 + 2").unwrap();
+            crate::parser::parse_expr(toks).unwrap()
+        }));
     }
 }
