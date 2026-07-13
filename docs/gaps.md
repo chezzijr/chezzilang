@@ -185,6 +185,23 @@ sweep (13 bugs fixed, main `0741a0b`). Each is either an accepted design consequ
 documented-but-unusable surface, or a safe over-rejection. Recorded so they are decisions, not
 surprises — **re-read this before the JIT freeze**, since a JIT bakes in whatever is true at freeze time.
 
+### 0. OPEN BUG — `Executor` + `read_line` DIVERGES serial vs M:N (a parity violation)
+Found 2026-07-14 while verifying the interactive-CLI milestone; **pre-existing** (reproduces unchanged
+on `c2d0cf7`, before that milestone), so it was not a merge blocker — but it breaks the project's
+hardest invariant and is the **only known open serial≠M:N divergence**. A task's stdin ownership is
+enforced at exactly ONE task-entry seam (`swap_ctx` — the `spawn:`/nursery fiber path, where a task gets
+`Stdin::Empty`). The cooperative `Executor` drain runs a submitted closure **inline on the entry Vm**
+(`src/vm/netio.rs`, "Cooperative engine: inline FIFO drain" — no `swap_ctx`), so on serial the task
+reads (and CONSUMES) the entry task's stdin, while the M:N drain builds workers with `Stdin::Empty`:
+```
+# task = read_line(); entry = read_line()
+printf 'a\nb\n' | chezzi run --serial x.chz   ->  task a  / entry b
+printf 'a\nb\n' | chezzi run          x.chz   ->  task eof / entry a
+```
+Fix: enforce the stdin-ownership invariant at **every** task-entry path, not just the fiber one (the
+Executor inline drain must swap the Vm's stdin to `Empty` for the duration of the submitted closure).
+Needs a parity test — the class is currently untested, which is why five hunt waves missed it.
+
 ### 3. Three over-rejections introduced by the Go-model int→float fix
 The wave-5 widening fix (untyped **constant** adapts; a typed int **value** never does) rejects three
 constructs that are *not* unsound — it errs safe, but it errs:
