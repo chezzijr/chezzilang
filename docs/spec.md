@@ -249,8 +249,9 @@ fn safe_div(a: int, b: int) -> Result[int]:
 fn main():
     r := safe_div(10, 2)?              # ? propagates Err
     nums := [1, 2, 3, 4]
-        |> filter(fn(x): x % 2 == 0)   # pipe (built last)
-        |> map(fn(x): x * 10)
+        |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # pipe (needs: import std.iter);
+                                                         #   a leading `|>` continues the line
+        |> iter.map(fn(x: int) -> int: x * 10)
     print(nums)
 
 main()                                 # no auto-entry — `main` is a normal fn you call yourself

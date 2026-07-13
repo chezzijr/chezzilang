@@ -2377,16 +2377,25 @@ Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.in
 Threads the left value as the first argument of the right call. Reads top-to-bottom for data flow.
 The right side must be a call; `a |> f(x)` desugars to `f(a, x)`.
 
+**Line continuation:** a line whose **first** token is `|>` continues the previous line, so a chain
+can be written one step per line with no parentheses. A **trailing** `|>` (a line *ending* in `|>`)
+is **not** a continuation — it is a parse error. Only the exact `|>` continues (`|`, `||`, `|=` do not).
+
 ```chezzi
-result := [1, 2, 3, 4]
-    |> filter(fn(x): x % 2 == 0)   # → filter([1,2,3,4], ...)
-    |> map(fn(x): x * 10)
-    |> sum()
-# result == 60
+import std.iter
+
+total := [1, 2, 3, 4]
+    |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # → iter.filter([1,2,3,4], ...)
+    |> iter.map(fn(x: int) -> int: x * 10)
+    |> iter.sum()
+print(total)                                         # 60
 
 # equivalent without pipe:
-# sum(map(filter([1,2,3,4], fn(x): x % 2 == 0), fn(x): x * 10))
+# iter.sum(iter.map(iter.filter([1,2,3,4], fn(x: int) -> bool: x % 2 == 0), fn(x: int) -> int: x * 10))
 ```
+
+(The pipe's right side must be a free **call**, so a method like `xs.sum()` is not reachable from
+`|>` — that's why `std.iter` carries free-function forms.)
 
 ## 11b. Concurrency — `spawn` / `parallel:`  (see [`concurrency.md`](concurrency.md))
 

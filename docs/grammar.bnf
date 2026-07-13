@@ -458,6 +458,11 @@
 # pipe `|>` (M6) is the loosest operator: it threads its left value as the first argument of the
 # call on its right, so the right side must end in a call. Left-associative. (The hand parser
 # desugars `a |> f(x)` to `f(a, x)` at parse time.)
+# LAYOUT CONTINUATION (lexer, not grammar): a line whose first token is `|>` CONTINUES the previous
+# logical line — the lexer emits no NEWLINE/INDENT/DEDENT for it, so a multi-line chain
+# (`xs\n    |> f()\n    |> g()`) reaches the parser as the single token stream `xs |> f() |> g()`
+# and needs no production of its own. A TRAILING `|>` (line ending in `|>`) is NOT a continuation:
+# it stays a parse error. Only the exact two-char `|>` continues (`|`, `||`, `|=` do not).
 <pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
 <pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
 <orExpr>   ::= <coalesceExpr> | <orExpr> "OR" <coalesceExpr>

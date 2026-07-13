@@ -11,6 +11,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
+> **✅ FEATURE — multi-line pipe chains + `iter.sum` (2026-07-13, `auto-task/pipe-multiline`).** A line whose
+> FIRST token is `|>` now **continues the previous logical line**: the lexer suppresses that line's
+> Newline/Indent/Dedent (same escape hatch as the existing `bracket_depth` suppression — new non-consuming
+> lookahead `pipe_continues_next_line`, `src/lexer/mod.rs` STEP D), so an un-parenthesized chain
+> (`xs\n    |> f()\n    |> g()`) lexes to the exact token stream of the one-line form — parser/VM see nothing
+> new, parity is by construction. Blank + comment-only lines inside a chain are skipped; only the exact `|>`
+> continues (`|`, `||`, `|=` do not); a **trailing** `|>` stays a parse error (out of scope). Layout-safety
+> fences: indent-stack integrity (multi-line chain nested in `fn`/`if` == one-line token stream), true spans
+> after a suppressed region, 10k-blank-lines + file-ending-in-`|>` forward-progress tripwires.
+> `std/iter.chz` gained `sum(xs: List[int]) -> int` (delegates to the native `xs.sum()` method; empty → `0`,
+> mirroring it) so a pipe's right side — which must be a free **call**, never a method — can end in a sum.
+> **int-only** and deliberately so: the native method is gated on a numeric element type, so a generic
+> `sum[T](xs: List[T]) -> T where T: Add` does not type-check (`sum() requires a numeric list, found List[T]`)
+> and a pure-Chezzi generic has no typed zero for the empty case; relaxing the checker gate would re-open the
+> MONOID hole 02586a0 closed. A generic/float `iter.sum` needs that gate re-litigated — its own milestone.
+> Docs: `docs/syntax.md` §11 (now a real, running example + the continuation rule), `docs/spec.md` tour,
+> `docs/stdlib.md` (`std.iter`), `docs/grammar.bnf` (layout-continuation note; token classes unchanged →
+> no production change), `tests/corpus/accept/pipe_multiline.chz` (conformance).
+
 > **📝 DOCS — pre-freeze Low clarifications (2026-07-12, `docs/low-clarifications`).** Documented four
 > known-and-intended behaviors surfaced by the pre-JIT hunt (no code change): (1) protocols are
 > module-local — not qualified-reachable, bare-importable, or usable as a cross-module bound (a possible
@@ -5293,7 +5312,6 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 Surfaced by coverage passes; no `src/` changes pending, recorded for when they bite:
 
-- **Collection literals must be single-line** — a newline inside `[`/`{` ends the expression.
 - **`match` limits** — no multiple `Some(...)` arms (one arm per outer variant; refine with `_`).
   Nested nullary-variant patterns (`Some(None)`, `Ok(Err(e))`) and **or-patterns** (`p1 | p2`) now
   work — see below.

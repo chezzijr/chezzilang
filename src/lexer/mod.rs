@@ -446,6 +446,27 @@ impl Lexer {
         *self.chars.get(self.pos + 1).unwrap_or(&'\0')
     }
 
+    /// Non-consuming lookahead from `self.pos` (which sits just past a '\n'): does the next real
+    /// content begin with the two chars `|>`? Blank lines, indentation and comment-only lines are
+    /// skipped. Exactly `|>` — `|`, `||`, `|=` are not continuations.
+    /// ponytail: O(k²) chars for k blank/comment lines before the `|>` (re-scanned once per
+    /// consumed '\n'). Irrelevant at real file sizes; memoize only if a pathological file shows up.
+    fn pipe_continues_next_line(&self) -> bool {
+        let mut i = self.pos;
+        while let Some(c) = self.chars.get(i) {
+            match c {
+                ' ' | '\t' | '\r' | '\n' => i += 1,
+                '#' => {
+                    while self.chars.get(i).is_some_and(|c| *c != '\n') {
+                        i += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        self.chars.get(i) == Some(&'|') && self.chars.get(i + 1) == Some(&'>')
+    }
+
     /// Consume the current char and return it. Remember to advance `self.pos`.
     /// HINT: read the char first, then bump `self.pos`, then return it.
     fn advance(&mut self) -> char {
@@ -612,6 +633,13 @@ impl Lexer {
                     // but suppress the Newline. `continue` (not recurse) so thousands of blank lines
                     // inside a bracket can't overflow the stack; `at_line_start` stays false so layout
                     // is frozen. Forward progress is guaranteed: we already advance()d past '\n'.
+                    continue 'scan;
+                }
+                if self.pipe_continues_next_line() {
+                    // Leading-`|>` line continuation: the next content line starts with `|>`, so it
+                    // continues THIS logical line — suppress the Newline and (by leaving
+                    // `at_line_start` false) its Indent/Dedent too, exactly like the bracket case.
+                    // Forward progress: we already advance()d past '\n'.
                     continue 'scan;
                 }
                 self.at_line_start = true;
@@ -2594,5 +2622,88 @@ mod tests {
         for (w, t) in KEYWORDS {
             assert_eq!(t.lexeme(), Some(*w), "{t:?} lexeme mismatch");
         }
+    }
+
+    // ===== Leading-`|>` line continuation (layout suppression) =====
+
+    /// A line whose first token is `|>` continues the previous logical line: no Newline,
+    /// no Indent/Dedent for it.
+    #[test]
+    fn pipe_continuation_suppresses_layout() {
+        let ks = kinds("r := 5\n    |> dbl()\n    |> inc()\nprint(r)\n");
+        assert!(
+            !ks.contains(&Token::Indent) && !ks.contains(&Token::Dedent),
+            "{ks:?}"
+        );
+        assert_eq!(
+            ks.iter().filter(|k| **k == Token::Newline).count(),
+            2,
+            "one Newline closes the chain, one closes `print(r)`: {ks:?}"
+        );
+        // same token stream as the single-line form
+        assert_eq!(ks, kinds("r := 5 |> dbl() |> inc()\nprint(r)\n"));
+    }
+
+    /// Only the exact two-char `|>` continues — `|`, `||`, `|=` do not.
+    #[test]
+    fn pipe_continuation_only_for_exact_pipe_arrow() {
+        for lead in ["| 2", "|| 2", "|= 2"] {
+            let ks = kinds(&format!("a := 1\n    {lead}\n"));
+            assert!(
+                ks.contains(&Token::Indent) && ks.contains(&Token::Dedent),
+                "{lead:?} must NOT continue the line: {ks:?}"
+            );
+        }
+    }
+
+    /// Blank and comment lines interleaved in the chain are skipped by the lookahead.
+    #[test]
+    fn pipe_continuation_skips_blank_and_comment_lines() {
+        let ks = kinds("r := 5\n\n    # double it\n    |> dbl()\n\n    |> inc()\nprint(r)\n");
+        assert!(
+            !ks.contains(&Token::Indent) && !ks.contains(&Token::Dedent),
+            "{ks:?}"
+        );
+        assert_eq!(ks.iter().filter(|k| **k == Token::Newline).count(), 2);
+    }
+
+    /// Inside a nested block the indent stack is untouched: the multi-line chain lexes to the
+    /// exact same token stream as the one-line chain (so the line after it still dedents).
+    #[test]
+    fn pipe_continuation_inside_nested_block_keeps_indent_stack() {
+        let multi = "fn f(x: int) -> int:\n    if x > 0:\n        r := x\n            |> dbl()\n            |> inc()\n        return r\n    return 0\n";
+        let single = "fn f(x: int) -> int:\n    if x > 0:\n        r := x |> dbl() |> inc()\n        return r\n    return 0\n";
+        assert_eq!(kinds(multi), kinds(single));
+    }
+
+    /// Spans still report true source lines across a suppressed region.
+    #[test]
+    fn pipe_continuation_spans_track_true_lines() {
+        // 1: r := 5 / 2: blank / 3: comment / 4: |> dbl() / 5: |> inc() / 6: print(r)
+        let toks = tokenize("r := 5\n\n    # c\n    |> dbl()\n    |> inc()\nprint(r)\n").unwrap();
+        let line_of = |name: &str| {
+            toks.iter()
+                .find(|t| t.kind == Token::Ident(name.to_string()))
+                .unwrap()
+                .span
+                .line
+        };
+        assert_eq!(line_of("dbl"), 4);
+        assert_eq!(line_of("inc"), 5);
+        assert_eq!(line_of("print"), 6);
+    }
+
+    /// Forward-progress tripwire: pathological input must terminate at Eof, never spin.
+    #[test]
+    fn pipe_continuation_pathological_terminates() {
+        let mut src = String::from("r := 5\n");
+        src.push_str(&"\n".repeat(10_000));
+        src.push_str("    |> dbl()\n");
+        let toks = tokenize(&src).unwrap();
+        assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
+
+        // a file ending in a bare `|>` still lexes (and stays a parse error)
+        let toks = tokenize("r := 5\n    |>\n").unwrap();
+        assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
     }
 }

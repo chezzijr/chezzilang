@@ -674,7 +674,9 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 
 ### `std.iter` — list/iterator helpers
 `enumerate(xs) -> List[(int, T)]` · `zip(xs, ys) -> List[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
-`fold(xs, init, f)` · `reduce(xs, f) -> T` (non-empty) · `take(xs, n)` · `drop(xs, n)` ·
+`fold(xs, init, f)` · `reduce(xs, f) -> T` (non-empty) · `sum(xs: List[int]) -> int` (empty → `0`;
+**int-only** — the free-function form of the `xs.sum()` method so it can sit on the right of a pipe;
+for a float list use the method, which is generic) · `take(xs, n)` · `drop(xs, n)` ·
 `any(xs, pred) -> bool` · `all(xs, pred) -> bool` · `find(xs, pred) -> Option[T]` ·
 `flatten(xss) -> List[T]`.
 Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi

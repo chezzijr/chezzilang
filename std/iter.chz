@@ -74,6 +74,14 @@ fn reduce[T](xs: List[T], f: fn(T, T) -> T) -> T:
         acc = f(acc, xs[i])
     return acc
 
+# Sum of a list of ints — the free-function form of the `xs.sum()` method, so it can sit on the
+# right of a pipe (`xs |> iter.sum()`). Empty list → `0`, exactly like `[].sum()`.
+# int-only: the native `sum` method is gated on a numeric element type, so a generic
+# `sum[T](xs: List[T]) -> T where T: Add` cannot delegate to it (and has no typed zero for the
+# empty case). For a float list use the method: `xs.sum()`.
+fn sum(xs: List[int]) -> int:
+    return xs.sum()
+
 # The first `n` elements (clamped: `n <= 0` → `[]`, `n >= len` → the whole list).
 fn take[T](xs: List[T], n: int) -> List[T]:
     out := []
