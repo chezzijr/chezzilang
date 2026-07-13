@@ -2168,6 +2168,12 @@ impl Checker {
                 // in both engines. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
                 // `loop_depth == 0` guard at `StmtKind::Break`/`Continue` fires at check time; a
                 // legitimate loop INSIDE the block re-increments from 0, keeping its own break legal.
+                // A `return` here can never mean anything (Chezzi has no named return values and the
+                // block is its own closure) — the compiler silently dropped it, so reject it, like
+                // `recover:`. `in_loop = true`: the `loop_depth` reset above owns break/continue.
+                if let Some((sp, kw)) = escaping_flow(body, true) {
+                    self.error(sp, format!("'{kw}' is not allowed inside a defer block"));
+                }
                 let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                 self.check_block(body);
                 self.loop_depth = saved_loop_depth;
@@ -2292,6 +2298,12 @@ impl Checker {
                         // are task-local. `enter`/`leave` is balanced even if checking errors.
                         let floor = self.scopes.len();
                         self.capture_floors.push(floor);
+                        // A spawned task outlives the frame — there is nothing for a `return` here
+                        // to return to (it was silently dropped). Reject it, like `recover:`.
+                        // `in_loop = true`: the `loop_depth` reset below owns break/continue.
+                        if let Some((sp, kw)) = escaping_flow(body, true) {
+                            self.error(sp, format!("'{kw}' is not allowed inside a spawn block"));
+                        }
                         // A `spawn:` block compiles to a fresh child proto with an empty loop stack,
                         // so a `break`/`continue` lexically nested in an enclosing loop but placed
                         // here is illegal in both engines. Save-zero-restore `loop_depth` (mirroring

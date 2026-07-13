@@ -2955,11 +2955,15 @@ fn op_sym(op: BinaryOp) -> &'static str {
 
 /// Built-in method signatures on `str` (M6). Must mirror the runtime handlers in both backends
 /// (`interp::builtins::call_method` and `vm::Vm::do_method_call`).
-/// Find a control-flow statement that would escape a `recover:` block — a `return`, or a
-/// `break`/`continue` not contained by a loop *inside* the block. Recurses through nested blocks but
-/// stops at nested `fn` declarations (their control flow is their own). `?` is an expression, not a
-/// statement, so it is never flagged.
-fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> {
+/// Find a control-flow statement that would escape a `recover:` / `defer:` / `spawn:` block — a
+/// `return`, or a `break`/`continue` not contained by a loop *inside* the block. Recurses through
+/// nested blocks but stops at nested `fn` declarations (their control flow is their own). `?` is an
+/// expression, not a statement, so it is never flagged — nor is a `return` inside a closure.
+/// Callers that already zero `loop_depth` (defer/spawn, whose own `break outside loop` guard fires)
+/// pass `in_loop = true` so only `return` can be reported here — no double diagnostic.
+/// Known hole: `wait:` arms and nested `defer:` bodies are not descended into (the latter get their
+/// own guard at their own site).
+fn escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> {
     for s in stmts {
         match &s.kind {
             StmtKind::Return(_) => return Some((s.span, "return")),
@@ -2971,25 +2975,25 @@ fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'stati
                 else_block,
             } => {
                 for (_, body) in branches {
-                    if let Some(x) = recover_escaping_flow(body, in_loop) {
+                    if let Some(x) = escaping_flow(body, in_loop) {
                         return Some(x);
                     }
                 }
                 if let Some(eb) = else_block
-                    && let Some(x) = recover_escaping_flow(eb, in_loop)
+                    && let Some(x) = escaping_flow(eb, in_loop)
                 {
                     return Some(x);
                 }
             }
             // A loop makes its own `break`/`continue` local; a `return` inside still escapes.
             StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
-                if let Some(x) = recover_escaping_flow(body, true) {
+                if let Some(x) = escaping_flow(body, true) {
                     return Some(x);
                 }
             }
             StmtKind::Match { arms, .. } => {
                 for arm in arms {
-                    if let Some(x) = recover_escaping_flow(&arm.body, in_loop) {
+                    if let Some(x) = escaping_flow(&arm.body, in_loop) {
                         return Some(x);
                     }
                 }
@@ -2998,12 +3002,12 @@ fn recover_escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'stati
             // escaping `return`/`break`/`continue` inside them must still be detected. A `for`/loop
             // is not introduced, so `in_loop` is unchanged.
             StmtKind::Parallel { body } => {
-                if let Some(x) = recover_escaping_flow(body, in_loop) {
+                if let Some(x) = escaping_flow(body, in_loop) {
                     return Some(x);
                 }
             }
             StmtKind::Spawn(SpawnTarget::Block(body)) => {
-                if let Some(x) = recover_escaping_flow(body, in_loop) {
+                if let Some(x) = escaping_flow(body, in_loop) {
                     return Some(x);
                 }
             }

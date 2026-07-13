@@ -16920,3 +16920,80 @@ fn qualified_not_a_type_turbofish_clean_error() {
         "no member",
     );
 }
+
+// --- `return` inside a `defer:` / `spawn:` block: a check-time error (was: silently discarded at
+// runtime). Chezzi has no named return values, so such a `return` could never mean anything — the
+// defer block is its own closure and a spawned task outlives the frame. Same escaping-flow guard
+// `recover:` uses.
+
+#[test]
+fn defer_block_rejects_return() {
+    entry_rejects(
+        "fn f() -> int!:\n    defer:\n        return Err(\"hijack\")\n    return Ok(1)\nprint(f())\n",
+        "'return' is not allowed inside a defer block",
+    );
+}
+
+#[test]
+fn defer_block_rejects_bare_return() {
+    entry_rejects(
+        "fn f() -> int:\n    defer:\n        return\n    return 1\nprint(f())\n",
+        "'return' is not allowed inside a defer block",
+    );
+}
+
+#[test]
+fn spawn_block_rejects_return() {
+    entry_rejects(
+        "fn f() -> int:\n    parallel:\n        spawn:\n            return 7\n    return 1\nprint(f())\n",
+        "'return' is not allowed inside a spawn block",
+    );
+}
+
+// --- boundary: the guard must NOT over-reject.
+
+#[test]
+fn defer_block_allows_return_in_nested_fn() {
+    // A nested `fn` declared inside the block has its own control flow — its `return` returns from
+    // IT, so it stays legal (the guard stops at `StmtKind::Fn`).
+    entry_ok(
+        "fn f() -> int:\n    defer:\n        fn g() -> int:\n            return 5\n        print(g())\n    return 1\nprint(f())\n",
+    );
+}
+
+#[test]
+fn spawn_block_allows_return_in_nested_fn() {
+    entry_ok(
+        "fn f() -> int:\n    parallel:\n        spawn:\n            fn g() -> int:\n                return 5\n            print(g())\n    return 1\nprint(f())\n",
+    );
+}
+
+#[test]
+fn parallel_body_still_allows_return() {
+    entry_ok("fn f() -> int:\n    parallel:\n        return 7\n    return 1\nprint(f())\n");
+}
+
+#[test]
+fn defer_block_q_still_allowed() {
+    // `?` inside a `defer:` block short-circuits the block and is discarded (docs/syntax.md) — an
+    // expression, not a statement: the escaping-flow guard never sees it.
+    entry_ok(
+        "fn g() -> int!:\n    return Ok(2)\nfn f() -> int!:\n    defer:\n        v := g()?\n        print(v)\n    return Ok(1)\nprint(f())\n",
+    );
+}
+
+#[test]
+fn defer_block_break_still_says_break_outside_loop() {
+    let errs = check_entry(
+        "fn f() -> int:\n    for i in 0..2:\n        defer:\n            break\n    return 1\nprint(f())\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("break outside loop")),
+        "expected 'break outside loop', got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("defer block")),
+        "the loop_depth guard must own break/continue — no double diagnostic: {errs:?}"
+    );
+}

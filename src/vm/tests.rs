@@ -12552,3 +12552,37 @@ print(total)                                         # 60
     assert!(pres.is_ok(), "M:N docs §11 faulted: {pres:?}");
     assert_eq!(pout, "60\n", "M:N");
 }
+
+/// Regression net for the check-time `return`-in-`defer:`/`spawn:` rejection: every legal nesting
+/// of `defer:`/`spawn:`/`parallel:` (plus a nested `fn` that DOES `return`, declared inside each block)
+/// must keep running identically on both engines. If the checker guard over-rejects, this goes red.
+#[test]
+fn defer_spawn_nesting_matrix_parity() {
+    let src = "\
+fn f() -> int:
+    defer:
+        fn g() -> int:
+            return 40
+        print(\"nested-fn-in-defer {g()}\")
+        defer:
+            print(\"defer-in-defer\")
+        parallel:
+            spawn print(\"spawn-call-in-defer\")
+        parallel:
+            spawn:
+                print(\"spawn-block-in-defer\")
+    parallel:
+        spawn:
+            fn h() -> int:
+                return 41
+            print(\"nested-fn-in-spawn {h()}\")
+            defer:
+                print(\"defer-in-spawn\")
+    return 1
+print(f())
+";
+    assert_mc_parity(
+        src,
+        "nested-fn-in-spawn 41\ndefer-in-spawn\nnested-fn-in-defer 40\nspawn-call-in-defer\nspawn-block-in-defer\ndefer-in-defer\n1\n",
+    );
+}

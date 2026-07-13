@@ -1283,7 +1283,7 @@ impl Checker {
     pub(super) fn infer_recover(&mut self, block: &Block) -> Ty {
         // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
         // would escape it are rejected (both engines agree). `?` is fine — it propagates normally.
-        if let Some((span, kw)) = recover_escaping_flow(block, false) {
+        if let Some((span, kw)) = escaping_flow(block, false) {
             self.error(
                 span,
                 format!("'{kw}' is not allowed inside a recover block"),

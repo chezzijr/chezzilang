@@ -2068,7 +2068,11 @@ their **latest** values when it runs at scope exit — `x := 1; defer: print(x);
 and **reassigning** an enclosing local inside the block mutates the shared binding. (This differs from
 the call form `defer f(x)`, whose *arguments* are still evaluated eagerly at the `defer` point.) One
 rule remains: a `?` short-circuit inside the block is **discarded** (a cleanup body has no
-error-return contract, like a deferred call whose `Err` result is dropped).
+error-return contract, like a deferred call whose `Err` result is dropped). A **`return` inside a
+`defer:` block is a compile error** (`'return' is not allowed inside a defer block`) — the block is
+its own closure and Chezzi has no named return values, so it could never affect the enclosing
+function's result (a `return` inside a closure or a nested `fn` *declared* in the block is fine — it
+returns from that function).
 
 ```chezzi
 fn handle(conn: Conn):
@@ -2077,7 +2081,7 @@ fn handle(conn: Conn):
         log("closing")
         conn.close()
     defer:
-        log("x = {x}")            # prints "x = 1" — snapshotted here, not at exit
+        log("x = {x}")            # prints "x = 2" — captured by reference, read at exit
     x = 2
 ```
 
@@ -2446,6 +2450,11 @@ main()
   after the join. An explicit `parallel:` is an *inner* sub-nursery for an earlier join. A `spawn`
   always binds to a nursery **in its own function** — a task can't outlive the function that spawned
   it (the function-boundary rule).
+- **`return` inside a `spawn:` block is a compile error** (`'return' is not allowed inside a spawn
+  block`) — a spawned task runs on its own, so there is nothing for it to return to (Chezzi has no
+  named return values). Send the value on a `Channel`/`Shared` instead. A `return` in a `parallel:`
+  body is fine (it runs in the parent frame), as is one inside a closure/nested `fn` declared in a
+  `spawn:` block.
 
 ```chezzi
 fn fetch_all(urls: List[str]):
