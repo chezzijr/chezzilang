@@ -1889,17 +1889,6 @@ impl Checker {
     /// per-task value captures. Used by the *read* sendability gate so reading an imported module or
     /// a top-level closure inside a `spawn:` block isn't flagged; the *reassign* gate keeps the
     /// broader [`is_captured`] (writing a copy of any capture, global or not, can't leak out).
-    /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
-    /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`
-    /// shadow of an imported name stays assignable.
-    pub(super) fn resolves_at_module_scope(&self, name: &str) -> bool {
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return i == 0;
-            }
-        }
-        false
-    }
     pub(super) fn is_local_capture(&self, name: &str) -> bool {
         let Some(&floor) = self.capture_floors.last() else {
             return false;
@@ -1907,6 +1896,18 @@ impl Checker {
         for i in (0..self.scopes.len()).rev() {
             if self.scopes[i].contains_key(name) {
                 return i > 0 && i < floor;
+            }
+        }
+        false
+    }
+
+    /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
+    /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`
+    /// shadow of an imported name stays assignable.
+    pub(super) fn resolves_at_module_scope(&self, name: &str) -> bool {
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                return i == 0;
             }
         }
         false
