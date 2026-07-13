@@ -2651,6 +2651,15 @@ import lib.geo as Ok        # error: import alias 'Ok' is reserved (builtin)
 import lib.int as ints      # ok — and `int("5")` keeps working
 ```
 
+The same rule covers a `from` import, which binds into the same namespace — a module global or
+function whose *bound* name is reserved (aliased or not) is rejected; alias it:
+
+```chezzi
+import str from lib.sh          # error: imported name 'str' is reserved (builtin) — alias it
+import str as s from lib.sh     # ok — and `str(5)` keeps working
+import Shared from std.concurrency   # ok — a reserved TYPE member licensing the builtin itself
+```
+
 The reserved set is the builtin callables + reserved type names + `nil` + the builtin variant ctors
 (`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
 reserved scalar/ctor name.) A collision with a *user-declared* type of the same name is not covered by
@@ -2666,7 +2675,9 @@ already errors):
 import COUNT, LST from lib.st
 LST.push(7)     # ok — same heap object as lib.st's LST
 COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' (a from-imported
-                #        global is a snapshot copy — assign through the module, or use a Shared/Ref)
+                #        global is a snapshot copy — call a mutator fn in that module, or use a
+                #        Shared/Ref). Writing through the module (`st.COUNT = 5`) is rejected too:
+                #        a module global is writable only from inside its own module.
 COUNT := 99     # ok — a fresh binding this module owns; `COUNT = 100` after it is fine too
 ```
 

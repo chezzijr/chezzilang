@@ -4231,6 +4231,54 @@ fn reserved_module_bind_alias_escape_hatch() {
     ]);
 }
 
+/// Bug 4B, third door: a FROM-import binds into the same VALUE namespace, so a reserved bound name —
+/// the ALIAS *or* the bare MEMBER name — is rejected there too. Otherwise `import str from lib.sh`
+/// (a module global named `str`) destroys the `str()` ctor in expression position exactly like
+/// `import std.str` did. Only the value/function binds are gated; the TYPE members that license a
+/// reserved builtin (`import Shared from std.concurrency`) are untouched.
+#[test]
+fn reserved_from_import_member_rejected() {
+    let sh = ("lib/sh.chz", "str := 5\nOk := 7\nint := 9\n");
+    for member in ["str", "Ok", "int"] {
+        files_reject(
+            &[
+                sh,
+                (
+                    "main.chz",
+                    &format!("import {member} from lib.sh\nprint(1)\n"),
+                ),
+            ],
+            "reserved (builtin)",
+        );
+    }
+    // a FUNCTION member with a reserved-variant name (`fn Ok` is legal at its decl site) is the same
+    // hazard — today the builtin ctor silently wins and the import is dead code.
+    files_reject(
+        &[
+            ("lib/fo.chz", "fn Ok(x: int) -> int:\n    return x\n"),
+            ("main.chz", "import Ok from lib.fo\nprint(Ok(5))\n"),
+        ],
+        "reserved (builtin)",
+    );
+    // escape hatch + no over-rejection: alias it, and the builtins it would have shadowed still work.
+    files_ok(&[
+        sh,
+        (
+            "main.chz",
+            "import str as s, Ok as k from lib.sh\nprint(s + k)\nprint(str(5))\nr: Result[int, str] = Ok(1)\nprint(r)\n",
+        ),
+    ]);
+    // the reserved TYPE members that LICENSE a builtin still import un-aliased.
+    files_ok(&[(
+        "main.chz",
+        "import Shared from std.concurrency\ns := Shared(1)\nprint(s.get())\n",
+    )]);
+    files_ok(&[(
+        "main.chz",
+        "import timer from std.time\nt := timer(1)\nprint(1)\n",
+    )]);
+}
+
 /// Bug 2 — a from-imported module global is a SNAPSHOT copy (Python-identical): REBINDING it is
 /// rejected, consistent with the qualified form (`st.COUNT = 5`). Mutating THROUGH a from-imported
 /// container still works (it is the same heap object).

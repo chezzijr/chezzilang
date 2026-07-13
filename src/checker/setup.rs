@@ -1205,15 +1205,30 @@ impl Checker {
                     // as a value — `is_reserved_alias_target`'s carve-out); only the MODULE bind adds
                     // it. The builtin variant ctors ARE rejected (an alias to `Ok` would kill the
                     // ctor in expression position).
-                    if alias.as_ref().is_some_and(|a| {
-                        a != member
-                            && (crate::checker::is_reserved_alias_target(a)
-                                || crate::checker::is_builtin_variant(a))
-                    }) {
-                        self.error(
-                            imp.span,
-                            format!("import alias '{bind}' is reserved (builtin)"),
-                        );
+                    // The SAME hazard reaches the VALUE namespace through the UN-aliased MEMBER
+                    // spelling too: a module GLOBAL or FUNCTION named `str`/`int`/`Ok` (all legal at
+                    // their decl site) bind here and beat the builtin ctor in EXPRESSION position —
+                    // `import str from lib.sh` made `str(5)` fail with `int is not callable`. So the
+                    // reserved-name reject covers BOTH doors: a genuine RENAME to a reserved name (any
+                    // member kind), and a bare reserved member that BINDS A VALUE/FUNCTION. The
+                    // value/function scoping is what keeps a reserved TYPE member — the LICENSING
+                    // import of the builtin itself (`import Shared from std.concurrency`, `import ptr
+                    // from std.ffi`) — legal un-aliased; it binds no value.
+                    let reserved_bind = crate::checker::is_reserved_alias_target(bind)
+                        || crate::checker::is_builtin_variant(bind);
+                    let binds_value =
+                        sig.functions.contains_key(member) || sig.values.contains_key(member);
+                    if reserved_bind && (alias.as_ref().is_some_and(|a| a != member) || binds_value)
+                    {
+                        let msg = if alias.is_some() {
+                            format!("import alias '{bind}' is reserved (builtin)")
+                        } else {
+                            format!(
+                                "imported name '{bind}' is reserved (builtin) — alias it: import {bind} as {bind}_ from {}",
+                                path.join(".")
+                            )
+                        };
+                        self.error(imp.span, msg);
                         continue;
                     }
                     // Reject a second import binding the same name (across ALL namespaces), but only

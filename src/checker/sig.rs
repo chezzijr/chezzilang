@@ -2511,7 +2511,7 @@ impl Checker {
                     self.error(
                         target.span,
                         format!(
-                            "cannot assign to '{name}' imported from module '{m}' (a from-imported global is a snapshot copy — assign through the module, or use a Shared/Ref)"
+                            "cannot assign to '{name}' imported from module '{m}' (a from-imported global is a snapshot copy — call a mutator fn in that module, or use a Shared/Ref)"
                         ),
                     );
                     return;

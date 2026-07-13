@@ -273,6 +273,8 @@ pub(super) fn is_builtin_variant(name: &str) -> bool {
 /// variant ctors. `nil` is carved out of `is_reserved_alias_target` because a from-import ALIAS binds
 /// a VALUE (and a value still works as a value); a MODULE is not a value, so `import lib.nil` /
 /// `import m as nil` would silently retype the `nil` literal — reject it here.
+/// The FROM-import path guards the same VALUE namespace with `is_reserved_alias_target ||
+/// is_builtin_variant` (this predicate minus `nil`) — see `bind_import`.
 /// RESIDUAL (out of scope, unchanged by this gate): a module bind colliding with a USER struct/enum
 /// ctor of the same name (`import lib.Point` + `struct Point`) still wins in expression position.
 pub(super) fn is_reserved_module_bind(name: &str) -> bool {
