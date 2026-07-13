@@ -2958,11 +2958,13 @@ fn op_sym(op: BinaryOp) -> &'static str {
 /// Find a control-flow statement that would escape a `recover:` / `defer:` / `spawn:` block — a
 /// `return`, or a `break`/`continue` not contained by a loop *inside* the block. Recurses through
 /// nested blocks but stops at nested `fn` declarations (their control flow is their own). `?` is an
-/// expression, not a statement, so it is never flagged — nor is a `return` inside a closure.
+/// expression, not a statement, so it is never flagged (a closure body is an expression too, so it
+/// cannot hold a `return` at all).
 /// Callers that already zero `loop_depth` (defer/spawn, whose own `break outside loop` guard fires)
 /// pass `in_loop = true` so only `return` can be reported here — no double diagnostic.
-/// Known hole: `wait:` arms and nested `defer:` bodies are not descended into (the latter get their
-/// own guard at their own site).
+/// It also does NOT descend into a nested `defer:` or `spawn:` block: each has its own guard at its
+/// own site, which names the block the statement is LEXICALLY in — descending here would report the
+/// same `return` twice, under the outer block's (wrong) noun.
 fn escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> {
     for s in stmts {
         match &s.kind {
@@ -2998,20 +3000,32 @@ fn escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> 
                     }
                 }
             }
-            // A `parallel:` body and a `spawn:` task body run within this function frame, so an
-            // escaping `return`/`break`/`continue` inside them must still be detected. A `for`/loop
+            // A `parallel:` body runs within this function frame (it has no guard of its own), so an
+            // escaping `return`/`break`/`continue` inside it must still be detected here. A `for`/loop
             // is not introduced, so `in_loop` is unchanged.
             StmtKind::Parallel { body } => {
                 if let Some(x) = escaping_flow(body, in_loop) {
                     return Some(x);
                 }
             }
-            StmtKind::Spawn(SpawnTarget::Block(body)) => {
-                if let Some(x) = escaping_flow(body, in_loop) {
+            // A `wait:` arm body / `else` block is an ordinary lexical sub-scope of this block, so a
+            // `return` there escapes exactly like a bare one (it was silently discarded at runtime).
+            StmtKind::Wait { arms, else_block } => {
+                for arm in arms {
+                    if let Some(x) = escaping_flow(&arm.body, in_loop) {
+                        return Some(x);
+                    }
+                }
+                if let Some(eb) = else_block
+                    && let Some(x) = escaping_flow(eb, in_loop)
+                {
                     return Some(x);
                 }
             }
             StmtKind::Fn(_) => {} // nested function: its control flow is its own
+            // `Spawn(Block)` / `Defer(Block)`: NOT descended into — each is guarded at its own site
+            // (`check_stmt`), which names the block the statement is lexically in. Descending would
+            // double-report the same `return` under this (outer) block's noun.
             _ => {}
         }
     }

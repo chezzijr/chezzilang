@@ -16997,3 +16997,73 @@ fn defer_block_break_still_says_break_outside_loop() {
         "the loop_depth guard must own break/continue — no double diagnostic: {errs:?}"
     );
 }
+
+// --- the guard must be exhaustive over block-bearing statements: a `wait:` arm body (and its
+// `else`) is inside the block too, so a `return` there escapes the same way.
+
+#[test]
+fn defer_block_rejects_return_in_wait_arm() {
+    entry_rejects(
+        "fn f() -> int!:\n    ch := Channel[int]()\n    ch.send(9)\n    defer:\n        wait:\n            v := ch.recv():\n                return Err(\"hijack {v}\")\n    return Ok(1)\nprint(f())\n",
+        "'return' is not allowed inside a defer block",
+    );
+}
+
+#[test]
+fn defer_block_rejects_return_in_wait_else() {
+    entry_rejects(
+        "fn f() -> int!:\n    ch := Channel[int]()\n    defer:\n        wait:\n            v := ch.recv():\n                print(v)\n            else:\n                return Err(\"hijack\")\n    return Ok(1)\nprint(f())\n",
+        "'return' is not allowed inside a defer block",
+    );
+}
+
+#[test]
+fn spawn_block_rejects_return_in_wait_arm() {
+    entry_rejects(
+        "fn f() -> int:\n    ch := Channel[int]()\n    ch.send(9)\n    parallel:\n        spawn:\n            wait:\n                v := ch.recv():\n                    return v\n    return 1\nprint(f())\n",
+        "'return' is not allowed inside a spawn block",
+    );
+}
+
+#[test]
+fn recover_block_rejects_return_in_wait_arm() {
+    entry_rejects(
+        "fn f() -> int!:\n    ch := Channel[int]()\n    ch.send(9)\n    r := recover:\n        wait:\n            v := ch.recv():\n                return Ok(v)\n        7\n    return r\nprint(f())\n",
+        "'return' is not allowed inside a recover block",
+    );
+}
+
+// --- one `return`, one diagnostic, naming the block it is LEXICALLY in (the innermost guarded
+// block owns it — the outer walker must not also claim it under the wrong noun).
+
+#[test]
+fn return_in_spawn_nested_in_defer_reports_spawn_only() {
+    let errs = check_entry(
+        "fn f() -> int:\n    defer:\n        parallel:\n            spawn:\n                return 7\n    return 1\nprint(f())\n",
+    );
+    let flow: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("is not allowed inside a"))
+        .collect();
+    assert_eq!(flow.len(), 1, "one return, one diagnostic: {errs:?}");
+    assert!(
+        flow[0].message.contains("spawn block"),
+        "the return is lexically in a spawn block: {errs:?}"
+    );
+}
+
+#[test]
+fn return_in_spawn_nested_in_recover_reports_spawn_only() {
+    let errs = check_entry(
+        "fn f() -> int:\n    x := recover:\n        parallel:\n            spawn:\n                return 7\n        1\n    return 1\nprint(f())\n",
+    );
+    let flow: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("is not allowed inside a"))
+        .collect();
+    assert_eq!(flow.len(), 1, "one return, one diagnostic: {errs:?}");
+    assert!(
+        flow[0].message.contains("spawn block"),
+        "the return is lexically in a spawn block: {errs:?}"
+    );
+}

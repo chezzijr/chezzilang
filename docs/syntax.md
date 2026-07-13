@@ -2071,8 +2071,9 @@ rule remains: a `?` short-circuit inside the block is **discarded** (a cleanup b
 error-return contract, like a deferred call whose `Err` result is dropped). A **`return` inside a
 `defer:` block is a compile error** (`'return' is not allowed inside a defer block`) — the block is
 its own closure and Chezzi has no named return values, so it could never affect the enclosing
-function's result (a `return` inside a closure or a nested `fn` *declared* in the block is fine — it
-returns from that function).
+function's result. This covers a `return` anywhere in the block, including inside an `if`/`for`/
+`match`/`wait:` arm in it; a `return` inside a nested `fn` *declared* in the block is fine (it
+returns from that `fn`).
 
 ```chezzi
 fn handle(conn: Conn):
@@ -2452,9 +2453,11 @@ main()
   it (the function-boundary rule).
 - **`return` inside a `spawn:` block is a compile error** (`'return' is not allowed inside a spawn
   block`) — a spawned task runs on its own, so there is nothing for it to return to (Chezzi has no
-  named return values). Send the value on a `Channel`/`Shared` instead. A `return` in a `parallel:`
-  body is fine (it runs in the parent frame), as is one inside a closure/nested `fn` declared in a
-  `spawn:` block.
+  named return values). Send the value on a `Channel`/`Shared` instead. The error names the block the
+  `return` is *lexically* in (a `spawn:` inside a `defer:` reports "spawn block", once), and covers a
+  `return` nested in an `if`/`for`/`match`/`wait:` arm inside the block. A `return` in a `parallel:`
+  body is fine (it runs in the parent frame), as is one inside a nested `fn` declared in a `spawn:`
+  block.
 
 ```chezzi
 fn fetch_all(urls: List[str]):
