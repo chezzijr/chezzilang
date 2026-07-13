@@ -3237,6 +3237,42 @@ fn parity_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -
     io
 }
 
+/// Like [`parity_entry_cfg`], but for a program whose stdout is a deterministic MULTISET with a
+/// nondeterministic ORDER — a shared, consumable stdin read from several tasks: which task gets
+/// which line is nondeterministic BY DESIGN (Go/Python), so a byte-equal stdout assert here would be
+/// a flake built on purpose. Asserts ok/err parity + that the two engines agree on the line multiset
+/// (the existing [`crate::vm::assert_same_lines`]), and returns both engines' stdout.
+///
+/// A FRESH cfg per engine (`mk_cfg` is called twice): the two engines must not share one `Arc` stdin
+/// queue, or the second engine would find it already drained.
+fn parity_entry_cfg_lines(
+    src: &str,
+    mk_cfg: impl Fn() -> crate::native::HostConfig,
+) -> (String, String) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mn, mn_err, mr, _mc) = run_file_parallel(&entry, mk_cfg());
+    let (se, se_err, sr, _sc) = run_file_with(&entry, mk_cfg());
+    assert_eq!(
+        mr.is_ok(),
+        sr.is_ok(),
+        "ok/err divergence: M:N={mr:?} serial={sr:?}"
+    );
+    assert_eq!(mn_err, se_err, "stderr divergence");
+    crate::vm::assert_same_lines(&se, &mn);
+    (mn, se)
+}
+
+/// Assert stdout is EXACTLY the `want` lines, in ANY order (sorted compare). Do NOT "fix" a caller
+/// of this into an `assert_eq!` on the raw stdout: the order is nondeterministic by design.
+fn assert_lines_multiset(out: &str, want: &[&str]) {
+    let mut got: Vec<&str> = out.lines().collect();
+    got.sort_unstable();
+    let mut want: Vec<&str> = want.to_vec();
+    want.sort_unstable();
+    assert_eq!(got, want, "line multiset differs; got:\n{out}");
+}
+
 #[test]
 fn parity_std_io_print() {
     assert_eq!(
@@ -3281,7 +3317,7 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    match io.read_line():\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\n    match io.read_line():\n        Some(l): io.print(l)\n        None: io.print(\"eof\")\nmain()";
     let out = parity_entry_cfg(src, || HostConfig {
-        stdin: Stdin::Lines(["alpha".to_string()].into_iter().collect()),
+        stdin: Stdin::lines(["alpha".to_string()]),
         ..Default::default()
     });
     assert_eq!(out, "got alpha\neof\n");
@@ -3296,45 +3332,46 @@ fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
     let out = parity_entry_cfg(src, || HostConfig {
-        stdin: Stdin::Lines(["ada".to_string()].into_iter().collect()),
+        stdin: Stdin::lines(["ada".to_string()]),
         ..Default::default()
     });
     assert_eq!(out, "p: got ada\n");
 }
 
-/// stdin belongs to the ENTRY task on BOTH engines: a SPAWNED task's `read_line`/`input` sees EOF.
-/// The M:N worker is built with `Stdin::Empty` (`spawn_worker`); the cooperative fibers share the one
-/// `Vm`, so without `swap_ctx` parking the parent's stdin they would consume it and the two engines
-/// would print different things for the same program.
+/// stdin is ONE shared, consumable source that EVERY task reads (Go's `os.Stdin` / Python's
+/// `sys.stdin`), at the `spawn:`/nursery task-entry path: 3 lines, 2 spawned readers + the entry
+/// reader ⇒ each line is read exactly ONCE, by SOME reader, and nobody sees a false EOF.
+///
+/// Every reader prints the same `got {v}` tag, so the line MULTISET is assignment-independent —
+/// which is the point: WHICH task gets a given line is nondeterministic BY DESIGN (both engines).
+/// Do NOT "fix" this back to an exact-stdout `assert_eq!`; that is a designed flake. A false EOF
+/// would add an `eof` line; a duplicated line would repeat a `got` line. Both change the multiset.
 #[test]
-fn parity_spawned_task_stdin_is_empty_on_both_engines() {
+fn parity_spawned_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nfn t():\n    match io.input(\"p: \"):\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n    match io.read_line():\n        Some(v): io.print(\"entry {v}\")\n        None: io.print(\"entry eof\")\nmain()";
-    let out = parity_entry_cfg(src, || HostConfig {
-        stdin: Stdin::Lines(["a".to_string()].into_iter().collect()),
+    let src = "import std.io\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n        spawn: t()\n    t()\nmain()";
+    let (mn, se) = parity_entry_cfg_lines(src, || HostConfig {
+        stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
     });
-    // The task gets EOF; the entry task still owns the injected line.
-    assert_eq!(out, "p: eof\nentry a\n");
+    for out in [&mn, &se] {
+        assert_lines_multiset(out, &["got a", "got b", "got c"]);
+    }
 }
 
-/// Same stdin-ownership invariant, at the OTHER task-entry path: an `Executor.submit` task. This one
-/// had NO coverage, and it was genuinely broken — the cooperative drain runs the submitted closure
-/// INLINE on the entry `Vm` (no `swap_ctx`), so it read AND CONSUMED the entry task's stdin on serial
-/// while the M:N drain's workers (built with `Stdin::Empty`) reported EOF:
-///   serial -> "task a" / "entry b"      M:N -> "task eof" / "entry a"
-/// A live serial≠M:N divergence — the one invariant the whole oracle rests on. Pre-existing; found
-/// while verifying the interactive-CLI milestone, fixed by parking the entry stdin across the drain.
+/// Same shared-stdin contract at the OTHER task-entry family: `Executor.submit` (the cooperative
+/// inline drain AND the M:N pool drain). An invariant enforced at one seam is not enforced.
 #[test]
-fn parity_executor_task_stdin_is_empty_on_both_engines() {
+fn parity_executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"task {v}\")\n        None: io.print(\"task eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.shutdown()\n    match io.read_line():\n        Some(v): io.print(\"entry {v}\")\n        None: io.print(\"entry eof\")\nmain()";
-    let out = parity_entry_cfg(src, || HostConfig {
-        stdin: Stdin::Lines(["a".to_string(), "b".to_string()].into_iter().collect()),
+    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
+    let (mn, se) = parity_entry_cfg_lines(src, || HostConfig {
+        stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
     });
-    // The submitted task gets EOF; the entry task still owns BOTH injected lines (nothing stolen).
-    assert_eq!(out, "task eof\nentry a\n");
+    for out in [&mn, &se] {
+        assert_lines_multiset(out, &["got a", "got b", "got c"]);
+    }
 }
 
 #[test]

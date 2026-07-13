@@ -185,25 +185,31 @@ sweep (13 bugs fixed, main `0741a0b`). Each is either an accepted design consequ
 documented-but-unusable surface, or a safe over-rejection. Recorded so they are decisions, not
 surprises — **re-read this before the JIT freeze**, since a JIT bakes in whatever is true at freeze time.
 
-### 0. `Executor` + `read_line` serial-vs-M:N divergence — **FIXED (2026-07-14)**
-Found while verifying the interactive-CLI milestone; **pre-existed** it (reproduced unchanged on
-`c2d0cf7`), and it was the **only known serial≠M:N divergence** — the invariant the entire parity
-oracle rests on. Stdin ownership was enforced at exactly ONE task-entry seam (`swap_ctx` — the
-`spawn:`/nursery fiber path, which hands a task `Stdin::Empty`). The cooperative `Executor` drain runs
-a submitted closure **inline on the entry Vm** (`src/vm/netio.rs`, no `swap_ctx`), so on serial the task
-read *and consumed* the entry task's stdin, while the M:N drain's workers (`spawn_worker` →
-`Stdin::Empty`) reported EOF:
-```
-# task = read_line(); entry = read_line()
-printf 'a\nb\n' | chezzi run --serial x.chz   ->  task a   / entry b     # and the entry's line was STOLEN
-printf 'a\nb\n' | chezzi run          x.chz   ->  task eof / entry a
-```
-Fixed by parking the entry task's stdin across the inline drain (restored on every path, including a
-faulting task — otherwise the entry would be left holding an `Empty` stdin and silently read EOF).
-Both engines now print `task eof` / `entry a`. Pinned by
-`parity_executor_task_stdin_is_empty_on_both_engines` — the class had **zero** coverage, which is
-exactly why five hunt waves walked past it. **Lesson for the remaining hunt: an invariant enforced at
-one seam is not enforced — enumerate every task-entry path.**
+### 0. Task stdin: serial-vs-M:N divergence + the false EOF — **BOTH FIXED (2026-07-14); stdin is now SHARED**
+Two bugs, one seam. Stdin was **entry-task-owned**: every other task was handed `Stdin::Empty`, so
+`read_line`/`input` inside a task returned `None` — a **false EOF**, while the entry task still had
+unread lines queued. And that rule was enforced at exactly ONE task-entry seam (`swap_ctx` — the
+`spawn:`/nursery fiber path), while the cooperative `Executor` drain runs a submitted closure **inline
+on the entry Vm** (`src/vm/netio.rs`, no `swap_ctx`) — so on serial the task read *and consumed* the
+entry's stdin while M:N's workers reported EOF: the **only known serial≠M:N divergence**, the invariant
+the whole parity oracle rests on.
+
+The semantics is now **shared stdin** (Go's `os.Stdin` / Python's `sys.stdin`): ONE source, any task may
+read it, a line goes to **exactly one** task (never duplicated, never dropped), WHICH task gets it is
+**nondeterministic** on both engines, and `None` means genuinely exhausted. The `Empty`-for-tasks rule
+was fake determinism protecting the oracle at the user's expense — the same mistake the interactive-CLI
+milestone removed from stdout. The oracle bends; the language does not. `Stdin::Empty` survives only as
+a legitimate host config (an embedder with no stdin). Killed at every task-entry seam — `swap_ctx`
+(field deleted), `spawn_worker` (shares the handle), the netio inline drain (park reverted) — and pinned
+by `parity_{spawned,executor}_tasks_share_stdin_exactly_once` (line-multiset, not exact stdout: the
+assignment is nondeterministic by design) + the real-binary `task_reads_piped_stdin_{mn,serial}`.
+**Lesson for the remaining hunt: an invariant enforced at one seam is not enforced — enumerate every
+task-entry path.**
+
+**New v1 limit it introduces:** `read_line`/`input` are deliberately outside `is_blocking` (the off-heap
+`OffloadHost::read_line` is `unreachable!`), so a task blocked in a read now **pins an M:N core worker** —
+K blocked readers occupy K workers until stdin produces lines. Previously impossible (tasks got instant
+EOF). Accepted; offloading stdin reads is its own milestone.
 
 ### 3. Three over-rejections introduced by the Go-model int→float fix
 The wave-5 widening fix (untyped **constant** adapts; a typed int **value** never does) rejects three

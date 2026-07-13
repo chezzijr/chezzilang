@@ -5530,8 +5530,8 @@ fn worker_runs_in_distinct_heap() {
 }
 
 /// B3.3-threads: a worker inherits the parent's read-only host state (process args + env) so a
-/// `--parallel` task reading `std.os.args` / an env var isn't silently inert; `stdin` is reset to
-/// `Empty` (a single consumable stream is not shared across worker threads).
+/// `--parallel` task reading `std.os.args` / an env var isn't silently inert — AND the one shared
+/// stdin, so a task's `read_line` reads the real stream instead of a false EOF.
 #[test]
 fn worker_inherits_host_args_and_env() {
     let mut vm = Vm::new(Arc::new(empty_program()));
@@ -5545,8 +5545,24 @@ fn worker_inherits_host_args_and_env() {
     );
     assert_eq!(worker.host.env.get("KEY").map(String::as_str), Some("val"));
     assert!(
-        matches!(worker.host.stdin, crate::native::Stdin::Empty),
-        "stdin must not be shared to workers"
+        matches!(worker.host.stdin, crate::native::Stdin::Real),
+        "the one stdin source must be shared with workers (no false EOF in a task)"
+    );
+}
+
+/// The worker's stdin is the SAME source, not a copy: a line a worker consumes is gone for the
+/// parent. A naive `#[derive(Clone)]` over a by-value queue would hand every worker its own copy of
+/// every line — delivering each line N times, which is worse than the false EOF this replaced.
+#[test]
+fn worker_shares_the_one_stdin_source() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    vm.host.stdin = crate::native::Stdin::lines(["a".to_string()]);
+    let mut worker = vm.spawn_worker();
+    assert_eq!(worker.host.stdin.read_line(), Ok(Some("a".to_string())));
+    assert_eq!(
+        vm.host.stdin.read_line(),
+        Ok(None),
+        "the line the worker consumed must be gone for the parent (shared, not cloned)"
     );
 }
 

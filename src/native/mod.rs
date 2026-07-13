@@ -38,24 +38,41 @@ use std::collections::HashMap;
 
 /// The source of lines for `std.io.read_line`. Tests inject a fixed buffer for determinism; the CLI
 /// uses the real process stdin (read lazily, one line at a time, so it never blocks until needed).
-#[derive(Debug, Default)]
+///
+/// **Every task shares ONE stdin** (Go's `os.Stdin` / Python's `sys.stdin`), so `Clone` SHARES the
+/// source, never copies the data: a line goes to exactly one reader — never duplicated, never
+/// dropped. Which task gets a given line is nondeterministic; `None` means genuinely exhausted.
+#[derive(Debug, Default, Clone)]
 pub enum Stdin {
-    /// No input — `read_line` immediately reports EOF.
+    /// No input — `read_line` immediately reports EOF. The host config for an embedder with no
+    /// stdin (and the deterministic default for tests / `run_file`).
     #[default]
     Empty,
-    /// A fixed list of lines (deterministic; used by tests and embedders to inject stdin).
-    #[allow(dead_code)]
-    Lines(std::collections::VecDeque<String>),
-    /// The real process stdin.
+    /// A fixed list of lines (used by tests and embedders to inject stdin). Behind a shared
+    /// `Arc<Mutex<..>>`: a clone reads the SAME queue, so a line consumed by one task is gone for
+    /// all — cloning the `VecDeque` by value would hand every worker its own copy of every line.
+    Lines(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>),
+    /// The real process stdin. A UNIT variant on purpose: `std::io::stdin()` is the process-global,
+    /// internally-locked handle, and one `read_line` call takes that lock for the whole call — so
+    /// concurrent readers get whole lines, never interleaved bytes. Never hold a `StdinLock` or wrap
+    /// it in a per-worker `BufReader`: the former deadlocks across tasks, the latter steals bytes
+    /// into a private buffer and drops lines.
     Real,
 }
 
 impl Stdin {
+    /// A shared injected-lines stdin (the test/embedder source).
+    pub fn lines(lines: impl IntoIterator<Item = String>) -> Stdin {
+        Stdin::Lines(std::sync::Arc::new(std::sync::Mutex::new(
+            lines.into_iter().collect(),
+        )))
+    }
+
     /// Read the next line (trailing `\n`/`\r\n` stripped); `None` at EOF.
     pub fn read_line(&mut self) -> Result<Option<String>, HostError> {
         match self {
             Stdin::Empty => Ok(None),
-            Stdin::Lines(q) => Ok(q.pop_front()),
+            Stdin::Lines(q) => Ok(q.lock().unwrap().pop_front()),
             Stdin::Real => {
                 let mut buf = String::new();
                 let n = std::io::stdin()

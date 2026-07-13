@@ -2617,14 +2617,15 @@ impl Vm {
         worker.parallel = self.parallel;
         // B3.3-threads: thread the parent's **read-only** host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
-        // defaults (the B3.2 silent-divergence owe). `stdin` is deliberately NOT shared: it is a
-        // single consumable stream owned by the main thread; handing each worker a copy of
-        // `Stdin::Lines` would duplicate input and concurrent `Stdin::Real` reads would race — a task
-        // reading stdin gets EOF (documented). `HostConfig` isn't `Clone`, so build it field-wise.
+        // defaults (the B3.2 silent-divergence owe). `stdin` is SHARED, not copied: `Stdin`'s clone
+        // hands over the same source (an `Arc` queue / the process-global locked handle), so a task's
+        // `read_line` reads the one stream — a line goes to exactly ONE task, and no task is ever
+        // handed a false EOF (Go's `os.Stdin` / Python's `sys.stdin`; which task gets a given line is
+        // nondeterministic BY DESIGN). `HostConfig` isn't `Clone`, so build it field-wise.
         worker.host = crate::native::HostConfig {
             args: self.host.args.clone(),
             env: self.host.env.clone(),
-            stdin: crate::native::Stdin::Empty,
+            stdin: self.host.stdin.clone(),
             // Streaming CLI: an M:N worker writes its task's output straight to the process stdout
             // as it prints (line-atomic), instead of buffering it until the nursery joins — which for
             // a server's nursery is never. In buffered (test/embedder) mode this is false and the

@@ -65,6 +65,13 @@ That permanently taxes the common case and hands users the entire data-race bug 
   (no handshake, no barrier)   values MOVE across the channel, never shared
 ```
 
+Heaps are share-nothing, but the **process** is one process: a task inherits the parent's `std.os.args`
+and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
+entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
+(never duplicated, never dropped); **which** task gets it is nondeterministic on both engines — order it
+yourself (entry task reads, fans out over a `Channel[str]`), exactly as with concurrent `print`. `None`
+means stdin is genuinely exhausted. Details + the v1 core-worker-pinning limit: `docs/stdlib.md` §`std.io`.
+
 ### The race you can't write
 
 ```chezzi

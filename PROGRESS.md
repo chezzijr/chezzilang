@@ -4732,6 +4732,40 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **stdin is SHARED by every task (Go/Python) — the false EOF is dead (2026-07-14).** stdin belonged to
+  the ENTRY task: every other task was handed `Stdin::Empty`, so `io.read_line()` / `io.input()` inside a
+  `spawn:`/nursery task or an `Executor.submit` task returned `None` — a **false EOF**, while the entry
+  task still had unread lines queued. That rule existed only to protect the byte-identical serial==M:N
+  parity oracle (a shared consumable stream makes which-task-gets-which-line scheduling-dependent) — the
+  same fake determinism the interactive-CLI milestone just removed from stdout. **The oracle bends; the
+  language does not.** Now: ONE stdin source, shared by every task, exactly like Go's `os.Stdin` and
+  Python's `sys.stdin` — any task may read it; a line goes to **exactly one** task (never duplicated,
+  never dropped); **which** task gets a given line is **nondeterministic** on both engines (want
+  deterministic distribution? entry task reads and fans out over a `Channel[str]` — the same "order it
+  yourself" answer as concurrent `print`); `None` means genuinely exhausted (a real EOF still EOFs).
+  Killed at **every** task-entry seam, because an invariant enforced at one seam is not enforced (that is
+  how the Executor divergence survived five hunt waves): `FiberCtx::stdin` + its `swap_ctx` park DELETED
+  (the `spawn:`/nursery fibers now read the one `Vm::host.stdin`), `spawn_worker` shares the handle
+  instead of `Stdin::Empty` (the single M:N funnel — nursery + Executor pool drain), and the cooperative
+  `Executor` inline drain's stdin park (65c2e42) is **reverted** — it made both engines agree on the
+  WRONG semantics, and consistent-and-lying is still lying. Sharing is by **handle, not copy**:
+  `Stdin::Lines` became an `Arc<Mutex<VecDeque<String>>>` (a by-value clone would hand every worker its
+  own copy of every line — delivering each line N times, worse than the bug being fixed) and `Stdin::Real`
+  stays a unit variant over the process-global, internally-locked `std::io::stdin()` (one `read_line` =
+  one whole line, atomic across the M:N worker threads; never a per-worker `BufReader`, which would steal
+  bytes into a private buffer and drop lines). `Stdin::Empty` survives only as a legitimate host config
+  (an embedder with genuinely no stdin) — hence the golden/parity suite stays byte-identical green.
+  Pinned by `parity_{spawned,executor}_tasks_share_stdin_exactly_once` (both task-entry families, both
+  engines: 3 lines, 2 tasks + entry ⇒ the stdout line MULTISET is exactly the 3 lines, each once, no
+  `eof` — asserted as a multiset, never an exact stdout, because the assignment is nondeterministic BY
+  DESIGN and an `assert_eq!` here would be a flake built on purpose), `worker_shares_the_one_stdin_source`
+  (a line the worker consumes is GONE for the parent — proves shared, not cloned) and the real-binary
+  `task_reads_piped_stdin_{mn,serial}` (the `Stdin::Real` path, piped stdin, both engines). **New v1
+  limit:** `read_line`/`input` are deliberately outside `is_blocking` (off-heap `OffloadHost::read_line`
+  is `unreachable!`), so a task blocked in a read now **pins an M:N core worker** (K blocked readers ⇒ K
+  pinned workers) — previously impossible, since tasks got an instant EOF. Accepted + documented
+  (`docs/gaps.md`); offloading stdin reads is its own milestone.
+
 - **Interactive CLI — `chezzi run` STREAMS stdout; the buffered sink stays for tests (2026-07-13).**
   `src/main.rs` used to capture the whole run into a `String` and `print!` it once, after the VM
   returned: a prompt never appeared before its `read_line`, a hung/killed program printed NOTHING, a
@@ -4761,9 +4795,11 @@ branch names) is in the git log.
   review panel, fixed before merge, pinned by `fault_under_broken_pipe_is_not_success_{mn,serial}`; any other stdout errno prints
   `chezzi run: cannot write stdout: …` and exits non-zero (a `> /dev/full` run can no longer report
   SUCCESS with no output); a **stderr** write failure is swallowed (diagnostic channel — a dead `2>`
-  reader must not kill a healthy program). A spawned task's stdin is `Empty` on **both** engines now
-  (`swap_ctx` parks the entry task's stdin), closing a serial-vs-M:N divergence `read_line`/`input`
-  inside a `spawn:` would otherwise have. The task-order flush is now documented as a **test-harness**
+  reader must not kill a healthy program). A spawned task's stdin was made `Empty` on **both** engines
+  here (`swap_ctx` parks the entry task's stdin), closing a serial-vs-M:N divergence `read_line`/`input`
+  inside a `spawn:` would otherwise have — **SUPERSEDED 2026-07-14** (see the shared-stdin entry above:
+  the `Empty`-for-tasks rule was a false EOF; stdin is now one source shared by every task).
+  The task-order flush is now documented as a **test-harness**
   property, not a user guarantee: cross-task print order is nondeterministic on both engines
   (Python/Go/Rust-identical); join and print the results yourself if you want order. Perf:
   `benches/run.chz` unmoved (all within noise); an ad-hoc 200k-line print loop goes **0.048 s →
