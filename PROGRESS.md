@@ -4729,6 +4729,15 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 
 ## Done (newest → oldest)
 
+- **`regex.Match.start`/`.end` are now CODEPOINT offsets (observable stdlib behavior change).** They
+  were the `regex` crate's raw **byte** offsets while Chezzi slicing/indexing is codepoint-based and
+  there is no byte-indexed slice — so on non-ASCII input `s[m.start:m.end]` silently produced the
+  wrong substring (`"héllo"` + `l+` → `"lo"`, want `"ll"`), with no fault. Converted at the single
+  Match-construction seam (`src/native/regex.rs` `match_from_caps`), matching Python's `re`, which the
+  module otherwise mirrors. New invariant, asserted in the tests: `subject[m.start:m.end] == m.text`.
+  ASCII programs are bit-identical (byte == codepoint); a non-ASCII program doing arithmetic on
+  `.start`/`.end` changes result — it was wrong before. Closes pre-JIT wave-5 audited residual #2.
+
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 

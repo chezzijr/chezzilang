@@ -502,7 +502,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
 - **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
   `find_all`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
-  are byte offsets); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
+  are codepoint offsets, so `subject[m.start:m.end] == m.text`); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
   `post(url, body)` returning a `Response` struct `{status, body, headers: Map[str,str]}`, where a
   ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
   dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).

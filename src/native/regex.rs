@@ -6,16 +6,17 @@
 //! pattern keeps repeated calls cheap (the program is single-threaded, so a `thread_local!` is both
 //! safe and contention-free). A bad pattern lowers to a chezzi `Err`.
 //!
-//! Offsets (`Match.start`/`Match.end`) are **byte** offsets into the subject (the `regex` crate's
-//! native unit). `groups` holds capture groups 1..n as strings; a non-participating optional group
-//! becomes `""`.
+//! Offsets (`Match.start`/`Match.end`) are **codepoint** offsets into the subject (Python `re`
+//! semantics; the `regex` crate's native byte spans are converted), so the invariant
+//! `subject[m.start:m.end] == m.text` holds — Chezzi slicing is codepoint-indexed. `groups` holds
+//! capture groups 1..n as strings; a non-participating optional group becomes `""`.
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// One match: the matched text, its byte span, and its capture groups (1..n).
+/// One match: the matched text, its codepoint span, and its capture groups (1..n).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchData {
     pub text: String,
@@ -57,7 +58,11 @@ fn compiled(pat: &str) -> Result<Rc<regex::Regex>, String> {
 
 /// Build a `MatchData` from a `Captures`: group 0 is the whole match (text + span), groups 1..n are
 /// the capture subgroups (a non-participating optional group becomes `""`).
-fn match_from_caps(caps: &regex::Captures) -> MatchData {
+/// Spans are converted from the `regex` crate's BYTE offsets to CODEPOINT offsets, because Chezzi
+/// slicing/indexing is codepoint-based (`s[m.start:m.end] == m.text` must hold on non-ASCII too).
+/// ponytail: O(n) per offset (O(n·m) across `find_all`); if regex ever shows up in a bench, walk one
+/// ascending byte→codepoint cursor across `captures_iter`'s monotonically increasing spans.
+fn match_from_caps(caps: &regex::Captures, s: &str) -> MatchData {
     let whole = caps.get(0).expect("group 0 always present on a match");
     let groups = (1..caps.len())
         .map(|i| {
@@ -67,8 +72,8 @@ fn match_from_caps(caps: &regex::Captures) -> MatchData {
         .collect();
     MatchData {
         text: whole.as_str().to_string(),
-        start: whole.start() as i64,
-        end: whole.end() as i64,
+        start: s[..whole.start()].chars().count() as i64,
+        end: s[..whole.end()].chars().count() as i64,
         groups,
     }
 }
@@ -80,14 +85,14 @@ fn do_is_match(pat: &str, s: &str) -> Result<bool, String> {
 fn do_find(pat: &str, s: &str) -> Result<Option<MatchData>, String> {
     Ok(compiled(pat)?
         .captures(s)
-        .map(|caps| match_from_caps(&caps)))
+        .map(|caps| match_from_caps(&caps, s)))
 }
 
 fn do_find_all(pat: &str, s: &str) -> Result<Vec<MatchData>, String> {
     let re = compiled(pat)?;
     Ok(re
         .captures_iter(s)
-        .map(|caps| match_from_caps(&caps))
+        .map(|caps| match_from_caps(&caps, s))
         .collect())
 }
 
@@ -193,6 +198,41 @@ mod tests {
         assert_eq!(m.text, "12");
         assert_eq!((m.start, m.end), (2, 4));
         assert_eq!(m.groups, Vec::<String>::new());
+    }
+
+    #[test]
+    fn find_offsets_are_codepoints_not_bytes() {
+        // "héllo": bytes h=0, é=1..3, l=3, l=4, o=5 — codepoints h=0, é=1, l=2, l=3, o=4.
+        let m = do_find(r"l+", "héllo").unwrap().unwrap();
+        assert_eq!(m.text, "ll");
+        assert_eq!((m.start, m.end), (2, 4));
+    }
+
+    /// The acceptance invariant: slicing the subject by (start, end) — Chezzi slices by CODEPOINT —
+    /// must reproduce `.text`, on ASCII and non-ASCII alike.
+    #[test]
+    fn offsets_slice_back_to_text() {
+        let cases: &[(&str, &str)] = &[
+            (r"\d+", "ab12cd34"),
+            (r"l+", "héllo"),
+            (r"\d+", "π1 π22"),
+            (r"x*", "héllo"), // zero-width match at codepoint 0
+        ];
+        for (pat, subj) in cases {
+            for m in do_find_all(pat, subj).unwrap() {
+                let sliced: String = subj
+                    .chars()
+                    .skip(m.start as usize)
+                    .take((m.end - m.start) as usize)
+                    .collect();
+                assert_eq!(
+                    sliced,
+                    m.text,
+                    "pat={pat} subj={subj} span={:?}",
+                    (m.start, m.end)
+                );
+            }
+        }
     }
 
     #[test]
