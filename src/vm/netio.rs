@@ -1419,21 +1419,37 @@ impl Vm {
                         core.inner.lock().unwrap().queue.drain(..).collect();
                     self.drain_executor_on_pool(tasks, span)?;
                 } else {
-                    // Cooperative engine: inline FIFO drain (unchanged). Root the executor handle across
-                    // the drain (its remaining queue is traced via it); each popped task is rooted on
-                    // the stack across its re-entrant call.
+                    // Cooperative engine: inline FIFO drain. Root the executor handle across the drain
+                    // (its remaining queue is traced via it); each popped task is rooted on the stack
+                    // across its re-entrant call.
+                    //
+                    // A submitted task runs INLINE on the entry `Vm` here — it is the one task-entry
+                    // path that does not go through `swap_ctx`, so it does not inherit that seam's
+                    // stdin ownership (`FiberCtx::stdin`). Park the entry task's real stdin for the
+                    // drain and hand each task `Stdin::Empty`, exactly like the M:N drain's workers
+                    // (`spawn_worker`): without it a `read_line`/`input` inside a submitted closure
+                    // read — and CONSUMED — the entry task's stdin on serial while reporting EOF on
+                    // M:N, a serial≠M:N divergence (and it stole the entry's next line as well).
+                    let parked_stdin =
+                        std::mem::replace(&mut self.host.stdin, crate::native::Stdin::Empty);
                     self.push(Value::Obj(h));
-                    loop {
+                    let drained = loop {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().queue.pop_front();
-                        let Some(task) = task else { break };
+                        let Some(task) = task else { break Ok(()) };
                         let task = self.from_wire(task);
                         self.push(task);
                         let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
                         self.pop();
-                        r?;
-                    }
+                        if let Err(e) = r {
+                            break Err(e);
+                        }
+                    };
                     self.pop(); // the executor root
+                    // Restore on EVERY path — a faulting task must not leave the entry task holding
+                    // an `Empty` stdin (its later `read_line` would silently report EOF).
+                    self.host.stdin = parked_stdin;
+                    drained?;
                 }
                 Ok(Value::Nil)
             }

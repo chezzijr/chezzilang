@@ -3318,6 +3318,25 @@ fn parity_spawned_task_stdin_is_empty_on_both_engines() {
     assert_eq!(out, "p: eof\nentry a\n");
 }
 
+/// Same stdin-ownership invariant, at the OTHER task-entry path: an `Executor.submit` task. This one
+/// had NO coverage, and it was genuinely broken — the cooperative drain runs the submitted closure
+/// INLINE on the entry `Vm` (no `swap_ctx`), so it read AND CONSUMED the entry task's stdin on serial
+/// while the M:N drain's workers (built with `Stdin::Empty`) reported EOF:
+///   serial -> "task a" / "entry b"      M:N -> "task eof" / "entry a"
+/// A live serial≠M:N divergence — the one invariant the whole oracle rests on. Pre-existing; found
+/// while verifying the interactive-CLI milestone, fixed by parking the entry stdin across the drain.
+#[test]
+fn parity_executor_task_stdin_is_empty_on_both_engines() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"task {v}\")\n        None: io.print(\"task eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.shutdown()\n    match io.read_line():\n        Some(v): io.print(\"entry {v}\")\n        None: io.print(\"entry eof\")\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::Lines(["a".to_string(), "b".to_string()].into_iter().collect()),
+        ..Default::default()
+    });
+    // The submitted task gets EOF; the entry task still owns BOTH injected lines (nothing stolen).
+    assert_eq!(out, "task eof\nentry a\n");
+}
+
 #[test]
 fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
     let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";
