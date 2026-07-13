@@ -2590,7 +2590,21 @@ impl Checker {
                     }
                     other => {
                         // A struct satisfying `IndexSet` (has `index` + `set_index`) is mutable by index.
-                        if let Some((k, v)) = self.index_set_kv(&other) {
+                        if let Some((set_k, set_v)) = self.index_set_kv(&other) {
+                            // `x OP= v` is EXACTLY `x = x OP v` (docs/syntax.md §3), and the compiler
+                            // lowers it that way (Dup2 → GetIndex → op → SetIndex). So a COMPOUND
+                            // assign's LHS is typed from `index`'s RETURN, not from `set_index`'s
+                            // `val` — reading it off the write slot let an incoherent pair
+                            // (`index -> str` / `set_index(_, val: int)`) check OK and then fault at
+                            // runtime with "cannot apply Add to str and int". A plain `=` never reads,
+                            // so it keeps typing against the write slot (an asymmetric pair — a
+                            // safe-read `index -> V?`, a widening writer — stays legal there).
+                            let read = if op == AssignOp::Eq {
+                                None
+                            } else {
+                                self.index_kv(&other)
+                            };
+                            let (k, v) = read.clone().unwrap_or((set_k.clone(), set_v.clone()));
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                                 self.error(
@@ -2598,7 +2612,30 @@ impl Checker {
                                     format!("index must be {k}, found {idx_ty}"),
                                 );
                             }
-                            self.check_assign_value(&v, op, &val_ty, target.span);
+                            // A compound reads through `index` and writes the result back through
+                            // `set_index`, so the two must agree — the same `IndexSet[K, V]`
+                            // coherence the bounded `[C: IndexSet[K, V]]` path already demands. On a
+                            // mismatch report only that (a cascading "cannot apply += to …" would
+                            // just restate it).
+                            let incoherent = read.as_ref().and_then(|(rk, rv)| {
+                                if !self.assignable(&set_v, rv) {
+                                    Some(format!(
+                                        "type {other} does not satisfy IndexSet (index returns \
+                                         {rv} but set_index's val is {set_v})"
+                                    ))
+                                } else if !self.assignable(&set_k, rk) {
+                                    Some(format!(
+                                        "type {other} does not satisfy IndexSet (index's key is \
+                                         {rk} but set_index's key is {set_k})"
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
+                            match incoherent {
+                                Some(msg) => self.error(target.span, msg),
+                                None => self.check_assign_value(&v, op, &val_ty, target.span),
+                            }
                         } else {
                             self.expect_int(index, "index");
                             self.error(target.span, format!("cannot index-assign into {other}"));
@@ -3314,6 +3351,11 @@ impl Checker {
     /// struct case via `set_index(self, K, V)`. `IndexSet` *requires* `index` too (Rust `IndexMut: Index`):
     /// a plain `=` only calls `set_index`, but a compound `b[k] += v` reads via `index` first, so a
     /// struct missing `index` would type-check then crash. `None` ⇒ not index-assignable.
+    ///
+    /// The pair is `set_index`-derived: it is the WRITE slot. A plain `=` never reads through
+    /// `index`, so the two may legitimately disagree (a `index -> V?` safe-read container, a widening
+    /// writer). The COMPOUND form is the one that reads — `check_assign`'s struct arm types its LHS
+    /// from `index_kv` (the read side) and then requires the result to fit this write slot.
     pub(super) fn index_set_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
         let Ty::Struct(name, targs) = ty else {
             return None;

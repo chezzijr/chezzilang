@@ -2348,13 +2348,21 @@ impl Checker {
                     if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
                         return subst(ty, &map);
                     }
-                    if let Some(sig) = info.methods.get(name) {
-                        let params = sig.params.iter().map(|t| subst(t, &map)).collect();
-                        return Ty::Func {
-                            params,
-                            ret: Box::new(subst(&sig.ret, &map)),
-                            labels: FnLabels::default(),
-                        };
+                    // A METHOD is not a field, and methods are NOT first-class values (a bound
+                    // method has no runtime representation — the compiler lowers a field-read to a
+                    // plain field load, which the VM would fault on). Reject like every sibling
+                    // receiver kind (enum/newtype/protocol) already does, but say WHY: reading a
+                    // method used to hand back a `Ty::Func` still carrying the un-bound `self` slot
+                    // typed `Ty::Unknown`, which laundered types (the `?` unified with anything).
+                    if info.methods.contains_key(name) {
+                        self.error(
+                            obj.span,
+                            format!(
+                                "type {obj_ty} has no field '{name}' ('{name}' is a method — methods \
+                                 are not values: call it (`x.{name}(…)`) or wrap it (`fn(): x.{name}()`))"
+                            ),
+                        );
+                        return Ty::Unknown;
                     }
                 }
                 self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));

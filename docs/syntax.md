@@ -190,6 +190,13 @@ or a numeric newtype's auto-flow) makes `x = x OP v` type-check — e.g. `a += V
 with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
 overload, or a mismatched operand). No implicit widening — `int /=
 float` is a type error (the result would be a float, which can't flow back into an `int` slot).
+The index expression is evaluated **exactly once** (`t[f()] += 1` calls `f` once, as in Python).
+
+Because `x OP= v` is `x = x OP v`, a compound assign to a **user index target** (`obj[k] += v`, §7b)
+**reads the LHS through `index`** — so its type is `index`'s **return**, not `set_index`'s `val`, and
+the two must agree (§7b's coherence rule): a compound on an incoherent pair — e.g. `index -> str` with
+`set_index(_, val: int)` — is a **check-time error** (`type S does not satisfy IndexSet (…)`), never a
+runtime fault. A plain `obj[k] = v` never reads, so it only type-checks against `set_index`'s `val`.
 (`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
 
 ```chezzi
@@ -1088,6 +1095,12 @@ print(p.dist())         # method call
 
 No inheritance (by design). Composition only.
 
+**Methods are not first-class values.** `p.dist` is not an expression — a method exists only to be
+**called** (`p.dist()`); there is no bound-method value. To pass one around, wrap it in a closure:
+`f := fn(): p.dist()`. (A struct **field** that is *fn-typed* — `f: fn(int) -> int` — is an ordinary
+value: `s.f(3)` and `g := s.f; g(3)` both work. The distinction is field vs method.) Reading a method
+name as a value is a check-time error: `type Point has no field 'dist' ('dist' is a method — …)`.
+
 ### 7a. Static (associated) methods — the "no self ⇒ static" rule
 
 A method's **first parameter** decides its call shape. If it is named `self`, the method is an
@@ -1369,6 +1382,15 @@ Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `
 `IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
 protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
 `Iterator[T]`'s element:
+
+`IndexSet[K, V]` **requires `Index[K, V]` too** (as Rust's `IndexMut: Index`). A **compound**
+`obj[k] += v` is `obj[k] = obj[k] OP v` (§3), so it *reads* through `index` and writes the result back
+through `set_index` — the two must be **coherent** there: `index`'s return must fit `set_index`'s
+`val`, and both must key on the same `K`. An incoherent pair used in a compound is a check-time error
+(`type S does not satisfy IndexSet (index returns str but set_index's val is int)`) instead of the
+runtime fault it used to be. A **plain** `obj[k] = v` never reads, so an asymmetric pair (a safe-read
+`index -> V?`, a widening writer) stays legal there. `index` alone is legal (a read-only type);
+`set_index` alone is not index-assignable.
 
 ```chezzi
 struct Ring:

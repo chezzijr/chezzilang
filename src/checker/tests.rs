@@ -17364,3 +17364,205 @@ fn widen_variadic_float_param_all_int_consts_rejected_known_limit() {
     );
     entry_ok("fn f(...zs: float):\n    print(zs)\nf(1, 2.5)\n");
 }
+
+// ---------------------------------------------------------------------------
+// Bound methods are NOT first-class values (check-OK -> runtime-fault hole).
+// A struct field-read that misses the data fields must NOT fall back to the
+// method table: it used to hand back a `Ty::Func` still carrying the un-bound
+// `self` slot typed `Ty::Unknown`, which (a) has no runtime lowering (the
+// compiler emits a plain field load -> VM "no field 'get' on S") and (b)
+// LAUNDERS types -- the `?` self slot unifies with anything.
+// ---------------------------------------------------------------------------
+
+const METH_S: &str = "\
+struct S:
+    n: int
+    fn get(self) -> int:
+        return self.n
+";
+
+#[test]
+fn bound_method_as_value_rejected() {
+    entry_rejects(
+        &format!("{METH_S}s := S(5)\ng := s.get\n"),
+        "type S has no field 'get'",
+    );
+    // ...and the message must say WHY (it's a method), not read as a typo.
+    entry_rejects(&format!("{METH_S}s := S(5)\ng := s.get\n"), "is a method");
+}
+
+#[test]
+fn bound_method_launder_rejected() {
+    // Each of these type-checked (the `?` self slot unified with anything) then faulted at runtime.
+    // Each must now be exactly ONE error -- no `'closure' expects 1 argument(s)` cascade.
+    for src in [
+        format!("{METH_S}s := S(5)\ng := s.get\nprint(g(s))\n"),
+        format!("{METH_S}s := S(5)\ng := s.get\nprint(g(\"anything\"))\n"),
+        format!(
+            "{METH_S}fn apply(f: fn(S) -> int, v: S) -> int:\n    return f(v)\ns := S(5)\nprint(apply(s.get, s))\n"
+        ),
+    ] {
+        let errs = check_entry(&src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected exactly one error for {src:?}, got: {errs:?}"
+        );
+        assert!(
+            errs[0].message.contains("has no field 'get'"),
+            "unexpected error for {src:?}: {errs:?}"
+        );
+    }
+    // `xs := [s.get, s.get]` used to build a `List[fn(?) -> int]` and fault at LIST CONSTRUCTION.
+    // Now each element is rejected at its own span; the elements are then `Unknown`, so the
+    // element-type inference reports its usual follow-on. No `'closure' expects 1 argument(s)`.
+    let errs = check_entry(&format!(
+        "{METH_S}s := S(5)\nxs := [s.get, s.get]\nprint(xs.len())\n"
+    ));
+    assert_eq!(
+        errs.iter()
+            .filter(|e| e.message.contains("has no field 'get'"))
+            .count(),
+        2,
+        "expected one reject per element, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("expects 1 argument")),
+        "no arity cascade expected, got: {errs:?}"
+    );
+}
+
+#[test]
+fn bound_method_via_self_rejected() {
+    entry_rejects(
+        "struct S:\n    n: int\n    fn get(self) -> int:\n        return self.n\n    fn leak(self) -> int:\n        g := self.get\n        return g(self)\ns := S(5)\nprint(s.leak())\n",
+        "has no field 'get'",
+    );
+}
+
+#[test]
+fn bound_method_on_generic_struct_rejected() {
+    // The error path on a GENERIC receiver still renders (no panic on the shape lookup).
+    entry_rejects(
+        "struct Box[T]:\n    v: T\n    fn get(self) -> T:\n        return self.v\nb := Box[int](1)\ng := b.get\n",
+        "has no field 'get'",
+    );
+}
+
+#[test]
+fn method_neighbors_still_ok() {
+    // NO-OVER-REJECTION guards -- everything adjacent to the bound-method reject keeps working.
+    // 1. a normal call, a chained call, a call on a nested field.
+    entry_ok(
+        "struct Inner:\n    n: int\n    fn get(self) -> int:\n        return self.n\nstruct Outer:\n    i: Inner\n    fn inner(self) -> Inner:\n        return self.i\no := Outer(Inner(5))\nprint(o.i.get())\nprint(o.inner().get())\n",
+    );
+    // 2. THE closest neighbor -- a genuinely fn-TYPED field. Both `h.f(3)` and `g := h.f; g(3)`.
+    entry_ok(
+        "struct H:\n    f: fn(int) -> int\nfn dbl(x: int) -> int:\n    return x * 2\nh := H(dbl)\nprint(h.f(3))\ng := h.f\nprint(g(3))\n",
+    );
+    // 3. a fn-typed FIELD whose name collides with a method-ish name -- the field still wins.
+    entry_ok(
+        "struct C:\n    get: fn(int) -> int\n    fn other(self) -> int:\n        return 1\nfn dbl(x: int) -> int:\n    return x * 2\nc := C(dbl)\nprint(c.get(3))\nprint(c.other())\n",
+    );
+    // 4. a static/associated CALL (a bare `P.make` VALUE is not legal today -- `unknown name 'P'`).
+    entry_ok(
+        "struct P:\n    n: int\n    fn make(n: int) -> P:\n        return P(n)\np := P.make(3)\nprint(p.n)\n",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `index` / `set_index` V-coherence. `x OP= v` is EXACTLY `x = x OP v`
+// (docs/syntax.md, compound assignment), so a compound index-assign's LHS is
+// typed from `index`'s RETURN. The direct index-assign path used to take it
+// from `set_index`'s `val` param instead, so an incoherent pair
+// (`index -> str` / `set_index(_, val: int)`) type-checked, then faulted with
+// "cannot apply Add to str and int" at runtime.
+// ---------------------------------------------------------------------------
+
+/// index -> str, but set_index takes an int val. Incoherent: not an `IndexSet[int, V]`.
+const INCOHERENT_V: &str = "\
+struct S:
+    d: List[str]
+    fn index(self, key: int) -> str:
+        return self.d[key]
+    fn set_index(self, key: int, val: int):
+        print(\"set {val}\")
+s := S([\"a\", \"b\"])
+";
+
+#[test]
+fn index_set_incoherent_rejected() {
+    // Exactly ONE error, and it names the incoherence (no "cannot apply += to str and int" cascade,
+    // no bogus "index must be int" from the not-indexable path).
+    let errs = check_entry(&format!("{INCOHERENT_V}s[0] += 1\n"));
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("does not satisfy IndexSet (index returns str but set_index's val is int)"),
+        "unexpected error: {errs:?}"
+    );
+    // K mismatch is a compound-path incoherence too: the read keys by int, the write-back by str.
+    entry_rejects(
+        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: str):\n        print(\"set {val}\")\ns := S([\"a\", \"b\"])\ns[0] += \"x\"\n",
+        "does not satisfy IndexSet (index's key is int but set_index's key is str)",
+    );
+    // A NON-int key routes through the same arm — no spurious "index must be int" companion.
+    let errs = check_entry(
+        "struct M:\n    d: Map[str, str]\n    fn index(self, key: str) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: int):\n        print(\"set {val}\")\nm := M({\"a\": \"x\"})\nm[\"a\"] += 1\n",
+    );
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("does not satisfy IndexSet"),
+        "unexpected error: {errs:?}"
+    );
+}
+
+#[test]
+fn index_set_asymmetric_plain_write_still_ok() {
+    // NO-OVER-REJECTION: a plain `=` NEVER reads through `index`, so an asymmetric pair stays legal
+    // (it type-checks AND runs today). Only the COMPOUND form reads, and only it is gated.
+    // (a) a safe-read container: `index -> V?`, `set_index(_, V)`.
+    entry_ok(
+        "struct T:\n    d: Map[int, int]\n    fn index(self, key: int) -> int?:\n        return self.d.get(key)\n    fn set_index(self, key: int, val: int):\n        self.d[key] = val\nt := T({})\nt[0] = 9\nprint(t[0])\n",
+    );
+    // (b) a widening writer: `index -> str`, `set_index(_, val: int)` — write-only use is sound.
+    entry_ok(&format!("{INCOHERENT_V}s[0] = 1\n"));
+}
+
+#[test]
+fn index_set_missing_method_messages_unchanged() {
+    // The vague wording is PRESERVED for the missing-method cases; only a disagreeing PAIR gets the
+    // new coherence message.
+    entry_rejects(
+        "struct RO:\n    xs: List[int]\n    fn index(self, key: int) -> int:\n        return self.xs[key]\nb := RO([1, 2, 3])\nb[0] = 9\n",
+        "cannot index-assign into RO",
+    );
+    entry_rejects(
+        "struct WO:\n    xs: List[int]\n    fn set_index(self, key: int, val: int):\n        self.xs[key] = val\nb := WO([1, 2, 3])\nb[0] = 9\n",
+        "cannot index-assign into WO",
+    );
+}
+
+#[test]
+fn index_set_coherent_still_ok() {
+    // NO-OVER-REJECTION: a coherent pair -- read / write / compound / negative index.
+    entry_ok(
+        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: int, val: str):\n        self.d[key] = val\ns := S([\"a\", \"b\"])\nprint(s[0])\ns[0] = \"x\"\ns[1] += \"y\"\nprint(s[-1])\n",
+    );
+    // A GENERIC coherent pair must survive EVERY instantiation (the compare happens AFTER the
+    // struct param substitution).
+    let g = "struct Buf[T]:\n    xs: List[T]\n    fn index(self, key: int) -> T:\n        return self.xs[key]\n    fn set_index(self, key: int, val: T):\n        self.xs[key] = val\n";
+    entry_ok(&format!(
+        "{g}b := Buf[int]([1, 2])\nb[0] = 9\nb[1] += 1\nprint(b[0])\n"
+    ));
+    entry_ok(&format!(
+        "{g}b := Buf[str]([\"a\"])\nb[0] = \"z\"\nb[0] += \"!\"\nprint(b[0])\n"
+    ));
+    // Builtin index/field targets must not regress.
+    entry_ok(
+        "struct F:\n    n: int\nm := {\"a\": 1}\nm[\"a\"] += 1\nxs := [1, 2]\nxs[0] += 1\nf := F(1)\nf.n += 1\nprint(m[\"a\"] + xs[0] + f.n)\n",
+    );
+}

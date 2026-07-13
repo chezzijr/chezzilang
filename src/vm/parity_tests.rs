@@ -7605,3 +7605,114 @@ fn widen_method_float_param_still_adapts() {
         "0.5\n",
     );
 }
+
+// ----- checker rejects (bound-method value, index/set_index V-coherence): the RUN-side guards -----
+// Both fixes are checker-only, so the risk is OVER-rejection, not divergence. These pin the
+// neighbours that must keep RUNNING identically on serial + M:N.
+
+#[test]
+fn coherent_index_set_str_parity() {
+    // A COHERENT user IndexSet (`index -> str` / `set_index(_, val: str)`): read, write, compound,
+    // negative index. The compound's LHS is typed from `index`'s RETURN (`x OP= v` ≡ `x = x OP v`).
+    assert_parity_out(
+        "\
+struct S:
+    d: List[str]
+    fn index(self, key: int) -> str:
+        return self.d[key]
+    fn set_index(self, key: int, val: str):
+        self.d[key] = val
+s := S([\"a\", \"b\"])
+print(s[0])
+s[0] = \"x\"
+print(s[0])
+s[1] += \"y\"
+print(s[1])
+print(s[-1])
+",
+        "a\nx\nby\nby\n",
+    );
+}
+
+#[test]
+fn compound_index_assign_evaluates_index_once_parity() {
+    // Python parity: `t[f()] += v` evaluates the index expression EXACTLY ONCE (the lowering dups
+    // it). A side-effecting index must not double-fire — on a user IndexSet, a map, or a list.
+    assert_parity_out(
+        "\
+struct S:
+    d: List[int]
+    fn index(self, key: int) -> int:
+        return self.d[key]
+    fn set_index(self, key: int, val: int):
+        self.d[key] = val
+fn bump(tag: str) -> int:
+    print(\"idx {tag}\")
+    return 0
+s := S([1])
+s[bump(\"struct\")] += 1
+print(s[0])
+m := {\"a\": 1}
+m[\"a\"] += 1
+print(m[\"a\"])
+xs := [1, 2]
+xs[bump(\"list\")] += 1
+print(xs[0])
+",
+        "idx struct\n2\n2\nidx list\n2\n",
+    );
+}
+
+#[test]
+fn fn_typed_field_value_parity() {
+    // THE closest neighbour to the bound-method reject: a genuinely fn-TYPED FIELD stays a
+    // first-class value (`h.f(3)` AND `g := h.f; g(3)`), while a METHOD is call-only.
+    assert_parity_out(
+        "\
+struct H:
+    f: fn(int) -> int
+    fn twice(self, x: int) -> int:
+        return self.f(self.f(x))
+fn dbl(x: int) -> int:
+    return x * 2
+h := H(dbl)
+print(h.f(3))
+g := h.f
+print(g(3))
+print(h.twice(3))
+",
+        "6\n6\n12\n",
+    );
+}
+
+#[test]
+fn asymmetric_index_set_plain_write_parity() {
+    // NO-OVER-REJECTION: a plain `obj[k] = v` never READS through `index`, so an asymmetric pair is
+    // sound and still runs (only the COMPOUND form is V-coherence-gated). A safe-read container
+    // (`index -> int?`) and a widening writer (`index -> str` / `set_index(_, val: int)`).
+    assert_parity_out(
+        "\
+struct T:
+    d: Map[int, int]
+    fn index(self, key: int) -> int?:
+        return self.d.get(key)
+    fn set_index(self, key: int, val: int):
+        self.d[key] = val
+struct W:
+    d: List[str]
+    fn index(self, key: int) -> str:
+        return self.d[key]
+    fn set_index(self, key: int, val: int):
+        print(\"set {val}\")
+t := T({})
+t[0] = 9
+match t[0]:
+    Some(v): print(v)
+    None: print(\"none\")
+w := W([\"a\"])
+w[0] = 1
+print(w[0])
+",
+        "9\nset 1\na\n",
+    );
+}
