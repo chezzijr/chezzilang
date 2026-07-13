@@ -57,7 +57,7 @@ Conventions used below:
 | `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` → unchanged. |
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
-| `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks. |
+| `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
 | `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. |
 | `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → `0`. |
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
@@ -74,8 +74,11 @@ Conventions used below:
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.str` free fns — `s.replace(a, b)` and
 `text.replace(s, a, b)` (after `import std.str as text`) are byte-identical for valid inputs; the free fns
-keep working. (One safety divergence: `s.repeat(n)` raises a recoverable capacity-overflow fault for a
-huge `n` rather than allocating until it aborts.)
+keep working. (Two safety divergences, both because only the native method can probe the allocator:
+`s.repeat(n)` raises a recoverable `string repeat capacity overflow` fault for a huge `n` rather than
+allocating until it aborts; and `s.pad_left(w, f)` likewise raises a recoverable `string pad capacity
+overflow` fault for a huge `w`, while the `std.str` free fn grows until the process dies. The empty-`fill`
+fault, by contrast, is raised identically by both.)
 
 ### `List[T]`
 | Method | Signature | Notes |

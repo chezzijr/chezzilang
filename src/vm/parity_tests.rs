@@ -3159,6 +3159,46 @@ fn parity_std_str_pure_chezzi_with_mixed_native_import() {
     assert_eq!(parity_entry(src), "ababab\nolleh\n007\nempty\na\nb\nc\n");
 }
 
+/// The pure-Chezzi `std.str` free fn is a byte-identical alias of the native `pad_left` METHOD:
+/// same never-shrinks rule, and the same truncated-cycle rule for a multi-char fill (it used to
+/// overshoot `width`). Codepoints, not bytes — a non-ASCII fill char counts as 1.
+#[test]
+fn parity_std_str_pad_left_matches_native_method() {
+    for (args, want) in [
+        (r#""a", 4, "xy""#, "xyxa"),
+        (r#""ab", 7, "xyz""#, "xyzxyab"),
+        (r#""7", 3, "0""#, "007"),
+        (r#""12345", 3, "0""#, "12345"),
+        (r#""a", -5, "0""#, "a"),
+        (r#""é", 3, "ü""#, "üüé"),
+        (r#""a", 4, "日本""#, "日本日a"),
+    ] {
+        let src =
+            format!("import std.str as text\nfn main():\n    print(text.pad_left({args}))\nmain()");
+        assert_eq!(
+            parity_entry(&src),
+            format!("{want}\n"),
+            "free fn mismatch for `{args}`"
+        );
+    }
+}
+
+/// An empty `fill` LIVELOCKED the free fn's prepend loop (zero output, no diagnostic). It must now
+/// fault — with the same message as the native method — on both engines, EAGERLY: a `width` the
+/// receiver already satisfies does not excuse it.
+#[test]
+fn parity_std_str_pad_left_empty_fill_faults() {
+    for args in [r#""a", 5, """#, r#""abc", 1, """#] {
+        let src =
+            format!("import std.str as text\nfn main():\n    print(text.pad_left({args}))\nmain()");
+        let msg = parity_entry_fault(&src);
+        assert!(
+            msg.contains("pad_left: fill must not be empty"),
+            "unexpected fault for `{args}`: {msg}"
+        );
+    }
+}
+
 #[test]
 fn native_returned_heap_values_survive_gc_stress() {
     use crate::native::HostConfig;

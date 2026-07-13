@@ -26,12 +26,20 @@ fn reverse(s: str) -> str:
         i -= 1
     return out
 
-# Left-pad `s` with `fill` until it is at least `width` long ("7", 3, "0" -> "007").
+# Left-pad `s` with `fill` to exactly `width` codepoints ("7", 3, "0" -> "007"). Never shrinks: a
+# `width` at or below `s.len()` returns `s` unchanged. A multi-char `fill` is a repeating cycle
+# truncated to fit ("a", 4, "xy" -> "xyxa"). An empty `fill` can never reach `width`, so it faults
+# rather than looping forever.
 fn pad_left(s: str, width: int, fill: str) -> str:
-    out := s
-    while out.len() < width:
-        out = fill + out
-    return out
+    if fill.len() == 0:
+        panic("pad_left: fill must not be empty")
+    need := width - s.len()
+    if need <= 0:
+        return s
+    pad := ""
+    while pad.len() < need:
+        pad = pad + fill
+    return pad[0 : need] + s
 
 # Split `s` on newlines into a list of lines.
 fn split_lines(s: str) -> List[str]:

@@ -11343,6 +11343,130 @@ fn shift_left_overflow_is_recoverable_fault() {
     }
 }
 
+/// `pad_left` with an EMPTY `fill` used to LIVELOCK (the pad loop never grew the string), producing
+/// zero output and no diagnostic. It must now raise a RECOVERABLE fault EAGERLY — before the
+/// `width <= len` early-out, so the fault is not input-dependent — on both engines, for both the
+/// native method and the `std.str` free fn.
+#[test]
+fn pad_left_empty_fill_is_recoverable_fault() {
+    const MSG: &str = "pad_left: fill must not be empty";
+    // Native method. Both a growing width and a width the receiver already exceeds (the eager rule:
+    // `width <= len` does NOT excuse an empty fill), plus the degenerate `"".pad_left(0, "")`.
+    for src in [
+        r#"print("a".pad_left(5, ""))"#,
+        r#"print("abc".pad_left(1, ""))"#,
+        r#"print("".pad_left(0, ""))"#,
+    ] {
+        assert_eq!(
+            run_capture(src)
+                .expect_err("serial: empty fill should fault")
+                .message,
+            MSG,
+            "serial mismatch for `{src}`"
+        );
+        assert_eq!(
+            run_capture_parallel(src)
+                .expect_err("M:N: empty fill should fault")
+                .message,
+            MSG,
+            "M:N mismatch for `{src}`"
+        );
+    }
+
+    // (The `std.str` free fn's identical fault needs the module-graph runner — it is asserted in
+    // `parity_tests::parity_std_str_pad_left_empty_fill_faults`.)
+
+    // The fault is CATCHABLE by `recover:` (a recoverable fault, not a host panic).
+    let rec = "fn main():\n\
+               \x20   r := recover:\n\
+               \x20       \"a\".pad_left(5, \"\")\n\
+               \x20   match r:\n\
+               \x20       Ok(v): print(\"ok {v}\")\n\
+               \x20       Err(e): print(\"caught {e.message()}\")\n\
+               main()\n";
+    let want = format!("caught {MSG}\n");
+    assert_eq!(run_capture(rec).expect("serial: recover"), want);
+    assert_eq!(run_capture_parallel(rec).expect("M:N: recover"), want);
+}
+
+/// A multi-character `fill` is a repeating cycle TRUNCATED to fit: the result is EXACTLY `width`
+/// codepoints (it used to overshoot — `"a".pad_left(4, "xy")` produced the 5-char `"xyxya"`).
+#[test]
+fn pad_left_multi_char_fill_is_exactly_width() {
+    for (src, want) in [
+        (r#"print("a".pad_left(4, "xy"))"#, "xyxa\n"),
+        (r#"print("ab".pad_left(7, "xyz"))"#, "xyzxyab\n"),
+        (r#"print("a".pad_left(2, "xy"))"#, "xa\n"),
+        // Single-char fill (the normal path) and the never-shrinks rule are unchanged.
+        (r#"print("7".pad_left(3, "0"))"#, "007\n"),
+        (r#"print("12345".pad_left(3, "0"))"#, "12345\n"),
+        (r#"print("a".pad_left(-5, "0"))"#, "a\n"),
+    ] {
+        assert_eq!(
+            run_capture(src).expect("serial"),
+            want,
+            "serial mismatch for `{src}`"
+        );
+        assert_eq!(
+            run_capture_parallel(src).expect("M:N"),
+            want,
+            "M:N mismatch for `{src}`"
+        );
+    }
+
+    // (The `std.str` free fn is a byte-identical alias — asserted in
+    // `parity_tests::parity_std_str_pad_left_matches_native_method`.)
+}
+
+/// Padding counts CODEPOINTS, not bytes — a non-ASCII fill char counts as 1 and no mid-char slice
+/// can panic.
+#[test]
+fn pad_left_codepoints_not_bytes() {
+    for (call, want) in [
+        (r#""é".pad_left(3, "ü")"#, "üüé\n"),
+        (r#""a".pad_left(4, "日本")"#, "日本日a\n"),
+        (r#""héllo".pad_left(3, "0")"#, "héllo\n"),
+    ] {
+        let src = format!("print({call})");
+        assert_eq!(
+            run_capture(&src).expect("serial"),
+            want,
+            "serial mismatch for `{call}`"
+        );
+        assert_eq!(
+            run_capture_parallel(&src).expect("M:N"),
+            want,
+            "M:N mismatch for `{call}`"
+        );
+    }
+}
+
+/// A huge `width` routes through the same capacity guard as `repeat`: a recoverable fault, not an
+/// OOM/abort. (Native only — the `std.str` free fn cannot probe the allocator; that is a documented
+/// divergence, docs/stdlib.md.)
+#[test]
+fn pad_left_huge_width_is_recoverable_fault() {
+    for src in [
+        r#"print("a".pad_left(9223372036854775807, "x"))"#,
+        r#"print("a".pad_left(100000000000000000, "x"))"#,
+    ] {
+        assert_eq!(
+            run_capture(src)
+                .expect_err("serial: huge pad should fault")
+                .message,
+            "string pad capacity overflow",
+            "serial mismatch for `{src}`"
+        );
+        assert_eq!(
+            run_capture_parallel(src)
+                .expect_err("M:N: huge pad should fault")
+                .message,
+            "string pad capacity overflow",
+            "M:N mismatch for `{src}`"
+        );
+    }
+}
+
 /// `str.repeat(n)` with a huge `n` must raise a RECOVERABLE fault (not hard-panic the process via
 /// Rust's `str::repeat` capacity-overflow abort), on both engines, matching the repo's
 /// checked-overflow policy. Normal repeats still work and stay parity-equal.

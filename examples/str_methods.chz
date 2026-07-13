@@ -24,9 +24,14 @@ fn main():
     print("hello".reverse())
     print("héllo".reverse())
 
-    # pad_left: grows to width, no shrink when already wide enough.
+    # pad_left: grows to width, no shrink when already wide enough. A multi-char fill is a
+    # repeating cycle truncated to fit, so the result is EXACTLY `width` codepoints.
     print("7".pad_left(3, "0"))
     print("12345".pad_left(3, "0"))
+    print("a".pad_left(4, "xy"))
+    print("a".pad_left(4, "日本"))
+    print("a".pad_left(-5, "0"))
+    print("héllo".pad_left(3, "0"))
 
     # index_of: first occurrence, multibyte (CODEPOINT index), absent (-1), empty (0).
     print("abcabc".index_of("bc"))

@@ -2010,12 +2010,47 @@ impl Vm {
                         self.arity_err("pad_left", args, 2, span)?;
                         let width = self.int_arg("pad_left", &args[0], span)?;
                         let fill = str_arg(self, 1)?;
-                        // std.str: prepend `fill` until the codepoint length reaches `width`.
-                        let mut out = s.clone();
-                        while (out.chars().count() as i64) < width {
-                            out = format!("{fill}{out}");
+                        // An empty `fill` can never reach `width` — the old prepend loop spun
+                        // forever. Fault EAGERLY (before the width check) so the diagnostic does
+                        // not depend on whether padding was actually needed.
+                        if fill.is_empty() {
+                            return Err(
+                                self.err("pad_left: fill must not be empty".to_string(), span)
+                            );
                         }
-                        Ok(self.alloc_str(out))
+                        // std.str: pad to `width` CODEPOINTS; never shrinks (a `width` at or below
+                        // the current length — including a negative one — returns `s` unchanged).
+                        // Kept in i64 and clamped BEFORE the `as usize` cast: a negative `need`
+                        // would otherwise wrap into a colossal `take`.
+                        let need = width - s.chars().count() as i64;
+                        if need <= 0 {
+                            return Ok(self.alloc_str(s));
+                        }
+                        let need = need as usize;
+                        // Guard the allocation the same way `repeat` does — a huge `width` must be
+                        // a recoverable fault, not an OOM/abort. Size in BYTES using the widest
+                        // fill char (`fill` is non-empty, so `max()` always yields).
+                        let widest = fill.chars().map(char::len_utf8).max().unwrap_or(1);
+                        match widest
+                            .checked_mul(need)
+                            .and_then(|pad| pad.checked_add(s.len()))
+                            .filter(|&t| t <= isize::MAX as usize)
+                        {
+                            Some(total) => {
+                                let mut out = String::new();
+                                if out.try_reserve_exact(total).is_err() {
+                                    return Err(
+                                        self.err("string pad capacity overflow".to_string(), span)
+                                    );
+                                }
+                                // The fill is a repeating cycle TRUNCATED to fit, so the result is
+                                // EXACTLY `width` codepoints (`"a".pad_left(4, "xy")` -> `"xyxa"`).
+                                out.extend(fill.chars().cycle().take(need));
+                                out.push_str(&s);
+                                Ok(self.alloc_str(out))
+                            }
+                            None => Err(self.err("string pad capacity overflow".to_string(), span)),
+                        }
                     }
                     "index_of" => {
                         self.arity_err("index_of", args, 1, span)?;
