@@ -17494,20 +17494,42 @@ s := S([\"a\", \"b\"])
 
 #[test]
 fn index_set_incoherent_rejected() {
-    entry_rejects(
-        &format!("{INCOHERENT_V}s[0] += 1\n"),
-        "does not satisfy IndexSet",
+    // Exactly ONE error, and it names the incoherence (no "cannot apply += to str and int" cascade,
+    // no bogus "index must be int" from the not-indexable path).
+    let errs = check_entry(&format!("{INCOHERENT_V}s[0] += 1\n"));
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("does not satisfy IndexSet (index returns str but set_index's val is int)"),
+        "unexpected error: {errs:?}"
     );
-    // The plain write flows through the same arm, so it is rejected too.
+    // K mismatch is a compound-path incoherence too: the read keys by int, the write-back by str.
     entry_rejects(
-        &format!("{INCOHERENT_V}s[0] = 1\n"),
-        "does not satisfy IndexSet",
+        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: str):\n        print(\"set {val}\")\ns := S([\"a\", \"b\"])\ns[0] += \"x\"\n",
+        "does not satisfy IndexSet (index's key is int but set_index's key is str)",
     );
-    // K mismatch: `index` keys by int, `set_index` by str.
-    entry_rejects(
-        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: str):\n        print(\"set {val}\")\ns := S([\"a\", \"b\"])\ns[0] = \"x\"\n",
-        "does not satisfy IndexSet",
+    // A NON-int key routes through the same arm — no spurious "index must be int" companion.
+    let errs = check_entry(
+        "struct M:\n    d: Map[str, str]\n    fn index(self, key: str) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: int):\n        print(\"set {val}\")\nm := M({\"a\": \"x\"})\nm[\"a\"] += 1\n",
     );
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("does not satisfy IndexSet"),
+        "unexpected error: {errs:?}"
+    );
+}
+
+#[test]
+fn index_set_asymmetric_plain_write_still_ok() {
+    // NO-OVER-REJECTION: a plain `=` NEVER reads through `index`, so an asymmetric pair stays legal
+    // (it type-checks AND runs today). Only the COMPOUND form reads, and only it is gated.
+    // (a) a safe-read container: `index -> V?`, `set_index(_, V)`.
+    entry_ok(
+        "struct T:\n    d: Map[int, int]\n    fn index(self, key: int) -> int?:\n        return self.d.get(key)\n    fn set_index(self, key: int, val: int):\n        self.d[key] = val\nt := T({})\nt[0] = 9\nprint(t[0])\n",
+    );
+    // (b) a widening writer: `index -> str`, `set_index(_, val: int)` — write-only use is sound.
+    entry_ok(&format!("{INCOHERENT_V}s[0] = 1\n"));
 }
 
 #[test]

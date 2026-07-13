@@ -7684,3 +7684,35 @@ print(h.twice(3))
         "6\n6\n12\n",
     );
 }
+
+#[test]
+fn asymmetric_index_set_plain_write_parity() {
+    // NO-OVER-REJECTION: a plain `obj[k] = v` never READS through `index`, so an asymmetric pair is
+    // sound and still runs (only the COMPOUND form is V-coherence-gated). A safe-read container
+    // (`index -> int?`) and a widening writer (`index -> str` / `set_index(_, val: int)`).
+    assert_parity_out(
+        "\
+struct T:
+    d: Map[int, int]
+    fn index(self, key: int) -> int?:
+        return self.d.get(key)
+    fn set_index(self, key: int, val: int):
+        self.d[key] = val
+struct W:
+    d: List[str]
+    fn index(self, key: int) -> str:
+        return self.d[key]
+    fn set_index(self, key: int, val: int):
+        print(\"set {val}\")
+t := T({})
+t[0] = 9
+match t[0]:
+    Some(v): print(v)
+    None: print(\"none\")
+w := W([\"a\"])
+w[0] = 1
+print(w[0])
+",
+        "9\nset 1\na\n",
+    );
+}

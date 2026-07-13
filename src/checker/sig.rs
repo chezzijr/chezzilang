@@ -2590,7 +2590,21 @@ impl Checker {
                     }
                     other => {
                         // A struct satisfying `IndexSet` (has `index` + `set_index`) is mutable by index.
-                        if let Some((k, v)) = self.index_set_kv(&other) {
+                        if let Some((set_k, set_v)) = self.index_set_kv(&other) {
+                            // `x OP= v` is EXACTLY `x = x OP v` (docs/syntax.md §3), and the compiler
+                            // lowers it that way (Dup2 → GetIndex → op → SetIndex). So a COMPOUND
+                            // assign's LHS is typed from `index`'s RETURN, not from `set_index`'s
+                            // `val` — reading it off the write slot let an incoherent pair
+                            // (`index -> str` / `set_index(_, val: int)`) check OK and then fault at
+                            // runtime with "cannot apply Add to str and int". A plain `=` never reads,
+                            // so it keeps typing against the write slot (an asymmetric pair — a
+                            // safe-read `index -> V?`, a widening writer — stays legal there).
+                            let read = if op == AssignOp::Eq {
+                                None
+                            } else {
+                                self.index_kv(&other)
+                            };
+                            let (k, v) = read.clone().unwrap_or((set_k.clone(), set_v.clone()));
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                                 self.error(
@@ -2598,11 +2612,33 @@ impl Checker {
                                     format!("index must be {k}, found {idx_ty}"),
                                 );
                             }
-                            self.check_assign_value(&v, op, &val_ty, target.span);
+                            // A compound reads through `index` and writes the result back through
+                            // `set_index`, so the two must agree — the same `IndexSet[K, V]`
+                            // coherence the bounded `[C: IndexSet[K, V]]` path already demands. On a
+                            // mismatch report only that (a cascading "cannot apply += to …" would
+                            // just restate it).
+                            let incoherent = read.as_ref().and_then(|(rk, rv)| {
+                                if !self.assignable(&set_v, rv) {
+                                    Some(format!(
+                                        "type {other} does not satisfy IndexSet (index returns \
+                                         {rv} but set_index's val is {set_v})"
+                                    ))
+                                } else if !self.assignable(&set_k, rk) {
+                                    Some(format!(
+                                        "type {other} does not satisfy IndexSet (index's key is \
+                                         {rk} but set_index's key is {set_k})"
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
+                            match incoherent {
+                                Some(msg) => self.error(target.span, msg),
+                                None => self.check_assign_value(&v, op, &val_ty, target.span),
+                            }
                         } else {
                             self.expect_int(index, "index");
-                            let msg = self.index_assign_error(&other);
-                            self.error(target.span, msg);
+                            self.error(target.span, format!("cannot index-assign into {other}"));
                         }
                     }
                 }
@@ -3310,26 +3346,16 @@ impl Checker {
         }
     }
 
-    /// Do `index` and `set_index` agree on this slot? An `Unknown` is a not-yet-inferred type, not a
-    /// disagreement (a partially-inferred receiver must not be newly rejected); otherwise the two
-    /// must be mutually compatible — a one-way fit would let `index -> int` / `set_index(_, float)`
-    /// through, and `b[k] += 1.0` reads an `int`.
-    fn coherent(a: &Ty, b: &Ty) -> bool {
-        a.is_unknown() || b.is_unknown() || (compatible(a, b) && compatible(b, a))
-    }
-
     /// The `(key, value)` types of a mutable `obj[k] = v` — the `IndexSet` protocol's args. Built-in
     /// `list`/`map` are mutable intrinsically (handled directly in `check_assign`); this resolves the
     /// struct case via `set_index(self, K, V)`. `IndexSet` *requires* `index` too (Rust `IndexMut: Index`):
     /// a plain `=` only calls `set_index`, but a compound `b[k] += v` reads via `index` first, so a
     /// struct missing `index` would type-check then crash. `None` ⇒ not index-assignable.
     ///
-    /// The two methods must also be COHERENT — `index(self, K) -> V` and `set_index(self, K, V)`
-    /// must agree on BOTH `K` and `V`, exactly as the `[C: IndexSet[K, V]]` bound path already
-    /// demands. `x OP= v` is defined as `x = x OP v` (docs/syntax.md), so the compound's LHS is
-    /// typed from `index`'s RETURN; taking `V` from `set_index`'s `val` instead let an incoherent
-    /// pair (`index -> str` / `set_index(_, val: int)`) type-check and then fault at runtime with
-    /// "cannot apply Add to str and int". So the returned `(K, V)` is the READ-derived pair.
+    /// The pair is `set_index`-derived: it is the WRITE slot. A plain `=` never reads through
+    /// `index`, so the two may legitimately disagree (a `index -> V?` safe-read container, a widening
+    /// writer). The COMPOUND form is the one that reads — `check_assign`'s struct arm types its LHS
+    /// from `index_kv` (the read side) and then requires the result to fit this write slot.
     pub(super) fn index_set_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
         let Ty::Struct(name, targs) = ty else {
             return None;
@@ -3340,53 +3366,12 @@ impl Checker {
             return None; // (self, key, val)
         }
         // Must also be readable — `index(self, key) -> val` — or compound index-assign would crash.
+        let read = info.methods.get("index")?;
+        if read.params.len() != 2 {
+            return None; // (self, key)
+        }
         let map = struct_param_map(info, targs);
-        // NOTE: substitute BEFORE comparing, or a generic `Buf[T]` (`index -> T` / `set_index(_, T)`)
-        // would be rejected at every instantiation.
-        let (read_k, read_v) = self.index_kv(ty)?;
-        let (set_k, set_v) = (subst(&sig.params[1], &map), subst(&sig.params[2], &map));
-        // An `Unknown` slot is a not-yet-inferred receiver, not a disagreement — stay lenient.
-        if !Self::coherent(&read_k, &set_k) || !Self::coherent(&read_v, &set_v) {
-            return None;
-        }
-        Some((read_k, read_v))
-    }
-
-    /// Why `ty` is not index-assignable — the message for the failing `index_set_kv` above. A struct
-    /// that HAS both methods but whose `index`/`set_index` disagree gets the protocol wording (it is
-    /// a real `IndexSet` conformance failure, and the `[C: IndexSet[K, V]]` bound path reports it
-    /// that way); everything else keeps the plain "cannot index-assign" wording.
-    pub(super) fn index_assign_error(&self, ty: &Ty) -> String {
-        self.index_incoherence(ty)
-            .unwrap_or_else(|| format!("cannot index-assign into {ty}"))
-    }
-
-    /// `Some(msg)` iff `ty` HAS both `index` and `set_index` but they disagree on `K` or `V`.
-    fn index_incoherence(&self, ty: &Ty) -> Option<String> {
-        let Ty::Struct(name, targs) = ty else {
-            return None;
-        };
-        let info = self.structs.get(name)?;
-        let set = info.methods.get("set_index")?;
-        if set.params.len() != 3 {
-            return None;
-        }
-        let (read_k, read_v) = self.index_kv(ty)?;
-        let map = struct_param_map(info, targs);
-        let (set_k, set_v) = (subst(&set.params[1], &map), subst(&set.params[2], &map));
-        if !Self::coherent(&read_v, &set_v) {
-            return Some(format!(
-                "type {ty} does not satisfy IndexSet (index returns {read_v} but set_index's val \
-                 is {set_v})"
-            ));
-        }
-        if !Self::coherent(&read_k, &set_k) {
-            return Some(format!(
-                "type {ty} does not satisfy IndexSet (index's key is {read_k} but set_index's key \
-                 is {set_k})"
-            ));
-        }
-        None
+        Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)))
     }
 
     /// The result type of `obj[a..b]` — the `Slice` protocol's arg. `list[T] → list[T]`, `str → str`;

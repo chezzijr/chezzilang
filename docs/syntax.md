@@ -193,10 +193,10 @@ float` is a type error (the result would be a float, which can't flow back into 
 The index expression is evaluated **exactly once** (`t[f()] += 1` calls `f` once, as in Python).
 
 Because `x OP= v` is `x = x OP v`, a compound assign to a **user index target** (`obj[k] += v`, §7b)
-**reads the LHS through `index`** — so its type is `index`'s **return**, not `set_index`'s `val`. A
-struct's `index`/`set_index` must therefore agree on `V` (and on the key type `K`); an incoherent
-pair — e.g. `index -> str` with `set_index(_, val: int)` — is a **check-time error** at any
-`obj[k] = v` / `obj[k] OP= v` (`type S does not satisfy IndexSet (…)`), never a runtime fault.
+**reads the LHS through `index`** — so its type is `index`'s **return**, not `set_index`'s `val`, and
+the two must agree (§7b's coherence rule): a compound on an incoherent pair — e.g. `index -> str` with
+`set_index(_, val: int)` — is a **check-time error** (`type S does not satisfy IndexSet (…)`), never a
+runtime fault. A plain `obj[k] = v` never reads, so it only type-checks against `set_index`'s `val`.
 (`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
 
 ```chezzi
@@ -1383,13 +1383,14 @@ Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `
 protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
 `Iterator[T]`'s element:
 
-`IndexSet[K, V]` **requires `Index[K, V]` too** (as Rust's `IndexMut: Index`), and the two must be
-**coherent**: `set_index`'s `val` type must be the *same* `V` that `index` returns, and both must key
-on the same `K`. A compound `obj[k] += v` is `obj[k] = obj[k] OP v` (§3), so it reads through `index`
-first — an incoherent pair would type-check and then fault at runtime, and is therefore rejected at
-check time (`type S does not satisfy IndexSet (index returns str but set_index's val is int)`) on
-`obj[k] = v` and `obj[k] OP= v` alike. `index` alone is legal (a read-only type); `set_index` alone is
-not index-assignable.
+`IndexSet[K, V]` **requires `Index[K, V]` too** (as Rust's `IndexMut: Index`). A **compound**
+`obj[k] += v` is `obj[k] = obj[k] OP v` (§3), so it *reads* through `index` and writes the result back
+through `set_index` — the two must be **coherent** there: `index`'s return must fit `set_index`'s
+`val`, and both must key on the same `K`. An incoherent pair used in a compound is a check-time error
+(`type S does not satisfy IndexSet (index returns str but set_index's val is int)`) instead of the
+runtime fault it used to be. A **plain** `obj[k] = v` never reads, so an asymmetric pair (a safe-read
+`index -> V?`, a widening writer) stays legal there. `index` alone is legal (a read-only type);
+`set_index` alone is not index-assignable.
 
 ```chezzi
 struct Ring:
