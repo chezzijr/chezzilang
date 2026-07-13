@@ -809,19 +809,8 @@ pub enum ElemFloatHint {
     MapValue,
 }
 
-/// Derive the collection element-widening hint from a `let` annotation. A non-collection /
-/// non-float-element annotation yields `None`.
-pub fn float_elem_hint(ty: &Type) -> Option<ElemFloatHint> {
-    match ty {
-        Type::Generic(n, args, ..) if n == "List" && args.len() == 1 && is_float_ty(&args[0]) => {
-            Some(ElemFloatHint::Elem)
-        }
-        Type::Generic(n, args, ..) if n == "Map" && args.len() == 2 && is_float_ty(&args[1]) => {
-            Some(ElemFloatHint::MapValue)
-        }
-        _ => None,
-    }
-}
+// (The hint itself is DERIVED on each side: the compiler resolves it from the syntactic `Type` with
+// aliases (`Compiler::float_aliases`), the checker from the resolved `Ty` (`float_elem_hint_ty`).)
 
 // ===== expressions =====
 

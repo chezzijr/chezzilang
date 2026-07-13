@@ -78,6 +78,9 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
     // first/entry-most keeps bare, the rest get `<dotted.path>::Name`).
     c.assign_type_keys(graph);
+    // Alias transparency for the backend's float coercion sites (`type F = float`): built BEFORE any
+    // hoist, so a struct field / fn param / `let` annotation spelled through an alias still coerces.
+    c.float_aliases = FloatAliases::collect(&float_alias_inputs(graph));
     // Pass 1: hoist all type declarations across every module. (No flat alias gather: the multi-file
     // path lowers every extern type from the checker-resolved, module-scoped `extern_sigs` table.)
     for (idx, lm) in graph.modules.iter().enumerate() {
@@ -131,6 +134,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
             );
         }
     }
+    c.float_aliases =
+        FloatAliases::collect(&[(alias_decls(&module.stmts), HashMap::new(), HashMap::new())]);
     c.hoist_types(0, &module.stmts)?;
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
@@ -229,6 +234,185 @@ struct Compiler {
     /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
     /// of `compile_expr` so int ELEMENTS widen to float. `None` outside an annotated collection let.
     float_elem_hint: Option<crate::ast::ElemFloatHint>,
+    /// Type-ALIAS names that mean `float` (`type F = float`, `type G = F`, `type H = m.F`). Every
+    /// float coercion site below keys on the SYNTACTIC declared type, while the checker keys on the
+    /// RESOLVED `Ty::Float` — without this table an alias-spelled `float` sink (`x: F = 1`,
+    /// `fn g(z: F)`, `-> F`, a `v: F` field) would check clean and lower with NO `Op::CoerceFloat`,
+    /// leaving a runtime `Int` under a static `float`. Built once per graph (see [`FloatAliases`]).
+    float_aliases: FloatAliases,
+}
+
+/// The alias names that resolve to `float`, per module — the backend's alias-transparency table (the
+/// checker gets this for free from `resolve_type`). Built once from the module graph, before any
+/// type is hoisted, so every coercion site can ask "is this declared type a `float`?" in the scope of
+/// the module that WROTE it.
+#[derive(Default)]
+struct FloatAliases {
+    /// `(declaring module idx, alias name)` for every alias resolving to `float` — the target of a
+    /// qualified `m.F` lookup, and of a struct field declared in another module.
+    decl: std::collections::HashSet<(usize, String)>,
+    /// module idx → the names usable BARE there that mean `float` (its own aliases + `from`-imported).
+    bare: Vec<std::collections::HashSet<String>>,
+    /// module idx → bound module name → that module's idx (for a qualified `m.F` annotation).
+    binds: Vec<HashMap<String, usize>>,
+}
+
+impl FloatAliases {
+    /// True iff the type `ty`, as WRITTEN in module `idx`, means `float` (directly or through an alias
+    /// chain). Mirrors `crate::ast::is_float_ty` with alias resolution added.
+    fn is_float(&self, idx: usize, ty: &Type) -> bool {
+        match ty {
+            Type::Named { name, .. } => {
+                name == "float" || self.bare.get(idx).is_some_and(|s| s.contains(name))
+            }
+            Type::Qualified { module, name, args } if args.is_empty() => self
+                .binds
+                .get(idx)
+                .and_then(|b| b.get(module))
+                .is_some_and(|j| self.decl.contains(&(*j, name.clone()))),
+            _ => false,
+        }
+    }
+
+    /// The collection element-widening hint for a `let` annotation written in module `idx`:
+    /// `List[float]` → `Elem`, `Map[_, float]` → `MapValue` (aliases resolved). The compiler twin of
+    /// the checker's `float_elem_hint_ty`.
+    fn elem_hint(&self, idx: usize, ty: &Type) -> Option<crate::ast::ElemFloatHint> {
+        match ty {
+            Type::Generic(n, args, ..)
+                if n == "List" && args.len() == 1 && self.is_float(idx, &args[0]) =>
+            {
+                Some(crate::ast::ElemFloatHint::Elem)
+            }
+            Type::Generic(n, args, ..)
+                if n == "Map" && args.len() == 2 && self.is_float(idx, &args[1]) =>
+            {
+                Some(crate::ast::ElemFloatHint::MapValue)
+            }
+            _ => None,
+        }
+    }
+
+    /// Collect every `type … = float` alias (transitively, across modules). Each module contributes
+    /// its top-level aliases, its bound module names, and its `from`-imported names (bound name →
+    /// source module + declared name).
+    fn collect(modules: &[AliasInputs]) -> FloatAliases {
+        let n = modules.len();
+        let mut decl: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        // Fixpoint over the alias graph (`type G = F` may precede `type F = float`, in this or another
+        // module); it terminates in at most one round per alias, and a cycle simply never resolves.
+        let total: usize = modules.iter().map(|(a, _, _)| a.len()).sum();
+        for _ in 0..=total {
+            let mut changed = false;
+            for (i, (aliases, binds, froms)) in modules.iter().enumerate() {
+                for (name, ty) in aliases {
+                    if decl.contains(&(i, name.clone())) {
+                        continue;
+                    }
+                    let is_float = match ty {
+                        Type::Named { name: n2, .. } => {
+                            n2 == "float"
+                                || decl.contains(&(i, n2.clone()))
+                                || froms
+                                    .get(n2)
+                                    .is_some_and(|(j, orig)| decl.contains(&(*j, orig.clone())))
+                        }
+                        Type::Qualified {
+                            module,
+                            name: n2,
+                            args,
+                        } if args.is_empty() => binds
+                            .get(module)
+                            .is_some_and(|j| decl.contains(&(*j, n2.clone()))),
+                        _ => false,
+                    };
+                    if is_float {
+                        decl.insert((i, name.clone()));
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let bare = (0..n)
+            .map(|i| {
+                let mut names: std::collections::HashSet<String> = decl
+                    .iter()
+                    .filter(|(j, _)| *j == i)
+                    .map(|(_, name)| name.clone())
+                    .collect();
+                // A `from`-imported alias is visible under its BOUND name (`import F as G from m`).
+                for (bound, (j, orig)) in &modules[i].2 {
+                    if decl.contains(&(*j, orig.clone())) {
+                        names.insert(bound.clone());
+                    }
+                }
+                names
+            })
+            .collect();
+        let binds = modules.iter().map(|(_, b, _)| b.clone()).collect();
+        FloatAliases { decl, bare, binds }
+    }
+}
+
+/// Per-module inputs to [`FloatAliases::collect`]: top-level type aliases, bound module name → idx,
+/// and `from`-imported BOUND name → (source module idx, declared name).
+type AliasInputs = (
+    Vec<(String, Type)>,
+    HashMap<String, usize>,
+    HashMap<String, (usize, String)>,
+);
+
+/// Gather [`AliasInputs`] for every module in the graph.
+fn float_alias_inputs(graph: &ModuleGraph) -> Vec<AliasInputs> {
+    let idx_of: HashMap<&crate::resolver::ModuleId, usize> = graph
+        .modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (&m.id, i))
+        .collect();
+    graph
+        .modules
+        .iter()
+        .map(|lm| {
+            let aliases = alias_decls(&lm.ast.stmts);
+            let mut binds = HashMap::new();
+            let mut froms = HashMap::new();
+            for imp in &lm.imports {
+                let Some(&j) = idx_of.get(&imp.target) else {
+                    continue;
+                };
+                match &imp.import {
+                    crate::ast::Import::Module { path, alias, .. } => {
+                        let bind = alias
+                            .clone()
+                            .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                        binds.insert(bind, j);
+                    }
+                    crate::ast::Import::From { names, .. } => {
+                        for (name, alias) in names {
+                            let bound = alias.clone().unwrap_or_else(|| name.clone());
+                            froms.insert(bound, (j, name.clone()));
+                        }
+                    }
+                }
+            }
+            (aliases, binds, froms)
+        })
+        .collect()
+}
+
+/// The top-level `type X = …` declarations of a module.
+fn alias_decls(stmts: &[Stmt]) -> Vec<(String, Type)> {
+    stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::TypeAlias { name, ty, .. } => Some((name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// All-constant int→float widening peephole: true iff `exprs` contains BOTH an untyped float constant
@@ -383,6 +567,7 @@ impl Compiler {
             kw_frag_ctx: crate::lexer::Span::default(),
             kw_frag_ord: 0,
             float_elem_hint: None,
+            float_aliases: FloatAliases::default(),
         }
     }
 
@@ -930,7 +1115,7 @@ impl Compiler {
                     // One-way int→float widening: a `float` suite field coerces its int default, so
                     // the constructed suite instance stores a genuine f64 (the suite thunk bypasses
                     // `compile_ctor_args`, which does this for a regular ctor).
-                    if crate::ast::is_float_ty(&f.ty) {
+                    if self.float_aliases.is_float(self.current_module_idx, &f.ty) {
                         fc.emit(Op::CoerceFloat, d.span);
                     }
                 }
@@ -975,7 +1160,10 @@ impl Compiler {
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         // One-way int→float widening: a `-> float` return type coerces every `return` value.
-        fc.ret_is_float = decl.ret.as_ref().is_some_and(crate::ast::is_float_ty);
+        fc.ret_is_float = decl
+            .ret
+            .as_ref()
+            .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t));
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
@@ -1032,7 +1220,11 @@ impl Compiler {
     /// byte-identical to before.
     fn emit_float_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
         for (i, p) in params.iter().enumerate() {
-            if p.ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+            if !p.is_variadic
+                && p.ty
+                    .as_ref()
+                    .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t))
+            {
                 let slot = i;
                 let span = Span { line: 1, col: 1 };
                 fc.emit_get_local_raw(slot, span);
@@ -1165,11 +1357,17 @@ impl Compiler {
                 // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
                 // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
                 // strict assign target — so it needs no runtime coercion.)
-                let elem_hint = ty.as_ref().and_then(crate::ast::float_elem_hint);
+                let elem_hint = ty
+                    .as_ref()
+                    .and_then(|t| self.float_aliases.elem_hint(self.current_module_idx, t));
                 let prev_hint = std::mem::replace(&mut self.float_elem_hint, elem_hint);
                 self.compile_expr(fc, value)?;
                 self.float_elem_hint = prev_hint;
-                if names.len() == 1 && ty.as_ref().is_some_and(crate::ast::is_float_ty) {
+                if names.len() == 1
+                    && ty
+                        .as_ref()
+                        .is_some_and(|t| self.float_aliases.is_float(self.current_module_idx, t))
+                {
                     fc.emit(Op::CoerceFloat, value.span);
                 }
                 if names.len() > 1 {
@@ -3563,13 +3761,21 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Snapshot the per-field float-ness up front so we don't borrow `self.struct_fields` across
         // the `&mut self` call to `compile_expr`.
+        // Field types are written in the struct's DECLARING module, so an alias (`v: F`) resolves in
+        // that module's scope — not the constructing one.
+        let home = self
+            .program
+            .structs
+            .get(key)
+            .map(|d| d.module_idx)
+            .unwrap_or(self.current_module_idx);
         let float_field: Vec<bool> = self
             .struct_fields
             .get(key)
             .map(|fields| {
                 fields
                     .iter()
-                    .map(|f| crate::ast::is_float_ty(&f.ty))
+                    .map(|f| self.float_aliases.is_float(home, &f.ty))
                     .collect()
             })
             .unwrap_or_default();

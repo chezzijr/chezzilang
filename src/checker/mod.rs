@@ -161,13 +161,28 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "timer"
 }
 
-/// The note appended to a `float`-sink mismatch whose actual type is `int` — the rule is Go's: an
-/// untyped int CONSTANT adapts, a typed int VALUE never does. Empty for any other mismatch.
-fn widen_note(expected: &Ty, actual: &Ty) -> &'static str {
-    if matches!((expected, actual), (Ty::Float, Ty::Int)) {
+/// The note appended to a `float`-sink mismatch whose actual expression is a TYPED int — the rule is
+/// Go's: an untyped int CONSTANT adapts to a float context, a typed int VALUE never does. Empty for
+/// any other mismatch, and empty when the offending expression IS an untyped int constant (it was
+/// rejected because the sink does not widen at all — a builtin-method arg, an enum payload, a call
+/// through a function VALUE — not because it is typed; claiming otherwise would be a lie).
+fn widen_note(expected: &Ty, actual: &Ty, e: &Expr) -> &'static str {
+    if matches!((expected, actual), (Ty::Float, Ty::Int)) && !crate::ast::untyped_int_const(e) {
         " (a typed int never widens to float — write float(x))"
     } else {
         ""
+    }
+}
+
+/// The collection element-widening hint derived from a RESOLVED `let` annotation: `List[float]` →
+/// `Elem`, `Map[_, float]` → `MapValue`. The `Ty` twin of the compiler's `Compiler::float_elem_hint`
+/// (which resolves the same thing from the syntactic `Type`, aliases included).
+/// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
+fn float_elem_hint_ty(ty: &Ty) -> Option<crate::ast::ElemFloatHint> {
+    match ty {
+        Ty::List(e) if **e == Ty::Float => Some(crate::ast::ElemFloatHint::Elem),
+        Ty::Map(_, v) if **v == Ty::Float => Some(crate::ast::ElemFloatHint::MapValue),
+        _ => None,
     }
 }
 

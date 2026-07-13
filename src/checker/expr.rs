@@ -517,8 +517,12 @@ impl Checker {
                 *ret
             }
             Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
-                // A closure/fn value coerces its float params at the prologue.
-                self.check_args_w("closure", &params, args, span);
+                // STRICT — no int→float widening through a function VALUE. A `Ty::Func` does not say
+                // which declaration it came from: a GENERIC fn instantiated at float (`f := id[float]`)
+                // has the declared param `T`, so the callee prologue emits NO `Op::CoerceFloat` and an
+                // int argument would sit in the slot under a static `float`. The checker cannot tell
+                // that value apart from a plain `fn(x: float)`, so neither adapts — write `f(1.0)`.
+                self.check_args("closure", &params, args, span);
                 *ret
             }
             Ty::Unknown => {
@@ -657,7 +661,9 @@ impl Checker {
                 &named[ci - args.len()].1
             };
             let at = self.infer_arg(e, Some(pt));
-            if !self.assignable_w(pt, &at, crate::ast::untyped_int_const(e)) {
+            // STRICT, like the positional function-value path above: a `Ty::Func` may be a generic fn
+            // instantiated at float (`f := id[float]`), whose callee prologue coerces nothing.
+            if !self.assignable_w(pt, &at, false) {
                 let pname = labels
                     .get(i)
                     .and_then(|l| l.as_deref())
@@ -667,7 +673,7 @@ impl Checker {
                     e.span,
                     format!(
                         "{pname} of a function-value call: expected {pt}, found {at}{}",
-                        widen_note(pt, &at)
+                        widen_note(pt, &at, e)
                     ),
                 );
             }
@@ -3020,7 +3026,7 @@ impl Checker {
                 } else {
                     // A typed int at a `float` sink is the one-way-widening rule, not a mistype —
                     // name the fix.
-                    widen_note(pt, &at).to_string()
+                    widen_note(pt, &at, arg).to_string()
                 };
                 self.error(
                     arg.span,

@@ -429,20 +429,23 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   untyped int constant is an int literal, unary `-`, and `+ - * / %` composed over those — anything with
   a declared type (a name, a CALL RESULT, a field, an index) is typed and is rejected at a `float` sink
   with a diagnostic naming the fix. It fires at every value-definition boundary: a typed binding
-  (`x: float = 1 + 2` so `x / 2 == 1.5`, real float division), a `float` function/method/closure parameter
-  (coerced at the callee prologue, so fn-values and closures are covered), a `float` parameter DEFAULT
+  (`x: float = 1 + 2` so `x / 2 == 1.5`, real float division), a `float` function/method parameter
+  (coerced at the callee prologue, from the DECLARED param type — so a call through a function VALUE
+  never widens: `f := id[float]`; `f(1)` is an error, write `f(1.0)`), a `float` parameter DEFAULT
   value (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field, native/`extern` `double`
   params, and a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
   infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), or an annotated
-  `xs: List[float] = [1, f]` (the annotation is the type context). The compiler emits a real conversion
+  `xs: List[float] = [1, f]` / `[1, 2]` (the annotation is the type context). A `float` sink spelled
+  through a type ALIAS (`type F = float`) is a float sink like any other (the backend resolves the alias).
+  The element widening belongs to the LITERAL, so it also fires where the element type is not `float`
+  (`xs: List[Any] = [1, -2.5]` stores `1.0`) — checker and backend agree there too. The compiler emits a real conversion
   (`Op::CoerceFloat`) so the checked path and the parity harness are byte-identical across both engines.
   The checker's accepted set is a strict SUBSET of what the type-blind compiler can coerce (one shared
   predicate, `ast::const_num`), so no sink can hold a runtime `Int` under a static `float`. Lossy
   conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`,
   `int`→`float` across a **newtype** boundary). Widening is **scalar-at-the-sink**: a compound/nested
-  float annotation is NOT widened — `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an
-  all-int literal `List[float] = [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors
-  (use explicit floats or a mixed literal). An un-annotated mixed collection with a TYPED int element
+  float annotation is NOT widened — `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, and
+  a non-literal RHS (`List[float] = f()`) all stay type errors (use explicit floats or a literal). An un-annotated mixed collection with a TYPED int element
   (`a := 1; xs := [a, 2.5]`) is an error — no type context, no adaptation; annotate AND write
   `float(a)`. One further restriction: a plain reassignment `x = 3` to a `float` local is rejected
   (type-blind target). The same scalar-only rule governs
@@ -796,9 +799,10 @@ when the input is untrusted.
 untyped int *constant* expression (literal / unary `-` / `+ - * / %` over those) adapts to a `float`
 slot and is converted to a real `f64` at every value-definition boundary (typed binding, `float`
 param/default, `-> float` return, `float` struct field, mixed-numeric-constant collection). A **typed**
-`int` value never implicitly converts — write `float(x)`. It is **scalar-at-the-sink**: never propagated
-into a compound (`List[float] = [1, 2]` stays an error), and the reverse (`float` → `int`) is always a
-lossy type error. Emitted as `Op::CoerceFloat` so both engines are byte-identical. (Full rules in the
+`int` value never implicitly converts — write `float(x)`, and a call through a function VALUE never
+widens at all. It is **scalar-or-element-at-the-sink**: never propagated into a nested/type-argument slot
+(`List[List[float]] = [[1]]`, `float? = Some(3)` stay errors), and the reverse (`float` → `int`) is always
+a lossy type error. Emitted as `Op::CoerceFloat` so both engines are byte-identical. (Full rules in the
 numeric-arithmetic section above.)
 
 **Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:

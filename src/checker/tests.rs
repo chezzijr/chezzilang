@@ -17253,3 +17253,64 @@ fn widen_let_hint_does_not_leak_into_nested_literal() {
         "list elements differ: int vs float",
     );
 }
+
+// ===== SOUNDNESS follow-ups (adversarial review): the sinks the first cut still leaked =====
+
+/// A GENERIC fn instantiated at float and used as a fn VALUE (`f := id[float]`) is generic-ERASED at
+/// runtime: its declared param is `T`, so the callee prologue emits NO `Op::CoerceFloat`. An int
+/// argument would sit in the slot under a static `float` (`f(1) / 2` → `0`, and a `List[float]` built
+/// from it sorted UNSORTED). A function-VALUE call therefore never widens — write `f(1.0)`.
+#[test]
+fn widen_through_fn_value_rejected() {
+    entry_rejects(
+        "fn id[T](x: T) -> T:\n    return x\nfn main():\n    f := id[float]\n    print(f(1) / 2)\n",
+        "expected float, found int",
+    );
+    entry_rejects(
+        "fn id[T](x: T) -> T:\n    return x\nfn main():\n    f: fn(float) -> float = id[float]\n    print(f(1) / 2)\n",
+        "expected float, found int",
+    );
+    // …and a plain (non-generic) fn reached through a VALUE is strict too (the checker cannot tell
+    // the two apart from the `Ty::Func` alone).
+    entry_rejects(
+        "fn h(z: float) -> float:\n    return z\nfn main():\n    f := h\n    print(f(1))\n",
+        "expected float, found int",
+    );
+    entry_ok(
+        "fn id[T](x: T) -> T:\n    return x\nfn main():\n    f := id[float]\n    print(f(1.0) / 2)\n",
+    );
+}
+
+/// A float sink spelled through a type ALIAS (`type F = float`) is a real float sink: the compiler
+/// resolves the alias at every coercion site, so the untyped-constant widen still lowers to an f64.
+#[test]
+fn widen_through_float_alias_ok() {
+    entry_ok(
+        "type F = float\nfn g(z: F) -> F:\n    return z\nstruct P:\n    v: F\nfn main():\n    x: F = 1\n    xs: List[F] = [1, 2]\n    print(x / 2)\n    print(g(3) / 2)\n    print(P(3).v / 2)\n    print(xs)\n",
+    );
+}
+
+/// The `float(x)` note is attached ONLY to a mismatch whose expression is a TYPED int. An untyped int
+/// CONSTANT at a NON-widening float sink (a builtin-method arg, an enum payload) is rejected because
+/// the sink does not widen at all — telling the user "a typed int never widens" would be a lie.
+#[test]
+fn widen_note_absent_for_untyped_const_at_nonwidening_sink() {
+    let errs = check_entry("fn main():\n    ch := Channel[float]()\n    ch.send(1)\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected float, found int")),
+        "expected the send() mismatch, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains(WIDEN_NOTE)),
+        "an untyped int constant must not be blamed as a TYPED int: {errs:?}"
+    );
+}
+
+/// A `List[float]` / `Map[_, float]` annotation is a type CONTEXT: an ALL-int-constant literal adapts
+/// to it (the docs say so — and now the checker agrees; it used to be a spurious error).
+#[test]
+fn widen_annotated_all_int_collection_adapts() {
+    entry_ok("fn main():\n    xs: List[float] = [1, 2]\n    print(xs)\n");
+    entry_ok("fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n");
+}

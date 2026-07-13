@@ -1622,14 +1622,16 @@ impl Checker {
                     // leaks it into the next statement.
                     Some(t) if !is_ref && names.len() == 1 => {
                         let expected = self.resolve_type(t, span);
-                        self.expected_hint = Some(expected);
                         // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
                         // annotation licenses the literal's untyped-int-constant elements to widen —
                         // and it is exactly the annotation the COMPILER reads (`float_elem_hint`) to
-                        // emit `Op::CoerceFloat` for them, so checker and backend agree. Set ONLY here
+                        // emit `Op::CoerceFloat` for them, so checker and backend agree. Keyed on the
+                        // RESOLVED type, so a `type F = float` alias licenses it exactly like `float`
+                        // (the compiler resolves aliases at its own coercion sites). Set ONLY here
                         // (never for a call arg / return: the compiler has no annotation there);
                         // `infer_kind` `take()`s it so nothing nested inherits the license.
-                        self.float_elem_hint = crate::ast::float_elem_hint(t);
+                        self.float_elem_hint = float_elem_hint_ty(&expected);
+                        self.expected_hint = Some(expected);
                         let vt = self.infer_value(value);
                         self.float_elem_hint = None;
                         self.expected_hint = None;
@@ -1673,7 +1675,7 @@ impl Checker {
                                 value.span,
                                 format!(
                                     "cannot assign {val_ty} to variable of type {exp}{}",
-                                    widen_note(&expected, &val_ty)
+                                    widen_note(&expected, &val_ty, value)
                                 ),
                             );
                         }
@@ -1902,7 +1904,7 @@ impl Checker {
                                 format!(
                                     "default value for field '{}': expected {expected}, found {actual}{}",
                                     field.name,
-                                    widen_note(&expected, &actual)
+                                    widen_note(&expected, &actual, def)
                                 ),
                             );
                         }
@@ -2812,7 +2814,7 @@ impl Checker {
                         e.span,
                         format!(
                             "expected return type {ret}, found {ty}{}",
-                            widen_note(&ret, &ty)
+                            widen_note(&ret, &ty, e)
                         ),
                     );
                 } else if let ExprKind::Ident(name) = &e.kind
@@ -3111,7 +3113,7 @@ impl Checker {
                         format!(
                             "default value for parameter '{}': expected {ty}, found {actual}{}",
                             param.name,
-                            widen_note(&ty, &actual)
+                            widen_note(&ty, &actual, def)
                         ),
                     );
                 }
@@ -3149,7 +3151,7 @@ impl Checker {
                     e.span,
                     format!(
                         "expected return type {ret}, found {ty}{}",
-                        widen_note(&ret, &ty)
+                        widen_note(&ret, &ty, e)
                     ),
                 );
             }

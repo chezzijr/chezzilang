@@ -49,6 +49,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > FLIPPED to rejections and 1 (which pinned the un-annotated leak AS behavior) deleted. `widen_three_engines`
 > lost its stale "interp" label (it called the M:N engine twice). No VM/opcode change ⇒ no perf delta.
 > Docs: `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`, `docs/future.md`, `gaps.md`.
+>
+> **Follow-up (same branch, adversarial review): the four sinks the first cut still leaked.** The
+> "checker ⊆ compiler BY CONSTRUCTION" claim was only true where the compiler's coercion site actually
+> exists — it does not for a generic-ERASED callee, and it did not RESOLVE a `float` spelled through an
+> alias. (1) **Function-VALUE calls no longer widen** (`checker/expr.rs`, both the positional and the
+> keyword path): `fn id[T](x: T) -> T` + `f := id[float]` + `f(1)` checked clean and landed an `Int` under
+> a static `float` (`f(1) / 2` → `0`; a `List[float]` built from it sorted UNSORTED), because the callee
+> prologue keys on the DECLARED param (`T`) — and a `Ty::Func` cannot be told apart from a plain
+> `fn(float)`. Write `f(1.0)`. (2) **Alias transparency in the BACKEND** (`compiler/mod.rs`, new
+> `FloatAliases`, built per module graph before hoist): every compiler coercion site tests the SYNTACTIC
+> `ast::is_float_ty` (`name == "float"`), which a `type F = float` alias never matched, while the checker's
+> sink is the RESOLVED `Ty::Float` — so `x: F = 1`, `fn g(z: F)`, `-> F`, a `v: F` field, `List[F]` all
+> checked clean and lowered with NO `Op::CoerceFloat` (`x / 2` → `0`; the integer-overflow-under-float
+> PROOF was still live). The table resolves alias chains, `from`-imports (incl. `as`), and qualified `m.F`,
+> in the module that WROTE the type (a struct field resolves in its DECLARING module). The checker's `let`
+> element hint now derives from the resolved `Ty` (`float_elem_hint_ty`), so both sides see the same thing.
+> (3) **A variadic `float` param no longer faults**: `fn f(...zs: float)` + `f(1, 2.5)` checked clean and
+> trapped at runtime ("expected number, found List") — the prologue coerced the slot holding the PACKED
+> list; it now skips `is_variadic` (the elements are coerced by the list peephole). (4) **`Any`/protocol
+> element contexts now AGREE**: the compiler's peephole is type-blind and fires inside `List[Any]` /
+> `Map[_, Any]` / the `...xs: Any` pack, where the checker had kept the element `int` — so the CHECKER now
+> applies the same element widening BEFORE the expected-type check (`elem_widen`, `checker/pattern.rs`):
+> a mixed untyped-numeric-CONSTANT literal has `float` elements in EVERY element context
+> (`xs: List[Any] = [1, -2.5]` → `[1.0, -2.5]`, as it already did on `main` for `[1, 2.5]`), and a TYPED
+> int element is still never touched. Dropping the old gate's `contains(Float)` requirement also makes the
+> documented all-int annotated literal true: `xs: List[float] = [1, 2]` / `m: Map[str, float] = {"a": 1}`
+> now ADAPT (they were a spurious error; the compiler's hint already coerced them). (5) The
+> `float(x)` note is no longer attached to an untyped int CONSTANT at a non-widening sink (`ch.send(1)`,
+> an enum payload) — it said "a typed int never widens" about a value that is not typed. +8 tests
+> (4 checker incl. the fn-value/alias/note/all-int-annotated cases, 4 two-engine parity RUN tests incl.
+> the alias sinks, the variadic param, the `Any` element agreement + its typed-int guard); RED-first
+> (6 of the 8 fail on the pre-fix branch, the other 2 lock in behavior the fix makes principled).
 
 > **✅ FEATURE — multi-line pipe chains + `iter.sum` (2026-07-13, `auto-task/pipe-multiline`).** A line whose
 > FIRST token is `|>` now **continues the previous logical line**: the lexer suppresses that line's

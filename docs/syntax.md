@@ -406,15 +406,25 @@ a name, a call result, a field, an index — so `i := 1; x: float = i`, `x: floa
 each naming the fix (`a typed int never widens to float — write float(x)`).
 
 An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
-`3.0`), a `float` function / method / closure parameter (coerced at the CALLEE prologue, so it works for
-fn-values and closures too), a `float` parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, a
-`float` struct field (`P(3)` for `v: float`), and a **mixed-numeric** collection literal — a list/map
-literal with ≥1 untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int
-constants (`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), as does an explicitly annotated `xs: List[float] =
-[1, f]` / `m: Map[str, float] = {"a": 1}` (the annotation is the type CONTEXT). Because the conversion is
-real, the value behaves as a float everywhere — `x: float = 3` makes `x / 2 == 1.5` (float division), not
-`1`. The mixed-type arithmetic / comparison operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same
-one-way rule.
+`3.0`), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
+type), a `float` parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field
+(`P(3)` for `v: float`), and a **mixed-numeric-constant** collection literal — a list/map literal with ≥1
+untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int constants
+(`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), as does an annotated `xs: List[float] = [1, f]` /
+`m: Map[str, float] = {"a": 1}` / `xs: List[float] = [1, 2]` (the annotation is the type CONTEXT). A
+`float` sink spelled through a type ALIAS (`type F = float`; `x: F = 1`, `fn g(z: F)`, `v: F`) is a float
+sink like any other. Because the conversion is real, the value behaves as a float everywhere —
+`x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
+operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule.
+
+Two boundaries follow from the rule (both are the SAME rule, not exceptions):
+- A call through a function **VALUE** never widens (`f := id[float]` / `f: fn(float) -> float = h`; write
+  `f(1.0)`). The coercion lives in the callee prologue, driven by the callee's DECLARED param type — a
+  generic fn instantiated at `float` declares `T` and is generic-erased at runtime, and a `fn(float)`
+  value cannot be told apart from it, so neither adapts.
+- The element widening of a mixed-numeric-CONSTANT literal is a property of the LITERAL, so it applies in
+  every element context: `xs: List[Any] = [1, -2.5]` and `f(1, -2.5)` for `fn f(...xs: Any)` store
+  `1.0`, not `1`. A TYPED int element is never touched (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`).
 
 Un-annotated, there is no type context, so **no** adaptation: `f := 2.5; xs := [1, f]` is an error
 (`list elements differ: int vs float`) — annotate `xs: List[float] = [1, f]`. Likewise a TYPED int
@@ -423,10 +433,10 @@ element never widens, annotated or not: `a := 1; xs: List[float] = [a, 2.3]` is 
 
 Anti-lossy cases stay type errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a
 `List[int]`, and an `int`→`float` into a **newtype** (nominal — no widening across its boundary).
-Widening is **scalar-at-the-sink** — a compound/nested float annotation is NOT widened:
-`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, an all-int literal
-`List[float] = [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type errors; write explicit
-floats (`[[1.0]]`, `Some(3.0)`, `[1.0, 2.0]`) or a mixed literal. One further scoped restriction: a plain
+Widening is **scalar-or-element-at-the-sink** — a nested / type-argument float slot is NOT widened:
+`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, and a non-literal RHS
+(`List[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`) or a literal.
+One further scoped restriction: a plain
 reassignment `x = 3` to a `float`-declared local is rejected (a reassignment target is type-blind, like
 `p.x = 3`).
 

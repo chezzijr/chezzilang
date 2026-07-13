@@ -278,10 +278,11 @@ and the `msg` is still evaluated lazily on the failing path only. Two fault site
 
 **Type-system/runtime ✅** · one-way `int`→`float` widening of an UNTYPED CONSTANT (2026-06-22; narrowed
 to Go's untyped-constant rule 2026-07-13) — runtime `Op::CoerceFloat`/`coerce_float` at every value-def
-sink (typed `let`, fn/method/closure args via the callee prologue, float param defaults, `-> float`
-returns, float struct fields, native/extern float params, mixed-numeric-constant collection literals); a
-TYPED int value never widens (write `float(x)`); anti-lossy `float`→`int` stays a type error; still
-rejected: plain reassign to a float local, generic `T`, compound/nested float annotation · bare-fn
+sink (typed `let`, fn/method args via the callee prologue — aliases of `float` included, float param
+defaults, `-> float` returns, float struct fields, native/extern float params, mixed-numeric-constant
+collection literals in ANY element context); a TYPED int value never widens (write `float(x)`), and a call
+through a function VALUE never widens (the callee may be generic-erased); anti-lossy `float`→`int` stays a
+type error; still rejected: plain reassign to a float local, generic `T`, nested/type-argument float slot · bare-fn
 misdiagnosis → real fix = missing-return check (Option B) + inline-expr body
 implicit return + nil-in-value-position rejected · non-const default exprs · calling `fn`-typed field ·
 `sort_by_key` · `Ref[T]` box · stack traces · overflow policy · loop-var reassign rejected ·

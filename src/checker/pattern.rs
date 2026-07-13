@@ -1643,31 +1643,37 @@ impl Checker {
         Ty::Unknown
     }
 
-    /// License to widen the int-typed items of a collection literal to `float` — the SOUNDNESS gate.
-    /// True only when BOTH:
-    ///  - the COMPILER is guaranteed to coerce them: either an untyped-float-constant sibling is
-    ///    present (its literal peephole fires) or the annotated-`let` element hint is active; AND
-    ///  - every int-typed item is an untyped int CONSTANT (a typed int value never widens — the
-    ///    compiler cannot coerce what it cannot see the type of, so accepting it would leave a runtime
-    ///    `Int` under a static `float`).
+    /// One-way int→float ELEMENT widening for a collection literal — the SOUNDNESS gate, applied
+    /// IN PLACE to the already-inferred item types BEFORE any expected-type check.
     ///
-    /// This is the checker ⊆ compiler subset property, by construction.
-    fn elem_widen_ok<'a>(
+    /// An item widens iff it is an untyped INT constant (`1`, `-2`, `1 + 1`) AND the compiler is
+    /// GUARANTEED to emit `Op::CoerceFloat` for it: either an untyped FLOAT constant sibling is
+    /// present (the compiler's `literal_numeric_mix` peephole fires) or the annotated-`let` element
+    /// hint is active (`Compiler::float_elem_hint`). Same predicate (`crate::ast::const_num`) over the
+    /// same syntax on both sides ⇒ the checker's element type IS what the backend stores, by
+    /// construction — in EVERY element context, including a `List[Any]` / variadic `...xs: Any` slot,
+    /// where the element type stays `Any` but the stored value is the widened `float`.
+    ///
+    /// A TYPED int item (a variable, a call result) never widens — the compiler cannot see its type,
+    /// so accepting it would leave a runtime `Int` under a static `float` (the V1 hole).
+    fn elem_widen<'a>(
         &self,
         items: impl Iterator<Item = &'a Expr> + Clone,
-        tys: &[Ty],
+        tys: &mut [Ty],
         hint: bool,
-    ) -> bool {
+    ) {
         let license = hint
             || items
                 .clone()
                 .any(|e| crate::ast::const_num(e) == Some(crate::ast::ConstNum::Float));
-        license
-            && tys.contains(&Ty::Int)
-            && tys.contains(&Ty::Float)
-            && items
-                .zip(tys)
-                .all(|(e, t)| *t != Ty::Int || crate::ast::untyped_int_const(e))
+        if !license {
+            return;
+        }
+        for (e, t) in items.zip(tys) {
+            if *t == Ty::Int && crate::ast::untyped_int_const(e) {
+                *t = Ty::Float;
+            }
+        }
     }
 
     pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>, hint: bool) -> Ty {
@@ -1682,7 +1688,11 @@ impl Checker {
         // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
         // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
         // (int→float) widening for a genuinely mistyped literal.
-        let tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
+        let mut tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
+        // Element widening runs FIRST, so the widened element type is what BOTH the expected-type
+        // path and the bottom-up path see — the compiler's peephole coerces the same items regardless
+        // of the slot, so the checker must not disagree with it in a `List[Any]` / variadic slot.
+        self.elem_widen(items.iter(), &mut tys, hint);
         if let Some(Ty::List(e)) = expected
             && !e.is_unknown()
             && !items.is_empty()
@@ -1690,18 +1700,12 @@ impl Checker {
         {
             return Ty::list((**e).clone());
         }
-        // Bottom-up homogeneity, with one-way int→float widening iff the soundness gate licenses it
-        // (`elem_widen_ok`): an int-typed item then reads as `float`. Otherwise a mixed literal is the
-        // ordinary heterogeneity error — `[a, 2.5]` with a TYPED int `a` has no type context to adapt
-        // to (Go), so it is rejected rather than silently leaving an `Int` under a static `float`.
-        let widen = self.elem_widen_ok(items.iter(), &tys, hint);
+        // Bottom-up homogeneity over the (possibly widened) item types. A mixed literal the gate did
+        // not license is the ordinary heterogeneity error — `[a, 2.5]` with a TYPED int `a` has no
+        // type context to adapt to (Go), so it is rejected rather than silently leaving an `Int` under
+        // a static `float`.
         let mut elem = Ty::Unknown;
         for (t, item) in tys.iter().zip(items) {
-            let t = if widen && *t == Ty::Int {
-                &Ty::Float
-            } else {
-                t
-            };
             if elem.is_unknown() {
                 elem = t.clone();
             } else if !t.is_unknown() && !compatible(&elem, t) {
@@ -1735,26 +1739,18 @@ impl Checker {
     pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)], hint: bool) -> Ty {
         // Infer keys+values in source order first (so the widen gate can see the whole VALUE column),
         // then run the homogeneity checks in that same order — diagnostics are unchanged.
-        let tys: Vec<(Ty, Ty)> = entries
-            .iter()
-            .map(|(k, v)| (self.infer_value(k), self.infer_value(v)))
-            .collect();
-        let widen = self.elem_widen_ok(
-            entries.iter().map(|(_, v)| v),
-            &tys.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
-            hint,
-        );
+        let mut key_tys: Vec<Ty> = Vec::with_capacity(entries.len());
+        let mut val_tys: Vec<Ty> = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            key_tys.push(self.infer_value(k));
+            val_tys.push(self.infer_value(v));
+        }
+        // One-way int→float widening on the VALUE column only (keys are never float — not Hashable).
+        self.elem_widen(entries.iter().map(|(_, v)| v), &mut val_tys, hint);
         let mut key = Ty::Unknown;
         let mut value = Ty::Unknown;
-        for ((k_expr, v_expr), (kt, vt)) in entries.iter().zip(&tys) {
-            let (kt, vt) = (
-                kt.clone(),
-                if widen && *vt == Ty::Int {
-                    Ty::Float
-                } else {
-                    vt.clone()
-                },
-            );
+        for (((k_expr, v_expr), kt), vt) in entries.iter().zip(&key_tys).zip(&val_tys) {
+            let (kt, vt) = (kt.clone(), vt.clone());
             if !kt.is_unknown() && !self.is_hashable_key(&kt) {
                 self.error(
                     k_expr.span,

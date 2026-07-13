@@ -7295,3 +7295,62 @@ main()
 "#;
     assert_parity_out(src, "deep\ntrue\n1\n");
 }
+
+// ===== widening follow-ups (adversarial review): alias sinks, variadic float param, `Any` elements
+
+/// A float sink spelled through a type ALIAS coerces exactly like `float` at EVERY sink (let, param,
+/// return, struct field, param default, `List[F]` elements). Before the alias table the compiler's
+/// syntactic `is_float_ty` never matched `F`, so the checker accepted the widen and the backend
+/// emitted no `Op::CoerceFloat` — a runtime `Int` under a static `float` (`x / 2` → `0`).
+#[test]
+fn widen_float_alias_sinks_coerce() {
+    widen_three_engines(
+        "type F = float\nfn g(z: F) -> F:\n    return z\nfn k(a: F = 3) -> F:\n    return a\nstruct P:\n    v: F\nx: F = 1\nprint(x / 2)\nprint(g(3) / 2)\nprint(k() / 2)\nprint(P(3).v / 2)\nxs: List[F] = [1, 2.5]\nprint(xs[0] / 2)\n",
+        "0.5\n1.5\n1.5\n1.5\n0.5\n",
+    );
+    // an alias OF an alias resolves too
+    widen_three_engines(
+        "type F = float\ntype G = F\ny: G = 1\nprint(y / 2)\n",
+        "0.5\n",
+    );
+}
+
+/// A VARIADIC `float` param (`fn f(...zs: float)`) packs its args into a `List[float]`: the callee
+/// prologue must NOT `Op::CoerceFloat` that slot (it holds a List — a guaranteed runtime fault on a
+/// program the checker just called well-typed). The elements are coerced by the list peephole.
+#[test]
+fn widen_variadic_float_param_runs() {
+    widen_three_engines(
+        "fn f(...zs: float):\n    print(zs)\n    print(zs[0] / 2)\nf(1, 2.5)\n",
+        "[1.0, 2.5]\n0.5\n",
+    );
+}
+
+/// A mixed untyped-numeric-CONSTANT literal has `float` elements in EVERY element context, including
+/// a `List[Any]` slot and the variadic `...xs: Any` pack — the compiler's peephole is type-blind, so
+/// the CHECKER widens there too (it types the element `float`, which `Any` accepts). Checker and
+/// backend agree; nothing stores a value the static type does not describe.
+#[test]
+fn widen_any_collection_const_mix_agrees() {
+    widen_three_engines("xs: List[Any] = [1, -2.5]\nprint(xs)\n", "[1.0, -2.5]\n");
+    widen_three_engines(
+        "fn show(...xs: Any):\n    print(xs)\nshow(1, 2.0 + 0.5)\n",
+        "[1.0, 2.5]\n",
+    );
+    // GUARD (the other direction): a TYPED int element is never touched — neither side widens it, so
+    // it stays an `Int` under the `Any` element type.
+    widen_three_engines(
+        "a := 1\nxs: List[Any] = [a, -2.5]\nprint(xs)\n",
+        "[1, -2.5]\n",
+    );
+}
+
+/// An ALL-int-constant literal under a `List[float]` / `Map[_, float]` annotation adapts (the
+/// annotation is the type context) and lands as genuine f64s.
+#[test]
+fn widen_annotated_all_int_collection_runs() {
+    widen_three_engines(
+        "xs: List[float] = [1, 2]\nm: Map[str, float] = {\"a\": 1}\nprint(xs)\nprint(m)\nprint(xs[0] / 2)\n",
+        "[1.0, 2.0]\n{a: 1.0}\n0.5\n",
+    );
+}
