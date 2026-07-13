@@ -315,8 +315,10 @@ are deterministic and byte-identical across all engines once seeded — draw in 
 `Shared`/lock, when you need reproducibility under concurrency.
 
 ### `std.regex`
-Returns use `struct Match { text: str, start: int, end: int, groups: List[str] }` (byte offsets;
-`groups` are capture groups 1..n; a non-participating optional group is `""`).
+Returns use `struct Match { text: str, start: int, end: int, groups: List[str] }` (**codepoint**
+offsets, like Python's `re` — so `subject[m.start:m.end] == m.text` holds on non-ASCII input, Chezzi
+slicing being codepoint-indexed; `groups` are capture groups 1..n; a non-participating optional group
+is `""`).
 `is_match(pattern, subject) -> Result[bool]` · `find(pattern, subject) -> Result[Option[Match]]` ·
 `find_all(pattern, subject) -> Result[List[Match]]` · `replace_all(pattern, subject, repl) -> Result[str]` ·
 `split(pattern, subject) -> Result[List[str]]`. A bad pattern is `Err`. Patterns are ordinary

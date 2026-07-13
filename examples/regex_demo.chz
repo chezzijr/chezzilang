@@ -12,7 +12,7 @@ match regex.is_match("[0-9]+", "abc123"):
             print("no digits")
     Err(e): print(e)
 
-# --- find: first match, with capture groups and byte offset ---
+# --- find: first match, with capture groups and codepoint offset ---
 match regex.find("([a-z]+)@([a-z]+)\\.com", "mail: ann@host.com done"):
     Ok(opt):
         match opt:

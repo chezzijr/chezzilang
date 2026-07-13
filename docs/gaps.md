@@ -202,17 +202,6 @@ sweep (13 bugs fixed, main `0741a0b`). Each is either an accepted design consequ
 documented-but-unusable surface, or a safe over-rejection. Recorded so they are decisions, not
 surprises — **re-read this before the JIT freeze**, since a JIT bakes in whatever is true at freeze time.
 
-### 2. `regex.Match.start` / `.end` are BYTE offsets, but slicing is codepoint-indexed
-`docs/stdlib.md` does say "(byte offsets)", so this is documented — but Chezzi has **no byte-indexed
-slice**, so on non-ASCII input these fields have *no correct use*:
-```chezzi
-s := "héllo"                  # regex.find("l+", s) -> Match{ text:"ll", start:3, end:5 }
-print(s[m.start:m.end])       # -> "lo"   WRONG (want "ll") — silently, no fault
-```
-Documented-but-unusable is worse than absent. Two coherent fixes: expose **codepoint** offsets (matches
-Python's `re`, which the module otherwise mirrors exactly), or drop the fields and keep only `.text`.
-Prefer codepoint offsets. Until then, `.text` is the only safe accessor.
-
 ### 3. Three over-rejections introduced by the Go-model int→float fix
 The wave-5 widening fix (untyped **constant** adapts; a typed int **value** never does) rejects three
 constructs that are *not* unsound — it errs safe, but it errs:

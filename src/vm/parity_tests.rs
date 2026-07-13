@@ -391,6 +391,34 @@ fn synthetic_struct_bare_ctor_on_import_parity() {
     assert_eq!(out, "yo3\n");
 }
 
+/// `Match.start`/`.end` are CODEPOINT offsets, so slicing the subject by them reproduces `.text` on
+/// non-ASCII input too (Chezzi slicing is codepoint-indexed; the regex crate's byte spans are
+/// converted at the native seam). Both engines must agree — they were consistently WRONG together
+/// before ("lo"), which is why parity alone never caught this.
+#[test]
+fn regex_offsets_are_codepoint_slicable_parity() {
+    let src = "import std.regex\n\
+                   s := \"héllo\"\n\
+                   match regex.find(\"l+\", s):\n\
+                   \x20   Ok(opt):\n\
+                   \x20       match opt:\n\
+                   \x20           Some(m):\n\
+                   \x20               print(s[m.start:m.end])\n\
+                   \x20               print(str(s[m.start:m.end] == m.text))\n\
+                   \x20           None: print(\"none\")\n\
+                   \x20   Err(e): print(e)\n";
+    let out = parity_entry(src);
+    assert_eq!(out, "ll\ntrue\n");
+    let t = TmpDir::new();
+    let path = t.write("main.chz", src);
+    let (mn_out, _e, mn_res, _) = run_file_parallel(&path, crate::native::HostConfig::default());
+    mn_res.expect("regex codepoint-offset program should run on the M:N engine");
+    assert_eq!(
+        mn_out, out,
+        "M:N diverged from serial on regex codepoint offsets"
+    );
+}
+
 /// Phase 4b — the whole regex SIGNATURE (the `native struct Match` + the 5 `native fn`s) now comes
 /// from the file-backed `std/regex.chz` (harvested into std.regex's ModuleSig via
 /// `harvest_native_module`), replacing BOTH the phase-4a companion stub and the hand-built
