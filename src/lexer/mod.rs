@@ -393,6 +393,9 @@ pub struct Lexer {
     /// so they can never become docs. The token stream is unaffected — this is a pure side table the
     /// parser consults for the contiguous comment run immediately above a declaration.
     doc_comments: Vec<DocComment>,
+    /// Memoized char index of the `|` of a resolved leading-`|>` continuation (see
+    /// [`Lexer::pipe_continues_next_line`]): scan a blank/comment run once, not once per line.
+    pipe_cont: Option<usize>,
 }
 
 impl Lexer {
@@ -415,6 +418,7 @@ impl Lexer {
             pending: VecDeque::new(),
             bracket_depth: 0,
             doc_comments: Vec::new(),
+            pipe_cont: None,
         }
     }
 
@@ -447,16 +451,38 @@ impl Lexer {
     }
 
     /// Non-consuming lookahead from `self.pos` (which sits just past a '\n'): does the next real
-    /// content begin with the two chars `|>`? Blank lines, indentation and comment-only lines are
-    /// skipped. Exactly `|>` — `|`, `||`, `|=` are not continuations.
-    /// ponytail: O(k²) chars for k blank/comment lines before the `|>` (re-scanned once per
-    /// consumed '\n'). Irrelevant at real file sizes; memoize only if a pathological file shows up.
-    fn pipe_continues_next_line(&self) -> bool {
+    /// content begin with the two chars `|>`, indented at least as deep as the block currently
+    /// open? Blank lines, indentation and comment-only lines are skipped. Exactly `|>` — `|`,
+    /// `||`, `|=` are not continuations.
+    ///
+    /// The indent floor keeps the offside rule intact: a `|>` line SHALLOWER than the open block
+    /// must close that block (a Dedent) rather than be silently absorbed into it — otherwise a
+    /// column-0 `|>` after an indented body would rewrite that body's last statement with no
+    /// diagnostic. Below the floor we return false and let the normal layout path run, so the
+    /// parser reports the stray `|>`. Indentation is spaces-only (`scan_indentation` rejects
+    /// tabs), so a tab-indented `|>` line is likewise not a continuation — it falls through to
+    /// that error.
+    ///
+    /// The resolved target is memoized: inside a continuation region `at_line_start` stays false,
+    /// so every blank/comment line's '\n' re-enters this lookahead. Without the memo a run of k
+    /// such lines costs O(k²) chars (a 50k-blank-line file lexed in ~9s); with it, each run is
+    /// scanned once.
+    fn pipe_continues_next_line(&mut self) -> bool {
+        match self.pipe_cont {
+            Some(t) if self.pos <= t => return true,
+            Some(_) => self.pipe_cont = None,
+            None => {}
+        }
         let mut i = self.pos;
-        while let Some(c) = self.chars.get(i) {
-            match c {
-                ' ' | '\t' | '\r' | '\n' => i += 1,
-                '#' => {
+        let mut line_start = self.pos; // index just past the most recent '\n'
+        loop {
+            match self.chars.get(i) {
+                Some(' ') | Some('\t') | Some('\r') => i += 1,
+                Some('\n') => {
+                    i += 1;
+                    line_start = i;
+                }
+                Some('#') => {
                     while self.chars.get(i).is_some_and(|c| *c != '\n') {
                         i += 1;
                     }
@@ -464,7 +490,15 @@ impl Lexer {
                 _ => break,
             }
         }
-        self.chars.get(i) == Some(&'|') && self.chars.get(i + 1) == Some(&'>')
+        if self.chars.get(i) != Some(&'|') || self.chars.get(i + 1) != Some(&'>') {
+            return false;
+        }
+        let indent = &self.chars[line_start..i];
+        if indent.iter().any(|c| *c != ' ') || indent.len() < *self.indents.last().unwrap() {
+            return false;
+        }
+        self.pipe_cont = Some(i);
+        true
     }
 
     /// Consume the current char and return it. Remember to advance `self.pos`.
@@ -2693,11 +2727,43 @@ mod tests {
         assert_eq!(line_of("print"), 6);
     }
 
-    /// Forward-progress tripwire: pathological input must terminate at Eof, never spin.
+    /// The offside rule still binds: a `|>` line SHALLOWER than the open block closes that block
+    /// (Dedent) instead of being absorbed into it — otherwise a column-0 `|>` after a function
+    /// body would silently rewrite that body's last statement.
+    #[test]
+    fn pipe_continuation_respects_the_indent_floor() {
+        // col-0 `|>` under an indented body: must dedent out, not continue `return 1`.
+        let ks = kinds("fn f() -> int:\n    return 1\n|> dbl()\n");
+        assert!(
+            ks.contains(&Token::Indent) && ks.contains(&Token::Dedent),
+            "a col-0 `|>` must close the block: {ks:?}"
+        );
+        // equal-indent `|>` inside a body IS a continuation (nothing to close)
+        let ks = kinds("fn f() -> int:\n    r := 1\n    |> dbl()\n    return r\n");
+        assert_eq!(
+            ks.iter().filter(|k| **k == Token::Indent).count(),
+            1,
+            "only the body's Indent: {ks:?}"
+        );
+        // tabs never indent (scan_indentation rejects them) → not a continuation either
+        assert!(tokenize("fn f() -> int:\n    r := 1\n\t|> dbl()\n").is_err());
+    }
+
+    /// Forward-progress tripwire: pathological input must terminate at Eof, never spin — and the
+    /// memoized lookahead must keep it LINEAR (this file lexed in ~9s before the memo landed).
     #[test]
     fn pipe_continuation_pathological_terminates() {
         let mut src = String::from("r := 5\n");
-        src.push_str(&"\n".repeat(10_000));
+        src.push_str(&"\n".repeat(200_000));
+        src.push_str("    |> dbl()\n");
+        let toks = tokenize(&src).unwrap();
+        assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
+
+        // the expensive variant: long comment lines (re-walked in full by an un-memoized scan)
+        let mut src = String::from("r := 5\n");
+        for _ in 0..50_000 {
+            src.push_str("    # filler comment line here\n");
+        }
         src.push_str("    |> dbl()\n");
         let toks = tokenize(&src).unwrap();
         assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));

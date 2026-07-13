@@ -2381,6 +2381,18 @@ The right side must be a call; `a |> f(x)` desugars to `f(a, x)`.
 can be written one step per line with no parentheses. A **trailing** `|>` (a line *ending* in `|>`)
 is **not** a continuation — it is a parse error. Only the exact `|>` continues (`|`, `||`, `|=` do not).
 
+The **offside rule still binds**: the `|>` line must be indented **at least as deep** as the block it
+continues. A `|>` line *shallower* than the open block closes that block, and is then a parse error —
+it is never absorbed back into the body it sits outside of:
+
+```chezzi
+fn f() -> int:
+    r := 1
+    |> dbl()       # OK — same indent as `r := 1`, and deeper is fine too
+    return r
+|> dbl()           # error: unexpected '|>' — column 0 is outside f's body
+```
+
 ```chezzi
 import std.iter
 

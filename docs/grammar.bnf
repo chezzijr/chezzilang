@@ -463,6 +463,9 @@
 # (`xs\n    |> f()\n    |> g()`) reaches the parser as the single token stream `xs |> f() |> g()`
 # and needs no production of its own. A TRAILING `|>` (line ending in `|>`) is NOT a continuation:
 # it stays a parse error. Only the exact two-char `|>` continues (`|`, `||`, `|=` do not).
+# The offside rule still binds: the `|>` line must be indented at least as deep as the currently
+# open block. A SHALLOWER `|>` line dedents out of that block (and is then a parse error) — it is
+# never absorbed into the body it sits outside of.
 <pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
 <pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
 <orExpr>   ::= <coalesceExpr> | <orExpr> "OR" <coalesceExpr>
