@@ -4274,6 +4274,36 @@ fn rebinding_from_imported_global_rejected() {
             "import COUNT, LST from lib.st\nLST.push(7)\nprint(COUNT)\nfn f():\n    COUNT := 1\n    COUNT = 2\n    print(COUNT)\nf()\n",
         ),
     ]);
+    // …and RE-DECLARING the name at MODULE scope (`:=`, which `declare` sanctions as a fresh, mutable
+    // binding) hands the name back to the module: the import bind is gone, so assigning is legal
+    // again. The gate must key on the CURRENT binding, not on the name having ever been imported.
+    files_ok(&[
+        st,
+        (
+            "main.chz",
+            "import COUNT from lib.st\nCOUNT := COUNT + 1\nCOUNT = COUNT + 1\nprint(COUNT)\n",
+        ),
+    ]);
+}
+
+/// `nil` is a value-builtin resolved through the scope stack, so a module bound to it wins in
+/// EXPRESSION position and the `nil` literal silently becomes a module — the exact Bug-4 failure
+/// mode. It is a rejected module bind (un-aliased AND aliased), even though it stays a legal
+/// from-import ALIAS target (`import x as nil` binds a value, and a value still works as a value).
+#[test]
+fn module_bind_named_nil_rejected() {
+    let m = ("lib/nil.chz", "fn f() -> int:\n    return 1\n");
+    files_reject(
+        &[m, ("main.chz", "import lib.nil\nx := nil\nprint(x)\n")],
+        "reserved (builtin)",
+    );
+    files_reject(
+        &[
+            ("lib/geo.chz", "struct Point:\n    x: int\n"),
+            ("main.chz", "import lib.geo as nil\nprint(1)\n"),
+        ],
+        "reserved (builtin)",
+    );
 }
 
 /// Bug 3 — a module-qualified GENERIC fn whose type param appears only in the return type: the

@@ -995,14 +995,15 @@ impl Checker {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                // A whole-module bind lands in the VALUE namespace, where it BEATS the reserved
-                // builtin/ctor of the same name in EXPRESSION position (`import std.str` used to make
-                // `str(5)` fail with the confusing `module str is not callable`; `import lib.geo as Ok`
-                // kills the `Ok(...)` variant ctor). So the BOUND name — the alias, or the last path
-                // segment when un-aliased — is rejected when reserved; that is what makes the shadowing
-                // impossible. The module stays usable under a non-reserved alias, which the un-aliased
-                // diagnostic names. `is_reserved_module_bind` = reserved CALLABLE + reserved TYPE names
-                // (`nil` carved out) + the builtin variant ctors (`Ok`/`Err`/`Some`/`None`).
+                // A whole-module bind lands in the VALUE namespace, where it BEATS a same-named
+                // builtin/ctor in EXPRESSION position (`import std.str` used to make `str(5)` fail with
+                // the confusing `module str is not callable`; `import lib.geo as Ok` kills the `Ok(...)`
+                // variant ctor). So a RESERVED bound name — the alias, or the last path segment when
+                // un-aliased — is REJECTED here; the module stays usable under a non-reserved alias,
+                // which the un-aliased diagnostic names. `is_reserved_module_bind` = reserved CALLABLE +
+                // reserved TYPE names + `nil` + the builtin variant ctors (`Ok`/`Err`/`Some`/`None`).
+                // (A collision with a USER-declared ctor of the same name is a separate, unhandled
+                // residual — see `is_reserved_module_bind`'s doc.)
                 if crate::checker::is_reserved_module_bind(&name) {
                     let msg = if alias.is_some() {
                         format!("import alias '{name}' is reserved (builtin)")
@@ -1200,10 +1201,15 @@ impl Checker {
                     // via a redundant self-rename (`as Shared`), so only a genuine RENAME to a reserved
                     // name is gated here. Fresh non-reserved aliases (`import timer as t2`) are inert to
                     // this check and fall through to the specialized rename-rejection arms below.
-                    if alias
-                        .as_ref()
-                        .is_some_and(|a| a != member && crate::checker::is_reserved_module_bind(a))
-                    {
+                    // A from-import alias binds a VALUE, so `nil` stays legal here (a value still works
+                    // as a value — `is_reserved_alias_target`'s carve-out); only the MODULE bind adds
+                    // it. The builtin variant ctors ARE rejected (an alias to `Ok` would kill the
+                    // ctor in expression position).
+                    if alias.as_ref().is_some_and(|a| {
+                        a != member
+                            && (crate::checker::is_reserved_alias_target(a)
+                                || crate::checker::is_builtin_variant(a))
+                    }) {
                         self.error(
                             imp.span,
                             format!("import alias '{bind}' is reserved (builtin)"),
@@ -1698,6 +1704,14 @@ impl Checker {
         // mutable binding — clear any loop-var mark so assignment to it isn't wrongly rejected.
         if let Some(set) = self.loop_vars.last_mut() {
             set.remove(name);
+        }
+        // Same rule for a `from`-imported global: re-declaring it at MODULE scope (`COUNT := COUNT + 1`)
+        // hands the name back to this module, so the from-import rebind gate (`imported_values`, keyed
+        // by bare name) must stop firing — the binding it names is gone. Module scope only (the sole
+        // scope the gate consults); a fn-local shadow leaves the module binding intact. `bind_import`
+        // inserts AFTER its own `declare`, so its entry survives.
+        if self.scopes.len() == 1 {
+            self.imported_values.remove(name);
         }
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {

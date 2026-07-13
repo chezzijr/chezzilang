@@ -3328,6 +3328,19 @@ fn parity_qualified_generic_fn_turbofish() {
     assert_eq!(assert_parity_file(&[geo, main], "main.chz"), "[1]\n[]\n");
 }
 
+/// A from-imported global RE-DECLARED at module scope (`:=`) is the module's OWN binding — assigning
+/// it is legal and runs on both engines (the rebind gate must not fire on a name the import no longer
+/// owns).
+#[test]
+fn parity_from_import_then_module_scope_redeclare() {
+    let st = ("st.chz", "COUNT := 0\n");
+    let main = (
+        "main.chz",
+        "import COUNT from st\nCOUNT := COUNT + 1\nCOUNT = COUNT + 1\nfn main():\n    print(COUNT)\nmain()",
+    );
+    assert_eq!(assert_parity_file(&[st, main], "main.chz"), "2\n");
+}
+
 /// Bug 4 acceptance: the std string module is `std.string`, so importing it UN-aliased does not
 /// bind the reserved name `str` — the global `str()` ctor and the qualified module fn both work in
 /// the SAME module.

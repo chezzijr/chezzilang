@@ -2651,9 +2651,10 @@ import lib.geo as Ok        # error: import alias 'Ok' is reserved (builtin)
 import lib.int as ints      # ok — and `int("5")` keeps working
 ```
 
-The reserved set is the builtin callables + reserved type names + the builtin variant ctors
+The reserved set is the builtin callables + reserved type names + `nil` + the builtin variant ctors
 (`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
-reserved scalar/ctor name.)
+reserved scalar/ctor name.) A collision with a *user-declared* type of the same name is not covered by
+this rule — name your modules and your types apart.
 
 **`from M import X` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
 time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
@@ -2666,6 +2667,7 @@ import COUNT, LST from lib.st
 LST.push(7)     # ok — same heap object as lib.st's LST
 COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' (a from-imported
                 #        global is a snapshot copy — assign through the module, or use a Shared/Ref)
+COUNT := 99     # ok — a fresh binding this module owns; `COUNT = 100` after it is fine too
 ```
 
 **Types are module-scoped** (like functions — exported by default, no `pub`; visible elsewhere only

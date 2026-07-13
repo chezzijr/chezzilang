@@ -266,13 +266,17 @@ pub(super) fn is_builtin_variant(name: &str) -> bool {
 
 /// True iff `name` may NOT be the bound name of a module import — ALIASED (`import lib.geo as Ok`)
 /// or UN-aliased (the last path segment: `import lib.int`). A module bind lands in the VALUE
-/// namespace, where it beats the reserved builtin/ctor in EXPRESSION position (`import std.str` used
-/// to make `str(5)` fail with "module str is not callable"). Rejecting the reserved bound name — the
-/// only names that can be beaten — is what makes such shadowing impossible; the module stays usable
-/// under an alias (`import lib.int as ints`). Covers reserved CALLABLES + reserved TYPE names
-/// (`is_reserved_alias_target`, `nil` carved out there) plus the builtin variant ctors.
+/// namespace, where it beats a same-named builtin/ctor in EXPRESSION position (`import std.str` used
+/// to make `str(5)` fail with "module str is not callable"). A RESERVED bound name is therefore
+/// rejected — the module stays usable under a non-reserved alias (`import lib.int as ints`).
+/// Covers reserved CALLABLES + reserved TYPE names (`is_reserved_alias_target`) + `nil` + the builtin
+/// variant ctors. `nil` is carved out of `is_reserved_alias_target` because a from-import ALIAS binds
+/// a VALUE (and a value still works as a value); a MODULE is not a value, so `import lib.nil` /
+/// `import m as nil` would silently retype the `nil` literal — reject it here.
+/// RESIDUAL (out of scope, unchanged by this gate): a module bind colliding with a USER struct/enum
+/// ctor of the same name (`import lib.Point` + `struct Point`) still wins in expression position.
 pub(super) fn is_reserved_module_bind(name: &str) -> bool {
-    is_reserved_alias_target(name) || is_builtin_variant(name)
+    is_reserved_alias_target(name) || name == "nil" || is_builtin_variant(name)
 }
 
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
