@@ -2019,20 +2019,25 @@ impl Vm {
                             );
                         }
                         // std.str: pad to `width` CODEPOINTS; never shrinks (a `width` at or below
-                        // the current length — including a negative one — returns `s` unchanged).
-                        // Kept in i64 and clamped BEFORE the `as usize` cast: a negative `need`
-                        // would otherwise wrap into a colossal `take`.
-                        let need = width - s.chars().count() as i64;
-                        if need <= 0 {
+                        // the current length — including `i64::MIN` — returns `s` unchanged). The
+                        // early-out comes BEFORE the subtraction, so `need` can never overflow i64
+                        // (a `width - len` on a negative `width` would panic in debug and wrap in
+                        // release) nor wrap into a colossal `take` at the `as usize` cast.
+                        let len = s.chars().count() as i64;
+                        if width <= len {
                             return Ok(self.alloc_str(s));
                         }
-                        let need = need as usize;
+                        let need = (width - len) as usize;
                         // Guard the allocation the same way `repeat` does — a huge `width` must be
-                        // a recoverable fault, not an OOM/abort. Size in BYTES using the widest
-                        // fill char (`fill` is non-empty, so `max()` always yields).
-                        let widest = fill.chars().map(char::len_utf8).max().unwrap_or(1);
-                        match widest
-                            .checked_mul(need)
+                        // a recoverable fault, not an OOM/abort. Size the pad in BYTES EXACTLY:
+                        // whole cycles of `fill` plus the byte length of its first `rem` chars (an
+                        // over-estimate would spuriously fault a pad that actually fits).
+                        let fill_cp = fill.chars().count(); // non-zero (empty `fill` rejected above)
+                        let rem: usize =
+                            fill.chars().take(need % fill_cp).map(char::len_utf8).sum();
+                        match (need / fill_cp)
+                            .checked_mul(fill.len())
+                            .and_then(|pad| pad.checked_add(rem))
                             .and_then(|pad| pad.checked_add(s.len()))
                             .filter(|&t| t <= isize::MAX as usize)
                         {

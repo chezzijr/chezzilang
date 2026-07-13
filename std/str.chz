@@ -33,9 +33,11 @@ fn reverse(s: str) -> str:
 fn pad_left(s: str, width: int, fill: str) -> str:
     if fill.len() == 0:
         panic("pad_left: fill must not be empty")
-    need := width - s.len()
-    if need <= 0:
+    # Early-out BEFORE the subtraction: Chezzi `-` is checked, so `width - s.len()` on a very
+    # negative `width` (down to i64::MIN) would fault instead of returning `s` unchanged.
+    if width <= s.len():
         return s
+    need := width - s.len()
     pad := ""
     while pad.len() < need:
         pad = pad + fill

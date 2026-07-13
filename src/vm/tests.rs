@@ -11401,6 +11401,11 @@ fn pad_left_multi_char_fill_is_exactly_width() {
         (r#"print("7".pad_left(3, "0"))"#, "007\n"),
         (r#"print("12345".pad_left(3, "0"))"#, "12345\n"),
         (r#"print("a".pad_left(-5, "0"))"#, "a\n"),
+        // `width = i64::MIN` (reachable from safe source) must ALSO just return `s` — the `need`
+        // subtraction must not overflow (debug: host panic; release: wraps to a huge positive
+        // `need` and bogusly faults `string pad capacity overflow`).
+        (r#"print("ab".pad_left(-9223372036854775808, "x"))"#, "ab\n"),
+        (r#"print("".pad_left(-9223372036854775808, "x"))"#, "\n"),
     ] {
         assert_eq!(
             run_capture(src).expect("serial"),

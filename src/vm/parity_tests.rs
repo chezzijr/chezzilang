@@ -3170,6 +3170,9 @@ fn parity_std_str_pad_left_matches_native_method() {
         (r#""7", 3, "0""#, "007"),
         (r#""12345", 3, "0""#, "12345"),
         (r#""a", -5, "0""#, "a"),
+        // `width = i64::MIN`: the free fn must return `s` unchanged like the native method — no
+        // `integer overflow in Sub` fault (Chezzi `-` is checked), no divergence from the alias.
+        (r#""ab", -9223372036854775808, "x""#, "ab"),
         (r#""é", 3, "ü""#, "üüé"),
         (r#""a", 4, "日本""#, "日本日a"),
     ] {
