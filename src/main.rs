@@ -303,29 +303,36 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
 
-    // Print whatever the program emitted before any error, then the error itself. The native std
+    // The CLI STREAMS: the VM writes each `print` straight to the real stdout as it happens (see
+    // `HostConfig::stream`), so a prompt appears before its `read_line`, a long-running program is
+    // not silent, and a spawned task's log is visible before its nursery joins. The lib helpers keep
+    // the buffered sink (the parity oracle), so `out`/`err` come back empty here. The native std
     // modules read args/env/stdin from a process-backed config.
     let p = std::path::Path::new(&path);
-    let cfg = native::HostConfig::from_process(prog_args);
-    let (output, errout, errored, exit_code) = {
-        let (out, err, result, code) =
+    let mut cfg = native::HostConfig::from_process(prog_args);
+    cfg.stream = true;
+    let (errored, exit_code) = {
+        let (_out, _err, result, code) =
             vm::run_file_with_entry(p, cfg, parallel, entry_fn.as_deref(), root_override.clone());
         (
-            out,
-            err,
             result
                 .err()
                 .map(|e| vm::format_trace(&e.message, e.span, &e.trace)),
             code,
         )
     };
-    print!("{output}");
-    // Flush program stderr (std.io.eprint output) to the real stderr.
-    eprint!("{errout}");
+    // Rust's `Stdout` is a `LineWriter`: flush before ANY exit path, so a trailing `print(…, end="")`
+    // or an `os.exit` mid-line does not lose its bytes. `BrokenPipe` is swallowed, never a panic.
+    let flush = || {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    };
     // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
     if let Some(code) = exit_code {
+        flush();
         return ExitCode::from(code as u8);
     }
+    flush();
     match errored {
         None => ExitCode::SUCCESS,
         Some(msg) => {

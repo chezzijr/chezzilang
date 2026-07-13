@@ -180,8 +180,9 @@ impl Vm {
                                 parts.push(self.stringify(v, span, 0)?);
                             }
                             self.stack.truncate(at);
-                            self.out.push_str(&parts.join(" "));
-                            self.out.push('\n');
+                            let mut line = parts.join(" ");
+                            line.push('\n');
+                            self.emit_out(&line);
                             Ok(Value::Nil)
                         }
                         "ord" => self.builtin_ord(&args, span),

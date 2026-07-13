@@ -3144,12 +3144,22 @@ impl crate::native::Host for VmHost<'_> {
         }
     }
     fn write_stdout(&mut self, s: &str) {
-        self.vm.out.push_str(s);
+        self.vm.emit_out(s);
     }
     fn write_stderr(&mut self, s: &str) {
-        self.vm.stderr.push_str(s);
+        self.vm.emit_err(s);
+    }
+    fn flush_stdout(&mut self) {
+        if self.vm.host.stream {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
     }
     fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        // Flush first: Rust's `Stdout` is a `LineWriter`, so a `print("name? ", end="")` prompt sits
+        // unflushed in its buffer. Without this the prompt would only appear AFTER the blocking read
+        // returned — the whole point of the interactive CLI.
+        self.flush_stdout();
         self.vm.host.stdin.read_line()
     }
     fn os_args(&self) -> Vec<String> {

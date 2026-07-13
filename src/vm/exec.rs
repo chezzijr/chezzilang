@@ -4,6 +4,37 @@
 use super::*;
 
 impl Vm {
+    /// The stdout sink. DEFAULT (`host.stream == false`) = append to the captured `out` buffer:
+    /// byte-identical to what every test helper, embedder and the serial-vs-M:N parity oracle has
+    /// always seen. STREAM (`chezzi run` only) = ONE locked write straight to the process's real
+    /// stdout, so output appears when it happens and a `print` is line-atomic across tasks. I/O
+    /// errors (notably `BrokenPipe` — `chezzi run x.chz | head -1`) are swallowed, never a panic
+    /// like `print!`. The caller must have released any GC/stringify borrow first: the lock is held
+    /// only for this write, never across user code.
+    pub(super) fn emit_out(&mut self, s: &str) {
+        if !self.host.stream {
+            self.out.push_str(s);
+            return;
+        }
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        let _ = lock.write_all(s.as_bytes());
+    }
+
+    /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE lock (so a task's `print`
+    /// and `eprint` can reorder relative to each other, exactly like Python's).
+    pub(super) fn emit_err(&mut self, s: &str) {
+        if !self.host.stream {
+            self.stderr.push_str(s);
+            return;
+        }
+        use std::io::Write;
+        let stderr = std::io::stderr();
+        let mut lock = stderr.lock();
+        let _ = lock.write_all(s.as_bytes());
+    }
+
     pub(super) fn new(program: Arc<Program>) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         let method_ic = vec![MethodIcSite::EMPTY; program.method_ic_sites as usize];

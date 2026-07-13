@@ -530,8 +530,7 @@ impl Vm {
                 // escape they never started → report them cancelled (parity with the lazy arm below and
                 // with coop), rather than silently dropping them. (Cross-nursery flat scheduler — #3.)
                 if !nursery.is_empty() {
-                    self.out
-                        .push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                    self.emit_out(&crate::runtime::pending_cancel_report(nursery.len()));
                 }
                 continue;
             }
@@ -542,8 +541,7 @@ impl Vm {
                 Some(scope) => self.abort_eager_nursery(scope),
                 None => {
                     if !nursery.is_empty() {
-                        self.out
-                            .push_str(&crate::runtime::pending_cancel_report(nursery.len()));
+                        self.emit_out(&crate::runtime::pending_cancel_report(nursery.len()));
                     }
                 }
             }
@@ -2627,6 +2625,11 @@ impl Vm {
             args: self.host.args.clone(),
             env: self.host.env.clone(),
             stdin: crate::native::Stdin::Empty,
+            // Streaming CLI: an M:N worker writes its task's output straight to the process stdout
+            // as it prints (line-atomic), instead of buffering it until the nursery joins — which for
+            // a server's nursery is never. In buffered (test/embedder) mode this is false and the
+            // per-task buffer + task-order flush is untouched.
+            stream: self.host.stream,
         };
         worker
     }

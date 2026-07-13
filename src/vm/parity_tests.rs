@@ -3287,6 +3287,21 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
     assert_eq!(out, "got alpha\neof\n");
 }
 
+/// `io.input(prompt)` = print the prompt (no newline) + flush + `read_line`. Under the BUFFERED sink
+/// (every test helper + embedder) `flush` is a no-op and the prompt simply lands in the captured
+/// `out` — both engines identical. Also pins that neither fn is in `is_blocking` (an offloaded call
+/// would hit `OffloadHost`'s stdio `unreachable!`).
+#[test]
+fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::Lines(["ada".to_string()].into_iter().collect()),
+        ..Default::default()
+    });
+    assert_eq!(out, "p: got ada\n");
+}
+
 #[test]
 fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
     let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";

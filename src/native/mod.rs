@@ -82,6 +82,11 @@ pub struct HostConfig {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub stdin: Stdin,
+    /// STREAM the program's stdout/stderr straight to the process's real streams (one locked write
+    /// per `print` → line-atomic), instead of accumulating into the VM's captured buffers. Only the
+    /// `chezzi run` CLI sets this; `Default` = `false` = the BUFFERED sink, which is what every test
+    /// helper and every embedder gets — and what keeps the serial-vs-M:N parity oracle byte-identical.
+    pub stream: bool,
 }
 
 impl HostConfig {
@@ -92,6 +97,7 @@ impl HostConfig {
             args,
             env: std::env::vars().collect(),
             stdin: Stdin::Real,
+            stream: false,
         }
     }
 }
@@ -252,6 +258,9 @@ pub trait Host {
     /// Read one line from the injected stdin source; `None` at EOF. The trailing newline is
     /// stripped.
     fn read_line(&mut self) -> Result<Option<String>, HostError>;
+    /// Flush the process's real stdout (streaming CLI). A no-op for a buffered/captured host, which
+    /// is why it is defaulted: the mock hosts need no edit.
+    fn flush_stdout(&mut self) {}
 
     /// The program arguments (injected; defaults to empty).
     fn os_args(&self) -> Vec<String>;

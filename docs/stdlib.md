@@ -241,9 +241,29 @@ Constants: `math.pi`, `math.e`.
 |----------|-----------|-------|
 | `print` | `(s: str) -> nil` | stdout + newline. |
 | `eprint` | `(s: str) -> nil` | stderr + newline. |
-| `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
+| `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). Flushes stdout first, so a `print(…, end="")` prompt is visible before the read. |
+| `flush` | `() -> nil` | Flush this process's stdout. A no-op when output is captured (tests / embedders). |
+| `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
+
+**Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
+its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned
+task's line is visible before its nursery joins). Three rules follow:
+
+- One `print(...)` call is **ONE locked write → line-atomic**: two tasks can never garble a single
+  `print`'s output. But `print(x, end="")` fragments from two tasks **can** interleave mid-line
+  (Python-identical).
+- Concurrent tasks' prints interleave **nondeterministically** — cross-task order is NOT a guarantee, on
+  either engine. Want ordered output from concurrency? **Join and print the results yourself** (as in
+  Python/Go/Rust). (The per-task buffer + task-order flush is a *test-harness* property of the captured
+  sink the lib helpers use — not a user-facing guarantee.)
+- stdout and stderr are **separately locked**, so a task's `print` and `eprint` may reorder relative to
+  each other (Python-identical).
+
+A **spawned task's stdin is empty** (a single consumable stream is not shared across workers), so
+`io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` on the M:N engine. Read stdin from
+the entry task.
 
 ### `std.os`
 | Function | Signature | Notes |

@@ -830,3 +830,22 @@ gaps, no regression. The cell cost lands **only on captured locals** (one heap a
 per captured local); a capture-heavy workload would pay it, but the suite has no such bench to isolate
 the delta. A later escape-analysis lever could unbox a cell that provably never escapes its frame.
 Full `--lib` **3221 green**, both-engine parity clean, conformance **7/7**, clippy `-D warnings` clean.
+
+## Interactive CLI — streaming stdout — 2026-07-13 (bench-neutral; print-in-a-loop pays a real cost)
+
+`chezzi run` now writes each `print` straight to the process's real stdout (one locked write per
+`print`) instead of accumulating into a `String` flushed once at exit. Rust's `Stdout` is a
+`LineWriter`, so that is **one `write` syscall per line** where it used to be a `push_str`.
+
+Tracked suite (same machine, `hyperfine`, `benches/run.chz`, before → after, Chezzi ms):
+`fib` 262.6 → 260.7 · `str` 176.4 → 175.4 · `primes` 658.6 → 645.0 · `loop` 979.8 → 998.0 ·
+`list` 398.5 → 410.0 · `struct` 455.8 → 463.2 · `poly_method` 1335 → 1329 · `map` 153.0 → 156.8 ·
+`empty` 1.9 → 1.9. **All within run-to-run noise** — every bench prints exactly once, so the suite
+cannot see the change.
+
+The cost is real where it exists, and it is not hidden: an ad-hoc **200 000-line print loop**
+(`for i in range(200000): print("line", i)`, stdout → `/dev/null`) goes **0.048 s → 0.078 s (~1.6×
+slower)**. That is the price of output that actually appears when it happens. A `BufWriter` would erase
+it — and would also break "a killed/hung program retains the output it already produced", which is one
+of the milestone's acceptance tests. The captured (test/embedder) sink is untouched: it still
+`push_str`s, so the parity suite's cost is unchanged.

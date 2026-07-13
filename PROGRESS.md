@@ -4732,6 +4732,24 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Interactive CLI — `chezzi run` STREAMS stdout; the buffered sink stays for tests (2026-07-13).**
+  `src/main.rs` used to capture the whole run into a `String` and `print!` it once, after the VM
+  returned: a prompt never appeared before its `read_line`, a hung/killed program printed NOTHING, a
+  long-running program was silent until exit, and a spawned task's log was invisible until its nursery
+  joined (for a server: never). Now the stdout/stderr sink is selected by `HostConfig::stream` (default
+  `false`): **every lib helper, golden and parity test keeps the BUFFERED sink unchanged** (per-task
+  buffers + task-order flush → byte-identical serial-VM == M:N-VM; zero test edits), while `chezzi run`
+  sets `stream = true` and each `print` becomes ONE locked write to the real stdout (line-atomic across
+  tasks; `BrokenPipe` swallowed, never a panic). In stream mode the per-task buffers just stay empty, so
+  the scheduler is untouched. `read_line` flushes stdout first (that is what makes a `print(…, end="")`
+  prompt appear). New `std.io` surface: **`flush()`** and **`input(prompt)`** (= print prompt, flush,
+  read line → `Option[str]`). The task-order flush is now documented as a **test-harness** property, not
+  a user guarantee: cross-task print order is nondeterministic on both engines (Python/Go/Rust-identical);
+  join and print the results yourself if you want order. Perf: `benches/run.chz` unmoved (all within
+  noise); an ad-hoc 200k-line print loop goes **0.048 s → 0.078 s** (~1.6×, one write syscall per line —
+  `Stdout` is a `LineWriter`; a `BufWriter` would hide it but break "a killed program retains its
+  output"). New real-binary suite `tests/interactive.rs` (11 tests, both engines).
+
 - **`regex.Match.start`/`.end` are now CODEPOINT offsets (observable stdlib behavior change).** They
   were the `regex` crate's raw **byte** offsets while Chezzi slicing/indexing is codepoint-based and
   there is no byte-indexed slice — so on non-ASCII input `s[m.start:m.end]` silently produced the

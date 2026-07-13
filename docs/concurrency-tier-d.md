@@ -306,7 +306,11 @@ Channel is a cross-nursery wakeup (handlers reach clients via sockets, which wor
 
 - **Serial engine frozen** — D1–D6 are `--parallel`-only; the serial `--serial` VM stays the parity oracle. Run
   the serial-vs-M:N sequential-subset parity suite every phase.
-- **Decision F** — output flushed in task order on join; deterministic transcript despite concurrent
+- **Decision F** — *(SUPERSEDED FOR THE CLI, 2026-07-13 — Interactive CLI milestone: `chezzi run` STREAMS,
+  so cross-task output order is nondeterministic and a print is line-atomic. Everything below still
+  describes the BUFFERED sink, which every test helper / golden / parity run uses — it remains the
+  byte-identical serial-vs-M:N oracle. Archival design record; do not read it as a user guarantee.)*
+  Output flushed in task order on join; deterministic transcript despite concurrent
   execution. All fault-free goldens stay byte-identical. The terminal (lowest-index propagating) fault
   ALSO flushes its buffered output at its task-order slot so a faulting task's partial output is not
   dropped; higher-index racy faults and `Cancelled` still drop (no deterministic slot position). This

@@ -990,8 +990,11 @@ impl Vm {
             parts.push(self.stringify(v, span, 0)?);
         }
         self.stack.truncate(at);
-        self.out.push_str(&parts.join(" "));
-        self.out.push('\n');
+        // ONE write (body + newline joined): in stream mode that is ONE locked write → a `print` is
+        // line-atomic across tasks. Byte-identical in buffered mode.
+        let mut line = parts.join(" ");
+        line.push('\n');
+        self.emit_out(&line);
         self.push(Value::Nil);
         Ok(())
     }
@@ -1012,8 +1015,9 @@ impl Vm {
             parts.push(self.stringify(v, span, 0)?);
         }
         self.stack.truncate(at);
-        self.out.push_str(&parts.join(&sep));
-        self.out.push_str(&end);
+        let mut line = parts.join(&sep);
+        line.push_str(&end);
+        self.emit_out(&line);
         self.push(Value::Nil);
         Ok(())
     }
