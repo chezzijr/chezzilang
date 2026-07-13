@@ -3239,7 +3239,17 @@ impl Compiler {
                 fc.emit(binary_op(*op), expr.span);
             }
             ExprKind::Range { .. } => {
-                // The interpreter only evaluates ranges inside `for`; a bare range has no value.
+                // A bare range has no runtime value: it is lowered ONLY as a `for`/comprehension
+                // iterable (a counting loop) or a slice receiver (materialize + slice), none of
+                // which route through here.
+                //
+                // DEFENSIVE BACKSTOP — unreachable from a check-clean program. The checker rejects
+                // every value use of a range up front (`RANGE_NOT_A_VALUE`, checker/pattern.rs),
+                // so its accepted set is now a subset of what this compiler can lower; that fix is
+                // what stops this error from surfacing at RUN time on a program `chezzi check`
+                // called clean. It stays because the compiler is also driven WITHOUT the checker:
+                // synthesized ASTs (difftest / panicfuzz) and the VM test helpers `run_capture` /
+                // `run_capture_parallel` skip type-checking entirely.
                 return Err(CompileError {
                     message: "a range can only be used as the iterable of a `for` loop".to_string(),
                     span: expr.span,

@@ -1,3 +1,4 @@
 # rule: rangeExpr
 fn main():
-    r := 0..10
+    for i in 0..10:
+        print(i)

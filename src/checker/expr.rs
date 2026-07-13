@@ -1337,10 +1337,11 @@ impl Checker {
                 }
                 Some(Ty::Str)
             }
-            // `list(it)` → a list from ANY for-iterable (list/set/str/bytes/bytearray/map-keys/range/
-            // Iterator). The element type flows through `iter_elem` — the single source of truth for
-            // "what `for x in X` accepts". The argument is REQUIRED: an empty list is the `[]` literal
-            // (zero args can't infer T).
+            // `list(it)` → a list from ANY iterable VALUE (list/set/str/bytes/bytearray/map-keys/
+            // Iterator). The element type flows through `iter_elem`. NB a bare RANGE is not one: it
+            // has no runtime value, so `List(0..3)` is rejected (see `RANGE_NOT_A_VALUE`) — the
+            // `range(a, b)` builtin is the materializer, and `List(range(0, 3))` works. The argument
+            // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
             "List" => {
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type is refined from the expected type / first use (mirrors `Set()`), and
@@ -1402,9 +1403,10 @@ impl Checker {
             }
             "Set" => {
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
-                // later use, like `{}` for maps); `Set(it)` → a set from ANY for-iterable (broadened
-                // from list-only), deduped. The element type flows through `iter_elem`; it must be
-                // Hashable. With a turbofish AND an iterable, elements are checked against `T`.
+                // later use, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
+                // (broadened from list-only), deduped. The element type flows through `iter_elem`;
+                // it must be Hashable. A bare RANGE is not a value, so `Set(0..3)` is rejected —
+                // use `Set(range(0, 3))`. With a turbofish AND an iterable, elements check against `T`.
                 let targ_elem = match targs {
                     [] => None,
                     [t] => Some(t.clone()),

@@ -7716,3 +7716,49 @@ print(w[0])
         "9\nset 1\na\n",
     );
 }
+
+/// A range is not a value — but its three SANCTIONED lowerings (`for` iterable, comprehension
+/// clause, slice receiver) and the `match` range pattern must still RUN, byte-identically, on both
+/// engines. These helpers SKIP the checker, so this pins the COMPILER half of the invariant: the
+/// checker now rejects exactly what the compiler cannot lower, and everything below still lowers.
+/// Also pins the diagnostic's hint as TRUE: `range(a, b)` really does materialize a `List[int]`.
+#[test]
+fn range_sanctioned_positions_run_on_both_engines() {
+    let src = "
+fn main():
+    total := 0
+    for i in 0..5:
+        total = total + i
+    print(total)
+    print([i for i in 0..3])
+    print([i for i in 0..10 if i % 2 == 0])
+    print((0..10)[::2])
+    print((0..10)[1:8:3])
+    print((0..5)[::-1])
+    match 3:
+        1..5: print(\"in\")
+        _: print(\"out\")
+    print(range(0, 3))
+    print(Set(range(0, 3)).len())
+main()
+";
+    assert_parity(src);
+    assert_eq!(
+        vm_outcome(src),
+        Ok("10\n[0, 1, 2]\n[0, 2, 4, 6, 8]\n[0, 2, 4, 6, 8]\n[1, 4, 7]\n[4, 3, 2, 1, 0]\nin\n[0, 1, 2]\n3\n".to_string())
+    );
+}
+
+/// The bug: `x := 0..3` used to type-check clean and then die in the COMPILER, so `print("before")`
+/// never ran (a compile error surfaced at run time, zero output, exit 1). The checker now rejects
+/// it, but the compiler keeps its rejection as a defensive backstop — unreachable from a
+/// check-clean program, yet still guarding these checker-SKIPPING helpers and synthesized ASTs.
+#[test]
+fn bare_range_value_still_rejected_by_the_compiler_backstop() {
+    for engine in [vm_outcome, parallel_outcome] {
+        let err =
+            engine("fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\nmain()\n")
+                .expect_err("a bare range has no runtime value");
+        assert!(err.contains("range can only be used"), "got: {err}");
+    }
+}

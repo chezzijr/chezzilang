@@ -872,6 +872,15 @@ for i in range(10, 0, -1):   # 10, 9, 8, … , 1
 print(range(0, 10, 2))       # [0, 2, 4, 6, 8]   — by-N
 print((0..10)[::2])          # [0, 2, 4, 6, 8]   — a range literal is sliceable like a list
 
+# A range is NOT a value: `a..b` is a syntactic form legal ONLY as the iterable of a `for` loop or
+# comprehension, as a slice receiver, or as a `match` pattern. It is lazy (`for i in 0..10000000000`
+# never materializes), so it has no runtime representation to bind, print, index, or pass along —
+# any other use is a TYPE ERROR at `chezzi check`. Use `range(a, b)` to materialize a `List[int]`:
+#   x := 0..3          # error: a range is only valid as the iterable of a `for` loop or …
+#   List(0..3)         # error (same) — the ctors take an iterable VALUE, and a range isn't one
+xs := range(0, 3)            # [0, 1, 2]         — the materializing escape hatch
+print(Set(range(0, 3)))      # a real List[int], so every container ctor / list op accepts it
+
 for item in items:     # iterate a list
     print(item)
 
@@ -1044,7 +1053,9 @@ omitted step defaults to `1`. A `step` of `0` faults (`slice step cannot be zero
 is unchanged — it stays the **range** used by `for i in 0..10` and match range-patterns (`0..10 =>`);
 only the subscript-slice form moved from `[a..b]` to `[a:b]`. A **range literal is sliceable** like a
 list: `(0..10)[::2]` materializes the (ascending) range then slices it with the same `start:end:step`
-machinery (`(0..5)[::-1]` → `[4, 3, 2, 1, 0]`).
+machinery (`(0..5)[::-1]` → `[4, 3, 2, 1, 0]`). The slice receiver is one of the few positions a range
+literal is legal in at all — it is **not a value** anywhere else (see the range section above); use
+`range(a, b)` to materialize a `List[int]`.
 
 **Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
 slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range

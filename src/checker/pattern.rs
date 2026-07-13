@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// The one diagnostic for a range used where it has no runtime value. It names every legal position
+/// AND the materialization escape hatch — the `range(a, b)` builtin, which really does return a
+/// `List[int]` (so `List(0..3)` is rejected and `Set(range(0, 3))` is the way).
+pub(super) const RANGE_NOT_A_VALUE: &str = "a range is only valid as the iterable of a `for` loop or comprehension, as a slice receiver, \
+     or as a `match` pattern — use `range(a, b)` to materialize a `List[int]`";
+
 impl Checker {
     /// Type-check a *nested* sub-pattern (a variant payload slot or tuple element — gap #15) against
     /// its expected type `ty`, declaring any bindings into the current scope. Returns whether the
@@ -987,10 +993,24 @@ impl Checker {
                 step.as_deref(),
                 expr.span,
             ),
+            // A range has NO runtime value in any engine: the compiler lowers `a..b` only as a
+            // `for`/comprehension iterable (a counting loop) or a slice receiver (materialize +
+            // slice), and rejects it everywhere else. This arm is reached from every VALUE position
+            // (assign RHS, call arg, collection element, binary operand, method receiver, index
+            // object, return, generic bound arg, interpolation, pipe) — so typing it as `List[int]`
+            // laundered a whole class of programs that check clean and then FAIL TO COMPILE at run
+            // time. Reject here instead; the sanctioned positions never reach `infer_kind`:
+            // `for_bindings` (sig.rs) matches `ExprKind::Range` syntactically for BOTH iterable
+            // forms, `infer_slice` special-cases a range receiver, and `case a..b:` is a
+            // `Pattern::Range` (a different AST node). Keeps the checker's accepted set a subset of
+            // what the compiler can lower (see the backstop in compiler/mod.rs).
             ExprKind::Range { start, end } => {
                 self.expect_int(start, "range bound");
                 self.expect_int(end, "range bound");
-                Ty::list(Ty::Int)
+                self.error(expr.span, RANGE_NOT_A_VALUE);
+                // `Unknown` (not `list[int]`) so the rejection doesn't cascade into a second,
+                // misleading diagnostic that names a type the range never had.
+                Ty::Unknown
             }
             ExprKind::Call {
                 callee,
@@ -1795,7 +1815,12 @@ impl Checker {
             // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject
             // on both engines instead — the `for v in ch:` statement form is the way to drain a channel.
             // Checked per clause so a channel in ANY clause is rejected.
-            if matches!(self.infer(&clause.iter), Ty::Channel(_)) {
+            // `for_bindings` above already handled a range clause SYNTACTICALLY (a comprehension
+            // over a range is sanctioned); a range is never a Channel, so skip it here — `infer`
+            // would otherwise re-visit it as a VALUE and reject `[i for i in 0..3]`.
+            if !matches!(clause.iter.kind, ExprKind::Range { .. })
+                && matches!(self.infer(&clause.iter), Ty::Channel(_))
+            {
                 self.error(
                     clause.iter.span,
                     "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
@@ -2014,14 +2039,9 @@ impl Checker {
             // yields `bool`. No user-`Contains` overload (reject anything else). The element/key
             // type must be compatible with the LHS.
             In => {
-                // A bare range has no runtime value (only valid as a `for` iterable) yet types as
-                // `list[int]` — reject a range RHS here or the engines diverge: the VM rejects the
-                // bare range at compile time, the interpreter dies at runtime. Mirrors the
-                // compiler's bare-range rejection.
-                if matches!(rhs.kind, ExprKind::Range { .. }) {
-                    self.error(rhs.span, "cannot use `in` on a range (a range is only valid as the iterable of a `for` loop)".to_string());
-                    return Ty::Bool;
-                }
+                // (A range RHS needs no special case here: `r = self.infer(rhs)` above already
+                // rejected it generically — see `infer_kind`'s `ExprKind::Range` arm — and lands
+                // `Unknown`, which `either_unknown` then silences. A guard here would DOUBLE-report.)
                 match &r {
                     Ty::List(elem) | Ty::Set(elem) => {
                         if !either_unknown && !compatible(elem, &l) {
@@ -2561,7 +2581,16 @@ impl Checker {
         for comp in [start, end, step].into_iter().flatten() {
             self.expect_int(comp, "slice bound");
         }
-        let obj_ty = self.infer_value(obj);
+        // A range receiver is a SANCTIONED position: the compiler materializes it and then slices
+        // (`CallBuiltin("range", 2)` + `GetSlice`), so `(0..10)[::2]` is a real `List[int]`. Handle
+        // it here rather than through `infer_value`, whose `Range` arm rejects every value use.
+        let obj_ty = if let ExprKind::Range { start, end } = &obj.kind {
+            self.expect_int(start, "range bound");
+            self.expect_int(end, "range bound");
+            Ty::list(Ty::Int)
+        } else {
+            self.infer_value(obj)
+        };
         if obj_ty.is_unknown() {
             return Ty::Unknown;
         }
