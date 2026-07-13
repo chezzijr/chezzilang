@@ -262,32 +262,78 @@ fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus
     }
 }
 
-/// A closed read end (`chezzi run x.chz | head -1`) must TERMINATE, cleanly and promptly: the writer
-/// thread marks stdout dead and the VM halts itself at its NEXT `print` (the `os.exit(0)` seam — the
-/// VM ends the run, never a detached thread). Rust installs `SIG_IGN` for SIGPIPE, so an ignored EPIPE
-/// would leave this never-ending printer spinning forever on a dead pipe at 100% CPU.
-fn broken_pipe_exits_clean(serial: bool) {
+/// A closed read end (`chezzi run x.chz | head -1`) must TERMINATE promptly, and report the run as
+/// FAILED: the writer thread marks stdout dead and the VM raises an ordinary runtime fault at its
+/// next `print` (Python raises `BrokenPipeError` here for the same reason). Rust installs `SIG_IGN`
+/// for SIGPIPE, so an ignored EPIPE would leave this never-ending printer spinning at 100% CPU.
+///
+/// The status must be NON-ZERO: the program did not finish, and its output was truncated. It must
+/// also not borrow the `os.exit` channel to say so — see `fault_under_broken_pipe_is_not_success`,
+/// the regression this contract exists to prevent.
+fn broken_pipe_terminates_with_fault(serial: bool) {
     let t = TmpDir::new();
     let entry = t.write("main.chz", "while true:\n    print(\"x\")\n");
     let mut child = spawn(&entry, serial);
     drop(child.stdout.take()); // close the read end immediately
+    let mut err = String::new();
+    let mut stderr = child.stderr.take().unwrap();
     let status =
         wait_timeout(&mut child, 20).expect("kept printing to a dead pipe (EPIPE ignored)");
+    use std::io::Read;
+    let _ = stderr.read_to_string(&mut err);
     assert!(status.code().is_some(), "killed by a signal: {status:?}");
     assert!(
-        status.success(),
-        "a closed reader is a clean exit: {status:?}"
+        !status.success(),
+        "a dead stdout truncated the output — the run must not report success: {status:?}"
+    );
+    assert!(
+        err.contains("stdout closed (broken pipe)"),
+        "the fault must name the cause; stderr was:\n{err}"
     );
 }
 
 #[test]
-fn broken_pipe_exits_clean_mn() {
-    broken_pipe_exits_clean(false);
+fn broken_pipe_terminates_with_fault_mn() {
+    broken_pipe_terminates_with_fault(false);
 }
 
 #[test]
-fn broken_pipe_exits_clean_serial() {
-    broken_pipe_exits_clean(true);
+fn broken_pipe_terminates_with_fault_serial() {
+    broken_pipe_terminates_with_fault(true);
+}
+
+/// REGRESSION (the bug this milestone shipped in its first cut): a dead stdout must NEVER be signalled
+/// through `pending_exit` — that is the `std.os.exit` channel, and it OUTRANKS a fault everywhere
+/// (`run_file_with_entry` returns `Ok(())` + the code and discards the `Err`; `classify_mn_outcome`
+/// ranks `Exit` above `Fault`). With that hijack in place, `chezzi run x.chz | head -1` on a program
+/// that then faulted exited **0 with no trace** — a crashing program reporting SUCCESS to CI.
+///
+/// The `defer:` that prints is load-bearing: it is what runs a `print` DURING the fault unwind, on the
+/// now-dead pipe. The first cut's own broken-pipe test could not see the bug because its program
+/// printed nothing on the unwind path.
+fn fault_under_broken_pipe_is_not_success(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.time\n\nfn main():\n    defer:\n        print(\"cleanup\")\n    print(\"hello\")\n    time.sleep_ms(150)\n    xs := [1]\n    print(xs[5])\n\nmain()\n",
+    );
+    let mut child = spawn(&entry, serial);
+    drop(child.stdout.take()); // the reader is gone, as under `| head -1`
+    let status = wait_timeout(&mut child, 20).expect("hung on a dead pipe");
+    assert!(
+        !status.success(),
+        "a FAULTING run reported success because the dead pipe hijacked the exit channel: {status:?}"
+    );
+}
+
+#[test]
+fn fault_under_broken_pipe_is_not_success_mn() {
+    fault_under_broken_pipe_is_not_success(false);
+}
+
+#[test]
+fn fault_under_broken_pipe_is_not_success_serial() {
+    fault_under_broken_pipe_is_not_success(true);
 }
 
 /// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run

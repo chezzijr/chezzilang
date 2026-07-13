@@ -267,12 +267,15 @@ task's line is visible before its nursery joins). Three rules follow:
   either. So a stalled/slow consumer (`chezzi run x.chz | (sleep 60; cat)`) can never pin a core worker
   and starve the other tasks.
 - A **failed write is not silent**, and the writer thread never decides the program's fate. A closed
-  stdout reader (`chezzi run x.chz | head -1`) halts the run at its next `print` — like `os.exit(0)`, so
-  an endless printer does not spin on a dead pipe — and the program's own status stands (a run that
-  faults first still exits non-zero with its trace). Any other stdout I/O error (`ENOSPC`, `EIO`, a
-  closed fd) prints `chezzi run: cannot write stdout: …` and exits **non-zero**: a truncated redirect
-  never reports success. A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead
-  `2>` reader is no reason to kill a healthy program.
+  stdout reader (`chezzi run x.chz | head -1`) makes the next `print` raise the ordinary runtime fault
+  `stdout closed (broken pipe)` — so an endless printer stops instead of spinning on a dead pipe, and
+  the run exits **non-zero** with a trace on stderr (still live: `| head` closes only stdout). Python
+  raises `BrokenPipeError` here for the same reason. A dead stdout deliberately does **not** halt via
+  the `os.exit` channel: that channel outranks a fault, so borrowing it made a *crashing* program under
+  `| head -1` report **exit 0 with no trace**. Any other stdout I/O error (`ENOSPC`, `EIO`, a closed fd)
+  additionally prints `chezzi run: cannot write stdout: …`: a truncated redirect never reports success.
+  A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
+  to kill a healthy program.
 
 A **spawned task's stdin is empty** (a single consumable stream is not shared across tasks), so
 `io.read_line()` / `io.input(...)` inside a `spawn:` returns `None` — on **both** engines. Read stdin

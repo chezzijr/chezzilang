@@ -12,30 +12,40 @@ impl Vm {
     /// stalled reader must not pin a core worker — the D5 invariant).
     ///
     /// If stdout has DIED (a closed reader, a full disk), the writer thread has marked it and dropped
-    /// the bytes; we halt the run right here — cooperatively, through the very `pending_exit` seam
-    /// `std.os.exit(0)` uses, so the VM (not a detached thread) ends the program: defers/joins unwind,
-    /// the sibling stream drains, and `main` still decides the status (a non-BrokenPipe failure
-    /// becomes a diagnostic + FAILURE via [`stream::stream_error`]; a closed reader is a clean end).
-    /// Without this, `chezzi run x.chz | head -1` would spin forever on a dead pipe — Rust ignores
-    /// SIGPIPE, and restoring it would break `std.net`'s EPIPE-as-an-error contract.
+    /// the bytes. Writing is then a NO-OP: `emit_out` never touches control flow. The halt is raised
+    /// separately, at the print SITE, by [`Vm::stream_halt`].
+    ///
+    /// It MUST NOT signal the death through `pending_exit`: that is the `std.os.exit` channel, and it
+    /// OUTRANKS a fault everywhere (`run_file_with_entry` returns `Ok(())` + the code and DISCARDS the
+    /// `Err`; `classify_mn_outcome` ranks `Exit` above `Fault` at the join). Routing a dead pipe
+    /// through it turned a genuinely FAULTING run into a silent `exit 0`: `chezzi run x.chz | head -1`
+    /// on a program that then indexes out of bounds reported SUCCESS with no trace — a red CI going
+    /// green. A dead stdout is not an exit request, so it does not borrow the exit channel.
     pub(super) fn emit_out(&mut self, s: &str) {
         if self.host.stream {
-            if !stream::write_out(s) {
-                self.pending_exit.get_or_insert(0);
-            }
+            stream::write_out(s);
         } else {
             self.out.push_str(s);
         }
     }
 
-    /// `Err`-sentinel for a `pending_exit` set by [`Vm::emit_out`] (dead stdout), if one was: the op
-    /// chain (`step` → `run_until`) recognizes the pending exit and unwinds past every `recover:` to
-    /// the top, exactly like `std.os.exit`.
+    /// The fault to raise at a print site once the streamed stdout is dead — an ORDINARY recoverable
+    /// `RuntimeError`, which is what composes correctly with everything the exit channel broke: it
+    /// unwinds through defers, can be caught by `recover:`, loses to nothing at a cross-task join, and
+    /// exits NON-ZERO with a trace on stderr (still live — `| head` closes only stdout). Python raises
+    /// `BrokenPipeError` here for the same reason. Without a halt at all, `chezzi run x.chz | head -1`
+    /// would spin forever on a dead pipe: Rust ignores SIGPIPE, and restoring it would break
+    /// `std.net`'s EPIPE-as-an-error contract.
+    ///
+    /// ponytail: a defer that prints while a REAL fault is unwinding raises this fault too, so its
+    /// message replaces the original's (the run still exits non-zero, with a trace — only the message
+    /// names the pipe instead of the first cause). Threading an `in_unwind` flag through the unwind
+    /// path would preserve it; not worth it until someone is actually confused by it.
     pub(super) fn stream_halt(&self, span: Span) -> Option<RuntimeError> {
-        self.pending_exit.map(|_| RuntimeError {
-            message: "exit".into(),
-            span,
-        })
+        if !self.host.stream {
+            return None;
+        }
+        stream::out_dead_reason().map(|why| RuntimeError { message: why, span })
     }
 
     /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's

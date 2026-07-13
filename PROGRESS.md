@@ -4750,10 +4750,15 @@ branch names) is in the git log.
   (`flush`/`read_line`/`input` only queue), so a stalled consumer cannot pin a worker either; `flush()`
   is consequently a no-op that exists because it is the portable idiom. A writer thread **never calls
   `std::process::exit`** (this is library code; two threads racing libc `exit(3)` is UB, and a thread
-  that kills the process discards the run's real outcome): it records, and the VM halts itself at its
-  next `print` through the `os.exit(0)` seam. Policy — a closed stdout reader (`| head -1`) = a clean
-  end (exit 0, and an endless printer stops instead of spinning on a dead pipe), but the program's own
-  status still wins if it faults/`os.exit`s first; any other stdout errno prints
+  that kills the process discards the run's real outcome): it records, and the VM raises an ORDINARY
+  runtime fault at its next `print` (`stdout closed (broken pipe)`). Policy — a closed stdout reader
+  (`| head -1`) fails the run non-zero with a trace on the still-live stderr (Python raises
+  `BrokenPipeError` identically), and an endless printer stops instead of spinning on a dead pipe. The
+  dead pipe must NOT borrow the `os.exit` channel to halt: that channel outranks a fault everywhere
+  (`run_file_with_entry` discards the `Err` when `pending_exit` is set; `classify_mn_outcome` ranks
+  `Exit` above `Fault`), so the first cut of this milestone turned a *faulting* run under `| head -1`
+  into a silent **exit 0 with no trace** — a crashing program reporting SUCCESS to CI. Caught by the
+  review panel, fixed before merge, pinned by `fault_under_broken_pipe_is_not_success_{mn,serial}`; any other stdout errno prints
   `chezzi run: cannot write stdout: …` and exits non-zero (a `> /dev/full` run can no longer report
   SUCCESS with no output); a **stderr** write failure is swallowed (diagnostic channel — a dead `2>`
   reader must not kill a healthy program). A spawned task's stdin is `Empty` on **both** engines now

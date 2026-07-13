@@ -12,11 +12,12 @@
 //
 // A writer thread NEVER decides the program's fate — it only records. On a failed write it marks its
 // stream dead and drops the rest (a dead fd never recovers); the VM notices at its next `print`
-// ([`super::Vm::emit_out`] → `pending_exit`, the same cooperative hard halt `std.os.exit` uses) and
-// `main` decides the exit status ([`stream_error`] → diagnostic + FAILURE for anything but a closed
-// reader). Nothing here calls `std::process::exit`: this is library code (`chezzi-lsp`, embedders),
-// two writer threads racing libc `exit(3)` is UB, and a thread that kills the process discards the
-// run's real outcome — its fault trace, its `os.exit(n)`, and the sibling stream's queued bytes.
+// ([`super::Vm::stream_halt`]) and raises an ORDINARY runtime fault, so the run ends non-zero with a
+// trace on the still-live stderr. It deliberately does NOT borrow the `std.os.exit` channel: that
+// outranks a fault, and using it made `chezzi run x.chz | head -1` report SUCCESS for a program that
+// crashed. Nothing here calls `std::process::exit` either: this is library code (`chezzi-lsp`,
+// embedders), two writer threads racing libc `exit(3)` is UB, and a thread that kills the process
+// discards the run's real outcome — its fault trace, its `os.exit(n)`, and the sibling's queued bytes.
 //
 // STDERR is a diagnostic channel: a write failure on it is swallowed (marked dead, further writes
 // dropped). A dead stderr reader is not a reason to kill a healthy program, and there is nowhere left
@@ -78,12 +79,24 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
     tx
 }
 
-/// Queue `s` for the process's real stdout (the writer thread does the syscall). `false` once stdout
-/// is dead — the caller ([`super::Vm::emit_out`]) halts the run at that point.
-pub(super) fn write_out(s: &str) -> bool {
+/// Queue `s` for the process's real stdout (the writer thread does the syscall). Once stdout is dead
+/// the bytes are dropped; the run is halted separately by [`super::Vm::stream_halt`] at the print site.
+pub(super) fn write_out(s: &str) {
     let tx = OUT.get_or_init(|| spawn_writer(std::io::stdout(), true));
     let _ = tx.send(Msg::Write(s.to_string()));
-    !OUT_DEAD.load(Ordering::Acquire)
+}
+
+/// Why the streamed stdout is dead, as the message of the fault a print site raises — `None` while it
+/// is healthy. A closed reader (`| head -1`) is the common case and reads as such; any other failure
+/// (ENOSPC, EBADF…) carries the OS error, so a truncated redirect can never look like a clean run.
+pub(super) fn out_dead_reason() -> Option<String> {
+    if !OUT_DEAD.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(match OUT_ERR.get() {
+        Some(e) => format!("stdout write failed: {e}"),
+        None => "stdout closed (broken pipe)".to_string(),
+    })
 }
 
 /// Queue `s` for the process's real stderr. A failure there is swallowed (diagnostic channel).
