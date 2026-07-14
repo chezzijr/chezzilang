@@ -1534,6 +1534,32 @@ impl SchedCore {
         any_incomplete
     }
 
+    /// N4 — some still-incomplete scope has its `cancel` tripped, i.e. is MID-TEARDOWN: a fault/exit/
+    /// abort has cancelled it and its parked fibers are about to be requeued by `cancel_drain` so they
+    /// can unwind their `defer`s. Vetoes the deadlock predicate (see [`MnSched::is_deadlocked`]).
+    ///
+    /// Every cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart, at four
+    /// seams: `mn_worker_loop`'s `finish` → `cancel_drain` (sched.rs), `abort_enlisted_scope` (which
+    /// also clears the `awaiting_builder` veto first), `abort_eager_nursery` (which also clears the
+    /// `any_body_open` veto first), and the two demote self-detect loops. An idle worker's
+    /// `take_runnable` landing in that gap sees the pre-drain quiesce (`running == 0 && runnable == 0
+    /// && parked_n > 0`) and, without this veto, calls the teardown a DEADLOCK — `flag_deadlock` then
+    /// DROPS the still-parked siblings without `unwind_deferred`, silently skipping their `defer`s.
+    ///
+    /// LIVENESS (why this can never become a hang): a cancelled scope always reaches `done == total`,
+    /// so the veto is transient by construction. `park`/`park_wait` re-read this same scope `cancel`
+    /// under the core lock and requeue `Ready` instead of parking, and the netpoller's `register`
+    /// rejects a tripped cancel — so a cancelled scope can never re-accumulate parked fibers after its
+    /// drain. Every cancel trip is followed by a `cancel_drain` (which requeues + `notify_all`), so an
+    /// idle worker sitting under the veto cannot miss the wakeup. A FUTURE park path that does not
+    /// re-check the scope cancel would break that and turn this veto into a hang — `park`'s gap
+    /// re-check is load-bearing here (pinned by `mnsched_park_requeues_when_cancel_tripped`).
+    fn any_incomplete_scope_cancelled(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|s| s.done < s.total && s.cancel.load(Ordering::Relaxed))
+    }
+
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
     /// global deadlock predicate). Fast path for the common single-nursery case.
     fn any_scope_incomplete(&self) -> bool {
@@ -2336,6 +2362,17 @@ impl MnSched {
         // as the builder begins draining each enlisted scope, so a genuine post-body deadlock still fires
         // (and a stuck NESTED scope keeps a non-`awaiting_builder` scope incomplete → fires). (#1/#2.)
         if c.all_incomplete_awaiting_builder() {
+            return false;
+        }
+        // N4 — a cancel-tripped scope with unsettled tasks is MID-TEARDOWN, not deadlocked. The cancel
+        // trip and its `cancel_drain` are two core-lock acquisitions apart (four seams), and an idle
+        // worker landing in that gap must not call the teardown a deadlock: `flag_deadlock` would drop
+        // the still-parked siblings WITHOUT `unwind_deferred`, silently skipping their `defer`s (and
+        // `reduce_task_slots` ranks Fault > Deadlocked, so the spurious deadlock never even surfaced —
+        // the lost `defer` was the only symptom). Transient: a cancelled scope always drains to
+        // `done == total`, so the veto always lifts. See `any_incomplete_scope_cancelled` for the full
+        // liveness argument. A GENUINE deadlock (nothing cancelled anywhere) is untouched.
+        if c.any_incomplete_scope_cancelled() {
             return false;
         }
         if !(c.running == 0

@@ -5246,6 +5246,41 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     }
 }
 
+/// N4 (cancel-teardown veto): a scope whose `cancel` is tripped but whose tasks have not all
+/// settled is MID-TEARDOWN, not deadlocked. Every cancel trip and its `cancel_drain` are two
+/// separate core-lock acquisitions apart (`mn_worker_loop`'s `finish`→`cancel_drain`,
+/// `abort_enlisted_scope`, `abort_eager_nursery`), and an idle worker's `take_runnable` can land in
+/// that gap and see the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`). Without
+/// the veto it declares DEADLOCK and `flag_deadlock` DROPS the parked siblings without running
+/// `unwind_deferred` — silently skipping their `defer`s. Pins the invariant itself (the scenario
+/// repro is `parallel_defer_runs_on_cancelled_sibling`).
+#[test]
+fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
+    // Scope 0's `JoinScope::cancel` IS this Arc (see `mnsched_park_requeues_when_cancel_tripped`).
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let c1 = empty_core();
+    let c2 = empty_core();
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let a = take_run(&sched);
+    let b = take_run(&sched);
+    // Cancel still false → these really park (the park-gap re-check does not requeue them).
+    sched.park(core_key(&c1), &c1, a);
+    sched.park(core_key(&c2), &c2, b);
+    {
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
+    }
+    // A sibling faults: `classify_mn_outcome` trips the scope cancel BEFORE `finish`/`cancel_drain`.
+    cancel.store(true, Ordering::Relaxed);
+    let c = sched.lock();
+    assert!(
+        !sched.is_deadlocked(&c),
+        "a cancel-tripped scope mid-teardown is not deadlocked (its parked fibers are about to be \
+         drained by `cancel_drain` so they can unwind their defers)"
+    );
+}
+
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
 /// `terminate` once every task is done.
 #[test]
@@ -10167,10 +10202,19 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 ///
 /// Synchronized like [`parallel_cpu_sibling_aborts_on_sibling_fault`]: `boom` waits for a token
 /// `consumer` sends only AFTER it has registered its `defer` and is about to block, so the fault
-/// happens-after the defer is registered — no timing race. (Under the M:N engine task start order
-/// is not deterministic, so a fault that races a not-yet-started sibling would legitimately skip
-/// its not-yet-registered defer, per Go semantics; this token makes the intended "blocked
-/// consumer is aborted" scenario the one actually exercised.)
+/// happens-after the defer is registered. (Under the M:N engine task start order is not
+/// deterministic, so a fault that races a not-yet-started sibling would legitimately skip its
+/// not-yet-registered defer, per Go semantics; this token makes the intended "blocked consumer is
+/// aborted" scenario the one actually exercised.)
+///
+/// The token closes ONLY the defer-REGISTRATION race — it does NOT make this test race-free (an
+/// earlier version of this comment wrongly claimed "no timing race"). The surviving race was
+/// scheduler-side and AFTER the fault: the cancel trip and its `cancel_drain` sit two core-lock
+/// acquisitions apart, and an idle worker's deadlock check landing in that gap used to reap the
+/// still-parked consumer as `Deadlocked`, dropping it WITHOUT `unwind_deferred` — so this printed
+/// `0` roughly 35/200 runs under CPU contention. That is closed by the cancel-teardown veto in
+/// `is_deadlocked` (see `SchedCore::any_incomplete_scope_cancelled`, src/vm/mod.rs). This test is
+/// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
 #[test]
 fn parallel_defer_runs_on_cancelled_sibling() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
