@@ -1192,11 +1192,14 @@ impl Vm {
                 // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
                 // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
                 // mirrors the snapshot-park recv's cancel branch.
-                if self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|x| x.load(Ordering::Relaxed))
-                {
+                //
+                // MUST go through `cancel_requested()`, never a raw `self.cancel` load: a `defer` body
+                // runs under `guarded` (native_reentry > 0), so a blocking op INSIDE cleanup (a
+                // `sock.close()`, a `ch.send()`, a `sleep`) lands here. A raw read fires on the already-
+                // tripped flag and truncates the defer mid-body — on M:N only, since serial runs the same
+                // call inline. The predicate's `deferring == 0` term is what keeps cleanup atomic, and it
+                // also folds in `cancel_outer` (an ENCLOSING scope's cancel), which a raw read misses.
+                if self.cancel_requested() {
                     self.cancelled = true;
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
@@ -1330,11 +1333,7 @@ impl Vm {
                     }
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
-                if self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|x| x.load(Ordering::Relaxed))
-                {
+                if self.cancel_requested() {
                     self.cancelled = true;
                     un_account(&mut c);
                     drop(c);
@@ -1454,11 +1453,7 @@ impl Vm {
         // callback element and then fault NORMALLY at a later back-edge — wrong classification (a
         // cancelled-task Fault masking the real sibling error) and wasted in-callback sleeps. Faulting
         // here aborts the native callback loop immediately, so no further elements sleep.
-        if self
-            .cancel
-            .as_ref()
-            .is_some_and(|x| x.load(Ordering::Relaxed))
-        {
+        if self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
@@ -1510,11 +1505,7 @@ impl Vm {
         let out = loop {
             // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
             // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
-            if self
-                .cancel
-                .as_ref()
-                .is_some_and(|x| x.load(Ordering::Relaxed))
-            {
+            if self.cancel_requested() {
                 self.cancelled = true;
                 break Err(self.err("cancelled".to_string(), span));
             }
