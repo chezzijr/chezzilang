@@ -21,6 +21,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fails until you add its `include_str!` line.** Known delta: a *pre-built* binary + an edited `std/*.chz`
 > is stale until rebuilt (`cargo run`/`cargo test` rebuild automatically; else use `CHEZZI_STD=./std`).
 
+> **✅ CLI (2026-07-14, same branch) — `docs/gaps.md` T2 FIXED: `chezzi repl` de-advertised.** The stub
+> arm and its USAGE line are deleted, so `chezzi repl` is now a plain unknown command (prints USAGE, exits
+> 1). **No REPL was ever built and none was built here** — `docs/spec.md`'s M1 row no longer claims one
+> shipped. The idea stays parked in `docs/future.md` (Tier 4, Ecosystem) as explicitly unbuilt. The CLI now
+> ships exactly the 8 commands it documents: `init run test check tokens ast docs help`.
+
 > **Mode:** Claude implements directly — working, tested code each session (see `CLAUDE.md`).
 > Full per-milestone detail lives in git history; this file is a forward-looking tracker, not a changelog.
 

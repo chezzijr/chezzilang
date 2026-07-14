@@ -895,7 +895,7 @@ src/
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
   test_runner   # `chezzi test` — discovers + runs `test fn`s in `*_test.chz`
-  main.rs       # `chezzi run/test/docs/repl/tokens/ast`
+  main.rs       # `chezzi init/run/test/check/tokens/ast/docs`
 std/            # std modules written in Chezzi
 examples/*.chz  # golden-test corpus + LLM eval material
 tests/          # Rust unit + golden tests
@@ -905,7 +905,7 @@ tests/          # Rust unit + golden tests
 
 | # | Deliverable | Runnable proof |
 |---|-------------|----------------|
-| ✅ **M1** | Indent-aware lexer + REPL that echoes tokens | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
+| ✅ **M1** | Indent-aware lexer | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
 | ✅ **M2** | Parser → AST + pretty-printer | `chezzi ast foo.chz` round-trips source |
 | ✅ **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, Result+`?` run single-file |
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
