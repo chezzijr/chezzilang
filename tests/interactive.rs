@@ -53,6 +53,14 @@ fn spawn(entry: &PathBuf, serial: bool) -> Child {
 
 /// Read from `r` on a helper thread until `want` bytes have arrived (or 5s elapse). Never
 /// `wait_with_output()`: the child still holds an open, unanswered stdin, so waiting deadlocks.
+///
+/// The helper KEEPS DRAINING `r` to EOF after handing back the first `want` bytes, and only then
+/// drops it. It must: `r` is the child's `ChildStdout`, so dropping it closes the pipe's READ end
+/// while the child is still blocked in `read_line` owing us its final line. That child's next
+/// `print` then hits EPIPE — and a dead stdout is a deliberate runtime fault (`stdout closed
+/// (broken pipe)`, exit 1, see `d965d96`), which raced the VM's post-emit `stream_halt` check and
+/// made every caller of this helper flake under a loaded box (~1-in-N, and 5/60 pinned to one core).
+/// The test was manufacturing the very broken pipe it then asserted `success()` against.
 fn read_bytes_timeout<R: Read + Send + 'static>(mut r: R, want: usize) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -65,6 +73,9 @@ fn read_bytes_timeout<R: Read + Send + 'static>(mut r: R, want: usize) -> Option
             }
         }
         let _ = tx.send(String::from_utf8_lossy(&acc).into_owned());
+        // Hold the read end open until the child is done writing — see the doc above.
+        let mut sink = Vec::new();
+        let _ = r.read_to_end(&mut sink);
     });
     rx.recv_timeout(Duration::from_secs(5)).ok()
 }

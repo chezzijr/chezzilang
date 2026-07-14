@@ -519,6 +519,41 @@ output joins and prints the collected results itself.
 Python); cross-task print order is **nondeterministic** on both engines; stdout and stderr are
 separately locked, so a task's `print` and `eprint` may reorder relative to each other.
 
+## Audited residuals — the Tier-0 post-merge gate (2026-07-14)
+
+Found by the post-merge adversarial panel on the B1 merge. **Not** caused by it; none are blockers;
+each is recorded rather than silently carried.
+
+### N1. A last `print` into a just-closed pipe exits **0 or 1 nondeterministically** — a real bug
+`stream_halt` (`src/vm/exec.rs`) is consulted **after** `emit_out` queues the line, and the EPIPE is
+discovered asynchronously on the writer thread (`src/vm/stream.rs`). So for the *same* run, a program
+whose final `print` lands in a pipe the reader just closed exits **0** (the VM's `Acquire` load wins →
+bytes silently dropped) or **1** (the writer's EPIPE lands first → `stdout closed (broken pipe)` fault).
+A ~nanosecond race decides which. **Python raises `BrokenPipeError` deterministically at write/flush.**
+This is the `runtime lies to the program` family again — and it is what made `tests/interactive.rs` flake
+(~1-in-N loaded; 5/60 pinned to one core). The TEST bug is fixed (`read_bytes_timeout` was itself
+manufacturing the broken pipe by dropping `ChildStdout` early, then asserting `success()` — it now drains
+to EOF). **The product race is NOT fixed** and nothing pins it. Fix = check `stream_halt` (or make the
+write synchronous enough to observe EPIPE) *before* declaring the print done. Small; own task.
+
+### N2. `Socket.write`/`accept` still restart their timeout budget on every park
+`src/vm/netio.rs` `write` (~:658) and `accept` (~:755) still pass `timeout.map(|t| t.deadline)` — a
+deadline **recomputed on every `ip`-rewind re-execution**. That is exactly the budget-restart bug
+`Vm::poll_deadline` was added to kill for `read` (a park rewinds `ip` and re-runs the whole op, so a
+re-parking op re-arms `now + timeout_ms` forever). Pre-existing, and `read` parks far more often now that
+a split codepoint forces a re-park — but `write`/`accept` are the same class and should latch the same
+way. Mechanical; own task.
+
+### N3. Two cosmetic B1 leftovers
+- The in-callback demote path (`src/vm/sched.rs`) and the netpoller-park path (`src/vm/netio.rs`) return
+  `Err("timeout")` even when that call already took a **partial codepoint** off the wire — while the
+  poll-once path was deliberately changed to say `Err("incomplete utf-8: …")` for exactly that case, and
+  `docs/stdlib.md` now states `Err("timeout")` means *nothing arrived*. Non-destructive (the carry is
+  kept), but it contradicts the doc the same change just wrote. No test.
+- `read(0)` on a socket whose carry holds sticky **invalid** bytes still returns `Ok("")` (only a *closed*
+  socket errs), so a `read(want - have)` loop that computes `0` cannot observe the sticky `Err`. Matches
+  the documented contract, harmless, but it is the one hole in "every later read re-errs identically".
+
 ## Audited residuals — pre-JIT hunt wave 5 (2026-07-13)
 
 Everything below was **found, reproduced on both engines, and deliberately NOT fixed** in the wave-5
