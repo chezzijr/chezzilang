@@ -10253,6 +10253,20 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 /// `0` roughly 35/200 runs under CPU contention. That is closed by the cancel-teardown veto in
 /// `is_deadlocked` (see `SchedCore::any_incomplete_scope_cancelled`, src/vm/mod.rs). This test is
 /// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
+#[test]
+fn parallel_defer_runs_on_cancelled_sibling() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+                   fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+                   fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
+    let out = run_capture_parallel(src)
+        .expect("the producer fault is recovered, so the program completes");
+    assert_eq!(
+        out, "42\n",
+        "the cancelled consumer's defer ran on the unwind"
+    );
+}
+
 /// Cancellation points: a task spinning in an UNBOUNDED `while true:` loop must still be cancelled
 /// promptly when a sibling faults — that is exactly what the loop BACK-EDGE checkpoint is for
 /// (`Vm::jump_checked`). A regression (e.g. only one of the two `Op::Jump` dispatch sites wired)
@@ -10272,20 +10286,6 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
         .expect("the spinning sibling must be cancelled at a loop back-edge, not hang the nursery")
         .expect("the trigger fault is recovered, so the program completes");
     assert_eq!(out, "42\n", "the spinner was cancelled and ran its defer");
-}
-
-#[test]
-fn parallel_defer_runs_on_cancelled_sibling() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
-                   fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
-                   fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
-                   fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
-    let out = run_capture_parallel(src)
-        .expect("the producer fault is recovered, so the program completes");
-    assert_eq!(
-        out, "42\n",
-        "the cancelled consumer's defer ran on the unwind"
-    );
 }
 
 /// N4 (second seam — `abort_enlisted_scope`): a cancelled task's `defer` must run when the cancel
