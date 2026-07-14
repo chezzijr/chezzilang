@@ -583,6 +583,27 @@ fn serve(tok: Token, io: Channel[str]):
         _ := tok.done().recv(): cleanup()   # cancelled (timeout or manual) → take this arm
 ```
 
+> **Cancellation runs `defer` — the cleanup guarantee (M:N).** On the default M:N engine a cancelled
+> task unwinds through its `defer`s whether it was cancelled while running (observed at a back-edge),
+> while parked on a `recv`/`wait:`, or while parked on a socket — including when the cancel comes from
+> a *sibling*'s fault tearing down the nursery. `defer` is the language's only cleanup mechanism (no
+> destructors, no `with`), so this is the guarantee cleanup rests on. Exactly one thing deliberately
+> skips a `defer`: **`std.os.exit`**, a hard halt by design.
+>
+> Two known holes, both tracked in `docs/gaps.md`:
+> - **`--serial` does not yet run a PARKED task's `defer` on a sibling fault** (`docs/gaps.md` **N6**).
+>   The cooperative scheduler propagates the faulting child's error straight out of `run_scheduler`,
+>   abandoning the parked children without resuming them. So a cancelled-while-parked task's cleanup
+>   runs on M:N but **not** on `--serial` — a real **serial ≠ M:N divergence**, pre-existing, and the
+>   serial side is the wrong one. Fixing it moves serial's fault-path output ordering, so it is its own
+>   task.
+> - A **genuine deadlock** (every fiber parked, nothing cancelled, nothing able to arrive) tears the
+>   parked fibers down where they stand and does **not** run their `defer`s (`docs/gaps.md` **N5**).
+>   Both engines agree here, so it is a known limit rather than a divergence.
+>
+> (A cancelled scope that merely *looked* deadlocked to an idle M:N worker used to fall into that same
+> teardown and silently skip its `defer`s — that was **N4**, now fixed.)
+
 **Parity-safe deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
 background canceller task — so a self-polling timeout loop stops on time identically on **every**
 engine. (`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)

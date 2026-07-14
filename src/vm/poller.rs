@@ -128,11 +128,14 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// Register read/write interest on `fd` under `key`, parking `fiber` (to be injected back into
 /// `sched`) until the OS reports readiness. Called by [`super::MnSched::poll_park_offload`] *after* it
 /// has done running→inflight, so the fiber is accounted as in-flight before the OS can wake it.
-/// Returns `Some(fiber)` WITHOUT registering iff `sched`'s cancel flag is already set (a sibling
-/// faulted while this fiber was on its way to park) — the caller must re-inject it so it resumes and
-/// unwinds, rather than parking on a poller that [`drain_sched`] may have already swept. `None` on a
-/// normal park. The cancel read + the insert happen under the registry lock that `drain_sched` also
-/// holds, so park and drain are serialized: the fiber is either registered-then-drained or rejected.
+/// Returns `Some(fiber)` WITHOUT registering iff `cancel` — the PARKING FIBER'S SCOPE cancel, handed
+/// in by `poll_park_offload` (NOT the sched's legacy global/outermost `MnSched::cancel`, which a
+/// cancelled INNER scope does not set) — is already set (a sibling faulted while this fiber was on its
+/// way to park). The caller must re-inject it so it resumes and unwinds, rather than parking on a poller
+/// that [`drain_sched`] may have already swept. `None` on a normal park. The cancel read + the insert
+/// happen under the registry lock that `drain_sched` also holds, so park and drain are serialized: the
+/// fiber is either registered-then-drained or rejected.
+#[allow(clippy::too_many_arguments)] // the park identity + the scope cancel + the D6c deadline
 #[must_use]
 pub fn register(
     key: usize,
@@ -140,12 +143,13 @@ pub fn register(
     interest: Interest,
     fiber: Fiber,
     sched: Arc<MnSched>,
+    cancel: Arc<AtomicBool>,
     in_flight: Arc<AtomicBool>,
     deadline: Option<Instant>,
 ) -> Option<Fiber> {
     SERVICE
         .get_or_init(NetPoller::new)
-        .register(key, fd, interest, fiber, sched, in_flight, deadline)
+        .register(key, fd, interest, fiber, sched, cancel, in_flight, deadline)
 }
 
 /// De-register a pending park on `key` (a socket `close` racing the park). If a fiber was still
@@ -198,7 +202,7 @@ impl NetPoller {
         NetPoller { inner }
     }
 
-    #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/in_flight) + D6c deadline
+    #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/cancel/in_flight) + D6c deadline
     fn register(
         &self,
         key: usize,
@@ -206,6 +210,7 @@ impl NetPoller {
         interest: Interest,
         fiber: Fiber,
         sched: Arc<MnSched>,
+        cancel: Arc<AtomicBool>,
         in_flight: Arc<AtomicBool>,
         deadline: Option<Instant>,
     ) -> Option<Fiber> {
@@ -216,10 +221,12 @@ impl NetPoller {
         // armed fd with no registry row.
         let mut reg = self.lock_registry();
         // Park-vs-cancel gap (mirrors `MnSched::park`): a sibling may have tripped cancel after this
-        // fiber passed the `run_until` loop-top cancel check but before it reached here. Read it under
-        // the SAME lock `drain_sched` sweeps under, so the two are serialized — hand the fiber back to
-        // unwind rather than park it on a poller a past sweep already drained.
-        if sched.cancel.load(Ordering::Relaxed) {
+        // fiber passed the `run_until` loop-top cancel check but before it reached here. `cancel` is the
+        // PARKING FIBER'S SCOPE cancel (handed in by `poll_park_offload`) — reading `sched.cancel` here
+        // would only see the OUTERMOST nursery's flag and let a fiber of a cancelled INNER scope park on
+        // an already-swept poller. Read it under the SAME lock `drain_sched` sweeps under, so the two are
+        // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
+        if cancel.load(Ordering::Relaxed) {
             return Some(fiber);
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
@@ -514,6 +521,11 @@ mod tests {
         ))
     }
 
+    /// A never-tripped scope cancel (the flag `poll_park_offload` hands `register`).
+    fn no_cancel() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     fn mk_fiber() -> Fiber {
         Fiber {
             ctx: super::super::FiberCtx::default(),
@@ -557,6 +569,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 None
             )
@@ -589,6 +602,47 @@ mod tests {
         drop(server);
     }
 
+    /// N4 (liveness) — the netpoller park is gated on the PARKING FIBER'S SCOPE cancel, not the
+    /// outermost nursery's. A fiber whose INNER scope was cancelled (a sibling faulted, so `cancel_drain`
+    /// and `drain_sched` already swept) must be handed back so it resumes and unwinds its `defer`s; if it
+    /// were parked on the already-swept poller instead it would be stranded, its scope would never reach
+    /// `done == total`, and the cancel-teardown veto in `is_deadlocked` would become PERMANENT (deadlock
+    /// detection disabled sched-wide). `register` used to read the sched-level (outermost) flag, which is
+    /// `false` here, so the park went through.
+    #[test]
+    fn poll_park_rejects_cancelled_inner_scope() {
+        let (_client, server) = loopback_pair();
+        let sched = mk_sched(); // scope 0 = the outermost nursery — its cancel stays FALSE
+        let inner_cancel = Arc::new(AtomicBool::new(false));
+        let inner = sched.register_scope(1, Arc::clone(&inner_cancel));
+        inner_cancel.store(true, Ordering::Relaxed); // a sibling of the INNER scope faulted
+        let mut fiber = mk_fiber();
+        fiber.scope_id = inner;
+        fiber.task_index = 1;
+        sched.lock().running += 1; // `poll_park_offload` does running → inflight
+        sched.poll_park_offload(
+            fiber,
+            super::super::PollPark {
+                key: usize::MAX - 7,
+                fd: server.as_raw_fd(),
+                interest: Interest::Read,
+                in_flight: new_in_flight(),
+                deadline: None,
+            },
+        );
+        assert_eq!(
+            sched.lock().global.len(),
+            1,
+            "a cancelled inner scope's fiber is re-injected to unwind, not parked on the netpoller"
+        );
+        assert_eq!(
+            sched.inflight.load(Ordering::Relaxed),
+            0,
+            "the rejected park went inflight → runnable, not inflight → parked"
+        );
+        drop(server);
+    }
+
     /// D6c — a deadline-bounded park whose fd NEVER becomes ready: the poll thread fires the timeout,
     /// re-injects the fiber with `poll_timed_out == true`, and disarms the fd (a later write does NOT
     /// double-inject). The marker is what the rewound socket op reads to return `Err("timeout")`.
@@ -605,6 +659,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 Some(deadline)
             )
@@ -653,6 +708,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 Some(deadline)
             )
@@ -687,6 +743,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 Some(deadline)
             )
@@ -725,6 +782,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 Some(deadline)
             )
@@ -774,6 +832,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 Arc::clone(&in_flight),
                 None
             )
@@ -808,6 +867,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 None
             )
@@ -859,6 +919,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched_a),
+                no_cancel(),
                 Arc::clone(&if_a1),
                 None
             )
@@ -872,6 +933,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched_a),
+                no_cancel(),
                 Arc::clone(&if_a2),
                 None
             )
@@ -885,6 +947,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched_b),
+                no_cancel(),
                 Arc::clone(&if_b),
                 None
             )
@@ -948,6 +1011,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 Arc::clone(&in_flight),
                 None
             )
@@ -1073,6 +1137,7 @@ mod tests {
                 Interest::Read,
                 mk_fiber(),
                 Arc::clone(&sched),
+                no_cancel(),
                 new_in_flight(),
                 None
             )

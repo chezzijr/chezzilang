@@ -5246,6 +5246,41 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     }
 }
 
+/// N4 (cancel-teardown veto): a scope whose `cancel` is tripped but whose tasks have not all
+/// settled is MID-TEARDOWN, not deadlocked. Every cancel trip and its `cancel_drain` are two
+/// separate core-lock acquisitions apart (`mn_worker_loop`'s `finish`→`cancel_drain`,
+/// `abort_enlisted_scope`, `abort_eager_nursery`), and an idle worker's `take_runnable` can land in
+/// that gap and see the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`). Without
+/// the veto it declares DEADLOCK and `flag_deadlock` DROPS the parked siblings without running
+/// `unwind_deferred` — silently skipping their `defer`s. Pins the invariant itself (the scenario
+/// repro is `parallel_defer_runs_on_cancelled_sibling`).
+#[test]
+fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
+    // Scope 0's `JoinScope::cancel` IS this Arc (see `mnsched_park_requeues_when_cancel_tripped`).
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let c1 = empty_core();
+    let c2 = empty_core();
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let a = take_run(&sched);
+    let b = take_run(&sched);
+    // Cancel still false → these really park (the park-gap re-check does not requeue them).
+    sched.park(core_key(&c1), &c1, a);
+    sched.park(core_key(&c2), &c2, b);
+    {
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
+    }
+    // A sibling faults: `classify_mn_outcome` trips the scope cancel BEFORE `finish`/`cancel_drain`.
+    cancel.store(true, Ordering::Relaxed);
+    let c = sched.lock();
+    assert!(
+        !sched.is_deadlocked(&c),
+        "a cancel-tripped scope mid-teardown is not deadlocked (its parked fibers are about to be \
+         drained by `cancel_drain` so they can unwind their defers)"
+    );
+}
+
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
 /// `terminate` once every task is done.
 #[test]
@@ -10167,10 +10202,19 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 ///
 /// Synchronized like [`parallel_cpu_sibling_aborts_on_sibling_fault`]: `boom` waits for a token
 /// `consumer` sends only AFTER it has registered its `defer` and is about to block, so the fault
-/// happens-after the defer is registered — no timing race. (Under the M:N engine task start order
-/// is not deterministic, so a fault that races a not-yet-started sibling would legitimately skip
-/// its not-yet-registered defer, per Go semantics; this token makes the intended "blocked
-/// consumer is aborted" scenario the one actually exercised.)
+/// happens-after the defer is registered. (Under the M:N engine task start order is not
+/// deterministic, so a fault that races a not-yet-started sibling would legitimately skip its
+/// not-yet-registered defer, per Go semantics; this token makes the intended "blocked consumer is
+/// aborted" scenario the one actually exercised.)
+///
+/// The token closes ONLY the defer-REGISTRATION race — it does NOT make this test race-free (an
+/// earlier version of this comment wrongly claimed "no timing race"). The surviving race was
+/// scheduler-side and AFTER the fault: the cancel trip and its `cancel_drain` sit two core-lock
+/// acquisitions apart, and an idle worker's deadlock check landing in that gap used to reap the
+/// still-parked consumer as `Deadlocked`, dropping it WITHOUT `unwind_deferred` — so this printed
+/// `0` roughly 35/200 runs under CPU contention. That is closed by the cancel-teardown veto in
+/// `is_deadlocked` (see `SchedCore::any_incomplete_scope_cancelled`, src/vm/mod.rs). This test is
+/// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
 #[test]
 fn parallel_defer_runs_on_cancelled_sibling() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -10182,6 +10226,64 @@ fn parallel_defer_runs_on_cancelled_sibling() {
     assert_eq!(
         out, "42\n",
         "the cancelled consumer's defer ran on the unwind"
+    );
+}
+
+/// N4 (second seam — `abort_enlisted_scope`): a cancelled task's `defer` must run when the cancel
+/// comes from an EARLY-ENLISTED outer nursery whose body ESCAPES past its join (here: a nested
+/// `parallel:` inside the outer body → `early_enlist_outer` seeds the outer scope's tasks as live
+/// fibers and marks it `awaiting_builder`; the `return` then escapes → `drain_escaped_nursery` →
+/// `abort_enlisted_scope`). That seam used to CLEAR the `awaiting_builder` deadlock veto before it
+/// tripped the scope cancel (which arms the cancel-teardown veto), leaving a window with NEITHER: an
+/// idle worker's `take_runnable` in that window saw the quiesce (the inline builder is not counted in
+/// `running`), declared a spurious DEADLOCK, and `flag_deadlock` DROPPED the parked `task` fiber
+/// without `unwind_deferred` — its `defer` never ran, invisibly (`abort_enlisted_scope` discards the
+/// reduce, so not even the bogus `Deadlocked` surfaced). Fixed by tripping the cancel FIRST (a gapless
+/// veto handoff — `MnSched::trip_scope_cancel`, under the core lock).
+///
+/// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
+/// `defer`, so the inner join — and therefore the escape — happens-after the defer is registered.
+/// Natural window: `cleanup=0` ~1/100 under CPU contention; with a 30ms sleep probing the gap it was
+/// 20/20 pre-fix and 0/20 after. M:N only (`run_capture_parallel`): the serial engine never STARTS a
+/// lazy nursery's pending task before the escape, so no `defer` is registered there at all and it
+/// prints `0` — a pre-existing engine divergence in what a not-yet-started task does (gaps.md N6), not
+/// this bug.
+#[test]
+fn parallel_defer_runs_when_enlisted_nursery_escapes() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+                   fn task(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+                   fn gate(go: Channel[int]):\n    go.recv()\n\
+                   fn outer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    parallel:\n        spawn task(ch, go, s)\n        parallel:\n            spawn gate(go)\n        return\n\
+                   fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    outer(ch, go, s)\n    print(s.get())\nmain()\n";
+    let out = run_capture_parallel(src).expect("the escape is not a fault — the program completes");
+    assert_eq!(
+        out, "42\n",
+        "the enlisted scope's cancelled task unwound through its defer (no spurious deadlock reaped it)"
+    );
+}
+
+/// N4 (panic-fault seam): a worker-VM PANIC (a VM bug, a panicking native/FFI callback) becomes a task
+/// `Fault` via `run_one_fiber`'s `catch_unwind` fallback — which NEVER reaches `classify_mn_outcome`,
+/// the only other place that trips the scope cancel. Without a trip here the scope aborts with
+/// `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`, `park`'s gap
+/// re-check sees no cancel and PARKS THEM AGAIN, the scope quiesces uncancelled, `is_deadlocked` fires
+/// (by its own rules — nothing is cancelled), and `flag_deadlock` drops them without `unwind_deferred`
+/// — their `defer`s silently skipped, hidden behind the panic-fault (`reduce_task_slots` ranks Fault >
+/// Deadlocked). Unit-level because there is no Chezzi-source way to panic a worker VM (every runtime
+/// error is an `Err(RuntimeError)`; even integer overflow is a clean fault).
+#[test]
+fn panic_fault_trips_the_scope_cancel() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    vm.cancel = Some(Arc::clone(&cancel)); // as `run_one_fiber`'s swap-in re-points it, per fiber scope
+    let out = vm.panic_outcome(Box::new("worker boom"), Span { line: 1, col: 1 });
+    assert!(
+        matches!(out, TaskOutcome::Fault { .. }),
+        "a panicking task is a Fault"
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "a panic-fault must trip its scope's cancel — siblings unwind (and run their defers) only if it does"
     );
 }
 
