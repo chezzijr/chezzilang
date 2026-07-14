@@ -2816,7 +2816,7 @@ impl Checker {
             return;
         }
         // Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
-        let Some(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
+        let Ok(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
         else {
             return;
         };

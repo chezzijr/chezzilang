@@ -390,6 +390,15 @@ manager) is the headline and lives above** — it is the one gap that keeps the 
 >
 > Residual: a **pre-built** binary plus an edited `std/*.chz` is stale until rebuilt (`cargo run`/`cargo
 > test` rebuild automatically via `include_str!`; the documented escape is `CHEZZI_STD=./std`).
+>
+> Residual 2 (**open**, found by the review panel, deliberately NOT fixed): `LoadedModule::is_std`'s
+> ENTRY backstop still keys on `path_under_std_root` → `std_root()` → the build machine's
+> `CARGO_MANIFEST_DIR/std`, which on an installed binary does not exist (`canonicalize` errs → `false`).
+> So type-checking a stdlib file **as the entry** (`chezzi check ./std/concurrency/collection.chz` from
+> an installed binary) loses stdlib auto-privilege and reports bogus "unknown type" errors on its bare
+> reserved types (`RwShared`, `Map`). Before the embed this path failed loudly at `std.prelude` instead.
+> Real, but the fix is re-keying `is_std` off the dotted path — a resolver change larger than the bug,
+> with no plausible user (nobody entry-checks the stdlib from an installed binary). Revisit if one appears.
 
 The original finding: `std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`**
 (`src/resolver/mod.rs`), and the `std/*.chz` files were **not embedded** (only `docs/*.md` were

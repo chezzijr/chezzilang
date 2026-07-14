@@ -181,14 +181,37 @@ pub fn find_root_from_dir(start: &Path) -> Option<PathBuf> {
 /// [`std_source`]: an installed binary reads its stdlib from the embedded copy, because the
 /// compile-time `<crate>/std` path belongs to the BUILD machine's checkout and need not exist.
 pub fn std_root() -> PathBuf {
-    match std::env::var_os("CHEZZI_STD") {
-        Some(p) => PathBuf::from(p),
+    match std_override_root() {
+        Some(p) => p,
         None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std"),
     }
 }
 
-/// The SOURCE of a `std.*` module, by dotted path (`["std","concurrency","collection"]`). `None` for
-/// a non-`std` path (those are ordinary project-root disk reads) or a `std.*` module that does not exist.
+/// `$CHEZZI_STD`, if it is set to something usable. An **empty** value counts as unset: an exported-
+/// but-empty var is routine in CI/Docker (`ENV CHEZZI_STD=`), and honouring it would resolve the
+/// stdlib against the CWD and then hard-fail, since the override is exclusive.
+fn std_override_root() -> Option<PathBuf> {
+    let raw = std::env::var_os("CHEZZI_STD")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+/// Why [`std_source`] produced no text.
+#[derive(Debug)]
+pub enum StdMiss {
+    /// Not a `std.*` path — the caller does its ordinary project-root disk read.
+    NotStd,
+    /// A `std.*` module that does not exist (in the embedded stdlib).
+    NoSuchModule,
+    /// `$CHEZZI_STD` is set and reading the module out of THAT tree failed. Carries the path and the
+    /// IO error: the override tree is user-supplied, so it is the likely bug and the only actionable
+    /// thing to print. Never collapse this into `NoSuchModule` — the module exists, the override lied.
+    OverrideRead { path: PathBuf, err: std::io::Error },
+}
+
+/// The SOURCE of a `std.*` module, by dotted path (`["std","concurrency","collection"]`).
 ///
 /// Priority: **`$CHEZZI_STD` (exclusive) → the embedded stdlib** ([`std_embed`]). The env override is
 /// a deliberate "use THIS tree" — when set, an absent file is a hard miss, never a silent fall-back to
@@ -198,14 +221,38 @@ pub fn std_root() -> PathBuf {
 ///
 /// Keyed off the DOTTED path the callers already hold, so there is no path arithmetic and no
 /// canonicalization step that would fail when the source tree is absent.
-pub fn std_source(dotted: &[String]) -> Option<String> {
+pub fn std_source(dotted: &[String]) -> Result<String, StdMiss> {
     if dotted.first().map(String::as_str) != Some("std") {
-        return None;
+        return Err(StdMiss::NotStd);
     }
     let rel = format!("{}.chz", dotted[1..].join("/"));
-    match std::env::var_os("CHEZZI_STD") {
-        Some(root) => std::fs::read_to_string(PathBuf::from(root).join(&rel)).ok(),
-        None => std_embed::lookup(&rel).map(str::to_string),
+    match std_override_root() {
+        Some(root) => {
+            let path = root.join(&rel);
+            std::fs::read_to_string(&path).map_err(|err| StdMiss::OverrideRead { path, err })
+        }
+        None => std_embed::lookup(&rel)
+            .map(str::to_string)
+            .ok_or(StdMiss::NoSuchModule),
+    }
+}
+
+/// The diagnostic for a [`StdMiss`] that isn't [`StdMiss::NotStd`]. Under `$CHEZZI_STD` it names the
+/// override path + the real IO error; otherwise it says the module isn't in the stdlib — and never
+/// prints `env!("CARGO_MANIFEST_DIR")`, which is the BUILD machine's checkout and means nothing to
+/// someone running an installed binary.
+fn std_miss_message(dotted: &[String], miss: &StdMiss) -> String {
+    match miss {
+        StdMiss::OverrideRead { path, err } => format!(
+            "cannot find module '{}' (looked for {} — $CHEZZI_STD is set, so ONLY that tree is \
+             searched, not the stdlib built into this binary): {err}",
+            dotted_label(dotted),
+            path.display()
+        ),
+        _ => format!(
+            "cannot find module '{}' (no such module in the stdlib)",
+            dotted_label(dotted)
+        ),
     }
 }
 
@@ -425,34 +472,31 @@ impl Builder {
             // `std.*` (incl. the always-linked prelude/ref) reads from `$CHEZZI_STD` or the EMBEDDED
             // stdlib — never the build machine's checkout, which an installed binary does not have.
             _ => match std_source(dotted) {
-                Some(src) => src,
-                // A std module that doesn't exist: the "looked for <path>" form below would print the
-                // BUILD machine's `<checkout>/std/nope.chz`, which means nothing to the user.
-                None if dotted.first().map(String::as_str) == Some("std") => {
+                Ok(src) => src,
+                // A std module that doesn't resolve. The "looked for <path>" form below would print
+                // the BUILD machine's `<checkout>/std/nope.chz`, which means nothing to the user —
+                // `std_miss_message` prints the $CHEZZI_STD path + IO error when there IS one.
+                Err(miss @ (StdMiss::NoSuchModule | StdMiss::OverrideRead { .. })) => {
                     return Err(ResolveError {
-                        message: prefix(
-                            &importer,
-                            format!(
-                                "cannot find module '{}' (no such module in the stdlib)",
-                                dotted_label(dotted)
-                            ),
-                        ),
+                        message: prefix(&importer, std_miss_message(dotted, &miss)),
                         span: import_span,
                         module: Some(dotted_label(dotted)),
                     });
                 }
-                None => std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
-                    message: prefix(
-                        &importer,
-                        format!(
-                            "cannot find module '{}' (looked for {})",
-                            dotted_label(dotted),
-                            id.0.display()
+                Err(StdMiss::NotStd) => {
+                    std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
+                        message: prefix(
+                            &importer,
+                            format!(
+                                "cannot find module '{}' (looked for {})",
+                                dotted_label(dotted),
+                                id.0.display()
+                            ),
                         ),
-                    ),
-                    span: import_span,
-                    module: Some(dotted_label(dotted)),
-                })?,
+                        span: import_span,
+                        module: Some(dotted_label(dotted)),
+                    })?
+                }
             },
         };
         let ast = self.parse(&source, dotted)?;
@@ -566,14 +610,8 @@ impl Builder {
         // Same source chain as any other `std.*` module ($CHEZZI_STD → embedded): these ARE std files
         // (`std/math.chz`, `std/regex.chz`, …), so reading them off the checkout would break `import
         // std.math` on an installed binary just as surely as the pure-Chezzi modules.
-        let source = std_source(path).ok_or_else(|| ResolveError {
-            message: prefix(
-                &dotted,
-                format!(
-                    "cannot find native module file '{}' (no such module in the stdlib)",
-                    dotted_label(&dotted)
-                ),
-            ),
+        let source = std_source(path).map_err(|miss| ResolveError {
+            message: prefix(&dotted, std_miss_message(&dotted, &miss)),
             span: import_span,
             module: Some(dotted_label(&dotted)),
         })?;
@@ -741,7 +779,7 @@ mod tests {
             &["std", "concurrency", "collection"][..], // nested dir
         ] {
             let src = std_source(&d(segs))
-                .unwrap_or_else(|| panic!("std_source({segs:?}) returned None — not embedded?"));
+                .unwrap_or_else(|e| panic!("std_source({segs:?}) missed ({e:?}) — not embedded?"));
             assert!(!src.is_empty(), "{segs:?} embedded source is empty");
         }
 
@@ -751,10 +789,38 @@ mod tests {
             std_embed::lookup("math.chz").unwrap()
         );
 
-        // A std module that does not exist → None (the caller turns this into a clean diagnostic).
-        assert!(std_source(&d(&["std", "nope"])).is_none());
+        // A std module that does not exist → NoSuchModule (a clean diagnostic, not a disk read).
+        assert!(matches!(
+            std_source(&d(&["std", "nope"])),
+            Err(StdMiss::NoSuchModule)
+        ));
         // Non-std paths are never intercepted — they stay project-root disk reads.
-        assert!(std_source(&d(&["myapp", "util"])).is_none());
+        assert!(matches!(
+            std_source(&d(&["myapp", "util"])),
+            Err(StdMiss::NotStd)
+        ));
+    }
+
+    // 0-std-override. A FAILED read out of a `$CHEZZI_STD` tree must name that tree + the real IO
+    // error — never claim "no such module in the stdlib", which is false (the module IS embedded) and
+    // hides the one thing the user can act on: the path they supplied. `std_source` reads the env var,
+    // so exercise `std_miss_message` on the constructed miss rather than mutating process-global env
+    // (this harness runs in parallel; see the note on `std_source_serves_std_from_embedded`).
+    #[test]
+    fn override_read_failure_names_the_override_path_not_the_stdlib() {
+        let dotted = vec!["std".to_string(), "math".to_string()];
+        let miss = StdMiss::OverrideRead {
+            path: PathBuf::from("/typo/std/math.chz"),
+            err: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        };
+        let msg = std_miss_message(&dotted, &miss);
+        assert!(msg.contains("/typo/std/math.chz"), "msg: {msg}");
+        assert!(msg.contains("CHEZZI_STD"), "msg: {msg}");
+        assert!(msg.contains("permission denied"), "msg: {msg}");
+        assert!(
+            !msg.contains("no such module"),
+            "a failed override read must not assert the module is absent: {msg}"
+        );
     }
 
     // 0-std-err. A missing `std.*` module must NOT leak the BUILD MACHINE's checkout path — on an
