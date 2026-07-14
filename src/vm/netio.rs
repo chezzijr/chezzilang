@@ -359,14 +359,11 @@ impl Vm {
         }
     }
 
-    /// D6 — `Socket` methods: `read(n) -> Result[str]`, `write(s) -> Result[int]`, `close() -> nil`.
-    /// On a would-block, under the M:N engine the fiber PARKS on the netpoller (re-root the receiver,
-    /// rewind `ip` so the op re-executes on resume, set the `poll_park` sentinel — mirrors the channel
-    /// `recv` park, but routed to the poller). Off the M:N engine (top level / cooperative) there is no
-    /// fiber to park, so the op blocks the thread once (a documented v1 fallback — net targets
-    /// `--parallel`).
-    ///
-    /// D6/B1 — `Socket.read(n) -> Result[str]` / `read(n, timeout_ms)`.
+    /// D6/B1 — `Socket.read(n) -> Result[str]` / `read(n, timeout_ms)`. On a would-block, under the M:N
+    /// engine the fiber PARKS on the netpoller (re-root the receiver, rewind `ip` so the op re-executes
+    /// on resume, set the `poll_park` sentinel — mirrors the channel `recv` park, but routed to the
+    /// poller). Off the M:N engine (top level / cooperative) there is no fiber to park, so the op fails
+    /// loud (a documented v1 fallback — net targets `--parallel`).
     ///
     /// Decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`). Contract: `n` bounds the NEW
     /// bytes taken off the fd; a ≤3-byte incomplete-codepoint tail carried from the previous read is
@@ -504,8 +501,10 @@ impl Vm {
         }
     }
 
-    /// B1 — `read` decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`); see
-    /// [`Vm::socket_read`] for its contract.
+    /// D6 — `Socket` methods: `read(n) -> Result[str]` (see [`Vm::socket_read`] — B1: it decodes through
+    /// [`Vm::decode_carry`], never `from_utf8_lossy`), `write(s) -> Result[int]`, `close() -> nil`. On a
+    /// would-block, under the M:N engine the fiber PARKS on the netpoller (rewind `ip`, set the
+    /// `poll_park` sentinel); off it, there is no fiber to park (net targets `--parallel`).
     pub(super) fn socket_method(
         &mut self,
         h: GcRef,
