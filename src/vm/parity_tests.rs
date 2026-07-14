@@ -2585,6 +2585,175 @@ main()
     );
 }
 
+/// B1 — a `read(n)` whose chunk ends mid-codepoint must NOT corrupt the text. The client reads a
+/// multibyte payload ONE BYTE AT A TIME (the ordinary read-in-a-loop idiom): the incomplete tail is
+/// carried on the socket core and prepended to the next read, so the reassembly is byte-exact.
+/// Before the fix `String::from_utf8_lossy` turned `é` into two U+FFFD.
+#[test]
+fn net_read_reassembles_split_codepoint_over_parallel() {
+    let src = "\
+import std.net
+
+fn serve(server: Listener) -> int!:
+    conn := server.accept()?
+    conn.write(\"héllo\")?
+    conn.close()
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    acc := \"\"
+    while true:
+        chunk := sock.read(1)?
+        if chunk == \"\":
+            break
+        acc = acc + chunk
+    print(\"GOT:\" + acc)
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    server := net.listen(\"127.0.0.1:0\")?
+    addr := server.addr()?
+    parallel:
+        spawn serve(server)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+";
+    let out = run_net_timeout_watchdog("split_codepoint", src);
+    assert!(
+        out.contains("GOT:héllo"),
+        "a byte-at-a-time read must reassemble the multibyte text exactly: {out:?}"
+    );
+    assert!(
+        !out.contains('\u{fffd}'),
+        "no replacement chars — the seam must never lossily decode: {out:?}"
+    );
+}
+
+/// B1 — a genuinely-invalid UTF-8 byte on the wire (a lone `0xFF` ⇒ `Utf8Error::error_len() ==
+/// Some(1)`) must surface a clear, recoverable `Err` naming the str-only limitation, NOT a silent
+/// U+FFFD. Peer is a raw Rust `TcpListener` so we can put arbitrary bytes on the wire.
+#[test]
+fn net_read_invalid_utf8_errs_not_replacement_chars() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"hi\xFFthere").unwrap();
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    match sock.read(64):
+        Ok(s): print(\"GOT:\" + s)
+        Err(e): print(\"ERR:\" + e.message())
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("invalid_utf8", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("invalid utf-8 on the socket"),
+        "an invalid byte sequence must surface the str-only Err: {out:?}"
+    );
+    assert!(
+        out.contains("read_bytes"),
+        "the Err must point at the real limitation/future path: {out:?}"
+    );
+    assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
+}
+
+/// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,
+/// then EOF) is a real error, never a silent drop and never U+FFFD. The valid prefix is still
+/// delivered; the dangling lead byte errors on the read that sees the close.
+#[test]
+fn net_read_incomplete_tail_at_eof_errs() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"ok\xC3").unwrap();
+        stream
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown the peer");
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    while true:
+        match sock.read(8):
+            Ok(s):
+                if s == \"\":
+                    break
+                print(\"GOT:\" + s)
+            Err(e):
+                print(\"ERR:\" + e.message())
+                break
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("eof_tail", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("GOT:ok"),
+        "the valid prefix is delivered: {out:?}"
+    );
+    assert!(
+        out.contains("ERR:invalid utf-8 at eof"),
+        "a dangling partial codepoint at EOF must error, not be dropped: {out:?}"
+    );
+    assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
+}
+
 /// D6c — `server.accept(timeout_ms)` returns `Err("timeout")` when NO client ever connects, and the
 /// program terminates (no hang). The lone acceptor parks on the netpoller with a deadline; the
 /// deadline fires, the rewound `accept` returns `Err("timeout")`, and the nursery joins.

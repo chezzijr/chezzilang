@@ -13,9 +13,9 @@ work already done.
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
-### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0
-`src/vm/netio.rs:315` and `:360` do `String::from_utf8_lossy(&buf)`, and `std/net.chz:23` types the
-method `read(self, n: int, ...) -> Result[str]`. So the socket seam **must** lossily decode. Two
+### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0 — **MITIGATED (not fixed)**
+`src/vm/netio.rs:315` and `:360` did `String::from_utf8_lossy(&buf)`, and `std/net.chz` types the
+method `read(self, n: int, ...) -> Result[str]`. So the socket seam **had to** lossily decode. Two
 failures, both silent — no `Err`, no fault, just wrong data:
 1. **Any binary payload** (TLS, an image, protobuf, a gzip body) becomes U+FFFD replacement chars.
 2. **Even pure UTF-8 text** is mangled when a multibyte codepoint straddles a `read(n)` chunk boundary
@@ -27,8 +27,25 @@ failures, both silent — no `Err`, no fault, just wrong data:
    ```
 This is the same family as the false-EOF and the swallowed exit status: **the runtime lies to the
 program.** It is worse than those, because it corrupts *data* rather than control flow, and `std.net`
-is documented as working. Root cause is R1 (no `bytes` in the native seam) — the honest fix is
-`Socket.read_bytes`/`write_bytes`; the interim mitigation is to at least *fault* instead of corrupting.
+is documented as working.
+
+**MITIGATION LANDED (2026-07-14).** Both lossy sites now route through one guard,
+`Vm::decode_socket_read` (`src/vm/netio.rs`), and `from_utf8_lossy` is gone from the socket path.
+The two failure modes are now separated, exactly as `Utf8Error` separates them:
+- **Split codepoint (`error_len() == None`) — case 2 is FIXED, not merely reported.** The incomplete
+  ≤3-byte tail is retained on the `SocketCore` and prepended to the next read, so a byte-at-a-time read
+  of valid text reassembles **byte-exactly**. Contract: `n` bounds the NEW bytes off the fd, so a
+  `read(n)` may return up to `n + 3` bytes; a read whose chunk holds no complete codepoint re-reads
+  (never `Ok("")` — that is the EOF sentinel), so it may block past its first fd read. `timeout_ms` still
+  fires, and the carry survives a timeout `Err`.
+- **Genuinely invalid bytes (`error_len() == Some(_)`) — i.e. a BINARY payload — case 1 is REPORTED, not
+  supported:** `Err("invalid utf-8 on the socket: std.net read is str-only — binary payloads need
+  Socket.read_bytes …")`. An incomplete codepoint left when the peer closes is likewise
+  `Err("invalid utf-8 at eof: …")`, never a silent drop.
+
+**Still not fixed:** you *cannot read binary over a socket*. The honest fix remains **R1** (a `bytes`
+native seam) + `Socket.read_bytes`/`write_bytes`. B1 stays open, downgraded from *silent corruption* to
+*a clear, recoverable limitation*.
 
 ### B2. `==` between disjoint types type-checks (a proposed tightening, not a clear bug)
 `1 == "a"` compiles and evaluates to `false` (`src/checker/pattern.rs`, the `Eq | NotEq` arm returns
@@ -51,7 +68,7 @@ the same missing seam, and each was filed separately as if it were its own featu
 - no binary file read/write (`read_bytes`/`write_bytes`) — filed under *IO/files*
 - no gzip/zlib, no arbitrary-bytes base64 round-trip — filed under *Crypto/encoding*
 - no binary sockets, so no binary HTTP body, no image upload/download — filed under *Net* (and it is
-  the root of **B1**, filed nowhere)
+  the root of **B1**, whose mitigation now returns a clear `Err` there — R1 is what makes it *work*)
 - no `sha256` of a file, no hashing of binary data — filed under *Crypto*
 - `std.request` cannot fetch a non-text body (`src/native/request.rs:62` → `into_string()`), i.e.
   **"download a file" is impossible** — filed nowhere
@@ -262,7 +279,9 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   `Socket.peer_addr()`.
 - **The HTTP-server blocker is not "no framework"** — you *can* hand-roll one on `listen`/`accept`/
   `read`/`write`. It is that the socket seam is **`str`-only**, so a hand-rolled server can serve JSON
-  and cannot accept an image. That is **R1**, and it is also **B1** (silent corruption).
+  and cannot accept an image. That is **R1**. It was also **B1** (silent corruption); since the B1
+  mitigation an image is a clear `Err("invalid utf-8 on the socket: …")` instead of U+FFFD garbage, and
+  split-codepoint text now reassembles exactly — but binary still needs R1.
 - **`std.net` requires the M:N engine**: off it, a would-block op returns `Err("read would block:
   std.net sockets require the --parallel engine")` (`src/vm/netio.rs`). So the same TCP program behaves
   differently on `--serial` vs the default engine. This is an *accepted design fallback*, not a bug —

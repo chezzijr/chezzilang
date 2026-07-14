@@ -196,6 +196,18 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` · `close() -> nil`.
+  `read` is a **`str`-only seam** — it decodes, and it never decodes lossily (no U+FFFD, ever):
+  - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
+    tail is carried on the socket and prepended here — so `read(n)` can return **up to `n + 3` bytes**,
+    and reading valid text in a loop (even `read(1)`) reassembles it **byte-exactly**. Such a read may
+    block past its first successful read to complete the codepoint (`timeout_ms` still applies; a
+    timed-out read keeps the carried tail for the next read — no bytes are lost).
+  - Bytes that are genuinely not UTF-8 (a **binary payload**) → `Err("invalid utf-8 on the socket: …")`.
+  - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
+  - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the
+    EOF error surfaces on the `read` that sees the close, not on `close`.
+  - **Binary payloads are not supported yet.** They need `Socket.read_bytes`/`write_bytes`, which need
+    the `bytes` native seam (`docs/gaps.md` R1). Until then they are a clear `Err`, not corruption.
 - `Listener`: `accept(timeout_ms?: int) -> Result[Socket]` · `addr() -> Result[str]` · `close() -> nil`.
 - `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
   requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
@@ -395,6 +407,9 @@ Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
 `listen(addr: "host:port") -> Listener`. Socket/Listener methods are in §3. See `concurrency.md`.
 The `Socket`/`Listener` TYPE names require `import std.net` to use bare in an annotation (whole-module,
 or `import Socket from std.net`) — they are reserved names, not global builtins.
+**Text-only:** `Socket.read -> Result[str]` decodes UTF-8 and never lossily (see §3) — a split codepoint
+is carried across reads and reassembled exactly, while a **binary** payload is a clear `Err`, not silent
+U+FFFD corruption. Binary sockets await `read_bytes`/`write_bytes` (`docs/gaps.md` R1).
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).

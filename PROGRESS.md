@@ -4732,6 +4732,31 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **`Socket.read` no longer CORRUPTS data — B1 MITIGATED (2026-07-14).** `src/vm/netio.rs` decoded every
+  socket chunk with `String::from_utf8_lossy` at TWO sites (the fast path + the in-callback demote
+  poller), so the `str`-only seam (`read -> Result[str]`, `std/net.chz`) silently produced U+FFFD: any
+  **binary** payload became garbage, and — worse — **valid UTF-8 text** was mangled whenever a multibyte
+  codepoint straddled a `read(n)` boundary, i.e. the ordinary read-in-a-loop idiom (`read(1)` over
+  `"héllo"` → `h\u{fffd}\u{fffd}llo`). The runtime lied about the *data*. Both sites now route through
+  ONE guard, `Vm::decode_socket_read`, which splits the two cases `Utf8Error` already distinguishes:
+  **(a) truncated tail** (`error_len() == None`) — the ≤3-byte incomplete codepoint is RETAINED on the
+  `Arc`'d `SocketCore` (`carry`, so it survives the would-block park's `ip`-rewind re-execution) and
+  prepended to the next read, so byte-at-a-time reads of valid text reassemble **exactly**; **(b)
+  genuinely invalid bytes** (`error_len() == Some(_)`) — a recoverable
+  `Err("invalid utf-8 on the socket: std.net read is str-only — binary payloads need Socket.read_bytes
+  …")`, and an incomplete codepoint left when the peer closes is `Err("invalid utf-8 at eof: …")`, never
+  a silent drop. **Contract changes:** `n` bounds the NEW bytes off the fd, so a `read(n)` may return up
+  to `n + 3` bytes; a chunk holding no complete codepoint re-reads rather than returning `Ok("")` (that
+  is the EOF sentinel — returning it mid-`é` would silently truncate every `while chunk != "":` loop), so
+  `read` may block past its first successful fd read; `timeout_ms` still fires and the carry is kept
+  across the timeout `Err` (the bytes are still owed). `close()` stays `-> nil` — a leftover tail at close
+  is dropped, the EOF error surfaces on the READ that sees the close. **Known v1 limit (unchanged):
+  binary sockets are UNSUPPORTED** — they need `Socket.read_bytes`/`write_bytes`, which need the `bytes`
+  native seam (`docs/gaps.md` R1, the honest fix). B1 is downgraded from *silent corruption* to *a clear,
+  recoverable limitation*, not closed. Pinned by three M:N tests (`net_read_reassembles_split_codepoint_
+  over_parallel`, `net_read_invalid_utf8_errs_not_replacement_chars`, `net_read_incomplete_tail_at_eof_
+  errs`); the serial engine's net path (immediate "requires the --parallel engine" `Err`) is untouched,
+  so no parity divergence.
 - **stdin is SHARED by every task (Go/Python) — the false EOF is dead (2026-07-14).** stdin belonged to
   the ENTRY task: every other task was handed `Stdin::Empty`, so `io.read_line()` / `io.input()` inside a
   `spawn:`/nursery task or an `Executor.submit` task returned `None` — a **false EOF**, while the entry

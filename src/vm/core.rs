@@ -147,6 +147,14 @@ pub struct SocketCore {
     /// and the duplicate registry insert would drop the first fiber (an `inflight` leak + hang). Shared
     /// (`Arc`) so the poller can clear it without holding the type-erased core.
     pub in_flight: Arc<AtomicBool>,
+    /// B1 — the incomplete-UTF-8 tail (≤3 bytes) of the previous `read`: a multibyte codepoint that
+    /// straddled the `read(n)` chunk boundary. `Socket.read -> Result[str]` is a str-only seam, so a
+    /// chunk that ends mid-codepoint is NOT decodable on its own — the tail is retained HERE and
+    /// prepended to the next read (never lossily decoded, never dropped). It lives on the `Arc`'d core,
+    /// not on the frame, because a would-block park REWINDS `ip` and re-executes the whole read op (see
+    /// [`Vm::park_on_fd`]) and because two fibers may alias one socket. Its own `Mutex`, only ever taken
+    /// AFTER `stream`'s guard is released.
+    pub carry: Mutex<Vec<u8>>,
 }
 
 /// D6 — `Listener` core: a non-blocking accepting socket. Same handle/core split + fd-lifecycle as
@@ -294,6 +302,7 @@ mod tests {
             stream: Mutex::new(Some(stream)),
             key: next_poll_key(),
             in_flight: new_in_flight(),
+            carry: Mutex::new(Vec::new()),
         };
         let s2 = ListenerCore {
             listener: Mutex::new(Some(listener)),
