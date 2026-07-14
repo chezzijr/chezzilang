@@ -1,8 +1,104 @@
 # Chezzi — gap backlog
 
 Catch-all backlog of missing / shallow surface. **Not a commitment** — draw from it when a feature
-earns its own milestone. Currently all entries are **stdlib + deps** (first audit 2026-07-07); add
-other categories (language, tooling, perf) here as they surface.
+earns its own milestone. Categories: **bugs** (fix, don't backlog), **root causes** (one change that
+unblocks many gaps), **language**, **stdlib**, **IO/runtime**, **tooling/ecosystem**, **deps**.
+
+**Audit history:** first stdlib pass 2026-07-07. **Full four-axis audit 2026-07-14** (IO/runtime,
+stdlib breadth, language features, tooling) — that pass found one live data-corruption **bug**, three
+cross-cutting **root causes** that were each recorded as unrelated footnotes, and a whole missing
+**tooling** category. It also found the file's own #1 entry ("number format-specs") had been **shipped
+and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
+work already done.
+
+## Bugs found by the 2026-07-14 audit — FIX, do not backlog
+
+### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0
+`src/vm/netio.rs:315` and `:360` do `String::from_utf8_lossy(&buf)`, and `std/net.chz:23` types the
+method `read(self, n: int, ...) -> Result[str]`. So the socket seam **must** lossily decode. Two
+failures, both silent — no `Err`, no fault, just wrong data:
+1. **Any binary payload** (TLS, an image, protobuf, a gzip body) becomes U+FFFD replacement chars.
+2. **Even pure UTF-8 text** is mangled when a multibyte codepoint straddles a `read(n)` chunk boundary
+   — i.e. the ordinary "read in a loop" idiom. VERIFIED end-to-end (`--parallel`, localhost TCP,
+   sending `"héllo"`, reading 1 byte at a time):
+   ```
+   expected   : héllo
+   reassembled: h��llo      # equal? false
+   ```
+This is the same family as the false-EOF and the swallowed exit status: **the runtime lies to the
+program.** It is worse than those, because it corrupts *data* rather than control flow, and `std.net`
+is documented as working. Root cause is R1 (no `bytes` in the native seam) — the honest fix is
+`Socket.read_bytes`/`write_bytes`; the interim mitigation is to at least *fault* instead of corrupting.
+
+### B2. `==` between disjoint types type-checks (a proposed tightening, not a clear bug)
+`1 == "a"` compiles and evaluates to `false` (`src/checker/pattern.rs`, the `Eq | NotEq` arm returns
+`Ty::Bool` without checking operand compatibility). Note the tension before "fixing" it: this is
+**exactly Python's runtime behavior** (`1 == "a"` → `False`), so by the no-drift rule it is not a
+divergence. But Chezzi is **statically typed**, and a comparison between provably disjoint types is
+always a bug in user code — which is why mypy ships `--strict-equality` to reject it and Go/Rust make
+it a compile error. Recommendation: reject at check time (a typed language should), and say so in the
+docs as a deliberate, explained divergence from Python's runtime.
+
+## Root causes — one change each, many gaps unblocked
+
+These are the entries that were previously scattered as unrelated one-liners. Ranked by how much they
+unblock.
+
+### R1. The native seam cannot carry `bytes` — **the highest-leverage item in the backlog**
+`bytes`/`bytearray` exist in the language, but `NativeRet` has no `Bytes` variant and `Host` has no
+`arg_bytes` (`src/native/mod.rs`), so **no native fn can accept or return them**. Everything below is
+the same missing seam, and each was filed separately as if it were its own feature:
+- no binary file read/write (`read_bytes`/`write_bytes`) — filed under *IO/files*
+- no gzip/zlib, no arbitrary-bytes base64 round-trip — filed under *Crypto/encoding*
+- no binary sockets, so no binary HTTP body, no image upload/download — filed under *Net* (and it is
+  the root of **B1**, filed nowhere)
+- no `sha256` of a file, no hashing of binary data — filed under *Crypto*
+- `std.request` cannot fetch a non-text body (`src/native/request.rs:62` → `into_string()`), i.e.
+  **"download a file" is impossible** — filed nowhere
+**Size:** one enum variant + one trait method + two engine lowerings. A *seam expansion*, not a
+subsystem. Python's `bytes` and Go's `[]byte` are the primary IO currency in both languages; Chezzi's
+IO is text-only by accident of the seam, not by design.
+
+### R2. There is no `Writer` / file-handle type — so no buffering, no streaming, no binary write
+Files are whole-string ≤64 MB (`std.fs`); there is no `io.Writer`-equivalent anywhere. Consequences:
+- **You cannot opt into buffered output.** Every `print` is one `Msg::Write` → one `write_all` +
+  `flush` (`src/vm/stream.rs`), i.e. **one syscall per print, with no way out**. `io.flush()` is a
+  genuine no-op (`Host::flush_stdout` is a defaulted no-op, `src/native/mod.rs`).
+- **Go gets away with unbuffered `os.Stdout` precisely because `bufio.NewWriter` exists**, and every Go
+  programmer reaches for it in a hot loop. Python block-buffers automatically when piped. **Chezzi took
+  Go's default without Go's escape hatch** — the worst corner of that design space. (Measured: 200k
+  lines piped = 0.108s unbuffered vs 0.068s for CPython's buffered; the writes are already off the VM
+  thread, so the gap is smaller than it looks, but the *capability* is missing.)
+- No line-streaming of a large file; no writing to anything that isn't stdout/stderr/whole-file.
+**The principled home:** a `Writer` native handle (the `Socket` userdata is the template) from
+`fs.open(path, mode)` / `io.stdout()`, with `write`/`write_bytes`/`flush`/`close`, plus a
+`buffered(w, size)` wrapper. Buffering then becomes *a value you hold*, not a global mode — and
+`io.flush()` keeps its honest no-op meaning for the process's (unbuffered) stdout. Lands together with
+R1 and with file handles: **one milestone, not three.**
+**Known ceiling, unmapped until now:** the stream queue is **unbounded** (`src/vm/stream.rs`) — a
+program printing faster than a stalled consumer drains grows memory without limit. Deliberate (never
+pin a core worker), but it is a real ceiling; bounded `sync_channel` is the upgrade.
+
+### R3. No package manager — **the wall that keeps Chezzi author-only**
+`Manifest` is `{name, version, entrypoint}` (`src/manifest.rs`) and the parser **silently ignores**
+unknown sections, so a `[dependencies]` block does nothing. The resolver knows exactly two roots — the
+project root and `std_root()` (`src/resolver/mod.rs`) — so **a third-party Chezzi library cannot be
+imported at all**, except by copying its `.chz` files into your tree. No registry, no lockfile, no
+versions, no vendoring.
+Everything else in this file is a bad afternoon for a user. This one is a closed door: **nobody can use
+anyone else's code, and nobody can use yours.**
+`docs/ffi-and-packaging.md §6.1` calls the pure-Chezzi source registry "cheap, do first" — and it is
+(a third resolver search path + a fetch cache + a lockfile; **no** ABI/NaN-boxing/`repr(C)` work, which
+is only needed for *native* packages). It has never been scheduled. That mis-sequencing — the cheap 90%
+stalled behind a native-ABI narrative it does not depend on — is the most consequential finding of the
+audit.
+
+### R4. No runtime type tags → no `cast[T]`, no `errors.As`
+`Any` (an empty protocol) lets values *in* and nothing *out*; there is no `type()`, no `isinstance`, no
+downcast. Protocol **existentials do** give real dynamic dispatch (`examples/poly_method.chz`), so the
+sharp edge is narrower than `future.md §14` implies — it is mostly **error discrimination** (see L3)
+and dynamic data-walking. **Size: large** (needs runtime type tags on heap objects); design already
+correct in `future.md §14`.
 
 ## Language / concurrency
 
@@ -92,11 +188,13 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 
 ## Ranked by hit-rate (most-used script surface first)
 
-### 1. String formatting — **highest payoff, most "Python-feel"**
-- **Number format-spec in interpolation.** `"{3.14159}"` prints all digits — no `{x:.2f}`, no width/
-  fill/align, no thousands-sep, no `int`→hex/oct/bin. This is the single biggest ergonomic gap. Touches
-  the lexer/interpolation path + a format-spec mini-grammar. (Python `f"{x:.2f}"` / `format()` has no equal.)
-- `str.pad_right` / `center` (only `pad_left` exists today). No `ljust`/`rjust`/`zfill`.
+### 1. String formatting
+- ~~Number format-spec in interpolation~~ — **SHIPPED** (`src/fmtspec.rs`, `Op::ToStrFmt`,
+  `docs/syntax.md §10`): the full Python mini-language, `{x:.2f}` / fill / align / width / `d f x X b o
+  e %`. This entry sat here as "the single biggest ergonomic gap" long after it landed — the audit's
+  cautionary tale. It also largely **obsoletes** the next bullet (`"{s:^10}"` is `center`).
+- `str.pad_right` / `center` / `ljust` / `rjust` / `zfill` — now only *method spellings* of what format
+  specs already do. Downgraded: alias sugar, not a gap.
 - `str.capitalize` / `title` / `swapcase`. No `rsplit`, no `split` with a limit, no split-on-whitespace-run.
 - `str.find(sub, from_index)` (only `index_of` from 0).
 
@@ -113,32 +211,212 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   `Iterator[T]`. `std.iter` is all-eager `List`. Natural follow-up now that generators infer their
   element type (`-> Iterator[T]` optional).
 
-### 4. IO / files
+### 4. IO / files — *see **R2** (no `Writer` type) for the root cause*
 - **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`
   and `io.input(prompt)` exist, and a prompt appears before its blocking read.
-- Read-all-stdin; char read.
+- **No way to BUFFER output** (R2). Unbuffered always, one syscall per `print`, `io.flush()` inert.
 - Files are **whole-string ≤64 MB only** — no file handles, no line-streaming, no `read_bytes` /
-  `write_bytes` (binary). New native userdata type = larger change.
+  `write_bytes` (binary). Needs R1 + R2 (one milestone).
+- Read-all-stdin; char read.
+- fs: no `canonicalize`/`realpath` (`path.normalize` is purely lexical — no symlink resolution), no
+  `chmod`/executable bit, no atomic write (write-temp + rename).
 
 ### 5. Numbers / math
 - `divmod`, `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`. `math.inf` / `math.nan` constants (only
   `pi`/`e` today). Int-from-base (parse a hex/bin string). `factorial` / `comb` / `perm`.
+- No **decimal / bigint**. `int` is a checked i64 (overflow FAULTS, never promotes), so a big-number or
+  exact-money program simply cannot be written — there is no workaround. (Python: `int` is arbitrary
+  precision + `decimal`; Go: `math/big`.) Rare in scripting; deferred, but it is a hard wall, not a
+  slow path.
 
 ### 6. OS / system
 - os: `setenv`, `chdir`, `getpid`, `platform` / `os_name`, `hostname`, `environ()` (all vars),
-  `home_dir` / `temp_dir`. No signal handling / `atexit`.
+  `home_dir` / `temp_dir`.
+- **No cleanup story at all** (three bullets that are really one): no temp-file/temp-dir creation, **no
+  signal handling / `atexit` hook**, and `os.exit` does **not** run `defer`s. So a program that must
+  clean up on Ctrl-C or on exit has no reliable path. (Python: `tempfile` + `atexit` + context managers;
+  Go: `os.CreateTemp` + `defer` + `signal.Notify`.)
+- **No TTY detection** — `isatty` does not exist (zero hits in `src/`). So a CLI must either always
+  colorize (garbage when piped) or never. `io.isatty() -> bool` is **one fn** (`std::io::IsTerminal`) —
+  the cheapest real win in this file. Terminal size / echo-off (password prompts) are a second step.
+- **`os.env` and `process.cmd` disagree**: `os.env` reads the injected `HostConfig`, while `process.cmd`
+  shells out with the real inherited process env — so under a synthetic host config `os.env("X")` is
+  `None` while `process.cmd("echo $X")` prints the real value. Nobody has written this down.
 - fs: recursive `walk`, `remove_dir_all` (intentionally omitted today — see `stdlib.md §std.fs`),
-  metadata (mtime / permissions / size-struct), temp-file creation.
+  metadata (mtime / permissions / size-struct).
 
 ### 7. Crypto / encoding
 - crypto: only `sha256` / `md5`. Missing `sha1` / `sha512`, **`hmac`**, secure-random-bytes / token,
   password hashing (bcrypt/argon2). All hand-rolled zero-dep today, so each is real work.
-- encoding: no gzip / zlib, no CSV. No arbitrary-**bytes** round-trip (documented native-seam limit —
-  needs a bytes-arg/bytes-return seam expansion).
+- encoding: no gzip / zlib, no CSV. No arbitrary-**bytes** round-trip → **this is R1**, not an encoding
+  gap. Hashing a *file* is blocked by the same seam.
+- **URL parsing is the missing half of an already-built module**: `url_encode` / `url_decode` /
+  `query_encode` exist — but **no `query_decode`** (query string → `Map[str,str]`) and no `url_parse`
+  (scheme/host/port/path/query). You can build a query string and not read one back. Blocks anything
+  webhook- or server-shaped. Small, pure-Chezzi.
 
-### 8. Net
+### 8. Net — *and `std.net` is `--parallel`-only, which is a standing serial≠M:N divergence*
 - TCP (`std.net`) + HTTP-client (`std.request`) only. No UDP, no HTTP **server**, no DNS-resolve
-  exposed, no raw TLS socket (`request` does HTTPS internally via ureq).
+  exposed, no raw TLS socket (`request` does HTTPS internally via ureq). Also missing: unix-domain
+  sockets, `shutdown()` half-close, socket options (`set_nodelay`, `SO_REUSEADDR`, keepalive),
+  `Socket.peer_addr()`.
+- **The HTTP-server blocker is not "no framework"** — you *can* hand-roll one on `listen`/`accept`/
+  `read`/`write`. It is that the socket seam is **`str`-only**, so a hand-rolled server can serve JSON
+  and cannot accept an image. That is **R1**, and it is also **B1** (silent corruption).
+- **`std.net` requires the M:N engine**: off it, a would-block op returns `Err("read would block:
+  std.net sockets require the --parallel engine")` (`src/vm/netio.rs`). So the same TCP program behaves
+  differently on `--serial` vs the default engine. This is an *accepted design fallback*, not a bug —
+  but it must be written down, because §"Audited residuals" previously claimed the task-stdin bug was
+  "the only known serial≠M:N divergence", and that was **wrong as written**.
+
+### 9. Date/time — `datetime` is **write-only** (no parsers)
+`std/datetime.chz` has 21 functions and **every one is a formatter or epoch-math helper**: `from_epoch`,
+`to_iso8601`, `to_date_string`… There is **no `parse_iso8601` / `strptime` / `from_string`**, and
+`std.time` is `now`/`monotonic`/`sleep_ms`/`format` — also format-only. So a script **cannot turn a
+timestamp from JSON, an HTTP header, a CSV or a log line into a `DateTime`**. The inverse is fully
+built. (Python: `fromisoformat`/`strptime`; Go: `time.Parse`.) **Small** — `days_from_civil` already
+exists; this is only the string→ints half. Blocks a very common script shape.
+
+### 10. Missing modules a real script reaches for
+- **`std.flag` — CLI arg parsing.** `os.args() -> List[str]` and nothing else. Every tool hand-rolls a
+  `for` over argv (Chezzi's own `src/main.rs` does exactly that). Go-style `flag.str/bool/int` +
+  positionals is ~120 lines of pure Chezzi, no native seam. (Python: `argparse`; Go: `flag`.)
+- **`std.log` — levels + timestamps + stderr default.** Does not exist; every script reimplements it.
+  ~80 lines pure Chezzi. (Python: `logging`; Go: `log`/`slog`.)
+- **`std.db` (sqlite).** Absent. Reachable *in theory* via FFI to `libsqlite3` (the opaque `ptr` type
+  names `sqlite3*` as its motivating case) but that is a research project, not a workaround. Blocks
+  persistence-shaped scripts. **Large.**
+- Config formats (TOML/YAML/INI): absent, JSON only. Low priority — JSON + env vars cover it. If ever:
+  TOML, not YAML.
+- `bisect` / `binary_search` on a sorted `List` (sort/sort_by already exist). ~10 lines.
+- `functools.cache` / `memoize` — now *possible* (closures-as-data landed); ~15 lines.
+- Runtime templating (`render(tpl, vars)`) — interpolation is compile-time only. Mostly obviated by
+  format specs; the residual need is HTML generation, and **if an HTTP server ever ships, the lack of an
+  auto-escaping template is an XSS hole**, not an ergonomics gap.
+
+### 11. `std.process` cannot talk to a running child — *the ranked list had no `process` entry at all*
+All three members (`cmd`/`run`/`run_args`) call `.output()`: spawn, wait, collect. There is **no
+`Popen`/`exec.Cmd` equivalent**, so you cannot pipe stdin to a child, read its output incrementally
+(progress from `ffmpeg`, a `tail -f`), set its env or cwd, get its pid, kill it, or run it in the
+background. A child producing 4 GB of stdout is buffered entirely in RAM. `stdlib.md §std.process`
+admits "Not yet: stdin piping, output streaming, per-process env/cwd overrides" — but that never made
+it here. Compounded by the missing `os.setenv`/`os.chdir`: with neither, there is **no way at all** to
+control a child's environment or working directory. Needs a `Child` handle (sibling of R2's `Writer`).
+
+## Language features (category added 2026-07-14 — this file previously had none)
+
+Verified against the parser/checker, not the docs. **Not gaps** (checked, and worth recording so nobody
+"fixes" them): protocol **existentials give real dynamic dispatch** (trait objects work —
+`examples/poly_method.chz`); `defer` is block-scoped and strictly more general than `with` for a
+language with no destructors (`future.md §1` rejected `with` and is still right); generators/`yield`,
+comprehensions, varargs, default args, keyword args, newtype, type aliases, static methods, enums with
+methods — all shipped. The mutability model (`ref T`, by-reference capture, `Shared`/`Atomic`/`Channel`)
+is coherent.
+
+### L1. `Result` / `Option` have **ZERO methods** — highest hit-rate gap in the language
+`native enum Option[T]` / `Result[T, E]` (`std/prelude.chz`) declare no methods, and there is no
+`Ty::Result`/`Ty::Option` arm in the method-call checker. So there is no `unwrap_or`, `unwrap_or_else`,
+`is_ok`, `is_some`, `ok()`, `map`, `map_err`, `and_then`, `expect`. Verified: `Some(1).unwrap_or(0)` →
+*"type Option[int] has no method 'unwrap_or'"*. Every `Result` must be handled with `match` or `?`.
+**Small**: the `native enum … native fn` method-table machinery already exists (it is how `List` works).
+~8 native methods. This also unblocks half of L3.
+
+### L2. No struct patterns in `match`, no struct destructuring
+`match p: Point(x, y):` → *"variant pattern 'Point' cannot match a value of type Point"*. Patterns are
+variant / tuple / literal / range / binding only; let-destructuring is tuple-only; no destructuring in
+fn params. **Enums destructure and structs don't — the asymmetry is arbitrary.** (Python 3.10 class
+patterns; Rust/Go destructuring.) Medium, and cheap at the VM (struct fields are already a positional
+`Vec`).
+
+### L3. Error handling: no conversion, no wrapping, no discrimination
+Three holes, one seam — together these **block a class of program** (any library composing errors from
+two sources; today the choice is one god-enum or stringly-typed messages):
+- **No `?`-time conversion.** `?` requires the inner `E` be assignable to the enclosing `E`, so a
+  `T!IoErr` fn called from a `T!DbErr` fn is a hard error — and with no `map_err` (L1) you hand-write a
+  `match` at every call site. (Rust: `From`-based auto-conversion; Go: `fmt.Errorf("%w")`.)
+- **No wrapping / cause chain.** The `Error` protocol is one method, `message() -> str`. No `source()` /
+  `Unwrap()`.
+- **No downcast out of the `Error` existential.** Once laundered into `Error`, only `message()` is
+  callable. There is no `errors.As` / `except DbError` equivalent — that needs **R4**.
+
+### L4. No `const`, no visibility
+No `const`/`final` keyword (every module global and struct field is mutable); no `pub`/private (every
+name in a module is importable). (Go: `const` + capitalization export; Python: convention + `__all__`.)
+`const` is small (a checker flag on the binding); visibility is small-to-medium (resolver + `ModuleSig`
+filter). Matters much more once **R3** lands and people publish libraries with an intended API surface.
+
+### L5. Operator-protocol holes
+The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
+Slice Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing, iteration,
+hashing, display. Missing: **`Eq`** (`==`/`!=` cannot be overloaded — and see **B2**, the checker is
+*permissive* about them), **`Contains`** (`x in my_struct` is a hard error — Python's `__contains__`),
+bitwise/shift protocols, and a call operator. Small each.
+
+### L6. Smaller, confirmed
+- Enums carry **no discriminant/value**, no variant iteration, no int conversion (Go's `iota`, Python's
+  `Enum.value`). Small.
+- No labeled `break`/`continue` (Go has them; Python doesn't). Small.
+- No generator *expressions* (`(x for x in xs)`) — comprehensions are `[]`/`{}` only; `yield` covers it
+  verbosely.
+- No walrus in expression position (`if (n := f()) > 0`) — `:=` is a statement.
+- No **struct embedding / extension methods**: methods may only be declared in the type's own body (no
+  `impl` block), so you cannot add a method to a builtin or to another module's type, and "composition
+  not inheritance" means hand-forwarding every delegated method. (Go's embedding is *the* composition
+  mechanism.) Medium.
+- Protocols have **no default method bodies** (a protocol method with a body is a parse error) → no
+  mixins. Go's interfaces don't either; Python ABCs do. Small, if ever wanted.
+- **Not a gap:** spread/unpack (`f(*args)`) was deliberately dropped in `spec.md` and varargs +
+  `.concat`/`.merge` cover it.
+
+## Tooling / ecosystem (category added 2026-07-14 — this file previously had none)
+
+The CLI ships exactly 8 commands (`init run test check tokens ast docs help`). **R3 (no package
+manager) is the headline and lives above** — it is the one gap that keeps the language author-only.
+
+### T1. Installing `chezzi` produces a binary that can't find its own stdlib — a real defect
+`std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`** (`src/resolver/mod.rs`), and the
+`std/*.chz` files are **not embedded** (only `docs/*.md` are `include_str!`'d). So `cargo install
+--path .` yields a `~/.cargo/bin/chezzi` that reads its stdlib from *the source checkout's build-time
+path*: move or delete the repo and every `import std.*` breaks. The code comment admits it defers "a
+real install story to M6, when `std/` actually ships content" — M6 shipped; the install story did not.
+**Fix: embed `std/` (`include_str!`) or search next to the exe. An afternoon.**
+
+### T2. `chezzi repl` is a stub that ERRORS — while `--help` advertises it
+`src/main.rs` prints *"'repl' is not implemented yet"* and exits 1, but `USAGE` still lists
+`repl  Start an interactive REPL`. For a language whose pitch is "Python-feel scripting" with an ~11×
+faster cold start than CPython, the first thing a Python user types errors out. (`docs/spec.md`'s M1 row
+even claims a REPL shipped — it never existed.) **At minimum stop advertising it (1 line).** A naive v1
+— accumulate lines, re-check + re-run the buffer, print the last expression — is small; the real work is
+incremental checker state, since the checker is whole-graph oriented. Medium.
+
+### T3. No formatter
+No `chezzi fmt`; no formatting provider in the LSP. (`src/fmtspec.rs` is the `{x:.2f}` mini-language —
+easy to misread as a source formatter. It isn't one.) Convenience today with one author; **structural
+the moment R3 lands and several people write code** — and a significant-whitespace language with no
+formatter is especially exposed. Medium-large: needs a real AST→source printer with comment/blank-line
+preservation (the AST doesn't carry comments today).
+
+### T4. Test tooling is thin (but the base is honest)
+`assert cond, msg`, `test fn`, `*_test.chz` discovery, `PASS/FAIL name (file:line)`, non-zero exit — a
+real runner. Missing: **test filtering** (`chezzi test` rejects *every* flag, so on a big suite it's all
+or nothing — a ~20-line change and the best ratio in this file), fixtures/setup-teardown, coverage,
+benchmarks, `assert_eq` with a diff, parallel execution, machine-readable output (`go test -json`).
+
+### T5. No debugger, no profiler, no doc generator
+- **Debugger:** nothing (no breakpoints, no DAP, no stepping). What exists is post-mortem: a fault
+  trace. Combined with T2, the language has **no interactive introspection of any kind** — the debug
+  loop is "add a `print`, re-run". A REPL buys most of this value far more cheaply than a DAP server.
+- **Profiler:** nothing user-facing. Ironic for a project mid-perf-milestone: the VM is profiled with
+  external Rust tooling, but a Chezzi *user* cannot find their own hot function. (Python: `cProfile`;
+  Go: `pprof`, best in class.) A sampling counter keyed by function + a flat report is contained.
+- **Doc generation:** `chezzi docs` prints *the language's own* embedded spec — it does **not** generate
+  docs from a user's source. The raw material already exists (the lexer captures doc-comments; the LSP
+  surfaces them on hover). Small-medium, and it's what makes third-party libraries browsable once R3
+  lands (`go doc` / pkg.go.dev is a big part of why Go's ecosystem is navigable).
+
+### T6. CI-friendliness — **not** a gap
+`--errors=json` works for `check` and `run`; exit codes are correct and deliberate (type error → 1,
+fault → 1, `os.exit(n)` honored, stdout write failure → 1). Missing only machine-readable *test* output.
 
 ## Type-system / construction (adjacent, tracked in `docs/future.md §15`)
 - **Definable conversion constructors already exist** as named **static factory methods** (`fn
@@ -191,8 +469,13 @@ Two bugs, one seam. Stdin was **entry-task-owned**: every other task was handed 
 unread lines queued. And that rule was enforced at exactly ONE task-entry seam (`swap_ctx` — the
 `spawn:`/nursery fiber path), while the cooperative `Executor` drain runs a submitted closure **inline
 on the entry Vm** (`src/vm/netio.rs`, no `swap_ctx`) — so on serial the task read *and consumed* the
-entry's stdin while M:N's workers reported EOF: the **only known serial≠M:N divergence**, the invariant
+entry's stdin while M:N's workers reported EOF: an **accidental serial≠M:N divergence**, the invariant
 the whole parity oracle rests on.
+
+> **Correction (2026-07-14 audit):** this entry used to call it "the only known serial≠M:N divergence".
+> That was wrong. `std.net` is a **standing, deliberate** one — a socket op on the serial engine returns
+> `Err("… requires the --parallel engine")`, so the same TCP program behaves differently on the two
+> engines (see §Net). An accepted design fallback, but a divergence, and the map must say so.
 
 The semantics is now **shared stdin** (Go's `os.Stdin` / Python's `sys.stdin`): ONE source, any task may
 read it, a line goes to **exactly one** task (never duplicated, never dropped), WHICH task gets it is
