@@ -1459,10 +1459,16 @@ impl Vm {
     /// cancelled task stops issuing socket work promptly and its outcome is SWALLOWED (mirrors the
     /// recv/sleep demote). `attempt` re-runs one non-blocking op (it owns a cloned `Arc<…Core>`) and
     /// returns `SockPoll::Ready` with the op's `Result`-shaped `Value`, or `SockPoll::WouldBlock`.
+    ///
+    /// `deadline` is the caller's `timeout_ms` (`None` = untimed): it bounds the WHOLE op here exactly
+    /// as it does on the netpoller-park path, and expiring yields the same `Err("timeout")` value. It is
+    /// the ONLY escape from the "never-ready fd" case above — an in-callback socket op is `inflight`, so
+    /// it can never self-fire the deadlock predicate.
     pub(super) fn demote_block_socket(
         &mut self,
         fd: std::os::fd::RawFd,
         interest: poller::Interest,
+        deadline: Option<std::time::Instant>,
         span: Span,
         mut attempt: impl FnMut(&mut Vm) -> SockPoll,
     ) -> Result<Value, RuntimeError> {
@@ -1491,7 +1497,25 @@ impl Vm {
             }
             match attempt(self) {
                 SockPoll::Ready(r) => break r,
-                SockPoll::WouldBlock => wait_fd_ready(fd, interest, DEMOTE_POLL_BACKOFF),
+                SockPoll::WouldBlock => {
+                    // The caller's `timeout_ms` bounds the WHOLE op here too, exactly as it does on the
+                    // netpoller-park path — the demote loop used to wait on fd readiness with no
+                    // deadline at all, and an in-callback op is accounted `inflight` (it VETOES the
+                    // deadlock predicate), so a peer that never sends hung the program with no fault and
+                    // no `Err("timeout")`. Cap the kernel wait by the remaining budget so the deadline is
+                    // observed within it, not one full backoff late.
+                    let left = match deadline {
+                        None => DEMOTE_POLL_BACKOFF,
+                        Some(dl) => {
+                            let left = dl.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                break Ok(self.sock_err("timeout"));
+                            }
+                            left.min(DEMOTE_POLL_BACKOFF)
+                        }
+                    };
+                    wait_fd_ready(fd, interest, left);
+                }
             }
         };
         self.demote_socket_exit();

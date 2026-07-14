@@ -14,6 +14,20 @@
 # netpoller interest, parking the fiber on a would-block op). The backends compile NOTHING for a
 # `native fn`/`native struct` — the front-end reads ONLY the signature.
 #
+# The socket seam is **`str`-only** (B1/R1): `read` returns `Result[str]`, so it DECODES. It never
+# lossily decodes: a chunk that ends mid-codepoint retains its ≤3-byte tail on the socket and prepends
+# it to the next read (so `read(n)` may return up to `n + 3` bytes, and a byte-at-a-time read of valid
+# text reassembles exactly); genuinely-invalid bytes — i.e. a BINARY payload — return
+# `Err("invalid utf-8 on the socket: …")`, and an incomplete codepoint left when the peer closes returns
+# `Err("invalid utf-8 at eof: …")`. An invalid-utf-8 Err is NON-DESTRUCTIVE and STICKY: the valid text
+# before the bad byte is delivered first, the undecodable bytes stay carried, and every later read re-errs
+# the same way — so a caller cannot silently shred the stream; it must `close()`. A read blocks until it
+# has a whole character (Go `ReadRune` / Python text-mode); `timeout_ms` bounds the whole call, and a
+# poll-once `read(n, 0)` that took a partial codepoint says `Err("incomplete utf-8: …")`, not
+# `Err("timeout")` (= nothing arrived). `read(0)` is a no-op `Ok("")` (it never touches the socket and
+# keeps any carried tail) but still errs on a CLOSED socket. Binary sockets need `read_bytes`/
+# `write_bytes`, which need the `bytes` native seam (docs/gaps.md R1) — not implemented yet.
+#
 # `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no data /
 # not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a
 # trailing-default param to an optional-tail sig (min_params = len - 1). The `= 0` is a MARKER only —

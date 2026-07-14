@@ -645,6 +645,13 @@ pub struct Vm {
     /// op ENTRY (after the `run_until` loop-top cancel check, so a sibling fault still wins): if set,
     /// clear it and return `Err("timeout")` instead of retrying the syscall. Snapshot-park path only.
     poll_timed_out: bool,
+    /// B1 — live mirror of [`FiberCtx::poll_deadline`]: the absolute deadline of the `Socket.read`
+    /// currently in flight on this fiber. A park REWINDS `ip` and re-executes the whole op, which would
+    /// recompute `now + timeout_ms` from scratch — so a read that parks more than once (the ordinary
+    /// outcome when a chunk ends mid-codepoint and the rest of it has not arrived) would restart its
+    /// timeout budget on every park and could block forever. Latched on the first park of a `read` and
+    /// cleared when that `read` finally returns a value. `None` = no read in flight.
+    poll_deadline: Option<std::time::Instant>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -866,6 +873,12 @@ struct FiberCtx {
     /// the rewound socket op checks it at ENTRY (before re-running the syscall) and returns
     /// `Err("timeout")` instead of retrying. `false` whenever no timeout wake is pending. M:N-only.
     poll_timed_out: bool,
+    /// B1 — the absolute deadline of the `Socket.read` in flight on this fiber (its `timeout_ms`,
+    /// latched at the first park). Travels WITH the fiber across [`Vm::swap_ctx`] like `poll_timed_out`,
+    /// because the whole read op re-executes on every wake: without the latch each park would recompute
+    /// `now + timeout_ms` and restart the budget. Cleared when the read returns. `None` = no read in
+    /// flight. M:N-only.
+    poll_deadline: Option<std::time::Instant>,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
