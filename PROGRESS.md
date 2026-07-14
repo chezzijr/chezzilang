@@ -4755,6 +4755,29 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **P0 fix — a cancelled task's `defer` silently did not run on M:N (2026-07-14).** Pre-existing
+  scheduler race. A cancel trip and its `cancel_drain` (which requeues the scope's PARKED fibers so they
+  unwind) sit two core-lock acquisitions apart; an idle worker's `take_runnable` landing in that gap saw
+  `running == 0 && runnable == 0 && parked_n > 0 && done < total`, called the teardown a **deadlock**, and
+  `flag_deadlock` dropped the still-parked sibling **without `unwind_deferred`** — its `defer`s never ran.
+  Invisible: `reduce_task_slots` ranks `Exit > Fault > Deadlocked`, so the real sibling fault surfaced and
+  the lost `defer` was the only symptom (`defer` is the language's ONLY cleanup mechanism — an unclosed
+  file, an unreleased lock, silently). Fixed with a **cancel-teardown veto** in `MnSched::is_deadlocked`
+  (`SchedCore::any_incomplete_scope_cancelled`): a scope with `cancel` set and `done < total` is
+  mid-teardown, not deadlocked. Put at the predicate, not at the one seam that reported it, because
+  **four** seams trip a cancel and drain in a later lock acquisition. Transient by construction (park/
+  park_wait/poller-register all refuse to park a cancelled fiber, and every trip is followed by a
+  notifying `cancel_drain`), so it can never become a hang; genuine deadlock detection is untouched.
+  `parallel_defer_runs_on_cancelled_sibling`: **35/200 failures → 0/200** under CPU contention; the
+  invariant itself is pinned by `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock`.
+  See `docs/gaps.md` **N4**. Two related holes found while verifying it, both pre-existing, both left
+  open with their own entries: **N5** (a GENUINE deadlock also tears parked fibers down without
+  `unwind_deferred`, so it skips `defer`s too — but both engines agree, so it is a known limit, not a
+  parity break) and **N6** (`--serial` does **not** run a PARKED task's `defer` on a sibling fault — it
+  abandons the parked children at `run_child(i)?` — a real **serial ≠ M:N divergence**, uncovered by the
+  parity suite, where the *oracle* is the wrong engine; fixing it moves serial's fault-path output
+  ordering, so it is its own task).
+
 - **R1 — the `bytes` native seam + binary IO/sockets; B1 now FIXED (2026-07-14).** `bytes`/`bytearray`
   shipped complete below the native seam (lexer/checker/VM/GC/airlock), but the seam itself was
   `str`-only, so **no native fn could accept or return them**. Widened in three places
