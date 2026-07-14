@@ -604,9 +604,23 @@ fn serve(tok: Token, io: Channel[str]):
 > `os.exit` executed *by* a cancelled task's `defer` is honored — it beats the sibling's fault and sets
 > the process exit code, identically on both engines.)
 >
-> **Guarantee boundary.** The guarantee is about a **started** task: whether a spawned task *starts at
-> all* before the scope is cancelled is scheduler-dependent (M:N races it; `--serial` never starts a
-> task after the cancel). A never-started task registered no `defer`, so there is nothing to run.
+> **Every spawned task starts — even into an already-cancelled scope.** A `spawn`ed task is *always*
+> run: M:N cannot do otherwise (a scope completes only at `done == total`, so a queued fiber is picked
+> up even after a sibling has faulted), and `--serial`'s cancel drain therefore starts its
+> never-started children too. So the task runs its prologue, prints what it prints, registers its
+> `defer`, and dies at its first checkpoint — on **both** engines, with the same line set. (This is why
+> a sibling of a task that calls `std.os.exit` still runs its prologue: the exit is a hard halt for the
+> *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
+>
+> **Where a cancel is NOT delivered — pure CPU with no back-edge.** A checkpoint is a loop back-edge, a
+> blocking op, or a native→user-code re-entry (a `list.map`/`filter`/`fold`/`sort` callback: the native's
+> per-element Rust loop *is* the back-edge, and the cancel is delivered between elements). **Deep
+> recursion is not a checkpoint** — a recursive function emits only `Call`/`Return`, never a backward
+> `Op::Jump` — so a cancelled task sitting in a loop-free recursive computation (`fib(34)`) runs it to
+> completion before it dies. This is Trio's model (pure-CPU code is not interrupted); making `Op::Call`
+> a checkpoint would put a checkpoint *before the `defer` line* of any prologue that calls a function and
+> would give back exactly the bug this design removed. Both engines behave identically, so it is a limit,
+> not a divergence. Bound a recursive computation yourself if a task must tear down promptly.
 >
 > **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
 > the *order* of prints from different tasks is nondeterministic on **both** engines (a cancelled task's

@@ -31,10 +31,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel` (a `while true:` sibling still dies at
 > the back-edge) and `compiler::back_edge_tests::loop_back_edge_is_a_backward_jump` (peephole may never
 > thread a loop back-edge away, or hot loops become uncancellable). **N5 untouched** (a genuine deadlock
-> still skips defers, identically on both engines). Boundary (**N6b**): a NEVER-STARTED task registers no
-> `defer`; whether a spawned task starts before the cancel stays scheduler-dependent. Perf side-effect of
+> still skips defers, identically on both engines). Perf side-effect of
 > deleting the per-instruction check: `loop` 1.32× → **1.12×** CPython, `fib` 3.54× → **3.16×**
 > (`docs/benchmarks.md`).
+>
+> **Post-review corrections (same branch — the first cut shipped two of these as bugs).**
+> (a) **`gaps.md` N6b — every spawned task STARTS, even into an already-cancelled scope.** M:N is
+> structurally forced to (a scope completes only at `done == total`; `take_runnable` never checks the
+> scope cancel), so the drain's original "skip never-started siblings" made serial print `{"0"}` where
+> M:N printed `{"hi","42"}`, **20/20** — a deterministic line-SET + defer-ran divergence. The drain now
+> re-drives **every not-`Done`** sibling. `exit_in_spawned_child_aborts_siblings`'s serial golden moved
+> deliberately (`{"a"}` → `{"a","b"}`): M:N already printed both **20/20**, so the engines converged.
+> New tests: `parity_probe_faulter_spawned_first_still_runs_the_siblings_defer`,
+> `parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled`.
+> (b) **`gaps.md` N6c — a native HOF's per-element callback IS a loop back-edge.** `map`/`filter`/`fold`/
+> `sort(cmp)` iterate in Rust and emit no `Op::Jump`, so a cancelled task burned every element to
+> completion (measured: 5M callbacks after the sibling faulted). The checkpoint now sits at the top of
+> `Vm::guarded` — one choke point, off the bytecode hot path. Test: `parity_native_hof_loop_is_cancellable`.
+> (c) **LOUD, accepted limit: loop-free RECURSION is not a cancellation point** (only `Call`/`Return`, no
+> back-edge) — a cancelled task inside `fib(34)` finishes it before it dies. Making `Op::Call` a
+> checkpoint would re-open BUG 1 (a checkpoint before the `defer` line of any prologue that calls a fn).
+> Both engines agree, so it is a limit, not a divergence. Also covered: `parity_nested_deadlock_cancels_the_outer_parked_siblings_defer`
+> and `parity_genuine_deadlock_is_still_detected` (N5 boundary intact). Race bar re-run after the fixes:
+> 4 shapes × 2 engines × **200 runs under full CPU load = 0 failures**.
 
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new

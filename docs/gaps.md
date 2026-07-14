@@ -687,7 +687,9 @@ token-sequenced repro (defer GUARANTEED registered) M:N printed `42` and serial 
    **loop back-edges** (`Vm::jump_checked` — a backward `Op::Jump`, pinned by
    `compiler::back_edge_tests::loop_back_edge_is_a_backward_jump`) and **blocking/park ops**
    (`chan_recv_step`, `op_wait_poll`, `park_on_fd`, the blocking-native offload — each now an
-   engine-agnostic top-of-fn check, replacing the `mn`-gated ones). Consequences, all intended:
+   engine-agnostic top-of-fn check, replacing the `mn`-gated ones) and **native→user-code re-entries**
+   (`Vm::guarded` — a native HOF's per-element callback is that Rust loop's back-edge; see N6c).
+   Consequences, all intended:
    a **started task always runs its straight-line prologue**, so a **registered `defer` always runs on
    cancel — on both engines**, deterministically (the old behavior made "does my cleanup run?" a
    scheduler race: 0/20 on the probe shape); a CPU loop is still promptly cancellable (the back-edge);
@@ -714,14 +716,44 @@ token-sequenced shape all print `42` on M:N and `--serial`, **0/200** failures p
 for a `while true:` sibling). None of these shapes had parity coverage before — which is exactly why a
 live divergence survived ~1500 green tests.
 
-### N6b. GUARANTEE BOUNDARY: a NEVER-STARTED task registers no `defer` — by design, not a bug
-The guarantee is *"a **started** task always runs its prologue, so a **registered** `defer` always runs"*.
-Whether a spawned task **starts at all** before the scope is cancelled is scheduler-dependent: M:N races
-it; `--serial` never starts a task after the cancel (`drain_cancelled_children` re-drives **`Blocked`**
-siblings only). Starting `Pending` siblings from the drain was rejected: it makes serial deterministically
-emit output M:N only races (strictly worse for the line-SET contract) and it flips
-`exit_in_spawned_child_aborts_siblings`'s serial expectation. A never-started task registered no `defer`,
-so there is nothing to unwind.
+### N6b. EVERY spawned task starts — including into an already-cancelled scope (adversarial-review fix)
+The first cut of the N6 drain re-drove only **`Blocked`** siblings and deliberately skipped never-started
+(`Pending`) ones, on the theory that M:N merely *races* them. It does not: M:N is **structurally forced**
+to start every spawned fiber — a scope completes only at `done == total` and `take_runnable`
+(`src/vm/mod.rs`) never consults the scope cancel — so a queued fiber is popped and started *after* the
+cancel trips, and with cancellation points it then runs its whole straight-line prologue. Measured on the
+first cut (`spawn boom(); spawn talker(ch, s)`, faulter FIRST): **serial `{"0"}` vs M:N `{"hi","42"}`,
+20/20** — a deterministic line-SET *and* defer-ran divergence, i.e. exactly the parity contract this
+change declares. (The old every-instruction check had hidden it: the freshly-started M:N fiber died at
+its first dispatched op and its output was dropped.)
+
+**Fix:** `drain_cancelled_children` drives **every not-`Done` sibling**, `Pending` included, with the
+cancel tripped. Both engines now start every spawned task, run its prologue, run any `defer` it
+registers, and agree on the line set. `exit_in_spawned_child_aborts_siblings`'s serial golden moved
+deliberately (`{"a"}` → `{"a","b"}`): M:N already printed `"a","b"` **20/20**, so this is the two engines
+converging, not a regression — `os.exit` is a hard halt for the *program* (reduced at the nursery join),
+not a freeze-frame on tasks the nursery already spawned.
+
+### N6c. NO cancellation point in a native-driven loop — FIXED; in loop-free RECURSION — accepted limit
+Two long-running CPU shapes have **no backward `Op::Jump`**, so the back-edge checkpoint cannot see them:
+
+1. **Native-driven user code — FIXED.** `list.map`/`filter`/`fold`, `sort(cmp)`, an operator overload, an
+   `Executor` handler all iterate in **Rust** (`for e in .. { self.guarded(|vm| vm.invoke_value(f, ..)) }`,
+   `src/vm/call.rs`) and emit no `Op::Jump`; a straight-line callback body has no back-edge either. The
+   first cut of this change therefore let a cancelled task burn every remaining element to completion,
+   with its prints / `Shared` writes / fs writes (measured: `xs.map(sq)` over 5M elements ran to
+   `"map finished"` long after the sibling had faulted; the deleted every-instruction check used to abort
+   it via the `?` on `guarded`). **A native HOF's per-element re-entry IS that loop's back-edge**, so the
+   cancellation checkpoint now lives at the top of `Vm::guarded` (`src/vm/exec.rs`) — one choke point, no
+   new hot-path cost (it only reads the flag when re-entering user code from native). Test:
+   `parity_native_hof_loop_is_cancellable`.
+2. **Loop-free recursion — ACCEPTED LIMIT, both engines.** A recursive function emits only `Call`/`Return`
+   (the repo's own `fib` bench), so a cancelled task inside one runs the whole computation before it dies
+   (measured: `fib(32)` completes and prints after the sibling faults). Making `Op::Call` a checkpoint is
+   **rejected**: it would put a cancellation point *before the `defer` line* of any prologue that calls a
+   function — precisely BUG 1, back again. Pure-CPU code being uninterruptible is Trio's model, both
+   engines agree, and `MAX_CALL_DEPTH` bounds the stack (not the time). Bound the recursion yourself if a
+   task must tear down promptly.
 
 ### N5 status after the N6 fix — still open, deliberately UNTOUCHED
 A **genuine** deadlock (every fiber parked, nothing cancelled, nothing able to arrive) still tears the

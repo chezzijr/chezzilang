@@ -2230,33 +2230,34 @@ fn exit_is_not_caught_by_recover() {
 
 #[test]
 fn exit_in_spawned_child_aborts_siblings() {
-    // B1/B2: `std.os.exit` inside a child is a hard halt — it aborts the rest of the program: the
-    // post-`parallel:` statement never runs and the exit code propagates. The two engines differ on
-    // one order-observable detail and that is *expected*, not a parity bug: `--serial` (cooperative,
-    // `run_file`) runs `a()` to its `os.exit` before `b()` ever starts, so `b` never prints; the M:N
-    // engine (`run_file_p`) dispatches both children to real worker threads, so `b` can flush its
-    // print before the exit halts the pool. So the serial arm is exact, and the M:N arm asserts the
-    // race-tolerant contract — same as the sibling `parallel_child_os_exit_halts_with_code` (B3.4).
+    // B1/B2: `std.os.exit` inside a child is a hard halt for the PROGRAM — the post-`parallel:`
+    // statement never runs and the exit code propagates. It is NOT a halt for the tasks the nursery
+    // has already spawned: those are torn down through the scope cancel, and (cancellation points) a
+    // spawned task always runs its straight-line prologue before it can observe that cancel. M:N has
+    // no choice about this — a scope completes only at `done == total`, so `b`'s queued fiber is
+    // popped and started after the exit trips the cancel, and it prints (measured 20/20). Serial's
+    // cancel drain therefore starts `b` too, and the two engines AGREE: `{"a","b"}` on both. (Before
+    // the N6 drain, serial abandoned the never-started sibling and printed only `"a"` — a
+    // near-deterministic line-SET divergence this test used to bless as "expected".) Cross-task
+    // ORDER stays nondeterministic on both engines, so the SET is what is asserted.
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
-    // serial: cooperative, `a()` finishes (incl. exit) before `b()` starts → `b` never prints.
-    assert_eq!(
-        vo, "a\n",
-        "serial: sibling and post-parallel statement aborted by os.exit"
-    );
-    // M:N: `b` may race in a print before the exit halts the pool, but the halt itself is firm —
-    // the exiting child's output is flushed and the post-`parallel:` statement never runs.
     assert!(
-        io.contains('a'),
-        "M:N: the exiting child's output is flushed: got {io:?}"
+        vo.contains('a') && vo.contains('b'),
+        "serial: the exiting child's output flushes and its already-spawned sibling still runs its prologue: got {vo:?}"
     );
     assert!(
-        !io.contains("after"),
-        "M:N: the post-parallel statement never runs after os.exit: got {io:?}"
+        io.contains('a') && io.contains('b'),
+        "M:N: same: got {io:?}"
     );
+    assert!(
+        !io.contains("after") && !vo.contains("after"),
+        "the post-parallel statement never runs after os.exit: mn={io:?} serial={vo:?}"
+    );
+    assert_same_lines(&vo, &io);
     assert_eq!(vc, Some(3), "serial exit code");
     assert_eq!(ic, Some(3), "M:N exit code");
     assert!(
@@ -8674,4 +8675,106 @@ fn parity_os_exit_inside_a_cancelled_tasks_defer() {
         "os.exit hard-halts: serial={so:?} mn={mo:?}"
     );
     assert_same_lines(&so, &mo);
+}
+
+/// The probe shape with the FAULTER SPAWNED FIRST — the shape that exposed the deterministic
+/// serial-vs-M:N divergence the cancellation-point change first shipped with. M:N is structurally
+/// forced to start every spawned fiber (a scope completes only at `done == total`; `take_runnable`
+/// never consults the scope cancel), so `talker` runs its prologue, prints, registers its `defer` and
+/// unwinds at its `recv` checkpoint — even though `boom` already faulted. Serial's cancel drain used
+/// to SKIP a never-started (`Pending`) sibling, so it emitted `{"0"}` while M:N emitted `{"hi","42"}`
+/// (20/20 — near-deterministic, not a rare race). The drain now starts every not-`Done` sibling with
+/// the cancel tripped, so both engines run the task and both run its `defer`.
+#[test]
+fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn talker(ch: Channel[int], s: Shared[int]):\n    print(\"hi\")\n    defer cleanup(s)\n    ch.recv()\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn boom()\n            spawn talker(ch, s)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert!(serial.contains("42\n"), "serial: the defer ran: {serial:?}");
+    assert!(mn.contains("42\n"), "M:N: the defer ran: {mn:?}");
+    assert!(
+        serial.contains("hi\n"),
+        "serial: the prologue ran: {serial:?}"
+    );
+    assert_same_lines(&serial, &mn);
+}
+
+/// A never-started straight-line sibling with NO defer, faulter first: M:N runs it to completion
+/// (`Done`, output flushed), so serial must too — the line SET is the parity contract.
+#[test]
+fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() {
+    let src = "fn noisy():\n    print(\"hi\")\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn noisy()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    assert!(serial.contains("hi\n"), "serial: {serial:?}");
+    assert_same_lines(&serial, &mn);
+}
+
+/// Cancellation points and a NATIVE-driven loop: `xs.map(f)` iterates in RUST (`for e in ..
+/// guarded(|vm| vm.invoke_value(f, ..))`, call.rs) and emits no `Op::Jump`, so `jump_checked`'s
+/// back-edge cannot fire inside it and a straight-line `f` has no back-edge of its own. Without a
+/// checkpoint at the native re-entry a cancelled task burns every remaining element to completion
+/// (measured on the first cut of this change: "map finished" printed after the sibling had faulted,
+/// 5M callbacks deep). The `guarded` checkpoint delivers the cancel between elements — that Rust
+/// loop's back-edge.
+///
+/// The faulter is spawned FIRST so the scope cancel is already tripped when `work` starts: no timing
+/// race, and BOTH engines must abort the map (serial's drain starts `work` with the cancel tripped,
+/// M:N pops its still-queued fiber after the cancel). A CPU-bound task that is ALREADY RUNNING when
+/// the cancel trips is a different, pre-existing story on serial — it is cooperative, so it simply
+/// runs to its next park before any sibling gets to fault (that is why the `while true:` spinner test
+/// is M:N-only).
+#[test]
+fn parity_native_hof_loop_is_cancellable() {
+    let src = "fn sq(x: int) -> int:\n    return x * x\n\
+               fn work(xs: List[int]):\n    ys := xs.map(sq)\n    print(\"map finished\")\n    print(ys.len())\n\
+               fn boom():\n    zs := [1]\n    print(zs[9])\n\
+               fn main():\n    xs := []\n    i := 0\n    while i < 200000:\n        xs.push(i)\n        i = i + 1\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn work(xs)\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    assert!(
+        !serial.contains("map finished"),
+        "serial: the cancelled task's native map must abort at a per-element checkpoint: {serial:?}"
+    );
+    assert!(
+        !mn.contains("map finished"),
+        "M:N: the cancelled task's native map must abort at a per-element checkpoint: {mn:?}"
+    );
+    assert_same_lines(&serial, &mn);
+}
+
+/// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`. The
+/// nested deadlock reaches the outer level as an ordinary child error on both engines, so both cancel
+/// the outer scope and both run the parked sibling's `defer` (42). Locks the N5 boundary: a level's
+/// OWN deadlock still tears its fibers down without defers, identically on both engines — but a
+/// nested one must not diverge.
+#[test]
+fn parity_nested_deadlock_cancels_the_outer_parked_siblings_defer() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn a(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn dead(d: Channel[int]):\n    d.recv()\n\
+               fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn a(ch, go, s)\n            spawn b(go)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the deadlock is recovered");
+    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    assert_eq!(serial, "42\n", "serial: the parked sibling's defer ran");
+    assert_eq!(mn, "42\n", "M:N: the parked sibling's defer ran");
+}
+
+/// A GENUINE deadlock (every task parked, nothing cancelled) is still DETECTED — not hung — on both
+/// engines. The cancel drain must never swallow it: it is reported from `run_scheduler_level`'s
+/// `None` arm, which never routes through `drain_cancelled_children`.
+#[test]
+fn parity_genuine_deadlock_is_still_detected() {
+    let src = "fn waiter(ch: Channel[int]):\n    ch.recv()\n\
+               fn main():\n    ch := Channel[int]()\n    r := recover:\n        parallel:\n            spawn waiter(ch)\n            spawn waiter(ch)\n        0\n    print(\"caught\")\nmain()\n";
+    let serial = run_capture(src).expect("the deadlock is recovered");
+    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    assert_eq!(serial, "caught\n");
+    assert_same_lines(&serial, &mn);
 }

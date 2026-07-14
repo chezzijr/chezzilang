@@ -876,3 +876,10 @@ Same machine, `benches/run.chz` (hyperfine, CPython ratio; lower is better), bef
 benches (`loop`, `fib`) move the most, as expected for a removed per-op load+branch; the rest are within
 run-to-run noise. Single run, not a median-of-N — treat the small deltas as noise and the `loop`/`fib`
 direction as real.
+
+**Re-measured after the adversarial-review fixes** (the cancellation checkpoint added at `Vm::guarded`,
+i.e. once per native→user-code re-entry — `map`/`filter`/`fold`/`sort` callbacks; see `docs/gaps.md` N6c),
+same machine, quiescent: `loop` **1.15×** · `fib` **3.29×** · `map` **1.86×** · `poly_method` 4.34× ·
+`str` 2.10× · `primes` 2.08× · `list` 2.49× · `struct` 2.75× · `empty` **4.55× faster**. `map` is the bench
+that pays for the new checkpoint (one relaxed atomic load per element) and it did **not** move (1.88× →
+1.86×, within noise) — the check is off the bytecode dispatch path entirely.

@@ -2092,25 +2092,23 @@ impl Vm {
     /// `faulted` of the innermost level faults or `os.exit`s, drive every still-PARKED sibling to a
     /// real end so each runs its `defer`s, then return the error the nursery propagates.
     ///
-    /// Per sibling, in task order (serial has no worker race, so this is ordering, not locking):
-    /// - **Blocked** (parked on a `recv`/`wait`): re-driven with the cancel flag tripped, so it
-    ///   observes the cancel at its rewound park op (the blocking CHECKPOINT in `chan_recv_step` /
-    ///   `op_wait_poll`) → `unwind_deferred` fires its defers, a `recover:` INSIDE the task is
-    ///   bypassed, it ends `Done`. `cancelled` is a per-VM latch, so it is cleared before EACH child
-    ///   (else only the first parked sibling unwinds).
-    /// - **Pending** (never started) children are deliberately NOT started: they registered no
-    ///   `defer`, so there is nothing to unwind, and starting them would make serial deterministically
-    ///   emit output that M:N only races (worse for the line-SET parity contract). A never-started
-    ///   task's `defer` therefore does not run on serial while M:N *races* it — the documented
-    ///   guarantee boundary (docs/gaps.md §N6b): a STARTED task always runs its prologue, so a
-    ///   REGISTERED defer always runs; whether a spawned task starts at all before the scope is
-    ///   cancelled is scheduler-dependent.
+    /// Every sibling that is not already `Done` is driven, in task order, with the cancel flag
+    /// tripped (serial has no worker race, so this is ordering, not locking) — INCLUDING a `Pending`
+    /// (never-started) one. That is not a nicety: M:N is structurally forced to start every spawned
+    /// fiber (a scope only completes at `done == total`, and `take_runnable` never consults the scope
+    /// cancel), so a cancelled-scope M:N sibling still runs its prologue, prints, and runs any `defer`
+    /// it registers. Serial must do the same or the two engines disagree on the LINE SET — the very
+    /// thing this contract declares parity (measured before this drain: `spawn boom(); spawn talker()`
+    /// → serial `{"0"}`, M:N `{"hi", "42"}`, 20/20). Cancellation points make the two orders converge:
+    /// a started task always runs its straight-line prologue, then dies at its first checkpoint.
     ///
-    /// `pending_exit` is cleared before each child (`unwind_deferred`, stmt.rs, refuses to run ANY
-    /// defer while an exit is pending — one task's exiting `defer` would otherwise poison every later
-    /// sibling's cleanup) and the exits are REDUCED exactly like M:N's `reduce_task_slots`: lowest
-    /// task index wins, and an `os.exit` (from the faulter itself or from any drained sibling's
-    /// `defer`) BEATS the fault — a hard halt is never demoted to a catchable error.
+    /// `cancelled` is a per-VM latch, so it is cleared before EACH child (else only the first sibling
+    /// unwinds). `pending_exit` too (`unwind_deferred`, stmt.rs, refuses to run ANY defer while an
+    /// exit is pending — one task's exiting `defer` would otherwise poison every later sibling's
+    /// cleanup). Exits and faults are then REDUCED exactly like M:N's `reduce_task_slots`: `Exit`
+    /// beats `Fault` (a hard halt is never demoted to a catchable error), and within each, the lowest
+    /// task index wins — so a drained sibling that faults *ahead* of `faulted` propagates ITS error,
+    /// as M:N's slot reduction does. A drained child that dies of the cancel itself is not a fault.
     ///
     /// Output: a drained child's bytes STAY (serial prints live into the shared `out` and cannot
     /// un-print; M:N now flushes a `Cancelled` fiber's buffer at its task slot for the same reason).
@@ -2119,12 +2117,11 @@ impl Vm {
     /// Genuine DEADLOCK of THIS level (all parked, nothing cancelled) is reported from
     /// `run_scheduler_level`'s `None` arm, which never reaches here — so a deadlocked level still
     /// tears its parked fibers down without running their defers, identically on both engines
-    /// (docs/gaps.md §N5, unchanged). A NESTED level's deadlock arrives here as an ordinary child
-    /// error and DOES cancel this level's siblings — matching M:N, which cancels the outer scope on
-    /// any child fault.
+    /// (docs/gaps.md §N5, unchanged).
     fn drain_cancelled_children(&mut self, faulted: usize, err: RuntimeError) -> RuntimeError {
         // Exit-over-fault, lowest task index wins — M:N's `reduce_task_slots` precedence.
         let mut first_exit: Option<(usize, i32)> = self.pending_exit.take().map(|c| (faulted, c));
+        let mut first_fault: (usize, RuntimeError) = (faulted, err);
         let cancel = Arc::new(AtomicBool::new(true));
         let n = self
             .scheduler_stack
@@ -2133,19 +2130,24 @@ impl Vm {
             .children
             .len();
         for i in 0..n {
-            if i == faulted {
-                continue;
-            }
-            if !matches!(self.child_state(i), FiberState::Blocked) {
+            if i == faulted || matches!(self.child_state(i), FiberState::Done) {
                 continue;
             }
             self.cancel = Some(Arc::clone(&cancel));
             self.cancelled = false;
             self.pending_exit = None;
-            let _ = self.run_child(i);
+            let r = self.run_child(i);
+            if let Err(e) = r
+                && !self.cancelled
+                && i < first_fault.0
+            {
+                // A real fault (not the cancel unwind) from a sibling AHEAD of the faulter: M:N's
+                // slot reduction reports the lowest-index fault, so serial must too.
+                first_fault = (i, e);
+            }
             if let Some(code) = self.pending_exit.take() {
-                // The child's `defer` called `os.exit` — carry the code (M:N's `Exit` arm does the
-                // same); never discard it.
+                // The child's `defer` (or its cancelled-but-still-running body) called `os.exit` —
+                // carry the code (M:N's `Exit` arm does the same); never discard it.
                 if first_exit.is_none_or(|(j, _)| i < j) {
                     first_exit = Some((i, code));
                 }
@@ -2157,7 +2159,7 @@ impl Vm {
                 self.pending_exit = Some(code);
                 self.err("exit".to_string(), Span { line: 1, col: 1 })
             }
-            None => err,
+            None => first_fault.1,
         }
     }
 

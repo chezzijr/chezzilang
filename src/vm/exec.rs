@@ -219,6 +219,27 @@ impl Vm {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
+        // CANCELLATION CHECKPOINT — a native that re-enters user code drives it from a RUST loop
+        // (`list.map`/`filter`/`fold`, `sort`'s comparator, an operator overload, an `Executor`
+        // handler: `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). That Rust
+        // loop emits no `Op::Jump`, so `jump_checked`'s back-edge never fires inside it and a
+        // straight-line callback body has no back-edge of its own — a cancelled task would burn every
+        // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
+        // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
+        // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
+        // the callback's nested `run_until`. `!self.cancelled` latches (a `defer` may itself call a
+        // HOF while the cancel unwind is in flight — re-firing would skip the remaining defers).
+        if !self.cancelled
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            && let Some(fr) = self.frames.last()
+        {
+            let span = fr.call_span;
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         self.native_reentry += 1;
         // The guard counter MUST return to its entry value on every exit path, including an unwind:
         // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
