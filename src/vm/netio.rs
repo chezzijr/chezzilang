@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// B1 — the outcome of decoding one socket chunk (+ the socket's carried tail) as UTF-8.
+pub(super) enum Decoded {
+    /// A complete, valid `str` (possibly empty — the EOF sentinel).
+    Text(String),
+    /// A recoverable `Err` message (genuinely-invalid bytes, or a partial codepoint left at EOF).
+    Fail(String),
+    /// The bytes so far are a strict prefix of ONE codepoint (≤3 bytes, now carried): no complete
+    /// codepoint to hand back yet — take more bytes off the fd.
+    NeedMore,
+}
+
 impl Vm {
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
     /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
@@ -129,67 +140,62 @@ impl Vm {
     ///
     /// `eof` (the fd returned 0 bytes for a `read(n>0)`) keeps today's `Ok("")` EOF sentinel — unless a
     /// carry is still owed, i.e. the peer closed mid-codepoint: that is a real error, not a silent drop.
-    pub(super) fn decode_socket_read(
-        &mut self,
-        core: &SocketCore,
-        chunk: &[u8],
-        eof: bool,
-    ) -> Option<Value> {
-        enum Decoded {
-            Text(String),
-            Fail(String),
-            NeedMore,
-        }
-        let decoded = {
-            // The `stream` guard is already released at every call site — this lock is a leaf.
-            let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-            if eof {
-                let owed = carry.len();
-                carry.clear();
-                if owed == 0 {
-                    Decoded::Text(String::new()) // the EOF sentinel, unchanged
-                } else {
-                    Decoded::Fail(format!(
-                        "invalid utf-8 at eof: the peer closed mid-codepoint ({owed} trailing byte(s))"
-                    ))
-                }
+    ///
+    /// PURE (no `&mut self`, no locking): the caller holds the `carry` guard ACROSS its fd read and
+    /// passes `&mut *guard` here, so read-off-the-fd and carry-update are ONE critical section (two
+    /// fibers aliasing one socket must decode in wire order — see [`SocketCore::carry`]).
+    pub(super) fn decode_carry(carry: &mut Vec<u8>, chunk: &[u8], eof: bool) -> Decoded {
+        if eof {
+            let owed = carry.len();
+            carry.clear();
+            return if owed == 0 {
+                Decoded::Text(String::new()) // the EOF sentinel, unchanged
             } else {
-                let bytes = if carry.is_empty() {
-                    chunk.to_vec()
+                Decoded::Fail(format!(
+                    "invalid utf-8 at eof: the peer closed mid-codepoint ({owed} trailing byte(s))"
+                ))
+            };
+        }
+        let bytes = if carry.is_empty() {
+            chunk.to_vec()
+        } else {
+            let mut b = std::mem::take(carry);
+            b.extend_from_slice(chunk);
+            b
+        };
+        match std::str::from_utf8(&bytes) {
+            Ok(s) => Decoded::Text(s.to_string()),
+            // Truncated at the end — carry the tail, hand back whatever completed.
+            Err(e) if e.error_len().is_none() => {
+                let good = e.valid_up_to();
+                *carry = bytes[good..].to_vec();
+                if good == 0 {
+                    Decoded::NeedMore
                 } else {
-                    let mut b = std::mem::take(&mut *carry);
-                    b.extend_from_slice(chunk);
-                    b
-                };
-                match std::str::from_utf8(&bytes) {
-                    Ok(s) => Decoded::Text(s.to_string()),
-                    // Truncated at the end — carry the tail, hand back whatever completed.
-                    Err(e) if e.error_len().is_none() => {
-                        let good = e.valid_up_to();
-                        *carry = bytes[good..].to_vec();
-                        if good == 0 {
-                            Decoded::NeedMore
-                        } else {
-                            Decoded::Text(
-                                std::str::from_utf8(&bytes[..good])
-                                    .expect("valid_up_to prefix is utf-8")
-                                    .to_string(),
-                            )
-                        }
-                    }
-                    // Genuinely invalid bytes on a str-only seam.
-                    Err(_) => {
-                        carry.clear();
-                        Decoded::Fail(
-                            "invalid utf-8 on the socket: std.net read is str-only — binary payloads \
-                             need Socket.read_bytes (not implemented yet; see docs/gaps.md R1)"
-                                .to_string(),
-                        )
-                    }
+                    Decoded::Text(
+                        std::str::from_utf8(&bytes[..good])
+                            .expect("valid_up_to prefix is utf-8")
+                            .to_string(),
+                    )
                 }
             }
-        };
-        match decoded {
+            // Genuinely invalid bytes on a str-only seam.
+            Err(_) => {
+                carry.clear();
+                Decoded::Fail(
+                    "invalid utf-8 on the socket: std.net read is str-only — binary payloads \
+                     need Socket.read_bytes (not implemented yet; see docs/gaps.md R1)"
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    /// B1 — materialize a [`Decoded`] into the `Result[str]` value (`None` = NeedMore: the caller must
+    /// take more bytes off the fd). Split from [`Vm::decode_carry`] so the allocating half runs with no
+    /// socket lock held.
+    pub(super) fn decoded_value(&mut self, d: Decoded) -> Option<Value> {
+        match d {
             Decoded::NeedMore => None,
             Decoded::Text(s) => {
                 let sv = self.alloc_str(s);
@@ -360,12 +366,146 @@ impl Vm {
     /// fiber to park, so the op blocks the thread once (a documented v1 fallback — net targets
     /// `--parallel`).
     ///
-    /// B1 — `read` decodes through [`Vm::decode_socket_read`] (never `from_utf8_lossy`). Contract:
-    /// `n` bounds the NEW bytes taken off the fd; a ≤3-byte incomplete-codepoint tail carried from the
-    /// previous read is prepended, so a `read(n)` can return up to `n + 3` bytes and never fewer than
-    /// the peer sent. A `read` whose bytes end mid-codepoint may BLOCK past its first successful fd read
-    /// (it needs the rest of that codepoint) — it re-reads, so `timeout_ms` still fires `Err("timeout")`,
-    /// and the carry is RETAINED across a timeout (those bytes are still owed to the next read).
+    /// D6/B1 — `Socket.read(n) -> Result[str]` / `read(n, timeout_ms)`.
+    ///
+    /// Decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`). Contract: `n` bounds the NEW
+    /// bytes taken off the fd; a ≤3-byte incomplete-codepoint tail carried from the previous read is
+    /// prepended, so a `read(n)` can return up to `n + 3` bytes and never fewer than the peer sent.
+    /// `read(0)` is a no-op `Ok("")` (it never touches the fd, and never turns a pending carry into a
+    /// false EOF). A `read` whose bytes end mid-codepoint may BLOCK past its first successful fd read
+    /// (it needs the rest of that codepoint); `timeout_ms` bounds the WHOLE call — the deadline is
+    /// latched on the fiber ([`Vm::poll_deadline`]), so re-parking to finish a codepoint does NOT
+    /// restart the budget — and the carry is RETAINED across a timeout `Err` (those bytes are still
+    /// owed to the next read).
+    fn socket_read(&mut self, h: GcRef, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        // The optional trailing int bounds readiness (D6c). On a timeout the netpoller re-injects this
+        // fiber with `poll_timed_out` set; the rewound op re-runs and lands HERE — so check it at entry
+        // (after the `run_until` loop-top cancel check, which a sibling fault wins) and return Err.
+        self.arity_range_err("read", args, 1, 2, span)?;
+        if self.poll_timed_out {
+            self.poll_timed_out = false;
+            return Ok(self.sock_err("timeout"));
+        }
+        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly allocate
+        // gigabytes before a byte arrives (review). The caller already loops for large payloads —
+        // `read` returns the actual count.
+        let n = match args.first() {
+            Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
+            _ => return Err(self.err("read expects an int byte count".into(), span)),
+        };
+        // `read(0)` (or a negative / caller-computed-to-zero `n`): nothing to take off the fd. Return
+        // the empty string WITHOUT reading — a zero-length `Read::read` returns `Ok(0)` unconditionally,
+        // so feeding it to the decode/re-read loop below would spin forever whenever a carry is pending
+        // (it can neither make progress nor would-block).
+        if n == 0 {
+            let sv = self.alloc_str(String::new());
+            return Ok(self.sock_ok(sv));
+        }
+        // The per-call deadline, latched on the fiber so it survives a park's ip-rewind re-execution.
+        let deadline = timeout
+            .filter(|t| !t.poll_once)
+            .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
+        let core = self.socket_core(h);
+        // B1 — the loop only re-reads when the fd's bytes ended mid-codepoint AND held no complete
+        // codepoint at all (`Decoded::NeedMore`): take more bytes for the rest of it. It is bounded —
+        // a NeedMore carry is a strict prefix of ONE codepoint (≤3 bytes), so at most 3 data-bearing
+        // re-reads can NeedMore before the codepoint completes (or the bytes are invalid ⇒ `Fail`).
+        // The ordinary outcome of the re-read is WouldBlock, which falls into the park/demote branch
+        // below (every arm of which returns).
+        loop {
+            let mut buf = vec![0u8; n];
+            let attempt = {
+                // LOCK ORDER: `carry` OUTER, `stream` INNER — the fd read and the carry update are ONE
+                // critical section, or two fibers aliasing this socket decode out of wire order (a
+                // valid multibyte stream would then err as "invalid utf-8"). See `SocketCore::carry`.
+                let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(stream) = guard.as_mut() else {
+                    return Ok(self.sock_err("read on a closed socket"));
+                };
+                match std::io::Read::read(stream, &mut buf) {
+                    // `got == 0` on a `read(n>0)` is EOF.
+                    Ok(got) => Ok(Self::decode_carry(&mut carry, &buf[..got], got == 0)),
+                    Err(e) => Err((e, stream.as_raw_fd())),
+                }
+            };
+            match attempt {
+                Ok(d) => match self.decoded_value(d) {
+                    Some(v) => return Ok(v),
+                    None => continue, // incomplete codepoint carried; need more bytes
+                },
+                Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // `timeout_ms == 0` (poll-once): do NOT park — surface the timeout immediately.
+                    if timeout.is_some_and(|t| t.poll_once) {
+                        return Ok(self.sock_err("timeout"));
+                    }
+                    let target = PollPark {
+                        key: core.key,
+                        fd,
+                        interest: poller::Interest::Read,
+                        in_flight: Arc::clone(&core.in_flight),
+                        deadline,
+                    };
+                    if self.park_on_fd(h, args, target, span)? {
+                        return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
+                    }
+                    // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
+                    // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
+                    // non-blocking read in place (#3 socket half). Off the M:N engine (top-level /
+                    // cooperative) there is no fiber to demote → fail loud (a silent hang would also
+                    // defeat the cooperative deadlock detector). net targets the `--parallel` engine.
+                    if self.mn.is_some() && self.native_reentry > 0 {
+                        let core = Arc::clone(&core);
+                        return self.demote_block_socket(
+                            fd,
+                            poller::Interest::Read,
+                            span,
+                            move |vm| {
+                                let mut b = vec![0u8; n];
+                                let r = {
+                                    let mut carry =
+                                        core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut guard =
+                                        core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                    let Some(stream) = guard.as_mut() else {
+                                        return SockPoll::Ready(Ok(
+                                            vm.sock_err("read on a closed socket")
+                                        ));
+                                    };
+                                    match std::io::Read::read(stream, &mut b) {
+                                        Ok(got) => {
+                                            Ok(Vm::decode_carry(&mut carry, &b[..got], got == 0))
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                };
+                                match r {
+                                    // Same decode guard as the fast path; a NeedMore (no complete
+                                    // codepoint yet) just re-polls, like a would-block.
+                                    Ok(d) => match vm.decoded_value(d) {
+                                        Some(v) => SockPoll::Ready(Ok(v)),
+                                        None => SockPoll::WouldBlock,
+                                    },
+                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                        SockPoll::WouldBlock
+                                    }
+                                    Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                                }
+                            },
+                        );
+                    }
+                    return Ok(self.sock_err(
+                        "read would block: std.net sockets require the --parallel engine",
+                    ));
+                }
+                Err((e, _)) => return Ok(self.sock_err(format!("{e}"))),
+            }
+        }
+    }
+
+    /// B1 — `read` decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`); see
+    /// [`Vm::socket_read`] for its contract.
     pub(super) fn socket_method(
         &mut self,
         h: GcRef,
@@ -375,122 +515,15 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         match method {
             "read" => {
-                // `read(n)` or `read(n, timeout_ms)` — the optional trailing int bounds the FIRST
-                // readiness (D6c). On a timeout the netpoller re-injects this fiber with `poll_timed_out`
-                // set; the rewound op re-runs and lands HERE — so check it at entry (after the
-                // `run_until` loop-top cancel check, which a sibling fault wins) and return Err.
-                self.arity_range_err("read", args, 1, 2, span)?;
-                if self.poll_timed_out {
-                    self.poll_timed_out = false;
-                    return Ok(self.sock_err("timeout"));
+                let r = self.socket_read(h, args, span);
+                // B1 — the read's absolute deadline is LATCHED on the fiber (`poll_deadline`) so a park
+                // + ip-rewind re-execution keeps the ORIGINAL `timeout_ms` budget instead of restarting
+                // it. This logical `read` is over unless it parked (`poll_park` set ⇒ the very same call
+                // resumes) — so drop the latch here; the next `read` gets a fresh budget.
+                if self.poll_park.is_none() {
+                    self.poll_deadline = None;
                 }
-                let timeout = self.parse_timeout_ms(args.get(1), span)?;
-                // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly
-                // allocate gigabytes before a byte arrives (review). The caller already loops for large
-                // payloads — `read` returns the actual count.
-                let n = match args.first() {
-                    Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
-                    _ => return Err(self.err("read expects an int byte count".into(), span)),
-                };
-                let core = self.socket_core(h);
-                // B1 — the loop only ever spins when the fd's bytes ended mid-codepoint AND held no
-                // complete codepoint at all (`decode_socket_read` ⇒ `None`): re-read for the rest of it.
-                // The ordinary outcome of that re-read is WouldBlock, which falls into the park/demote
-                // branch below (every arm of which returns) — so this is not a busy loop.
-                loop {
-                    let mut buf = vec![0u8; n];
-                    let attempt = {
-                        let mut guard = core.stream.lock().unwrap();
-                        let Some(stream) = guard.as_mut() else {
-                            return Ok(self.sock_err("read on a closed socket"));
-                        };
-                        match std::io::Read::read(stream, &mut buf) {
-                            Ok(got) => Ok(got),
-                            Err(e) => Err((e, stream.as_raw_fd())),
-                        }
-                    };
-                    match attempt {
-                        Ok(got) => {
-                            buf.truncate(got);
-                            // `got == 0` on a `read(n>0)` is EOF (a degenerate `read(0)` is not).
-                            match self.decode_socket_read(&core, &buf, got == 0 && n > 0) {
-                                Some(v) => return Ok(v),
-                                None => continue, // incomplete codepoint carried; need more bytes
-                            }
-                        }
-                        Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // `timeout_ms == 0` (poll-once): do NOT park — surface the timeout immediately.
-                            if timeout.is_some_and(|t| t.poll_once) {
-                                return Ok(self.sock_err("timeout"));
-                            }
-                            let target = PollPark {
-                                key: core.key,
-                                fd,
-                                interest: poller::Interest::Read,
-                                in_flight: Arc::clone(&core.in_flight),
-                                deadline: timeout.map(|t| t.deadline),
-                            };
-                            if self.park_on_fd(h, args, target, span)? {
-                                return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
-                            }
-                            // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
-                            // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
-                            // non-blocking read in place (#3 socket half). Off the M:N engine (top-level /
-                            // cooperative) there is no fiber to demote → fail loud (a silent hang would also
-                            // defeat the cooperative deadlock detector). net targets the `--parallel` engine.
-                            if self.mn.is_some() && self.native_reentry > 0 {
-                                let core = Arc::clone(&core);
-                                return self.demote_block_socket(
-                                    fd,
-                                    poller::Interest::Read,
-                                    span,
-                                    move |vm| {
-                                        let mut b = vec![0u8; n];
-                                        let r = {
-                                            let mut guard = core
-                                                .stream
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
-                                            let Some(stream) = guard.as_mut() else {
-                                                return SockPoll::Ready(Ok(
-                                                    vm.sock_err("read on a closed socket")
-                                                ));
-                                            };
-                                            std::io::Read::read(stream, &mut b)
-                                        };
-                                        match r {
-                                            Ok(got) => {
-                                                b.truncate(got);
-                                                // Same decode guard as the fast path; a `None` (no complete
-                                                // codepoint yet) just re-polls, like a would-block.
-                                                match vm.decode_socket_read(
-                                                    &core,
-                                                    &b,
-                                                    got == 0 && n > 0,
-                                                ) {
-                                                    Some(v) => SockPoll::Ready(Ok(v)),
-                                                    None => SockPoll::WouldBlock,
-                                                }
-                                            }
-                                            Err(e)
-                                                if e.kind() == std::io::ErrorKind::WouldBlock =>
-                                            {
-                                                SockPoll::WouldBlock
-                                            }
-                                            Err(e) => {
-                                                SockPoll::Ready(Ok(vm.sock_err(format!("{e}"))))
-                                            }
-                                        }
-                                    },
-                                );
-                            }
-                            return Ok(self.sock_err(
-                                "read would block: std.net sockets require the --parallel engine",
-                            ));
-                        }
-                        Err((e, _)) => return Ok(self.sock_err(format!("{e}"))),
-                    }
-                }
+                r
             }
             "write" => {
                 // `write(s)` or `write(s, timeout_ms)` — the optional trailing int bounds writability.

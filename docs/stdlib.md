@@ -200,8 +200,14 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
   - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
     tail is carried on the socket and prepended here — so `read(n)` can return **up to `n + 3` bytes**,
     and reading valid text in a loop (even `read(1)`) reassembles it **byte-exactly**. Such a read may
-    block past its first successful read to complete the codepoint (`timeout_ms` still applies; a
-    timed-out read keeps the carried tail for the next read — no bytes are lost).
+    block past its first successful read to complete the codepoint — `timeout_ms` bounds the **whole
+    call** (the deadline is fixed when the call starts; finishing a split codepoint does not re-arm it),
+    and a timed-out read keeps the carried tail for the next read — no bytes are lost.
+  - `read(0)` (or a negative / caller-computed-to-zero `n`) is a **no-op** `Ok("")`: it never touches the
+    socket, never reports EOF, and leaves any carried tail for the next read.
+  - Two tasks may share one `Socket` (it crosses the airlock as a shared handle): each `read` takes its
+    bytes off the socket and decodes them as ONE atomic step, so concurrent readers see wire order (they
+    still must not both *block* on it — a second parked op on a shared socket is a fault, unchanged).
   - Bytes that are genuinely not UTF-8 (a **binary payload**) → `Err("invalid utf-8 on the socket: …")`.
   - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
   - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the

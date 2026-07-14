@@ -2754,6 +2754,196 @@ main()
     assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
 }
 
+/// B1 (review #1/#4/#6) — a `read(0)` while a partial codepoint is CARRIED must return `Ok("")` at
+/// once, never spin. `read(2)` over `"héllo"` hands back `"h"` and carries the `0xC3` lead byte; a
+/// following `read(0)` (the caller-computed `read(want - have)` that lands on 0 is the real-world
+/// shape) reads a ZERO-length buffer — which `Read::read` answers `Ok(0)` for unconditionally, so the
+/// decode-retry loop could neither progress nor would-block: it spun at 100% CPU forever, un-cancelable
+/// and un-timeout-able. The carry must SURVIVE the no-op read (the next `read` still gets `"éllo"`).
+#[test]
+fn net_read_zero_with_pending_carry_returns_empty_not_spin() {
+    let src = "\
+import std.net
+
+fn serve(server: Listener) -> int!:
+    conn := server.accept()?
+    conn.write(\"héllo\")?
+    conn.close()
+    server.close()
+    return Ok(0)
+
+fn client(addr: str) -> int!:
+    sock := net.connect(addr)?
+    first := sock.read(2)?          # \"h\" — the 0xC3 lead byte of \"é\" is carried
+    print(\"FIRST:\" + first)
+    zero := sock.read(0)?           # must NOT spin: no bytes wanted, carry untouched
+    print(\"ZERO:[\" + zero + \"]\")
+    rest := sock.read(64)?          # the carry is still owed — \"éllo\"
+    print(\"REST:\" + rest)
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    server := net.listen(\"127.0.0.1:0\")?
+    addr := server.addr()?
+    parallel:
+        spawn serve(server)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+";
+    let out = run_net_timeout_watchdog("read_zero_carry", src);
+    assert!(out.contains("FIRST:h"), "{out:?}");
+    assert!(
+        out.contains("ZERO:[]"),
+        "read(0) is a no-op Ok(\"\"), not a spin and not a false EOF error: {out:?}"
+    );
+    assert!(
+        out.contains("REST:éllo"),
+        "the carried lead byte survives the read(0) and is prepended to the next read: {out:?}"
+    );
+}
+
+/// B1 (review #2/#5/#7) — TWO fibers reading ONE shared `Socket` (an `Arc`'d core — the `spawn
+/// handle(conn)` idiom) must decode in WIRE order. The fd read and the carry update are one critical
+/// section (carry lock OUTER); when they were split, fiber B could take the continuation bytes off the
+/// fd and decode them BEFORE fiber A stored the lead byte it had taken — a leading continuation byte is
+/// `error_len() == Some(1)`, so a perfectly valid UTF-8 text stream errored as `"invalid utf-8 on the
+/// socket"` (and A's stale carry then poisoned the next read). Both readers poll-once (`read(n, 0)`) so
+/// neither ever parks (a second PARKED op on a shared socket is a separate, deliberate fault).
+#[test]
+fn net_read_shared_socket_two_fibers_decode_in_wire_order() {
+    let src = "\
+import std.net
+import std.concurrency
+
+fn serve(server: Listener) -> int!:
+    conn := server.accept()?
+    i := 0
+    while i < 300:
+        conn.write(\"é\")?
+        i = i + 1
+    conn.close()
+    server.close()
+    return Ok(0)
+
+fn drain(sock: Socket, seen: Shared[int], bad: Shared[int]) -> int!:
+    while seen.get() < 300 and bad.get() == 0:
+        match sock.read(3, 0):
+            Ok(s):
+                got := s.chars().len()
+                if got > 0:
+                    seen.update(fn(v: int) -> int: v + got)
+            Err(e):
+                if e.message() != \"timeout\":
+                    print(\"ERR:\" + e.message())
+                    bad.update(fn(v: int) -> int: v + 1)
+    return Ok(0)
+
+fn run() -> int!:
+    server := net.listen(\"127.0.0.1:0\")?
+    addr := server.addr()?
+    seen := Shared(0)
+    bad := Shared(0)
+    parallel:
+        spawn serve(server)
+        spawn:
+            sock := net.connect(addr)?
+            parallel:
+                spawn drain(sock, seen, bad)
+                spawn drain(sock, seen, bad)
+            sock.close()
+            return Ok(0)
+    print(\"SEEN:\" + str(seen.get()))
+    print(\"BAD:\" + str(bad.get()))
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+";
+    let out = run_net_timeout_watchdog("shared_socket_carry", src);
+    assert!(
+        !out.contains("invalid utf-8"),
+        "valid multibyte text must never error, whichever fiber takes which bytes: {out:?}"
+    );
+    assert!(
+        out.contains("SEEN:300") && out.contains("BAD:0"),
+        "every codepoint is delivered exactly once across the two readers: {out:?}"
+    );
+    assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
+}
+
+/// B1 (review #3/#8) — `timeout_ms` bounds the WHOLE `read` call, not one park. A park rewinds `ip` and
+/// re-executes the op, so the deadline used to be recomputed (`now + timeout_ms`) on every wake: a peer
+/// that dribbles ONE byte of a multibyte codepoint per (timeout - ε) kept re-arming the budget and the
+/// `read` never timed out. The deadline is now latched on the fiber (`Vm::poll_deadline`), so it fires.
+/// Peer: a raw `TcpListener` sending the 4 bytes of `😀` 300 ms apart; `read(64, 400)` must `Err`.
+#[test]
+fn net_read_timeout_bounds_whole_call_across_codepoint_parks() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        for b in "😀".as_bytes() {
+            // The client hangs up on the timeout (that IS the fix), so a later byte can hit EPIPE.
+            if stream
+                .write_all(&[*b])
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    match sock.read(64, 400):
+        Ok(s): print(\"GOT:\" + s)
+        Err(e): print(\"ERR:\" + e.message())
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("read_timeout_midcodepoint", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("ERR:timeout"),
+        "a 400 ms read must time out against a 300 ms-per-byte dribbler, not re-arm its budget \
+         at every park: {out:?}"
+    );
+}
+
 /// D6c — `server.accept(timeout_ms)` returns `Err("timeout")` when NO client ever connects, and the
 /// program terminates (no hang). The lone acceptor parks on the netpoller with a deadline; the
 /// deadline fires, the rewound `accept` returns `Err("timeout")`, and the nursery joins.

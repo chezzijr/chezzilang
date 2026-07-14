@@ -4738,7 +4738,7 @@ branch names) is in the git log.
   **binary** payload became garbage, and — worse — **valid UTF-8 text** was mangled whenever a multibyte
   codepoint straddled a `read(n)` boundary, i.e. the ordinary read-in-a-loop idiom (`read(1)` over
   `"héllo"` → `h\u{fffd}\u{fffd}llo`). The runtime lied about the *data*. Both sites now route through
-  ONE guard, `Vm::decode_socket_read`, which splits the two cases `Utf8Error` already distinguishes:
+  ONE guard, `Vm::decode_carry`, which splits the two cases `Utf8Error` already distinguishes:
   **(a) truncated tail** (`error_len() == None`) — the ≤3-byte incomplete codepoint is RETAINED on the
   `Arc`'d `SocketCore` (`carry`, so it survives the would-block park's `ip`-rewind re-execution) and
   prepended to the next read, so byte-at-a-time reads of valid text reassemble **exactly**; **(b)
@@ -4748,15 +4748,26 @@ branch names) is in the git log.
   a silent drop. **Contract changes:** `n` bounds the NEW bytes off the fd, so a `read(n)` may return up
   to `n + 3` bytes; a chunk holding no complete codepoint re-reads rather than returning `Ok("")` (that
   is the EOF sentinel — returning it mid-`é` would silently truncate every `while chunk != "":` loop), so
-  `read` may block past its first successful fd read; `timeout_ms` still fires and the carry is kept
-  across the timeout `Err` (the bytes are still owed). `close()` stays `-> nil` — a leftover tail at close
-  is dropped, the EOF error surfaces on the READ that sees the close. **Known v1 limit (unchanged):
-  binary sockets are UNSUPPORTED** — they need `Socket.read_bytes`/`write_bytes`, which need the `bytes`
-  native seam (`docs/gaps.md` R1, the honest fix). B1 is downgraded from *silent corruption* to *a clear,
-  recoverable limitation*, not closed. Pinned by three M:N tests (`net_read_reassembles_split_codepoint_
-  over_parallel`, `net_read_invalid_utf8_errs_not_replacement_chars`, `net_read_incomplete_tail_at_eof_
-  errs`); the serial engine's net path (immediate "requires the --parallel engine" `Err`) is untouched,
-  so no parity divergence.
+  `read` may block past its first successful fd read; `timeout_ms` bounds the WHOLE call and the carry is
+  kept across the timeout `Err` (the bytes are still owed). `close()` stays `-> nil` — a leftover tail at
+  close is dropped, the EOF error surfaces on the READ that sees the close. Three review-caught corners of
+  the retry loop, all fixed here: **(i) `read(0)`** (a caller-computed `read(want - have)` that lands on
+  0) is a **no-op `Ok("")`** — it never touches the fd, because a zero-length `Read::read` answers `Ok(0)`
+  unconditionally and would spin the retry loop forever against a pending carry; **(ii) the fd read and
+  the carry update are ONE critical section** (the `carry` lock is taken OUTER, `stream` inner) — split,
+  two fibers sharing a socket (the `spawn handle(conn)` idiom) could decode out of wire order and error
+  valid text as "invalid utf-8"; **(iii) the read's deadline is LATCHED on the fiber**
+  (`Vm::poll_deadline`, swapped in `FiberCtx` like `poll_timed_out`) — a park rewinds `ip` and re-executes
+  the op, so recomputing `now + timeout_ms` per park let a byte-per-(timeout-ε) dribbler keep a
+  `read(n, ms)` alive forever. **Known v1 limit (unchanged): binary sockets are UNSUPPORTED** — they need
+  `Socket.read_bytes`/`write_bytes`, which need the `bytes` native seam (`docs/gaps.md` R1, the honest
+  fix). B1 is downgraded from *silent corruption* to *a clear, recoverable limitation*, not closed. Pinned
+  by six M:N tests (`net_read_reassembles_split_codepoint_over_parallel`,
+  `net_read_invalid_utf8_errs_not_replacement_chars`, `net_read_incomplete_tail_at_eof_errs`,
+  `net_read_zero_with_pending_carry_returns_empty_not_spin`,
+  `net_read_shared_socket_two_fibers_decode_in_wire_order`,
+  `net_read_timeout_bounds_whole_call_across_codepoint_parks`); the serial engine's net path (immediate
+  "requires the --parallel engine" `Err`) is untouched, so no parity divergence.
 - **stdin is SHARED by every task (Go/Python) — the false EOF is dead (2026-07-14).** stdin belonged to
   the ENTRY task: every other task was handed `Stdin::Empty`, so `io.read_line()` / `io.input()` inside a
   `spawn:`/nursery task or an `Executor.submit` task returned `None` — a **false EOF**, while the entry

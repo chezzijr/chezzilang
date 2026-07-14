@@ -19,8 +19,9 @@
 # it to the next read (so `read(n)` may return up to `n + 3` bytes, and a byte-at-a-time read of valid
 # text reassembles exactly); genuinely-invalid bytes — i.e. a BINARY payload — return
 # `Err("invalid utf-8 on the socket: …")`, and an incomplete codepoint left when the peer closes returns
-# `Err("invalid utf-8 at eof: …")`. Binary sockets need `read_bytes`/`write_bytes`, which need the
-# `bytes` native seam (docs/gaps.md R1) — not implemented yet.
+# `Err("invalid utf-8 at eof: …")`. `read(0)` is a no-op `Ok("")` (it never touches the socket and keeps
+# any carried tail). Binary sockets need `read_bytes`/`write_bytes`, which need the `bytes` native seam
+# (docs/gaps.md R1) — not implemented yet.
 #
 # `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no data /
 # not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a

@@ -152,8 +152,13 @@ pub struct SocketCore {
     /// chunk that ends mid-codepoint is NOT decodable on its own — the tail is retained HERE and
     /// prepended to the next read (never lossily decoded, never dropped). It lives on the `Arc`'d core,
     /// not on the frame, because a would-block park REWINDS `ip` and re-executes the whole read op (see
-    /// [`Vm::park_on_fd`]) and because two fibers may alias one socket. Its own `Mutex`, only ever taken
-    /// AFTER `stream`'s guard is released.
+    /// [`Vm::park_on_fd`]) and because two fibers may alias one socket.
+    ///
+    /// LOCK ORDER — `carry` is the OUTER lock: a reader takes `carry`, then `stream`, does the fd read,
+    /// updates the carry, and drops both. The fd read and the carry update MUST be one critical section:
+    /// with two fibers aliasing one socket, splitting them lets fiber B take the continuation bytes off
+    /// the fd and decode them BEFORE fiber A stores the lead byte it took — valid text then errors as
+    /// "invalid utf-8" and A's carry poisons the next read. Nothing may take `stream` then `carry`.
     pub carry: Mutex<Vec<u8>>,
 }
 
