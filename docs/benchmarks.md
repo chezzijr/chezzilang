@@ -861,3 +861,31 @@ sitting in `Stdout`'s `LineWriter`), and the VM no longer waits on the writer at
 is a no-op memcheck. Re-measured on the same machine: print loop **0.101 s** (was 0.102 s), tracked
 suite `fib` 262.0 · `str` 178.7 · `primes` 653.2 · `loop` 992.8 · `list` 406.5 · `struct` 472.6 ·
 `poly_method` 1374 · `map` 156.1 · `empty` 1.9 — all within noise of the numbers above.
+
+
+## Cancellation points — the per-instruction cancel check leaves the hot path — 2026-07-14
+
+Cancel is now observed only at **checkpoints** (loop back-edges + blocking/park ops), so `run_until`'s
+dispatch loop no longer does an `Option` deref + relaxed atomic load + branch **per instruction**
+(`src/vm/exec.rs`; the check moved to `Vm::jump_checked`, i.e. backward `Op::Jump` only). Correctness
+rationale in `docs/gaps.md` §N6 — the speedup is a side-effect, not the goal.
+
+Same machine, `benches/run.chz` (hyperfine, CPython ratio; lower is better), before → after:
+`loop` 1.32× → **1.12×** · `fib` 3.54× → **3.16×** · `map` 1.98× → **1.88×** · `poly_method` 4.52× →
+**4.49×** · this run's others: `str` 2.12× · `primes` 2.20× · `list` 2.55× · `struct` 2.76×. The dispatch-bound
+benches (`loop`, `fib`) move the most, as expected for a removed per-op load+branch; the rest are within
+run-to-run noise. Single run, not a median-of-N — treat the small deltas as noise and the `loop`/`fib`
+direction as real.
+
+**Re-measured after the adversarial-review fixes** (the cancellation checkpoint added at `Vm::guarded`,
+i.e. once per native→user-code re-entry — `map`/`filter`/`fold`/`sort` callbacks; see `docs/gaps.md` N6c),
+same machine, quiescent: `loop` **1.15×** · `fib` **3.29×** · `map` **1.86×** · `poly_method` 4.34× ·
+`str` 2.10× · `primes` 2.08× · `list` 2.49× · `struct` 2.75× · `empty` **4.55× faster**. `map` is the bench
+that pays for the new checkpoint (one relaxed atomic load per element) and it did **not** move (1.88× →
+1.86×, within noise) — the check is off the bytecode dispatch path entirely.
+
+**Re-measured after adversarial-review round 2** (`Vm::cancel_requested` — the one predicate every
+checkpoint calls; it adds an `is_empty`-style read of the enclosing-scope flags, only at checkpoints,
+never on the dispatch path): `loop` **1.13×** · `fib` **3.29×** · `str` 2.15× · `primes` 2.28× · `list`
+2.51× · `struct` 2.70× · `poly_method` 4.53× · `map` **1.88×** · `empty` **4.63× faster**. Unmoved from
+the numbers above (single run, treat sub-0.1× deltas as noise).

@@ -669,10 +669,26 @@ pub struct Vm {
     /// nursery aborts running siblings instead of join-then-report. `None` on the cooperative engine
     /// (it already aborts via the scheduler unwind) and on the top-level VM (never a worker).
     cancel: Option<Arc<AtomicBool>>,
+    /// The cancel flags of the ENCLOSING scopes of the scope this VM currently runs in (outermost
+    /// first; empty at the top level and in the outermost nursery). Cancelling a scope must cancel its
+    /// descendants, so every checkpoint reads these too ([`Vm::cancel_requested`]) — a nested nursery
+    /// keeps its OWN `cancel` (an inner fault must not cancel an outer sibling) but its fibers still
+    /// die when an outer scope is cancelled. Re-pointed per fiber swap-in from
+    /// [`JoinScope::ancestors`], exactly like `cancel`. (The cooperative engine inherits differently —
+    /// see `run_scheduler` — so this stays empty there.)
+    cancel_outer: Vec<Arc<AtomicBool>>,
     /// B3.4: set true only when *this* worker observed [`Vm::cancel`] and bailed, so the join can
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
+    /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
+    /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must
+    /// run to completion. Defers also drain on the NORMAL-return and own-fault paths, where
+    /// `cancelled` is still false while the scope flag is already tripped by a faulted sibling —
+    /// without this counter the first checkpoint inside the first deferred call would eat it.
+    /// See [`Vm::cancel_requested`].
+    deferring: usize,
     /// D1 — on a `--parallel` **worker** VM, the read-only [`ModuleSnapshot`] of the parent's module
     /// graph that this worker faults into its own heap lazily, one module at a time, on first global
     /// access ([`Vm::fault_module`]). `None` on the top-level VM and the cooperative engine (which
@@ -1179,8 +1195,12 @@ enum SnapValue {
 enum TaskOutcome {
     /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
     Done(WorkerResult),
-    /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Dropped.
-    Cancelled,
+    /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
+    /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task
+    /// always runs its prologue, so those bytes really were printed — and serial (which prints live
+    /// into the shared buffer) cannot un-print them. Dropping them here was a capture-mode-only
+    /// divergence from the serial engine's line SET.
+    Cancelled { out: String, stderr: String },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
         code: i32,
@@ -1453,6 +1473,14 @@ struct JoinScope {
     /// concurrency invariant). Read by `park`/`park_wait`'s gap re-check and the running fiber's
     /// back-edge (via the shell's re-pointed `self.cancel`) and `cancel_drain(scope_id)`.
     cancel: Arc<AtomicBool>,
+    /// The cancel tokens of every ENCLOSING scope, outermost first (empty for the outermost nursery).
+    /// Structured concurrency: cancelling a scope cancels its DESCENDANT scopes. A nested nursery keeps
+    /// its own `cancel` (so an inner fault never cancels an outer sibling — the other half of the
+    /// invariant), but its fibers must still observe an outer cancel at their checkpoints, or a nested
+    /// nursery entered from a task that is later cancelled becomes UNCANCELLABLE and a spinning
+    /// grandchild hangs the teardown forever. Read at every checkpoint via the shell's re-pointed
+    /// `Vm::cancel_outer` (`Vm::cancel_requested`).
+    ancestors: Vec<Arc<AtomicBool>>,
 }
 
 struct SchedCore {
@@ -1491,6 +1519,18 @@ struct SchedCore {
     /// so it is not a deadlock. Registered/un-registered under core lock A by [`Vm::demote_recv_block`];
     /// the refcount handles 2+ fibers demoted on the same channel.
     demoted_chans: std::collections::HashMap<usize, (Arc<ChannelCore>, usize)>,
+    /// N4 (demoted half) — the cancel flags each DEMOTED fiber that a CANCEL can still wake is
+    /// watching (its own scope's flag + `Vm::cancel_outer`), keyed by a demote token. CANCEL is a
+    /// wakeup source the park/inflight/`runnable` counters do not model: [`Vm::demote_recv_block`]
+    /// ranks `cancel_requested()` ABOVE its own deadlock self-detect, so a demoted fiber whose flag
+    /// is set resumes within one `DEMOTE_POLL_BACKOFF`, unwinds, and runs its `defer`s (which can
+    /// `send` — waking parked siblings). Declaring deadlock against it would latch `terminate` and
+    /// truncate that cleanup. Only a fiber that a cancel WOULD honour is registered (`!cancelled &&
+    /// deferring == 0` at demote time — neither can change while it is blocked), so the fiber that
+    /// is demoted-blocked forever INSIDE its own uncancellable `defer` registers nothing and stays a
+    /// genuine deadlock. Registered/un-registered under core lock A, 1:1 with `blocked_native`.
+    demote_cancel_watch: std::collections::HashMap<u64, Vec<Arc<AtomicBool>>>,
+    next_demote_tok: u64,
 }
 
 impl SchedCore {
@@ -1557,21 +1597,49 @@ impl SchedCore {
     /// synchronizes-with edge). On the fault path the edge is `finish`'s own lock release (the predicate
     /// needs `running == 0`, which only holds after it).
     ///
-    /// LIVENESS (why this can never become a hang): a cancelled scope always reaches `done == total`,
-    /// so the veto is transient by construction. EVERY park path re-checks THIS scope's cancel:
-    /// `park`/`park_wait` re-read `c.scopes[fiber.scope_id].cancel` under the core lock and requeue
-    /// `Ready` instead of parking, and `poll_park_offload` hands the netpoller's `register` that same
-    /// per-scope flag (NOT the legacy outermost `MnSched::cancel`), which rejects the park under the
-    /// registry lock `drain_sched` sweeps under. So a cancelled scope can never re-accumulate parked
-    /// fibers after its drain. Every cancel trip is followed by a `cancel_drain` (which requeues +
-    /// `notify_all`), so an idle worker sitting under the veto cannot miss the wakeup. A FUTURE park path
-    /// that does not re-check the scope cancel would break that and turn this veto into a hang — those
-    /// re-checks are load-bearing here (pinned by `mnsched_park_requeues_when_cancel_tripped` and
-    /// `poll_park_rejects_cancelled_inner_scope`).
-    fn any_incomplete_scope_cancelled(&self) -> bool {
-        self.scopes
-            .iter()
-            .any(|s| s.done < s.total && s.cancel.load(Ordering::Relaxed))
+    /// BOUNDED TO THAT WINDOW (this is the whole liveness argument): the veto asks for an UNDRAINED
+    /// PARKED fiber of the cancelled scope, not merely `done < total`. "Some incomplete cancelled scope"
+    /// was too wide and could never lift: a `defer` is not itself cancellable (`cancel_requested`'s
+    /// `deferring == 0` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
+    /// answer) demotes and sits there — the scope is then incomplete *because of* that fiber, the veto
+    /// held forever and the M:N engine hung SILENTLY (serial reports it). The harm the veto exists to
+    /// prevent is only possible while parked fibers are still owed their `cancel_drain`; once drained
+    /// they are in `global` (`runnable > 0`), so the predicate is false on its own terms and the veto is
+    /// no longer needed. A cancelled scope cannot RE-accumulate parked fibers after its drain: every
+    /// park path re-checks THIS scope's cancel (`park`/`park_wait` re-read
+    /// `c.scopes[fiber.scope_id].cancel` under the core lock and requeue `Ready` instead of parking;
+    /// `poll_park_offload` hands the netpoller's `register` that same per-scope flag, which rejects the
+    /// park under the registry lock `drain_sched` sweeps under) — pinned by
+    /// `mnsched_park_requeues_when_cancel_tripped` and `poll_park_rejects_cancelled_inner_scope`. The
+    /// NETPOLLER half of the drain window needs no veto at all: a poll-parked fiber is deliberately NOT
+    /// in `parked` and `poll_park_offload` accounts it running→`inflight`, and `is_deadlocked` already
+    /// requires `inflight == 0` (if that accounting ever changes, this argument changes with it).
+    /// A cancelled scope whose last unsettled fiber is DEMOTED-blocked forever inside its own cleanup is
+    /// therefore a REAL deadlock, and `demote_recv_block`'s self-detect reports it instead of hanging
+    /// (`mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`).
+    fn any_cancelled_scope_awaiting_drain(&self) -> bool {
+        self.scopes.iter().enumerate().any(|(sid, s)| {
+            s.done < s.total
+                && s.cancel.load(Ordering::Relaxed)
+                && self.scope_has_undrained_park(sid)
+        })
+    }
+
+    /// Is any fiber of scope `sid` still sitting in `parked`, i.e. still owed its `cancel_drain`?
+    /// Scans the same structure `cancel_drain` empties, in the same way (a `Recv` entry's scope by
+    /// reference; a `Wait` token's PEEKED under its fiber lock without claiming), under the same core
+    /// lock — so no new lock order, and no new state to keep in sync (a flag would have to be
+    /// set/cleared at every trip + drain seam; a missed clear re-creates the hang).
+    fn scope_has_undrained_park(&self, sid: usize) -> bool {
+        self.parked.values().flatten().any(|e| match e {
+            ParkedEntry::Recv(f) => f.scope_id == sid,
+            ParkedEntry::Wait(wp) => wp
+                .fiber
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|f| f.scope_id == sid),
+        })
     }
 
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
@@ -1590,6 +1658,35 @@ impl SchedCore {
             .entry(ptr)
             .or_insert_with(|| (Arc::clone(core), 0))
             .1 += 1;
+    }
+
+    /// N4 (demoted half) — start watching a demoted fiber's cancel flags. `flags` is `Vm::cancel`
+    /// followed by `Vm::cancel_outer` and is passed EMPTY when a cancel could not wake this fiber
+    /// anyway (it is already unwinding, or it is blocked inside a `defer` — `cancel_requested()`'s
+    /// `!cancelled && deferring == 0` terms, neither of which can change while it is blocked). Returns
+    /// the token to hand back to `unwatch_demoted_cancel`. Caller holds core lock A.
+    fn watch_demoted_cancel(&mut self, flags: Vec<Arc<AtomicBool>>) -> u64 {
+        let tok = self.next_demote_tok;
+        self.next_demote_tok += 1;
+        if !flags.is_empty() {
+            self.demote_cancel_watch.insert(tok, flags);
+        }
+        tok
+    }
+
+    /// Stop watching a demoted fiber (it resumed / faulted / settled). Caller holds A.
+    fn unwatch_demoted_cancel(&mut self, tok: u64) {
+        self.demote_cancel_watch.remove(&tok);
+    }
+
+    /// N4 (demoted half) — does some demoted fiber have a tripped cancel flag, i.e. is it about to
+    /// resume and unwind? That is live progress the deadlock predicate's counters cannot see, so it
+    /// VETOES the fire (see [`MnSched::is_deadlocked`]). Self-lifting: the entry disappears the moment
+    /// the fiber leaves `demote_recv_block`/`demote_wait_block`, on every exit path.
+    fn any_demoted_cancel_pending(&self) -> bool {
+        self.demote_cancel_watch
+            .values()
+            .any(|flags| flags.iter().any(|f| f.load(Ordering::Relaxed)))
     }
 
     /// Drop a demoted fiber's channel registration (removes the entry at refcount 0). Caller holds A.
@@ -1638,9 +1735,14 @@ impl MnSched {
                     body_open: false,
                     awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
+                    // The creator wires the enclosing scopes' flags in (`Vm::scope_ancestors`)
+                    // when this sched is built INSIDE an already-running task.
+                    ancestors: Vec::new(),
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
+                demote_cancel_watch: std::collections::HashMap::new(),
+                next_demote_tok: 0,
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -1660,7 +1762,12 @@ impl MnSched {
     /// `scope_id`. Append-only (existing scopes' `base_index` never shifts, so live fibers' `task_index`
     /// stays valid). Holds the core lock so the grow is atomic against the deadlock predicate. `total`
     /// may be 0 for an eager nursery (it grows via `inject`).
-    fn register_scope(&self, total: usize, cancel: Arc<AtomicBool>) -> usize {
+    fn register_scope(
+        &self,
+        total: usize,
+        cancel: Arc<AtomicBool>,
+        ancestors: Vec<Arc<AtomicBool>>,
+    ) -> usize {
         let mut c = self.lock();
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
@@ -1672,6 +1779,7 @@ impl MnSched {
             body_open: false,
             awaiting_builder: false,
             cancel,
+            ancestors,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
@@ -1693,7 +1801,12 @@ impl MnSched {
     /// `running`. Mirrors [`MnSched::inject`]'s grow+runnable atomicity contract. `workers` are already
     /// prepared (no fallible/heap work happens inside the lock); each fiber's flat `task_index` is
     /// `base_index + i`, assigned here under the lock.
-    fn register_scope_seeded(&self, cancel: Arc<AtomicBool>, workers: Vec<ReadyWorker>) -> usize {
+    fn register_scope_seeded(
+        &self,
+        cancel: Arc<AtomicBool>,
+        ancestors: Vec<Arc<AtomicBool>>,
+        workers: Vec<ReadyWorker>,
+    ) -> usize {
         let total = workers.len();
         let mut c = self.lock();
         let base_index = c.slots.len();
@@ -1706,6 +1819,7 @@ impl MnSched {
             body_open: false,
             awaiting_builder: false,
             cancel,
+            ancestors,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
@@ -2389,17 +2503,6 @@ impl MnSched {
         if c.all_incomplete_awaiting_builder() {
             return false;
         }
-        // N4 — a cancel-tripped scope with unsettled tasks is MID-TEARDOWN, not deadlocked. The cancel
-        // trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and an idle
-        // worker landing in that gap must not call the teardown a deadlock: `flag_deadlock` would drop
-        // the still-parked siblings WITHOUT `unwind_deferred`, silently skipping their `defer`s (and
-        // `reduce_task_slots` ranks Fault > Deadlocked, so the spurious deadlock never even surfaced —
-        // the lost `defer` was the only symptom). Transient: a cancelled scope always drains to
-        // `done == total`, so the veto always lifts. See `any_incomplete_scope_cancelled` for the full
-        // liveness argument. A GENUINE deadlock (nothing cancelled anywhere) is untouched.
-        if c.any_incomplete_scope_cancelled() {
-            return false;
-        }
         if !(c.running == 0
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
@@ -2410,6 +2513,30 @@ impl MnSched {
             // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
             && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0))
         {
+            return false;
+        }
+        // N4 — CANCEL is a wakeup source the counters above do not model, and a cancelled scope
+        // mid-teardown is not a deadlock. Two shapes, both live progress:
+        //
+        // * an UNDRAINED PARKED fiber of a cancelled scope (`any_cancelled_scope_awaiting_drain`): the
+        //   cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and
+        //   an idle worker landing in that gap sees the pre-drain quiesce. `cancel_drain` is about to
+        //   requeue those fibers so they unwind their `defer`s;
+        // * a DEMOTED fiber whose cancel flag is tripped (`any_demoted_cancel_pending`): it is
+        //   `blocked_native`, not `parked`, so the first scan cannot see it — but `demote_recv_block`
+        //   ranks `cancel_requested()` above `terminate`/self-detect, so it resumes within one
+        //   `DEMOTE_POLL_BACKOFF`, unwinds and runs its `defer`s (which can `send`).
+        //
+        // Either way `flag_deadlock` would drop every parked fiber WITHOUT `unwind_deferred` (silently
+        // skipping their `defer`s — and `reduce_task_slots` ranks Fault > Deadlocked, so the spurious
+        // deadlock never even surfaced; the lost `defer` was the only symptom) and LATCH `terminate`,
+        // truncating the cleanup of anything demoted inside its own `defer`. BOUNDED to real progress:
+        // a cancelled scope with no undrained park whose last fiber is demoted-blocked forever INSIDE
+        // an uncancellable `defer` (no cancel watch — `cancel_requested()` is false while
+        // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
+        // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
+        // deadlock (nothing cancelled anywhere) is untouched.
+        if c.any_cancelled_scope_awaiting_drain() || c.any_demoted_cancel_pending() {
             return false;
         }
         // D5 owe #3 Path C (#1 false-positive fix) — before declaring deadlock, peek every demoted
@@ -2731,8 +2858,11 @@ impl ReadyWorker {
                 stderr: std::mem::take(&mut self.worker.stderr),
             }
         } else if self.worker.cancelled {
-            // This worker observed a sibling's cancel and unwound — swallow it (output dropped).
-            TaskOutcome::Cancelled
+            // This worker observed a sibling's cancel and unwound — its output still flushes.
+            TaskOutcome::Cancelled {
+                out: std::mem::take(&mut self.worker.out),
+                stderr: std::mem::take(&mut self.worker.stderr),
+            }
         } else {
             match res {
                 Err(e) => {

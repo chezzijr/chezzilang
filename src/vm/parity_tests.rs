@@ -2230,33 +2230,34 @@ fn exit_is_not_caught_by_recover() {
 
 #[test]
 fn exit_in_spawned_child_aborts_siblings() {
-    // B1/B2: `std.os.exit` inside a child is a hard halt — it aborts the rest of the program: the
-    // post-`parallel:` statement never runs and the exit code propagates. The two engines differ on
-    // one order-observable detail and that is *expected*, not a parity bug: `--serial` (cooperative,
-    // `run_file`) runs `a()` to its `os.exit` before `b()` ever starts, so `b` never prints; the M:N
-    // engine (`run_file_p`) dispatches both children to real worker threads, so `b` can flush its
-    // print before the exit halts the pool. So the serial arm is exact, and the M:N arm asserts the
-    // race-tolerant contract — same as the sibling `parallel_child_os_exit_halts_with_code` (B3.4).
+    // B1/B2: `std.os.exit` inside a child is a hard halt for the PROGRAM — the post-`parallel:`
+    // statement never runs and the exit code propagates. It is NOT a halt for the tasks the nursery
+    // has already spawned: those are torn down through the scope cancel, and (cancellation points) a
+    // spawned task always runs its straight-line prologue before it can observe that cancel. M:N has
+    // no choice about this — a scope completes only at `done == total`, so `b`'s queued fiber is
+    // popped and started after the exit trips the cancel, and it prints (measured 20/20). Serial's
+    // cancel drain therefore starts `b` too, and the two engines AGREE: `{"a","b"}` on both. (Before
+    // the N6 drain, serial abandoned the never-started sibling and printed only `"a"` — a
+    // near-deterministic line-SET divergence this test used to bless as "expected".) Cross-task
+    // ORDER stays nondeterministic on both engines, so the SET is what is asserted.
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (io, _ie, ir, ic) = run_file_p(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
-    // serial: cooperative, `a()` finishes (incl. exit) before `b()` starts → `b` never prints.
-    assert_eq!(
-        vo, "a\n",
-        "serial: sibling and post-parallel statement aborted by os.exit"
-    );
-    // M:N: `b` may race in a print before the exit halts the pool, but the halt itself is firm —
-    // the exiting child's output is flushed and the post-`parallel:` statement never runs.
     assert!(
-        io.contains('a'),
-        "M:N: the exiting child's output is flushed: got {io:?}"
+        vo.contains('a') && vo.contains('b'),
+        "serial: the exiting child's output flushes and its already-spawned sibling still runs its prologue: got {vo:?}"
     );
     assert!(
-        !io.contains("after"),
-        "M:N: the post-parallel statement never runs after os.exit: got {io:?}"
+        io.contains('a') && io.contains('b'),
+        "M:N: same: got {io:?}"
     );
+    assert!(
+        !io.contains("after") && !vo.contains("after"),
+        "the post-parallel statement never runs after os.exit: mn={io:?} serial={vo:?}"
+    );
+    assert_same_lines(&vo, &io);
     assert_eq!(vc, Some(3), "serial exit code");
     assert_eq!(ic, Some(3), "M:N exit code");
     assert!(
@@ -8598,5 +8599,439 @@ main()
     assert!(
         out.contains("BYTES:2\n255\n254\n"),
         "read_bytes must recover the carried undecodable bytes byte-exactly: {out:?}"
+    );
+}
+
+// ===== cancellation points + the serial cancel drain (N6) =====
+// Cancel is delivered at CHECKPOINTS (loop back-edges + blocking/park ops), so a STARTED task always
+// runs its straight-line prologue and a REGISTERED `defer` always runs on cancel — on BOTH engines.
+// Cross-task stdout ORDER stays nondeterministic on both engines (one print = one locked write,
+// line-atomic); only the line SET / exit code / did-the-defer-run are parity.
+
+/// N6 — token-sequenced: `consumer` registers `defer cleanup(s)`, hands `boom` a token, then parks in
+/// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so both engines
+/// must run it (42). Serial used to print `0`: `run_scheduler`'s `run_child(i)?` propagated the
+/// faulting child's error straight out and ABANDONED the parked consumer — never resumed, never
+/// cancelled, never unwound.
+#[test]
+fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert_eq!(serial, "42\n", "serial: the parked consumer's defer ran");
+    assert_eq!(mn, "42\n", "M:N: the parked consumer's defer ran");
+    assert_same_lines(&serial, &mn);
+}
+
+/// BUG 1 / the PROBE shape — no token: `consumer` PRINTS, THEN registers `defer cleanup(s)`, then
+/// parks; `boom` faults immediately. With cancel observed at EVERY instruction the consumer could be
+/// killed between its first statement and its `defer` line, so the defer never registered and cleanup
+/// silently never ran (measured: 0/20 on M:N). With CANCELLATION POINTS (loop back-edges + blocking
+/// ops) a STARTED task always runs its straight-line prologue, so the defer is registered by
+/// construction — deterministically 42 on BOTH engines. The pre-defer `print` must survive on both
+/// (line SET parity: a cancelled M:N task's buffer is flushed at its task slot, serial printed live).
+#[test]
+fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn consumer(ch: Channel[int], s: Shared[int]):\n    print(\"consumer started\")\n    defer cleanup(s)\n    ch.recv()\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom()\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert!(
+        serial.contains("42\n"),
+        "serial: the started consumer's defer ran: {serial:?}"
+    );
+    assert!(
+        mn.contains("42\n"),
+        "M:N: the started consumer's defer ran: {mn:?}"
+    );
+    // Cross-task ORDER is nondeterministic on both engines; the line SET is the contract.
+    assert_same_lines(&serial, &mn);
+}
+
+/// `os.exit` inside a CANCELLED task's `defer`: the exit code is identical on both engines and is
+/// never demoted to the sibling's catchable fault (Exit > Fault, lowest task index wins — serial's
+/// drain reduces exits exactly like M:N's `reduce_task_slots`). Line SET parity only; order is not
+/// asserted.
+#[test]
+fn parity_os_exit_inside_a_cancelled_tasks_defer() {
+    let src = "import std.os\n\
+               fn bye():\n    print(\"cleanup\")\n    os.exit(7)\n\
+               fn consumer(ch: Channel[int], go: Channel[int]):\n    defer bye()\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    r := recover:\n        parallel:\n            spawn consumer(ch, go)\n            spawn boom(go)\n        0\n    print(\"unreachable\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mo, _me, _mr, mc) = run_file_p(&entry);
+    let (so, _se, _sr, sc) = run_file(&entry);
+    assert_eq!(sc, Some(7), "serial: the cancelled defer's os.exit wins");
+    assert_eq!(mc, Some(7), "M:N: the cancelled defer's os.exit wins");
+    assert!(
+        !so.contains("unreachable") && !mo.contains("unreachable"),
+        "os.exit hard-halts: serial={so:?} mn={mo:?}"
+    );
+    assert_same_lines(&so, &mo);
+}
+
+/// The probe shape with the FAULTER SPAWNED FIRST — the shape that exposed the deterministic
+/// serial-vs-M:N divergence the cancellation-point change first shipped with. M:N is structurally
+/// forced to start every spawned fiber (a scope completes only at `done == total`; `take_runnable`
+/// never consults the scope cancel), so `talker` runs its prologue, prints, registers its `defer` and
+/// unwinds at its `recv` checkpoint — even though `boom` already faulted. Serial's cancel drain used
+/// to SKIP a never-started (`Pending`) sibling, so it emitted `{"0"}` while M:N emitted `{"hi","42"}`
+/// (20/20 — near-deterministic, not a rare race). The drain now starts every not-`Done` sibling with
+/// the cancel tripped, so both engines run the task and both run its `defer`.
+#[test]
+fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn talker(ch: Channel[int], s: Shared[int]):\n    print(\"hi\")\n    defer cleanup(s)\n    ch.recv()\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn boom()\n            spawn talker(ch, s)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert!(serial.contains("42\n"), "serial: the defer ran: {serial:?}");
+    assert!(mn.contains("42\n"), "M:N: the defer ran: {mn:?}");
+    assert!(
+        serial.contains("hi\n"),
+        "serial: the prologue ran: {serial:?}"
+    );
+    assert_same_lines(&serial, &mn);
+}
+
+/// A never-started straight-line sibling with NO defer, faulter first: M:N runs it to completion
+/// (`Done`, output flushed), so serial must too — the line SET is the parity contract.
+#[test]
+fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() {
+    let src = "fn noisy():\n    print(\"hi\")\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn noisy()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    assert!(serial.contains("hi\n"), "serial: {serial:?}");
+    assert_same_lines(&serial, &mn);
+}
+
+/// Cancellation points and a NATIVE-driven loop: `xs.map(f)` iterates in RUST (`for e in ..
+/// guarded(|vm| vm.invoke_value(f, ..))`, call.rs) and emits no `Op::Jump`, so `jump_checked`'s
+/// back-edge cannot fire inside it and a straight-line `f` has no back-edge of its own. Without a
+/// checkpoint at the native re-entry a cancelled task burns every remaining element to completion
+/// (measured on the first cut of this change: "map finished" printed after the sibling had faulted,
+/// 5M callbacks deep). The `guarded` checkpoint delivers the cancel between elements — that Rust
+/// loop's back-edge.
+///
+/// The faulter is spawned FIRST so the scope cancel is already tripped when `work` starts: no timing
+/// race, and BOTH engines must abort the map (serial's drain starts `work` with the cancel tripped,
+/// M:N pops its still-queued fiber after the cancel). A CPU-bound task that is ALREADY RUNNING when
+/// the cancel trips is a different, pre-existing story on serial — it is cooperative, so it simply
+/// runs to its next park before any sibling gets to fault (that is why the `while true:` spinner test
+/// is M:N-only).
+#[test]
+fn parity_native_hof_loop_is_cancellable() {
+    let src = "fn sq(x: int) -> int:\n    return x * x\n\
+               fn work(xs: List[int]):\n    ys := xs.map(sq)\n    print(\"map finished\")\n    print(ys.len())\n\
+               fn boom():\n    zs := [1]\n    print(zs[9])\n\
+               fn main():\n    xs := []\n    i := 0\n    while i < 200000:\n        xs.push(i)\n        i = i + 1\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn work(xs)\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    assert!(
+        !serial.contains("map finished"),
+        "serial: the cancelled task's native map must abort at a per-element checkpoint: {serial:?}"
+    );
+    assert!(
+        !mn.contains("map finished"),
+        "M:N: the cancelled task's native map must abort at a per-element checkpoint: {mn:?}"
+    );
+    assert_same_lines(&serial, &mn);
+}
+
+/// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`. The
+/// nested deadlock reaches the outer level as an ordinary child error on both engines, so both cancel
+/// the outer scope and both run the parked sibling's `defer` (42). Locks the N5 boundary: a level's
+/// OWN deadlock still tears its fibers down without defers, identically on both engines — but a
+/// nested one must not diverge.
+#[test]
+fn parity_nested_deadlock_cancels_the_outer_parked_siblings_defer() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn a(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn dead(d: Channel[int]):\n    d.recv()\n\
+               fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn a(ch, go, s)\n            spawn b(go)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the deadlock is recovered");
+    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    assert_eq!(serial, "42\n", "serial: the parked sibling's defer ran");
+    assert_eq!(mn, "42\n", "M:N: the parked sibling's defer ran");
+}
+
+/// A GENUINE deadlock (every task parked, nothing cancelled) is still DETECTED — not hung — on both
+/// engines. The cancel drain must never swallow it: it is reported from `run_scheduler_level`'s
+/// `None` arm, which never routes through `drain_cancelled_children`.
+#[test]
+fn parity_genuine_deadlock_is_still_detected() {
+    let src = "fn waiter(ch: Channel[int]):\n    ch.recv()\n\
+               fn main():\n    ch := Channel[int]()\n    r := recover:\n        parallel:\n            spawn waiter(ch)\n            spawn waiter(ch)\n        0\n    print(\"caught\")\nmain()\n";
+    let serial = run_capture(src).expect("the deadlock is recovered");
+    let mn = run_capture_parallel(src).expect("the deadlock is recovered");
+    assert_eq!(serial, "caught\n");
+    assert_same_lines(&serial, &mn);
+}
+
+/// A `defer` is the cleanup the cancel exists to RUN — so no cancellation checkpoint fires INSIDE a
+/// deferred call (`Vm::deferring` ⇒ `cancel_requested()` is false). Without that, every defer of a
+/// task that ends on the NORMAL-return path (or faults on its own) while a sibling has already
+/// tripped the scope cancel hit the checkpoint at the top of `guarded` (`run_one_deferred` runs every
+/// deferred call through it) with `cancelled` still false: the FIRST (LIFO) deferred call returned
+/// `cancelled` BEFORE its body ran, and only the rest of the defers executed. Measured on both
+/// engines: `cleanup2` was silently swallowed — arbitrary PARTIAL cleanup (one fd released, the next
+/// not), while parity stayed green because both engines dropped it identically.
+#[test]
+fn parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel() {
+    let src = "fn boom() -> int:\n    return 1 / 0\n\
+               fn tidy():\n    defer print(\"cleanup1\")\n    defer print(\"cleanup2\")\n    print(\"start\")\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn tidy()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("cleanup1\n") && out.contains("cleanup2\n"),
+            "{engine}: EVERY registered defer runs (LIFO), not all-but-the-first: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// Structured concurrency — cancelling a scope cancels its DESCENDANT scopes. A nested `parallel:`
+/// entered from a task that is then cancelled used to be UNCANCELLABLE: the nested scope got a fresh
+/// cancel flag (M:N) / serial handed the level `cancel = None`, so the nested spinner's back-edge
+/// checkpoint had no tripped flag to read and looped forever — the teardown never finished and the
+/// program HUNG on BOTH engines (measured: `timeout` on both). The nested scope now INHERITS its
+/// enclosing scopes' flags (`JoinScope::ancestors` / `Vm::cancel_outer`; serial inherits the `Arc`).
+#[test]
+fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
+    let src = "fn boom() -> int:\n    return 1 / 0\n\
+               fn spin():\n    i := 0\n    while true:\n        i = i + 1\n\
+               fn t():\n    parallel:\n        spawn spin()\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn t()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered — must not hang");
+    let mn = run_capture_parallel(src).expect("recovered — must not hang");
+    assert_eq!(serial, "end\n", "serial: the nested spinner was cancelled");
+    assert_eq!(mn, "end\n", "M:N: the nested spinner was cancelled");
+}
+
+/// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is a cancellation checkpoint on BOTH
+/// engines — the check sits OUTSIDE the M:N-only offload gate. It used to be M:N-only, so a cancelled
+/// SERIAL task slept the full duration (stalling the whole teardown — `sleep_ms(60000)` would freeze
+/// it for a minute) and then, having no other checkpoint, ran every straight-line statement AFTER the
+/// sleep to completion: `{napper start, napper woke, end}` on serial vs `{napper start, end}` on M:N,
+/// deterministically. The line SET is the parity contract.
+#[test]
+fn parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines() {
+    let src = "import std.time\n\
+               fn boom() -> int:\n    return 1 / 0\n\
+               fn napper():\n    print(\"napper start\")\n    time.sleep_ms(3000)\n    print(\"napper woke\")\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn napper()\n        0\n    print(\"end\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let t0 = std::time::Instant::now();
+    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (serial, _se, _sr, _sc) = run_file(&entry);
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            !out.contains("napper woke"),
+            "{engine}: the cancelled task dies AT the blocking native, and never runs past it: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(3000),
+        "neither engine's teardown waits out the cancelled task's 3s sleep: {:?}",
+        t0.elapsed()
+    );
+}
+
+/// Run one engine under a HARD DEADLINE: a scheduler bug in this area is a HANG, and a hung test
+/// would just wedge the suite. On timeout we panic with the engine name (the hung VM thread is left
+/// to die with the test process).
+#[cfg(test)]
+fn run_with_deadline(
+    engine: &str,
+    f: impl FnOnce() -> (String, Result<(), RuntimeError>) + Send + 'static,
+) -> (String, Result<(), RuntimeError>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("failed to spawn the deadline thread");
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .unwrap_or_else(|_| {
+            panic!("{engine} HUNG: a defer that can never complete must be REPORTED as a deadlock, never a silent hang")
+        })
+}
+
+/// A `defer` that can NEVER complete (its body `recv`s on a channel nobody will ever send to) inside
+/// a CANCELLED task is REPORTED as a deadlock — never a silent hang. A defer is not itself cancellable
+/// (`cancel_requested`'s `deferring == 0`), so on M:N that cleanup demotes and blocks in place; the
+/// scope is then incomplete BECAUSE of it, which made the N4 cancel-teardown veto
+/// (`any_cancelled_scope_awaiting_drain`, mod.rs) permanent and the M:N engine hung SILENTLY while
+/// serial reported (measured: M:N `timeout` rc=124, serial rc=1). The veto is now bounded to the
+/// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the demoted
+/// fiber faults in place, and — the task being already cancelled — its error is swallowed and the
+/// SIBLING'S real fault is what propagates, identically on both engines.
+#[test]
+fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
+    let src = "fn cleanup(dead: Channel[int]):\n    print(\"CLEANUP-ENTER\")\n    dead.recv()\n    print(\"CLEANUP-DONE\")\n\
+               fn consumer(ch: Channel[int], go: Channel[int], dead: Channel[int]):\n    defer cleanup(dead)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    dead := Channel[int]()\n    parallel:\n        spawn consumer(ch, go, dead)\n        spawn boom(go)\nmain()\n";
+    let s = src.to_string();
+    let (mn, mn_res) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let s = src.to_string();
+    let (serial, se_res) = run_with_deadline("serial", move || run_program(&s));
+    for (engine, out, res) in [("serial", &serial, &se_res), ("M:N", &mn, &mn_res)] {
+        assert!(
+            out.contains("CLEANUP-ENTER\n"),
+            "{engine}: the cleanup RAN (it is the cancel's whole point): {out:?}"
+        );
+        assert!(
+            !out.contains("CLEANUP-DONE\n"),
+            "{engine}: it can never finish — its recv has no sender: {out:?}"
+        );
+        let err = res.as_ref().expect_err("the program must FAIL, not hang");
+        assert!(
+            err.message.contains("index 9 out of bounds"),
+            "{engine}: the sibling's real fault is what is reported (the stuck cleanup's own error \
+             is swallowed with its cancelled task): {err:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// The regression guard for the demote-path cancel fix: a `defer` whose body BLOCKS (here
+/// `time.sleep_ms`) in a CANCELLED task runs to COMPLETION — cleanup is never truncated mid-body. The
+/// M:N demote loops used to read the raw `self.cancel` flag instead of `cancel_requested()`, so the
+/// blocking op inside the cleanup saw the already-tripped scope cancel and aborted the defer at that
+/// call: `CLEANUP-ENTER` then nothing, sentinel 0 on M:N vs 42 on serial. Blocking cleanup is what
+/// real cleanup DOES (close a socket, send a final message, flush).
+#[test]
+fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
+    let src = "import std.concurrency\nimport std.time\n\
+               fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    time.sleep_ms(20)\n    s.set(42)\n    print(\"CLEANUP-DONE\")\n\
+               fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (serial, _se, _sr, _sc) = run_file(&entry);
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("CLEANUP-DONE\n") && out.contains("sentinel=42\n"),
+            "{engine}: a blocking op inside a defer must NOT truncate the cleanup: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// The cleanup's OWN work must survive too: a `parallel:` (or `spawn`) opened INSIDE a cancelled task's
+/// `defer` runs to completion on BOTH engines. The `deferring > 0` suppression that makes a defer
+/// uncancellable is per-`Vm` and does NOT cross the airlock — a worker fiber is a fresh `Vm` with
+/// `deferring == 0` — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
+/// `JoinScope::ancestors` → `cancel_outer`). So the child of a cleanup's nursery inherited the
+/// already-tripped enclosing flag and died at its first checkpoint (back-edge / blocking op): M:N
+/// printed `CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` (the child silently dropped, rc 0) against serial's
+/// `sentinel=42` — serial severs the flag in a defer (`run_scheduler`'s `in_defer`). `scope_ancestors`
+/// now severs identically, so cleanup that DELEGATES is as uncancellable as cleanup that blocks inline.
+#[test]
+fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
+    let src = "import std.concurrency\n\
+               fn setit(s: Shared[int]):\n    i := 0\n    while i < 1000:\n        i = i + 1\n    s.set(42)\n    print(\"CHILD-DONE\")\n\
+               fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    parallel:\n        spawn setit(s)\n    print(\"CLEANUP-DONE\")\n\
+               fn worker(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn worker(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+    let s = src.to_string();
+    let (mn, _) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let s = src.to_string();
+    let (serial, _) = run_with_deadline("serial", move || run_program(&s));
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("CHILD-DONE\n") && out.contains("sentinel=42\n"),
+            "{engine}: a task spawned by a cancelled task's cleanup must NOT inherit that cancel: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// N4 (demoted half), at the PROGRAM level: a DEMOTED fiber (a `recv` inside a native HOF callback —
+/// `blocked_native`, not `parked`) whose cancel flag is tripped is about to resume and unwind, which is
+/// live progress `is_deadlocked`'s counters cannot see. Without the `any_demoted_cancel_pending` veto
+/// the quiesce between the faulting sibling's `finish` and that fiber's next `DEMOTE_POLL_BACKOFF` poll
+/// reads as a deadlock, and `flag_deadlock` then drops EVERY parked fiber in the sched — including the
+/// INNOCENT outer-scope sibling `b`, which is waiting for the value the cleanup is about to send. Fails
+/// 7/8 runs with the veto removed (`B-GOT` replaced by a bogus nursery deadlock error).
+#[test]
+fn parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
+    let src = "fn b(ch2: Channel[int]):\n    v := ch2.recv()\n    print(\"B-GOT=\" + str(v))\n\
+               fn acleanup(ch2: Channel[int]):\n    ch2.send(7)\n    print(\"A-CLEANUP-DONE\")\n\
+               fn a(ch: Channel[int], go: Channel[int], ch2: Channel[int]):\n    defer acleanup(ch2)\n    go.send(0)\n    xs := [1]\n    ys := xs.map(fn(x: int) -> int: ch.recv())\n    print(\"A-NEVER\")\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
+               fn main():\n    ch := Channel[int]()\n    ch2 := Channel[int]()\n    go := Channel[int]()\n    parallel:\n        spawn b(ch2)\n        r := recover:\n            parallel:\n                spawn a(ch, go, ch2)\n                spawn boom(go)\n            0\nmain()\n";
+    let s = src.to_string();
+    let (mn, _) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let s = src.to_string();
+    let (serial, _) = run_with_deadline("serial", move || run_program(&s));
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("A-CLEANUP-DONE\n") && out.contains("B-GOT=7\n"),
+            "{engine}: an innocent parked sibling must not be faulted while a demoted fiber is \
+             resuming on a tripped cancel: {out:?}"
+        );
+        assert!(
+            !out.contains("deadlock"),
+            "{engine}: no false deadlock: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// KNOWN LIMIT (C5 — no snapshot-park inside a native callback), pinned so it cannot silently change:
+/// a `defer` body runs `guarded` (the LIFO unwind drain is host-stack state), so on the SERIAL engine a
+/// `recv` inside a cleanup CANNOT park and yield to the sibling that would feed it — it faults in place.
+/// M:N has no such limit (the same recv DEMOTES and completes). Both engines run the defer and both
+/// report/handle it; what differs is whether the cleanup can finish. Recorded in docs/gaps.md — the fix
+/// is C5 (a resumable native re-entry), not this branch. Two shapes, both measured:
+///
+/// * no cancellation at all (pre-existing on `main`): serial faults the recv with the C5 deadlock
+///   message, M:N completes the cleanup;
+/// * a CANCELLED task (this branch made serial run the defer at all — on `main` it ran nothing): the
+///   in-place fault is swallowed with the cancelled task, so serial's cleanup stops at the recv.
+#[test]
+fn c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial() {
+    let src = "import std.concurrency\nimport std.time\n\
+               fn cleanup(c1: Channel[int], s: Shared[int]):\n    v := c1.recv()\n    s.set(v)\n    print(\"CLEANUP-DONE\")\n\
+               fn t1(c1: Channel[int], s: Shared[int]):\n    defer cleanup(c1, s)\n    print(\"T1-BODY\")\n\
+               fn t2(c1: Channel[int]):\n    time.sleep_ms(15)\n    c1.send(42)\n    print(\"T2-SENT\")\n\
+               fn main():\n    s := Shared(0)\n    c1 := Channel[int]()\n    parallel:\n        spawn t1(c1, s)\n        spawn t2(c1)\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (serial, _se, sr, _sc) = run_file(&entry);
+    assert!(
+        mn.contains("CLEANUP-DONE\n") && mn.contains("sentinel=42\n"),
+        "M:N: a demoted recv inside a defer completes: {mn:?}"
+    );
+    assert!(
+        !serial.contains("CLEANUP-DONE\n"),
+        "serial: C5 — the recv cannot park inside the unwind: {serial:?}"
+    );
+    let err = sr.expect_err("serial: the stuck cleanup is REPORTED, never a silent hang");
+    assert!(
+        format!("{err:?}").contains("deadlock"),
+        "serial: reported as a deadlock at the recv site: {err:?}"
     );
 }

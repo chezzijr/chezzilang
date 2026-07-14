@@ -121,7 +121,9 @@ impl Vm {
             demoted: false, // D5 owe #3 (Path C)
             scheduler_stack: Vec::new(),
             cancel: None,
+            cancel_outer: Vec::new(),
             cancelled: false,
+            deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
@@ -219,6 +221,25 @@ impl Vm {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
+        // CANCELLATION CHECKPOINT — a native that re-enters user code drives it from a RUST loop
+        // (`list.map`/`filter`/`fold`, `sort`'s comparator, an operator overload, an `Executor`
+        // handler: `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). That Rust
+        // loop emits no `Op::Jump`, so `jump_checked`'s back-edge never fires inside it and a
+        // straight-line callback body has no back-edge of its own — a cancelled task would burn every
+        // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
+        // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
+        // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
+        // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
+        // (`run_one_deferred`) — `cancel_requested` is false while `deferring > 0`, so the defer body
+        // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
+        // returned normally / faulted on its own under a tripped scope flag).
+        if self.cancel_requested()
+            && let Some(fr) = self.frames.last()
+        {
+            let span = fr.call_span;
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         self.native_reentry += 1;
         // The guard counter MUST return to its entry value on every exit path, including an unwind:
         // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
@@ -817,33 +838,19 @@ impl Vm {
             if self.gc_stress || self.heap.should_collect() {
                 self.collect();
             }
-            // B3.4: a `--parallel` worker observes its nursery's cancel flag at this back-edge (the
-            // same boundary `gc_stress` is checked at). A sibling having faulted / `os.exit`d set it;
-            // unwind the whole worker so this still-running task aborts promptly instead of burning
-            // cycles to completion. Cancellation behaves like an uncaught fault that bypasses
-            // `recover:`: `unwind_deferred(base_level)` runs every frame's `defer`s (Go semantics)
-            // AND drops their handlers, so a `recover:` inside the task cannot catch the cancel and
-            // resume it (a cancelled task must die). `!self.cancelled` latches on the first
-            // observation: while the cancel unwind runs the task's `defer`s back through this loop,
-            // re-firing would skip them — so we stop observing once cancellation is in flight.
-            if !self.cancelled
-                && self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(Ordering::Relaxed))
-            {
-                self.cancelled = true;
-                let span = self.frames[self.frames.len() - 1].call_span;
-                let rte = self.err("cancelled".to_string(), span);
-                // B3.4 cancel: no cancel-report — a cancelled task's pending nurseries are torn down
-                // silently (the parent that set the flag already escaped and reported its own).
-                let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
-                return Err(rte);
-            }
+            // CANCELLATION POINTS (the every-instruction cancel check that used to sit here is GONE).
+            // A cancel is observed only at CHECKPOINTS: loop back-edges (`jump_checked`, below) and
+            // blocking/park ops (`chan_recv_step` / `op_wait_poll` / the blocking-native offload).
+            // Consequence, intended (Trio-style structured concurrency): a STARTED task always runs
+            // its straight-line prologue, so a `defer` it registers is ALWAYS registered before
+            // anything can kill it — "does my cleanup run?" no longer depends on scheduler timing.
+            // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
+            // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
+            //
             // D3: reduction-counting preemption (M:N engine only — the cooperative engine is the
             // frozen parity oracle and never preempts). Decrement the budget per dispatched op; at
-            // exhaustion yield this worker so a queued sibling runs (round-robin fairness). Placed
-            // AFTER the cancel check so cancel wins (a cancelled fiber unwinds, never yields). The
+            // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
+            // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
             // save the caller's Rust-stack state, so we defer it (leave `reds` at 0 and re-check next
             // op, once the reentry unwinds). Reuses the suspend/rewind contract — frames stay intact,
@@ -898,10 +905,9 @@ impl Vm {
                     self.op_bin_local_const(*slot, *val, *kind, span)
                 }
                 Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span),
-                Op::Jump(t) => {
-                    self.frames[fi].ip = *t;
-                    Ok(())
-                }
+                // A cancellation CHECKPOINT: a backward `Op::Jump` is a loop back-edge (see
+                // `jump_checked`) — keep in lock-step with `step`'s arm.
+                Op::Jump(t) => self.jump_checked(*t, span),
                 Op::JumpIfFalse(t) => {
                     if let Value::Bool(false) = self.pop() {
                         self.frames[fi].ip = *t;
@@ -1194,6 +1200,94 @@ impl Vm {
         self.frames.last_mut().unwrap().ip = target;
     }
 
+    /// The loop-BACK-EDGE cancellation checkpoint (the only per-instruction cancel check left; the
+    /// old every-instruction one at the dispatch-loop top is gone — see `run_until`). The frame's
+    /// stored `ip` is already `ip + 1` for the op being dispatched, so `target < ip` is exactly a
+    /// backward jump, i.e. a loop back-edge (pinned by `compiler::back_edge_tests`). A long-running
+    /// CPU loop therefore stays promptly cancellable, while straight-line code (a task's prologue,
+    /// its `defer` registration) runs to completion first.
+    ///
+    /// `!self.cancelled` latches on the first observation: a `defer` containing a loop must not
+    /// re-fire the check and skip the remaining defers while the cancel unwind is already in flight.
+    /// The `Err` is funnelled by `run_until`'s post-step handler into `unwind_deferred(base_level,
+    /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
+    pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
+        let ip = self.frames.last().unwrap().ip;
+        if target < ip && self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        self.frames.last_mut().unwrap().ip = target;
+        Ok(())
+    }
+
+    /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
+    /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
+    /// `op_sock_park`) asks exactly this, on BOTH engines. Two suppressions, both load-bearing:
+    ///
+    /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
+    ///   not re-fire and skip the remaining `defer`s.
+    /// * `self.deferring == 0` — a deferred call is the cleanup the cancel exists to run. Defers drain
+    ///   on the normal-return / own-fault paths too, where `cancelled` is still false while the scope
+    ///   flag is already tripped by a faulted sibling; without this, the first checkpoint inside the
+    ///   first deferred call returns `cancelled` and the defer body never executes.
+    pub(super) fn cancel_requested(&self) -> bool {
+        !self.cancel_suppressed() && self.cancel_flags().any(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// The flags `cancel_requested()` reads: this fiber's own scope flag plus every ENCLOSING scope's
+    /// (structured concurrency — an outer cancel cancels this one too; a nested nursery keeps its own
+    /// flag for its own faults, and `cancel_outer` is normally empty).
+    ///
+    /// SINGLE SOURCE — `demote_cancel_flags` (the N4 watch set) MUST stay exactly the flags the resume
+    /// path re-reads, so both go through this + [`Vm::cancel_suppressed`] rather than hand-copying the
+    /// set. (A watch that misses a flag ⇒ a cancel-wakeable demoted fiber is called a deadlock and its
+    /// cleanup is truncated; a watch that misses a suppression ⇒ the veto never lifts and a genuine
+    /// deadlock hangs silently.)
+    fn cancel_flags(&self) -> impl Iterator<Item = &Arc<AtomicBool>> {
+        self.cancel.iter().chain(self.cancel_outer.iter())
+    }
+
+    /// The two suppressions of the cancel predicate — a tripped flag does NOT cancel this fiber while
+    /// either holds, and neither can change while it is blocked in place.
+    fn cancel_suppressed(&self) -> bool {
+        self.cancelled || self.deferring > 0
+    }
+
+    /// N4 (M:N) — the cancel flags a DEMOTED fiber must be watched on, i.e. the exact flags
+    /// `cancel_requested()` reads. EMPTY when a cancel could not wake it at all (`cancel_suppressed`:
+    /// already unwinding, or inside a `defer`) — a fiber a cancel can never wake is exactly the one
+    /// that IS a genuine deadlock. Handed to `SchedCore::watch_demoted_cancel`
+    /// (`demote_recv_block` / `demote_wait_block`).
+    pub(super) fn demote_cancel_flags(&self) -> Vec<Arc<AtomicBool>> {
+        if self.cancel_suppressed() {
+            return Vec::new();
+        }
+        self.cancel_flags().cloned().collect()
+    }
+
+    /// The cancel-flag chain a nursery CREATED FROM THIS VM must inherit: the scopes enclosing it, i.e.
+    /// this VM's own scope flag appended to its own ancestors. Empty at the top level.
+    ///
+    /// …and EMPTY inside a `defer` (`deferring > 0`): a `parallel:`/`spawn` opened by a cancelled task's
+    /// CLEANUP is the cleanup's own work and must not inherit the already-tripped enclosing flag, or its
+    /// children die at their first checkpoint and the cleanup is silently truncated through the back
+    /// door. The `deferring > 0` suppression that makes a defer uncancellable is per-VM and does NOT
+    /// cross the airlock into a worker fiber (a fresh `Vm` with `deferring == 0`), so the severance has
+    /// to happen HERE, where the child's flag chain is built. The serial engine severs identically
+    /// (`run_scheduler`'s `in_defer` → `self.cancel.take()`, sched.rs) — that is what this keeps parity
+    /// with. The defer's OWN nursery still gets a fresh flag, so it can cancel its own children.
+    pub(super) fn scope_ancestors(&self) -> Vec<Arc<AtomicBool>> {
+        if self.deferring > 0 {
+            return Vec::new();
+        }
+        let mut a = self.cancel_outer.clone();
+        if let Some(c) = &self.cancel {
+            a.push(Arc::clone(c));
+        }
+        a
+    }
+
     pub(super) fn push(&mut self, v: Value) {
         self.stack.push(v);
     }
@@ -1432,7 +1526,8 @@ impl Vm {
             Op::PopHandler => {
                 self.handlers.pop();
             }
-            Op::Jump(t) => self.jump(*t),
+            // Cancellation checkpoint — lock-step with the inlined arm in `run_until`.
+            Op::Jump(t) => self.jump_checked(*t, span)?,
             Op::JumpIfFalse(t) => {
                 if let Value::Bool(false) = self.pop() {
                     self.jump(*t);

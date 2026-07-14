@@ -583,26 +583,94 @@ fn serve(tok: Token, io: Channel[str]):
         _ := tok.done().recv(): cleanup()   # cancelled (timeout or manual) → take this arm
 ```
 
-> **Cancellation runs `defer` — the cleanup guarantee (M:N).** On the default M:N engine a cancelled
-> task unwinds through its `defer`s whether it was cancelled while running (observed at a back-edge),
-> while parked on a `recv`/`wait:`, or while parked on a socket — including when the cancel comes from
-> a *sibling*'s fault tearing down the nursery. `defer` is the language's only cleanup mechanism (no
-> destructors, no `with`), so this is the guarantee cleanup rests on. Exactly one thing deliberately
-> skips a `defer`: **`std.os.exit`**, a hard halt by design.
+> **Cancellation is delivered at CHECKPOINTS — and a registered `defer` ALWAYS runs (BOTH engines).**
+> A cancel (a sibling's fault, an `os.exit`, a scope teardown) is observed only at **cancellation
+> points**: **loop back-edges** and **blocking / park ops** (`recv`, `wait:`, a socket op, a blocking
+> native like `sleep_ms`). It is *not* observed at every instruction. Two consequences, both intended
+> (this is Trio-style structured concurrency; Go never preemptively kills a goroutine at all):
 >
-> Two known holes, both tracked in `docs/gaps.md`:
-> - **`--serial` does not yet run a PARKED task's `defer` on a sibling fault** (`docs/gaps.md` **N6**).
->   The cooperative scheduler propagates the faulting child's error straight out of `run_scheduler`,
->   abandoning the parked children without resuming them. So a cancelled-while-parked task's cleanup
->   runs on M:N but **not** on `--serial` — a real **serial ≠ M:N divergence**, pre-existing, and the
->   serial side is the wrong one. Fixing it moves serial's fault-path output ordering, so it is its own
->   task.
-> - A **genuine deadlock** (every fiber parked, nothing cancelled, nothing able to arrive) tears the
->   parked fibers down where they stand and does **not** run their `defer`s (`docs/gaps.md` **N5**).
->   Both engines agree here, so it is a known limit rather than a divergence.
+> - **A STARTED task always runs its straight-line prologue**, so a `defer` it registers is registered
+>   *before* anything can kill it. "Does my cleanup run?" no longer depends on scheduler timing.
+> - **A long-running CPU loop is still cancelled promptly** — the loop back-edge is the checkpoint.
 >
-> (A cancelled scope that merely *looked* deadlocked to an idle M:N worker used to fall into that same
-> teardown and silently skip its `defer`s — that was **N4**, now fixed.)
+> A cancelled task then unwinds through its `defer`s — cancelled while running (back-edge), while parked
+> on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
+> nursery down — **on the M:N engine and on `--serial` alike** (serial's scheduler cancels and re-drives
+> its still-parked children before propagating the fault). `defer` is the language's only cleanup
+> mechanism (no destructors, no `with`), so this is the guarantee cleanup rests on. At a `recv`/`wait:`
+> checkpoint **cancel wins** over a queued value, a tripped `done()` latch and a fired timer.
+>
+> Exactly one thing deliberately skips a `defer`: **`std.os.exit`**, a hard halt by design. (An
+> `os.exit` executed *by* a cancelled task's `defer` is honored — it beats the sibling's fault and sets
+> the process exit code, identically on both engines.)
+>
+> **Every spawned task starts — even into an already-cancelled scope.** A `spawn`ed task is *always*
+> run: M:N cannot do otherwise (a scope completes only at `done == total`, so a queued fiber is picked
+> up even after a sibling has faulted), and `--serial`'s cancel drain therefore starts its
+> never-started children too. So the task runs its prologue, prints what it prints, registers its
+> `defer`, and dies at its first checkpoint — on **both** engines, with the same line set. (This is why
+> a sibling of a task that calls `std.os.exit` still runs its prologue: the exit is a hard halt for the
+> *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
+>
+> **A `defer` is never itself cancelled.** No cancellation point fires *inside* a deferred call — a
+> `defer` is the cleanup the cancel exists to run. Every registered `defer` of a cancelled task runs, in
+> LIFO order (loops, blocking ops and HOF callbacks inside a defer body included), whether the task was
+> cancelled at a checkpoint, returned normally, or faulted on its own while a sibling had already
+> tripped the scope cancel. The suppression covers the work the cleanup *delegates*, too: a `spawn` /
+> `parallel:` opened inside a `defer` gets a **clean slate** — it does not inherit the already-tripped
+> enclosing cancel, so its children run to completion (they are still cancellable by their *own*
+> nursery's faults). Both engines.
+>
+> **…so cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a
+> last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, on both
+> engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
+> Go's rule for a deferred function during a panic, and it is the price of "cleanup is never truncated".
+>
+> **The one thing a `defer` cannot do on `--serial`: PARK.** A defer body runs during frame teardown,
+> whose LIFO drain is host-stack state, so it runs *guarded* — like a `list.map` callback, it cannot
+> snapshot-park (the **C5** limit). Time/IO blocking is fine (it runs inline / demotes). But a `recv`
+> inside a cleanup that needs a value from a **live sibling** cannot yield to that sibling on `--serial`:
+> it faults in place with the deadlock error, so that cleanup stops there, while the same cleanup
+> *completes* on M:N (the demoted worker blocks in place and the sibling's `send` reaches it). A real,
+> recorded **serial ≠ M:N** limit (`docs/gaps.md` **C5/N6g**) — lifting it needs a resumable native
+> re-entry, not a cancellation change. Cleanup that only sends, sleeps, closes or computes is unaffected.
+>
+> **Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
+> something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —
+> and the deadlock detector still fires, on **both** engines (serial faults the `recv` in place; on M:N
+> the demoted worker self-detects the quiesce). If a sibling's fault is what cancelled the task, *that*
+> fault is what is reported — the stuck cleanup's own error is swallowed with its cancelled task, so
+> both engines print the same line set and exit code.
+>
+> **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
+> task that is then cancelled dies with it: its children observe the enclosing cancel at their own
+> checkpoints (a spinning grandchild cannot wedge the teardown). A nested nursery still keeps its own
+> cancel token for its own faults: an inner fault never cancels an *outer sibling*.
+> One limit, in the N5 family and identical on both engines: a grandchild that is already **parked**
+> (`recv`/`wait:`) when the *outer* scope is cancelled is not re-driven — the cancel drain is scope-
+> scoped, and a parked fiber has no checkpoint to observe the inherited flag — so it is torn down by the
+> deadlock reap **without running its `defer`s** (`docs/gaps.md` **N5**). A grandchild that is *running*
+> (or parks *after* the cancel) unwinds normally.
+>
+> **Where a cancel is NOT delivered — pure CPU with no back-edge.** A checkpoint is a loop back-edge, a
+> blocking op, or a native→user-code re-entry (a `list.map`/`filter`/`fold`/`sort` callback: the native's
+> per-element Rust loop *is* the back-edge, and the cancel is delivered between elements). **Deep
+> recursion is not a checkpoint** — a recursive function emits only `Call`/`Return`, never a backward
+> `Op::Jump` — so a cancelled task sitting in a loop-free recursive computation (`fib(34)`) runs it to
+> completion before it dies. This is Trio's model (pure-CPU code is not interrupted); making `Op::Call`
+> a checkpoint would put a checkpoint *before the `defer` line* of any prologue that calls a function and
+> would give back exactly the bug this design removed. Both engines behave identically, so it is a limit,
+> not a divergence. Bound a recursive computation yourself if a task must tear down promptly.
+>
+> **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
+> the *order* of prints from different tasks is nondeterministic on **both** engines (a cancelled task's
+> already-printed lines are kept, not retracted). What is identical across engines: the **set of lines**,
+> the **exit code**, and **whether the `defer` ran**. Parity tests for concurrent output use the
+> order-insensitive comparison, never a byte-equal one.
+>
+> One known limit remains: a **genuine deadlock** (every fiber parked, nothing cancelled, nothing able
+> to arrive) tears the parked fibers down where they stand and does **not** run their `defer`s
+> (`docs/gaps.md` **N5**). Both engines agree there, so it is a limit, not a divergence.
 
 **Parity-safe deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
 background canceller task — so a self-polling timeout loop stops on time identically on **every**

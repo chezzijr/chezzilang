@@ -574,7 +574,14 @@ way. Mechanical; own task.
   socket errs), so a `read(want - have)` loop that computes `0` cannot observe the sticky `Err`. Matches
   the documented contract, harmless, but it is the one hole in "every later read re-errs identically".
 
-### N4. A cancelled task's `defer` **silently did not run** on M:N — **FOUND + FIXED (2026-07-14)**
+### N4. A cancelled task's `defer` **silently did not run** on M:N (spurious-deadlock race) — **FOUND + FIXED (2026-07-14)**
+> **Scope correction (2026-07-14, cancellation points).** N4 fixed exactly ONE hole: an idle worker's
+> spurious `Deadlocked` reaping a mid-teardown scope's parked fibers without `unwind_deferred`. It did
+> **not** make "a cancelled task's `defer` always runs" true — with cancel observed at EVERY
+> instruction a task could still be killed *between its first statement and its `defer` line*, so the
+> defer never registered (measured: the pre-defer-`print` probe shape ran the defer in **0/20** M:N
+> runs on `09cb2af`). That hole is closed by **cancellation points** (see N6 below), not by N4.
+
 **Pre-existing** (not caused by the B1/bytes-seam merge, which touched zero lines of `src/vm/sched.rs`).
 Every cancel trip and its `cancel_drain` sat **two separate core-lock acquisitions apart** — in
 `mn_worker_loop` (`sched.rs`) a faulting fiber is settled by `finish(...)` and only *then* by
@@ -660,32 +667,267 @@ deferred fns on a panic. Deliberately **not** folded into the N4 fix, for two re
 Documented as the one exception to the "cancellation always runs `defer`" guarantee in
 `docs/concurrency.md`.
 
-### N6. `--serial` does **not** run a PARKED task's `defer` on a sibling fault — a real serial ≠ M:N divergence, open
-Found while verifying the N4 fix end-to-end on the CLI (it is **not** caused by it — reproduced on the
-unfixed `main` binary, `0b23703`). The N4 repro program (`spawn consumer` blocks on `ch.recv()` after
-registering `defer cleanup(s)`; `spawn boom` faults; the fault is `recover:`ed and the sentinel printed):
+### N6. `--serial` abandoned a PARKED task's `defer` on a sibling fault — **FIXED (2026-07-14, `auto-task/cancel-points`)**
+Found while verifying the N4 fix end-to-end on the CLI (**not** caused by it — reproduced on unfixed
+`main`, `0b23703`). Serial's `run_scheduler` (`src/vm/sched.rs`) drove children with `run_child(i)?` —
+the `?` propagated the faulting child's error **straight out of the scheduler loop**, so the still-parked
+children were abandoned where they sat: never resumed, never cancelled, never unwound. On the
+token-sequenced repro (defer GUARANTEED registered) M:N printed `42` and serial printed **`0`, 10/10**.
 
-| engine | 2026-07-14 unfixed `main` | after the N4 fix |
-|---|---|---|
-| M:N (default) | `42` (but `0` in **35/200** runs under load — that was N4) | `42`, **0/200** failures |
-| `--serial` | **`0`** (10/10) | **`0`** (unchanged — N4 never touched serial) |
+**Fix (two independent changes; the language-semantics one is BUG 1 below).**
+1. **Serial cancel drain** — `run_scheduler` now saves/restores the enclosing scope's cancel state around
+   each level (`run_scheduler_level`), and on a child fault/exit trips a transient scope cancel and
+   **re-drives every still-`Blocked` sibling** (`drain_cancelled_children`, task order) so each observes
+   the cancel at its rewound park op and unwinds its `defer`s **before** the fault propagates. Exits are
+   reduced exactly like M:N's `reduce_task_slots` (**`Exit` > `Fault`, lowest task index wins**), so an
+   `os.exit` executed by a *drained child's `defer`* is carried, never discarded. A cancelled task's
+   already-printed bytes are **kept** (serial prints live and cannot un-print).
+2. **Cancellation points (BUG 1, BOTH engines)** — cancel is no longer observed at every instruction (the
+   every-instruction check at `run_until`'s loop top is **deleted**). It is delivered at **checkpoints**:
+   **loop back-edges** (`Vm::jump_checked` — a backward `Op::Jump`, pinned by
+   `compiler::back_edge_tests::loop_back_edge_is_a_backward_jump`) and **blocking/park ops**
+   (`chan_recv_step`, `op_wait_poll`, `park_on_fd`, the blocking-native offload — each now an
+   engine-agnostic top-of-fn check, replacing the `mn`-gated ones) and **native→user-code re-entries**
+   (`Vm::guarded` — a native HOF's per-element callback is that Rust loop's back-edge; see N6c).
+   Consequences, all intended:
+   a **started task always runs its straight-line prologue**, so a **registered `defer` always runs on
+   cancel — on both engines**, deterministically (the old behavior made "does my cleanup run?" a
+   scheduler race: 0/20 on the probe shape); a CPU loop is still promptly cancellable (the back-edge);
+   at a `recv`/`wait:` checkpoint **cancel now wins over a queued value / a tripped done-latch / a fired
+   timer**, uniformly on both engines. Cost, accepted: cancellation is less prompt — a cancelled task
+   runs to its next checkpoint. This is Trio's model; the old every-instruction kill was neither Go's
+   (goroutines are never preemptively killed) nor Trio's.
+3. **M:N `TaskOutcome::Cancelled` now carries its output** and flushes it at its task-order slot
+   (`classify_mn_outcome` / `reduce_task_slots`): with (2) a cancelled task really did print those lines,
+   and serial cannot un-print them — dropping them was a capture-mode-only line-SET divergence.
 
-`0` means **the cancelled consumer's `defer` never ran**. Cause: serial's `run_scheduler`
-(`src/vm/sched.rs`) drives children with `run_child(i)?` — the `?` propagates the faulting child's error
-**straight out of the scheduler loop**, so the still-parked children are abandoned where they sit: never
-resumed, never cancelled, never unwound. It is the same shape as N5 (a parked fiber torn down without
-`unwind_deferred`), but on the *cancel* path rather than the *deadlock* path.
+**Output-order rule (documented, not a bug):** cross-task stdout ORDER is nondeterministic on **both**
+engines (one `print` = one locked, line-atomic write) and is **not** part of the parity contract. What is
+identical across engines: the **line set**, the **exit code**, and **whether the `defer` ran**. Parity
+tests of concurrent output use `assert_same_lines`.
 
-**M:N is the correct one here** (Go runs a cancelled goroutine's deferred fns); serial is the engine that
-is wrong, which is uncomfortable given serial is the parity oracle — the oracle is not automatically
-right, and this is the second time it has been the one bending the language (cf. §0's stdin false-EOF and
-the stdout task-order buffering). The existing parity suite does **not** cover this scenario, which is why
-it was green throughout.
+**Evidence (release binary, N-1 CPU load generators, 200 runs per engine per shape — 0 failures each):**
+`defer`-first immediate-fault, the **probe** shape (a `print` BEFORE the `defer`) and the
+token-sequenced shape all print `42` on M:N and `--serial`, **0/200** failures per engine per shape
+(before: probe = defer ran in **0/20** M:N runs; token = serial `0` **10/10**). Parity tests:
+`parity_defer_runs_on_parked_sibling_when_sibling_faults`,
+`parity_probe_defer_runs_when_cancelled_before_its_defer_line`,
+`parity_os_exit_inside_a_cancelled_tasks_defer` (+ `parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel`
+for a `while true:` sibling). None of these shapes had parity coverage before — which is exactly why a
+live divergence survived ~1500 green tests.
 
-**Not fixed here** (the N4 task is the M:N scheduler race, and this is a serial-engine change of its own):
-the fix is for `run_scheduler` to trip the scope cancel and re-drive the parked children to completion
-*before* propagating the fault, which necessarily moves serial's fault-path stdout ordering. Own task, and
-it needs a parity test for exactly this shape.
+### N6b. EVERY spawned task starts — including into an already-cancelled scope (adversarial-review fix)
+The first cut of the N6 drain re-drove only **`Blocked`** siblings and deliberately skipped never-started
+(`Pending`) ones, on the theory that M:N merely *races* them. It does not: M:N is **structurally forced**
+to start every spawned fiber — a scope completes only at `done == total` and `take_runnable`
+(`src/vm/mod.rs`) never consults the scope cancel — so a queued fiber is popped and started *after* the
+cancel trips, and with cancellation points it then runs its whole straight-line prologue. Measured on the
+first cut (`spawn boom(); spawn talker(ch, s)`, faulter FIRST): **serial `{"0"}` vs M:N `{"hi","42"}`,
+20/20** — a deterministic line-SET *and* defer-ran divergence, i.e. exactly the parity contract this
+change declares. (The old every-instruction check had hidden it: the freshly-started M:N fiber died at
+its first dispatched op and its output was dropped.)
+
+**Fix:** `drain_cancelled_children` drives **every not-`Done` sibling**, `Pending` included, with the
+cancel tripped. Both engines now start every spawned task, run its prologue, run any `defer` it
+registers, and agree on the line set. `exit_in_spawned_child_aborts_siblings`'s serial golden moved
+deliberately (`{"a"}` → `{"a","b"}`): M:N already printed `"a","b"` **20/20**, so this is the two engines
+converging, not a regression — `os.exit` is a hard halt for the *program* (reduced at the nursery join),
+not a freeze-frame on tasks the nursery already spawned.
+
+### N6c. NO cancellation point in a native-driven loop — FIXED; in loop-free RECURSION — accepted limit
+Two long-running CPU shapes have **no backward `Op::Jump`**, so the back-edge checkpoint cannot see them:
+
+1. **Native-driven user code — FIXED.** `list.map`/`filter`/`fold`, `sort(cmp)`, an operator overload, an
+   `Executor` handler all iterate in **Rust** (`for e in .. { self.guarded(|vm| vm.invoke_value(f, ..)) }`,
+   `src/vm/call.rs`) and emit no `Op::Jump`; a straight-line callback body has no back-edge either. The
+   first cut of this change therefore let a cancelled task burn every remaining element to completion,
+   with its prints / `Shared` writes / fs writes (measured: `xs.map(sq)` over 5M elements ran to
+   `"map finished"` long after the sibling had faulted; the deleted every-instruction check used to abort
+   it via the `?` on `guarded`). **A native HOF's per-element re-entry IS that loop's back-edge**, so the
+   cancellation checkpoint now lives at the top of `Vm::guarded` (`src/vm/exec.rs`) — one choke point, no
+   new hot-path cost (it only reads the flag when re-entering user code from native). Test:
+   `parity_native_hof_loop_is_cancellable`.
+2. **Loop-free recursion — ACCEPTED LIMIT, both engines.** A recursive function emits only `Call`/`Return`
+   (the repo's own `fib` bench), so a cancelled task inside one runs the whole computation before it dies
+   (measured: `fib(32)` completes and prints after the sibling faults). Making `Op::Call` a checkpoint is
+   **rejected**: it would put a cancellation point *before the `defer` line* of any prologue that calls a
+   function — precisely BUG 1, back again. Pure-CPU code being uninterruptible is Trio's model, both
+   engines agree, and `MAX_CALL_DEPTH` bounds the stack (not the time). Bound the recursion yourself if a
+   task must tear down promptly.
+
+### N6d. A `defer` was itself cancelled — the LIFO-first defer was SILENTLY SWALLOWED (adversarial-review fix, round 2)
+The first cut of the cancellation-point change put a checkpoint at the top of `Vm::guarded` (N6c) —
+and **every deferred call runs through `guarded`** (`run_one_deferred`, `src/vm/call.rs`). A task that
+ends on the **normal-return** path (or faults on its own) while a sibling has already tripped the scope
+cancel has `self.cancelled == false`, so that checkpoint fired on the FIRST (LIFO) deferred call and
+returned `cancelled` **before its body ran**; only the remaining defers executed. Arbitrary **partial
+cleanup** — one fd released, the next not. Deterministic, on BOTH engines (so parity stayed green: both
+dropped it identically). Repro: `parallel: { spawn boom(); spawn tidy() }` with
+`fn tidy(): defer print("cleanup1"); defer print("cleanup2"); print("start")` → `start`, `cleanup1`, and
+`cleanup2` **never printed**. The same hole applied to a loop (`jump_checked`) or a blocking op inside a
+defer body.
+**Fix:** a `defer` is the cleanup the cancel exists to run, so **no cancellation point fires inside a
+deferred call**. `Vm::deferring` (a depth counter raised in `run_one_deferred`) is read by the ONE cancel
+predicate every checkpoint now calls — `Vm::cancel_requested` (`src/vm/exec.rs`), which also keeps the old
+`!self.cancelled` unwind latch. Test: `parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel`.
+
+### N6e. A nested `parallel:` inside a cancelled task was UNCANCELLABLE — the teardown HUNG (adversarial-review fix, round 2)
+Structured concurrency says cancelling a scope cancels its **descendant** scopes. It did not: a nested
+nursery got a fresh cancel flag (M:N `register_scope`) / serial handed the level `cancel = None`, so the
+nested children's back-edge checkpoints had **no tripped flag to read** — a spinning grandchild looped
+forever and the whole teardown never finished. **NEW HANG on both engines** (measured with `timeout`;
+`main` did not hang only because the deleted every-instruction check killed the parent fiber before it
+could enter the nested nursery — a timing accident).
+**Fix:** a nested scope keeps its OWN `cancel` (an inner fault must never cancel an outer sibling — the
+other half of the invariant) and additionally inherits its enclosing scopes' flags: `JoinScope::ancestors`
+→ re-pointed per fiber swap-in into `Vm::cancel_outer`, read by `cancel_requested`. Serial's
+`run_scheduler` inherits the enclosing `Arc` directly (and hands a **clean slate** to a nursery started
+from inside a `defer` — that cleanup must run). Test:
+`parity_nested_nursery_inside_a_cancelled_task_is_cancellable`.
+
+### N6f. The blocking-op checkpoint existed only on M:N — serial ran a cancelled task PAST it (adversarial-review fix, round 2)
+The blocking-native cancel check was written INSIDE the `self.mn.is_some()` offload gate
+(`src/vm/call.rs`), so `--serial` had **no** cancel-delivery point at `sleep_ms` / `io.*` / `fs.*` /
+`request` / `process` at all. With the every-instruction check gone, a cancelled serial task ran the
+blocking call to completion (stalling the entire teardown for its full duration — `sleep_ms(60000)` would
+freeze it for a minute) and then, having no further checkpoint, ran **every straight-line statement after
+it**. Deterministic line-SET divergence: `{napper start, napper woke, end}` on serial vs
+`{napper start, end}` on M:N; with an `os.exit(7)` after the sleep, the exit CODE diverged too (7 vs 1).
+**Fix:** the check moved OUTSIDE the `mn` gate (and the same for `park_on_fd`'s socket checkpoint), so the
+cancellation-point SET is engine-agnostic, exactly as the contract claims. Test:
+`parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` (also asserts the teardown does not
+wait out the cancelled task's 3 s sleep).
+
+### N6g. A `defer` that BLOCKS: truncated mid-body on M:N (fixed), and — if it can never complete — a silent M:N HANG (fixed)
+Two bugs at the same seam, both found by running a cancelled task's `defer` through a *blocking* body —
+which is what real cleanup does (close a socket, send a final message, flush). Both were introduced by
+this branch's own rules (a `defer` is not itself cancellable, N6d) and both are M:N-only, i.e. live
+serial != M:N divergences.
+
+1. **Cleanup TRUNCATED mid-body (M:N).** The M:N demote paths (`demote_recv_block`, `demote_block_sleep`,
+   `src/vm/sched.rs`) read the raw `self.cancel` flag instead of the `Vm::cancel_requested()` predicate.
+   A defer body runs under `guarded` (`native_reentry > 0`), so a blocking op inside cleanup demotes and
+   lands there — and the raw read fires on the already-tripped scope flag, aborting the defer *at that
+   call*: `CLEANUP-ENTER` and then nothing, sentinel `0` on M:N vs `42` on serial (which runs the same
+   call inline). The predicate's `deferring == 0` term is exactly what keeps cleanup atomic, and it also
+   folds in `cancel_outer` (an *enclosing* scope's cancel), which a raw read misses. **Fixed** by routing
+   both demote loops through `cancel_requested()`. Guard:
+   `parity_a_blocking_defer_body_completes_when_the_task_is_cancelled`.
+2. **Cleanup that can NEVER complete → SILENT M:N HANG (the N4 veto never lifted).** A `defer` whose body
+   `recv`s on a channel nobody will ever send to correctly cannot be cancelled out — so on M:N it sits in
+   `demote_recv_block` forever. That loop *does* self-detect deadlock every backoff cycle
+   (`sched.is_deadlocked`), but the predicate was vetoed by **N4's** `any_incomplete_scope_cancelled` —
+   "some incomplete cancelled scope" — and the scope is incomplete *precisely because* that fiber is stuck
+   in its own cleanup. The veto's own liveness argument ("a cancelled scope always reaches
+   `done == total`, so the veto is transient by construction") is falsified by a never-completing defer.
+   Measured: M:N `timeout` rc=124 (prints `CLEANUP-ENTER`, then hangs forever), serial rc=1 (reports the
+   sibling's real fault). **Fix:** bound the veto to the window it exists for — the trip→`cancel_drain`
+   gap — by asking for an **undrained PARKED fiber** of the cancelled scope
+   (`SchedCore::any_cancelled_scope_awaiting_drain` + `scope_has_undrained_park`, `src/vm/mod.rs`, which
+   scans `parked` exactly as `cancel_drain` does, under the same core lock). Once drained those fibers are
+   in `global` → `runnable > 0` → the predicate is false on its own terms, so the veto is not needed past
+   that point; and a cancelled scope cannot re-accumulate parked fibers (every park path re-checks its
+   scope's cancel). The netpoller half of the drain window needs no veto: a poll-parked fiber is not in
+   `parked` and is accounted `inflight`, which `is_deadlocked` already requires to be 0. Post-fix, the
+   quiesce fires, the demoted fiber faults in place, its error is swallowed (its task is cancelled) and
+   the **sibling's real fault** is reported — the same line set serial prints. Predicate tests:
+   `mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock` (fires) and
+   `mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock` +
+   `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock` (still vetoed — N4 intact). Parity test:
+   `parity_a_defer_that_can_never_complete_is_reported_not_hung` (hard 20s deadline: a hang fails the test
+   instead of wedging the suite).
+3. **…and the bounded veto lost the DEMOTED half (adversarial-review round 4, fixed before merge).**
+   `parked`-only was too narrow the other way: a fiber demoted (`blocked_native`) in its **body** —
+   a `recv` reached inside a native HOF callback / `Shared.update` / an `Executor` handler — is *not* in
+   `parked`, yet a cancel WILL wake it (`demote_recv_block` ranks `cancel_requested()` above `terminate`
+   and above its own self-detect), whereupon it unwinds and runs its `defer`s, which can `send`. **CANCEL
+   is a wakeup source the `running`/`runnable`/`inflight`/`parked` counters do not model**, so with a
+   cancelled scope whose only unsettled fiber was demoted, an idle worker could declare a spurious
+   deadlock in the ≤5 ms `DEMOTE_POLL_BACKOFF` window before that fiber noticed the cancel — and
+   `flag_deadlock` then reaps every parked fiber of **every** scope without `unwind_deferred` (the exact
+   N4 lost-defer symptom) and latches `terminate`, truncating any sibling that is demoted inside its own
+   `defer`. **Fix:** each demoted fiber now WATCHES the cancel flags it would honour
+   (`Vm::demote_cancel_flags` → `SchedCore::watch_demoted_cancel`, dropped on every demote-loop exit);
+   `is_deadlocked` vetoes while any watched flag is tripped (`any_demoted_cancel_pending`). The watch is
+   EMPTY when a cancel could not wake the fiber anyway — already unwinding (`cancelled`) or blocked
+   inside its own `defer` (`deferring > 0`; neither term can change while it is blocked in place) — which
+   is precisely the never-completing cleanup of (2), so that still fires as a genuine deadlock. The veto
+   is self-lifting (the entry disappears when the fiber settles) and is now evaluated *after* the counter
+   gate, i.e. only at a candidate quiesce, so the `parked` scan is off the idle/steal hot path. Predicate
+   test: `mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock` (RED before the fix).
+
+4. **N6h — a nursery opened INSIDE a cleanup `defer` had its children cancelled (M:N only).** The
+   `deferring > 0` suppression that makes a defer uncancellable is **per-`Vm`** and does not cross the
+   airlock: a worker fiber is a fresh `Vm` with `deferring == 0`. The cancel-flag CHAIN does cross it
+   (`Vm::scope_ancestors` → `JoinScope::ancestors` → `cancel_outer`), so a task spawned by a cancelled
+   task's cleanup inherited the already-tripped enclosing flag and died at its first checkpoint —
+   silently, rc 0 (`CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` on M:N vs `sentinel=42` on `--serial`,
+   deterministic; `main` agreed with serial, so it was a REGRESSION introduced by the N6 fixes above).
+   Serial severs the enclosing cancel in a defer (`run_scheduler`'s `in_defer` → `self.cancel.take()`);
+   **fix:** `Vm::scope_ancestors` severs identically (empty chain while `deferring > 0`), so the defer's
+   own nursery gets a clean slate (and still its own fresh flag for its own faults). Test:
+   `parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion` (RED before the fix).
+
+**THE RULE (both engines, now documented in `docs/concurrency.md`):** a `defer` is never itself cancelled
+and runs to completion, blocking ops (and the work it *spawns*) included. Cleanup that blocks on
+**time/IO** is uninterruptible and delays the teardown for exactly as long as it takes — no cap
+(`defer time.sleep_ms(10000)` in a cancelled task = a 10 s nursery join, on both engines). That is Go's
+rule for a deferred fn during a panic, and it is a documented ceiling, not a bug — a cap would
+re-introduce silent truncation. Cleanup that can **never** complete is REPORTED as a deadlock, never a
+silent hang. **One carve-out (C5, below): on `--serial` a defer body cannot PARK.**
+
+### N6g — OPEN (C5 family): a `defer` that `recv`s from a LIVE sibling cannot park on `--serial`
+A defer body runs `guarded` (the LIFO unwind drain is host-stack state), so — exactly like a `list.map`
+callback — it cannot snapshot-park on the cooperative engine. A `recv` inside a cleanup whose value a
+live sibling *will* send therefore cannot yield to that sibling on `--serial`: it faults **in place**
+with the C5 deadlock error. On M:N the same recv DEMOTES (blocks in place on a real thread) and
+completes. Two measured shapes, both pinned by
+`c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial`:
+- **no cancellation at all** (pre-existing on `main`, unchanged by this branch): serial prints the C5
+  deadlock error at the recv site and the cleanup stops there; M:N completes the cleanup. This is an
+  **outcome-level** divergence (different line set), *not* the "message-only" one previously recorded
+  here — that characterisation was wrong and is corrected.
+- **a cancelled task** (new surface — before the N6 fixes serial ran no defer at all here): the in-place
+  fault is *swallowed* with the cancelled task, so serial's cleanup simply stops at the recv while M:N
+  finishes it.
+Lifting it needs **C5** (a resumable native re-entry / a VM-driven defer drain), not a cancellation
+change; faulting M:N's demoted recv to "match" would trade a real capability for a tidier oracle. Cleanup
+that sends, sleeps, closes or computes is unaffected — the park is the only thing serial cannot do.
+
+**Out of scope, measured, recorded (no hang, no lost cleanup — do not "fix" one engine alone):**
+- A fiber already **PARKED inside a NESTED nursery** when the *outer* scope is cancelled does **not** run
+  its `defer`s — on **either** engine (measured 3/3 each: `sentinel=0` on M:N and on `--serial`; `main`
+  agrees). The cancel drain is scope-scoped and a parked fiber has no checkpoint at which to observe the
+  inherited `cancel_outer` flag, so the fiber is reaped by the deadlock teardown instead (M:N
+  `flag_deadlock`; serial's nested `run_scheduler_level` `None` arm — it cannot switch back to the outer
+  level to run the faulting sibling at all). This is the **N5** family, not a cancel bug: both engines
+  agree, so parity holds, and draining descendant scopes on M:N alone would *create* a divergence serial
+  structurally cannot match. The claim "cancelling a scope cancels its nested scopes" is therefore true
+  **at checkpoints** (a running or later-parking grandchild), not for an already-parked one —
+  `docs/concurrency.md` now says so.
+- A forever-blocking `defer` in a **non-cancelled** task is reported by BOTH engines but with different
+  text/span (serial: `recv on an empty channel: deadlock …` at the recv site; M:N: the nursery-level
+  deadlock message at line 1). Message-only here (both fault, both exit non-zero) — but see **N6g**: when
+  the value WOULD have arrived from a live sibling the divergence is outcome-level, not cosmetic.
+- `--serial` has no preemption and runs `spawn`s in order, so a CPU spinner spawned BEFORE its faulting
+  sibling never yields and the sibling never runs (`timeout`), while M:N cancels it promptly. Spawn the
+  faulter first and both engines cancel promptly (verified). Pre-existing cooperative-engine property, not
+  a cancellation bug — the back-edge checkpoint is intact.
+- `MnSched::take_runnable` checks `c.terminate` BEFORE it looks at `c.global` (and the 1-in-61
+  `GLOBAL_CHECK_INTERVAL` fast path pops `global` without a terminate check). Inert known hazard: no repro
+  exists, because `terminate` is latched only by `finish` when every scope is done (no fiber can then be
+  owed an unwind) or by `flag_deadlock`, which drains `parked` itself and — after the N6g fix — can only
+  fire for a cancelled scope with no undrained park **and no cancel-wakeable demoted fiber** (i.e. when
+  nothing is owed an unwind that a cancel could still deliver). A demoted fiber unwinding after `terminate` runs on
+  its own thread and never re-enters `take_runnable`. No failing test, so no change.
+
+### N5 status after the N6 fix — still open, deliberately UNTOUCHED
+A **genuine** deadlock (every fiber parked, nothing cancelled, nothing able to arrive) still tears the
+parked fibers down without running their `defer`s — on **both** engines. Serial reports it from
+`run_scheduler_level`'s `None` arm, which **never** routes through the cancel drain; M:N's `flag_deadlock`
+is unchanged. So the engines still agree and no new divergence was created. (A *nested* level's deadlock
+arriving at the outer level as an ordinary child error DOES now cancel-and-drain the outer level's parked
+siblings on serial — it already did on M:N. That is a deliberate convergence, not N5.)
 
 ## Audited residuals — pre-JIT hunt wave 5 (2026-07-13)
 
