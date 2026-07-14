@@ -120,6 +120,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > scope"). Race bar re-run: `defer_blocking` × 2 engines × **200 runs under 8-way CPU load = 0 failures**;
 > full `cargo test` green ×2, clippy clean.
 
+> **Post-review round 5 (same branch) — the cleanup's own SPAWNED work was still being killed
+> (`docs/gaps.md` N6h), RED-first.** The `deferring > 0` suppression that makes a `defer` uncancellable is
+> **per-`Vm`** and does not cross the airlock — a worker fiber is a fresh `Vm` with `deferring == 0` —
+> while the cancel-flag CHAIN does (`Vm::scope_ancestors` → `JoinScope::ancestors` → `cancel_outer`). So a
+> `parallel:`/`spawn` opened by a cancelled task's cleanup inherited the already-tripped enclosing flag and
+> its children died at their first checkpoint: M:N `CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` (rc 0, silent)
+> vs serial `sentinel=42` — deterministic, and a **regression vs `main`** (serial severs the cancel in a
+> defer: `run_scheduler`'s `in_defer`). **Fix:** `Vm::scope_ancestors` severs identically (empty chain while
+> `deferring > 0`) — cleanup that *delegates* is now as uncancellable as cleanup that blocks inline, and the
+> defer's nursery still gets its own fresh flag for its own faults. Also: the N4 demoted-veto got the
+> **program-level** test it lacked (`parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock` — a `recv`
+> inside a `map` callback + a faulting sibling + an innocent parked outer sibling; **7/8 RED** with the veto
+> removed), and `cancel_requested` / `demote_cancel_flags` now share ONE flag set + ONE suppression
+> predicate (`Vm::cancel_flags` / `Vm::cancel_suppressed`) instead of a hand-copied duplicate that could
+> drift. **Corrected overclaim (`docs/gaps.md` N6g):** the residual serial/M:N defer-blocking divergence is
+> **not** "message-only" — a `defer` that `recv`s a value a LIVE sibling will send cannot park on `--serial`
+> (a defer body runs guarded; the **C5** no-park-inside-native limit), so serial faults it in place while
+> M:N demotes and completes. Outcome-level, recorded as OPEN N6g, pinned by
+> `c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial`; lifting it is C5 work, not
+> cancellation work. Race bar: nursery-in-defer + `defer_blocking` × 2 engines × **200 runs under 8-way CPU
+> load = 0 failures**; full `cargo test` green ×2, clippy clean.
+
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`

@@ -1232,41 +1232,55 @@ impl Vm {
     ///   flag is already tripped by a faulted sibling; without this, the first checkpoint inside the
     ///   first deferred call returns `cancelled` and the defer body never executes.
     pub(super) fn cancel_requested(&self) -> bool {
-        !self.cancelled
-            && self.deferring == 0
-            && (self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
-                // Structured concurrency: an ENCLOSING scope's cancel cancels this one too (a nested
-                // nursery keeps its own flag for its own faults; `cancel_outer` is normally empty).
-                || self
-                    .cancel_outer
-                    .iter()
-                    .any(|c| c.load(Ordering::Relaxed)))
+        !self.cancel_suppressed() && self.cancel_flags().any(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// The flags `cancel_requested()` reads: this fiber's own scope flag plus every ENCLOSING scope's
+    /// (structured concurrency — an outer cancel cancels this one too; a nested nursery keeps its own
+    /// flag for its own faults, and `cancel_outer` is normally empty).
+    ///
+    /// SINGLE SOURCE — `demote_cancel_flags` (the N4 watch set) MUST stay exactly the flags the resume
+    /// path re-reads, so both go through this + [`Vm::cancel_suppressed`] rather than hand-copying the
+    /// set. (A watch that misses a flag ⇒ a cancel-wakeable demoted fiber is called a deadlock and its
+    /// cleanup is truncated; a watch that misses a suppression ⇒ the veto never lifts and a genuine
+    /// deadlock hangs silently.)
+    fn cancel_flags(&self) -> impl Iterator<Item = &Arc<AtomicBool>> {
+        self.cancel.iter().chain(self.cancel_outer.iter())
+    }
+
+    /// The two suppressions of the cancel predicate — a tripped flag does NOT cancel this fiber while
+    /// either holds, and neither can change while it is blocked in place.
+    fn cancel_suppressed(&self) -> bool {
+        self.cancelled || self.deferring > 0
     }
 
     /// N4 (M:N) — the cancel flags a DEMOTED fiber must be watched on, i.e. the exact flags
-    /// `cancel_requested()` reads: this fiber's own scope flag plus every enclosing scope's
-    /// (`cancel_outer`). EMPTY when a cancel could not wake it at all — it is already unwinding
-    /// (`cancelled`) or it is inside a `defer` (`deferring > 0`, the suppression that makes cleanup
-    /// atomic) — because neither term can change while the fiber is blocked in place, and a fiber a
-    /// cancel can never wake is exactly the one that IS a genuine deadlock. Handed to
-    /// `SchedCore::watch_demoted_cancel` (`demote_recv_block` / `demote_wait_block`).
+    /// `cancel_requested()` reads. EMPTY when a cancel could not wake it at all (`cancel_suppressed`:
+    /// already unwinding, or inside a `defer`) — a fiber a cancel can never wake is exactly the one
+    /// that IS a genuine deadlock. Handed to `SchedCore::watch_demoted_cancel`
+    /// (`demote_recv_block` / `demote_wait_block`).
     pub(super) fn demote_cancel_flags(&self) -> Vec<Arc<AtomicBool>> {
-        if self.cancelled || self.deferring > 0 {
+        if self.cancel_suppressed() {
             return Vec::new();
         }
-        self.cancel
-            .iter()
-            .chain(self.cancel_outer.iter())
-            .cloned()
-            .collect()
+        self.cancel_flags().cloned().collect()
     }
 
     /// The cancel-flag chain a nursery CREATED FROM THIS VM must inherit: the scopes enclosing it, i.e.
     /// this VM's own scope flag appended to its own ancestors. Empty at the top level.
+    ///
+    /// …and EMPTY inside a `defer` (`deferring > 0`): a `parallel:`/`spawn` opened by a cancelled task's
+    /// CLEANUP is the cleanup's own work and must not inherit the already-tripped enclosing flag, or its
+    /// children die at their first checkpoint and the cleanup is silently truncated through the back
+    /// door. The `deferring > 0` suppression that makes a defer uncancellable is per-VM and does NOT
+    /// cross the airlock into a worker fiber (a fresh `Vm` with `deferring == 0`), so the severance has
+    /// to happen HERE, where the child's flag chain is built. The serial engine severs identically
+    /// (`run_scheduler`'s `in_defer` → `self.cancel.take()`, sched.rs) — that is what this keeps parity
+    /// with. The defer's OWN nursery still gets a fresh flag, so it can cancel its own children.
     pub(super) fn scope_ancestors(&self) -> Vec<Arc<AtomicBool>> {
+        if self.deferring > 0 {
+            return Vec::new();
+        }
         let mut a = self.cancel_outer.clone();
         if let Some(c) = &self.cancel {
             a.push(Arc::clone(c));

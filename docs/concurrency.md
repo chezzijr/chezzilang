@@ -613,15 +613,27 @@ fn serve(tok: Token, io: Channel[str]):
 > *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
 >
 > **A `defer` is never itself cancelled.** No cancellation point fires *inside* a deferred call — a
-> `defer` is the cleanup the cancel exists to run. Every registered `defer` of a cancelled task runs, in LIFO order, to
-> completion (loops, blocking ops and HOF callbacks inside a defer body included), whether the task was
+> `defer` is the cleanup the cancel exists to run. Every registered `defer` of a cancelled task runs, in
+> LIFO order (loops, blocking ops and HOF callbacks inside a defer body included), whether the task was
 > cancelled at a checkpoint, returned normally, or faulted on its own while a sibling had already
-> tripped the scope cancel. A nursery started inside a `defer` runs uncancelled too.
+> tripped the scope cancel. The suppression covers the work the cleanup *delegates*, too: a `spawn` /
+> `parallel:` opened inside a `defer` gets a **clean slate** — it does not inherit the already-tripped
+> enclosing cancel, so its children run to completion (they are still cancellable by their *own*
+> nursery's faults). Both engines.
 >
 > **…so cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a
 > last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, on both
 > engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
 > Go's rule for a deferred function during a panic, and it is the price of "cleanup is never truncated".
+>
+> **The one thing a `defer` cannot do on `--serial`: PARK.** A defer body runs during frame teardown,
+> whose LIFO drain is host-stack state, so it runs *guarded* — like a `list.map` callback, it cannot
+> snapshot-park (the **C5** limit). Time/IO blocking is fine (it runs inline / demotes). But a `recv`
+> inside a cleanup that needs a value from a **live sibling** cannot yield to that sibling on `--serial`:
+> it faults in place with the deadlock error, so that cleanup stops there, while the same cleanup
+> *completes* on M:N (the demoted worker blocks in place and the sibling's `send` reaches it). A real,
+> recorded **serial ≠ M:N** limit (`docs/gaps.md` **C5/N6g**) — lifting it needs a resumable native
+> re-entry, not a cancellation change. Cleanup that only sends, sleeps, closes or computes is unaffected.
 >
 > **Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
 > something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —

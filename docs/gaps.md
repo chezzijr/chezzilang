@@ -856,12 +856,43 @@ serial != M:N divergences.
    gate, i.e. only at a candidate quiesce, so the `parked` scan is off the idle/steal hot path. Predicate
    test: `mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock` (RED before the fix).
 
+4. **N6h — a nursery opened INSIDE a cleanup `defer` had its children cancelled (M:N only).** The
+   `deferring > 0` suppression that makes a defer uncancellable is **per-`Vm`** and does not cross the
+   airlock: a worker fiber is a fresh `Vm` with `deferring == 0`. The cancel-flag CHAIN does cross it
+   (`Vm::scope_ancestors` → `JoinScope::ancestors` → `cancel_outer`), so a task spawned by a cancelled
+   task's cleanup inherited the already-tripped enclosing flag and died at its first checkpoint —
+   silently, rc 0 (`CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` on M:N vs `sentinel=42` on `--serial`,
+   deterministic; `main` agreed with serial, so it was a REGRESSION introduced by the N6 fixes above).
+   Serial severs the enclosing cancel in a defer (`run_scheduler`'s `in_defer` → `self.cancel.take()`);
+   **fix:** `Vm::scope_ancestors` severs identically (empty chain while `deferring > 0`), so the defer's
+   own nursery gets a clean slate (and still its own fresh flag for its own faults). Test:
+   `parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion` (RED before the fix).
+
 **THE RULE (both engines, now documented in `docs/concurrency.md`):** a `defer` is never itself cancelled
-and runs to completion, blocking ops included. Cleanup that blocks on **time/IO** is uninterruptible and
-delays the teardown for exactly as long as it takes — no cap (`defer time.sleep_ms(10000)` in a cancelled
-task = a 10 s nursery join, on both engines). That is Go's rule for a deferred fn during a panic, and it is
-a documented ceiling, not a bug — a cap would re-introduce silent truncation. Cleanup that can **never**
-complete is REPORTED as a deadlock, never a silent hang.
+and runs to completion, blocking ops (and the work it *spawns*) included. Cleanup that blocks on
+**time/IO** is uninterruptible and delays the teardown for exactly as long as it takes — no cap
+(`defer time.sleep_ms(10000)` in a cancelled task = a 10 s nursery join, on both engines). That is Go's
+rule for a deferred fn during a panic, and it is a documented ceiling, not a bug — a cap would
+re-introduce silent truncation. Cleanup that can **never** complete is REPORTED as a deadlock, never a
+silent hang. **One carve-out (C5, below): on `--serial` a defer body cannot PARK.**
+
+### N6g — OPEN (C5 family): a `defer` that `recv`s from a LIVE sibling cannot park on `--serial`
+A defer body runs `guarded` (the LIFO unwind drain is host-stack state), so — exactly like a `list.map`
+callback — it cannot snapshot-park on the cooperative engine. A `recv` inside a cleanup whose value a
+live sibling *will* send therefore cannot yield to that sibling on `--serial`: it faults **in place**
+with the C5 deadlock error. On M:N the same recv DEMOTES (blocks in place on a real thread) and
+completes. Two measured shapes, both pinned by
+`c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial`:
+- **no cancellation at all** (pre-existing on `main`, unchanged by this branch): serial prints the C5
+  deadlock error at the recv site and the cleanup stops there; M:N completes the cleanup. This is an
+  **outcome-level** divergence (different line set), *not* the "message-only" one previously recorded
+  here — that characterisation was wrong and is corrected.
+- **a cancelled task** (new surface — before the N6 fixes serial ran no defer at all here): the in-place
+  fault is *swallowed* with the cancelled task, so serial's cleanup simply stops at the recv while M:N
+  finishes it.
+Lifting it needs **C5** (a resumable native re-entry / a VM-driven defer drain), not a cancellation
+change; faulting M:N's demoted recv to "match" would trade a real capability for a tidier oracle. Cleanup
+that sends, sleeps, closes or computes is unaffected — the park is the only thing serial cannot do.
 
 **Out of scope, measured, recorded (no hang, no lost cleanup — do not "fix" one engine alone):**
 - A fiber already **PARKED inside a NESTED nursery** when the *outer* scope is cancelled does **not** run
@@ -876,7 +907,8 @@ complete is REPORTED as a deadlock, never a silent hang.
   `docs/concurrency.md` now says so.
 - A forever-blocking `defer` in a **non-cancelled** task is reported by BOTH engines but with different
   text/span (serial: `recv on an empty channel: deadlock …` at the recv site; M:N: the nursery-level
-  deadlock message at line 1). Message-only divergence; byte-equality means rewriting serial's reporting.
+  deadlock message at line 1). Message-only here (both fault, both exit non-zero) — but see **N6g**: when
+  the value WOULD have arrived from a live sibling the divergence is outcome-level, not cosmetic.
 - `--serial` has no preemption and runs `spawn`s in order, so a CPU spinner spawned BEFORE its faulting
   sibling never yields and the sibling never runs (`timeout`), while M:N cancels it promptly. Spawn the
   faulter first and both engines cancel promptly (verified). Pre-existing cooperative-engine property, not
