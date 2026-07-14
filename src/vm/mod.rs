@@ -1666,7 +1666,7 @@ impl MnSched {
                     body_open: false,
                     awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
-                    // The creator wires the enclosing scopes' flags in (`Vm::install_scope_ancestors`)
+                    // The creator wires the enclosing scopes' flags in (`Vm::scope_ancestors`)
                     // when this sched is built INSIDE an already-running task.
                     ancestors: Vec::new(),
                 }],
