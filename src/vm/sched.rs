@@ -736,6 +736,7 @@ impl Vm {
             Arc::clone(&cancel),
             deadlock_err,
         ));
+        sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.seed(fibers);
         // Early-enlist OUTER still-pending nurseries (case-A: `main`'s sibling `O` when the builder is a
         // nested join) — BEFORE farming any helper or starting the owner, so EVERY scope's fibers are
@@ -807,7 +808,8 @@ impl Vm {
         for t in tasks {
             workers.push(self.prepare_worker(t)?);
         }
-        let scope_id = sched.register_scope_seeded(Arc::clone(&cancel), workers);
+        let scope_id =
+            sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
         let wid = self.wid;
         let mut shell = self.spawn_shell(&snap, sched, &cancel);
         shell.mn_worker_loop(sched, wid, scope_id);
@@ -848,7 +850,7 @@ impl Vm {
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
             let _ = std::mem::take(&mut self.nurseries[i]);
             let cancel = Arc::new(AtomicBool::new(false));
-            let scope_id = sched.register_scope(total, Arc::clone(&cancel));
+            let scope_id = sched.register_scope(total, Arc::clone(&cancel), self.scope_ancestors());
             // Mark the scope as awaiting the builder's own join: its parked fibers have the live builder
             // body as a feeder, so the deadlock predicate must not fault them until the builder reaches
             // this scope's `JoinNursery` (which clears the flag). (Cross-nursery flat scheduler — #1/#2.)
@@ -973,6 +975,9 @@ impl Vm {
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
         let sched = Arc::new(MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err));
+        // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
+        // enclosing scopes' cancel too (`JoinScope::ancestors`).
+        sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.open_body(0);
         let mut shell = self.spawn_shell(&snap, &sched, &cancel);
         let drain_sched = Arc::clone(&sched);
@@ -1074,6 +1079,13 @@ impl Vm {
         let mut shell = self.spawn_worker();
         shell.module_snapshot = Some(Arc::clone(snap));
         shell.mn = Some(Arc::clone(sched));
+        // Cancel inheritance: if this shell serves a NESTED scope (its `cancel` is not the flag this VM
+        // runs under), the enclosing scopes' flags go on the chain. `run_one_fiber` re-points both per
+        // fiber swap-in; this only makes the shell coherent before the first swap-in.
+        shell.cancel_outer = match &self.cancel {
+            Some(mine) if !Arc::ptr_eq(mine, cancel) => self.scope_ancestors(),
+            _ => self.cancel_outer.clone(),
+        };
         shell.cancel = Some(Arc::clone(cancel));
         shell
     }
@@ -1698,8 +1710,15 @@ impl Vm {
         // fiber's scope — else an inner fault would trip the wrong scope and cancel an outer sibling.
         // No-op for the cooperative engine / a non-fiber run (`mn` is `None` there).
         if let Some(sched) = self.mn.clone() {
-            let scope_cancel = Arc::clone(&sched.lock().scopes[fiber.scope_id].cancel);
+            let (scope_cancel, ancestors) = {
+                let c = sched.lock();
+                let s = &c.scopes[fiber.scope_id];
+                (Arc::clone(&s.cancel), s.ancestors.clone())
+            };
             self.cancel = Some(scope_cancel);
+            // …and the ENCLOSING scopes' flags with it: an outer cancel must reach a nested scope's
+            // fibers (structured concurrency), or a nested nursery inside a cancelled task never dies.
+            self.cancel_outer = ancestors;
         }
         self.suspend = None;
         self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
@@ -2041,19 +2060,39 @@ impl Vm {
     /// ([`Vm::wake_on_send`]). When `ready` empties: all children `Done` ⇒ the nursery is finished;
     /// otherwise every remaining child is parked on an empty channel no sibling can fill — a deadlock.
     pub(super) fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
-        // A nursery scope owns its OWN cancel state: M:N clones a fresh per-scope flag into each
-        // worker and resets `cancelled` at every fiber swap-in. Serial keeps both in VM-globals, so
-        // hand this level a clean slate and restore the enclosing scope's on EVERY exit. Two things
-        // depend on it: (a) a nested `parallel:` entered from inside a cancelled task's `defer` must
-        // run its OWN children uncancelled (else the outer scope's tripped flag kills them at their
-        // first checkpoint and bypasses their `recover:`); (b) a leaked `cancelled == true` would
-        // make the fault this level propagates look like a cancel-unwind (exec.rs) and bypass the
-        // PARENT's `recover:`.
-        let saved_cancel = self.cancel.take();
+        // A nursery scope's cancel state is per-scope on M:N (a fresh flag cloned into each worker,
+        // `cancelled` reset at every fiber swap-in). Serial keeps both in VM-globals, so save/restore
+        // them around the level. What the level STARTS with:
+        //
+        // * The enclosing scope's cancel flag is INHERITED (structured concurrency: cancelling a scope
+        //   cancels its descendants). Severing it would make a nested `parallel:` inside a cancelled
+        //   task uncancellable — its children's back-edge checkpoints would have no flag to read and a
+        //   spinning grandchild would hang the drain forever.
+        // * …EXCEPT inside a `defer` (`deferring > 0`), where the enclosing cancel must NOT reach:
+        //   a `parallel:` in a cancelled task's cleanup gets a clean slate and runs to completion (and
+        //   `deferring` itself resets, so THAT nursery can still cancel its OWN children on a fault).
+        // * `cancelled` starts false — this level's fibers have not observed anything yet.
+        //
+        // On the way out `cancelled` is restored, EXCEPT when the level propagates an error while the
+        // enclosing scope is itself cancelled: the parent fiber is dying of that cancel, so the latch
+        // stays set and it unwinds as a cancel (defers run, `recover:` bypassed — exec.rs) rather than
+        // as a catchable fault. Conversely a leaked `cancelled == true` from an ordinary child fault
+        // would bypass the PARENT's `recover:`, which is what the restore prevents.
+        let in_defer = self.deferring > 0;
+        let saved_cancel = if in_defer {
+            self.cancel.take()
+        } else {
+            self.cancel.clone()
+        };
         let saved_cancelled = std::mem::replace(&mut self.cancelled, false);
+        let saved_deferring = std::mem::replace(&mut self.deferring, 0);
         let r = self.run_scheduler_level();
+        self.deferring = saved_deferring;
         self.cancel = saved_cancel;
         self.cancelled = saved_cancelled;
+        if r.is_err() && self.cancel_requested() {
+            self.cancelled = true;
+        }
         r
     }
 

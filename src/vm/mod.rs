@@ -669,10 +669,26 @@ pub struct Vm {
     /// nursery aborts running siblings instead of join-then-report. `None` on the cooperative engine
     /// (it already aborts via the scheduler unwind) and on the top-level VM (never a worker).
     cancel: Option<Arc<AtomicBool>>,
+    /// The cancel flags of the ENCLOSING scopes of the scope this VM currently runs in (outermost
+    /// first; empty at the top level and in the outermost nursery). Cancelling a scope must cancel its
+    /// descendants, so every checkpoint reads these too ([`Vm::cancel_requested`]) — a nested nursery
+    /// keeps its OWN `cancel` (an inner fault must not cancel an outer sibling) but its fibers still
+    /// die when an outer scope is cancelled. Re-pointed per fiber swap-in from
+    /// [`JoinScope::ancestors`], exactly like `cancel`. (The cooperative engine inherits differently —
+    /// see `run_scheduler` — so this stays empty there.)
+    cancel_outer: Vec<Arc<AtomicBool>>,
     /// B3.4: set true only when *this* worker observed [`Vm::cancel`] and bailed, so the join can
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
+    /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
+    /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must
+    /// run to completion. Defers also drain on the NORMAL-return and own-fault paths, where
+    /// `cancelled` is still false while the scope flag is already tripped by a faulted sibling —
+    /// without this counter the first checkpoint inside the first deferred call would eat it.
+    /// See [`Vm::cancel_requested`].
+    deferring: usize,
     /// D1 — on a `--parallel` **worker** VM, the read-only [`ModuleSnapshot`] of the parent's module
     /// graph that this worker faults into its own heap lazily, one module at a time, on first global
     /// access ([`Vm::fault_module`]). `None` on the top-level VM and the cooperative engine (which
@@ -1457,6 +1473,14 @@ struct JoinScope {
     /// concurrency invariant). Read by `park`/`park_wait`'s gap re-check and the running fiber's
     /// back-edge (via the shell's re-pointed `self.cancel`) and `cancel_drain(scope_id)`.
     cancel: Arc<AtomicBool>,
+    /// The cancel tokens of every ENCLOSING scope, outermost first (empty for the outermost nursery).
+    /// Structured concurrency: cancelling a scope cancels its DESCENDANT scopes. A nested nursery keeps
+    /// its own `cancel` (so an inner fault never cancels an outer sibling — the other half of the
+    /// invariant), but its fibers must still observe an outer cancel at their checkpoints, or a nested
+    /// nursery entered from a task that is later cancelled becomes UNCANCELLABLE and a spinning
+    /// grandchild hangs the teardown forever. Read at every checkpoint via the shell's re-pointed
+    /// `Vm::cancel_outer` (`Vm::cancel_requested`).
+    ancestors: Vec<Arc<AtomicBool>>,
 }
 
 struct SchedCore {
@@ -1642,6 +1666,9 @@ impl MnSched {
                     body_open: false,
                     awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
+                    // The creator wires the enclosing scopes' flags in (`Vm::install_scope_ancestors`)
+                    // when this sched is built INSIDE an already-running task.
+                    ancestors: Vec::new(),
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
@@ -1664,7 +1691,12 @@ impl MnSched {
     /// `scope_id`. Append-only (existing scopes' `base_index` never shifts, so live fibers' `task_index`
     /// stays valid). Holds the core lock so the grow is atomic against the deadlock predicate. `total`
     /// may be 0 for an eager nursery (it grows via `inject`).
-    fn register_scope(&self, total: usize, cancel: Arc<AtomicBool>) -> usize {
+    fn register_scope(
+        &self,
+        total: usize,
+        cancel: Arc<AtomicBool>,
+        ancestors: Vec<Arc<AtomicBool>>,
+    ) -> usize {
         let mut c = self.lock();
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
@@ -1676,6 +1708,7 @@ impl MnSched {
             body_open: false,
             awaiting_builder: false,
             cancel,
+            ancestors,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
@@ -1697,7 +1730,12 @@ impl MnSched {
     /// `running`. Mirrors [`MnSched::inject`]'s grow+runnable atomicity contract. `workers` are already
     /// prepared (no fallible/heap work happens inside the lock); each fiber's flat `task_index` is
     /// `base_index + i`, assigned here under the lock.
-    fn register_scope_seeded(&self, cancel: Arc<AtomicBool>, workers: Vec<ReadyWorker>) -> usize {
+    fn register_scope_seeded(
+        &self,
+        cancel: Arc<AtomicBool>,
+        ancestors: Vec<Arc<AtomicBool>>,
+        workers: Vec<ReadyWorker>,
+    ) -> usize {
         let total = workers.len();
         let mut c = self.lock();
         let base_index = c.slots.len();
@@ -1710,6 +1748,7 @@ impl MnSched {
             body_open: false,
             awaiting_builder: false,
             cancel,
+            ancestors,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.

@@ -55,6 +55,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and `parity_genuine_deadlock_is_still_detected` (N5 boundary intact). Race bar re-run after the fixes:
 > 4 shapes × 2 engines × **200 runs under full CPU load = 0 failures**.
 
+> **Post-review round 2 (same branch) — three MORE confirmed bugs in the first cut, all fixed
+> (`docs/gaps.md` N6d/N6e/N6f), each RED-first.**
+> (d) **A `defer` was itself cancelled.** Every deferred call runs through `Vm::guarded`, whose new
+> checkpoint fired on the FIRST (LIFO) defer of any task that returned normally / faulted on its own
+> under an already-tripped scope cancel (`cancelled` still false there) — the defer body never ran.
+> Silent PARTIAL cleanup, deterministic, both engines (so parity stayed green). Fixed with `Vm::deferring`
+> + the single cancel predicate `Vm::cancel_requested`: **no cancellation point fires inside a `defer`**.
+> (e) **A nested `parallel:` inside a cancelled task was uncancellable → the teardown HUNG** (new hang,
+> both engines). Cancelling a scope must cancel its descendants: nested scopes now inherit the enclosing
+> cancel flags (`JoinScope::ancestors` → `Vm::cancel_outer`; serial inherits the `Arc`), while keeping
+> their own token so an inner fault never cancels an outer sibling.
+> (f) **The blocking-op checkpoint was inside the `mn.is_some()` gate → serial had none**: a cancelled
+> serial task slept out its `sleep_ms` (stalling the whole teardown) and then ran every statement after
+> it — line-SET *and* exit-code divergence vs M:N. Moved outside the gate (same for the socket park), so
+> the checkpoint SET is engine-agnostic as the contract claims.
+> New parity tests: `parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel`,
+> `parity_nested_nursery_inside_a_cancelled_task_is_cancellable`,
+> `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines`. Race bar re-run: 3 shapes × 2
+> engines × **200 runs under CPU load = 0 failures** (before, on `main`: serial 0/50 on all three shapes;
+> M:N probe 0/50). Full `cargo test` green ×2, clippy clean, benches unmoved.
+
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`

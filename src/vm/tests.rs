@@ -2423,7 +2423,7 @@ fn mnsched_inject_does_not_false_deadlock() {
 #[test]
 fn mn_register_scope_appends_and_offsets_slots() {
     let sched = mk_sched(2); // scope 0: total 2, base 0
-    let s1 = sched.register_scope(3, Arc::new(AtomicBool::new(false)));
+    let s1 = sched.register_scope(3, Arc::new(AtomicBool::new(false)), Vec::new());
     assert_eq!(s1, 1, "second scope id");
     let c = sched.lock();
     assert_eq!(c.scopes.len(), 2);
@@ -2443,7 +2443,7 @@ fn mn_register_scope_appends_and_offsets_slots() {
 #[test]
 fn mn_owner_stops_on_own_scope_not_global() {
     let sched = mk_sched(1); // scope 0: total 1
-    let _s1 = sched.register_scope(1, Arc::new(AtomicBool::new(false))); // scope 1: total 1
+    let _s1 = sched.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // scope 1: total 1
     {
         let mut c = sched.lock();
         c.scopes[0].done = 1; // scope 0 complete
@@ -2467,7 +2467,7 @@ fn mn_owner_stops_on_own_scope_not_global() {
 #[test]
 fn mn_finish_routes_done_to_scope_via_fiber() {
     let sched = mk_sched(1); // scope 0: total 1, base 0
-    let _s1 = sched.register_scope(1, Arc::new(AtomicBool::new(false))); // scope 1: total 1, base 1
+    let _s1 = sched.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // scope 1: total 1, base 1
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let _f0 = take_run(&sched); // scope 0's fiber (task_index 0)
     let _f1 = take_run(&sched); // queued as task_index 1
@@ -2504,7 +2504,7 @@ fn mn_finish_routes_done_to_scope_via_fiber() {
 #[test]
 fn mn_take_scope_slots_drains_only_its_range() {
     let sched = mk_sched(2); // scope 0: base 0, total 2
-    let _s1 = sched.register_scope(2, Arc::new(AtomicBool::new(false))); // scope 1: base 2, total 2
+    let _s1 = sched.register_scope(2, Arc::new(AtomicBool::new(false)), Vec::new()); // scope 1: base 2, total 2
     {
         let mut c = sched.lock();
         for i in 0..4 {

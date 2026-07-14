@@ -883,3 +883,9 @@ same machine, quiescent: `loop` **1.15×** · `fib` **3.29×** · `map` **1.86×
 `str` 2.10× · `primes` 2.08× · `list` 2.49× · `struct` 2.75× · `empty` **4.55× faster**. `map` is the bench
 that pays for the new checkpoint (one relaxed atomic load per element) and it did **not** move (1.88× →
 1.86×, within noise) — the check is off the bytecode dispatch path entirely.
+
+**Re-measured after adversarial-review round 2** (`Vm::cancel_requested` — the one predicate every
+checkpoint calls; it adds an `is_empty`-style read of the enclosing-scope flags, only at checkpoints,
+never on the dispatch path): `loop` **1.13×** · `fib` **3.29×** · `str` 2.15× · `primes` 2.28× · `list`
+2.51× · `struct` 2.70× · `poly_method` 4.53× · `map` **1.88×** · `empty` **4.63× faster**. Unmoved from
+the numbers above (single run, treat sub-0.1× deltas as noise).

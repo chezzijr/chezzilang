@@ -121,7 +121,9 @@ impl Vm {
             demoted: false, // D5 owe #3 (Path C)
             scheduler_stack: Vec::new(),
             cancel: None,
+            cancel_outer: Vec::new(),
             cancelled: false,
+            deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
@@ -227,13 +229,11 @@ impl Vm {
         // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
         // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
         // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
-        // the callback's nested `run_until`. `!self.cancelled` latches (a `defer` may itself call a
-        // HOF while the cancel unwind is in flight — re-firing would skip the remaining defers).
-        if !self.cancelled
-            && self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
+        // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
+        // (`run_one_deferred`) — `cancel_requested` is false while `deferring > 0`, so the defer body
+        // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
+        // returned normally / faulted on its own under a tripped scope flag).
+        if self.cancel_requested()
             && let Some(fr) = self.frames.last()
         {
             let span = fr.call_span;
@@ -1213,18 +1213,47 @@ impl Vm {
     /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
     pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
         let ip = self.frames.last().unwrap().ip;
-        if target < ip
-            && !self.cancelled
-            && self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
-        {
+        if target < ip && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
         self.frames.last_mut().unwrap().ip = target;
         Ok(())
+    }
+
+    /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
+    /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
+    /// `op_sock_park`) asks exactly this, on BOTH engines. Two suppressions, both load-bearing:
+    ///
+    /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
+    ///   not re-fire and skip the remaining `defer`s.
+    /// * `self.deferring == 0` — a deferred call is the cleanup the cancel exists to run. Defers drain
+    ///   on the normal-return / own-fault paths too, where `cancelled` is still false while the scope
+    ///   flag is already tripped by a faulted sibling; without this, the first checkpoint inside the
+    ///   first deferred call returns `cancelled` and the defer body never executes.
+    pub(super) fn cancel_requested(&self) -> bool {
+        !self.cancelled
+            && self.deferring == 0
+            && (self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+                // Structured concurrency: an ENCLOSING scope's cancel cancels this one too (a nested
+                // nursery keeps its own flag for its own faults; `cancel_outer` is normally empty).
+                || self
+                    .cancel_outer
+                    .iter()
+                    .any(|c| c.load(Ordering::Relaxed)))
+    }
+
+    /// The cancel-flag chain a nursery CREATED FROM THIS VM must inherit: the scopes enclosing it, i.e.
+    /// this VM's own scope flag appended to its own ancestors. Empty at the top level.
+    pub(super) fn scope_ancestors(&self) -> Vec<Arc<AtomicBool>> {
+        let mut a = self.cancel_outer.clone();
+        if let Some(c) = &self.cancel {
+            a.push(Arc::clone(c));
+        }
+        a
     }
 
     pub(super) fn push(&mut self, v: Value) {

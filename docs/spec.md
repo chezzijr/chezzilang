@@ -131,7 +131,8 @@ callback — that native's per-element Rust loop is its back-edge). Not at every
 registered before anything can kill it and **always** runs on the cancel unwind — on the M:N engine and
 on `--serial`. Every spawned task starts, even into an already-cancelled scope. A CPU loop stays
 promptly cancellable (the back-edge is a checkpoint); **loop-free recursion is not a checkpoint** and
-runs to completion first (Trio's model — pure CPU code is not interrupted). A `recover:` *inside* a
+runs to completion first (Trio's model — pure CPU code is not interrupted). A **`defer` is never itself cancelled**: no checkpoint fires inside a deferred call, so every
+registered `defer` runs in full (LIFO). Cancelling a scope also cancels its **nested** scopes. A `recover:` *inside* a
 cancelled task never catches the cancel (a cancelled task must die). `std.os.exit` is the one thing that
 skips `defer`s by design. Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task
 stdout order is nondeterministic on both engines** (one `print` = one locked, line-atomic write); the

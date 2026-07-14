@@ -614,7 +614,7 @@ mod tests {
         let (_client, server) = loopback_pair();
         let sched = mk_sched(); // scope 0 = the outermost nursery — its cancel stays FALSE
         let inner_cancel = Arc::new(AtomicBool::new(false));
-        let inner = sched.register_scope(1, Arc::clone(&inner_cancel));
+        let inner = sched.register_scope(1, Arc::clone(&inner_cancel), Vec::new());
         inner_cancel.store(true, Ordering::Relaxed); // a sibling of the INNER scope faulted
         let mut fiber = mk_fiber();
         fiber.scope_id = inner;

@@ -1000,22 +1000,19 @@ impl Vm {
         target: PollPark,
         span: Span,
     ) -> Result<bool, RuntimeError> {
+        // CANCELLATION CHECKPOINT — a socket op is a blocking op, so it is a cancel-delivery point
+        // (the single choke point for `accept`/`read`/`write`/`connect`), on BOTH engines: the check
+        // sits OUTSIDE the `mn.is_some()` gate, because serial runs the op as a BLOCKING syscall below
+        // and would otherwise have no cancel-delivery point at a socket at all. On M:N a cancelled
+        // fiber must also not RE-park: `poller::drain_sched` re-injects a poller-parked fiber on
+        // cancel and the rewound op re-runs here — without this check it would would-block and re-park
+        // forever (the every-instruction check that used to kill it at the dispatch loop top is gone;
+        // see `run_until`), wedging the nursery.
+        if self.native_reentry == 0 && self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         if self.mn.is_some() && self.native_reentry == 0 {
-            // CANCELLATION CHECKPOINT — a socket park is a blocking op, so it is a cancel-delivery
-            // point (the single choke point for `accept`/`read`/`write`/`connect`). A cancelled fiber
-            // must NOT re-park: `poller::drain_sched` re-injects a poller-parked fiber on cancel and
-            // the rewound op re-runs here — without this check it would would-block and re-park
-            // forever (the every-instruction check that used to kill it at the dispatch loop top is
-            // gone; see `run_until`), wedging the nursery.
-            if !self.cancelled
-                && self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(Ordering::Relaxed))
-            {
-                self.cancelled = true;
-                return Err(self.err("cancelled".to_string(), span));
-            }
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
             // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
@@ -1224,13 +1221,7 @@ impl Vm {
         // tripped done-latch and a fired timer — identically on both engines. `native_reentry == 0`
         // mirrors the park gate: inside a native callback the caller's Rust-stack state cannot be
         // unwound here.
-        if self.native_reentry == 0
-            && !self.cancelled
-            && self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
-        {
+        if self.native_reentry == 0 && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
@@ -1357,13 +1348,7 @@ impl Vm {
         // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
         // ready arm / a fired timer, and it covers the COOPERATIVE multi-channel park below (which
         // had no check at all, so serial's cancel drain could never unwind a `wait`-parked fiber).
-        if self.native_reentry == 0
-            && !self.cancelled
-            && self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
-        {
+        if self.native_reentry == 0 && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }

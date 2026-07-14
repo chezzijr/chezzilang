@@ -8778,3 +8778,76 @@ fn parity_genuine_deadlock_is_still_detected() {
     assert_eq!(serial, "caught\n");
     assert_same_lines(&serial, &mn);
 }
+
+/// A `defer` is the cleanup the cancel exists to RUN — so no cancellation checkpoint fires INSIDE a
+/// deferred call (`Vm::deferring` ⇒ `cancel_requested()` is false). Without that, every defer of a
+/// task that ends on the NORMAL-return path (or faults on its own) while a sibling has already
+/// tripped the scope cancel hit the checkpoint at the top of `guarded` (`run_one_deferred` runs every
+/// deferred call through it) with `cancelled` still false: the FIRST (LIFO) deferred call returned
+/// `cancelled` BEFORE its body ran, and only the rest of the defers executed. Measured on both
+/// engines: `cleanup2` was silently swallowed — arbitrary PARTIAL cleanup (one fd released, the next
+/// not), while parity stayed green because both engines dropped it identically.
+#[test]
+fn parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel() {
+    let src = "fn boom() -> int:\n    return 1 / 0\n\
+               fn tidy():\n    defer print(\"cleanup1\")\n    defer print(\"cleanup2\")\n    print(\"start\")\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn tidy()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered");
+    let mn = run_capture_parallel(src).expect("recovered");
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("cleanup1\n") && out.contains("cleanup2\n"),
+            "{engine}: EVERY registered defer runs (LIFO), not all-but-the-first: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// Structured concurrency — cancelling a scope cancels its DESCENDANT scopes. A nested `parallel:`
+/// entered from a task that is then cancelled used to be UNCANCELLABLE: the nested scope got a fresh
+/// cancel flag (M:N) / serial handed the level `cancel = None`, so the nested spinner's back-edge
+/// checkpoint had no tripped flag to read and looped forever — the teardown never finished and the
+/// program HUNG on BOTH engines (measured: `timeout` on both). The nested scope now INHERITS its
+/// enclosing scopes' flags (`JoinScope::ancestors` / `Vm::cancel_outer`; serial inherits the `Arc`).
+#[test]
+fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
+    let src = "fn boom() -> int:\n    return 1 / 0\n\
+               fn spin():\n    i := 0\n    while true:\n        i = i + 1\n\
+               fn t():\n    parallel:\n        spawn spin()\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn t()\n        0\n    print(\"end\")\nmain()\n";
+    let serial = run_capture(src).expect("recovered — must not hang");
+    let mn = run_capture_parallel(src).expect("recovered — must not hang");
+    assert_eq!(serial, "end\n", "serial: the nested spinner was cancelled");
+    assert_eq!(mn, "end\n", "M:N: the nested spinner was cancelled");
+}
+
+/// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is a cancellation checkpoint on BOTH
+/// engines — the check sits OUTSIDE the M:N-only offload gate. It used to be M:N-only, so a cancelled
+/// SERIAL task slept the full duration (stalling the whole teardown — `sleep_ms(60000)` would freeze
+/// it for a minute) and then, having no other checkpoint, ran every straight-line statement AFTER the
+/// sleep to completion: `{napper start, napper woke, end}` on serial vs `{napper start, end}` on M:N,
+/// deterministically. The line SET is the parity contract.
+#[test]
+fn parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines() {
+    let src = "import std.time\n\
+               fn boom() -> int:\n    return 1 / 0\n\
+               fn napper():\n    print(\"napper start\")\n    time.sleep_ms(3000)\n    print(\"napper woke\")\n\
+               fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn napper()\n        0\n    print(\"end\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let t0 = std::time::Instant::now();
+    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (serial, _se, _sr, _sc) = run_file(&entry);
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            !out.contains("napper woke"),
+            "{engine}: the cancelled task dies AT the blocking native, and never runs past it: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(3000),
+        "neither engine's teardown waits out the cancelled task's 3s sleep: {:?}",
+        t0.elapsed()
+    );
+}

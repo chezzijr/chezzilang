@@ -248,24 +248,22 @@ impl Vm {
         // falls through to inline. Record the call + extracted primitive args; the worker loop hands
         // it to the pool ([`Disp::Offload`]) and `paused()` skips the (missing) result-push here. The
         // result is lowered + pushed by the worker that resumes the fiber after completion.
+        // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point, on BOTH engines: it sits
+        // OUTSIDE the `mn.is_some()` offload gate below. Serial needs it every bit as much as M:N —
+        // it is the only checkpoint a `sleep_ms` / `io` / `fs` / `request` / `process` call offers, and
+        // without it a cancelled serial fiber (one the cancel drain re-drove, say) would run the
+        // blocking call to completion, stalling the whole teardown for its full duration, and then
+        // keep executing the straight-line statements after it — output M:N never produces. On M:N it
+        // also stops a post-cancel `sleep_ms` from delaying the teardown by the full sleep.
+        if self.native_reentry == 0 && crate::native::is_blocking(name) && self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         if self.mn.is_some()
             && self.native_reentry == 0
             && crate::native::is_blocking(name)
             && let Some(nargs) = self.extract_native_args(&args)
         {
-            // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point. Without it, a task
-            // that reaches a `sleep_ms` / io / fs call after its scope was cancelled would delay the
-            // whole teardown by the full blocking duration (the every-instruction check used to kill
-            // it at the next dispatch; that check is gone — see `run_until`).
-            if !self.cancelled
-                && self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                self.cancelled = true;
-                return Err(self.err("cancelled".to_string(), span));
-            }
             // D5 owe #2 — `sleep_ms` rides the timer thread (park + deadline-wake), not a pool thread
             // (`timer_ms = Some(ms)`). A non-positive (or non-int) `sleep_ms` has nothing to wait for,
             // so it is NOT offloaded — `offload` stays `None` and execution falls through to the
@@ -2801,6 +2799,17 @@ impl Vm {
     /// discarded result. The pop→push window has no instruction boundary, so the moved-out values
     /// can't be collected before they're re-rooted.
     pub(super) fn run_one_deferred(&mut self, d: Deferred) -> Result<(), RuntimeError> {
+        // A defer is the cleanup a cancel exists to run, so NO cancellation checkpoint fires inside
+        // it: `deferring > 0` ⇒ `cancel_requested()` is false (exec.rs). It must be raised BEFORE
+        // `guarded` (whose own checkpoint would otherwise eat this very call) and lowered on every
+        // exit path, including a fault thrown by the deferred body itself.
+        self.deferring += 1;
+        let r = self.run_one_deferred_inner(d);
+        self.deferring -= 1;
+        r
+    }
+
+    fn run_one_deferred_inner(&mut self, d: Deferred) -> Result<(), RuntimeError> {
         // Guarded: a deferred call runs during frame teardown (the LIFO drain loop is Rust-stack
         // state), so a blocking `recv` inside it cannot park — it faults `deadlock` (B1).
         self.guarded(|vm| match d {

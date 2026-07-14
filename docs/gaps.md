@@ -755,6 +755,49 @@ Two long-running CPU shapes have **no backward `Op::Jump`**, so the back-edge ch
    engines agree, and `MAX_CALL_DEPTH` bounds the stack (not the time). Bound the recursion yourself if a
    task must tear down promptly.
 
+### N6d. A `defer` was itself cancelled — the LIFO-first defer was SILENTLY SWALLOWED (adversarial-review fix, round 2)
+The first cut of the cancellation-point change put a checkpoint at the top of `Vm::guarded` (N6c) —
+and **every deferred call runs through `guarded`** (`run_one_deferred`, `src/vm/call.rs`). A task that
+ends on the **normal-return** path (or faults on its own) while a sibling has already tripped the scope
+cancel has `self.cancelled == false`, so that checkpoint fired on the FIRST (LIFO) deferred call and
+returned `cancelled` **before its body ran**; only the remaining defers executed. Arbitrary **partial
+cleanup** — one fd released, the next not. Deterministic, on BOTH engines (so parity stayed green: both
+dropped it identically). Repro: `parallel: { spawn boom(); spawn tidy() }` with
+`fn tidy(): defer print("cleanup1"); defer print("cleanup2"); print("start")` → `start`, `cleanup1`, and
+`cleanup2` **never printed**. The same hole applied to a loop (`jump_checked`) or a blocking op inside a
+defer body.
+**Fix:** a `defer` is the cleanup the cancel exists to run, so **no cancellation point fires inside a
+deferred call**. `Vm::deferring` (a depth counter raised in `run_one_deferred`) is read by the ONE cancel
+predicate every checkpoint now calls — `Vm::cancel_requested` (`src/vm/exec.rs`), which also keeps the old
+`!self.cancelled` unwind latch. Test: `parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel`.
+
+### N6e. A nested `parallel:` inside a cancelled task was UNCANCELLABLE — the teardown HUNG (adversarial-review fix, round 2)
+Structured concurrency says cancelling a scope cancels its **descendant** scopes. It did not: a nested
+nursery got a fresh cancel flag (M:N `register_scope`) / serial handed the level `cancel = None`, so the
+nested children's back-edge checkpoints had **no tripped flag to read** — a spinning grandchild looped
+forever and the whole teardown never finished. **NEW HANG on both engines** (measured with `timeout`;
+`main` did not hang only because the deleted every-instruction check killed the parent fiber before it
+could enter the nested nursery — a timing accident).
+**Fix:** a nested scope keeps its OWN `cancel` (an inner fault must never cancel an outer sibling — the
+other half of the invariant) and additionally inherits its enclosing scopes' flags: `JoinScope::ancestors`
+→ re-pointed per fiber swap-in into `Vm::cancel_outer`, read by `cancel_requested`. Serial's
+`run_scheduler` inherits the enclosing `Arc` directly (and hands a **clean slate** to a nursery started
+from inside a `defer` — that cleanup must run). Test:
+`parity_nested_nursery_inside_a_cancelled_task_is_cancellable`.
+
+### N6f. The blocking-op checkpoint existed only on M:N — serial ran a cancelled task PAST it (adversarial-review fix, round 2)
+The blocking-native cancel check was written INSIDE the `self.mn.is_some()` offload gate
+(`src/vm/call.rs`), so `--serial` had **no** cancel-delivery point at `sleep_ms` / `io.*` / `fs.*` /
+`request` / `process` at all. With the every-instruction check gone, a cancelled serial task ran the
+blocking call to completion (stalling the entire teardown for its full duration — `sleep_ms(60000)` would
+freeze it for a minute) and then, having no further checkpoint, ran **every straight-line statement after
+it**. Deterministic line-SET divergence: `{napper start, napper woke, end}` on serial vs
+`{napper start, end}` on M:N; with an `os.exit(7)` after the sleep, the exit CODE diverged too (7 vs 1).
+**Fix:** the check moved OUTSIDE the `mn` gate (and the same for `park_on_fd`'s socket checkpoint), so the
+cancellation-point SET is engine-agnostic, exactly as the contract claims. Test:
+`parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines` (also asserts the teardown does not
+wait out the cancelled task's 3 s sleep).
+
 ### N5 status after the N6 fix — still open, deliberately UNTOUCHED
 A **genuine** deadlock (every fiber parked, nothing cancelled, nothing able to arrive) still tears the
 parked fibers down without running their `defer`s — on **both** engines. Serial reports it from
