@@ -613,7 +613,7 @@ fn serve(tok: Token, io: Channel[str]):
 > *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
 >
 > **A `defer` is never itself cancelled.** No cancellation point fires *inside* a deferred call — a
-> `defer` is the cleanup the cancel exists to run. Every registered `defer` runs, in LIFO order, to
+> `defer` is the cleanup the cancel exists to run. Every registered `defer` of a cancelled task runs, in LIFO order, to
 > completion (loops, blocking ops and HOF callbacks inside a defer body included), whether the task was
 > cancelled at a checkpoint, returned normally, or faulted on its own while a sibling had already
 > tripped the scope cancel. A nursery started inside a `defer` runs uncancelled too.
@@ -630,10 +630,15 @@ fn serve(tok: Token, io: Channel[str]):
 > fault is what is reported — the stuck cleanup's own error is swallowed with its cancelled task, so
 > both engines print the same line set and exit code.
 >
-> **Cancelling a scope cancels its nested scopes.** A `parallel:` entered from a task that is then
-> cancelled dies with it — its children observe the enclosing cancel at their own checkpoints (a
-> spinning grandchild cannot wedge the teardown). A nested nursery still keeps its own cancel token for
-> its own faults: an inner fault never cancels an *outer sibling*.
+> **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
+> task that is then cancelled dies with it: its children observe the enclosing cancel at their own
+> checkpoints (a spinning grandchild cannot wedge the teardown). A nested nursery still keeps its own
+> cancel token for its own faults: an inner fault never cancels an *outer sibling*.
+> One limit, in the N5 family and identical on both engines: a grandchild that is already **parked**
+> (`recv`/`wait:`) when the *outer* scope is cancelled is not re-driven — the cancel drain is scope-
+> scoped, and a parked fiber has no checkpoint to observe the inherited flag — so it is torn down by the
+> deadlock reap **without running its `defer`s** (`docs/gaps.md` **N5**). A grandchild that is *running*
+> (or parks *after* the cancel) unwinds normally.
 >
 > **Where a cancel is NOT delivered — pure CPU with no back-edge.** A checkpoint is a loop back-edge, a
 > blocking op, or a native→user-code re-entry (a `list.map`/`filter`/`fold`/`sort` callback: the native's

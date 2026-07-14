@@ -1519,6 +1519,18 @@ struct SchedCore {
     /// so it is not a deadlock. Registered/un-registered under core lock A by [`Vm::demote_recv_block`];
     /// the refcount handles 2+ fibers demoted on the same channel.
     demoted_chans: std::collections::HashMap<usize, (Arc<ChannelCore>, usize)>,
+    /// N4 (demoted half) — the cancel flags each DEMOTED fiber that a CANCEL can still wake is
+    /// watching (its own scope's flag + `Vm::cancel_outer`), keyed by a demote token. CANCEL is a
+    /// wakeup source the park/inflight/`runnable` counters do not model: [`Vm::demote_recv_block`]
+    /// ranks `cancel_requested()` ABOVE its own deadlock self-detect, so a demoted fiber whose flag
+    /// is set resumes within one `DEMOTE_POLL_BACKOFF`, unwinds, and runs its `defer`s (which can
+    /// `send` — waking parked siblings). Declaring deadlock against it would latch `terminate` and
+    /// truncate that cleanup. Only a fiber that a cancel WOULD honour is registered (`!cancelled &&
+    /// deferring == 0` at demote time — neither can change while it is blocked), so the fiber that
+    /// is demoted-blocked forever INSIDE its own uncancellable `defer` registers nothing and stays a
+    /// genuine deadlock. Registered/un-registered under core lock A, 1:1 with `blocked_native`.
+    demote_cancel_watch: std::collections::HashMap<u64, Vec<Arc<AtomicBool>>>,
+    next_demote_tok: u64,
 }
 
 impl SchedCore {
@@ -1648,6 +1660,35 @@ impl SchedCore {
             .1 += 1;
     }
 
+    /// N4 (demoted half) — start watching a demoted fiber's cancel flags. `flags` is `Vm::cancel`
+    /// followed by `Vm::cancel_outer` and is passed EMPTY when a cancel could not wake this fiber
+    /// anyway (it is already unwinding, or it is blocked inside a `defer` — `cancel_requested()`'s
+    /// `!cancelled && deferring == 0` terms, neither of which can change while it is blocked). Returns
+    /// the token to hand back to `unwatch_demoted_cancel`. Caller holds core lock A.
+    fn watch_demoted_cancel(&mut self, flags: Vec<Arc<AtomicBool>>) -> u64 {
+        let tok = self.next_demote_tok;
+        self.next_demote_tok += 1;
+        if !flags.is_empty() {
+            self.demote_cancel_watch.insert(tok, flags);
+        }
+        tok
+    }
+
+    /// Stop watching a demoted fiber (it resumed / faulted / settled). Caller holds A.
+    fn unwatch_demoted_cancel(&mut self, tok: u64) {
+        self.demote_cancel_watch.remove(&tok);
+    }
+
+    /// N4 (demoted half) — does some demoted fiber have a tripped cancel flag, i.e. is it about to
+    /// resume and unwind? That is live progress the deadlock predicate's counters cannot see, so it
+    /// VETOES the fire (see [`MnSched::is_deadlocked`]). Self-lifting: the entry disappears the moment
+    /// the fiber leaves `demote_recv_block`/`demote_wait_block`, on every exit path.
+    fn any_demoted_cancel_pending(&self) -> bool {
+        self.demote_cancel_watch
+            .values()
+            .any(|flags| flags.iter().any(|f| f.load(Ordering::Relaxed)))
+    }
+
     /// Drop a demoted fiber's channel registration (removes the entry at refcount 0). Caller holds A.
     fn unregister_demoted(&mut self, ptr: usize) {
         if let Some(entry) = self.demoted_chans.get_mut(&ptr) {
@@ -1700,6 +1741,8 @@ impl MnSched {
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
+                demote_cancel_watch: std::collections::HashMap::new(),
+                next_demote_tok: 0,
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -2460,19 +2503,6 @@ impl MnSched {
         if c.all_incomplete_awaiting_builder() {
             return false;
         }
-        // N4 — a cancel-tripped scope that still has UNDRAINED PARKED fibers is MID-TEARDOWN, not
-        // deadlocked. The cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three
-        // seams), and an idle worker landing in that gap must not call the teardown a deadlock:
-        // `flag_deadlock` would drop the still-parked siblings WITHOUT `unwind_deferred`, silently
-        // skipping their `defer`s (and `reduce_task_slots` ranks Fault > Deadlocked, so the spurious
-        // deadlock never even surfaced — the lost `defer` was the only symptom). Bounded to exactly that
-        // window: a cancelled scope with NO undrained park (its last fiber demoted-blocked forever inside
-        // an uncancellable `defer`) IS a real deadlock and must be reported, not hung. See
-        // `any_cancelled_scope_awaiting_drain` for the full liveness argument. A GENUINE deadlock
-        // (nothing cancelled anywhere) is untouched.
-        if c.any_cancelled_scope_awaiting_drain() {
-            return false;
-        }
         if !(c.running == 0
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
@@ -2483,6 +2513,30 @@ impl MnSched {
             // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
             && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0))
         {
+            return false;
+        }
+        // N4 — CANCEL is a wakeup source the counters above do not model, and a cancelled scope
+        // mid-teardown is not a deadlock. Two shapes, both live progress:
+        //
+        // * an UNDRAINED PARKED fiber of a cancelled scope (`any_cancelled_scope_awaiting_drain`): the
+        //   cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and
+        //   an idle worker landing in that gap sees the pre-drain quiesce. `cancel_drain` is about to
+        //   requeue those fibers so they unwind their `defer`s;
+        // * a DEMOTED fiber whose cancel flag is tripped (`any_demoted_cancel_pending`): it is
+        //   `blocked_native`, not `parked`, so the first scan cannot see it — but `demote_recv_block`
+        //   ranks `cancel_requested()` above `terminate`/self-detect, so it resumes within one
+        //   `DEMOTE_POLL_BACKOFF`, unwinds and runs its `defer`s (which can `send`).
+        //
+        // Either way `flag_deadlock` would drop every parked fiber WITHOUT `unwind_deferred` (silently
+        // skipping their `defer`s — and `reduce_task_slots` ranks Fault > Deadlocked, so the spurious
+        // deadlock never even surfaced; the lost `defer` was the only symptom) and LATCH `terminate`,
+        // truncating the cleanup of anything demoted inside its own `defer`. BOUNDED to real progress:
+        // a cancelled scope with no undrained park whose last fiber is demoted-blocked forever INSIDE
+        // an uncancellable `defer` (no cancel watch — `cancel_requested()` is false while
+        // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
+        // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
+        // deadlock (nothing cancelled anywhere) is untouched.
+        if c.any_cancelled_scope_awaiting_drain() || c.any_demoted_cancel_pending() {
             return false;
         }
         // D5 owe #3 Path C (#1 false-positive fix) — before declaring deadlock, peek every demoted

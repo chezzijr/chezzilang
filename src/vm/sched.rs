@@ -1122,14 +1122,22 @@ impl Vm {
         //    all-blocked quiesce would never be detected — a hang). The registration lets
         //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
         //    deadlock (the #1 false-positive against an innocent parked sibling).
-        {
+        let tok = {
             let mut c = sched.lock();
             c.running -= 1;
             sched.blocked_native.fetch_add(1, Ordering::Relaxed);
             c.register_demoted(ptr, &core);
+            // N4 — a cancel can still WAKE this fiber (the `cancel_requested()` check below ranks above
+            // `terminate` / the self-detect), and that is progress the deadlock predicate's counters
+            // cannot see: it is `blocked_native`, not `parked`. Watch the flags it would honour so
+            // `is_deadlocked` vetoes while one of them is tripped. Empty (⇒ no veto) when a cancel could
+            // NOT wake it — already unwinding, or blocked inside its own `defer` — which is exactly the
+            // fiber that IS a genuine deadlock, and must be reported rather than hang.
+            let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
             drop(c);
             sched.cv.notify_all();
-        }
+            tok
+        };
         // 2. Spin up a replacement worker ONCE per demoted thread (covers this `wid` while we block).
         //    Subsequent re-entries of this loop on the SAME thread (a callback that recvs repeatedly)
         //    reuse the already-spawned coverage — one spawn + one eventual exit per demoted thread.
@@ -1142,6 +1150,7 @@ impl Vm {
                 c.running += 1;
                 sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                 c.unregister_demoted(ptr);
+                c.unwatch_demoted_cancel(tok);
                 drop(c);
                 return Err(self.err(
                     "recv inside a native callback could not demote the worker (OS thread limit \
@@ -1168,6 +1177,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(qg);
                     drop(c);
                     return Ok(RecvStep::Got(w));
@@ -1179,6 +1189,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(qg);
                     drop(c);
                     return Ok(RecvStep::Got(WireValue::Bool(true)));
@@ -1204,6 +1215,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
@@ -1211,6 +1223,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(c);
                     return Ok(RecvStep::ClosedEmpty);
                 }
@@ -1224,6 +1237,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(c);
                     return Err(sched.deadlock_err.clone());
                 }
@@ -1232,6 +1246,7 @@ impl Vm {
                     c.running += 1;
                     sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
                     c.unregister_demoted(ptr);
+                    c.unwatch_demoted_cancel(tok);
                     drop(c);
                     sched.cv.notify_all();
                     return Err(sched.deadlock_err.clone());
@@ -1271,16 +1286,20 @@ impl Vm {
         );
         // 1. Account running → blocked_native AND register EVERY arm channel, under core lock A, then
         //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
-        {
+        // (`watch_demoted_cancel`: see `demote_recv_block` — a cancel can still wake this fiber, and
+        // that is progress `is_deadlocked`'s counters cannot see.)
+        let tok = {
             let mut c = sched.lock();
             c.running -= 1;
             sched.blocked_native.fetch_add(1, Ordering::Relaxed);
             for (ptr, core) in &arms {
                 c.register_demoted(*ptr, core);
             }
+            let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
             drop(c);
             sched.cv.notify_all();
-        }
+            tok
+        };
         // Un-account helper: reverse step 1 (called on every exit path), caller holds core lock A.
         let un_account = |c: &mut SchedCore| {
             c.running += 1;
@@ -1288,6 +1307,7 @@ impl Vm {
             for (ptr, _) in &arms {
                 c.unregister_demoted(*ptr);
             }
+            c.unwatch_demoted_cancel(tok);
         };
         // 2. Spin a replacement worker ONCE per demoted thread (covers this `wid` while we block). If the
         //    OS refuses the thread, un-roll step 1 and fault cleanly so the join still completes.

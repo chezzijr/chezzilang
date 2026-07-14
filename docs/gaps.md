@@ -836,6 +836,25 @@ serial != M:N divergences.
    `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock` (still vetoed — N4 intact). Parity test:
    `parity_a_defer_that_can_never_complete_is_reported_not_hung` (hard 20s deadline: a hang fails the test
    instead of wedging the suite).
+3. **…and the bounded veto lost the DEMOTED half (adversarial-review round 4, fixed before merge).**
+   `parked`-only was too narrow the other way: a fiber demoted (`blocked_native`) in its **body** —
+   a `recv` reached inside a native HOF callback / `Shared.update` / an `Executor` handler — is *not* in
+   `parked`, yet a cancel WILL wake it (`demote_recv_block` ranks `cancel_requested()` above `terminate`
+   and above its own self-detect), whereupon it unwinds and runs its `defer`s, which can `send`. **CANCEL
+   is a wakeup source the `running`/`runnable`/`inflight`/`parked` counters do not model**, so with a
+   cancelled scope whose only unsettled fiber was demoted, an idle worker could declare a spurious
+   deadlock in the ≤5 ms `DEMOTE_POLL_BACKOFF` window before that fiber noticed the cancel — and
+   `flag_deadlock` then reaps every parked fiber of **every** scope without `unwind_deferred` (the exact
+   N4 lost-defer symptom) and latches `terminate`, truncating any sibling that is demoted inside its own
+   `defer`. **Fix:** each demoted fiber now WATCHES the cancel flags it would honour
+   (`Vm::demote_cancel_flags` → `SchedCore::watch_demoted_cancel`, dropped on every demote-loop exit);
+   `is_deadlocked` vetoes while any watched flag is tripped (`any_demoted_cancel_pending`). The watch is
+   EMPTY when a cancel could not wake the fiber anyway — already unwinding (`cancelled`) or blocked
+   inside its own `defer` (`deferring > 0`; neither term can change while it is blocked in place) — which
+   is precisely the never-completing cleanup of (2), so that still fires as a genuine deadlock. The veto
+   is self-lifting (the entry disappears when the fiber settles) and is now evaluated *after* the counter
+   gate, i.e. only at a candidate quiesce, so the `parked` scan is off the idle/steal hot path. Predicate
+   test: `mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock` (RED before the fix).
 
 **THE RULE (both engines, now documented in `docs/concurrency.md`):** a `defer` is never itself cancelled
 and runs to completion, blocking ops included. Cleanup that blocks on **time/IO** is uninterruptible and
@@ -845,6 +864,16 @@ a documented ceiling, not a bug — a cap would re-introduce silent truncation. 
 complete is REPORTED as a deadlock, never a silent hang.
 
 **Out of scope, measured, recorded (no hang, no lost cleanup — do not "fix" one engine alone):**
+- A fiber already **PARKED inside a NESTED nursery** when the *outer* scope is cancelled does **not** run
+  its `defer`s — on **either** engine (measured 3/3 each: `sentinel=0` on M:N and on `--serial`; `main`
+  agrees). The cancel drain is scope-scoped and a parked fiber has no checkpoint at which to observe the
+  inherited `cancel_outer` flag, so the fiber is reaped by the deadlock teardown instead (M:N
+  `flag_deadlock`; serial's nested `run_scheduler_level` `None` arm — it cannot switch back to the outer
+  level to run the faulting sibling at all). This is the **N5** family, not a cancel bug: both engines
+  agree, so parity holds, and draining descendant scopes on M:N alone would *create* a divergence serial
+  structurally cannot match. The claim "cancelling a scope cancels its nested scopes" is therefore true
+  **at checkpoints** (a running or later-parking grandchild), not for an already-parked one —
+  `docs/concurrency.md` now says so.
 - A forever-blocking `defer` in a **non-cancelled** task is reported by BOTH engines but with different
   text/span (serial: `recv on an empty channel: deadlock …` at the recv site; M:N: the nursery-level
   deadlock message at line 1). Message-only divergence; byte-equality means rewriting serial's reporting.
@@ -856,7 +885,8 @@ complete is REPORTED as a deadlock, never a silent hang.
   `GLOBAL_CHECK_INTERVAL` fast path pops `global` without a terminate check). Inert known hazard: no repro
   exists, because `terminate` is latched only by `finish` when every scope is done (no fiber can then be
   owed an unwind) or by `flag_deadlock`, which drains `parked` itself and — after the N6g fix — can only
-  fire for a cancelled scope with no undrained park. A demoted fiber unwinding after `terminate` runs on
+  fire for a cancelled scope with no undrained park **and no cancel-wakeable demoted fiber** (i.e. when
+  nothing is owed an unwind that a cancel could still deliver). A demoted fiber unwinding after `terminate` runs on
   its own thread and never re-enters `take_runnable`. No failing test, so no change.
 
 ### N5 status after the N6 fix — still open, deliberately UNTOUCHED

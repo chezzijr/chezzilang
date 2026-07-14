@@ -98,6 +98,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Race bar: 2 new shapes × 2 engines × **200 runs under full CPU load = 0 failures** (before: the
 > forever-defer hung **200/200** on M:N).
 
+> **Post-review round 4 (same branch) — the bounded N4 veto lost the DEMOTED half (`docs/gaps.md` N6g.3),
+> RED-first.** Bounding the veto to "an undrained PARKED fiber of a cancelled scope" was too narrow in the
+> other direction: a fiber demoted (`blocked_native` — a `recv` reached inside a native HOF callback /
+> `Shared.update` / an `Executor` handler) is not in `parked`, yet a **cancel WILL wake it**
+> (`demote_recv_block` ranks `cancel_requested()` above `terminate` and above its own deadlock
+> self-detect), after which it unwinds and runs its `defer`s — which can `send`. Cancel is a wakeup source
+> the `running`/`runnable`/`inflight`/`parked` counters do not model, so an idle worker could declare a
+> **spurious deadlock** in the ≤5 ms `DEMOTE_POLL_BACKOFF` window before that fiber saw the cancel;
+> `flag_deadlock` then reaps every parked fiber of every scope *without* `unwind_deferred` (the exact N4
+> lost-defer symptom) and latches `terminate`, truncating a sibling's in-flight cleanup. **Fix:** a demoted
+> fiber now WATCHES the cancel flags it would honour (`Vm::demote_cancel_flags` →
+> `SchedCore::watch_demoted_cancel`, dropped on every demote-loop exit), and `is_deadlocked` vetoes while
+> one is tripped (`any_demoted_cancel_pending`). The watch is EMPTY for a fiber a cancel can never wake —
+> already unwinding, or blocked inside its own `defer` (`deferring > 0`) — so the never-completing cleanup
+> of round 3 still fires as a real deadlock, no hang re-introduced. Both vetoes now run *after* the counter
+> gate (only at a candidate quiesce), keeping the `parked` scan off the idle/steal hot path. New test:
+> `mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock`. Also corrected an overclaim: a fiber
+> already **parked inside a NESTED nursery** when the outer scope is cancelled does not run its `defer`s on
+> **either** engine (the drain is scope-scoped; N5 family, both engines agree — `docs/gaps.md` N6g "out of
+> scope"). Race bar re-run: `defer_blocking` × 2 engines × **200 runs under 8-way CPU load = 0 failures**;
+> full `cargo test` green ×2, clippy clean.
+
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`

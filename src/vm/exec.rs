@@ -1246,6 +1246,24 @@ impl Vm {
                     .any(|c| c.load(Ordering::Relaxed)))
     }
 
+    /// N4 (M:N) — the cancel flags a DEMOTED fiber must be watched on, i.e. the exact flags
+    /// `cancel_requested()` reads: this fiber's own scope flag plus every enclosing scope's
+    /// (`cancel_outer`). EMPTY when a cancel could not wake it at all — it is already unwinding
+    /// (`cancelled`) or it is inside a `defer` (`deferring > 0`, the suppression that makes cleanup
+    /// atomic) — because neither term can change while the fiber is blocked in place, and a fiber a
+    /// cancel can never wake is exactly the one that IS a genuine deadlock. Handed to
+    /// `SchedCore::watch_demoted_cancel` (`demote_recv_block` / `demote_wait_block`).
+    pub(super) fn demote_cancel_flags(&self) -> Vec<Arc<AtomicBool>> {
+        if self.cancelled || self.deferring > 0 {
+            return Vec::new();
+        }
+        self.cancel
+            .iter()
+            .chain(self.cancel_outer.iter())
+            .cloned()
+            .collect()
+    }
+
     /// The cancel-flag chain a nursery CREATED FROM THIS VM must inherit: the scopes enclosing it, i.e.
     /// this VM's own scope flag appended to its own ancestors. Empty at the top level.
     pub(super) fn scope_ancestors(&self) -> Vec<Arc<AtomicBool>> {

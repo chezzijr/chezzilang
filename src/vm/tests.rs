@@ -5322,11 +5322,14 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
     let a = take_run(&sched);
     let b = take_run(&sched);
     // Fiber b enters its `defer` and blocks in place on an empty channel (running → blocked_native).
+    // Inside a `defer` a cancel is SUPPRESSED (`cancel_requested()`'s `deferring == 0` term), so it
+    // registers NO cancel watch — nothing can ever wake it. That is what makes it a real deadlock.
     {
         let mut c = sched.lock();
         c.running -= 1;
         sched.blocked_native.fetch_add(1, Ordering::Relaxed);
         c.register_demoted(ptr, &core);
+        c.watch_demoted_cancel(vec![]);
     }
     // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked.
     cancel.store(true, Ordering::Relaxed);
@@ -5346,6 +5349,70 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
         "a cancelled scope whose remaining fiber is demoted-blocked forever inside its cleanup is a \
          REAL deadlock — report it, never hang"
     );
+    let _ = b;
+}
+
+/// N4 (the DEMOTED half of the cancel-teardown veto): a demoted fiber whose cancel flag is TRIPPED is
+/// NOT stuck — `demote_recv_block` ranks `cancel_requested()` ABOVE `terminate` and its own deadlock
+/// self-detect (sched.rs), so it resumes within one `DEMOTE_POLL_BACKOFF`, unwinds and runs its
+/// `defer`s (which can `send`, waking parked siblings). CANCEL is a wakeup source the park/inflight/
+/// `runnable` counters do not model, so without a veto an idle worker's `take_runnable` sees
+/// `running == 0 && runnable == 0 && inflight == 0 && blocked_native > 0` and declares a SPURIOUS
+/// deadlock: `flag_deadlock` then reaps every parked fiber of EVERY scope with no `unwind_deferred`
+/// (their `defer`s silently skipped — the exact N4 harm) and LATCHES `terminate`, which truncates the
+/// cleanup of any sibling demoted inside its own `defer`. The parked-only veto
+/// (`any_cancelled_scope_awaiting_drain`) cannot see this fiber — it is in `blocked_native`, not
+/// `parked` — hence the explicit watch. Boundary vs the test above: a fiber demoted INSIDE a `defer`
+/// registers no watch and stays a genuine deadlock, so the hang fix is preserved.
+#[test]
+fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let core = empty_core();
+    let ptr = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let a = take_run(&sched);
+    let b = take_run(&sched);
+    // Fiber b blocks in place on an empty channel from inside a native callback, in its BODY
+    // (`deferring == 0`) — a cancel would be honoured, so it watches its scope's flag.
+    let tok = {
+        let mut c = sched.lock();
+        c.running -= 1;
+        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+        c.register_demoted(ptr, &core);
+        c.watch_demoted_cancel(vec![Arc::clone(&cancel)])
+    };
+    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked, so
+    // the parked-window veto is silent — only the demoted watch can save b.
+    cancel.store(true, Ordering::Relaxed);
+    sched.finish(
+        a.task_index,
+        0,
+        TaskOutcome::Fault {
+            err: dl_err(),
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
+    {
+        let c = sched.lock();
+        assert_eq!(c.parked_n, 0, "no fiber of the cancelled scope is parked");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "a demoted fiber with a tripped cancel is about to resume and unwind — that is progress, \
+             not a deadlock (declaring one latches `terminate` and skips every parked fiber's defers)"
+        );
+    }
+    // It resumes, unwinds and settles: the watch is dropped on the way out and the veto lifts, so a
+    // genuine post-teardown quiesce still fires (no stale entry vetoing forever).
+    {
+        let mut c = sched.lock();
+        c.unwatch_demoted_cancel(tok);
+        assert!(
+            sched.is_deadlocked(&c),
+            "once the demoted fiber has settled the veto must lift"
+        );
+    }
     let _ = b;
 }
 
