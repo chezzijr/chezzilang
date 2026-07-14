@@ -652,6 +652,36 @@ with a 30ms sleep probing the veto-free gap it printed `cleanup=0` **20/20** on 
 rules directly rather than a scenario. `reduce_task_slots`'s ranking is **not** touched: it is correct — the
 spurious `Deadlocked` simply must never be produced.
 
+### N8. `--serial` HANGS on a CPU-bound sibling — cooperative engine never preempts it — open
+Found 2026-07-15 by the post-merge harness; **pre-existing** (reproduces identically on `09cb2af`, before the
+cancellation-points work). A `parallel:` with one task in a long CPU loop and one that faults:
+
+| engine | result |
+|---|---|
+| M:N (default) | the spinner is cancelled promptly at its back-edge checkpoint |
+| `--serial` | **HANGS** — the spinner never yields, so the sibling never runs, never faults, and the cancel that would kill the spinner is never tripped |
+
+Cancellation points put a checkpoint on every loop back-edge, but a checkpoint only *delivers* a cancel that
+someone already tripped. On the cooperative engine nothing can trip it while the spinner holds the thread.
+The serial scheduler needs a **preemption budget** (the `reds` reduction counter already exists — D3) that
+forces a yield at the back-edge so siblings get a turn. Until then `--serial` is not safe for CPU-bound
+concurrent tasks. Own task.
+
+### N9. A cancelled task's OUTPUT LINE SET differs between engines — inherent, open
+Same shape as N8 and also **pre-existing** (`09cb2af`: M:N emits 1 line, sometimes 0; serial emits 5). A task
+cancelled mid-loop emits *however far it got*, and "how far it got" is a scheduling fact:
+
+| engine | lines a cancelled 5-iteration loop emits |
+|---|---|
+| M:N | 1 (it is cancelled at its first back-edge after the sibling faults) |
+| `--serial` | 5 (it runs to completion **before** the sibling ever gets a turn to fault — see N8) |
+
+This is not an ordering question (the docs already declare cross-task print ORDER nondeterministic) — it is the
+line **set**. It is a real serial ≠ M:N divergence and the parity oracle cannot see it, because no parity test
+has this shape. Fixing N8 (serial preemption) would largely close it: once serial yields at back-edges, the
+cancelled task dies at a back-edge on both engines. **The cancellation-points work made M:N side of this
+DETERMINISTIC (always 1, never 0) — it did not create the gap.**
+
 ### N5. A **genuine** deadlock tears tasks down without running their `defer`s — open
 Found while fixing N4, and **independent** of it. `flag_deadlock` (`src/vm/mod.rs`) drops each parked
 `Fiber` **without** `unwind_deferred`, so on a real deadlock (every fiber parked, nothing cancelled, no
