@@ -6387,7 +6387,14 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(io.functions.get("input").unwrap().params, vec![Ty::Str]);
     assert_eq!(io.functions.get("input").unwrap().ret, Ty::option(Ty::Str));
     assert_eq!(io.functions.get("flush").unwrap().ret, Ty::Nil);
-    assert_eq!(io.functions.len(), 7);
+    // R1 — the binary whole-file twins.
+    let read_bytes = io.functions.get("read_bytes").expect("io.read_bytes");
+    assert_eq!(read_bytes.params, vec![Ty::Str]);
+    assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
+    let write_bytes = io.functions.get("write_bytes").expect("io.write_bytes");
+    assert_eq!(write_bytes.params, vec![Ty::Str, Ty::Bytes]);
+    assert_eq!(write_bytes.ret, Ty::result(Ty::Nil));
+    assert_eq!(io.functions.len(), 9);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6444,7 +6451,7 @@ fn math_io_os_fn_hover_doc_preserved() {
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 21);
-    assert_eq!(crate::native::native_members("std.io").len(), 7);
+    assert_eq!(crate::native::native_members("std.io").len(), 9);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 12);
@@ -6488,7 +6495,17 @@ fn net_sig_from_file_not_native_module_sig() {
         .expect("net.Socket struct_def");
     let mut smeths: Vec<&str> = socket.methods.keys().map(String::as_str).collect();
     smeths.sort();
-    assert_eq!(smeths, ["close", "read", "write"]);
+    assert_eq!(
+        smeths,
+        ["close", "read", "read_bytes", "write", "write_bytes"]
+    );
+    // R1 — the binary twins: `read_bytes -> Result[bytes]`, `write_bytes(bytes) -> Result[int]`.
+    let read_bytes = socket.methods.get("read_bytes").unwrap();
+    assert_eq!(read_bytes.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
+    let write_bytes = socket.methods.get("write_bytes").unwrap();
+    assert_eq!(write_bytes.params, vec![Ty::Bytes, Ty::Int]);
+    assert_eq!(write_bytes.ret, Ty::result(Ty::Int));
     // read/write are optional-tail (the trailing `timeout_ms`); close is nil.
     let read = socket.methods.get("read").unwrap();
     assert_eq!(read.params, vec![Ty::Int, Ty::Int]);
@@ -6778,6 +6795,8 @@ fn enc_fn_sigs_exact() {
         ("base64_encode_url", vec![Ty::Str], Ty::Str),
         ("base64_decode", vec![Ty::Str], Ty::result(Ty::Str)),
         ("base64_decode_url", vec![Ty::Str], Ty::result(Ty::Str)),
+        ("base64_encode_bytes", vec![Ty::Bytes], Ty::Str),
+        ("base64_decode_bytes", vec![Ty::Str], Ty::result(Ty::Bytes)),
         ("hex_encode", vec![Ty::Str], Ty::Str),
         ("hex_decode", vec![Ty::Str], Ty::result(Ty::Str)),
         ("url_encode", vec![Ty::Str], Ty::Str),
@@ -7050,6 +7069,7 @@ fn crypto_fn_sigs_exact() {
     let sig = native_module_sig_via_graph("crypto");
     let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
         ("sha256", vec![Ty::Str], Ty::Str),
+        ("sha256_bytes", vec![Ty::Bytes], Ty::Str),
         ("md5", vec![Ty::Str], Ty::Str),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");

@@ -25,8 +25,15 @@
 # has a whole character (Go `ReadRune` / Python text-mode); `timeout_ms` bounds the whole call, and a
 # poll-once `read(n, 0)` that took a partial codepoint says `Err("incomplete utf-8: …")`, not
 # `Err("timeout")` (= nothing arrived). `read(0)` is a no-op `Ok("")` (it never touches the socket and
-# keeps any carried tail) but still errs on a CLOSED socket. Binary sockets need `read_bytes`/
-# `write_bytes`, which need the `bytes` native seam (docs/gaps.md R1) — not implemented yet.
+# keeps any carried tail) but still errs on a CLOSED socket.
+#
+# BINARY sockets: `read_bytes(n) -> Result[bytes]` / `write_bytes(b) -> Result[int]` (R1). They never
+# decode, so any payload survives byte-exactly. `read_bytes(n)` returns AT MOST `n` bytes (the natural
+# byte contract — unlike `read(n)`, whose `n` bounds only the NEW fd bytes and which may return up to
+# `n + 3`), `Ok(b"")` at EOF, and it DRAINS any carried tail FIRST — including the undecodable bytes a
+# str `read`'s sticky `Err("invalid utf-8 …")` refused to deliver. So a caller that hits that Err can
+# switch to `read_bytes` and recover the exact bytes instead of having to `close()`. `write_bytes`
+# takes a `bytes` or a `bytearray`.
 #
 # `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no data /
 # not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a
@@ -36,6 +43,8 @@
 native struct Socket:
     native fn read(self, n: int, timeout_ms: int = 0) -> Result[str]
     native fn write(self, data: str, timeout_ms: int = 0) -> Result[int]
+    native fn read_bytes(self, n: int, timeout_ms: int = 0) -> Result[bytes]
+    native fn write_bytes(self, data: bytes, timeout_ms: int = 0) -> Result[int]
     native fn close(self) -> nil
 
 native struct Listener:

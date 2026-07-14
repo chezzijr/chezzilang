@@ -12731,3 +12731,167 @@ print(f())
         "nested-fn-in-spawn 41\ndefer-in-spawn\nnested-fn-in-defer 40\nspawn-call-in-defer\nspawn-block-in-defer\ndefer-in-defer\n1\n",
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// R1 — the bytes native seam (`NativeRet::Bytes` / `Host::arg_bytes` / `NativeArg::Bytes`).
+// ---------------------------------------------------------------------------------------------
+
+/// Run a std-module-importing program on BOTH engines (a `import std.*` program needs the resolver,
+/// so it runs from a file) and assert identical stdout.
+fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
+    let entry = write_temp_chz(tag, src);
+    let (out, _e, res, _c) = run_file(&entry);
+    assert!(res.is_ok(), "serial VM faulted: {res:?}");
+    assert_eq!(out, expected, "serial VM");
+    let (out_p, _e, res_p, _c) = run_file_p(&entry);
+    assert!(res_p.is_ok(), "M:N engine faulted: {res_p:?}");
+    assert_eq!(out_p, expected, "M:N engine");
+    let _ = std::fs::remove_file(&entry);
+}
+
+/// R1 step 1 — a native fn RETURNING bytes lowers to `Obj::Bytes` (`NativeRet::Bytes`).
+#[test]
+fn native_ret_bytes_lowers_to_bytes() {
+    let src = "\
+import std.encoding
+
+fn go() -> int!:
+    b := encoding.base64_decode_bytes(\"AAD/\")?
+    print(b.len())
+    print(b[0])
+    print(b[2])
+    return Ok(0)
+
+fn main():
+    match go():
+        Ok(_): print(\"ok\")
+        Err(e): print(\"ERR:\" + e.message())
+main()
+";
+    assert_mc_parity_file("r1_ret_bytes", src, "3\n0\n255\nok\n");
+}
+
+/// R1 step 2 — `Host::arg_bytes` accepts BOTH `bytes` and `bytearray` (Python parity: binary APIs
+/// take either).
+#[test]
+fn host_arg_bytes_accepts_bytes_and_bytearray() {
+    let src = "\
+import std.crypto
+import std.encoding
+
+fn main():
+    print(crypto.sha256_bytes(b\"abc\"))
+    print(crypto.sha256_bytes(bytearray(b\"abc\")))
+    print(encoding.base64_encode_bytes(b\"\\x00\\xff\"))
+main()
+";
+    let d = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    assert_mc_parity_file("r1_arg_bytes", src, &format!("{d}\n{d}\nAP8=\n"));
+}
+
+/// R1 step 2 — a non-bytes arg to a bytes-taking native is a recoverable typed fault.
+#[test]
+fn host_arg_bytes_rejects_non_bytes() {
+    let src = "\
+import std.crypto
+
+fn main():
+    r := recover:
+        crypto.sha256_bytes(7)
+    match r:
+        Ok(v): print(\"ok \" + v)
+        Err(e): print(e.message())
+main()
+";
+    let entry = write_temp_chz("r1_arg_bytes_bad", src);
+    let (out, _e, _res, _c) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(out.contains("must be bytes"), "{out:?}");
+    assert!(out.contains("int"), "{out:?}");
+}
+
+/// R1 step 3 — `Vm::extract_native_args` carries a bytes/bytearray arg across the D5 off-heap
+/// handoff (without this NO blocking native can take a bytes arg: extraction returns `None`, the
+/// call silently runs INLINE and pins a core worker — invisible black-box, hence this direct test).
+#[test]
+fn extract_native_args_carries_bytes() {
+    use crate::native::NativeArg as A;
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let b = Value::Obj(vm.heap.alloc(Obj::Bytes(vec![0u8, 255].into_boxed_slice())));
+    let ba = Value::Obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
+    assert_eq!(
+        vm.extract_native_args(&[b, ba]),
+        Some(vec![A::Bytes(vec![0, 255]), A::Bytes(vec![1, 2])])
+    );
+}
+
+/// R1 step 3 — the off-heap host SERVES a pre-extracted bytes arg (leaving it on the trait default
+/// would make a blocking bytes native fail ONLY under M:N).
+#[test]
+fn offload_host_serves_bytes_arg() {
+    use crate::native::{Host, NativeArg as A};
+    let mut h = OffloadHost {
+        args: vec![A::Bytes(vec![7, 8]), A::Str("x".into())],
+    };
+    assert_eq!(h.arg_bytes(0).unwrap(), vec![7u8, 8]);
+    assert!(h.arg_bytes(1).is_err());
+}
+
+/// R1 step 4 — a real BINARY file (NULs, 0xFF, invalid UTF-8) round-trips byte-exactly through
+/// `io.write_bytes` → `io.read_bytes` (both BLOCKING natives — the end-to-end proof of the
+/// `NativeArg::Bytes` offload path), and `io.read_file` on it errs with a hint at `read_bytes`.
+#[test]
+fn io_bytes_round_trips_a_binary_file() {
+    let path = std::env::temp_dir().join(format!("chezzi_r1_bin_{}.dat", std::process::id()));
+    let p = path.to_str().unwrap().to_string();
+    let src = format!(
+        "\
+import std.io
+
+fn go() -> int!:
+    b := bytes([0, 255, 254, 128])
+    io.write_bytes(\"{p}\", b)?
+    back := io.read_bytes(\"{p}\")?
+    print(back.len())
+    for x in back:
+        print(x)
+    print(back == b)
+    match io.read_file(\"{p}\"):
+        Ok(s): print(\"decoded?! \" + s)
+        Err(e): print(e.message().contains(\"read_bytes\"))
+    return Ok(0)
+
+fn main():
+    match go():
+        Ok(_): print(\"ok\")
+        Err(e): print(\"ERR:\" + e.message())
+main()
+"
+    );
+    assert_mc_parity_file("r1_io_bin", &src, "4\n0\n255\n254\n128\ntrue\ntrue\nok\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// R1 — REGRESSION PIN: a `bytes` / `bytearray` value already crosses the task airlock
+/// (`WireValue::Bytes`/`ByteArray`). R1 must not regress it.
+#[test]
+fn bytes_crosses_the_task_airlock() {
+    let src = "\
+fn worker(ch: Channel[bytes], b: bytes):
+    ch.send(b)
+
+fn main():
+    ch := Channel[bytes](1)
+    parallel:
+        spawn worker(ch, b\"\\x00A\\xff\")
+    got := ch.recv()
+    print(got.len())
+    print(got[0])
+    print(got[2])
+    ba := bytearray(b\"\\x01\")
+    parallel:
+        spawn print(ba.len())
+main()
+";
+    assert_mc_parity(src, "3\n0\n255\n1\n");
+}

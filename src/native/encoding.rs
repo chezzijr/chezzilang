@@ -1,13 +1,15 @@
 //! `std.encoding` — reversible text codecs (base64, hex, URL percent-encoding).
 //!
-//! Every member takes a `str` and operates on its UTF-8 bytes (matching `bytes(s)` / `s.encode()`),
+//! The `str` members take a `str` and operate on its UTF-8 bytes (matching `bytes(s)` / `s.encode()`),
 //! returning `str` (infallible encode) or `Result[str]` (decode — malformed input or non-UTF-8
-//! decoded bytes are a recoverable `Err`, never a panic). This mirrors the str-only native FFI seam
-//! ([`super::Host`] carries only scalar args; [`super::NativeRet`] has no `Bytes` variant), so a
-//! decode that produces arbitrary bytes is UTF-8-validated and surfaced as `Result[str]`.
+//! decoded bytes are a recoverable `Err`, never a panic): a str-typed decode that would produce
+//! arbitrary bytes is UTF-8-validated and surfaced as an `Err`. R1 added the BINARY twins
+//! `base64_encode_bytes` / `base64_decode_bytes`, which carry raw `bytes` across the native seam
+//! ([`super::Host::arg_bytes`] / [`super::NativeRet::Bytes`]) and so round-trip arbitrary data.
 //!
-//! - base64: RFC 4648 — `base64_encode`/`base64_decode` (std `+/` alphabet, `=` padding) and the
-//!   URL-safe `base64_encode_url`/`base64_decode_url` (`-_` alphabet). Decode strips/accepts padding;
+//! - base64: RFC 4648 — `base64_encode`/`base64_decode` (std `+/` alphabet, `=` padding), the
+//!   URL-safe `base64_encode_url`/`base64_decode_url` (`-_` alphabet), and the binary
+//!   `base64_encode_bytes`/`base64_decode_bytes` (std alphabet). Decode strips/accepts padding;
 //!   the std decoder rejects `-_` and the url decoder rejects `+/`.
 //! - hex: lowercase `hex_encode`, `hex_decode` (rejects odd length / non-hex digits).
 //! - url: RFC 3986 COMPONENT percent-encoding — `url_encode` keeps the unreserved set
@@ -25,7 +27,7 @@ const STD_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 const URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Encode `bytes` to base64 using `alphabet`, with `=` padding.
-fn base64_encode_bytes(bytes: &[u8], alphabet: &[u8; 64]) -> String {
+fn b64_encode(bytes: &[u8], alphabet: &[u8; 64]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -50,7 +52,7 @@ fn base64_encode_bytes(bytes: &[u8], alphabet: &[u8; 64]) -> String {
 
 /// Decode a base64 `str` to raw bytes using `alphabet`. Rejects out-of-alphabet chars, bad length,
 /// and misplaced padding. Padding is required to a multiple of 4 (canonical RFC 4648).
-fn base64_decode_bytes(s: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, HostError> {
+fn b64_decode(s: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, HostError> {
     let mut rev = [255u8; 256];
     for (i, &c) in alphabet.iter().enumerate() {
         rev[c as usize] = i as u8;
@@ -116,25 +118,19 @@ fn bytes_to_result(bytes: Vec<u8>, codec: &str) -> NativeRet {
 fn base64_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "base64_encode", 1)?;
     let s = h.arg_str(0)?;
-    Ok(NativeRet::Str(base64_encode_bytes(
-        s.as_bytes(),
-        STD_ALPHABET,
-    )))
+    Ok(NativeRet::Str(b64_encode(s.as_bytes(), STD_ALPHABET)))
 }
 
 fn base64_encode_url(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "base64_encode_url", 1)?;
     let s = h.arg_str(0)?;
-    Ok(NativeRet::Str(base64_encode_bytes(
-        s.as_bytes(),
-        URL_ALPHABET,
-    )))
+    Ok(NativeRet::Str(b64_encode(s.as_bytes(), URL_ALPHABET)))
 }
 
 fn base64_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "base64_decode", 1)?;
     let s = h.arg_str(0)?;
-    match base64_decode_bytes(&s, STD_ALPHABET) {
+    match b64_decode(&s, STD_ALPHABET) {
         Ok(bytes) => Ok(bytes_to_result(bytes, "base64")),
         Err(e) => Ok(NativeRet::Err(e.message)),
     }
@@ -143,8 +139,25 @@ fn base64_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 fn base64_decode_url(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "base64_decode_url", 1)?;
     let s = h.arg_str(0)?;
-    match base64_decode_bytes(&s, URL_ALPHABET) {
+    match b64_decode(&s, URL_ALPHABET) {
         Ok(bytes) => Ok(bytes_to_result(bytes, "base64")),
+        Err(e) => Ok(NativeRet::Err(e.message)),
+    }
+}
+
+/// R1 — the BINARY twins of `base64_encode`/`base64_decode` (std alphabet): they take/return raw
+/// `bytes` instead of round-tripping through UTF-8, so arbitrary binary data survives.
+fn base64_encode_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "base64_encode_bytes", 1)?;
+    let b = h.arg_bytes(0)?;
+    Ok(NativeRet::Str(b64_encode(&b, STD_ALPHABET)))
+}
+
+fn base64_decode_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "base64_decode_bytes", 1)?;
+    let s = h.arg_str(0)?;
+    match b64_decode(&s, STD_ALPHABET) {
+        Ok(bytes) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(bytes)))),
         Err(e) => Ok(NativeRet::Err(e.message)),
     }
 }
@@ -281,6 +294,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("base64_encode_url", base64_encode_url),
     ("base64_decode", base64_decode),
     ("base64_decode_url", base64_decode_url),
+    ("base64_encode_bytes", base64_encode_bytes),
+    ("base64_decode_bytes", base64_decode_bytes),
     ("hex_encode", hex_encode),
     ("hex_decode", hex_decode),
     ("url_encode", url_encode),
@@ -397,7 +412,7 @@ mod tests {
         dec_err(base64_decode, "abc"); // length not a multiple of 4
         dec_err(base64_decode, "ab=c"); // misplaced padding
         // base64 of a single 0xFF byte ("/w==") decodes to a non-UTF-8 byte → Err.
-        let enc_ff = base64_encode_bytes(&[0xFF], STD_ALPHABET);
+        let enc_ff = b64_encode(&[0xFF], STD_ALPHABET);
         dec_err(base64_decode, &enc_ff);
     }
 
@@ -405,8 +420,8 @@ mod tests {
     fn base64_url_safe_variant() {
         // 0xFB, 0xFF produces "+/" in std; "-_" in url-safe.
         let bytes = [0xFBu8, 0xFF];
-        assert_eq!(base64_encode_bytes(&bytes, STD_ALPHABET), "+/8=");
-        assert_eq!(base64_encode_bytes(&bytes, URL_ALPHABET), "-_8=");
+        assert_eq!(b64_encode(&bytes, STD_ALPHABET), "+/8=");
+        assert_eq!(b64_encode(&bytes, URL_ALPHABET), "-_8=");
         // url round-trips on text.
         assert_eq!(
             dec_ok(base64_decode_url, &enc(base64_encode_url, "foobar")),

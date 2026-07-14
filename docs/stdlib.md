@@ -195,7 +195,9 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 `submit(task: fn() -> _) -> nil` (detached) · `shutdown() -> nil` (drain) · `shutdown_now() -> nil` (abandon pending).
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
-- `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` · `close() -> nil`.
+- `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` ·
+  `read_bytes(n: int, timeout_ms?: int) -> Result[bytes]` · `write_bytes(b: bytes, timeout_ms?: int) -> Result[int]` ·
+  `close() -> nil`.
   `read` is a **`str`-only seam** — it decodes, and it never decodes lossily (no U+FFFD, ever):
   - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
     tail is carried on the socket and prepended here — so `read(n)` can return **up to `n + 3` bytes**,
@@ -222,12 +224,17 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
     **Nothing is discarded, and the error is sticky:** any valid text that arrived *before* the bad byte
     is delivered first (a normal `Ok`), and the undecodable bytes stay on the socket — so every later
     `read` returns the same `Err` rather than silently eating the stream. A `str` seam can never hand
-    those bytes back: `close()` the socket (see R1 below).
+    those bytes back — switch to `read_bytes` (below), which hands them over byte-exactly.
   - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
   - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the
     EOF error surfaces on the `read` that sees the close, not on `close`.
-  - **Binary payloads are not supported yet.** They need `Socket.read_bytes`/`write_bytes`, which need
-    the `bytes` native seam (`docs/gaps.md` R1). Until then they are a clear `Err`, not corruption.
+  - **Binary payloads: use `read_bytes` / `write_bytes`.** They never decode, so any payload survives
+    byte-exactly. Contract differences from the `str` `read`: `read_bytes(n)` returns **at most `n`**
+    bytes (`read(n)`'s `n` bounds only the NEW fd bytes, so it can return up to `n + 3`); `Ok(b"")` is
+    the EOF sentinel; `read_bytes(0)` is a no-op `Ok(b"")` that still errs on a closed socket; and it
+    **drains any carried tail first** — including the undecodable bytes a str `read`'s sticky
+    `Err("invalid utf-8 …")` refused to deliver, so mixing the two on one socket is lossless.
+    `write_bytes` takes a `bytes` or a `bytearray`. `timeout_ms` behaves exactly as for `read`/`write`.
 - `Listener`: `accept(timeout_ms?: int) -> Result[Socket]` · `addr() -> Result[str]` · `close() -> nil`.
 - `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
   requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
@@ -276,8 +283,10 @@ Constants: `math.pi`, `math.e`.
 | `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
 | `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
-| `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). |
+| `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
+| `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
+| `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes (a `bytes` or a `bytearray`); no size cap, like `write_file`. |
 
 **Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
 its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned
@@ -427,9 +436,10 @@ Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
 `listen(addr: "host:port") -> Listener`. Socket/Listener methods are in §3. See `concurrency.md`.
 The `Socket`/`Listener` TYPE names require `import std.net` to use bare in an annotation (whole-module,
 or `import Socket from std.net`) — they are reserved names, not global builtins.
-**Text-only:** `Socket.read -> Result[str]` decodes UTF-8 and never lossily (see §3) — a split codepoint
-is carried across reads and reassembled exactly, while a **binary** payload is a clear `Err`, not silent
-U+FFFD corruption. Binary sockets await `read_bytes`/`write_bytes` (`docs/gaps.md` R1).
+**Text and binary:** `Socket.read -> Result[str]` decodes UTF-8 and never lossily (see §3) — a split
+codepoint is carried across reads and reassembled exactly, while a **binary** payload is a clear `Err`
+(never silent U+FFFD). For binary, use `Socket.read_bytes` / `write_bytes` (§3): they never decode, and
+`read_bytes` drains any carry, so bytes a str `read` refused are recovered rather than stranded.
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).
@@ -524,6 +534,10 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
 - base64 (RFC 4648): `base64_encode(s) -> str` / `base64_decode(s) -> Result[str]` (std `+/` alphabet,
   `=` padding) · `base64_encode_url(s) -> str` / `base64_decode_url(s) -> Result[str]` (URL-safe `-_`
   alphabet). The std decoder rejects `-_`; the URL decoder rejects `+/`.
+- base64 of **raw bytes** (R1): `base64_encode_bytes(b: bytes) -> str` (takes a `bytes` or a
+  `bytearray`) · `base64_decode_bytes(s: str) -> Result[bytes]` (std alphabet). These do not
+  UTF-8-validate, so **arbitrary binary round-trips** (an image, a gzip body). Not added: URL-safe or
+  hex bytes twins (say so and they are ~6 lines each).
 - hex: `hex_encode(s) -> str` (lowercase) · `hex_decode(s) -> Result[str]` (rejects odd length /
   non-hex digits).
 - URL percent-encoding (RFC 3986 **component** form): `url_encode(s) -> str` keeps the unreserved set
@@ -536,16 +550,16 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   iteration order (a stable golden + 3-engine parity). An empty map yields `""` (no leading `?`);
   `{"k": ""}` yields `"k="`. Compose `url + "?" + query_encode(params)`.
 
-**Seam limit (deferred, not a bug):** the native FFI seam carries only `str` (no raw-bytes arg/return),
-so base64/hex `decode` UTF-8-validate their output and surface non-UTF-8 results as `Err`. Round-tripping
-**arbitrary binary** (e.g. an image) back to raw bytes through this surface is therefore not possible
-yet — it needs a bytes-arg/bytes-return seam expansion (a separate, larger change). Text round-trips
-fully.
+**Seam note:** the `str` members UTF-8-validate their decoded output, so a non-UTF-8 result is an `Err`
+(that is the *str* contract, not a limitation). Arbitrary binary round-trips through
+`base64_encode_bytes`/`base64_decode_bytes` (R1 widened the native seam to carry raw `bytes`). No
+gzip/zlib yet (a new dependency).
 
 ### `std.crypto`
 Hand-rolled digests (zero dependencies). Each hashes the str's UTF-8 bytes and returns the
 lowercase-hex digest as a `str` (always valid UTF-8 → infallible, no `Result`).
-`sha256(s) -> str` (FIPS 180-4) · `md5(s) -> str` (RFC 1321).
+`sha256(s) -> str` (FIPS 180-4) · `sha256_bytes(b: bytes) -> str` (same digest over raw bytes — a
+`bytes` or a `bytearray`; e.g. `io.read_bytes(p)` → hash a file) · `md5(s) -> str` (RFC 1321).
 **Security:** MD5 is **cryptographically broken** — use it only for checksums / legacy interop, never
 for passwords, signatures, or integrity against an adversary. *Pure CPU (no I/O); inline on every engine.*
 

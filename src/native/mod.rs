@@ -136,6 +136,10 @@ pub enum NativeRet {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// R1 — raw bytes. Lowers to the IMMUTABLE `bytes` value (`Obj::Bytes`, Python's
+    /// `open(path,'rb').read()` model); a caller wanting mutation writes `bytearray(b)`. There is
+    /// deliberately no `ByteArray` variant — one seam variant, one lowering.
+    Bytes(Vec<u8>),
     List(Vec<NativeRet>),
     /// A struct instance: type name + named fields in declaration order. The checker must know a
     /// struct of this `name` with matching field types (seeded for stdlib structs like
@@ -166,13 +170,20 @@ pub enum NativeRet {
 /// D5 — an offloaded blocking native's already-extracted argument, in `Send` primitive form (no heap
 /// `GcRef`). The engine materializes these on the worker (heap live) before handing a blocking call
 /// to the dirty pool; the off-heap host serves them back to the native fn off-thread. The scoped
-/// blocking fns take only int / str args; float / bool are carried for completeness.
+/// blocking fns take int / str / bytes args; float / bool are carried for completeness.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeArg {
     Int(i64),
     Float(f64),
     Bool(bool),
     Str(String),
+    /// R1 — raw bytes (a `bytes` OR a `bytearray` arg, copied out at the boundary), pre-extracted so
+    /// a BLOCKING native taking binary data (`std.io.write_bytes`) can still offload to the dirty
+    /// pool. Without this variant extraction returns `None` and the call quietly runs INLINE on a
+    /// core worker (right answer, pinned worker — the D5 invariant it exists to protect), so it is
+    /// unprovable black-box: it is pinned by direct unit tests on `Vm::extract_native_args` +
+    /// `OffloadHost::arg_bytes`.
+    Bytes(Vec<u8>),
     /// An insertion-ordered `map[str, str]`, pre-extracted so a blocking native that reads a map arg
     /// (today only `std.request.request`'s custom headers) can still offload to the dirty pool: the
     /// off-heap host has no `Vm`/heap, so the map is snapshotted into owned `(String, String)` pairs
@@ -267,6 +278,16 @@ pub trait Host {
             message: "this host does not support list arguments".into(),
         })
     }
+    /// R1 — `args[i]` as raw bytes, copied out at the boundary (no heap aliasing). Accepts BOTH a
+    /// `bytes` and a `bytearray` (Python parity: binary APIs take either); anything else is an
+    /// arg-type error. The default returns a "no bytes args" error so a host that never passes
+    /// binary data (the std-module test fixtures, the FFI callback host) needn't implement it.
+    fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, HostError> {
+        let _ = i;
+        Err(HostError {
+            message: "this host does not support bytes arguments".into(),
+        })
+    }
 
     /// Append to the program's captured stdout buffer.
     fn write_stdout(&mut self, s: &str);
@@ -334,7 +355,9 @@ pub fn is_blocking(name: &str) -> bool {
         name,
         // std.io (file I/O only — print/eprint/read_line touch host stdio, run inline; even under the
         // streaming CLI a `print` cannot block: it hands the line to `vm::stream`'s writer thread)
-        "read_file" | "write_file"
+        // R1: `read_bytes`/`write_bytes` are the binary twins — `write_bytes` offloads its `bytes`
+        // arg via `NativeArg::Bytes` (off-heap-safe: owned byte vec, primitive return).
+        "read_file" | "write_file" | "read_bytes" | "write_bytes"
         // std.fs (all members are filesystem syscalls — reads + mutations)
         | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
         | "mkdir" | "remove_file" | "remove_dir" | "rename" | "copy" | "append"
@@ -656,6 +679,8 @@ mod tests {
                 "base64_encode_url",
                 "base64_decode",
                 "base64_decode_url",
+                "base64_encode_bytes",
+                "base64_decode_bytes",
                 "hex_encode",
                 "hex_decode",
                 "url_encode",
@@ -667,7 +692,7 @@ mod tests {
             .iter()
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(cry, ["sha256", "md5"]);
+        assert_eq!(cry, ["sha256", "sha256_bytes", "md5"]);
         let uid: Vec<&str> = native_members("std.uuid").iter().map(|(n, _)| *n).collect();
         assert_eq!(uid, ["v4", "uuid_seed"]);
 
@@ -710,6 +735,9 @@ mod tests {
         for name in [
             "read_file",
             "write_file",
+            // R1 — the binary whole-file twins (`write_bytes` offloads via `NativeArg::Bytes`).
+            "read_bytes",
+            "write_bytes",
             "list_dir",
             "exists",
             "is_file",

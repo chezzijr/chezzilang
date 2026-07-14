@@ -2895,6 +2895,14 @@ impl crate::native::Host for OffloadHost {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
+    fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
+        match self.args.get(i) {
+            // R1 — pre-extracted on the worker (heap live) into an owned byte vec; served off-thread.
+            Some(crate::native::NativeArg::Bytes(b)) => Ok(b.clone()),
+            Some(_) => Err(crate::native::HostError::arg_type(i, "bytes", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn write_stdout(&mut self, _s: &str) {
         unreachable!("offloaded blocking native must not write stdout (off-heap host)")
     }
@@ -2995,6 +3003,27 @@ impl crate::native::Host for VmHost<'_> {
             Some(other) => Err(crate::native::HostError::arg_type(
                 i,
                 "str",
+                self.vm.type_name(*other),
+            )),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
+    /// R1 — a `bytes` OR a `bytearray` arg, copied out of the heap (Python parity: binary APIs take
+    /// either). It does NOT accept a `list[int]` — that is a `bytes()`-ctor convenience, not a seam
+    /// contract; the checker types the param `bytes`.
+    fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
+                Obj::Bytes(b) => Ok(b.to_vec()),
+                Obj::ByteArray(b) => Ok(b.clone()),
+                _ => {
+                    let got = self.vm.type_name(self.args[i]);
+                    Err(crate::native::HostError::arg_type(i, "bytes", got))
+                }
+            },
+            Some(other) => Err(crate::native::HostError::arg_type(
+                i,
+                "bytes",
                 self.vm.type_name(*other),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),

@@ -4755,6 +4755,30 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **R1 — the `bytes` native seam + binary IO/sockets; B1 now FIXED (2026-07-14).** `bytes`/`bytearray`
+  shipped complete below the native seam (lexer/checker/VM/GC/airlock), but the seam itself was
+  `str`-only, so **no native fn could accept or return them**. Widened in three places
+  (`src/native/mod.rs`): `NativeRet::Bytes(Vec<u8>)` (lowered in `Vm::lower_native` to `Obj::Bytes` —
+  the immutable form; a caller wanting mutation writes `bytearray(b)`), a defaulted-to-error
+  `Host::arg_bytes` (implemented on `VmHost`, accepting a `bytes` OR a `bytearray` — Python parity),
+  and `NativeArg::Bytes` + `OffloadHost::arg_bytes` so a **blocking** bytes native still offloads to
+  the dirty pool instead of pinning a core worker (D5). No new type, no heap obj, no GC/airlock work.
+  `value_to_native_ret` deliberately gets no bytes arm (it writes C's return register; the checker
+  restricts callback returns to C scalars). Consumers wired: `io.read_bytes(path) -> Result[bytes]` /
+  `io.write_bytes(path, data) -> Result[nil]` (binary whole-file IO — `read_file` decodes UTF-8 and so
+  hard-failed on any binary file; it now says `use io.read_bytes for binary files`; the 64 MB
+  `MAX_READ_FILE_BYTES` cap applies read-side only, as for `read_file`), `crypto.sha256_bytes(b)`
+  (hash a file / a socket payload), `encoding.base64_encode_bytes` / `base64_decode_bytes` (the
+  arbitrary-binary base64 round-trip), and `Socket.read_bytes(n[, timeout_ms]) -> Result[bytes]` /
+  `Socket.write_bytes(b[, timeout_ms]) -> Result[int]` (`src/vm/netio.rs` — **B1's honest fix**: binary
+  sockets work; `read_bytes` returns AT MOST `n` bytes and DRAINS the carry first, so the bytes the str
+  `read`'s sticky `Err("invalid utf-8 …")` refused to deliver are recoverable instead of forcing a
+  `close()`; the str `read` keeps its documented decode contract, unchanged). **Not done (out of
+  scope):** `std.request` binary bodies (ureq `into_string()` needs its own reader plumbing → "download
+  a file" stays blocked on *request*, not on R1), gzip/zlib, `NativeRet::ByteArray`, and any
+  `Writer`/file-handle type (that is R2). Docs: `docs/stdlib.md`, `docs/gaps.md` (R1 DONE, B1 FIXED,
+  dependent bullets re-graded), `std/{io,net,crypto,encoding}.chz`.
+
 - **`Socket.read` no longer CORRUPTS data — B1 MITIGATED (2026-07-14).** `src/vm/netio.rs` decoded every
   socket chunk with `String::from_utf8_lossy` at TWO sites (the fast path + the in-callback demote
   poller), so the `str`-only seam (`read -> Result[str]`, `std/net.chz`) silently produced U+FFFD: any

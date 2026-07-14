@@ -136,7 +136,7 @@ impl Vm {
     ///   no complete codepoint at all, return `None` = "need more bytes" — the caller re-reads (it must
     ///   NOT return `Ok("")`, which every `while chunk != "":` loop reads as EOF).
     /// * `error_len() == Some(_)` — genuinely INVALID bytes: a recoverable `Err` naming the real limit
-    ///   (the seam is str-only; binary needs `read_bytes`, gated on R1), never a silent U+FFFD.
+    ///   (the str seam decodes; binary payloads are read with `read_bytes`), never a silent U+FFFD.
     ///
     /// NON-DESTRUCTIVE either way: the valid text that decoded BEFORE the problem byte is always handed
     /// back, and everything from the problem byte on stays in [`SocketCore::carry`]. So an invalid-utf-8
@@ -197,9 +197,9 @@ impl Vm {
             // Invalid, but valid text came first: deliver that text now; the bad bytes re-err next read.
             (Some(_), 1..) => prefix,
             (Some(_), _) => Decoded::Fail(
-                "invalid utf-8 on the socket: std.net read is str-only — binary payloads \
-                 need Socket.read_bytes (not implemented yet; see docs/gaps.md R1). The bytes stay \
-                 carried, so every read on this socket now returns this error: close it"
+                "invalid utf-8 on the socket: std.net read is str-only — read binary payloads with \
+                 Socket.read_bytes. The bytes stay carried (read_bytes hands them back byte-exactly), \
+                 so every str read on this socket now returns this error"
                     .to_string(),
             ),
         }
@@ -370,6 +370,141 @@ impl Vm {
                 }
                 Ok(()) => std::thread::sleep(std::time::Duration::from_millis(1)), // not settled yet
             }
+        }
+    }
+
+    /// R1/B1 — `Socket.read_bytes(n) -> Result[bytes]` / `read_bytes(n, timeout_ms)`: the BINARY read.
+    /// No decode at all, so no carry/`NeedMore` loop — the contract is the natural byte one: it returns
+    /// AT MOST `n` bytes (unlike the str `read`, whose `n` bounds only the NEW fd bytes and which may
+    /// hand back up to `n + 3` when it prepends a carried codepoint tail).
+    ///
+    /// It DRAINS the carry first: bytes a previous str `read` left behind — including the undecodable
+    /// bytes its sticky `Err("invalid utf-8 …")` refused to deliver — are handed back here byte-exactly
+    /// (that is the escape hatch the str Err points at; ignoring the carry would make a mixed
+    /// `read`/`read_bytes` socket silently lossy). Only when the carry is empty does it touch the fd.
+    /// `got == 0` on a `read_bytes(n>0)` is EOF → `Ok(b"")`. `read_bytes(0)` is a no-op `Ok(b"")` that
+    /// still errs on a CLOSED socket (same shape as `read(0)`). Would-block: park on the netpoller /
+    /// demote in-callback / fail loud off the M:N engine, exactly like `read`, with the same LATCHED
+    /// `poll_deadline` (a re-park must not re-arm the timeout budget).
+    fn socket_read_bytes(
+        &mut self,
+        h: GcRef,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        self.arity_range_err("read_bytes", args, 1, 2, span)?;
+        if self.poll_timed_out {
+            self.poll_timed_out = false;
+            return Ok(self.sock_err("timeout"));
+        }
+        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        let n = match args.first() {
+            Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
+            _ => return Err(self.err("read_bytes expects an int byte count".into(), span)),
+        };
+        let core = self.socket_core(h);
+        if n == 0 {
+            if core
+                .stream
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+            {
+                return Ok(self.sock_err("read_bytes on a closed socket"));
+            }
+            let bv = Value::Obj(self.heap.alloc(Obj::Bytes(Box::default())));
+            return Ok(self.sock_ok(bv));
+        }
+        let deadline = timeout
+            .filter(|t| !t.poll_once)
+            .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
+        let mut buf = vec![0u8; n];
+        let attempt = {
+            // LOCK ORDER: `carry` OUTER, `stream` INNER (see `SocketCore::carry`).
+            let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(stream) = guard.as_mut() else {
+                return Ok(self.sock_err("read_bytes on a closed socket"));
+            };
+            if !carry.is_empty() {
+                let take = n.min(carry.len());
+                Ok(carry.drain(..take).collect::<Vec<u8>>())
+            } else {
+                match std::io::Read::read(stream, &mut buf) {
+                    Ok(got) => Ok(buf[..got].to_vec()),
+                    Err(e) => Err((e, stream.as_raw_fd())),
+                }
+            }
+        };
+        // Allocate only AFTER the locks drop.
+        match attempt {
+            Ok(bytes) => {
+                let bv = Value::Obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
+                Ok(self.sock_ok(bv))
+            }
+            Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if timeout.is_some_and(|t| t.poll_once) {
+                    return Ok(self.sock_err("timeout"));
+                }
+                let target = PollPark {
+                    key: core.key,
+                    fd,
+                    interest: poller::Interest::Read,
+                    in_flight: Arc::clone(&core.in_flight),
+                    deadline,
+                };
+                if self.park_on_fd(h, args, target, span)? {
+                    return Ok(Value::Nil); // parked (sentinel)
+                }
+                if self.mn.is_some() && self.native_reentry > 0 {
+                    let core = Arc::clone(&core);
+                    return self.demote_block_socket(
+                        fd,
+                        poller::Interest::Read,
+                        deadline,
+                        span,
+                        move |vm| {
+                            let mut b = vec![0u8; n];
+                            let r = {
+                                let mut carry =
+                                    core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut guard =
+                                    core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                let Some(stream) = guard.as_mut() else {
+                                    return SockPoll::Ready(Ok(
+                                        vm.sock_err("read_bytes on a closed socket")
+                                    ));
+                                };
+                                if !carry.is_empty() {
+                                    let take = n.min(carry.len());
+                                    Ok(carry.drain(..take).collect::<Vec<u8>>())
+                                } else {
+                                    match std::io::Read::read(stream, &mut b) {
+                                        Ok(got) => Ok(b[..got].to_vec()),
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                            };
+                            match r {
+                                Ok(bytes) => {
+                                    let bv = Value::Obj(
+                                        vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
+                                    );
+                                    SockPoll::Ready(Ok(vm.sock_ok(bv)))
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    SockPoll::WouldBlock
+                                }
+                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                            }
+                        },
+                    );
+                }
+                Ok(self.sock_err(
+                    "read_bytes would block: std.net sockets require the --parallel engine",
+                ))
+            }
+            Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
     }
 
@@ -607,16 +742,28 @@ impl Vm {
                 }
                 r
             }
-            "write" => {
-                // `write(s)` or `write(s, timeout_ms)` — the optional trailing int bounds writability.
-                self.arity_range_err("write", args, 1, 2, span)?;
+            "read_bytes" => {
+                let r = self.socket_read_bytes(h, args, span);
+                // Same latch discipline as `read`: drop the deadline unless the op PARKED (the very
+                // same call resumes) — a re-park must not re-arm the timeout budget.
+                if self.poll_park.is_none() {
+                    self.poll_deadline = None;
+                }
+                r
+            }
+            // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw bytes /
+            // bytearray) are the SAME write path — only the byte-extraction differs.
+            "write" | "write_bytes" => {
+                // The optional trailing int bounds writability.
+                self.arity_range_err(method, args, 1, 2, span)?;
                 if self.poll_timed_out {
                     self.poll_timed_out = false;
                     return Ok(self.sock_err("timeout"));
                 }
                 let timeout = self.parse_timeout_ms(args.get(1), span)?;
-                let data = match args.first() {
-                    Some(Value::Obj(sh)) => match self.heap.get(*sh) {
+                let data = match (method, args.first()) {
+                    ("write_bytes", Some(v)) => self.collect_bytes_arg("write_bytes", *v, span)?,
+                    (_, Some(Value::Obj(sh))) => match self.heap.get(*sh) {
                         Obj::Str(s) => s.as_bytes().to_vec(),
                         _ => return Err(self.err("write expects a str".into(), span)),
                     },

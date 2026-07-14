@@ -8480,3 +8480,123 @@ fn bare_range_value_still_rejected_by_the_compiler_backstop() {
         assert!(err.contains("range can only be used"), "got: {err}");
     }
 }
+
+/// R1/B1 — BINARY sockets. `write_bytes` / `read_bytes` carry raw bytes over TCP byte-exactly (the
+/// payload the str-only `read` can only ever `Err` on), and `read_bytes` at EOF returns the empty
+/// `Ok(b"")` sentinel. M:N-only (std.net requires the OS-thread engine).
+#[test]
+fn socket_bytes_round_trip_binary_payload() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut got = vec![0u8; 4];
+        stream.read_exact(&mut got).unwrap();
+        assert_eq!(got, vec![0u8, 255, 0x80, 10], "the client's binary write");
+        stream.write_all(&[0u8, 255, 0x80, 10]).unwrap();
+        // Close → the client's second read_bytes sees EOF.
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    payload := bytes([0, 255, 128, 10])
+    n := sock.write_bytes(payload)?
+    print(\"WROTE:{{n}}\")
+    got := sock.read_bytes(16, 5000)?
+    print(\"LEN:{{got.len()}}\")
+    for x in got:
+        print(x)
+    eof := sock.read_bytes(16, 5000)?
+    print(\"EOF:{{eof.len()}}\")
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("bytes_round_trip", &src);
+    server.join().unwrap();
+    assert_eq!(
+        out, "WROTE:4\nLEN:4\n0\n255\n128\n10\nEOF:0\ndone\n",
+        "the binary payload must survive byte-exactly: {out:?}"
+    );
+}
+
+/// R1/B1 — the ESCAPE HATCH: after the str-only `read` returns its sticky `Err("invalid utf-8 …")`,
+/// the undecodable bytes stay CARRIED on the socket. `read_bytes` drains that carry first, so the
+/// caller recovers the exact bytes instead of being forced to `close()`. This is what makes B1
+/// honestly fixed rather than merely mitigated.
+#[test]
+fn socket_read_bytes_recovers_the_sticky_invalid_utf8_carry() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"hi\xFF\xFE").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    match sock.read(64, 5000):
+        Ok(s): print(\"GOT:[\" + s + \"]\")
+        Err(e): print(\"ERR\")
+    match sock.read(64, 5000):
+        Ok(s): print(\"GOT2:[\" + s + \"]\")
+        Err(e): print(\"ERR2\")
+    b := sock.read_bytes(64, 5000)?
+    print(\"BYTES:{{b.len()}}\")
+    for x in b:
+        print(x)
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("bytes_carry", &src);
+    server.join().unwrap();
+    assert!(out.contains("GOT:[hi]"), "{out:?}");
+    assert!(
+        out.contains("ERR2"),
+        "the invalid-utf-8 Err is sticky: {out:?}"
+    );
+    assert!(
+        out.contains("BYTES:2\n255\n254\n"),
+        "read_bytes must recover the carried undecodable bytes byte-exactly: {out:?}"
+    );
+}

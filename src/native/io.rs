@@ -1,7 +1,8 @@
 //! `std.io` — native I/O (M6c): line output, stdin, whole-string file read/write.
 //!
 //! File handles / streaming are intentionally out of scope (no userdata this milestone): files are
-//! read and written as whole strings, which covers the common scripting case. Errors come back as
+//! read and written whole — as `str` (`read_file`/`write_file`, UTF-8) or as raw `bytes`
+//! (`read_bytes`/`write_bytes`, R1 — binary files), which covers the common scripting case. Errors come back as
 //! `Result` values (the engine lowers `NativeRet::Err` to `Err(msg)`), never panics.
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
@@ -72,6 +73,41 @@ fn read_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
             "{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
         ))),
         Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(buf)))),
+        // R1 — a non-UTF-8 file is not a mystery I/O error: point at the binary reader.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(NativeRet::Err(format!(
+            "{path}: {e} — use io.read_bytes for binary files"
+        ))),
+        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+    }
+}
+
+/// R1 — read a file as raw `bytes` (the binary twin of `read_file`, which decodes UTF-8 and so hard-
+/// fails on any binary file). Same `MAX_READ_FILE_BYTES` read cap.
+fn read_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "read_bytes", 1)?;
+    let path = h.arg_str(0)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+    };
+    let mut buf = Vec::new();
+    match file.take(MAX_READ_FILE_BYTES + 1).read_to_end(&mut buf) {
+        Ok(_) if buf.len() as u64 > MAX_READ_FILE_BYTES => Ok(NativeRet::Err(format!(
+            "{path}: file exceeds the {MAX_READ_FILE_BYTES}-byte read limit"
+        ))),
+        Ok(_) => Ok(NativeRet::Ok(Box::new(NativeRet::Bytes(buf)))),
+        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+    }
+}
+
+/// R1 — write raw `bytes` (or a `bytearray`) to a file. No size cap, matching `write_file` (the cap
+/// is read-side only: the writer already holds the data in memory).
+fn write_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "write_bytes", 2)?;
+    let path = h.arg_str(0)?;
+    let data = h.arg_bytes(1)?;
+    match std::fs::write(&path, &data) {
+        Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
     }
 }
@@ -95,4 +131,6 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("input", input),
     ("read_file", read_file),
     ("write_file", write_file),
+    ("read_bytes", read_bytes),
+    ("write_bytes", write_bytes),
 ];
