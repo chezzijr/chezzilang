@@ -140,6 +140,11 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
 Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`.
 
+A `bytearray` is **not** assignable to a `bytes` slot (it is mutable — an alias under an immutable
+`bytes` type would change under you). Convert with **`bytes(ba)`** (an explicit copy, exactly like
+CPython's `bytes(ba)`) — that is how a built-up buffer reaches the binary APIs (`io.write_bytes`,
+`crypto.sha256_bytes`, `encoding.base64_encode_bytes`, `Socket.write_bytes`).
+
 ---
 
 ## 3. Runtime types (concurrency & iteration)
@@ -234,7 +239,8 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
     the EOF sentinel; `read_bytes(0)` is a no-op `Ok(b"")` that still errs on a closed socket; and it
     **drains any carried tail first** — including the undecodable bytes a str `read`'s sticky
     `Err("invalid utf-8 …")` refused to deliver, so mixing the two on one socket is lossless.
-    `write_bytes` takes a `bytes` or a `bytearray`. `timeout_ms` behaves exactly as for `read`/`write`.
+    `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes(ba)`). `timeout_ms` behaves exactly
+    as for `read`/`write`.
 - `Listener`: `accept(timeout_ms?: int) -> Result[Socket]` · `addr() -> Result[str]` · `close() -> nil`.
 - `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
   requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
@@ -286,7 +292,7 @@ Constants: `math.pi`, `math.e`.
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
 | `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
-| `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes (a `bytes` or a `bytearray`); no size cap, like `write_file`. |
+| `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes; no size cap, like `write_file`. |
 
 **Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
 its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned
@@ -534,8 +540,8 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
 - base64 (RFC 4648): `base64_encode(s) -> str` / `base64_decode(s) -> Result[str]` (std `+/` alphabet,
   `=` padding) · `base64_encode_url(s) -> str` / `base64_decode_url(s) -> Result[str]` (URL-safe `-_`
   alphabet). The std decoder rejects `-_`; the URL decoder rejects `+/`.
-- base64 of **raw bytes** (R1): `base64_encode_bytes(b: bytes) -> str` (takes a `bytes` or a
-  `bytearray`) · `base64_decode_bytes(s: str) -> Result[bytes]` (std alphabet). These do not
+- base64 of **raw bytes** (R1): `base64_encode_bytes(b: bytes) -> str` ·
+  `base64_decode_bytes(s: str) -> Result[bytes]` (std alphabet). These do not
   UTF-8-validate, so **arbitrary binary round-trips** (an image, a gzip body). Not added: URL-safe or
   hex bytes twins (say so and they are ~6 lines each).
 - hex: `hex_encode(s) -> str` (lowercase) · `hex_decode(s) -> Result[str]` (rejects odd length /
@@ -559,7 +565,7 @@ gzip/zlib yet (a new dependency).
 Hand-rolled digests (zero dependencies). Each hashes the str's UTF-8 bytes and returns the
 lowercase-hex digest as a `str` (always valid UTF-8 → infallible, no `Result`).
 `sha256(s) -> str` (FIPS 180-4) · `sha256_bytes(b: bytes) -> str` (same digest over raw bytes — a
-`bytes` or a `bytearray`; e.g. `io.read_bytes(p)` → hash a file) · `md5(s) -> str` (RFC 1321).
+`bytes`; e.g. `io.read_bytes(p)` → hash a file) · `md5(s) -> str` (RFC 1321).
 **Security:** MD5 is **cryptographically broken** — use it only for checksums / legacy interop, never
 for passwords, signatures, or integrity against an adversary. *Pure CPU (no I/O); inline on every engine.*
 

@@ -327,10 +327,9 @@ impl Vm {
                 Value::Obj(h) => match self.heap.get(*h) {
                     Obj::Str(s) => Some(A::Str(s.to_string())),
                     // R1 — a binary arg (today `io.write_bytes`): copied out so it survives the
-                    // off-heap handoff. A `bytearray` extracts as bytes too (`Host::arg_bytes`
-                    // accepts both), so a blocking native reading it offloads either way.
+                    // off-heap handoff. `bytes` only — the checker types every seam param `bytes`
+                    // and a `bytearray` is not assignable to it (`bytes(ba)` converts).
                     Obj::Bytes(b) => Some(A::Bytes(b.to_vec())),
-                    Obj::ByteArray(b) => Some(A::Bytes(b.clone())),
                     // A `Map[str, str]` arg (today only `request`'s headers) is snapshotted into
                     // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
                     // to `None` → run inline (safe fallback; the checker guarantees str/str for

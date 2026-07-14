@@ -17,6 +17,7 @@ native fn read_file(path: str) -> Result[str]
 native fn write_file(path: str, text: str) -> Result[nil]
 # Binary whole-file I/O (R1). `read_file` DECODES UTF-8, so it errs on a binary file — `read_bytes`
 # is the escape hatch. Same 64 MB read cap as `read_file`; `write_bytes` (like `write_file`) has none.
-# `write_bytes` takes a `bytes` or a `bytearray`.
+# `write_bytes` takes a `bytes` — convert a `bytearray` buffer with `bytes(ba)` (an explicit copy,
+# like CPython's `bytes(ba)`; `bytearray` is deliberately NOT assignable to a `bytes` sink).
 native fn read_bytes(path: str) -> Result[bytes]
 native fn write_bytes(path: str, data: bytes) -> Result[nil]

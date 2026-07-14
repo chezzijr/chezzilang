@@ -83,7 +83,8 @@ unblock.
 `arg_bytes` (`src/native/mod.rs`), so **no native fn could accept or return them**. Landed as a seam
 expansion (no new type, no heap obj, no GC/airlock work — they already shipped below the seam):
 `NativeRet::Bytes` (lowered by `Vm::lower_native` to the immutable `Obj::Bytes`), a defaulted-to-error
-`Host::arg_bytes` (on `VmHost`: accepts a `bytes` **or** a `bytearray`, Python parity), and
+`Host::arg_bytes` (on `VmHost`: `bytes`-only — a `bytearray` is not assignable to a `bytes` sink
+(7b29552), so a built-up buffer is passed as `bytes(ba)`, the explicit copy CPython also makes), and
 `NativeArg::Bytes` + `OffloadHost::arg_bytes` so a *blocking* bytes native still offloads to the dirty
 pool instead of pinning a core worker (D5). `value_to_native_ret` gets no bytes arm on purpose (it fills
 C's return register; a callback return is checker-restricted to C scalars).

@@ -177,7 +177,7 @@ pub enum NativeArg {
     Float(f64),
     Bool(bool),
     Str(String),
-    /// R1 — raw bytes (a `bytes` OR a `bytearray` arg, copied out at the boundary), pre-extracted so
+    /// R1 — raw bytes (a `bytes` arg, copied out at the boundary), pre-extracted so
     /// a BLOCKING native taking binary data (`std.io.write_bytes`) can still offload to the dirty
     /// pool. Without this variant extraction returns `None` and the call quietly runs INLINE on a
     /// core worker (right answer, pinned worker — the D5 invariant it exists to protect), so it is
@@ -278,10 +278,12 @@ pub trait Host {
             message: "this host does not support list arguments".into(),
         })
     }
-    /// R1 — `args[i]` as raw bytes, copied out at the boundary (no heap aliasing). Accepts BOTH a
-    /// `bytes` and a `bytearray` (Python parity: binary APIs take either); anything else is an
-    /// arg-type error. The default returns a "no bytes args" error so a host that never passes
-    /// binary data (the std-module test fixtures, the FFI callback host) needn't implement it.
+    /// R1 — `args[i]` as raw bytes, copied out at the boundary (no heap aliasing). A `bytes` only:
+    /// every seam param is typed `bytes`, and a `bytearray` is NOT assignable to a `bytes` sink
+    /// (commit 7b29552 — a mutable buffer aliased as immutable `bytes` is the hole that rule closes);
+    /// a caller converts with `bytes(ba)`, exactly as in CPython. Anything else is an arg-type error.
+    /// The default returns a "no bytes args" error so a host that never passes binary data (the
+    /// std-module test fixtures, the FFI callback host) needn't implement it.
     fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, HostError> {
         let _ = i;
         Err(HostError {

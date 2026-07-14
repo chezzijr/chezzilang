@@ -17966,3 +17966,42 @@ fn range_sanctioned_positions_still_check() {
         "fn main():\n    xs: List[int] = range(0, 3)\n    print(Set(range(0, 3)).len() + xs.len())\nmain()\n",
     );
 }
+
+/// R1 — the bytes native seam is `bytes`-ONLY at every param. A `bytearray` is NOT assignable to a
+/// `bytes` sink (the deliberate rule from 7b29552 — `bytearray_not_assignable_to_bytes`; a mutable
+/// buffer aliased under an immutable `bytes` type is the hole it closes), so a caller converts with
+/// `bytes(ba)` — an explicit copy, exactly like CPython's `bytes(ba)`. This pins the rule ACROSS the
+/// new seam (io / crypto / encoding / Socket), which is what the shipped doc comments now say.
+#[test]
+fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
+    for (call, what) in [
+        ("crypto.sha256_bytes(ba)", "sha256_bytes"),
+        ("encoding.base64_encode_bytes(ba)", "base64_encode_bytes"),
+        ("io.write_bytes(\"/dev/null\", ba)", "write_bytes"),
+    ] {
+        let errs = check_entry(&format!(
+            "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print({call})\nmain()\n"
+        ));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("expected bytes, found bytearray")),
+            "{what} must reject a bytearray, got: {errs:?}"
+        );
+    }
+    // Socket.write_bytes too (the same rule on the VM-intercepted method sig).
+    let errs = check_entry(
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(ba)?\n    return Ok(n)\n\nfn main():\n    pass\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected bytes, found bytearray")),
+        "Socket.write_bytes must reject a bytearray, got: {errs:?}"
+    );
+    // …and `bytes(ba)` is the documented convert — it type-checks everywhere the seam takes bytes.
+    entry_ok(
+        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print(crypto.sha256_bytes(bytes(ba)))\n    print(encoding.base64_encode_bytes(bytes(ba)))\n    match io.write_bytes(\"/dev/null\", bytes(ba)):\n        Ok(_): pass\n        Err(e): print(e.message())\nmain()\n",
+    );
+    entry_ok(
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(bytes(ba))?\n    return Ok(n)\n\nfn main():\n    pass\nmain()\n",
+    );
+}

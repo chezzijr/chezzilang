@@ -4760,7 +4760,9 @@ branch names) is in the git log.
   `str`-only, so **no native fn could accept or return them**. Widened in three places
   (`src/native/mod.rs`): `NativeRet::Bytes(Vec<u8>)` (lowered in `Vm::lower_native` to `Obj::Bytes` —
   the immutable form; a caller wanting mutation writes `bytearray(b)`), a defaulted-to-error
-  `Host::arg_bytes` (implemented on `VmHost`, accepting a `bytes` OR a `bytearray` — Python parity),
+  `Host::arg_bytes` (implemented on `VmHost`; `bytes`-ONLY — a `bytearray` is not assignable to a
+  `bytes` sink (7b29552: a mutable buffer aliased as immutable `bytes` is the hole that rule closes),
+  so a caller converts with `bytes(ba)`, an explicit copy exactly like CPython's `bytes(ba)`),
   and `NativeArg::Bytes` + `OffloadHost::arg_bytes` so a **blocking** bytes native still offloads to
   the dirty pool instead of pinning a core worker (D5). No new type, no heap obj, no GC/airlock work.
   `value_to_native_ret` deliberately gets no bytes arm (it writes C's return register; the checker

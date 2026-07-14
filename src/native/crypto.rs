@@ -183,7 +183,7 @@ fn sha256(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(to_hex(&sha256_digest(s.as_bytes()))))
 }
 
-/// R1 — SHA-256 of raw `bytes` (or a `bytearray`): hashing binary data (a file read through
+/// R1 — SHA-256 of raw `bytes`: hashing binary data (a file read through
 /// `io.read_bytes`, a socket payload) without a lossy UTF-8 detour.
 fn sha256_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "sha256_bytes", 1)?;

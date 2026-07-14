@@ -12738,8 +12738,16 @@ print(f())
 
 /// Run a std-module-importing program on BOTH engines (a `import std.*` program needs the resolver,
 /// so it runs from a file) and assert identical stdout.
+///
+/// TYPE-CHECKS FIRST — `run_file`/`run_file_p` are resolve → compile → run and skip `check_graph`
+/// (the known test-helper-vs-CLI divergence), so without this gate a test could assert a program
+/// green that `chezzi run` rejects outright. Every R1 program here is what the CLI would run.
 fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
     let entry = write_temp_chz(tag, src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        panic!("program must type-check ({tag}), got: {errs:?}");
+    }
     let (out, _e, res, _c) = run_file(&entry);
     assert!(res.is_ok(), "serial VM faulted: {res:?}");
     assert_eq!(out, expected, "serial VM");
@@ -12771,17 +12779,19 @@ main()
     assert_mc_parity_file("r1_ret_bytes", src, "3\n0\n255\nok\n");
 }
 
-/// R1 step 2 — `Host::arg_bytes` accepts BOTH `bytes` and `bytearray` (Python parity: binary APIs
-/// take either).
+/// R1 step 2 — `Host::arg_bytes` carries a `bytes` arg across the seam. The seam is `bytes`-ONLY: a
+/// `bytearray` buffer is converted with `bytes(ba)` (checker rule 7b29552, pinned by
+/// `checker::tests::bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert`), and that
+/// converted buffer hashes to the same digest as the literal.
 #[test]
-fn host_arg_bytes_accepts_bytes_and_bytearray() {
+fn host_arg_bytes_accepts_bytes_and_a_converted_bytearray() {
     let src = "\
 import std.crypto
 import std.encoding
 
 fn main():
     print(crypto.sha256_bytes(b\"abc\"))
-    print(crypto.sha256_bytes(bytearray(b\"abc\")))
+    print(crypto.sha256_bytes(bytes(bytearray(b\"abc\"))))
     print(encoding.base64_encode_bytes(b\"\\x00\\xff\"))
 main()
 ";
@@ -12789,28 +12799,38 @@ main()
     assert_mc_parity_file("r1_arg_bytes", src, &format!("{d}\n{d}\nAP8=\n"));
 }
 
-/// R1 step 2 — a non-bytes arg to a bytes-taking native is a recoverable typed fault.
+/// R1 step 2 — a non-bytes arg to a bytes-taking native. In real code this is a CHECK-time error
+/// (the param is typed `bytes`; the assignability rule is pinned by
+/// `checker::tests::bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert`), so the
+/// seam's runtime arg-type fault is pinned DIRECTLY on `VmHost`
+/// rather than through a .chz program that could never compile.
 #[test]
 fn host_arg_bytes_rejects_non_bytes() {
-    let src = "\
-import std.crypto
-
-fn main():
-    r := recover:
-        crypto.sha256_bytes(7)
-    match r:
-        Ok(v): print(\"ok \" + v)
-        Err(e): print(e.message())
-main()
-";
-    let entry = write_temp_chz("r1_arg_bytes_bad", src);
-    let (out, _e, _res, _c) = run_file(&entry);
+    use crate::native::Host;
+    let entry = write_temp_chz(
+        "r1_arg_bytes_bad",
+        "import std.crypto\n\nfn main():\n    print(crypto.sha256_bytes(7))\nmain()\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let errs =
+        crate::checker::check_graph(&graph).expect_err("a non-bytes arg must not type-check");
     let _ = std::fs::remove_file(&entry);
-    assert!(out.contains("must be bytes"), "{out:?}");
-    assert!(out.contains("int"), "{out:?}");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected bytes, found int")),
+        "{errs:?}"
+    );
+
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let mut host = VmHost {
+        vm: &mut vm,
+        args: vec![Value::Int(7)],
+    };
+    let err = host.arg_bytes(0).expect_err("int is not bytes");
+    assert_eq!(err.message, "argument 0 must be bytes, got int");
 }
 
-/// R1 step 3 — `Vm::extract_native_args` carries a bytes/bytearray arg across the D5 off-heap
+/// R1 step 3 — `Vm::extract_native_args` carries a `bytes` arg across the D5 off-heap
 /// handoff (without this NO blocking native can take a bytes arg: extraction returns `None`, the
 /// call silently runs INLINE and pins a core worker — invisible black-box, hence this direct test).
 #[test]
@@ -12818,11 +12838,14 @@ fn extract_native_args_carries_bytes() {
     use crate::native::NativeArg as A;
     let mut vm = Vm::new(Arc::new(empty_program()));
     let b = Value::Obj(vm.heap.alloc(Obj::Bytes(vec![0u8, 255].into_boxed_slice())));
-    let ba = Value::Obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
     assert_eq!(
-        vm.extract_native_args(&[b, ba]),
-        Some(vec![A::Bytes(vec![0, 255]), A::Bytes(vec![1, 2])])
+        vm.extract_native_args(&[b, Value::Int(3)]),
+        Some(vec![A::Bytes(vec![0, 255]), A::Int(3)])
     );
+    // A `bytearray` is NOT a seam arg (the checker rejects it at a `bytes` param): extraction bails
+    // to `None` → the call would run inline, never off-heap with a stale copy of a mutable buffer.
+    let ba = Value::Obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
+    assert_eq!(vm.extract_native_args(&[ba]), None);
 }
 
 /// R1 step 3 — the off-heap host SERVES a pre-extracted bytes arg (leaving it on the trait default

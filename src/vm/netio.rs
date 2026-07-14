@@ -751,8 +751,8 @@ impl Vm {
                 }
                 r
             }
-            // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw bytes /
-            // bytearray) are the SAME write path — only the byte-extraction differs.
+            // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw `bytes`)
+            // are the SAME write path — only the byte-extraction differs.
             "write" | "write_bytes" => {
                 // The optional trailing int bounds writability.
                 self.arity_range_err(method, args, 1, 2, span)?;

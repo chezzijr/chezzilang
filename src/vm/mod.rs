@@ -3008,14 +3008,13 @@ impl crate::native::Host for VmHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
-    /// R1 — a `bytes` OR a `bytearray` arg, copied out of the heap (Python parity: binary APIs take
-    /// either). It does NOT accept a `list[int]` — that is a `bytes()`-ctor convenience, not a seam
-    /// contract; the checker types the param `bytes`.
+    /// R1 — a `bytes` arg, copied out of the heap (no aliasing). `bytes` ONLY: the checker types every
+    /// seam param `bytes`, and neither a `bytearray` (not assignable to a `bytes` sink — 7b29552) nor a
+    /// `list[int]` (a `bytes()`-ctor convenience, not a seam contract) can reach here from typed code.
     fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
         match self.args.get(i) {
             Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
                 Obj::Bytes(b) => Ok(b.to_vec()),
-                Obj::ByteArray(b) => Ok(b.clone()),
                 _ => {
                     let got = self.vm.type_name(self.args[i]);
                     Err(crate::native::HostError::arg_type(i, "bytes", got))

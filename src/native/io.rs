@@ -100,7 +100,7 @@ fn read_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-/// R1 — write raw `bytes` (or a `bytearray`) to a file. No size cap, matching `write_file` (the cap
+/// R1 — write raw `bytes` to a file. No size cap, matching `write_file` (the cap
 /// is read-side only: the writer already holds the data in memory).
 fn write_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "write_bytes", 2)?;

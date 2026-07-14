@@ -33,7 +33,7 @@
 # `n + 3`), `Ok(b"")` at EOF, and it DRAINS any carried tail FIRST — including the undecodable bytes a
 # str `read`'s sticky `Err("invalid utf-8 …")` refused to deliver. So a caller that hits that Err can
 # switch to `read_bytes` and recover the exact bytes instead of having to `close()`. `write_bytes`
-# takes a `bytes` or a `bytearray`.
+# takes a `bytes`; convert a `bytearray` buffer with `bytes(ba)`.
 #
 # `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`Err("timeout")` if no data /
 # not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a
