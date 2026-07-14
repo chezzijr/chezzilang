@@ -10,4 +10,7 @@
 # `str` (infallible).
 
 native fn sha256(s: str) -> str
+# SHA-256 of raw binary data — e.g. io.read_bytes(p) |> sha256_bytes. Takes a `bytes`; convert a
+# `bytearray` buffer with `bytes(ba)`.
+native fn sha256_bytes(b: bytes) -> str
 native fn md5(s: str) -> str

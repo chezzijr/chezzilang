@@ -326,6 +326,10 @@ impl Vm {
                 Value::Bool(b) => Some(A::Bool(*b)),
                 Value::Obj(h) => match self.heap.get(*h) {
                     Obj::Str(s) => Some(A::Str(s.to_string())),
+                    // R1 — a binary arg (today `io.write_bytes`): copied out so it survives the
+                    // off-heap handoff. `bytes` only — the checker types every seam param `bytes`
+                    // and a `bytearray` is not assignable to it (`bytes(ba)` converts).
+                    Obj::Bytes(b) => Some(A::Bytes(b.to_vec())),
                     // A `Map[str, str]` arg (today only `request`'s headers) is snapshotted into
                     // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
                     // to `None` → run inline (safe fallback; the checker guarantees str/str for
@@ -376,6 +380,10 @@ impl Vm {
     /// only: a callback return is checker-restricted to int/float/bool/ptr). A non-scalar is a
     /// checker-prevented case; default to `Int(0)` defensively (the trampoline then writes a zeroed
     /// register, never UB).
+    ///
+    /// R1: deliberately NO `bytes` arm. This maps a value into C's *return register* — there is no C
+    /// return repr for a byte buffer, and the checker rejects a non-scalar callback return, so a
+    /// `Bytes` arm here would be unreachable dead code.
     pub(super) fn value_to_native_ret(&self, v: Value) -> crate::native::NativeRet {
         use crate::native::NativeRet as N;
         match v {
@@ -399,6 +407,7 @@ impl Vm {
             N::Nil => Value::Nil,
             N::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
             N::Str(s) => self.alloc_str(s),
+            N::Bytes(b) => Value::Obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice()))),
             N::List(items) => {
                 let mut vs = Vec::with_capacity(items.len());
                 for x in items {

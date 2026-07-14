@@ -13,7 +13,7 @@ work already done.
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
-### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0 — **MITIGATED (not fixed)**
+### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0 — **FIXED (2026-07-14, R1)**
 `src/vm/netio.rs:315` and `:360` did `String::from_utf8_lossy(&buf)`, and `std/net.chz` types the
 method `read(self, n: int, ...) -> Result[str]`. So the socket seam **had to** lossily decode. Two
 failures, both silent — no `Err`, no fault, just wrong data:
@@ -54,9 +54,15 @@ The two failure modes are now separated, exactly as `Utf8Error` separates them:
   wearing an `Err`.) An incomplete codepoint left when the peer closes is likewise
   `Err("invalid utf-8 at eof: …")`, never a silent drop.
 
-**Still not fixed:** you *cannot read binary over a socket*. The honest fix remains **R1** (a `bytes`
-native seam) + `Socket.read_bytes`/`write_bytes`. B1 stays open, downgraded from *silent corruption* to
-*a clear, recoverable limitation*.
+**FIXED (2026-07-14) — R1 landed the honest fix.** `Socket.read_bytes(n[, timeout_ms]) -> Result[bytes]`
+and `Socket.write_bytes(b[, timeout_ms]) -> Result[int]` (`src/vm/netio.rs`, declared in `std/net.chz`):
+they never decode, so **binary sockets work byte-exactly**. `read_bytes(n)` returns AT MOST `n` bytes
+(the natural byte contract — the str `read`'s `n` bounds only the NEW fd bytes, hence its `n + 3`), `Ok(b"")`
+is the EOF sentinel, and it **drains the carry first** — so the undecodable bytes the str `read`'s sticky
+`Err` refused to deliver are recovered here instead of forcing a `close()`. The str `read` keeps its
+documented decode contract, unchanged (`read_bytes` is purely additive).
+**What remains is not a defect:** the caller must pick the right method — a `str` seam cannot hand back
+bytes that are not UTF-8, and it now says so and points at `read_bytes`.
 
 ### B2. `==` between disjoint types type-checks (a proposed tightening, not a clear bug)
 `1 == "a"` compiles and evaluates to `false` (`src/checker/pattern.rs`, the `Eq | NotEq` arm returns
@@ -72,23 +78,34 @@ docs as a deliberate, explained divergence from Python's runtime.
 These are the entries that were previously scattered as unrelated one-liners. Ranked by how much they
 unblock.
 
-### R1. The native seam cannot carry `bytes` — **the highest-leverage item in the backlog**
-`bytes`/`bytearray` exist in the language, but `NativeRet` has no `Bytes` variant and `Host` has no
-`arg_bytes` (`src/native/mod.rs`), so **no native fn can accept or return them**. Everything below is
-the same missing seam, and each was filed separately as if it were its own feature:
-- no binary file read/write (`read_bytes`/`write_bytes`) — filed under *IO/files*
-- no gzip/zlib, no arbitrary-bytes base64 round-trip — filed under *Crypto/encoding*
-- no binary sockets, so no binary HTTP body, no image upload/download — filed under *Net* (and it is
-  the root of **B1**, whose mitigation now returns a clear `Err` there — R1 is what makes it *work*)
-- no `sha256` of a file, no hashing of binary data — filed under *Crypto*
+### R1. The native seam cannot carry `bytes` — **DONE (2026-07-14)**
+`bytes`/`bytearray` existed in the language, but `NativeRet` had no `Bytes` variant and `Host` no
+`arg_bytes` (`src/native/mod.rs`), so **no native fn could accept or return them**. Landed as a seam
+expansion (no new type, no heap obj, no GC/airlock work — they already shipped below the seam):
+`NativeRet::Bytes` (lowered by `Vm::lower_native` to the immutable `Obj::Bytes`), a defaulted-to-error
+`Host::arg_bytes` (on `VmHost`: `bytes`-only — a `bytearray` is not assignable to a `bytes` sink
+(7b29552), so a built-up buffer is passed as `bytes(ba)`, the explicit copy CPython also makes), and
+`NativeArg::Bytes` + `OffloadHost::arg_bytes` so a *blocking* bytes native still offloads to the dirty
+pool instead of pinning a core worker (D5). `value_to_native_ret` gets no bytes arm on purpose (it fills
+C's return register; a callback return is checker-restricted to C scalars).
+Consumers wired, and the gaps that were filed separately as if each were its own feature:
+- binary file read/write → **DONE**: `io.read_bytes(path) -> Result[bytes]` / `io.write_bytes(path, b) ->
+  Result[nil]` (`read_file` decodes UTF-8, so it hard-failed on any binary file — it now errs with
+  `use io.read_bytes for binary files`). Same 64 MB read cap; `write_bytes` uncapped, like `write_file`.
+- arbitrary-bytes base64 round-trip → **DONE**: `encoding.base64_encode_bytes` / `base64_decode_bytes`.
+  gzip/zlib → **still open** (a new dependency, not a seam gap).
+- binary sockets → **DONE**: `Socket.read_bytes` / `write_bytes` — this is the fix for **B1** (above).
+  A hand-rolled HTTP server can now accept an image.
+- `sha256` of a file / hashing binary data → **DONE**: `crypto.sha256_bytes(b)` over `io.read_bytes(p)`.
 - `std.request` cannot fetch a non-text body (`src/native/request.rs:62` → `into_string()`), i.e.
-  **"download a file" is impossible** — filed nowhere
-**Size:** one enum variant + one trait method + two engine lowerings. A *seam expansion*, not a
-subsystem. Python's `bytes` and Go's `[]byte` are the primary IO currency in both languages; Chezzi's
-IO is text-only by accident of the seam, not by design.
+  **"download a file" is still impossible** → **still open, and it never was an R1 gap**: it needs
+  reader plumbing + a `Response.body` type change inside `std.request`. Its own (small) task.
 
-### R2. There is no `Writer` / file-handle type — so no buffering, no streaming, no binary write
-Files are whole-string ≤64 MB (`std.fs`); there is no `io.Writer`-equivalent anywhere. Consequences:
+### R2. There is no `Writer` / file-handle type — so no buffering, no streaming
+Files are read/written **whole** — `std.io`'s `read_file`/`read_bytes` cap the read at 64 MB
+(`MAX_READ_FILE_BYTES`, `src/native/io.rs`; the write side is uncapped). (`std.fs` has **no file-content
+API at all** — only metadata + mutations, `std/fs.chz`.) There is no `io.Writer`-equivalent anywhere.
+Binary whole-file write landed with R1 (`io.write_bytes`); what R2 owes is *handles*. Consequences:
 - **You cannot opt into buffered output.** Every `print` is one `Msg::Write` → one `write_all` +
   `flush` (`src/vm/stream.rs`), i.e. **one syscall per print, with no way out**. `io.flush()` is a
   genuine no-op (`Host::flush_stdout` is a defaulted no-op, `src/native/mod.rs`).
@@ -103,9 +120,10 @@ Files are whole-string ≤64 MB (`std.fs`); there is no `io.Writer`-equivalent a
 `buffered(w, size)` wrapper. Buffering then becomes *a value you hold*, not a global mode — and
 `io.flush()` keeps its honest no-op meaning for the process's (unbuffered) stdout. Lands together with
 R1 and with file handles: **one milestone, not three.**
-**Known ceiling, unmapped until now:** the stream queue is **unbounded** (`src/vm/stream.rs`) — a
-program printing faster than a stalled consumer drains grows memory without limit. Deliberate (never
-pin a core worker), but it is a real ceiling; bounded `sync_channel` is the upgrade.
+**Known ceiling (mapped in-tree):** the stream queue is **unbounded** (`src/vm/stream.rs:26-27`, a
+`ponytail:` comment naming the same upgrade path) — a program printing faster than a stalled consumer
+drains grows memory without limit. Deliberate (never pin a core worker), but it is a real ceiling;
+bounded `sync_channel` is the upgrade.
 
 ### R3. No package manager — **the wall that keeps Chezzi author-only**
 `Manifest` is `{name, version, entrypoint}` (`src/manifest.rs`) and the parser **silently ignores**
@@ -243,8 +261,8 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`
   and `io.input(prompt)` exist, and a prompt appears before its blocking read.
 - **No way to BUFFER output** (R2). Unbuffered always, one syscall per `print`, `io.flush()` inert.
-- Files are **whole-string ≤64 MB only** — no file handles, no line-streaming, no `read_bytes` /
-  `write_bytes` (binary). Needs R1 + R2 (one milestone).
+- Files are **whole-file only** (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes`
+  uncapped) — binary IO landed with R1; what is still missing is **file handles + line-streaming** (R2).
 - Read-all-stdin; char read.
 - fs: no `canonicalize`/`realpath` (`path.normalize` is purely lexical — no symlink resolution), no
   `chmod`/executable bit, no atomic write (write-temp + rename).
@@ -274,10 +292,12 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   metadata (mtime / permissions / size-struct).
 
 ### 7. Crypto / encoding
-- crypto: only `sha256` / `md5`. Missing `sha1` / `sha512`, **`hmac`**, secure-random-bytes / token,
+- crypto: `sha256` / `sha256_bytes` (R1: hash binary data / a file) / `md5`. Missing `sha1` / `sha512`,
+  **`hmac`**, secure-random-bytes / token,
   password hashing (bcrypt/argon2). All hand-rolled zero-dep today, so each is real work.
-- encoding: no gzip / zlib, no CSV. No arbitrary-**bytes** round-trip → **this is R1**, not an encoding
-  gap. Hashing a *file* is blocked by the same seam.
+- encoding: no gzip / zlib (new dependency), no CSV. Arbitrary-**bytes** base64 round-trip →
+  **DONE (R1)** (`base64_encode_bytes`/`base64_decode_bytes`); hashing a *file* → **DONE (R1)**
+  (`io.read_bytes` + `crypto.sha256_bytes`). Not added: hex / URL-safe bytes twins (~6 lines each, on demand).
 - **URL parsing is the missing half of an already-built module**: `url_encode` / `url_decode` /
   `query_encode` exist — but **no `query_decode`** (query string → `Map[str,str]`) and no `url_parse`
   (scheme/host/port/path/query). You can build a query string and not read one back. Blocks anything
@@ -288,11 +308,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   exposed, no raw TLS socket (`request` does HTTPS internally via ureq). Also missing: unix-domain
   sockets, `shutdown()` half-close, socket options (`set_nodelay`, `SO_REUSEADDR`, keepalive),
   `Socket.peer_addr()`.
-- **The HTTP-server blocker is not "no framework"** — you *can* hand-roll one on `listen`/`accept`/
-  `read`/`write`. It is that the socket seam is **`str`-only**, so a hand-rolled server can serve JSON
-  and cannot accept an image. That is **R1**. It was also **B1** (silent corruption); since the B1
-  mitigation an image is a clear `Err("invalid utf-8 on the socket: …")` instead of U+FFFD garbage, and
-  split-codepoint text now reassembles exactly — but binary still needs R1.
+- **The HTTP-server blocker was not "no framework"** — you *can* hand-roll one on `listen`/`accept`/
+  `read`/`write`. The blocker was that the socket seam was **`str`-only**, so a hand-rolled server could
+  serve JSON and could not accept an image. **FIXED by R1** (`Socket.read_bytes`/`write_bytes`, 2026-07-14):
+  binary sockets work byte-exactly. Missing HTTP *fetch* of a binary body is a separate, `std.request`-side
+  gap (`into_string()`), not a socket one.
 - **`std.net` requires the M:N engine**: off it, a would-block op returns `Err("read would block:
   std.net sockets require the --parallel engine")` (`src/vm/netio.rs`). So the same TCP program behaves
   differently on `--serial` vs the default engine. This is an *accepted design fallback*, not a bug —

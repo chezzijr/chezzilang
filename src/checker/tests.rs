@@ -6387,7 +6387,14 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(io.functions.get("input").unwrap().params, vec![Ty::Str]);
     assert_eq!(io.functions.get("input").unwrap().ret, Ty::option(Ty::Str));
     assert_eq!(io.functions.get("flush").unwrap().ret, Ty::Nil);
-    assert_eq!(io.functions.len(), 7);
+    // R1 — the binary whole-file twins.
+    let read_bytes = io.functions.get("read_bytes").expect("io.read_bytes");
+    assert_eq!(read_bytes.params, vec![Ty::Str]);
+    assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
+    let write_bytes = io.functions.get("write_bytes").expect("io.write_bytes");
+    assert_eq!(write_bytes.params, vec![Ty::Str, Ty::Bytes]);
+    assert_eq!(write_bytes.ret, Ty::result(Ty::Nil));
+    assert_eq!(io.functions.len(), 9);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6444,7 +6451,7 @@ fn math_io_os_fn_hover_doc_preserved() {
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 21);
-    assert_eq!(crate::native::native_members("std.io").len(), 7);
+    assert_eq!(crate::native::native_members("std.io").len(), 9);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 12);
@@ -6488,7 +6495,17 @@ fn net_sig_from_file_not_native_module_sig() {
         .expect("net.Socket struct_def");
     let mut smeths: Vec<&str> = socket.methods.keys().map(String::as_str).collect();
     smeths.sort();
-    assert_eq!(smeths, ["close", "read", "write"]);
+    assert_eq!(
+        smeths,
+        ["close", "read", "read_bytes", "write", "write_bytes"]
+    );
+    // R1 — the binary twins: `read_bytes -> Result[bytes]`, `write_bytes(bytes) -> Result[int]`.
+    let read_bytes = socket.methods.get("read_bytes").unwrap();
+    assert_eq!(read_bytes.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
+    let write_bytes = socket.methods.get("write_bytes").unwrap();
+    assert_eq!(write_bytes.params, vec![Ty::Bytes, Ty::Int]);
+    assert_eq!(write_bytes.ret, Ty::result(Ty::Int));
     // read/write are optional-tail (the trailing `timeout_ms`); close is nil.
     let read = socket.methods.get("read").unwrap();
     assert_eq!(read.params, vec![Ty::Int, Ty::Int]);
@@ -6778,6 +6795,8 @@ fn enc_fn_sigs_exact() {
         ("base64_encode_url", vec![Ty::Str], Ty::Str),
         ("base64_decode", vec![Ty::Str], Ty::result(Ty::Str)),
         ("base64_decode_url", vec![Ty::Str], Ty::result(Ty::Str)),
+        ("base64_encode_bytes", vec![Ty::Bytes], Ty::Str),
+        ("base64_decode_bytes", vec![Ty::Str], Ty::result(Ty::Bytes)),
         ("hex_encode", vec![Ty::Str], Ty::Str),
         ("hex_decode", vec![Ty::Str], Ty::result(Ty::Str)),
         ("url_encode", vec![Ty::Str], Ty::Str),
@@ -7050,6 +7069,7 @@ fn crypto_fn_sigs_exact() {
     let sig = native_module_sig_via_graph("crypto");
     let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
         ("sha256", vec![Ty::Str], Ty::Str),
+        ("sha256_bytes", vec![Ty::Bytes], Ty::Str),
         ("md5", vec![Ty::Str], Ty::Str),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");
@@ -17944,5 +17964,44 @@ fn range_sanctioned_positions_still_check() {
     // the documented escape hatch: `range(a, b)` really does materialize a `List[int]`.
     entry_ok(
         "fn main():\n    xs: List[int] = range(0, 3)\n    print(Set(range(0, 3)).len() + xs.len())\nmain()\n",
+    );
+}
+
+/// R1 — the bytes native seam is `bytes`-ONLY at every param. A `bytearray` is NOT assignable to a
+/// `bytes` sink (the deliberate rule from 7b29552 — `bytearray_not_assignable_to_bytes`; a mutable
+/// buffer aliased under an immutable `bytes` type is the hole it closes), so a caller converts with
+/// `bytes(ba)` — an explicit copy, exactly like CPython's `bytes(ba)`. This pins the rule ACROSS the
+/// new seam (io / crypto / encoding / Socket), which is what the shipped doc comments now say.
+#[test]
+fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
+    for (call, what) in [
+        ("crypto.sha256_bytes(ba)", "sha256_bytes"),
+        ("encoding.base64_encode_bytes(ba)", "base64_encode_bytes"),
+        ("io.write_bytes(\"/dev/null\", ba)", "write_bytes"),
+    ] {
+        let errs = check_entry(&format!(
+            "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print({call})\nmain()\n"
+        ));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("expected bytes, found bytearray")),
+            "{what} must reject a bytearray, got: {errs:?}"
+        );
+    }
+    // Socket.write_bytes too (the same rule on the VM-intercepted method sig).
+    let errs = check_entry(
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(ba)?\n    return Ok(n)\n\nfn main():\n    pass\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected bytes, found bytearray")),
+        "Socket.write_bytes must reject a bytearray, got: {errs:?}"
+    );
+    // …and `bytes(ba)` is the documented convert — it type-checks everywhere the seam takes bytes.
+    entry_ok(
+        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print(crypto.sha256_bytes(bytes(ba)))\n    print(encoding.base64_encode_bytes(bytes(ba)))\n    match io.write_bytes(\"/dev/null\", bytes(ba)):\n        Ok(_): pass\n        Err(e): print(e.message())\nmain()\n",
+    );
+    entry_ok(
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(bytes(ba))?\n    return Ok(n)\n\nfn main():\n    pass\nmain()\n",
     );
 }

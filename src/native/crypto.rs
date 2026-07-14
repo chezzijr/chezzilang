@@ -183,6 +183,14 @@ fn sha256(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(to_hex(&sha256_digest(s.as_bytes()))))
 }
 
+/// R1 — SHA-256 of raw `bytes`: hashing binary data (a file read through
+/// `io.read_bytes`, a socket payload) without a lossy UTF-8 detour.
+fn sha256_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "sha256_bytes", 1)?;
+    let b = h.arg_bytes(0)?;
+    Ok(NativeRet::Str(to_hex(&sha256_digest(&b))))
+}
+
 fn md5(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "md5", 1)?;
     let s = h.arg_str(0)?;
@@ -190,7 +198,11 @@ fn md5(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// Callable members. `(name, fn)`.
-pub const MEMBERS: &[(&str, NativeFn)] = &[("sha256", sha256), ("md5", md5)];
+pub const MEMBERS: &[(&str, NativeFn)] = &[
+    ("sha256", sha256),
+    ("sha256_bytes", sha256_bytes),
+    ("md5", md5),
+];
 
 #[cfg(test)]
 mod tests {
