@@ -907,11 +907,22 @@ impl Vm {
         let Some(sched) = self.mn_enlist_sched.clone() else {
             return;
         };
-        // Draining (cancelling) this scope, not feeding it — clear `awaiting_builder` so the cancel
-        // quiesce is observed promptly rather than vetoed. (Cross-nursery flat scheduler — #1/#2.)
-        sched.lock().scopes[scope_id].awaiting_builder = false;
-        let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
-        cancel.store(true, Ordering::Relaxed);
+        // N4 — ARM the cancel-teardown veto BEFORE clearing `awaiting_builder` (which is the veto that
+        // has been holding the deadlock predicate off this scope): a GAPLESS handoff. Clearing first —
+        // as this did — leaves a window in which the scope has NEITHER veto, and an idle worker's
+        // `take_runnable` landing in it sees the quiesce (`running == 0` — the inline builder is not
+        // counted — `runnable == 0`, `parked_n > 0`) and declares a spurious DEADLOCK, whose
+        // `flag_deadlock` DROPS this scope's parked fibers without `unwind_deferred` (their `defer`s
+        // never run) and reaps every OTHER scope's parked fibers too (it sets global `terminate`).
+        // `trip_scope_cancel` stores under the core lock, so the flag is published to any worker that
+        // takes that lock to evaluate the predicate. THEN clear `awaiting_builder` so the cancel quiesce
+        // is observed promptly rather than vetoed. (Cross-nursery flat scheduler — #1/#2.)
+        sched.trip_scope_cancel(scope_id);
+        let cancel = {
+            let mut c = sched.lock();
+            c.scopes[scope_id].awaiting_builder = false;
+            Arc::clone(&c.scopes[scope_id].cancel)
+        };
         sched.cancel_drain(scope_id);
         poller::drain_sched(&sched);
         // Worker-shell / memo early-return (the snapshot was already built at the outermost nursery,
@@ -1021,7 +1032,13 @@ impl Vm {
             drainer,
             ..
         } = scope;
-        cancel.store(true, Ordering::Relaxed);
+        // N4 — trip the cancel UNDER the core lock (`trip_scope_cancel`, scope 0 = the eager scope, whose
+        // `JoinScope::cancel` IS this `cancel` Arc) and BEFORE `close_body` clears the `any_body_open`
+        // veto: gapless veto handoff, and the store is published to any worker that takes the core lock
+        // to evaluate the deadlock predicate (a bare `Relaxed` store outside the lock has no
+        // synchronizes-with edge, so a worker could read a stale `false` and reap this scope's parked
+        // handlers as `Deadlocked` — dropping them without `unwind_deferred`, skipping their `defer`s).
+        sched.trip_scope_cancel(0);
         sched.close_body(0);
         sched.cancel_drain(0);
         poller::drain_sched(&sched);
@@ -1762,15 +1779,31 @@ impl Vm {
                 Disp::Finish(self.classify_mn_outcome(res))
             }
         }))
-        .unwrap_or_else(|p| {
-            Disp::Finish(TaskOutcome::Fault {
-                err: panic_to_fault(p, span),
-                out: String::new(),
-                stderr: String::new(),
-            })
-        });
+        .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
         self.swap_ctx(&mut fiber.ctx);
         disp
+    }
+
+    /// D2b — a worker-VM PANIC (a VM `unwrap`/index bug, a panicking native/FFI callback) became this
+    /// fiber's outcome. It never reached [`Vm::classify_mn_outcome`], so this is the ONLY place that can
+    /// trip the fiber's SCOPE cancel on that path — and it MUST: `mn_worker_loop` treats a `Fault` as an
+    /// abort and calls `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv`
+    /// and PARKS AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
+    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s never
+    /// run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked). The trip is
+    /// program-ordered before `finish`'s lock release, which publishes it (see `trip_scope_cancel`).
+    /// `self.cancel` is the RUNNING fiber's scope cancel (re-pointed at every `swap_ctx` in).
+    pub(super) fn panic_outcome(
+        &mut self,
+        p: Box<dyn std::any::Any + Send>,
+        span: Span,
+    ) -> TaskOutcome {
+        self.trip_cancel();
+        TaskOutcome::Fault {
+            err: panic_to_fault(p, span),
+            out: String::new(),
+            stderr: String::new(),
+        }
     }
 
     /// D2b — classify a finished fiber's run into a [`TaskOutcome`] (the M:N analogue of

@@ -4765,11 +4765,23 @@ branch names) is in the git log.
   file, an unreleased lock, silently). Fixed with a **cancel-teardown veto** in `MnSched::is_deadlocked`
   (`SchedCore::any_incomplete_scope_cancelled`): a scope with `cancel` set and `done < total` is
   mid-teardown, not deadlocked. Put at the predicate, not at the one seam that reported it, because
-  **four** seams trip a cancel and drain in a later lock acquisition. Transient by construction (park/
-  park_wait/poller-register all refuse to park a cancelled fiber, and every trip is followed by a
-  notifying `cancel_drain`), so it can never become a hang; genuine deadlock detection is untouched.
-  `parallel_defer_runs_on_cancelled_sibling`: **35/200 failures → 0/200** under CPU contention; the
-  invariant itself is pinned by `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock`.
+  **three** seams trip a cancel and drain in a later lock acquisition. The veto alone was not enough —
+  the two abort seams (`abort_enlisted_scope`, `abort_eager_nursery`) *cleared their own* deadlock veto
+  (`awaiting_builder` / `body_open`) before arming this one, so they now trip the cancel FIRST
+  (`MnSched::trip_scope_cancel`, a store **under the core lock** — a bare `Relaxed` store outside it had
+  no synchronizes-with edge to the worker evaluating the predicate). Two more holes in the same
+  invariant, both fixed here: the **panic-fault** path (a worker-VM panic → `Vm::panic_outcome`) never
+  tripped the cancel at all, so the requeued siblings re-parked and the scope quiesced *uncancelled*;
+  and the netpoller's `register` gated the park on the **outermost** nursery's flag, so a fiber of a
+  cancelled INNER scope could park on an already-swept poller (which would have made the veto permanent
+  → deadlock detection disabled sched-wide) — `poll_park_offload` now hands it the per-scope cancel, and
+  the dead sched-level `MnSched::cancel` field is deleted. Transient by construction (park/park_wait/
+  poller-register all refuse to park a cancelled fiber, and every trip is followed by a notifying
+  `cancel_drain`), so it can never become a hang; genuine deadlock detection is untouched.
+  `parallel_defer_runs_on_cancelled_sibling`: **14/200 failures → 0/200** under CPU contention (35/200 on a busier box);
+  `parallel_defer_runs_when_enlisted_nursery_escapes` covers the escaped-enlisted-nursery seam; the
+  invariants are pinned by `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock`,
+  `panic_fault_trips_the_scope_cancel` and `poll_park_rejects_cancelled_inner_scope`.
   See `docs/gaps.md` **N4**. Two related holes found while verifying it, both pre-existing, both left
   open with their own entries: **N5** (a GENUINE deadlock also tears parked fibers down without
   `unwind_deferred`, so it skips `defer`s too — but both engines agree, so it is a known limit, not a

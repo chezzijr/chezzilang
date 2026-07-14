@@ -1372,10 +1372,11 @@ enum ParkedEntry {
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
-    /// B3.4 — the shared cancel flag (same token cloned onto every enlisted shell). Read under the
-    /// core lock by [`MnSched::park`] to close the park-vs-cancel gap: a fiber must not park if cancel
-    /// was tripped after its `recv` empty-check but before it actually parks.
-    cancel: Arc<AtomicBool>,
+    // N4 — the legacy sched-level `cancel` field is GONE. It held only the OUTERMOST nursery's flag, so
+    // every read of it was a latent bug for a nested/enlisted scope: `park`/`park_wait` had already moved
+    // to the per-fiber `scopes[fiber.scope_id].cancel`, and its last reader (the netpoller's `register`,
+    // via `poll_park_offload`) now takes that same per-scope flag. The outermost cancel lives on
+    // `scopes[0].cancel` like every other scope's.
     /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the predicate
     /// fires, so the join's lowest-index-fault reduce propagates it (`DEADLOCK_MSG`). The parked
     /// fiber's OWN buffered stdout travels into its slot alongside this error (see `flag_deadlock`),
@@ -1538,22 +1539,35 @@ impl SchedCore {
     /// abort has cancelled it and its parked fibers are about to be requeued by `cancel_drain` so they
     /// can unwind their `defer`s. Vetoes the deadlock predicate (see [`MnSched::is_deadlocked`]).
     ///
-    /// Every cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart, at four
-    /// seams: `mn_worker_loop`'s `finish` → `cancel_drain` (sched.rs), `abort_enlisted_scope` (which
-    /// also clears the `awaiting_builder` veto first), `abort_eager_nursery` (which also clears the
-    /// `any_body_open` veto first), and the two demote self-detect loops. An idle worker's
-    /// `take_runnable` landing in that gap sees the pre-drain quiesce (`running == 0 && runnable == 0
-    /// && parked_n > 0`) and, without this veto, calls the teardown a DEADLOCK — `flag_deadlock` then
-    /// DROPS the still-parked siblings without `unwind_deferred`, silently skipping their `defer`s.
+    /// A cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart at every seam
+    /// that trips one — there are exactly THREE (the only scope-cancel stores in the VM):
+    /// `Vm::trip_cancel` (exec.rs, from `classify_mn_outcome`'s fault/exit AND `run_one_fiber`'s
+    /// panic-fault fallback) followed by `mn_worker_loop`'s `finish` → `cancel_drain`;
+    /// `abort_enlisted_scope`; and `abort_eager_nursery` (sched.rs). (The two demote self-detect loops
+    /// only READ a cancel — they trip none.) An idle worker's `take_runnable` landing in such a gap sees
+    /// the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`) and, without this veto,
+    /// calls the teardown a DEADLOCK — `flag_deadlock` then DROPS the still-parked siblings without
+    /// `unwind_deferred`, silently skipping their `defer`s.
+    ///
+    /// The two abort seams also clear a PRE-EXISTING veto of their own (`awaiting_builder` /
+    /// `any_body_open`); both trip the scope cancel FIRST (`MnSched::trip_scope_cancel`, a store under
+    /// the core lock) so the veto handoff is GAPLESS — one veto is armed before the other is dropped.
+    /// The store must stay under the core lock: it is what publishes the flag to any worker that later
+    /// takes that lock to evaluate the predicate (a bare `Relaxed` store outside it has no
+    /// synchronizes-with edge). On the fault path the edge is `finish`'s own lock release (the predicate
+    /// needs `running == 0`, which only holds after it).
     ///
     /// LIVENESS (why this can never become a hang): a cancelled scope always reaches `done == total`,
-    /// so the veto is transient by construction. `park`/`park_wait` re-read this same scope `cancel`
-    /// under the core lock and requeue `Ready` instead of parking, and the netpoller's `register`
-    /// rejects a tripped cancel — so a cancelled scope can never re-accumulate parked fibers after its
-    /// drain. Every cancel trip is followed by a `cancel_drain` (which requeues + `notify_all`), so an
-    /// idle worker sitting under the veto cannot miss the wakeup. A FUTURE park path that does not
-    /// re-check the scope cancel would break that and turn this veto into a hang — `park`'s gap
-    /// re-check is load-bearing here (pinned by `mnsched_park_requeues_when_cancel_tripped`).
+    /// so the veto is transient by construction. EVERY park path re-checks THIS scope's cancel:
+    /// `park`/`park_wait` re-read `c.scopes[fiber.scope_id].cancel` under the core lock and requeue
+    /// `Ready` instead of parking, and `poll_park_offload` hands the netpoller's `register` that same
+    /// per-scope flag (NOT the legacy outermost `MnSched::cancel`), which rejects the park under the
+    /// registry lock `drain_sched` sweeps under. So a cancelled scope can never re-accumulate parked
+    /// fibers after its drain. Every cancel trip is followed by a `cancel_drain` (which requeues +
+    /// `notify_all`), so an idle worker sitting under the veto cannot miss the wakeup. A FUTURE park path
+    /// that does not re-check the scope cancel would break that and turn this veto into a hang — those
+    /// re-checks are load-bearing here (pinned by `mnsched_park_requeues_when_cancel_tripped` and
+    /// `poll_park_rejects_cancelled_inner_scope`).
     fn any_incomplete_scope_cancelled(&self) -> bool {
         self.scopes
             .iter()
@@ -1601,9 +1615,9 @@ enum Take {
 
 impl MnSched {
     /// Build the ONE global sched the outermost owner shares with every nested nursery. Seeds scope 0
-    /// for the outermost nursery's `total` tasks + its `cancel`; nested nurseries `register_scope` more.
-    /// `MnSched::cancel` keeps the OUTERMOST cancel (back-compat for the gap re-check default + the
-    /// existing unit tests), but `park`/`park_wait`/`cancel_drain` use the PER-FIBER scope cancel.
+    /// for the outermost nursery's `total` tasks + its `cancel` (which lives on `scopes[0]` like every
+    /// other scope's — there is no sched-level cancel; `park`/`park_wait`/`cancel_drain`/`poll_park_offload`
+    /// all use the PER-FIBER scope cancel).
     fn new(
         total: usize,
         nworkers: usize,
@@ -1629,7 +1643,6 @@ impl MnSched {
                 demoted_chans: std::collections::HashMap::new(),
             }),
             cv: Condvar::new(),
-            cancel,
             deadlock_err,
             runnable: AtomicUsize::new(0),
             locals: (0..nworkers.max(1))
@@ -2208,6 +2221,18 @@ impl MnSched {
         self.cv.notify_all();
     }
 
+    /// N4 — trip scope `scope_id`'s cancel **under the core lock**. Two reasons the lock is not
+    /// optional: (1) the mutex release PUBLISHES the flag to every worker that later takes the lock to
+    /// evaluate `is_deadlocked` (a bare `Relaxed` store outside it has no synchronizes-with edge, so a
+    /// lock-holder could legally still read `false` and reap the scope's parked fibers as `Deadlocked`);
+    /// (2) it lets the abort seams arm this veto BEFORE they clear their own (`awaiting_builder` /
+    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path also trips via
+    /// `Vm::trip_cancel`, which is program-ordered before `finish`'s own lock release).
+    fn trip_scope_cancel(&self, scope_id: usize) {
+        let c = self.lock();
+        c.scopes[scope_id].cancel.store(true, Ordering::Relaxed);
+    }
+
     /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
     /// back onto the global queue so a worker resumes it and it observes the cancel flag (at the recv
     /// re-check / a dispatch back-edge) and unwinds. Cross-nursery flat scheduler: with one global
@@ -2365,7 +2390,7 @@ impl MnSched {
             return false;
         }
         // N4 — a cancel-tripped scope with unsettled tasks is MID-TEARDOWN, not deadlocked. The cancel
-        // trip and its `cancel_drain` are two core-lock acquisitions apart (four seams), and an idle
+        // trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and an idle
         // worker landing in that gap must not call the teardown a deadlock: `flag_deadlock` would drop
         // the still-parked siblings WITHOUT `unwind_deferred`, silently skipping their `defer`s (and
         // `reduce_task_slots` ranks Fault > Deadlocked, so the spurious deadlock never even surfaced —
@@ -2482,20 +2507,29 @@ impl MnSched {
     /// fiber back onto the run queue on readiness (inflight→runnable), exactly like the blocking pool.
     /// Takes `&Arc<Self>` so the poller can hold the scheduler for that completion.
     fn poll_park_offload(self: &Arc<Self>, fiber: Fiber, pp: PollPark) {
-        {
+        // Cross-nursery flat scheduler — clone THIS fiber's SCOPE cancel (not the sched's legacy global
+        // `cancel`, which is only the OUTERMOST nursery's) while we hold the core lock anyway: it is the
+        // flag `register` must gate the park on, exactly like `park`/`park_wait`'s gap re-check. Reading
+        // the global one here would let a fiber of a CANCELLED INNER scope park on a poller that
+        // `drain_sched` had already swept — stranding it, and (N4) holding the cancel-teardown veto
+        // forever.
+        let cancel = {
             let mut c = self.lock();
             c.running -= 1;
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
-        }
-        // `register` rejects (returns the fiber) iff cancel was tripped before it could park — a
-        // sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds on the
-        // cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a hang).
+            Arc::clone(&c.scopes[fiber.scope_id].cancel)
+        };
+        // `register` rejects (returns the fiber) iff that scope's cancel was tripped before it could
+        // park — a sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds
+        // on the cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a
+        // hang).
         if let Some(fiber) = poller::register(
             pp.key,
             pp.fd,
             pp.interest,
             fiber,
             Arc::clone(self),
+            cancel,
             Arc::clone(&pp.in_flight),
             pp.deadline,
         ) {

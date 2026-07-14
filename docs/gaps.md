@@ -590,26 +590,60 @@ fault is what got reported and the spurious deadlock was completely hidden. The 
 **only** symptom — no program could detect it. Same "the runtime lies to the program" family as the false
 EOF (§0) and N1.
 
-**Fix:** a cancel-teardown **veto** in `MnSched::is_deadlocked` (`src/vm/mod.rs`) —
-`SchedCore::any_incomplete_scope_cancelled()`: a scope with `cancel` set and `done < total` is
-*mid-teardown*, not deadlocked. Placed at the predicate itself rather than reordering the one seam that
-reported it, because **four** seams trip a scope cancel and then `cancel_drain` in a later lock
-acquisition — `mn_worker_loop`'s `finish`→`cancel_drain`, `abort_enlisted_scope` (which first clears the
-`awaiting_builder` veto), `abort_eager_nursery` (which first clears the `any_body_open` veto), and the two
-demote self-detect loops. Patching only the first would have left the others broken: **an invariant
-enforced at one seam is not enforced** (the wave-5 lesson, §0). Liveness holds because `park`/`park_wait`/
-the netpoller's `register` all refuse to park a cancelled-scope fiber and every trip is followed by a
-`cancel_drain` that requeues + notifies, so a cancelled scope always drains to `done == total` and the veto
-is transient by construction. Genuine deadlock detection (nothing cancelled) is untouched.
-Uses the **per-scope** `JoinScope::cancel`, never the legacy global one — an inner fault must not veto an
-outer sibling.
+**Fix — one veto at the predicate + gapless arming at every seam that trips a cancel.** There are exactly
+**three** such seams (the only scope-cancel stores in the VM): `Vm::trip_cancel` (from
+`classify_mn_outcome`'s fault/exit **and**, now, `run_one_fiber`'s panic-fault fallback) followed by
+`mn_worker_loop`'s `finish`→`cancel_drain`; `abort_enlisted_scope`; and `abort_eager_nursery`. (The two
+demote self-detect loops only *read* a cancel — they trip none.) All three go through
+`MnSched::is_deadlocked`, so the guard belongs there:
+
+1. **The veto** — `SchedCore::any_incomplete_scope_cancelled()`: a scope with `cancel` set and
+   `done < total` is *mid-teardown*, not deadlocked. Uses the **per-scope** `JoinScope::cancel`, never a
+   global one — an inner fault must not veto an outer sibling.
+2. **Gapless veto handoff at the two abort seams.** The veto alone was **not enough**, and the first cut
+   of this fix shipped that hole: `abort_enlisted_scope` *cleared* the `awaiting_builder` veto (the one
+   that had been holding the predicate off that scope) **before** it stored the cancel that arms the new
+   one — a window with *neither*, in which the bug reproduced exactly as before (an idle worker's
+   `flag_deadlock` dropped the parked fibers without `unwind_deferred`, and there `abort_enlisted_scope`
+   discards the reduce, so not even the bogus `Deadlocked` surfaced). Both abort seams now trip the cancel
+   **first** (`MnSched::trip_scope_cancel`) and only then clear their own veto (`awaiting_builder` /
+   `body_open`). *An invariant enforced at the predicate is still not enforced if a seam disarms a
+   different guard before arming this one* — the wave-5 lesson (§0), one level up.
+3. **`trip_scope_cancel` stores under the core lock.** The bare `Relaxed` stores at the abort seams had no
+   *synchronizes-with* edge to a worker holding the core lock and evaluating the predicate, so it could
+   legally read a stale `false` (x86 hides this; aarch64 need not). The mutex release publishes it. On the
+   fault path the edge already exists: the trip is program-ordered before `finish`, whose lock release the
+   predicate's `running == 0` depends on.
+4. **The panic-fault path now trips the cancel** (`Vm::panic_outcome`). A worker-VM panic (a VM bug, a
+   panicking native/FFI callback) never reaches `classify_mn_outcome`, so the scope aborted with
+   `cancel == false`: `cancel_drain` requeued the parked siblings, they re-ran `recv`, `park`'s gap
+   re-check saw no cancel and **parked them again**, and the scope then quiesced *uncancelled* → a
+   deadlock that fired **by the predicate's own rules** → same dropped `defer`s, hidden behind the
+   panic-fault (Fault > Deadlocked).
+5. **The netpoller park is gated on the per-scope cancel.** `poller::register` read the sched-level
+   (= OUTERMOST nursery's) flag, so a fiber of a cancelled **inner** scope could park on a poller whose
+   `drain_sched` sweep had already run — stranding it, and (with the new veto) holding the veto **forever**
+   → deadlock detection disabled sched-wide. `poll_park_offload` now hands `register` the parking fiber's
+   `scopes[fiber.scope_id].cancel`, exactly like `park`/`park_wait`'s gap re-check. The now-dead sched-level
+   `MnSched::cancel` field is **deleted** (its last reader).
+
+**Liveness** (why the veto can never become a hang): every park path refuses to park a cancelled-scope
+fiber (`park`/`park_wait` requeue `Ready` under the core lock; `register` rejects under the registry lock
+`drain_sched` sweeps under — see (5)), every trip is followed by a `cancel_drain` that requeues + notifies,
+and both demote self-detect loops check their cancel before the deadlock check. So a cancelled scope always
+drains to `done == total` and the veto is **transient by construction**. Genuine deadlock detection (nothing
+cancelled anywhere) is untouched — `mnsched_deadlock_when_all_parked_runq_empty` still passes.
 
 Repro was a **race**: `parallel_defer_runs_on_cancelled_sibling` printed `0` instead of `42` in
-**35/200** runs under CPU contention before the fix, **0/200** after (and `--threads=1`/`2` always passed —
-no idle worker, so the window could not open). Pinned by the invariant test
-`mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock`, which asserts the predicate directly rather
-than the scenario. `reduce_task_slots`'s ranking is **not** touched: it is correct — the spurious
-`Deadlocked` simply must never be produced.
+**14/200** runs under CPU contention on the fix box (**35/200** in an earlier run on a busier one) before the fix, **0/200** after (and `--threads=1`/`2` always passed —
+no idle worker, so the window could not open). The `abort_enlisted_scope` seam has its own scenario test
+(`parallel_defer_runs_when_enlisted_nursery_escapes`, an early-enlisted outer nursery escaped by `return`);
+with a 30ms sleep probing the veto-free gap it printed `cleanup=0` **20/20** on the old ordering and `42`
+**20/20** on the new one. The invariants themselves are pinned by
+`mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock` (the predicate),
+`panic_fault_trips_the_scope_cancel` (4) and `poll_park_rejects_cancelled_inner_scope` (5), which assert the
+rules directly rather than a scenario. `reduce_task_slots`'s ranking is **not** touched: it is correct — the
+spurious `Deadlocked` simply must never be produced.
 
 ### N5. A **genuine** deadlock tears tasks down without running their `defer`s — open
 Found while fixing N4, and **independent** of it. `flag_deadlock` (`src/vm/mod.rs`) drops each parked
