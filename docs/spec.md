@@ -313,7 +313,13 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
    → the manifest entrypoint) it's the *cwd* — the directory you launched from.
 2. Walk *up* from the origin for the **nearest** `chezzi.toml`. Found → that dir is root. **Not found
    → the script's own dir is root** (`run <file>`) / an error (bare `run` needs a manifest).
-3. `std.*` is reserved → always resolves to the stdlib dir.
+3. `std.*` is reserved → resolves to the **stdlib**, whose source is read from `$CHEZZI_STD` if that
+   env var is set (a dev override: "use *this* tree", exclusive — a module missing from it is an
+   error, never a silent fall-back), else from the **stdlib baked into the binary** (`std/*.chz` is
+   `include_str!`'d at compile time, like the `docs/*.md` topics). So an installed `chezzi` is
+   self-contained: it needs no source checkout, and moving or deleting the repo cannot break
+   `import std.*`. Note the flip side: a **pre-built** binary plus an edited `std/*.chz` is stale
+   until it is rebuilt (`cargo run`/`cargo test` rebuild automatically; otherwise use `$CHEZZI_STD`).
 4. `a.b.c` → `<root>/a/b/c.chz`. **No `./` relative imports.**
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.

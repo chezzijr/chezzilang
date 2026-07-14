@@ -2815,8 +2815,9 @@ impl Checker {
         if !self.native_prelude_sigs.is_empty() {
             return;
         }
-        let path = crate::resolver::std_root().join("prelude.chz");
-        let Ok(src) = std::fs::read_to_string(&path) else {
+        // Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
+        let Some(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
+        else {
             return;
         };
         let Ok(toks) = crate::lexer::tokenize(&src) else {

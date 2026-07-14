@@ -4,6 +4,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
+> `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
+> `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`
+> embedding), and *every* `std.*` source read — `Builder::visit` (incl. the always-linked
+> `std.prelude`/`std.ref`) and `Builder::visit_native_file` (the file-backed natives `math`/`regex`/`io`/…)
+> — routes through the new **`resolver::std_source(dotted)`**: **`$CHEZZI_STD` (dev override, exclusive:
+> a module absent from it is a hard error, never a silent fall-back) → the embedded stdlib.** The
+> build-time `env!("CARGO_MANIFEST_DIR")/std` path is out of the READ chain, so `cargo install --path .`
+> now yields a binary that survives the checkout being moved or deleted (E2E-verified with `mv std
+> std.bak`: both engines, `run` and `run --serial`, byte-identical output). `std_root()` itself is
+> unchanged — it still supplies ModuleId paths, diagnostics and `is_std`'s entry backstop; only the TEXT
+> source moved. Bonus: a missing std module reports *"no such module in the stdlib"* rather than leaking
+> the build machine's path. The hand-written table is rot-guarded by `embedded_std_table_matches_disk`
+> (embedded key set **and** contents == the on-disk `std/` tree) — **add a new `std/foo.chz` and that test
+> fails until you add its `include_str!` line.** Known delta: a *pre-built* binary + an edited `std/*.chz`
+> is stale until rebuilt (`cargo run`/`cargo test` rebuild automatically; else use `CHEZZI_STD=./std`).
+
 > **Mode:** Claude implements directly — working, tested code each session (see `CLAUDE.md`).
 > Full per-milestone detail lives in git history; this file is a forward-looking tracker, not a changelog.
 

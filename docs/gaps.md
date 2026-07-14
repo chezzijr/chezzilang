@@ -373,13 +373,30 @@ bitwise/shift protocols, and a call operator. Small each.
 The CLI ships exactly 8 commands (`init run test check tokens ast docs help`). **R3 (no package
 manager) is the headline and lives above** — it is the one gap that keeps the language author-only.
 
-### T1. Installing `chezzi` produces a binary that can't find its own stdlib — a real defect
-`std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`** (`src/resolver/mod.rs`), and the
-`std/*.chz` files are **not embedded** (only `docs/*.md` are `include_str!`'d). So `cargo install
---path .` yields a `~/.cargo/bin/chezzi` that reads its stdlib from *the source checkout's build-time
-path*: move or delete the repo and every `import std.*` breaks. The code comment admits it defers "a
-real install story to M6, when `std/` actually ships content" — M6 shipped; the install story did not.
-**Fix: embed `std/` (`include_str!`) or search next to the exe. An afternoon.**
+### T1. ~~Installing `chezzi` produces a binary that can't find its own stdlib~~ — **FIXED**
+> **FIXED** (`fix(resolver): embed std/ so an installed chezzi finds its own stdlib`). `std/**/*.chz` is
+> now `include_str!`'d into the binary (`src/resolver/std_embed.rs`, the same pattern the CLI already
+> used for the `docs/*.md` topics), and *every* `std.*` source read — `Builder::visit` (incl. the
+> always-linked `std.prelude`/`std.ref`) and `Builder::visit_native_file` (the file-backed natives
+> `math`/`regex`/`io`/…) — routes through the new `resolver::std_source(dotted)`: **`$CHEZZI_STD` (dev
+> override, exclusive) → the embedded stdlib.** The build-time `CARGO_MANIFEST_DIR/std` path is no longer
+> in the *read* chain, so an installed `~/.cargo/bin/chezzi` keeps working with the checkout moved or
+> deleted (verified E2E: `mv std std.bak`, then `chezzi run` + `chezzi run --serial` a program importing
+> `std.math` / `std.regex` / `std.concurrency.collection` — byte-identical on both engines). A missing std
+> module now says *"no such module in the stdlib"* instead of leaking the build machine's path. The
+> hand-written table is rot-guarded by `embedded_std_table_matches_disk` (embedded key set **and**
+> contents == the on-disk `std/` tree): **add a `std/foo.chz` and that test fails until you add its
+> `include_str!` line.**
+>
+> Residual: a **pre-built** binary plus an edited `std/*.chz` is stale until rebuilt (`cargo run`/`cargo
+> test` rebuild automatically via `include_str!`; the documented escape is `CHEZZI_STD=./std`).
+
+The original finding: `std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`**
+(`src/resolver/mod.rs`), and the `std/*.chz` files were **not embedded** (only `docs/*.md` were
+`include_str!`'d). So `cargo install --path .` yielded a `~/.cargo/bin/chezzi` that read its stdlib from
+*the source checkout's build-time path*: move or delete the repo and every `import std.*` broke. The code
+comment admitted it deferred "a real install story to M6, when `std/` actually ships content" — M6
+shipped; the install story did not.
 
 ### T2. `chezzi repl` is a stub that ERRORS — while `--help` advertises it
 `src/main.rs` prints *"'repl' is not implemented yet"* and exits 1, but `USAGE` still lists
