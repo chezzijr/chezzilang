@@ -199,16 +199,30 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
   `read` is a **`str`-only seam** — it decodes, and it never decodes lossily (no U+FFFD, ever):
   - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
     tail is carried on the socket and prepended here — so `read(n)` can return **up to `n + 3` bytes**,
-    and reading valid text in a loop (even `read(1)`) reassembles it **byte-exactly**. Such a read may
-    block past its first successful read to complete the codepoint — `timeout_ms` bounds the **whole
-    call** (the deadline is fixed when the call starts; finishing a split codepoint does not re-arm it),
-    and a timed-out read keeps the carried tail for the next read — no bytes are lost.
+    and reading valid text in a loop (even `read(1)`) reassembles it **byte-exactly**.
+  - **A read blocks until it has at least one whole character.** A chunk that ends mid-codepoint cannot
+    be handed to a `str` seam, so the read waits for the rest of it — the same contract as Go's
+    `bufio.Reader.ReadRune` and Python's text-mode socket file. The peer owes those 1–3 bytes; the two
+    escapes are `timeout_ms` and the peer closing (which errors — see below — rather than dropping the
+    tail). `timeout_ms` bounds the **whole call** on every path (a plain read, one that parks, and one
+    reached inside a callback like `list.map`): the deadline is fixed when the call starts, so finishing
+    a split codepoint never re-arms it. A timed-out read keeps the carried tail for the next read — no
+    bytes are lost.
+  - **`read(n, 0)` polls once.** `Err("timeout")` means *nothing arrived*. If the poll DID take bytes but
+    they did not complete a character, you get `Err("incomplete utf-8: …")` instead — a distinct error,
+    because those bytes are off the wire (retained on the socket); read the socket again to finish the
+    character. Both are benign "not ready yet" signals for a poll loop.
   - `read(0)` (or a negative / caller-computed-to-zero `n`) is a **no-op** `Ok("")`: it never touches the
-    socket, never reports EOF, and leaves any carried tail for the next read.
+    socket, never reports EOF, and leaves any carried tail for the next read. It *does* still report a
+    closed socket (`Err("read on a closed socket")`).
   - Two tasks may share one `Socket` (it crosses the airlock as a shared handle): each `read` takes its
     bytes off the socket and decodes them as ONE atomic step, so concurrent readers see wire order (they
     still must not both *block* on it — a second parked op on a shared socket is a fault, unchanged).
   - Bytes that are genuinely not UTF-8 (a **binary payload**) → `Err("invalid utf-8 on the socket: …")`.
+    **Nothing is discarded, and the error is sticky:** any valid text that arrived *before* the bad byte
+    is delivered first (a normal `Ok`), and the undecodable bytes stay on the socket — so every later
+    `read` returns the same `Err` rather than silently eating the stream. A `str` seam can never hand
+    those bytes back: `close()` the socket (see R1 below).
   - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
   - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the
     EOF error surfaces on the `read` that sees the close, not on `close`.

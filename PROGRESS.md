@@ -4743,30 +4743,47 @@ branch names) is in the git log.
   `Arc`'d `SocketCore` (`carry`, so it survives the would-block park's `ip`-rewind re-execution) and
   prepended to the next read, so byte-at-a-time reads of valid text reassemble **exactly**; **(b)
   genuinely invalid bytes** (`error_len() == Some(_)`) — a recoverable
-  `Err("invalid utf-8 on the socket: std.net read is str-only — binary payloads need Socket.read_bytes
-  …")`, and an incomplete codepoint left when the peer closes is `Err("invalid utf-8 at eof: …")`, never
-  a silent drop. **Contract changes:** `n` bounds the NEW bytes off the fd, so a `read(n)` may return up
-  to `n + 3` bytes; a chunk holding no complete codepoint re-reads rather than returning `Ok("")` (that
-  is the EOF sentinel — returning it mid-`é` would silently truncate every `while chunk != "":` loop), so
-  `read` may block past its first successful fd read; `timeout_ms` bounds the WHOLE call and the carry is
-  kept across the timeout `Err` (the bytes are still owed). `close()` stays `-> nil` — a leftover tail at
-  close is dropped, the EOF error surfaces on the READ that sees the close. Three review-caught corners of
-  the retry loop, all fixed here: **(i) `read(0)`** (a caller-computed `read(want - have)` that lands on
-  0) is a **no-op `Ok("")`** — it never touches the fd, because a zero-length `Read::read` answers `Ok(0)`
-  unconditionally and would spin the retry loop forever against a pending carry; **(ii) the fd read and
-  the carry update are ONE critical section** (the `carry` lock is taken OUTER, `stream` inner) — split,
-  two fibers sharing a socket (the `spawn handle(conn)` idiom) could decode out of wire order and error
-  valid text as "invalid utf-8"; **(iii) the read's deadline is LATCHED on the fiber**
+  `Err("invalid utf-8 on the socket: …")` that is **non-destructive and sticky** — the valid text before
+  the bad byte is delivered as a normal `Ok`, the undecodable bytes STAY carried, and every later read
+  re-errs identically, so a log-and-continue caller cannot silently shred the stream (an `Err` that eats
+  the chunk it already took off the fd is just silent data loss wearing an `Err`); it must `close()`. An
+  incomplete codepoint left when the peer closes is `Err("invalid utf-8 at eof: …")`, never a silent drop.
+  **Contract changes:** `n` bounds the NEW bytes off the fd, so a `read(n)` may return up to `n + 3`
+  bytes; a chunk holding no complete codepoint re-reads rather than returning `Ok("")` (that is the EOF
+  sentinel — returning it mid-`é` would silently truncate every `while chunk != "":` loop), so **a read
+  blocks until it has at least one whole character** — the Go `bufio.Reader.ReadRune` / Python
+  text-mode-socket contract, escapable via `timeout_ms` or the peer's close. `timeout_ms` bounds the WHOLE
+  call on EVERY path and the carry is kept across the timeout `Err` (the bytes are still owed). `close()`
+  stays `-> nil` — a leftover tail at close is dropped, the EOF error surfaces on the READ that sees the
+  close. Review-caught corners of the retry loop, all fixed here: **(i) `read(0)`** (a caller-computed
+  `read(want - have)` that lands on 0) is a **no-op `Ok("")`** — it never touches the fd, because a
+  zero-length `Read::read` answers `Ok(0)` unconditionally and would spin the retry loop forever against a
+  pending carry — but it is taken AFTER the closed-socket check, since the stream lock's `None` arm is the
+  only closed-fd detector on the read path and `Ok("")` there is indistinguishable from EOF; **(ii) the fd
+  read and the carry update are ONE critical section** (the `carry` lock is taken OUTER, `stream` inner) —
+  split, two fibers sharing a socket (the `spawn handle(conn)` idiom) could decode out of wire order and
+  error valid text as "invalid utf-8"; **(iii) the read's deadline is LATCHED on the fiber**
   (`Vm::poll_deadline`, swapped in `FiberCtx` like `poll_timed_out`) — a park rewinds `ip` and re-executes
   the op, so recomputing `now + timeout_ms` per park let a byte-per-(timeout-ε) dribbler keep a
-  `read(n, ms)` alive forever. **Known v1 limit (unchanged): binary sockets are UNSUPPORTED** — they need
+  `read(n, ms)` alive forever — **and it is now threaded into `Vm::demote_block_socket`** (`sched.rs`),
+  which took no deadline at all: an in-callback read (`native_reentry > 0` — a `list.map`, a
+  `Shared.update`) waited on fd readiness forever, and a demoted op is accounted `inflight`, which VETOES
+  the deadlock predicate — so it hung with no fault and no `Err("timeout")`; **(iv)** a poll-once
+  `read(n, 0)` that TOOK bytes but completed no codepoint returns `Err("incomplete utf-8: …")`, not
+  `Err("timeout")` (which is documented as *nothing arrived*) — the bytes are off the wire and retained,
+  and saying "deadline expired" about a read that consumed data is the same lie-about-your-data class B1
+  exists to kill. Also: the decode's hot path (no carry, valid chunk) decodes the fd buffer BORROWED
+  (`Cow`), so it costs one `String` alloc — exactly what `from_utf8_lossy(..).into_owned()` cost, no
+  regression on the IO path. **Known v1 limit (unchanged): binary sockets are UNSUPPORTED** — they need
   `Socket.read_bytes`/`write_bytes`, which need the `bytes` native seam (`docs/gaps.md` R1, the honest
   fix). B1 is downgraded from *silent corruption* to *a clear, recoverable limitation*, not closed. Pinned
-  by six M:N tests (`net_read_reassembles_split_codepoint_over_parallel`,
+  by nine M:N tests (`net_read_reassembles_split_codepoint_over_parallel`,
   `net_read_invalid_utf8_errs_not_replacement_chars`, `net_read_incomplete_tail_at_eof_errs`,
-  `net_read_zero_with_pending_carry_returns_empty_not_spin`,
+  `net_read_zero_with_pending_carry_returns_empty_not_spin`, `net_read_zero_on_closed_socket_errs`,
   `net_read_shared_socket_two_fibers_decode_in_wire_order`,
-  `net_read_timeout_bounds_whole_call_across_codepoint_parks`); the serial engine's net path (immediate
+  `net_read_poll_once_mid_codepoint_errs_incomplete_not_timeout`,
+  `net_read_timeout_bounds_whole_call_across_codepoint_parks`,
+  `net_read_timeout_bounds_the_in_callback_demote_path`); the serial engine's net path (immediate
   "requires the --parallel engine" `Err`) is untouched, so no parity divergence.
 - **stdin is SHARED by every task (Go/Python) — the false EOF is dead (2026-07-14).** stdin belonged to
   the ENTRY task: every other task was handed `Stdin::Empty`, so `io.read_line()` / `io.input()` inside a

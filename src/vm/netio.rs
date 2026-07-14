@@ -138,6 +138,12 @@ impl Vm {
     /// * `error_len() == Some(_)` — genuinely INVALID bytes: a recoverable `Err` naming the real limit
     ///   (the seam is str-only; binary needs `read_bytes`, gated on R1), never a silent U+FFFD.
     ///
+    /// NON-DESTRUCTIVE either way: the valid text that decoded BEFORE the problem byte is always handed
+    /// back, and everything from the problem byte on stays in [`SocketCore::carry`]. So an invalid-utf-8
+    /// `Err` is STICKY (the same bytes re-decode and re-err on the next read) rather than eating the
+    /// chunk — a recoverable `Err` that silently drops up to `MAX_SOCKET_READ` of already-received
+    /// payload would just be a different flavour of the corruption B1 fixes.
+    ///
     /// `eof` (the fd returned 0 bytes for a `read(n>0)`) keeps today's `Ok("")` EOF sentinel — unless a
     /// carry is still owed, i.e. the peer closed mid-codepoint: that is a real error, not a silent drop.
     ///
@@ -156,38 +162,46 @@ impl Vm {
                 ))
             };
         }
-        let bytes = if carry.is_empty() {
-            chunk.to_vec()
+        // The hot path (no carry, a fully-valid chunk) decodes the fd's buffer BORROWED — one alloc
+        // for the resulting `String`, exactly what `from_utf8_lossy(..).into_owned()` cost. Only a
+        // pending carry has to splice, and a carry is ≤3 bytes on every non-error path.
+        let bytes: std::borrow::Cow<'_, [u8]> = if carry.is_empty() {
+            std::borrow::Cow::Borrowed(chunk)
         } else {
             let mut b = std::mem::take(carry);
             b.extend_from_slice(chunk);
-            b
+            std::borrow::Cow::Owned(b)
         };
-        match std::str::from_utf8(&bytes) {
-            Ok(s) => Decoded::Text(s.to_string()),
-            // Truncated at the end — carry the tail, hand back whatever completed.
-            Err(e) if e.error_len().is_none() => {
-                let good = e.valid_up_to();
-                *carry = bytes[good..].to_vec();
-                if good == 0 {
-                    Decoded::NeedMore
-                } else {
-                    Decoded::Text(
-                        std::str::from_utf8(&bytes[..good])
-                            .expect("valid_up_to prefix is utf-8")
-                            .to_string(),
-                    )
-                }
-            }
-            // Genuinely invalid bytes on a str-only seam.
-            Err(_) => {
-                carry.clear();
-                Decoded::Fail(
-                    "invalid utf-8 on the socket: std.net read is str-only — binary payloads \
-                     need Socket.read_bytes (not implemented yet; see docs/gaps.md R1)"
-                        .to_string(),
-                )
-            }
+        let err = match std::str::from_utf8(&bytes) {
+            Ok(s) => return Decoded::Text(s.to_string()),
+            Err(e) => e,
+        };
+        // Whatever decoded BEFORE the problem byte is real text the peer sent: hand it back. Never
+        // drop it — a `read` that consumed bytes off the fd and returned neither them nor an error
+        // about them is silent data loss (the exact family B1 exists to kill).
+        let good = err.valid_up_to();
+        let prefix = std::str::from_utf8(&bytes[..good]).expect("valid_up_to prefix is utf-8");
+        let prefix = Decoded::Text(prefix.to_string());
+        // Everything from the problem byte on stays CARRIED — nothing is consumed-and-dropped.
+        //   * truncated tail (`error_len() == None`): ≤3 bytes, the next read prepends them and the
+        //     codepoint completes.
+        //   * genuinely INVALID bytes (`error_len() == Some(_)`): a str-only seam can never hand them
+        //     back, so the carry makes the `Err` STICKY — every later read re-decodes the same bytes
+        //     and re-errs identically. A caller that logs the Err and keeps reading (what a `Result`
+        //     invites) therefore cannot silently shred the stream; it must `close()`.
+        *carry = bytes[good..].to_vec();
+        match (err.error_len(), good) {
+            // Truncated: nothing complete yet ⇒ the caller must take more bytes off the fd.
+            (None, 0) => Decoded::NeedMore,
+            (None, _) => prefix,
+            // Invalid, but valid text came first: deliver that text now; the bad bytes re-err next read.
+            (Some(_), 1..) => prefix,
+            (Some(_), _) => Decoded::Fail(
+                "invalid utf-8 on the socket: std.net read is str-only — binary payloads \
+                 need Socket.read_bytes (not implemented yet; see docs/gaps.md R1). The bytes stay \
+                 carried, so every read on this socket now returns this error: close it"
+                    .to_string(),
+            ),
         }
     }
 
@@ -368,12 +382,21 @@ impl Vm {
     /// Decodes through [`Vm::decode_carry`] (never `from_utf8_lossy`). Contract: `n` bounds the NEW
     /// bytes taken off the fd; a ≤3-byte incomplete-codepoint tail carried from the previous read is
     /// prepended, so a `read(n)` can return up to `n + 3` bytes and never fewer than the peer sent.
-    /// `read(0)` is a no-op `Ok("")` (it never touches the fd, and never turns a pending carry into a
-    /// false EOF). A `read` whose bytes end mid-codepoint may BLOCK past its first successful fd read
-    /// (it needs the rest of that codepoint); `timeout_ms` bounds the WHOLE call — the deadline is
-    /// latched on the fiber ([`Vm::poll_deadline`]), so re-parking to finish a codepoint does NOT
-    /// restart the budget — and the carry is RETAINED across a timeout `Err` (those bytes are still
-    /// owed to the next read).
+    /// `read(0)` is a no-op `Ok("")` — it never touches the fd and never turns a pending carry into a
+    /// false EOF, but it still reports a CLOSED socket (`Ok("")` there would be indistinguishable from
+    /// the EOF sentinel).
+    ///
+    /// A `read` whose bytes end mid-codepoint may BLOCK past its first successful fd read: it needs the
+    /// rest of that codepoint, because a str-only seam cannot hand back half a character. (This is the
+    /// same contract as Go's `bufio.Reader.ReadRune` and Python's text-mode socket file: a text reader
+    /// blocks for a whole rune. The peer OWES those 1–3 bytes; the escapes are `timeout_ms` and the
+    /// peer's close, which errors rather than dropping the tail.) `timeout_ms` bounds the WHOLE call on
+    /// EVERY path — the netpoller park (the deadline is latched on the fiber, [`Vm::poll_deadline`], so
+    /// re-parking to finish a codepoint does NOT restart the budget) and the in-callback demote loop
+    /// ([`Vm::demote_block_socket`]) alike. The carry is RETAINED across a timeout `Err` (those bytes
+    /// are still owed to the next read), and a poll-once (`timeout_ms == 0`) read that took a partial
+    /// codepoint says so — `Err("incomplete utf-8: …")`, not the `Err("timeout")` that means "nothing
+    /// arrived".
     fn socket_read(&mut self, h: GcRef, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         // The optional trailing int bounds readiness (D6c). On a timeout the netpoller re-injects this
         // fiber with `poll_timed_out` set; the rewound op re-runs and lands HERE — so check it at entry
@@ -391,11 +414,22 @@ impl Vm {
             Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
             _ => return Err(self.err("read expects an int byte count".into(), span)),
         };
+        let core = self.socket_core(h);
         // `read(0)` (or a negative / caller-computed-to-zero `n`): nothing to take off the fd. Return
         // the empty string WITHOUT reading — a zero-length `Read::read` returns `Ok(0)` unconditionally,
         // so feeding it to the decode/re-read loop below would spin forever whenever a carry is pending
-        // (it can neither make progress nor would-block).
+        // (it can neither make progress nor would-block). It must STILL report a closed socket, though:
+        // the stream lock's `None` arm is the only closed-fd detector on this path, and answering `Ok("")`
+        // for a closed socket is indistinguishable from the EOF sentinel (review #1).
         if n == 0 {
+            if core
+                .stream
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+            {
+                return Ok(self.sock_err("read on a closed socket"));
+            }
             let sv = self.alloc_str(String::new());
             return Ok(self.sock_ok(sv));
         }
@@ -403,15 +437,17 @@ impl Vm {
         let deadline = timeout
             .filter(|t| !t.poll_once)
             .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
-        let core = self.socket_core(h);
         // B1 — the loop only re-reads when the fd's bytes ended mid-codepoint AND held no complete
         // codepoint at all (`Decoded::NeedMore`): take more bytes for the rest of it. It is bounded —
         // a NeedMore carry is a strict prefix of ONE codepoint (≤3 bytes), so at most 3 data-bearing
         // re-reads can NeedMore before the codepoint completes (or the bytes are invalid ⇒ `Fail`).
         // The ordinary outcome of the re-read is WouldBlock, which falls into the park/demote branch
         // below (every arm of which returns).
+        let mut buf = vec![0u8; n];
+        // Did THIS call take bytes off the fd that completed no codepoint? Then a would-block is not a
+        // "no data arrived" timeout, and saying so would be a lie (review #3/#8).
+        let mut took_partial = false;
         loop {
-            let mut buf = vec![0u8; n];
             let attempt = {
                 // LOCK ORDER: `carry` OUTER, `stream` INNER — the fd read and the carry update are ONE
                 // critical section, or two fibers aliasing this socket decode out of wire order (a
@@ -421,20 +457,50 @@ impl Vm {
                 let Some(stream) = guard.as_mut() else {
                     return Ok(self.sock_err("read on a closed socket"));
                 };
-                match std::io::Read::read(stream, &mut buf) {
-                    // `got == 0` on a `read(n>0)` is EOF.
-                    Ok(got) => Ok(Self::decode_carry(&mut carry, &buf[..got], got == 0)),
-                    Err(e) => Err((e, stream.as_raw_fd())),
+                // A carry that ALREADY decides must not wait on the fd first. After an invalid-utf-8
+                // `Err` the offending bytes STAY carried (they are undeliverable through a str seam),
+                // so a peer that sends nothing more would otherwise park us forever on bytes we already
+                // hold. Re-decoding the carry against an EMPTY chunk settles it: `Fail` (sticky Err) or
+                // `NeedMore` (a genuine truncated tail ⇒ go take its remaining bytes).
+                let decided = match carry.is_empty() {
+                    true => None,
+                    false => match Self::decode_carry(&mut carry, &[], false) {
+                        Decoded::NeedMore => None,
+                        d => Some(d),
+                    },
+                };
+                match decided {
+                    Some(d) => Ok(d),
+                    None => match std::io::Read::read(stream, &mut buf) {
+                        // `got == 0` on a `read(n>0)` is EOF.
+                        Ok(got) => Ok(Self::decode_carry(&mut carry, &buf[..got], got == 0)),
+                        Err(e) => Err((e, stream.as_raw_fd())),
+                    },
                 }
             };
             match attempt {
                 Ok(d) => match self.decoded_value(d) {
                     Some(v) => return Ok(v),
-                    None => continue, // incomplete codepoint carried; need more bytes
+                    None => {
+                        // Incomplete codepoint carried; take the rest of it off the fd.
+                        took_partial = true;
+                        continue;
+                    }
                 },
                 Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // `timeout_ms == 0` (poll-once): do NOT park — surface the timeout immediately.
+                    // `timeout_ms == 0` (poll-once): do NOT park — answer immediately. If this poll took
+                    // a partial codepoint, say THAT: `Err("timeout")` is documented as "no data within
+                    // timeout_ms", and reporting a deadline expiry for a read that removed 1-3 bytes from
+                    // the wire is the same lie-about-your-data class B1 exists to kill. The bytes are
+                    // retained on the socket, so a retry finishes the codepoint byte-exactly.
                     if timeout.is_some_and(|t| t.poll_once) {
+                        if took_partial {
+                            let owed = core.carry.lock().unwrap_or_else(|e| e.into_inner()).len();
+                            return Ok(self.sock_err(format!(
+                                "incomplete utf-8: the poll landed mid-codepoint ({owed} byte(s) \
+                                 carried and retained) — read this socket again to finish it"
+                            )));
+                        }
                         return Ok(self.sock_err("timeout"));
                     }
                     let target = PollPark {
@@ -457,6 +523,7 @@ impl Vm {
                         return self.demote_block_socket(
                             fd,
                             poller::Interest::Read,
+                            deadline,
                             span,
                             move |vm| {
                                 let mut b = vec![0u8; n];
@@ -470,11 +537,27 @@ impl Vm {
                                             vm.sock_err("read on a closed socket")
                                         ));
                                     };
-                                    match std::io::Read::read(stream, &mut b) {
-                                        Ok(got) => {
-                                            Ok(Vm::decode_carry(&mut carry, &b[..got], got == 0))
-                                        }
-                                        Err(e) => Err(e),
+                                    // Settle a carry that already decides BEFORE touching the fd —
+                                    // same guard, same order as the fast path (an invalid carry is
+                                    // sticky, so waiting on the fd for it would poll to the deadline
+                                    // for nothing).
+                                    let decided = match carry.is_empty() {
+                                        true => None,
+                                        false => match Vm::decode_carry(&mut carry, &[], false) {
+                                            Decoded::NeedMore => None,
+                                            d => Some(d),
+                                        },
+                                    };
+                                    match decided {
+                                        Some(d) => Ok(d),
+                                        None => match std::io::Read::read(stream, &mut b) {
+                                            Ok(got) => Ok(Vm::decode_carry(
+                                                &mut carry,
+                                                &b[..got],
+                                                got == 0,
+                                            )),
+                                            Err(e) => Err(e),
+                                        },
                                     }
                                 };
                                 match r {
@@ -572,6 +655,7 @@ impl Vm {
                             return self.demote_block_socket(
                                 fd,
                                 poller::Interest::Write,
+                                timeout.map(|t| t.deadline),
                                 span,
                                 move |vm| {
                                     let r = {
@@ -668,6 +752,7 @@ impl Vm {
                             return self.demote_block_socket(
                                 fd,
                                 poller::Interest::Read,
+                                timeout.map(|t| t.deadline),
                                 span,
                                 move |vm| {
                                     let r = {

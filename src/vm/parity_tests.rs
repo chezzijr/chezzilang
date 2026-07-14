@@ -2642,6 +2642,14 @@ main()
 /// B1 — a genuinely-invalid UTF-8 byte on the wire (a lone `0xFF` ⇒ `Utf8Error::error_len() ==
 /// Some(1)`) must surface a clear, recoverable `Err` naming the str-only limitation, NOT a silent
 /// U+FFFD. Peer is a raw Rust `TcpListener` so we can put arbitrary bytes on the wire.
+///
+/// Review #2/#5 — and the `Err` must NOT SHRED the stream. The first cut dropped the WHOLE chunk it
+/// had already taken off the fd (`carry.clear()`), so the valid text before the bad byte (`"hi"`) and
+/// everything after it vanished — a recoverable `Err` that silently eats up to `MAX_SOCKET_READ` of
+/// payload is the same data-loss family B1 exists to kill. Now: the valid prefix is DELIVERED, the
+/// undecodable remainder STAYS carried, and the `Err` is STICKY (a str-only seam can never hand those
+/// bytes back, so every later read re-decodes them and re-errs identically — no byte is ever silently
+/// consumed-and-dropped, and a log-and-continue caller cannot shred the stream).
 #[test]
 fn net_read_invalid_utf8_errs_not_replacement_chars() {
     use std::io::Write;
@@ -2660,9 +2668,12 @@ import std.net
 
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
-    match sock.read(64):
-        Ok(s): print(\"GOT:\" + s)
-        Err(e): print(\"ERR:\" + e.message())
+    i := 0
+    while i < 3:
+        match sock.read(64):
+            Ok(s): print(\"GOT:[\" + s + \"]\")
+            Err(e): print(\"ERR:\" + e.message())
+        i = i + 1
     sock.close()
     return Ok(0)
 
@@ -2689,7 +2700,197 @@ main()
         out.contains("read_bytes"),
         "the Err must point at the real limitation/future path: {out:?}"
     );
+    assert!(
+        out.contains("GOT:[hi]"),
+        "the valid text BEFORE the bad byte must still be delivered, never swallowed by the Err: \
+         {out:?}"
+    );
+    assert!(
+        out.matches("invalid utf-8 on the socket").count() >= 2,
+        "the Err is sticky — the undecodable bytes stay carried, so a log-and-continue caller \
+         re-errs instead of silently shredding the stream: {out:?}"
+    );
     assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
+}
+
+/// B1 (review #1) — `read(0)` on a CLOSED socket must still be `Err("read on a closed socket")`. The
+/// first cut early-returned `Ok("")` for `n == 0` BEFORE taking the stream lock, and the `guard.as_mut()`
+/// `None` arm is the ONLY closed-socket detector on the read path — so `read(0)` (or any caller-computed
+/// `read(want - have)` that lands on 0) silently converted a recoverable error into a value that is
+/// indistinguishable from the EOF sentinel.
+#[test]
+fn net_read_zero_on_closed_socket_errs() {
+    use std::net::TcpListener;
+
+    // Bound-but-never-accepted: the connect completes out of the listen backlog, so no peer thread is
+    // needed. `listener` is held alive for the whole test.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    sock.close()
+    match sock.read(0):
+        Ok(s): print(\"OK:[\" + s + \"]\")
+        Err(e): print(\"ERR:\" + e.message())
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("read_zero_closed", &src);
+    drop(listener);
+    assert!(
+        out.contains("ERR:read on a closed socket"),
+        "read(0) must not mask the closed-socket Err as a success indistinguishable from EOF: {out:?}"
+    );
+}
+
+/// B1 (review #3/#8) — a POLL-ONCE read (`read(n, 0)`) that DID take bytes off the fd but landed
+/// mid-codepoint must not report `Err("timeout")`. `timeout` is documented as "no data within
+/// timeout_ms"; here data arrived, it just did not complete a codepoint — and 1–3 bytes were
+/// permanently removed from the wire into the socket's carry. The distinct `Err("incomplete utf-8:
+/// …")` names what actually happened and says the bytes are retained, so a retry on the same socket
+/// recovers them byte-exactly (asserted: the full `"éllo"` still arrives).
+#[test]
+fn net_read_poll_once_mid_codepoint_errs_incomplete_not_timeout() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // The lead byte of `é` alone, then a stall — the poll-once read takes it and can complete
+        // nothing.
+        stream.write_all(b"\xC3").unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        stream.write_all(b"\xA9llo").unwrap();
+        stream.flush().unwrap();
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    acc := \"\"
+    seen := 0
+    while true:
+        match sock.read(8, 0):
+            Ok(s):
+                if s == \"\":
+                    break
+                acc = acc + s
+            Err(e):
+                m := e.message()
+                if m != \"timeout\" and seen == 0:
+                    print(\"ERR:\" + m)
+                    seen = 1
+    print(\"ACC:\" + acc)
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("poll_once_mid_codepoint", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("ERR:incomplete utf-8"),
+        "a poll-once read that consumed bytes must not lie about it as a deadline expiry: {out:?}"
+    );
+    assert!(
+        out.contains("ACC:éllo"),
+        "the carried lead byte is retained across the Err and recovered by the next read: {out:?}"
+    );
+    assert!(!out.contains('\u{fffd}'), "no replacement chars: {out:?}");
+}
+
+/// B1 (review #7) — `timeout_ms` must bound the WHOLE `read` call on the DEMOTE path too. A `read`
+/// reached inside a native callback (`native_reentry > 0` — here a `list.map`) cannot snapshot-park
+/// onto the netpoller, so it demotes to [`Vm::demote_block_socket`] — which took no deadline and
+/// looped on `wait_fd_ready` until readiness/cancel/terminate. Once B1 routed a mid-codepoint read
+/// back into that wait, `read(8, 200)` against a peer that sends the lead byte and STALLS blocked
+/// indefinitely: the demoted op is accounted `inflight`, which VETOES the deadlock predicate, so it
+/// hung with no fault and no `Err("timeout")` — while `docs/stdlib.md` promised the deadline bounds
+/// the whole call. The deadline is now threaded into the demote loop.
+#[test]
+fn net_read_timeout_bounds_the_in_callback_demote_path() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"\xC3").unwrap(); // a lone lead byte…
+        stream.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // …then stall, far past the 200 ms budget
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn grab(s: Socket) -> str:
+    match s.read(8, 200):
+        Ok(v): return \"GOT:\" + v
+        Err(e): return \"ERR:\" + e.message()
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    outs := [sock].map(grab)
+    print(outs[0])
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error: \" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("demote_read_timeout", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("ERR:timeout"),
+        "the in-callback demote loop must honour timeout_ms instead of waiting on the fd forever: \
+         {out:?}"
+    );
 }
 
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,
@@ -2841,7 +3042,11 @@ fn drain(sock: Socket, seen: Shared[int], bad: Shared[int]) -> int!:
                 if got > 0:
                     seen.update(fn(v: int) -> int: v + got)
             Err(e):
-                if e.message() != \"timeout\":
+                # \"timeout\" (nothing ready) and \"incomplete utf-8\" (this poll took a partial
+                # codepoint — retained, the next read finishes it) are both benign poll-once retry
+                # signals. \"invalid utf-8\" is THE bug this test guards: valid text mis-decoded
+                # because two fibers took bytes out of wire order.
+                if e.message().starts_with(\"invalid utf-8\"):
                     print(\"ERR:\" + e.message())
                     bad.update(fn(v: int) -> int: v + 1)
     return Ok(0)

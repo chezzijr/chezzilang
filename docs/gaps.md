@@ -38,12 +38,20 @@ The two failure modes are now separated, exactly as `Utf8Error` separates them:
   `read(n)` may return up to `n + 3` bytes; a read whose chunk holds no complete codepoint re-reads
   (never `Ok("")` — that is the EOF sentinel), so it may block past its first fd read. `timeout_ms` bounds
   the WHOLE call (the deadline is latched on the fiber — `Vm::poll_deadline` — so re-parking to finish a
-  codepoint does not re-arm the budget), and the carry survives a timeout `Err`. `read(0)` is a no-op
-  `Ok("")` (it never touches the fd, so it can neither spin nor fake an EOF), and the fd read + carry
-  update are ONE critical section (carry lock outer), so two tasks sharing a socket decode in wire order.
+  codepoint does not re-arm the budget — on the in-callback demote path too), and the carry survives a
+  timeout `Err`. Blocking for the rest of a character is the Go `bufio.Reader.ReadRune` / Python
+  text-mode-socket contract. A poll-once `read(n, 0)` that took a partial codepoint says so —
+  `Err("incomplete utf-8: …")`, not the `Err("timeout")` that means *nothing arrived*. `read(0)` is a
+  no-op `Ok("")` (it never touches the fd, so it can neither spin nor fake an EOF) but still reports a
+  closed socket, and the fd read + carry update are ONE critical section (carry lock outer), so two tasks
+  sharing a socket decode in wire order.
 - **Genuinely invalid bytes (`error_len() == Some(_)`) — i.e. a BINARY payload — case 1 is REPORTED, not
   supported:** `Err("invalid utf-8 on the socket: std.net read is str-only — binary payloads need
-  Socket.read_bytes …")`. An incomplete codepoint left when the peer closes is likewise
+  Socket.read_bytes …")`. The error is **non-destructive and sticky**: the valid text that arrived before
+  the bad byte is delivered first, the undecodable bytes stay carried on the socket, and every later read
+  re-errs identically — so a caller that logs the `Err` and keeps reading (what a `Result` invites) cannot
+  silently shred the stream. It must `close()`. (Swallowing the chunk would just be silent data loss
+  wearing an `Err`.) An incomplete codepoint left when the peer closes is likewise
   `Err("invalid utf-8 at eof: …")`, never a silent drop.
 
 **Still not fixed:** you *cannot read binary over a socket*. The honest fix remains **R1** (a `bytes`
