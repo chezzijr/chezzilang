@@ -8851,3 +8851,88 @@ fn parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines() {
         t0.elapsed()
     );
 }
+
+/// Run one engine under a HARD DEADLINE: a scheduler bug in this area is a HANG, and a hung test
+/// would just wedge the suite. On timeout we panic with the engine name (the hung VM thread is left
+/// to die with the test process).
+#[cfg(test)]
+fn run_with_deadline(
+    engine: &str,
+    f: impl FnOnce() -> (String, Result<(), RuntimeError>) + Send + 'static,
+) -> (String, Result<(), RuntimeError>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("failed to spawn the deadline thread");
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .unwrap_or_else(|_| {
+            panic!("{engine} HUNG: a defer that can never complete must be REPORTED as a deadlock, never a silent hang")
+        })
+}
+
+/// A `defer` that can NEVER complete (its body `recv`s on a channel nobody will ever send to) inside
+/// a CANCELLED task is REPORTED as a deadlock — never a silent hang. A defer is not itself cancellable
+/// (`cancel_requested`'s `deferring == 0`), so on M:N that cleanup demotes and blocks in place; the
+/// scope is then incomplete BECAUSE of it, which made the N4 cancel-teardown veto
+/// (`any_cancelled_scope_awaiting_drain`, mod.rs) permanent and the M:N engine hung SILENTLY while
+/// serial reported (measured: M:N `timeout` rc=124, serial rc=1). The veto is now bounded to the
+/// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the demoted
+/// fiber faults in place, and — the task being already cancelled — its error is swallowed and the
+/// SIBLING'S real fault is what propagates, identically on both engines.
+#[test]
+fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
+    let src = "fn cleanup(dead: Channel[int]):\n    print(\"CLEANUP-ENTER\")\n    dead.recv()\n    print(\"CLEANUP-DONE\")\n\
+               fn consumer(ch: Channel[int], go: Channel[int], dead: Channel[int]):\n    defer cleanup(dead)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    dead := Channel[int]()\n    parallel:\n        spawn consumer(ch, go, dead)\n        spawn boom(go)\nmain()\n";
+    let s = src.to_string();
+    let (mn, mn_res) = run_with_deadline("M:N", move || run_program_parallel(&s));
+    let s = src.to_string();
+    let (serial, se_res) = run_with_deadline("serial", move || run_program(&s));
+    for (engine, out, res) in [("serial", &serial, &se_res), ("M:N", &mn, &mn_res)] {
+        assert!(
+            out.contains("CLEANUP-ENTER\n"),
+            "{engine}: the cleanup RAN (it is the cancel's whole point): {out:?}"
+        );
+        assert!(
+            !out.contains("CLEANUP-DONE\n"),
+            "{engine}: it can never finish — its recv has no sender: {out:?}"
+        );
+        let err = res.as_ref().expect_err("the program must FAIL, not hang");
+        assert!(
+            err.message.contains("index 9 out of bounds"),
+            "{engine}: the sibling's real fault is what is reported (the stuck cleanup's own error \
+             is swallowed with its cancelled task): {err:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}
+
+/// The regression guard for the demote-path cancel fix: a `defer` whose body BLOCKS (here
+/// `time.sleep_ms`) in a CANCELLED task runs to COMPLETION — cleanup is never truncated mid-body. The
+/// M:N demote loops used to read the raw `self.cancel` flag instead of `cancel_requested()`, so the
+/// blocking op inside the cleanup saw the already-tripped scope cancel and aborted the defer at that
+/// call: `CLEANUP-ENTER` then nothing, sentinel 0 on M:N vs 42 on serial. Blocking cleanup is what
+/// real cleanup DOES (close a socket, send a final message, flush).
+#[test]
+fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
+    let src = "import std.concurrency\nimport std.time\n\
+               fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    time.sleep_ms(20)\n    s.set(42)\n    print(\"CLEANUP-DONE\")\n\
+               fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mn, _me, _mr, _mc) = run_file_p(&entry);
+    let (serial, _se, _sr, _sc) = run_file(&entry);
+    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
+        assert!(
+            out.contains("CLEANUP-DONE\n") && out.contains("sentinel=42\n"),
+            "{engine}: a blocking op inside a defer must NOT truncate the cleanup: {out:?}"
+        );
+    }
+    assert_same_lines(&serial, &mn);
+}

@@ -1585,21 +1585,49 @@ impl SchedCore {
     /// synchronizes-with edge). On the fault path the edge is `finish`'s own lock release (the predicate
     /// needs `running == 0`, which only holds after it).
     ///
-    /// LIVENESS (why this can never become a hang): a cancelled scope always reaches `done == total`,
-    /// so the veto is transient by construction. EVERY park path re-checks THIS scope's cancel:
-    /// `park`/`park_wait` re-read `c.scopes[fiber.scope_id].cancel` under the core lock and requeue
-    /// `Ready` instead of parking, and `poll_park_offload` hands the netpoller's `register` that same
-    /// per-scope flag (NOT the legacy outermost `MnSched::cancel`), which rejects the park under the
-    /// registry lock `drain_sched` sweeps under. So a cancelled scope can never re-accumulate parked
-    /// fibers after its drain. Every cancel trip is followed by a `cancel_drain` (which requeues +
-    /// `notify_all`), so an idle worker sitting under the veto cannot miss the wakeup. A FUTURE park path
-    /// that does not re-check the scope cancel would break that and turn this veto into a hang — those
-    /// re-checks are load-bearing here (pinned by `mnsched_park_requeues_when_cancel_tripped` and
-    /// `poll_park_rejects_cancelled_inner_scope`).
-    fn any_incomplete_scope_cancelled(&self) -> bool {
-        self.scopes
-            .iter()
-            .any(|s| s.done < s.total && s.cancel.load(Ordering::Relaxed))
+    /// BOUNDED TO THAT WINDOW (this is the whole liveness argument): the veto asks for an UNDRAINED
+    /// PARKED fiber of the cancelled scope, not merely `done < total`. "Some incomplete cancelled scope"
+    /// was too wide and could never lift: a `defer` is not itself cancellable (`cancel_requested`'s
+    /// `deferring == 0` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
+    /// answer) demotes and sits there — the scope is then incomplete *because of* that fiber, the veto
+    /// held forever and the M:N engine hung SILENTLY (serial reports it). The harm the veto exists to
+    /// prevent is only possible while parked fibers are still owed their `cancel_drain`; once drained
+    /// they are in `global` (`runnable > 0`), so the predicate is false on its own terms and the veto is
+    /// no longer needed. A cancelled scope cannot RE-accumulate parked fibers after its drain: every
+    /// park path re-checks THIS scope's cancel (`park`/`park_wait` re-read
+    /// `c.scopes[fiber.scope_id].cancel` under the core lock and requeue `Ready` instead of parking;
+    /// `poll_park_offload` hands the netpoller's `register` that same per-scope flag, which rejects the
+    /// park under the registry lock `drain_sched` sweeps under) — pinned by
+    /// `mnsched_park_requeues_when_cancel_tripped` and `poll_park_rejects_cancelled_inner_scope`. The
+    /// NETPOLLER half of the drain window needs no veto at all: a poll-parked fiber is deliberately NOT
+    /// in `parked` and `poll_park_offload` accounts it running→`inflight`, and `is_deadlocked` already
+    /// requires `inflight == 0` (if that accounting ever changes, this argument changes with it).
+    /// A cancelled scope whose last unsettled fiber is DEMOTED-blocked forever inside its own cleanup is
+    /// therefore a REAL deadlock, and `demote_recv_block`'s self-detect reports it instead of hanging
+    /// (`mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`).
+    fn any_cancelled_scope_awaiting_drain(&self) -> bool {
+        self.scopes.iter().enumerate().any(|(sid, s)| {
+            s.done < s.total
+                && s.cancel.load(Ordering::Relaxed)
+                && self.scope_has_undrained_park(sid)
+        })
+    }
+
+    /// Is any fiber of scope `sid` still sitting in `parked`, i.e. still owed its `cancel_drain`?
+    /// Scans the same structure `cancel_drain` empties, in the same way (a `Recv` entry's scope by
+    /// reference; a `Wait` token's PEEKED under its fiber lock without claiming), under the same core
+    /// lock — so no new lock order, and no new state to keep in sync (a flag would have to be
+    /// set/cleared at every trip + drain seam; a missed clear re-creates the hang).
+    fn scope_has_undrained_park(&self, sid: usize) -> bool {
+        self.parked.values().flatten().any(|e| match e {
+            ParkedEntry::Recv(f) => f.scope_id == sid,
+            ParkedEntry::Wait(wp) => wp
+                .fiber
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|f| f.scope_id == sid),
+        })
     }
 
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
@@ -2432,15 +2460,17 @@ impl MnSched {
         if c.all_incomplete_awaiting_builder() {
             return false;
         }
-        // N4 — a cancel-tripped scope with unsettled tasks is MID-TEARDOWN, not deadlocked. The cancel
-        // trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and an idle
-        // worker landing in that gap must not call the teardown a deadlock: `flag_deadlock` would drop
-        // the still-parked siblings WITHOUT `unwind_deferred`, silently skipping their `defer`s (and
-        // `reduce_task_slots` ranks Fault > Deadlocked, so the spurious deadlock never even surfaced —
-        // the lost `defer` was the only symptom). Transient: a cancelled scope always drains to
-        // `done == total`, so the veto always lifts. See `any_incomplete_scope_cancelled` for the full
-        // liveness argument. A GENUINE deadlock (nothing cancelled anywhere) is untouched.
-        if c.any_incomplete_scope_cancelled() {
+        // N4 — a cancel-tripped scope that still has UNDRAINED PARKED fibers is MID-TEARDOWN, not
+        // deadlocked. The cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three
+        // seams), and an idle worker landing in that gap must not call the teardown a deadlock:
+        // `flag_deadlock` would drop the still-parked siblings WITHOUT `unwind_deferred`, silently
+        // skipping their `defer`s (and `reduce_task_slots` ranks Fault > Deadlocked, so the spurious
+        // deadlock never even surfaced — the lost `defer` was the only symptom). Bounded to exactly that
+        // window: a cancelled scope with NO undrained park (its last fiber demoted-blocked forever inside
+        // an uncancellable `defer`) IS a real deadlock and must be reported, not hung. See
+        // `any_cancelled_scope_awaiting_drain` for the full liveness argument. A GENUINE deadlock
+        // (nothing cancelled anywhere) is untouched.
+        if c.any_cancelled_scope_awaiting_drain() {
             return false;
         }
         if !(c.running == 0

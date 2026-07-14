@@ -5305,6 +5305,92 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
     );
 }
 
+/// N4 boundary (the other half): the veto covers the trip→`cancel_drain` window ONLY. A cancelled
+/// scope whose last unsettled fiber is DEMOTED — blocked in place inside its own `defer` on a `recv`
+/// nobody will ever answer — has no undrained park left, so nothing can ever wake it: that IS a
+/// genuine deadlock and must be REPORTED, never left to hang silently (`demote_recv_block`'s own
+/// `is_deadlocked` self-detect is what fires). Before the veto was bounded to the parked window the
+/// scope stayed `done < total && cancel` forever (incomplete *because* that fiber is stuck), so the
+/// veto never lifted → silent M:N hang (repro: a `defer` whose body does a `recv` nobody answers).
+#[test]
+fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err());
+    let core = empty_core();
+    let ptr = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let a = take_run(&sched);
+    let b = take_run(&sched);
+    // Fiber b enters its `defer` and blocks in place on an empty channel (running → blocked_native).
+    {
+        let mut c = sched.lock();
+        c.running -= 1;
+        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+        c.register_demoted(ptr, &core);
+    }
+    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked.
+    cancel.store(true, Ordering::Relaxed);
+    sched.finish(
+        a.task_index,
+        0,
+        TaskOutcome::Fault {
+            err: dl_err(),
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
+    let c = sched.lock();
+    assert_eq!(c.parked_n, 0, "no fiber of the cancelled scope is parked");
+    assert!(
+        sched.is_deadlocked(&c),
+        "a cancelled scope whose remaining fiber is demoted-blocked forever inside its cleanup is a \
+         REAL deadlock — report it, never hang"
+    );
+    let _ = b;
+}
+
+/// N4 boundary (pins the veto's remaining half): a cancelled scope with BOTH an undrained parked
+/// fiber and a demoted one is still mid-teardown — the parked one is about to be requeued by
+/// `cancel_drain` to unwind its `defer`s, so the deadlock must NOT fire (`flag_deadlock` would drop it
+/// without `unwind_deferred`). If this flips, the parked-scan is keyed wrong.
+#[test]
+fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err());
+    let park_core = empty_core();
+    let demote_core = empty_core();
+    let ptr = core_key(&demote_core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
+    let a = take_run(&sched);
+    let b = take_run(&sched);
+    let d = take_run(&sched);
+    sched.park(core_key(&park_core), &park_core, b); // cancel still false → really parks
+    {
+        let mut c = sched.lock();
+        c.running -= 1;
+        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+        c.register_demoted(ptr, &demote_core);
+    }
+    cancel.store(true, Ordering::Relaxed);
+    sched.finish(
+        a.task_index,
+        0,
+        TaskOutcome::Fault {
+            err: dl_err(),
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
+    let c = sched.lock();
+    assert_eq!(c.parked_n, 1);
+    assert!(
+        !sched.is_deadlocked(&c),
+        "an undrained parked fiber of the cancelled scope still vetoes: it is about to be requeued \
+         by `cancel_drain` to unwind its defers"
+    );
+    let _ = d;
+}
+
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips
 /// `terminate` once every task is done.
 #[test]

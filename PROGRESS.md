@@ -76,6 +76,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > engines × **200 runs under CPU load = 0 failures** (before, on `main`: serial 0/50 on all three shapes;
 > M:N probe 0/50). Full `cargo test` green ×2, clippy clean, benches unmoved.
 
+> **Post-review round 3 (same branch) — a `defer` whose body BLOCKS (`docs/gaps.md` N6g), both M:N-only,
+> both RED-first.** (g1) The M:N demote loops read the raw `self.cancel` flag instead of
+> `Vm::cancel_requested()`, so a blocking op *inside* cleanup (a `sleep`, a `sock.close()`, a final
+> `send`) saw the already-tripped scope cancel and **truncated the defer mid-body** — `CLEANUP-ENTER`,
+> then nothing: sentinel `0` on M:N vs `42` on serial. (g2) With that fixed, a `defer` that can **never**
+> complete (`recv` nobody will answer) correctly cannot be cancelled out — and then **hung M:N silently**:
+> `demote_recv_block`'s deadlock self-detect was vetoed forever by N4's `any_incomplete_scope_cancelled`,
+> whose liveness argument ("a cancelled scope always reaches `done == total`") a never-completing defer
+> falsifies (M:N rc=124 hang vs serial rc=1 report). The veto is now **bounded to the trip→`cancel_drain`
+> window** it exists for — an *undrained parked* fiber of the cancelled scope
+> (`SchedCore::any_cancelled_scope_awaiting_drain` + `scope_has_undrained_park`) — so the quiesce fires,
+> the stuck cleanup is reported as a deadlock, and the sibling's real fault propagates: same line set on
+> both engines. **The rule (now in `docs/concurrency.md`):** cleanup that blocks on time/IO is
+> uninterruptible and delays the teardown by exactly that long, no cap (Go's deferred-fn-during-panic
+> rule); cleanup that can never complete is REPORTED as a deadlock, never a silent hang. New tests:
+> `mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`,
+> `mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock` (N4 boundary),
+> `parity_a_blocking_defer_body_completes_when_the_task_is_cancelled`,
+> `parity_a_defer_that_can_never_complete_is_reported_not_hung` (hard 20 s deadline — a hang FAILS).
+> Race bar: 2 new shapes × 2 engines × **200 runs under full CPU load = 0 failures** (before: the
+> forever-defer hung **200/200** on M:N).
+
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`

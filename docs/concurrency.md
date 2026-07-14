@@ -618,6 +618,18 @@ fn serve(tok: Token, io: Channel[str]):
 > cancelled at a checkpoint, returned normally, or faulted on its own while a sibling had already
 > tripped the scope cancel. A nursery started inside a `defer` runs uncancelled too.
 >
+> **…so cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a
+> last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, on both
+> engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
+> Go's rule for a deferred function during a panic, and it is the price of "cleanup is never truncated".
+>
+> **Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
+> something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —
+> and the deadlock detector still fires, on **both** engines (serial faults the `recv` in place; on M:N
+> the demoted worker self-detects the quiesce). If a sibling's fault is what cancelled the task, *that*
+> fault is what is reported — the stuck cleanup's own error is swallowed with its cancelled task, so
+> both engines print the same line set and exit code.
+>
 > **Cancelling a scope cancels its nested scopes.** A `parallel:` entered from a task that is then
 > cancelled dies with it — its children observe the enclosing cancel at their own checkpoints (a
 > spinning grandchild cannot wedge the teardown). A nested nursery still keeps its own cancel token for
