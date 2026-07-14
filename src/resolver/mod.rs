@@ -7,7 +7,9 @@
 //! Resolution rules (see `docs/spec.md` §"Imports & module resolution"):
 //!   1. Take the entry `.chz`. Walk *up* for `chezzi.toml` → that dir is the project root.
 //!      None found → the entry's own dir is root. (Kills Python's run-relative import footgun.)
-//!   2. `std.*` is reserved → always resolves under the stdlib dir ([`std_root`]).
+//!   2. `std.*` is reserved → its SOURCE comes from [`std_source`]: `$CHEZZI_STD` (dev override,
+//!      exclusive) if set, else the stdlib BAKED INTO the binary ([`std_embed`]). Never the build
+//!      machine's checkout — an installed `chezzi` has no source tree.
 //!   3. `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 //!   4. Import cycles are a clean error (Go-style), not lazy resolution.
 
@@ -15,6 +17,8 @@ use crate::ast::{Import, Module, Span, StmtKind};
 use crate::{lexer, parser};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+pub mod std_embed;
 
 /// Maximum depth of a transitive import chain before the resolver gives up with a clean diagnostic
 /// instead of recursing further. The DFS `Builder::visit` recurses once per import *edge*; a
@@ -170,13 +174,38 @@ pub fn find_root_from_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The stdlib directory: `$CHEZZI_STD` if set, else the compile-time `<crate>/std`. The env
-/// override keeps tests deterministic (point it at a tempdir) and defers a real install story
-/// (next-to-binary discovery) to M6, when `std/` actually ships content.
+/// The stdlib directory: `$CHEZZI_STD` if set, else the compile-time `<crate>/std`.
+///
+/// This is a PATH, used for ModuleIds, diagnostics, [`path_under_std_root`]'s entry backstop and the
+/// manifest entrypoint — **not** the source of truth for a `std.*` module's TEXT. That is
+/// [`std_source`]: an installed binary reads its stdlib from the embedded copy, because the
+/// compile-time `<crate>/std` path belongs to the BUILD machine's checkout and need not exist.
 pub fn std_root() -> PathBuf {
     match std::env::var_os("CHEZZI_STD") {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std"),
+    }
+}
+
+/// The SOURCE of a `std.*` module, by dotted path (`["std","concurrency","collection"]`). `None` for
+/// a non-`std` path (those are ordinary project-root disk reads) or a `std.*` module that does not exist.
+///
+/// Priority: **`$CHEZZI_STD` (exclusive) → the embedded stdlib** ([`std_embed`]). The env override is
+/// a deliberate "use THIS tree" — when set, an absent file is a hard miss, never a silent fall-back to
+/// the baked-in copy (mixing two stdlib versions is worse than a clean error). With it unset the
+/// binary is self-contained: `cargo install`ing `chezzi` and then deleting the checkout keeps every
+/// `import std.*` working.
+///
+/// Keyed off the DOTTED path the callers already hold, so there is no path arithmetic and no
+/// canonicalization step that would fail when the source tree is absent.
+pub fn std_source(dotted: &[String]) -> Option<String> {
+    if dotted.first().map(String::as_str) != Some("std") {
+        return None;
+    }
+    let rel = format!("{}.chz", dotted[1..].join("/"));
+    match std::env::var_os("CHEZZI_STD") {
+        Some(root) => std::fs::read_to_string(PathBuf::from(root).join(&rel)).ok(),
+        None => std_embed::lookup(&rel).map(str::to_string),
     }
 }
 
@@ -391,20 +420,40 @@ impl Builder {
             .map(|(_, d)| d.clone())
             .unwrap_or_default();
         let source = match &self.entry_override {
-            // The entry buffer is supplied in-memory (live LSP doc); imports still hit disk.
+            // The entry buffer is supplied in-memory (live LSP doc); imports still resolve normally.
             Some((oid, osrc)) if oid == id => osrc.clone(),
-            _ => std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
-                message: prefix(
-                    &importer,
-                    format!(
-                        "cannot find module '{}' (looked for {})",
-                        dotted_label(dotted),
-                        id.0.display()
+            // `std.*` (incl. the always-linked prelude/ref) reads from `$CHEZZI_STD` or the EMBEDDED
+            // stdlib — never the build machine's checkout, which an installed binary does not have.
+            _ => match std_source(dotted) {
+                Some(src) => src,
+                // A std module that doesn't exist: the "looked for <path>" form below would print the
+                // BUILD machine's `<checkout>/std/nope.chz`, which means nothing to the user.
+                None if dotted.first().map(String::as_str) == Some("std") => {
+                    return Err(ResolveError {
+                        message: prefix(
+                            &importer,
+                            format!(
+                                "cannot find module '{}' (no such module in the stdlib)",
+                                dotted_label(dotted)
+                            ),
+                        ),
+                        span: import_span,
+                        module: Some(dotted_label(dotted)),
+                    });
+                }
+                None => std::fs::read_to_string(&id.0).map_err(|_| ResolveError {
+                    message: prefix(
+                        &importer,
+                        format!(
+                            "cannot find module '{}' (looked for {})",
+                            dotted_label(dotted),
+                            id.0.display()
+                        ),
                     ),
-                ),
-                span: import_span,
-                module: Some(dotted_label(dotted)),
-            })?,
+                    span: import_span,
+                    module: Some(dotted_label(dotted)),
+                })?,
+            },
         };
         let ast = self.parse(&source, dotted)?;
         let imports = self.scan_imports(&ast);
@@ -514,14 +563,15 @@ impl Builder {
             return Ok(());
         }
         let dotted: Vec<String> = name.split('.').map(str::to_string).collect();
-        let file = module_file(path, &self.project_root, &self.std_root);
-        let source = std::fs::read_to_string(&file).map_err(|_| ResolveError {
+        // Same source chain as any other `std.*` module ($CHEZZI_STD → embedded): these ARE std files
+        // (`std/math.chz`, `std/regex.chz`, …), so reading them off the checkout would break `import
+        // std.math` on an installed binary just as surely as the pure-Chezzi modules.
+        let source = std_source(path).ok_or_else(|| ResolveError {
             message: prefix(
                 &dotted,
                 format!(
-                    "cannot find native module file '{}' (looked for {})",
-                    dotted_label(&dotted),
-                    file.display()
+                    "cannot find native module file '{}' (no such module in the stdlib)",
+                    dotted_label(&dotted)
                 ),
             ),
             span: import_span,
@@ -675,6 +725,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // 0-std. `std.*` module source comes from the EMBEDDED table (an installed binary has no checkout).
+    // NOTE: this must never set/unset `$CHEZZI_STD` — it is process-global and every other test in this
+    // parallel harness builds graphs through `std_root()`. The env arm is verified E2E in the shell.
+    #[test]
+    fn std_source_serves_std_from_embedded() {
+        let d = |segs: &[&str]| -> Vec<String> { segs.iter().map(|s| s.to_string()).collect() };
+
+        for segs in [
+            &["std", "prelude"][..],
+            &["std", "ref"][..],
+            &["std", "math"][..], // file-backed native module
+            &["std", "concurrency", "collection"][..], // nested dir
+        ] {
+            let src = std_source(&d(segs))
+                .unwrap_or_else(|| panic!("std_source({segs:?}) returned None — not embedded?"));
+            assert!(!src.is_empty(), "{segs:?} embedded source is empty");
+        }
+
+        // Same bytes as the embedded table (no disk in the no-env path).
+        assert_eq!(
+            std_source(&d(&["std", "math"])).unwrap(),
+            std_embed::lookup("math.chz").unwrap()
+        );
+
+        // A std module that does not exist → None (the caller turns this into a clean diagnostic).
+        assert!(std_source(&d(&["std", "nope"])).is_none());
+        // Non-std paths are never intercepted — they stay project-root disk reads.
+        assert!(std_source(&d(&["myapp", "util"])).is_none());
+    }
+
+    // 0-std-err. A missing `std.*` module must NOT leak the BUILD MACHINE's checkout path — on an
+    // installed binary that path is meaningless (and may not exist).
+    #[test]
+    fn missing_std_module_error_does_not_leak_build_path() {
+        let d = TmpDir::new();
+        let entry = d.write("main.chz", "import std.nope\n");
+        let err = build_graph(&entry).expect_err("import std.nope must fail");
+        assert!(err.message.contains("std.nope"), "msg: {}", err.message);
+        assert!(err.message.contains("stdlib"), "msg: {}", err.message);
+        assert!(
+            !err.message.contains(env!("CARGO_MANIFEST_DIR")),
+            "the diagnostic leaks the build-time checkout path: {}",
+            err.message
+        );
     }
 
     // 0a. The entry-source override is used verbatim instead of reading the entry from disk.

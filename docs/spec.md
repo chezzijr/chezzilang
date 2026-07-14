@@ -313,7 +313,13 @@ Resolution — **optional root marker**, kills Python's run-relative footgun:
    → the manifest entrypoint) it's the *cwd* — the directory you launched from.
 2. Walk *up* from the origin for the **nearest** `chezzi.toml`. Found → that dir is root. **Not found
    → the script's own dir is root** (`run <file>`) / an error (bare `run` needs a manifest).
-3. `std.*` is reserved → always resolves to the stdlib dir.
+3. `std.*` is reserved → resolves to the **stdlib**, whose source is read from `$CHEZZI_STD` if that
+   env var is set (a dev override: "use *this* tree", exclusive — a module missing from it is an
+   error, never a silent fall-back), else from the **stdlib baked into the binary** (`std/*.chz` is
+   `include_str!`'d at compile time, like the `docs/*.md` topics). So an installed `chezzi` is
+   self-contained: it needs no source checkout, and moving or deleting the repo cannot break
+   `import std.*`. Note the flip side: a **pre-built** binary plus an edited `std/*.chz` is stale
+   until it is rebuilt (`cargo run`/`cargo test` rebuild automatically; otherwise use `$CHEZZI_STD`).
 4. `a.b.c` → `<root>/a/b/c.chz`. **No `./` relative imports.**
 
 Single-file scripts need zero config (Deno/Bun/Go model); `chezzi.toml` only matters once a project spans multiple files.
@@ -889,7 +895,7 @@ src/
   runtime/      # builtins + native std modules
   resolver/     # module path resolution
   test_runner   # `chezzi test` — discovers + runs `test fn`s in `*_test.chz`
-  main.rs       # `chezzi run/test/docs/repl/tokens/ast`
+  main.rs       # `chezzi init/run/test/check/tokens/ast/docs`
 std/            # std modules written in Chezzi
 examples/*.chz  # golden-test corpus + LLM eval material
 tests/          # Rust unit + golden tests
@@ -899,7 +905,7 @@ tests/          # Rust unit + golden tests
 
 | # | Deliverable | Runnable proof |
 |---|-------------|----------------|
-| ✅ **M1** | Indent-aware lexer + REPL that echoes tokens | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
+| ✅ **M1** | Indent-aware lexer | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
 | ✅ **M2** | Parser → AST + pretty-printer | `chezzi ast foo.chz` round-trips source |
 | ✅ **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, Result+`?` run single-file |
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |

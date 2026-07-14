@@ -29,7 +29,6 @@ COMMANDS:
     tokens  <file>   Print the token stream
     ast     <file>   Print the parsed AST
     docs    [topic]  Print language docs (no topic → full reference, for piping to an LLM)
-    repl             Start an interactive REPL
     help             Show this message
 
 FLAGS:
@@ -59,11 +58,6 @@ fn main() -> ExitCode {
         "test" => cmd_test(&args[1..]),
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
-        "repl" => {
-            eprintln!("chezzi: 'repl' is not implemented yet.");
-            eprintln!("        see the roadmap in docs/spec.md");
-            ExitCode::FAILURE
-        }
         other => {
             eprintln!("chezzi: unknown command '{other}'\n");
             print!("{USAGE}");

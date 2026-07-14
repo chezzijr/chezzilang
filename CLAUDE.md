@@ -55,7 +55,6 @@ cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alia
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
 cargo run -- docs                        # print docs: no topic = full LLM reference bundle; `docs <topic>` = one (spec/syntax/stdlib); `docs topics` lists them
-cargo run -- repl                        # interactive REPL (NOT IMPLEMENTED — stub errors; see src/main.rs:81)
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
 

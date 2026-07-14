@@ -373,21 +373,43 @@ bitwise/shift protocols, and a call operator. Small each.
 The CLI ships exactly 8 commands (`init run test check tokens ast docs help`). **R3 (no package
 manager) is the headline and lives above** — it is the one gap that keeps the language author-only.
 
-### T1. Installing `chezzi` produces a binary that can't find its own stdlib — a real defect
-`std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`** (`src/resolver/mod.rs`), and the
-`std/*.chz` files are **not embedded** (only `docs/*.md` are `include_str!`'d). So `cargo install
---path .` yields a `~/.cargo/bin/chezzi` that reads its stdlib from *the source checkout's build-time
-path*: move or delete the repo and every `import std.*` breaks. The code comment admits it defers "a
-real install story to M6, when `std/` actually ships content" — M6 shipped; the install story did not.
-**Fix: embed `std/` (`include_str!`) or search next to the exe. An afternoon.**
+### T1. ~~Installing `chezzi` produces a binary that can't find its own stdlib~~ — **FIXED**
+> **FIXED** (`fix(resolver): embed std/ so an installed chezzi finds its own stdlib`). `std/**/*.chz` is
+> now `include_str!`'d into the binary (`src/resolver/std_embed.rs`, the same pattern the CLI already
+> used for the `docs/*.md` topics), and *every* `std.*` source read — `Builder::visit` (incl. the
+> always-linked `std.prelude`/`std.ref`) and `Builder::visit_native_file` (the file-backed natives
+> `math`/`regex`/`io`/…) — routes through the new `resolver::std_source(dotted)`: **`$CHEZZI_STD` (dev
+> override, exclusive) → the embedded stdlib.** The build-time `CARGO_MANIFEST_DIR/std` path is no longer
+> in the *read* chain, so an installed `~/.cargo/bin/chezzi` keeps working with the checkout moved or
+> deleted (verified E2E: `mv std std.bak`, then `chezzi run` + `chezzi run --serial` a program importing
+> `std.math` / `std.regex` / `std.concurrency.collection` — byte-identical on both engines). A missing std
+> module now says *"no such module in the stdlib"* instead of leaking the build machine's path. The
+> hand-written table is rot-guarded by `embedded_std_table_matches_disk` (embedded key set **and**
+> contents == the on-disk `std/` tree): **add a `std/foo.chz` and that test fails until you add its
+> `include_str!` line.**
+>
+> Residual: a **pre-built** binary plus an edited `std/*.chz` is stale until rebuilt (`cargo run`/`cargo
+> test` rebuild automatically via `include_str!`; the documented escape is `CHEZZI_STD=./std`).
 
-### T2. `chezzi repl` is a stub that ERRORS — while `--help` advertises it
-`src/main.rs` prints *"'repl' is not implemented yet"* and exits 1, but `USAGE` still lists
-`repl  Start an interactive REPL`. For a language whose pitch is "Python-feel scripting" with an ~11×
-faster cold start than CPython, the first thing a Python user types errors out. (`docs/spec.md`'s M1 row
-even claims a REPL shipped — it never existed.) **At minimum stop advertising it (1 line).** A naive v1
-— accumulate lines, re-check + re-run the buffer, print the last expression — is small; the real work is
-incremental checker state, since the checker is whole-graph oriented. Medium.
+The original finding: `std_root()` = `$CHEZZI_STD` else **`env!("CARGO_MANIFEST_DIR")/std`**
+(`src/resolver/mod.rs`), and the `std/*.chz` files were **not embedded** (only `docs/*.md` were
+`include_str!`'d). So `cargo install --path .` yielded a `~/.cargo/bin/chezzi` that read its stdlib from
+*the source checkout's build-time path*: move or delete the repo and every `import std.*` broke. The code
+comment admitted it deferred "a real install story to M6, when `std/` actually ships content" — M6
+shipped; the install story did not.
+
+### T2. ~~`chezzi repl` is a stub that ERRORS — while `--help` advertises it~~ — **FIXED (de-advertised)**
+> **FIXED** (`fix(cli): drop the repl stub — it never shipped`). The `repl` subcommand arm and its USAGE
+> line are **deleted**: `chezzi repl` is now a plain *unknown command* (prints USAGE, exits 1), which is
+> the honest behavior for a command that does not exist. `docs/spec.md`'s M1 row no longer claims a REPL
+> shipped, and the `CLAUDE.md` Commands block no longer lists it. **No REPL was built** — the idea lives
+> in `docs/future.md` (Tier 4, Ecosystem) as an explicitly-unbuilt item, which is its only correct home.
+
+The original finding: `src/main.rs` printed *"'repl' is not implemented yet"* and exited 1, while `USAGE`
+still listed `repl  Start an interactive REPL` — so for a language pitched as "Python-feel scripting" with
+an ~11× faster cold start than CPython, the first thing a Python user types errored out. Building one
+remains Medium: a naive v1 (accumulate lines, re-check + re-run the buffer, print the last expression) is
+small, but the real work is incremental checker state, since the checker is whole-graph oriented.
 
 ### T3. No formatter
 No `chezzi fmt`; no formatting provider in the LSP. (`src/fmtspec.rs` is the `{x:.2f}` mini-language —
@@ -404,8 +426,10 @@ benchmarks, `assert_eq` with a diff, parallel execution, machine-readable output
 
 ### T5. No debugger, no profiler, no doc generator
 - **Debugger:** nothing (no breakpoints, no DAP, no stepping). What exists is post-mortem: a fault
-  trace. Combined with T2, the language has **no interactive introspection of any kind** — the debug
-  loop is "add a `print`, re-run". A REPL buys most of this value far more cheaply than a DAP server.
+  trace. And there is no REPL either (T2 removed the false advertisement; **no REPL was ever built**),
+  so the language has **no interactive introspection of any kind** — the debug loop is "add a `print`,
+  re-run". An (unbuilt) REPL would buy most of this value far more cheaply than a DAP server; it is
+  tracked as a Tier-4 idea in `docs/future.md`, not as a shipped or in-progress feature.
 - **Profiler:** nothing user-facing. Ironic for a project mid-perf-milestone: the VM is profiled with
   external Rust tooling, but a Chezzi *user* cannot find their own hot function. (Python: `cProfile`;
   Go: `pprof`, best in class.) A sampling counter keyed by function + a flat report is contained.
