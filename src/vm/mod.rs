@@ -1179,8 +1179,12 @@ enum SnapValue {
 enum TaskOutcome {
     /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
     Done(WorkerResult),
-    /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Dropped.
-    Cancelled,
+    /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
+    /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task
+    /// always runs its prologue, so those bytes really were printed — and serial (which prints live
+    /// into the shared buffer) cannot un-print them. Dropping them here was a capture-mode-only
+    /// divergence from the serial engine's line SET.
+    Cancelled { out: String, stderr: String },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
         code: i32,
@@ -2731,8 +2735,11 @@ impl ReadyWorker {
                 stderr: std::mem::take(&mut self.worker.stderr),
             }
         } else if self.worker.cancelled {
-            // This worker observed a sibling's cancel and unwound — swallow it (output dropped).
-            TaskOutcome::Cancelled
+            // This worker observed a sibling's cancel and unwound — its output still flushes.
+            TaskOutcome::Cancelled {
+                out: std::mem::take(&mut self.worker.out),
+                stderr: std::mem::take(&mut self.worker.stderr),
+            }
         } else {
             match res {
                 Err(e) => {

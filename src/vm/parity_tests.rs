@@ -8600,3 +8600,78 @@ main()
         "read_bytes must recover the carried undecodable bytes byte-exactly: {out:?}"
     );
 }
+
+// ===== cancellation points + the serial cancel drain (N6) =====
+// Cancel is delivered at CHECKPOINTS (loop back-edges + blocking/park ops), so a STARTED task always
+// runs its straight-line prologue and a REGISTERED `defer` always runs on cancel — on BOTH engines.
+// Cross-task stdout ORDER stays nondeterministic on both engines (one print = one locked write,
+// line-atomic); only the line SET / exit code / did-the-defer-run are parity.
+
+/// N6 — token-sequenced: `consumer` registers `defer cleanup(s)`, hands `boom` a token, then parks in
+/// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so both engines
+/// must run it (42). Serial used to print `0`: `run_scheduler`'s `run_child(i)?` propagated the
+/// faulting child's error straight out and ABANDONED the parked consumer — never resumed, never
+/// cancelled, never unwound.
+#[test]
+fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert_eq!(serial, "42\n", "serial: the parked consumer's defer ran");
+    assert_eq!(mn, "42\n", "M:N: the parked consumer's defer ran");
+    assert_same_lines(&serial, &mn);
+}
+
+/// BUG 1 / the PROBE shape — no token: `consumer` PRINTS, THEN registers `defer cleanup(s)`, then
+/// parks; `boom` faults immediately. With cancel observed at EVERY instruction the consumer could be
+/// killed between its first statement and its `defer` line, so the defer never registered and cleanup
+/// silently never ran (measured: 0/20 on M:N). With CANCELLATION POINTS (loop back-edges + blocking
+/// ops) a STARTED task always runs its straight-line prologue, so the defer is registered by
+/// construction — deterministically 42 on BOTH engines. The pre-defer `print` must survive on both
+/// (line SET parity: a cancelled M:N task's buffer is flushed at its task slot, serial printed live).
+#[test]
+fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
+    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+               fn consumer(ch: Channel[int], s: Shared[int]):\n    print(\"consumer started\")\n    defer cleanup(s)\n    ch.recv()\n\
+               fn boom():\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom()\n        0\n    print(s.get())\nmain()\n";
+    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
+    let mn = run_capture_parallel(src).expect("the fault is recovered, so the program completes");
+    assert!(
+        serial.contains("42\n"),
+        "serial: the started consumer's defer ran: {serial:?}"
+    );
+    assert!(
+        mn.contains("42\n"),
+        "M:N: the started consumer's defer ran: {mn:?}"
+    );
+    // Cross-task ORDER is nondeterministic on both engines; the line SET is the contract.
+    assert_same_lines(&serial, &mn);
+}
+
+/// `os.exit` inside a CANCELLED task's `defer`: the exit code is identical on both engines and is
+/// never demoted to the sibling's catchable fault (Exit > Fault, lowest task index wins — serial's
+/// drain reduces exits exactly like M:N's `reduce_task_slots`). Line SET parity only; order is not
+/// asserted.
+#[test]
+fn parity_os_exit_inside_a_cancelled_tasks_defer() {
+    let src = "import std.os\n\
+               fn bye():\n    print(\"cleanup\")\n    os.exit(7)\n\
+               fn consumer(ch: Channel[int], go: Channel[int]):\n    defer bye()\n    go.send(0)\n    ch.recv()\n\
+               fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+               fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    r := recover:\n        parallel:\n            spawn consumer(ch, go)\n            spawn boom(go)\n        0\n    print(\"unreachable\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (mo, _me, _mr, mc) = run_file_p(&entry);
+    let (so, _se, _sr, sc) = run_file(&entry);
+    assert_eq!(sc, Some(7), "serial: the cancelled defer's os.exit wins");
+    assert_eq!(mc, Some(7), "M:N: the cancelled defer's os.exit wins");
+    assert!(
+        !so.contains("unreachable") && !mo.contains("unreachable"),
+        "os.exit hard-halts: serial={so:?} mn={mo:?}"
+    );
+    assert_same_lines(&so, &mo);
+}

@@ -1820,7 +1820,10 @@ impl Vm {
                 stderr: std::mem::take(&mut self.stderr),
             }
         } else if self.cancelled {
-            TaskOutcome::Cancelled
+            TaskOutcome::Cancelled {
+                out: std::mem::take(&mut self.out),
+                stderr: std::mem::take(&mut self.stderr),
+            }
         } else {
             match res {
                 Err(e) => {
@@ -2004,7 +2007,14 @@ impl Vm {
                         deadlock_err = Some(err);
                     }
                 }
-                TaskOutcome::Cancelled => {}
+                TaskOutcome::Cancelled { out, stderr } => {
+                    // A cancelled task's buffered output flushes at its task-order slot (it really
+                    // printed those bytes — with cancellation points a started task always completes
+                    // its prologue), matching serial, which prints live and cannot un-print. Cross-task
+                    // ORDER stays nondeterministic on both engines; the line SET is the contract.
+                    self.out.push_str(&out);
+                    self.stderr.push_str(&stderr);
+                }
             }
         }
         match (first_exit, first_fault, deadlock_err) {
@@ -2031,6 +2041,23 @@ impl Vm {
     /// ([`Vm::wake_on_send`]). When `ready` empties: all children `Done` ⇒ the nursery is finished;
     /// otherwise every remaining child is parked on an empty channel no sibling can fill — a deadlock.
     pub(super) fn run_scheduler(&mut self) -> Result<(), RuntimeError> {
+        // A nursery scope owns its OWN cancel state: M:N clones a fresh per-scope flag into each
+        // worker and resets `cancelled` at every fiber swap-in. Serial keeps both in VM-globals, so
+        // hand this level a clean slate and restore the enclosing scope's on EVERY exit. Two things
+        // depend on it: (a) a nested `parallel:` entered from inside a cancelled task's `defer` must
+        // run its OWN children uncancelled (else the outer scope's tripped flag kills them at their
+        // first checkpoint and bypasses their `recover:`); (b) a leaked `cancelled == true` would
+        // make the fault this level propagates look like a cancel-unwind (exec.rs) and bypass the
+        // PARENT's `recover:`.
+        let saved_cancel = self.cancel.take();
+        let saved_cancelled = std::mem::replace(&mut self.cancelled, false);
+        let r = self.run_scheduler_level();
+        self.cancel = saved_cancel;
+        self.cancelled = saved_cancelled;
+        r
+    }
+
+    fn run_scheduler_level(&mut self) -> Result<(), RuntimeError> {
         loop {
             let next = self
                 .scheduler_stack
@@ -2039,7 +2066,18 @@ impl Vm {
                 .ready
                 .pop_first();
             match next {
-                Some(i) => self.run_child(i)?,
+                Some(i) => {
+                    if let Err(e) = self.run_child(i) {
+                        // N6 — the child faulted / `os.exit`ed. Its siblings must not be abandoned
+                        // where they sit: cancel them and re-drive each one so it unwinds through
+                        // its `defer`s (Go runs a cancelled goroutine's deferred functions; `defer`
+                        // is Chezzi's only cleanup mechanism). M:N already did this (`cancel_drain`
+                        // + the fibers' cancel-recheck-on-park); serial used to propagate this `Err`
+                        // straight out with a bare `?`. THIS is serial's ONLY child-error
+                        // propagation point — every other nursery path is `self.parallel`-gated.
+                        return Err(self.drain_cancelled_children(i, e));
+                    }
+                }
                 None => {
                     if self.all_children_done() {
                         return Ok(());
@@ -2048,6 +2086,88 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// N6 — serial's cancel teardown, the cooperative twin of M:N's `cancel_drain`: after child
+    /// `faulted` of the innermost level faults or `os.exit`s, drive every still-PARKED sibling to a
+    /// real end so each runs its `defer`s, then return the error the nursery propagates.
+    ///
+    /// Per sibling, in task order (serial has no worker race, so this is ordering, not locking):
+    /// - **Blocked** (parked on a `recv`/`wait`): re-driven with the cancel flag tripped, so it
+    ///   observes the cancel at its rewound park op (the blocking CHECKPOINT in `chan_recv_step` /
+    ///   `op_wait_poll`) → `unwind_deferred` fires its defers, a `recover:` INSIDE the task is
+    ///   bypassed, it ends `Done`. `cancelled` is a per-VM latch, so it is cleared before EACH child
+    ///   (else only the first parked sibling unwinds).
+    /// - **Pending** (never started) children are deliberately NOT started: they registered no
+    ///   `defer`, so there is nothing to unwind, and starting them would make serial deterministically
+    ///   emit output that M:N only races (worse for the line-SET parity contract). A never-started
+    ///   task's `defer` therefore does not run on serial while M:N *races* it — the documented
+    ///   guarantee boundary (docs/gaps.md §N6b): a STARTED task always runs its prologue, so a
+    ///   REGISTERED defer always runs; whether a spawned task starts at all before the scope is
+    ///   cancelled is scheduler-dependent.
+    ///
+    /// `pending_exit` is cleared before each child (`unwind_deferred`, stmt.rs, refuses to run ANY
+    /// defer while an exit is pending — one task's exiting `defer` would otherwise poison every later
+    /// sibling's cleanup) and the exits are REDUCED exactly like M:N's `reduce_task_slots`: lowest
+    /// task index wins, and an `os.exit` (from the faulter itself or from any drained sibling's
+    /// `defer`) BEATS the fault — a hard halt is never demoted to a catchable error.
+    ///
+    /// Output: a drained child's bytes STAY (serial prints live into the shared `out` and cannot
+    /// un-print; M:N now flushes a `Cancelled` fiber's buffer at its task slot for the same reason).
+    /// Cross-task ORDER is nondeterministic on both engines and is not part of the parity contract.
+    ///
+    /// Genuine DEADLOCK of THIS level (all parked, nothing cancelled) is reported from
+    /// `run_scheduler_level`'s `None` arm, which never reaches here — so a deadlocked level still
+    /// tears its parked fibers down without running their defers, identically on both engines
+    /// (docs/gaps.md §N5, unchanged). A NESTED level's deadlock arrives here as an ordinary child
+    /// error and DOES cancel this level's siblings — matching M:N, which cancels the outer scope on
+    /// any child fault.
+    fn drain_cancelled_children(&mut self, faulted: usize, err: RuntimeError) -> RuntimeError {
+        // Exit-over-fault, lowest task index wins — M:N's `reduce_task_slots` precedence.
+        let mut first_exit: Option<(usize, i32)> = self.pending_exit.take().map(|c| (faulted, c));
+        let cancel = Arc::new(AtomicBool::new(true));
+        let n = self
+            .scheduler_stack
+            .last()
+            .expect("scheduler level present")
+            .children
+            .len();
+        for i in 0..n {
+            if i == faulted {
+                continue;
+            }
+            if !matches!(self.child_state(i), FiberState::Blocked) {
+                continue;
+            }
+            self.cancel = Some(Arc::clone(&cancel));
+            self.cancelled = false;
+            self.pending_exit = None;
+            let _ = self.run_child(i);
+            if let Some(code) = self.pending_exit.take() {
+                // The child's `defer` called `os.exit` — carry the code (M:N's `Exit` arm does the
+                // same); never discard it.
+                if first_exit.is_none_or(|(j, _)| i < j) {
+                    first_exit = Some((i, code));
+                }
+            }
+        }
+        self.cancel = None; // `run_scheduler` restores the enclosing scope's flag on the way out
+        match first_exit {
+            Some((_, code)) => {
+                self.pending_exit = Some(code);
+                self.err("exit".to_string(), Span { line: 1, col: 1 })
+            }
+            None => err,
+        }
+    }
+
+    fn child_state(&self, i: usize) -> &FiberState {
+        &self
+            .scheduler_stack
+            .last()
+            .expect("scheduler level present")
+            .children[i]
+            .state
     }
 
     pub(super) fn all_children_done(&self) -> bool {

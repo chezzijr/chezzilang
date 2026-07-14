@@ -4,6 +4,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE SEMANTICS + FIX (2026-07-14, `auto-task/cancel-points`) — CANCELLATION POINTS; `docs/gaps.md`
+> N6 FIXED, N4's "defers now always run" overclaim corrected.** A cancel (sibling fault, `os.exit`, scope
+> teardown) is now delivered at **checkpoints — loop back-edges + blocking/park ops** — *not* at every
+> instruction (the loop-top check in `run_until` is **deleted**; the back-edge check is `Vm::jump_checked`,
+> wired into BOTH `Op::Jump` dispatch sites, and the park checkpoints are engine-agnostic top-of-fn checks
+> in `chan_recv_step` / `op_wait_poll` / `park_on_fd` / the blocking-native offload). **Therefore a STARTED
+> task always runs its straight-line prologue, so a REGISTERED `defer` ALWAYS runs on cancel — on BOTH
+> engines, deterministically.** Before: a task could be killed *between its first statement and its `defer`
+> line* — the probe shape ran its defer in **0/20** M:N runs. This is Trio's model (the old
+> every-instruction kill was neither Go's nor Trio's); accepted cost: a cancelled task runs to its next
+> checkpoint, and at a `recv`/`wait:` checkpoint **cancel now wins over a queued value / done-latch / fired
+> timer** (uniform on both engines). Second, independent fix (**N6**): serial's `run_scheduler` used to
+> propagate a faulting child's error straight out with `run_child(i)?`, **abandoning its still-parked
+> siblings** — it now trips a scope cancel and **re-drives every `Blocked` sibling** to completion
+> (`drain_cancelled_children`) so each unwinds its `defer`s before the fault propagates, reducing exits like
+> M:N (`Exit` > `Fault`, lowest index — an `os.exit` from a drained child's `defer` is carried, never
+> dropped). M:N's `TaskOutcome::Cancelled` now **carries + flushes its output** (those lines really printed;
+> serial can't un-print them). **Rule, documented:** cross-task stdout ORDER is nondeterministic on both
+> engines and is NOT parity — the **line set**, the **exit code** and **whether the defer ran** are.
+> Race bar (release, N-1 CPU load hogs): defer-first / probe / token shapes = `42`, **0/200 failures per
+> engine per shape** (before: probe 0/20 defers on M:N, token serial `0` 10/10). New parity tests:
+> `parity_defer_runs_on_parked_sibling_when_sibling_faults`,
+> `parity_probe_defer_runs_when_cancelled_before_its_defer_line`,
+> `parity_os_exit_inside_a_cancelled_tasks_defer`; plus
+> `parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel` (a `while true:` sibling still dies at
+> the back-edge) and `compiler::back_edge_tests::loop_back_edge_is_a_backward_jump` (peephole may never
+> thread a loop back-edge away, or hot loops become uncancellable). **N5 untouched** (a genuine deadlock
+> still skips defers, identically on both engines). Boundary (**N6b**): a NEVER-STARTED task registers no
+> `defer`; whether a spawned task starts before the cancel stays scheduler-dependent. Perf side-effect of
+> deleting the per-instruction check: `loop` 1.32× → **1.12×** CPython, `fib` 3.54× → **3.16×**
+> (`docs/benchmarks.md`).
+
 > **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`

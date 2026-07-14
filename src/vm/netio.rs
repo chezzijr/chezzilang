@@ -1001,6 +1001,21 @@ impl Vm {
         span: Span,
     ) -> Result<bool, RuntimeError> {
         if self.mn.is_some() && self.native_reentry == 0 {
+            // CANCELLATION CHECKPOINT — a socket park is a blocking op, so it is a cancel-delivery
+            // point (the single choke point for `accept`/`read`/`write`/`connect`). A cancelled fiber
+            // must NOT re-park: `poller::drain_sched` re-injects a poller-parked fiber on cancel and
+            // the rewound op re-runs here — without this check it would would-block and re-park
+            // forever (the every-instruction check that used to kill it at the dispatch loop top is
+            // gone; see `run_until`), wedging the nursery.
+            if !self.cancelled
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
+                self.cancelled = true;
+                return Err(self.err("cancelled".to_string(), span));
+            }
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
             // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
@@ -1203,6 +1218,22 @@ impl Vm {
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
+        // CANCELLATION CHECKPOINT (engine-agnostic — the serial drain in `drain_cancelled_children`
+        // depends on it, and it replaces the two `mn`-gated checks that used to sit inside the timer
+        // and snapshot-park branches). At a `recv` checkpoint CANCEL WINS over a queued value, a
+        // tripped done-latch and a fired timer — identically on both engines. `native_reentry == 0`
+        // mirrors the park gate: inside a native callback the caller's Rust-stack state cannot be
+        // unwound here.
+        if self.native_reentry == 0
+            && !self.cancelled
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+        {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         // A tripped latch (`trip()`) delivers `true` immediately and forever, on every engine — a
         // pending queued value (if any) still wins first. Checked before the timer/park logic so a
         // `done().recv()` on a manually-cancelled token never parks.
@@ -1234,14 +1265,7 @@ impl Vm {
                     // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
                     // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
                     // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
-                    if self
-                        .cancel
-                        .as_ref()
-                        .is_some_and(|c| c.load(Ordering::Relaxed))
-                    {
-                        self.cancelled = true;
-                        return Err(self.err("cancelled".to_string(), span));
-                    }
+                    // (Cancel was checked at the top of this fn — the engine-agnostic checkpoint.)
                     let sched = self.mn.clone().unwrap();
                     let key = self.channel_core_ptr(h);
                     let core_job = Arc::clone(&core);
@@ -1270,16 +1294,9 @@ impl Vm {
             }
         }
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
-        // set). Cancel is checked FIRST: a fiber woken only to be cancelled must not re-park.
+        // set). A fiber woken only to be cancelled must not re-park — the top-of-fn checkpoint above
+        // already returned in that case (on BOTH engines).
         if self.mn.is_some() && self.native_reentry == 0 {
-            if self
-                .cancel
-                .as_ref()
-                .is_some_and(|c| c.load(Ordering::Relaxed))
-            {
-                self.cancelled = true;
-                return Err(self.err("cancelled".to_string(), span));
-            }
             let core = self.channel_core(h);
             let mut g = core.q.lock().unwrap();
             if let Some(w) = g.queue.pop_front() {
@@ -1337,6 +1354,19 @@ impl Vm {
     /// the soonest live timer and take it, else fault (all-closed) or block (cooperative multi-channel
     /// park; the M:N park is a follow-up — a blocking `wait` faults under `--parallel` for now).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
+        // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
+        // ready arm / a fired timer, and it covers the COOPERATIVE multi-channel park below (which
+        // had no check at all, so serial's cancel drain could never unwind a `wait`-parked fiber).
+        if self.native_reentry == 0
+            && !self.cancelled
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+        {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
         let n = meta.n;
         let base = self.stack.len() - n;
         let mut soonest: Option<(usize, std::time::Instant)> = None;
@@ -1409,16 +1439,8 @@ impl Vm {
             // {a sibling send/close, the timer's own deadline send} wins (WAIT-2 late-alarm = CAS
             // already claimed = no-op; WAIT-3 same-instant = single claimed CAS = one winner).
             if let Some((i, deadline)) = soonest {
-                // Cancel checked first: a fiber about to be cancelled must not arm a stray timer (mirror
-                // the single-`recv` timer-park at `chan_recv_step`).
-                if self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(Ordering::Relaxed))
-                {
-                    self.cancelled = true;
-                    return Err(self.err("cancelled".to_string(), span));
-                }
+                // A fiber about to be cancelled must not arm a stray timer — the top-of-fn
+                // cancellation checkpoint already returned in that case (on BOTH engines).
                 let sched = self.mn.clone().unwrap();
                 let key = self.channel_core_ptr(keys[i]);
                 let core_job = self.channel_core(keys[i]);

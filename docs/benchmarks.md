@@ -861,3 +861,18 @@ sitting in `Stdout`'s `LineWriter`), and the VM no longer waits on the writer at
 is a no-op memcheck. Re-measured on the same machine: print loop **0.101 s** (was 0.102 s), tracked
 suite `fib` 262.0 · `str` 178.7 · `primes` 653.2 · `loop` 992.8 · `list` 406.5 · `struct` 472.6 ·
 `poly_method` 1374 · `map` 156.1 · `empty` 1.9 — all within noise of the numbers above.
+
+
+## Cancellation points — the per-instruction cancel check leaves the hot path — 2026-07-14
+
+Cancel is now observed only at **checkpoints** (loop back-edges + blocking/park ops), so `run_until`'s
+dispatch loop no longer does an `Option` deref + relaxed atomic load + branch **per instruction**
+(`src/vm/exec.rs`; the check moved to `Vm::jump_checked`, i.e. backward `Op::Jump` only). Correctness
+rationale in `docs/gaps.md` §N6 — the speedup is a side-effect, not the goal.
+
+Same machine, `benches/run.chz` (hyperfine, CPython ratio; lower is better), before → after:
+`loop` 1.32× → **1.12×** · `fib` 3.54× → **3.16×** · `map` 1.98× → **1.88×** · `poly_method` 4.52× →
+**4.49×** · this run's others: `str` 2.12× · `primes` 2.20× · `list` 2.55× · `struct` 2.76×. The dispatch-bound
+benches (`loop`, `fib`) move the most, as expected for a removed per-op load+branch; the rest are within
+run-to-run noise. Single run, not a median-of-N — treat the small deltas as noise and the `loop`/`fib`
+direction as real.

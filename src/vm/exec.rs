@@ -817,33 +817,19 @@ impl Vm {
             if self.gc_stress || self.heap.should_collect() {
                 self.collect();
             }
-            // B3.4: a `--parallel` worker observes its nursery's cancel flag at this back-edge (the
-            // same boundary `gc_stress` is checked at). A sibling having faulted / `os.exit`d set it;
-            // unwind the whole worker so this still-running task aborts promptly instead of burning
-            // cycles to completion. Cancellation behaves like an uncaught fault that bypasses
-            // `recover:`: `unwind_deferred(base_level)` runs every frame's `defer`s (Go semantics)
-            // AND drops their handlers, so a `recover:` inside the task cannot catch the cancel and
-            // resume it (a cancelled task must die). `!self.cancelled` latches on the first
-            // observation: while the cancel unwind runs the task's `defer`s back through this loop,
-            // re-firing would skip them — so we stop observing once cancellation is in flight.
-            if !self.cancelled
-                && self
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(Ordering::Relaxed))
-            {
-                self.cancelled = true;
-                let span = self.frames[self.frames.len() - 1].call_span;
-                let rte = self.err("cancelled".to_string(), span);
-                // B3.4 cancel: no cancel-report — a cancelled task's pending nurseries are torn down
-                // silently (the parent that set the flag already escaped and reported its own).
-                let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
-                return Err(rte);
-            }
+            // CANCELLATION POINTS (the every-instruction cancel check that used to sit here is GONE).
+            // A cancel is observed only at CHECKPOINTS: loop back-edges (`jump_checked`, below) and
+            // blocking/park ops (`chan_recv_step` / `op_wait_poll` / the blocking-native offload).
+            // Consequence, intended (Trio-style structured concurrency): a STARTED task always runs
+            // its straight-line prologue, so a `defer` it registers is ALWAYS registered before
+            // anything can kill it — "does my cleanup run?" no longer depends on scheduler timing.
+            // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
+            // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
+            //
             // D3: reduction-counting preemption (M:N engine only — the cooperative engine is the
             // frozen parity oracle and never preempts). Decrement the budget per dispatched op; at
-            // exhaustion yield this worker so a queued sibling runs (round-robin fairness). Placed
-            // AFTER the cancel check so cancel wins (a cancelled fiber unwinds, never yields). The
+            // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
+            // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
             // save the caller's Rust-stack state, so we defer it (leave `reds` at 0 and re-check next
             // op, once the reentry unwinds). Reuses the suspend/rewind contract — frames stay intact,
@@ -898,10 +884,9 @@ impl Vm {
                     self.op_bin_local_const(*slot, *val, *kind, span)
                 }
                 Op::IncLocal { slot, delta } => self.op_inc_local(*slot, *delta, span),
-                Op::Jump(t) => {
-                    self.frames[fi].ip = *t;
-                    Ok(())
-                }
+                // A cancellation CHECKPOINT: a backward `Op::Jump` is a loop back-edge (see
+                // `jump_checked`) — keep in lock-step with `step`'s arm.
+                Op::Jump(t) => self.jump_checked(*t, span),
                 Op::JumpIfFalse(t) => {
                     if let Value::Bool(false) = self.pop() {
                         self.frames[fi].ip = *t;
@@ -1194,6 +1179,33 @@ impl Vm {
         self.frames.last_mut().unwrap().ip = target;
     }
 
+    /// The loop-BACK-EDGE cancellation checkpoint (the only per-instruction cancel check left; the
+    /// old every-instruction one at the dispatch-loop top is gone — see `run_until`). The frame's
+    /// stored `ip` is already `ip + 1` for the op being dispatched, so `target < ip` is exactly a
+    /// backward jump, i.e. a loop back-edge (pinned by `compiler::back_edge_tests`). A long-running
+    /// CPU loop therefore stays promptly cancellable, while straight-line code (a task's prologue,
+    /// its `defer` registration) runs to completion first.
+    ///
+    /// `!self.cancelled` latches on the first observation: a `defer` containing a loop must not
+    /// re-fire the check and skip the remaining defers while the cancel unwind is already in flight.
+    /// The `Err` is funnelled by `run_until`'s post-step handler into `unwind_deferred(base_level,
+    /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
+    pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
+        let ip = self.frames.last().unwrap().ip;
+        if target < ip
+            && !self.cancelled
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+        {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        self.frames.last_mut().unwrap().ip = target;
+        Ok(())
+    }
+
     pub(super) fn push(&mut self, v: Value) {
         self.stack.push(v);
     }
@@ -1432,7 +1444,8 @@ impl Vm {
             Op::PopHandler => {
                 self.handlers.pop();
             }
-            Op::Jump(t) => self.jump(*t),
+            // Cancellation checkpoint — lock-step with the inlined arm in `run_until`.
+            Op::Jump(t) => self.jump_checked(*t, span)?,
             Op::JumpIfFalse(t) => {
                 if let Value::Bool(false) = self.pop() {
                     self.jump(*t);

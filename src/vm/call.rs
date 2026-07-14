@@ -253,6 +253,19 @@ impl Vm {
             && crate::native::is_blocking(name)
             && let Some(nargs) = self.extract_native_args(&args)
         {
+            // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point. Without it, a task
+            // that reaches a `sleep_ms` / io / fs call after its scope was cancelled would delay the
+            // whole teardown by the full blocking duration (the every-instruction check used to kill
+            // it at the next dispatch; that check is gone — see `run_until`).
+            if !self.cancelled
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                self.cancelled = true;
+                return Err(self.err("cancelled".to_string(), span));
+            }
             // D5 owe #2 — `sleep_ms` rides the timer thread (park + deadline-wake), not a pool thread
             // (`timer_ms = Some(ms)`). A non-positive (or non-int) `sleep_ms` has nothing to wait for,
             // so it is NOT offloaded — `offload` stays `None` and execution falls through to the

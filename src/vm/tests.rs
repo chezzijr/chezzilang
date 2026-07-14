@@ -2348,7 +2348,14 @@ fn mnsched_runnable_tracks_single_queue() {
     );
     let f = take_run(&sched);
     assert_eq!(sched.runnable.load(Ordering::Relaxed), 2);
-    sched.finish(f.task_index, 0, TaskOutcome::Cancelled);
+    sched.finish(
+        f.task_index,
+        0,
+        TaskOutcome::Cancelled {
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
     assert_eq!(
         sched.runnable.load(Ordering::Relaxed),
         2,
@@ -2464,7 +2471,14 @@ fn mn_finish_routes_done_to_scope_via_fiber() {
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let _f0 = take_run(&sched); // scope 0's fiber (task_index 0)
     let _f1 = take_run(&sched); // queued as task_index 1
-    sched.finish(1, 1, TaskOutcome::Cancelled); // finish scope 1's fiber (flat slot 1)
+    sched.finish(
+        1,
+        1,
+        TaskOutcome::Cancelled {
+            out: String::new(),
+            stderr: String::new(),
+        },
+    ); // finish scope 1's fiber (flat slot 1)
     {
         let c = sched.lock();
         assert_eq!(c.scopes[1].done, 1, "scope 1 done bumped");
@@ -2472,7 +2486,14 @@ fn mn_finish_routes_done_to_scope_via_fiber() {
         assert!(c.slots[1].is_some(), "flat slot 1 set");
         assert!(!c.terminate, "not all scopes done yet");
     }
-    sched.finish(0, 0, TaskOutcome::Cancelled);
+    sched.finish(
+        0,
+        0,
+        TaskOutcome::Cancelled {
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
     assert!(
         sched.lock().terminate,
         "global terminate once every scope is done"
@@ -2487,7 +2508,10 @@ fn mn_take_scope_slots_drains_only_its_range() {
     {
         let mut c = sched.lock();
         for i in 0..4 {
-            c.slots[i] = Some(TaskOutcome::Cancelled);
+            c.slots[i] = Some(TaskOutcome::Cancelled {
+                out: String::new(),
+                stderr: String::new(),
+            });
         }
     }
     let s0 = sched.take_scope_slots(0);
@@ -5289,13 +5313,27 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
-    sched.finish(a.task_index, 0, TaskOutcome::Cancelled);
+    sched.finish(
+        a.task_index,
+        0,
+        TaskOutcome::Cancelled {
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
     {
         let c = sched.lock();
         assert_eq!(c.scopes[0].done, 1);
         assert!(!c.terminate);
     }
-    sched.finish(b.task_index, 0, TaskOutcome::Cancelled);
+    sched.finish(
+        b.task_index,
+        0,
+        TaskOutcome::Cancelled {
+            out: String::new(),
+            stderr: String::new(),
+        },
+    );
     {
         let c = sched.lock();
         assert_eq!(c.scopes[0].done, 2);
@@ -10215,6 +10253,27 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 /// `0` roughly 35/200 runs under CPU contention. That is closed by the cancel-teardown veto in
 /// `is_deadlocked` (see `SchedCore::any_incomplete_scope_cancelled`, src/vm/mod.rs). This test is
 /// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
+/// Cancellation points: a task spinning in an UNBOUNDED `while true:` loop must still be cancelled
+/// promptly when a sibling faults — that is exactly what the loop BACK-EDGE checkpoint is for
+/// (`Vm::jump_checked`). A regression (e.g. only one of the two `Op::Jump` dispatch sites wired)
+/// HANGS the nursery here instead of failing an assert.
+#[test]
+fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
+    let src = "fn spinner(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while true:\n        i = i + 1\n\
+                   fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+                   fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
+                   fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn spinner(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the spinning sibling must be cancelled at a loop back-edge, not hang the nursery")
+        .expect("the trigger fault is recovered, so the program completes");
+    assert_eq!(out, "42\n", "the spinner was cancelled and ran its defer");
+}
+
 #[test]
 fn parallel_defer_runs_on_cancelled_sibling() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\

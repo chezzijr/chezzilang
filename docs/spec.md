@@ -123,6 +123,17 @@ top level is an implicit nursery that joins at its `return`/end, so a bare `spaw
 in [`docs/concurrency.md`](concurrency.md); phase history in
 [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) + [`docs/concurrency-b3.md`](concurrency-b3.md).
 
+**Cancellation semantics (both engines).** A cancel — a sibling's fault, an `os.exit`, a scope teardown
+— is delivered at **cancellation points**: **loop back-edges** and **blocking/park ops** (`recv`,
+`wait:`, socket ops, blocking natives). Not at every instruction. So a **started task always runs its
+straight-line prologue**, which means a `defer` it registers is **always** registered before anything
+can kill it and **always** runs on the cancel unwind — on the M:N engine and on `--serial`. A CPU loop
+stays promptly cancellable (the back-edge is a checkpoint), and a `recover:` *inside* a cancelled task
+never catches the cancel (a cancelled task must die). `std.os.exit` is the one thing that skips
+`defer`s by design. Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task stdout
+order is nondeterministic on both engines** (one `print` = one locked, line-atomic write); the line
+*set*, the exit code and whether a `defer` ran are what both engines agree on.
+
 **Still deferred (YAGNI v1):** macros, package registry, and native backend (a Cranelift AOT/JIT is
 the stretch end-game). **Level-3 dynamic C-ABI FFI is now partially shipped** (`extern "lib":` blocks
 calling C functions via dlopen+libffi) — v1 marshals scalars (int/float/bool/str→`char*`), the
