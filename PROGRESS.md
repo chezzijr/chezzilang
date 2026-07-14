@@ -17,7 +17,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > checkpoint, and at a `recv`/`wait:` checkpoint **cancel now wins over a queued value / done-latch / fired
 > timer** (uniform on both engines). Second, independent fix (**N6**): serial's `run_scheduler` used to
 > propagate a faulting child's error straight out with `run_child(i)?`, **abandoning its still-parked
-> siblings** — it now trips a scope cancel and **re-drives every `Blocked` sibling** to completion
+> siblings** — it now trips a scope cancel and **re-drives every not-`Done` sibling** to completion
 > (`drain_cancelled_children`) so each unwinds its `defer`s before the fault propagates, reducing exits like
 > M:N (`Exit` > `Fault`, lowest index — an `os.exit` from a drained child's `defer` is carried, never
 > dropped). M:N's `TaskOutcome::Cancelled` now **carries + flushes its output** (those lines really printed;
