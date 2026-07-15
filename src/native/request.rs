@@ -89,8 +89,11 @@ fn lower_result(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
 }
 
 /// Read a `ureq::Response`'s body as raw bytes (byte-exact, no UTF-8 decode) into a `Result[bytes]`.
-/// A download exceeding `MAX_DOWNLOAD_BYTES` and a truncated/aborted read both lower to `Err` (never a
-/// lying empty-body success). Called only for a 2xx response — a non-2xx status is turned into `Err`
+/// A download exceeding `MAX_DOWNLOAD_BYTES` lowers to `Err`; a read that errors mid-stream (e.g. a
+/// `Content-Length`/chunked body that ends short) also lowers to `Err` rather than a lying empty-body
+/// success. Ceiling: a `Connection: close`-delimited body has no promised length, so a premature peer
+/// close is indistinguishable from a clean end — that returns `Ok(partial)` (no HTTP client can detect
+/// it). Called only for a 2xx response — a non-2xx status is turned into `Err`
 /// by [`lower_result_bytes`] before we get here, so the caller never mistakes a 404/500 error page for
 /// a successful download. Headers are dropped — a binary download is GET-only and body-only.
 fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
