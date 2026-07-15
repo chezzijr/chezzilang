@@ -770,6 +770,72 @@ impl Vm {
         Ok(())
     }
 
+    /// Try to dispatch a BODIED Chezzi method on a native handle (`native struct` bare name `key`, e.g.
+    /// `"Reader"`). Returns `Ok(true)` if `method` resolved to a compiled proto and was dispatched (a
+    /// result/generator pushed, or a frame flattened into `run_until`); `Ok(false)` if the native
+    /// struct carries no such bodied method — the caller then falls through to the native name-keyed
+    /// dispatch (`reader_method` etc.), leaving those byte-identical. Mirrors the enum-method arm
+    /// (`Obj::Enum` in this file): type-erased (no `StructDef`/`tid`), home-globals from `native_home`,
+    /// generator-aware (a `yield`-bearing method allocates rather than running).
+    #[allow(clippy::too_many_arguments)] // handle key + method + recv/args + argc + ic + span, like the enum arm
+    fn try_native_bodied_method(
+        &mut self,
+        key: &str,
+        method: &str,
+        recv: Value,
+        args: &[Value],
+        argc: usize,
+        ic: u32,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        let prog = Arc::clone(&self.program);
+        let Some(proto) = prog
+            .native_methods
+            .get(key)
+            .and_then(|ms| ms.get(method).copied())
+        else {
+            return Ok(false);
+        };
+        if self.program.protos[proto].arity != argc + 1 {
+            return Err(self.err(
+                format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    self.program.protos[proto].name,
+                    self.program.protos[proto].arity,
+                    argc + 1
+                ),
+                span,
+            ));
+        }
+        let home = self.module_objs[prog.native_home[key]];
+        if self.program.protos[proto].is_generator {
+            let mut gen_args = Vec::with_capacity(argc + 1);
+            gen_args.push(recv);
+            gen_args.extend_from_slice(args);
+            let g = self.alloc_generator(proto, home, None, gen_args);
+            self.push(g);
+            return Ok(true);
+        }
+        // Flatten only on the real dispatch-loop path (`ic != NO_IC`); a re-entrant caller passes
+        // `NO_IC` and uses the synchronous `run_proto` path (mirrors the struct/enum arms).
+        if ic != NO_IC {
+            let base = self.stack.len();
+            self.stack.push(recv);
+            self.stack.extend_from_slice(args);
+            self.push_frame_in_place(proto, home, None, base, span)?;
+            return Ok(true);
+        }
+        let mut call_args = Vec::with_capacity(argc + 1);
+        call_args.push(recv);
+        call_args.extend_from_slice(args);
+        let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
+        if self.paused() {
+            return Ok(true);
+        }
+        self.push(v);
+        Ok(true)
+    }
+
     /// `ic`: the per-call-site method inline-cache id from the `CallMethod` op, or [`NO_IC`] for the
     /// native-re-entry callers (`spawn`/`defer` method tasks) that need a *synchronous* result and so
     /// must take the re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
@@ -1021,6 +1087,11 @@ impl Vm {
         // `Arc`'d core. Like `Writer`, file reads are synchronous blocking syscalls — no netpoller, no
         // `poll_park` gate; and NO `stream_halt` check (a Reader never emits to stdout/stderr).
         if matches!(self.heap.get(h), Obj::Reader(_)) {
+            // A BODIED Chezzi method on the handle (`Reader.lines`, compiled to bytecode) dispatches
+            // FIRST; a miss falls through to the native (name-keyed) `read_line`/`read_bytes`/`close`.
+            if self.try_native_bodied_method("Reader", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.reader_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());

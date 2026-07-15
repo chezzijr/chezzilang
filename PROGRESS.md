@@ -4,6 +4,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANG+STDLIB (2026-07-15, `auto-task/native-struct-bodied-methods`) — bodied Chezzi methods on a
+> `native struct`, first user `Reader.lines() -> Iterator[str]` (`docs/gaps.md` R2b `lines()` DONE).**
+> A `native struct` (a RESERVED opaque VM handle — `Ty::Reader`/`Writer`/…, no `StructDef`/`tid`) may now
+> MIX Rust-backed bodyless `native fn` sigs (dispatch stays native, name-keyed) with pure-Chezzi bodied
+> `fn` methods (COMPILED to bytecode, routed via new `Program::native_methods`/`native_home`, keyed by
+> the handle's bare reserved name — the SAME type-erased, generator-aware mechanism as `enum_methods`).
+> Shipped `fn lines(self) -> Iterator[str]` in `std/io.chz` (a generator over `read_line()`): `for ln in
+> r.lines():` streams **lazily** — the file is not snapshotted, an early `break` stops reading (Python
+> `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). `read_line`/`read_bytes`/`close` are NOT in
+> `native_methods`, so they stay byte-identical. Seams: parser accepts a bodied `fn` in a native-struct
+> body into a new `bodied_methods: Vec<FnDecl>` (bodyless `native fn` + `test fn`-reject unchanged);
+> checker harvest (`setup.rs` PASS 1b) folds them into the handle's method table via `fn_sig` (leading
+> `self` stripped to match); compiler adds a native-struct bodied-method pass mirroring the enum pass; VM
+> `do_method_call` Reader arm tries `try_native_bodied_method("Reader", …)` before `reader_method`.
+> **Known v1 limit:** the bodied body is compiled-but-NOT-type-checked (the native module skips
+> `check_module`), so the mandated dual-engine RUN test is the safety net for any future bodied method.
+> Spawn-across-airlock for a generator holding a native handle: noted, not exercised (the handle itself is
+> sendability-tested). New tests: `reader_lines_parity` + `reader_lines_lazy_early_break_parity` (both
+> engines) + parser unit tests. Docs: `docs/stdlib.md` (Reader.lines), `docs/gaps.md` (R2b + IO §4 flip).
+> Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ STDLIB (2026-07-15, `auto-task/stdin-read-all-char`) — `docs/gaps.md` R2 stdin grab-bag DONE:
 > `io.read_all()` + `io.read_char()`.** Two module-level stdin readers in `std.io`, plain name-dispatched
 > natives (siblings of `read_line`, NOT engine-intercepted), routed through the SAME shared `Stdin` seam
@@ -55,9 +76,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `src/vm/fileio.rs` (blocking-classified, NO netpoller, NO `stream_halt` — a Reader never emits),
 > `Ty::Reader` gated by `import std.io` (3-touchpoint additive checker seam + `io_reader_seed` field,
 > SEPARATE from `io_writer_seed`). Cross-task read order to one shared handle is unspecified (offset race)
-> — no shared-read parity test (meaningless); sendability tested via send-across-`spawn`. `lines() ->
-> Iterator[str]` deferred (the cursor model snapshots eagerly — would defeat streaming; loop `read_line()`
-> for now). 11 new tests (7 run-parity both engines incl. bare-`\r` strip + 2 checker-level guarding the
+> — no shared-read parity test (meaningless); sendability tested via send-across-`spawn`. (`lines() ->
+> Iterator[str]` since SHIPPED as a bodied Chezzi method — see the top entry.) 11 new tests (7 run-parity
+> both engines incl. bare-`\r` strip + 2 checker-level guarding the
 > `Ty::Reader` method arm + the reserved-name ratchet + the io member-count bump). Docs: `docs/stdlib.md`
 > (Reader surface), `docs/gaps.md` (R2b DONE + IO §4 refreshed). Full `cargo test`/`clippy` green.
 >

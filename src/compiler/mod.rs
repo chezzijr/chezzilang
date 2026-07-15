@@ -512,6 +512,8 @@ impl Compiler {
             enum_home: HashMap::new(),
             newtype_methods: HashMap::new(),
             newtype_home: HashMap::new(),
+            native_methods: HashMap::new(),
+            native_home: HashMap::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             modules: Vec::new(),
@@ -1036,6 +1038,41 @@ impl Compiler {
                     .or_default()
                     .extend(compiled);
                 self.program.enum_home.insert(key, module_idx);
+            }
+        }
+        // Compile native-struct BODIED methods (`fn lines(self) -> …: <body>` on a `native struct`),
+        // keyed by the reserved handle's BARE name (`"Reader"`) — reserved handle names are unique and
+        // import-gated, so there is no user-type collision, and it matches the checker's bare re-seed of
+        // the method table. Like the enum-method pass: type-erased (no `StructDef`/`tid`), routed via
+        // `Program::native_methods` at the handle's `do_method_call` arm. The bodyless `native fn` sigs
+        // compile NOTHING (their dispatch stays native).
+        for stmt in &module.stmts {
+            if let StmtKind::NativeStruct {
+                name,
+                bodied_methods,
+                type_params,
+                ..
+            } = &stmt.kind
+            {
+                if bodied_methods.is_empty() {
+                    continue;
+                }
+                let prev_shadow = std::mem::replace(
+                    &mut self.float_shadow,
+                    type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
+                let mut compiled: HashMap<String, ProtoId> = HashMap::new();
+                for m in bodied_methods {
+                    let pid = self.compile_fn(m, false)?;
+                    compiled.insert(m.name.clone(), pid);
+                }
+                self.float_shadow = prev_shadow;
+                self.program
+                    .native_methods
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(compiled);
+                self.program.native_home.insert(name.clone(), module_idx);
             }
         }
         // Compile newtype methods (name-keyed, like enum methods), recording proto ids under the

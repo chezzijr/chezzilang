@@ -207,15 +207,17 @@ ordering to one shared handle is unspecified (two tasks race the file offset). R
 slow fifo, the same accepted ceiling `Writer.write` carries, `ponytail:` comment); type `Ty::Reader`
 gated by `import std.io`. So a big file can now be read **line/chunk-by-chunk** instead of slurped whole.
 Whole-file `read_file`/`read_bytes` (≤64 MB) untouched.
-**Still open (small enabling work, NOT a new engine feature):** `lines() -> Iterator[str]`. Earlier
-notes claimed this needed "a new lazy `Obj` variant because the cursor snapshots eagerly" — that is
-**wrong**: a plain generator over `read_line()` (`fn lines(r): while true: match r.read_line(): ...
-yield`) streams lazily by construction and works TODAY in user code (verified, both engines). The real
-blocker to shipping it *in std.io* is packaging: std.io is a **file-backed native module that harvests
-only bodyless `native fn` decls**, so a real-bodied generator fn placed in `std/io.chz` isn't seen as a
-member; and a native struct can't carry a bodied method yet, so there's no `r.lines()` method form
-either. Enabling EITHER (harvest+run real-bodied fns from a file-backed native module, or bodied methods
-on native structs) is a small, bounded change that unblocks `lines()` and future std ergonomic wrappers.
+**DONE:** `lines() -> Iterator[str]` — the idiomatic method form of line-streaming (Python `for l in f`
+/ Go `bufio.Scanner` / Rust `BufRead::lines`). Shipped as a **BODIED Chezzi generator method on the
+`native struct Reader`** in `std/io.chz` (`fn lines(self): while true: match self.read_line(): Some(l):
+yield l; None: break`). This unblocked the packaging question by enabling **bodied methods on native
+structs**: a `native struct` may now MIX Rust-backed bodyless `native fn` sigs (native dispatch) with
+pure-Chezzi `fn` methods (compiled to bytecode, routed via `Program::native_methods`, keyed by the
+reserved handle's bare name — the enum-method mechanism). `r.lines()` streams lazily by construction (a
+generator over `read_line()`; the file is NOT snapshotted), verified on both engines
+(`reader_lines_parity` + early-break laziness). Caveat carried forward: the bodied method's BODY is
+compiled-but-not-type-checked (the native module skips `check_module`), so the dual-engine RUN test is
+the safety net for any future bodied native-struct method.
 Also still open: seek / random-access; a `Reader` structural protocol (paired with the `Writer` one —
 that pairing is now the "second implementer", so schedule the protocol spike rather than YAGNI it).
 
@@ -365,9 +367,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   (`write`/`write_bytes`/`flush`/`close`) — append-to-an-open-file + streaming write now exist. Whole-file
   read stays (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes` uncapped).
 - **Reader / file handles — SHIPPED (R2b).** `open(path)` opener + a read-only `Reader`
-  (`read_line`/`read_bytes`/`close`) — line/chunk streaming of a large file (past the 64 MB whole-file
-  cap) now exists, the read twin of R2's `Writer`. Still missing: a lazy `lines() -> Iterator[str]`
-  cursor (loop `read_line()` for now).
+  (`read_line`/`read_bytes`/`close`/`lines`) — line/chunk streaming of a large file (past the 64 MB
+  whole-file cap) now exists, the read twin of R2's `Writer`. `lines() -> Iterator[str]` (a lazy
+  generator over `read_line()`) is SHIPPED as a bodied Chezzi method on the native handle
+  (`for ln in r.lines():`).
 - **Read-all-stdin; char read — SHIPPED.** `io.read_all() -> str` drains all remaining stdin to EOF
   as one `str` (Python `sys.stdin.read()`; `""` at clean EOF; non-UTF-8 = fault, no stdin `read_bytes`
   hatch), and `io.read_char() -> Option[str]` reads one Unicode scalar as a 1-char `str` (`None` at

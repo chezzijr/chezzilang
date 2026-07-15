@@ -218,6 +218,12 @@ pub enum StmtKind {
         type_params: Vec<TypeParam>,
         fields: Vec<Field>,
         methods: Vec<NativeDecl>,
+        /// Phase 4c-followup: BODIED Chezzi methods on a native handle (`fn lines(self) -> …: <body>`),
+        /// mixed with the bodyless `native fn` sigs above on one native struct. Unlike `methods` (whose
+        /// runtime dispatch stays native/name-keyed), these ARE compiled to bytecode (like an enum
+        /// method — no `StructDef`/`tid`) and routed via `Program::native_methods`. Empty for the
+        /// common bodyless-only native struct. Kept LAST so `..`-destructures elsewhere are untouched.
+        bodied_methods: Vec<FnDecl>,
         span: Span,
     },
     /// `native enum NAME[T…]:` with an indented block of body-less variants — the ENUM analog of

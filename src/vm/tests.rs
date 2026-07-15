@@ -1675,6 +1675,8 @@ pub(crate) fn empty_program() -> Program {
         enum_home: Default::default(),
         newtype_methods: Default::default(),
         newtype_home: Default::default(),
+        native_methods: Default::default(),
+        native_home: Default::default(),
         variants: Default::default(),
         variants_by_id: Vec::new(),
         modules: vec![],

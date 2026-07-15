@@ -438,15 +438,33 @@ impl Checker {
                 name,
                 type_params,
                 methods,
+                bodied_methods,
                 ..
             } = &s.kind
-                && !methods.is_empty()
+                && (!methods.is_empty() || !bodied_methods.is_empty())
             {
                 let saved = self.enter_type_params(type_params);
-                let table: HashMap<String, FnSig> = methods
+                let mut table: HashMap<String, FnSig> = methods
                     .iter()
                     .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
                     .collect();
+                // Phase 4c-followup — a BODIED method (`fn lines(self) -> …: <body>`) is checked via
+                // the same method-resolution path as a bodyless `native fn`, so its sig must land in the
+                // SAME table with the SAME shape (leading `self` stripped). `fn_sig` leaves `self` on;
+                // drop the first param to match `harvest_native_fn_sig(_, true)`. The body itself is NOT
+                // checked (the native module skips `check_module`) — the mandated dual-engine RUN test
+                // is the safety net for that.
+                for m in bodied_methods {
+                    let mut fsig = self.fn_sig(m, m.name_span);
+                    if !fsig.params.is_empty() {
+                        fsig.params.remove(0);
+                        fsig.min_params = fsig.min_params.saturating_sub(1);
+                    }
+                    if !fsig.labels.is_empty() {
+                        fsig.labels.remove(0);
+                    }
+                    table.insert(m.name.clone(), fsig);
+                }
                 self.exit_type_params(saved);
                 if let Some(info) = sig.struct_defs.get_mut(name) {
                     info.methods = table;

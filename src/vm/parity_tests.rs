@@ -9463,6 +9463,45 @@ fn reader_read_line_strips_bare_cr_parity() {
     }
 }
 
+/// R2b — `r.lines()` is a BODIED Chezzi method on the `native struct Reader` (mixing Rust-backed
+/// `native fn` sigs with a pure-Chezzi generator method on one native handle). It streams the file
+/// line-by-line lazily (a generator over `read_line()`). Both engines.
+#[test]
+fn reader_lines_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "one\ntwo\nthree\n");
+    }
+}
+
+/// R2b — `r.lines()` yields LAZILY: an early `break` after the first line must NOT drain the file
+/// into a list. Proves the generator suspends between lines (does not snapshot the file). Both engines.
+#[test]
+fn reader_lines_lazy_early_break_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n        break\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "one\n");
+    }
+}
+
 /// R2b — `read_bytes(n)` chunks the file: exactly-n bytes until the short final chunk, then empty
 /// bytes (`len == 0`) = EOF. Both engines.
 #[test]

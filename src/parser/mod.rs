@@ -988,11 +988,11 @@ impl Parser {
         self.open_block()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        let mut bodied_methods = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             // Phase 4c — a body-less `native fn` inside the struct body is a METHOD sig, harvested into
-            // the native type's method table. A PLAIN `fn`/`test` (with a body) is still rejected: the
-            // runtime dispatch stays native, so a native struct never carries a compiled method.
+            // the native type's method table. Its runtime dispatch stays native (name-keyed).
             if self.check(&Token::Native) {
                 let StmtKind::Native(decl) = self.parse_native(true)? else {
                     return Err(self.err(
@@ -1003,9 +1003,18 @@ impl Parser {
                 self.skip_newlines();
                 continue;
             }
-            if self.check(&Token::Fn) || self.check(&Token::Test) {
+            // Phase 4c-followup — a BODIED `fn name(self, …) -> T: <body>` is a Chezzi method on the
+            // native handle (mixed with the bodyless `native fn` sigs). Unlike them it IS compiled to
+            // bytecode (routed via `Program::native_methods`), so `parse_fn` (which flags a generator
+            // via a `yield` in the body) parses it into `bodied_methods`. A `test fn` stays rejected.
+            if self.check(&Token::Fn) {
+                bodied_methods.push(self.parse_fn(true)?);
+                self.skip_newlines();
+                continue;
+            }
+            if self.check(&Token::Test) {
                 return Err(self.err(
-                    "native struct methods are not supported (declare fields or `native fn` sigs only)"
+                    "a native struct cannot carry a `test fn` (declare fields, `native fn` sigs, or bodied `fn` methods)"
                         .to_string(),
                 ));
             }
@@ -1034,6 +1043,7 @@ impl Parser {
             type_params,
             fields,
             methods,
+            bodied_methods,
             span,
         })
     }
@@ -3318,6 +3328,31 @@ mod tests {
     }
 
     #[test]
+    fn native_struct_mixes_bodyless_and_bodied_methods() {
+        // Phase 4c-followup — a `native struct` may carry BOTH bodyless `native fn` sigs (native
+        // dispatch) AND a bodied `fn` method (compiled to bytecode). A `yield` in the body flags a
+        // generator.
+        let StmtKind::NativeStruct {
+            methods,
+            bodied_methods,
+            ..
+        } = only(
+            "native struct R:\n    native fn read_line(self) -> Option[str]\n    fn lines(self) -> Iterator[str]:\n        yield \"x\"\n",
+        )
+        else {
+            panic!("expected StmtKind::NativeStruct");
+        };
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "read_line");
+        assert_eq!(bodied_methods.len(), 1);
+        assert_eq!(bodied_methods[0].name, "lines");
+        assert!(
+            bodied_methods[0].is_generator,
+            "a `yield`-bearing bodied method is a generator"
+        );
+    }
+
+    #[test]
     fn native_fn_allows_optional_trailing_default() {
         // Phase 4f — a `native fn` may carry a DEFAULTED trailing param (`timeout_ms: int = 0`),
         // the file-backed spelling of std.request's optional-tail sig. The parser now accepts a
@@ -3406,14 +3441,13 @@ mod tests {
     }
 
     #[test]
-    fn native_struct_method_rejected() {
-        // Phase 4c — a PLAIN (non-native) method sig inside a native-struct body is still a parse
-        // error; only bodyless `native fn` methods are admitted (harvested into the type's method
-        // table).
-        let e = parse_err("native struct M:\n    a: int\n    fn m(self) -> int\n");
+    fn native_struct_test_fn_rejected() {
+        // Phase 4c-followup — a BODIED `fn` is now admitted (compiled to bytecode, `native_methods`),
+        // but a `test fn` inside a native-struct body is still a parse error (a native handle is not a
+        // test suite).
+        let e = parse_err("native struct M:\n    a: int\n    test fn m(self):\n        pass\n");
         assert!(
-            e.message
-                .contains("native struct methods are not supported"),
+            e.message.contains("cannot carry a `test fn`"),
             "unexpected error: {}",
             e.message
         );

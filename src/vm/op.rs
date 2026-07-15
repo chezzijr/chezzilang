@@ -577,6 +577,17 @@ pub struct Program {
     /// Newtype runtime key → the index of the module that declared it (home-globals for its methods),
     /// mirroring `enum_home`.
     pub newtype_home: HashMap<String, usize>,
+    /// Native-struct BODIED methods, keyed by the reserved handle's bare name (`"Reader"`) → (method
+    /// name → its proto). The native-handle analogue of `enum_methods`: a `native struct` (a reserved
+    /// opaque VM handle — no `StructDef`/`tid`) may carry a pure-Chezzi `fn` (e.g. `Reader.lines`)
+    /// alongside its Rust-backed `native fn` sigs. `do_method_call`'s handle arms look this up FIRST;
+    /// a miss falls through to the native (name-keyed) dispatch (`reader_method` etc.), so the bodyless
+    /// native methods are byte-identical. Reserved handle names are unique + import-gated → no user
+    /// collision. Empty when no native struct carries a bodied method.
+    pub native_methods: HashMap<String, HashMap<String, ProtoId>>,
+    /// Native-struct bare name → the index of the module that declared it (home-globals for its bodied
+    /// methods), mirroring `enum_home`.
+    pub native_home: HashMap<String, usize>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)

@@ -337,12 +337,12 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
 | `read_line` | `() -> Option[str]` | One line; trailing `\n` (and a preceding `\r`) **stripped**; `None` at EOF. Matches the module-level `read_line()`. A mid-read I/O error or non-UTF-8 file is a clean **fault** pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). |
 | `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. |
 | `close` | `() -> Result[nil]` | Release the fd. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
+| `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), trailing `\n`/`\r` stripped, ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`. |
 
 - **Cross-task read ordering to one shared `Reader` is unspecified** — two tasks reading one handle race
   the file offset (Go's `bufio`-not-goroutine-safe rule). Each single read is one atomic critical section;
   read from one task if you need order.
-- Out of scope (v1): a lazy `lines() -> Iterator[str]` cursor (the cursor model snapshots eagerly, which
-  would read the whole file — loop `read_line()` in a `while` for now); seek / random-access.
+- Out of scope (v1): seek / random-access.
 
 **Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
 its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned

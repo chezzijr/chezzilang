@@ -67,15 +67,19 @@ native fn buffered(w: Writer, size: int = 8192) -> Writer
 # the fd (idempotent). A method on a closed reader is clean: `read_bytes`/`close` return `Result::Err` /
 # `Ok`, `read_line` faults cleanly (an `Option` can't carry the error).
 #
-# `lines()` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`) is a natural next add and
-# is NOT blocked by the iterator model — a plain generator over `read_line()` streams lazily (verified in
-# user code). The real blocker is PACKAGING: std.io is a file-backed native module that harvests only
-# bodyless `native fn` decls, so a real-bodied generator fn placed here isn't seen as a member; and a
-# native struct can't carry a bodied method yet (so no `r.lines()` either). Both are small enabling
-# changes, tracked as a follow-up. For now, loop `read_line()` in a `while`.
+# `lines()` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`) is the idiomatic method
+# form of line-streaming: a BODIED Chezzi generator method on the native handle (mixing Rust-backed
+# `native fn` sigs with a pure-Chezzi `fn` on one native struct). It streams lazily over `read_line()`
+# — the file is NOT snapshotted; the generator suspends between lines. A mid-read non-UTF-8 fault
+# surfaces from the underlying `read_line()` exactly as the `while` form.
 native struct Reader:
     native fn read_line(self) -> Option[str]
     native fn read_bytes(self, n: int) -> Result[bytes]
     native fn close(self) -> Result[nil]
+    fn lines(self) -> Iterator[str]:
+        while true:
+            match self.read_line():
+                Some(l): yield l
+                None: break
 
 native fn open(path: str) -> Result[Reader]
