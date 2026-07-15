@@ -59,7 +59,8 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
   [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
 - [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
   still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
-- Backlog headliners: **R2** (Writer/file handles) **DONE 2026-07-15**; **R3** (package manager) still
+- Backlog headliners: **R2** (Writer/file handles) **DONE 2026-07-15** + **R2b** (Reader/file handles)
+  **DONE 2026-07-15**; **R3** (package manager) still
   open — see their sections. (**R4** runtime type tags and **L3** error-handling machinery were reviewed
   2026-07-15 and marked **won't-do**; **L1** `Result`/`Option` methods deprioritized — we're not
   imitating Rust's method surface.)
@@ -168,8 +169,8 @@ write ordering to one shared handle is unspecified (Go's `bufio`-not-goroutine-s
 buffering is now **a value you hold**, not a global mode; `io.flush()` keeps its honest no-op meaning for
 the process's unbuffered stdout while `buffered(...).flush()` is the real thing. `std.fs`'s
 `fs.append(path, text)` whole-file appender is untouched (no collision — `std.io` owns the handle verbs).
-**Deliberately out of scope (still open, separate IO §4 gaps):** reader / line-streaming of a large
-file; seek / random-access.
+**Deliberately out of scope (still open, separate IO §4 gaps):** seek / random-access. (Reader /
+line-streaming of a large file — the write side's twin — landed as **R2b**, below.)
 **Follow-up — promote `Writer` to a structural protocol (Go `io.Writer` parity).** As shipped, `Writer`
 is a **sealed concrete native handle** (four `Backing` arms baked into the runtime), NOT an interface —
 so a user cannot implement their own writer (a `StringWriter`, `TeeWriter`, byte-count/limit wrapper, or
@@ -191,6 +192,25 @@ symmetric design) — a protocol over a single native concrete family is ceremon
 drains grows memory without limit. Deliberate (never pin a core worker), but it is a real ceiling;
 bounded `sync_channel` is the upgrade. (Independent of R2 — buffering the *producer* does not bound the
 *queue*.)
+
+### R2b. `Reader` / read-only file handle — **DONE (2026-07-15)**
+Landed the read twin of R2's `Writer` (same `Socket`/`Writer` handle template): a read-only `Reader`
+native handle in `std.io`, opener `open(path)`, methods `read_line()` / `read_bytes(n)` / `close()`.
+`read_line() -> Option[str]` streams one line at a time (trailing `\n`/`\r\n` stripped, `None` = EOF) —
+matching the module-level `read_line()` shape (anti-drift); a mid-read I/O error or non-UTF-8 file is a
+clean runtime fault pointing at `read_bytes` (an `Option` can't carry the error, mirroring `read_file`).
+`read_bytes(n) -> Result[bytes]` is the binary + error-distinguishing escape hatch (at-most-n bytes,
+empty = EOF, `Err` on closed/IO). `close() -> Result[nil]` idempotent (fd closes on `BufReader` drop —
+no `Drop` impl needed, reads are flush-free). Sendable across the airlock like `Writer`; cross-task read
+ordering to one shared handle is unspecified (two tasks race the file offset). Runtime in
+`src/vm/fileio.rs` (blocking-classified, no netpoller — an inline blocking read pins an M:N worker on a
+slow fifo, the same accepted ceiling `Writer.write` carries, `ponytail:` comment); type `Ty::Reader`
+gated by `import std.io`. So a big file can now be read **line/chunk-by-chunk** instead of slurped whole.
+Whole-file `read_file`/`read_bytes` (≤64 MB) untouched.
+**Deliberately out of scope (still open):** `lines() -> Iterator[str]` — the cursor model snapshots
+eagerly (would read the whole file, defeating streaming), so a lazy file-backed cursor is a distinct
+follow-up (a new `Obj` variant with its own GC/airlock story); loop `read_line()` for now. Also: seek /
+random-access; a `Reader` structural protocol (same YAGNI-until-a-second-implementer call as `Writer`).
 
 ### R3. No package manager — **the wall that keeps Chezzi author-only**
 `Manifest` is `{name, version, entrypoint}` (`src/manifest.rs`) and the parser **silently ignores**
@@ -336,10 +356,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   *Writer*'s `flush()` is the real drain.
 - **Writer / file handles — SHIPPED (R2).** `create`/`append` openers + a write-only `Writer`
   (`write`/`write_bytes`/`flush`/`close`) — append-to-an-open-file + streaming write now exist. Whole-file
-  read stays (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes` uncapped); still
-  missing is **reader-side line-streaming** of a large file (a separate gap, below).
-- **No reader-side streaming** of a large file (whole-file read only) — the write side landed with R2; a
-  `Reader` line/chunk handle is a distinct follow-up.
+  read stays (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes` uncapped).
+- **Reader / file handles — SHIPPED (R2b).** `open(path)` opener + a read-only `Reader`
+  (`read_line`/`read_bytes`/`close`) — line/chunk streaming of a large file (past the 64 MB whole-file
+  cap) now exists, the read twin of R2's `Writer`. Still missing: a lazy `lines() -> Iterator[str]`
+  cursor (loop `read_line()` for now).
 - Read-all-stdin; char read.
 - fs: no `canonicalize`/`realpath` (`path.normalize` is purely lexical — no symlink resolution), no
   `chmod`/executable bit, no atomic write (write-temp + rename).

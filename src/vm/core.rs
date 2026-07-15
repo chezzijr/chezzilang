@@ -177,6 +177,20 @@ pub fn new_in_flight() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// R2b — `Reader` core: a read-only file handle, the shared half of an `Obj::Reader` — the input twin
+/// of [`WriterCore`]. Same handle/core split as [`SocketCore`]: an `Arc`'d `BufReader<File>` outside
+/// every heap, so a `spawn`ed fiber can alias the handle (cross-task read ORDERING against one shared
+/// fd is unspecified — two tasks race the file offset, Go's `bufio`-not-goroutine-safe rule — but each
+/// read is one Mutex critical section). `Option` so `close()` can take + drop the reader (closing the
+/// fd) while aliasing handles observe `None` — a use-after-close is then a clean fault, never a panic.
+/// `key` is a stable identity (like `SocketCore.key`); NO netpoller registration + NO `Drop` (reads are
+/// flush-free — the fd closes on the `BufReader` drop). File-only (stdin is a separate shared source).
+#[derive(Debug)]
+pub struct ReaderCore {
+    pub inner: Mutex<Option<std::io::BufReader<std::fs::File>>>,
+    pub key: usize,
+}
+
 /// R2 — `Writer` core: a write-only file/stream handle, the shared half of an `Obj::Writer`. Same
 /// handle/core split as [`SocketCore`] — an `Arc`'d core outside every heap, so a `spawn`ed fiber can
 /// alias one handle. `Option` so `close()` can take + drop the backing (flushing + closing an fd)
@@ -324,6 +338,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // A first-class builtin fn crosses by value (its name) — pure code, roots no heap object.
         // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
         // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
+        // R2b: a `Reader` core holds a BufReader<File> + a key — likewise no `WireValue`s, no `GcRef`s.
         WireValue::Str(_)
         | WireValue::Bytes(_)
         | WireValue::ByteArray(_)
@@ -333,6 +348,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         | WireValue::Socket(_)
         | WireValue::Listener(_)
         | WireValue::Writer(_)
+        | WireValue::Reader(_)
         | WireValue::Ptr(_)
         | WireValue::Builtin(_)
         | WireValue::Func { .. }

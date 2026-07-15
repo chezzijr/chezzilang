@@ -75,6 +75,7 @@ impl Checker {
             net_socket_seed: None,
             net_listener_seed: None,
             io_writer_seed: None,
+            io_reader_seed: None,
             concurrency_seeds: HashMap::new(),
             container_seeds: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
@@ -292,6 +293,12 @@ impl Checker {
         // whose `Ty` is already `Ty::Writer`, so a bare unimported annotation still errors.
         if let Some(info) = self.io_writer_seed.clone() {
             self.structs.insert("Writer".into(), info);
+        }
+        // R2b — re-seed std.io's `Reader` METHOD table (harvested from `std/io.chz`) under its bare name
+        // so `r.read_line()`/`r.read_bytes(..)`/`r.close()` resolve via the normal method path (the
+        // `Ty::Reader` method arm looks the table up here). Same as `Writer` above.
+        if let Some(info) = self.io_reader_seed.clone() {
+            self.structs.insert("Reader".into(), info);
         }
         // Phase 4c-concurrency — re-seed std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`
         // METHOD tables (harvested from `std/concurrency.chz`) under their bare names so `s.set(...)`/
@@ -889,7 +896,7 @@ impl Checker {
         self.imported_concurrency.clear();
         self.imported_time.clear();
         self.imported_net.clear();
-        self.imported_io.clear();
+        self.imported_io.clear(); // R2/R2b — Writer + Reader licensing
         self.imported_builtin_types.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
@@ -1191,6 +1198,8 @@ impl Checker {
                 // only ADD the type licensing.
                 if path.as_slice() == ["std".to_string(), "io".to_string()] {
                     self.imported_io.insert("Writer".to_string());
+                    // R2b — a whole-module `import std.io` also licenses the bare `Reader` TYPE name.
+                    self.imported_io.insert("Reader".to_string());
                 }
             }
             Import::From {
@@ -1397,15 +1406,15 @@ impl Checker {
                                 self.imported_net.insert(member.clone());
                                 self.record_native_type_import_hover(member, *name_span, path);
                             }
-                        } else if member == "Writer"
+                        } else if (member == "Writer" || member == "Reader")
                             && path.as_slice() == ["std".to_string(), "io".to_string()]
                         {
-                            // R2 — a selective `import Writer from std.io` licenses just the `Writer`
-                            // TYPE in THIS module. Like the net handles, `Writer` carries no runtime
-                            // value (the type resolves directly to `Ty::Writer`; a value comes from
-                            // `create`/`append`/`stdout`/…) AND the runtime `bind_import` skip keys on
-                            // the original member name — so an alias would bind nothing usable: reject
-                            // the rename.
+                            // R2/R2b — a selective `import Writer from std.io` / `import Reader from
+                            // std.io` licenses just that TYPE in THIS module. Like the net handles, it
+                            // carries no runtime value (the type resolves directly to `Ty::Writer`/
+                            // `Ty::Reader`; a value comes from `create`/`open`/…) AND the runtime
+                            // `bind_import` skip keys on the original member name — so an alias would
+                            // bind nothing usable: reject the rename.
                             if alias.as_ref().is_some_and(|a| a != member) {
                                 self.error(
                                     imp.span,

@@ -2600,6 +2600,18 @@ impl Checker {
                 self.error(span, format!("type {obj_ty} has no method '{method}'"));
                 Ty::Unknown
             }
+            // R2b — `Reader` (std.io): a small fixed read-only method set (`read_line`/`read_bytes`/
+            // `close`). Method table harvested from `std/io.chz`, looked up here like Writer.
+            Ty::Reader => {
+                if let Some(sig) = self.native_handle_method("Reader", method, &[]) {
+                    self.record_method_hover(name_span, &sig);
+                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    return sig.ret;
+                }
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
             // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
             // where `a: T` and `T: Comparable`).
             Ty::Param(pname) => {

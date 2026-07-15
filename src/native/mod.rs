@@ -863,7 +863,7 @@ mod tests {
                 if module == "std.io"
                     && matches!(
                         *name,
-                        "create" | "append" | "stdout" | "stderr" | "buffered"
+                        "create" | "append" | "stdout" | "stderr" | "buffered" | "open"
                     )
                 {
                     continue;

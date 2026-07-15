@@ -10,8 +10,8 @@
 //! shared `Arc` core).
 
 use super::core::{
-    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, RwSharedCore, SharedCore, SocketCore,
-    WriterCore,
+    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
+    SocketCore, WriterCore,
 };
 use super::op::ProtoId;
 use super::value::GcRef;
@@ -120,6 +120,12 @@ pub enum WireValue {
     /// shared Writer is unspecified (Go's `bufio`-not-goroutine-safe rule), but each single write is one
     /// Mutex critical section.
     Writer(Arc<WriterCore>),
+    /// R2b — a `Reader` handle crossing the airlock as its shared [`ReaderCore`] — an `Arc`'d file
+    /// handle, so a spawned fiber reaches the same fd. Cross-safe (an `Arc`, not a `GcRef`), like
+    /// [`Writer`]/[`Socket`] — `has_handle` leaves it `false` via the `_` arm. Cross-task read ORDERING
+    /// against one shared Reader is unspecified (two tasks race the file offset), but each read is one
+    /// Mutex critical section.
+    Reader(Arc<ReaderCore>),
     /// An opaque C-ABI `ptr` handle crossing the airlock **by value** (the raw `usize` address). A C
     /// `void*` is heap-independent — the same address is meaningful in any worker's heap — so
     /// `from_wire` allocates a fresh `Obj::Ptr` wrapping the identical address. Holds no `GcRef`, so it

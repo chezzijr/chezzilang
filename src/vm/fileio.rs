@@ -168,6 +168,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         match name {
             "create" | "append" => self.io_open(name, &args, span),
+            "open" => self.io_open_reader(&args, span),
             "stdout" => Ok(self.io_std_handle(Backing::Stdout)),
             "stderr" => Ok(self.io_std_handle(Backing::Stderr)),
             "buffered" => self.io_buffered(&args, span),
@@ -239,5 +240,144 @@ impl Vm {
             key: core::next_poll_key(),
         });
         Ok(Value::Obj(self.heap.alloc(Obj::Writer(core))))
+    }
+
+    // ===== R2b — `Reader` / read-only file handle (the input twin of `Writer`) =====
+
+    /// R2b — clone out the shared `Arc<ReaderCore>` behind a `Reader` handle (refcount bump), mirroring
+    /// [`Vm::writer_core`]. Held only for the calling method, so locking the reader does not borrow the
+    /// heap.
+    pub(super) fn reader_core(&self, h: GcRef) -> Arc<ReaderCore> {
+        match self.heap.get(h) {
+            Obj::Reader(core) => Arc::clone(core),
+            _ => unreachable!("reader_core on non-reader"),
+        }
+    }
+
+    /// R2b — `Reader` methods, the input twin of `writer_method`:
+    /// * `read_line() -> Option[str]` — one line, trailing `\n` (and a preceding `\r`) stripped; `None`
+    ///   at EOF. Matches the existing module-level `io.read_line()` shape (anti-drift). An IO error or a
+    ///   non-UTF-8 file is a clean runtime FAULT pointing at `read_bytes` (Option can't carry an Err —
+    ///   mirrors `read_file`'s non-UTF-8 fault); a read on a CLOSED reader is likewise a clean fault.
+    /// * `read_bytes(n) -> Result[bytes]` — at-most-`n` bytes (exactly-`n` until a short final chunk);
+    ///   empty bytes = EOF; `Err` on closed/IO. `n <= 0` clamps to `Ok(b"")`. The binary + error-
+    ///   distinguishing escape hatch.
+    /// * `close() -> Result[nil]` — idempotent: take + drop the `BufReader` (the fd closes on drop).
+    ///
+    /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
+    ///
+    /// ponytail: an inline blocking read can pin an M:N worker on a slow fifo/pipe — the same accepted
+    /// ceiling `Writer.write` carries; NOT offloaded to the dirty pool (that path is whole-file-only).
+    /// For the intended regular-file use (always ready) the risk is nil; add offload if a fifo use lands.
+    pub(super) fn reader_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match method {
+            "read_line" => {
+                self.arity_err("read_line", args, 0, span)?;
+                let core = self.reader_core(h);
+                let outcome = {
+                    use std::io::BufRead;
+                    let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_mut() {
+                        None => Err(None), // closed
+                        Some(br) => {
+                            let mut line = String::new();
+                            match br.read_line(&mut line) {
+                                Ok(0) => Ok(None), // EOF
+                                Ok(_) => {
+                                    // Strip the line terminator the same way the module-level
+                                    // io.read_line does (native/mod.rs): trailing '\n' then '\r'
+                                    // UNCONDITIONALLY — a bare/classic-Mac '\r' must not survive,
+                                    // or Reader.read_line drifts from its owning ancestor.
+                                    let end =
+                                        line.trim_end_matches('\n').trim_end_matches('\r').len();
+                                    line.truncate(end);
+                                    Ok(Some(line))
+                                }
+                                Err(e) => Err(Some(e.to_string())),
+                            }
+                        }
+                    }
+                };
+                match outcome {
+                    Ok(Some(line)) => {
+                        let sv = self.alloc_str(line);
+                        Ok(self.alloc_enum("Option", "Some", vec![sv]))
+                    }
+                    Ok(None) => Ok(self.alloc_enum("Option", "None", vec![])),
+                    Err(None) => Err(self.err("read_line on a closed reader".into(), span)),
+                    Err(Some(e)) => Err(self.err(
+                        format!("{e} — read binary files with Reader.read_bytes"),
+                        span,
+                    )),
+                }
+            }
+            "read_bytes" => {
+                self.arity_err("read_bytes", args, 1, span)?;
+                let n = match args.first() {
+                    Some(Value::Int(n)) => (*n).max(0) as u64,
+                    _ => return Err(self.err("read_bytes expects an int byte count".into(), span)),
+                };
+                let core = self.reader_core(h);
+                let outcome = {
+                    use std::io::Read;
+                    let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_mut() {
+                        None => Err(None), // closed
+                        Some(br) => {
+                            let mut buf = Vec::new();
+                            match br.take(n).read_to_end(&mut buf) {
+                                Ok(_) => Ok(buf),
+                                Err(e) => Err(Some(e.to_string())),
+                            }
+                        }
+                    }
+                };
+                match outcome {
+                    Ok(buf) => {
+                        let bv = Value::Obj(self.heap.alloc(Obj::Bytes(buf.into_boxed_slice())));
+                        Ok(self.sock_ok(bv))
+                    }
+                    Err(None) => Ok(self.sock_err("read_bytes on a closed reader")),
+                    Err(Some(e)) => Ok(self.sock_err(e)),
+                }
+            }
+            "close" => {
+                self.arity_err("close", args, 0, span)?;
+                let core = self.reader_core(h);
+                // Take + drop the reader (closing the fd). Idempotent: an already-closed reader is Ok.
+                *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                Ok(self.sock_ok(Value::Nil))
+            }
+            _ => Err(self.err(format!("type Reader has no method '{method}'"), span)),
+        }
+    }
+
+    /// R2b — `io.open(path)` = open a file read-only. Returns `Ok(Reader)` or a clean `Err` (missing
+    /// file, perms). The read twin of `io.create`/`io.append`.
+    fn io_open_reader(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let path = match args.first() {
+            Some(Value::Obj(h)) => match self.heap.get(*h) {
+                Obj::Str(s) => s.to_string(),
+                _ => return Err(self.err("io.open expects a path string".into(), span)),
+            },
+            _ => return Err(self.err("io.open expects a path string".into(), span)),
+        };
+        match std::fs::File::open(&path) {
+            Ok(f) => {
+                let core = Arc::new(ReaderCore {
+                    inner: Mutex::new(Some(std::io::BufReader::new(f))),
+                    key: core::next_poll_key(),
+                });
+                let v = Value::Obj(self.heap.alloc(Obj::Reader(core)));
+                Ok(self.sock_ok(v))
+            }
+            Err(e) => Ok(self.sock_err(format!("{path}: {e}"))),
+        }
     }
 }

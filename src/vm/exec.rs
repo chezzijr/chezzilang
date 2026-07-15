@@ -669,7 +669,11 @@ impl Vm {
                     // directly to `Ty::Writer`). Skip it — the module has no such global. Its openers
                     // (`create`/`append`/`stdout`/`stderr`/`buffered`) DO bind normally (real MEMBERS
                     // values). Without this, `import Writer from std.io` faults.
-                    if self.module_name(target_obj) == "std.io" && member == "Writer" {
+                    // R2b — same for `std.io`'s `Reader` TYPE (a value comes from `open`; the type
+                    // resolves directly to `Ty::Reader`). Without this, `import Reader from std.io` faults.
+                    if self.module_name(target_obj) == "std.io"
+                        && (member == "Writer" || member == "Reader")
+                    {
                         continue;
                     }
                     // Bind the member's runtime value if the target module exports one (a fn/value).

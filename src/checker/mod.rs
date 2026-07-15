@@ -146,6 +146,8 @@ fn is_reserved_type(name: &str) -> bool {
         // R2 — the std.io `Writer` write-only file/stream handle. Reserved at declaration even though
         // its USE is import-gated (std.io) — the two gates are independent, like Socket/Listener above.
         || name == "Writer"
+        // R2b — the std.io `Reader` read-only file handle (the read twin of `Writer`). Same dual gate.
+        || name == "Reader"
         || name == "ptr"
         || name == "owned_str"
         // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
@@ -990,6 +992,9 @@ impl Checker {
                 // `w.close(...)` resolve via the normal method path.
                 if name == "std.io" {
                     c.io_writer_seed = sig.struct_defs.get("Writer").cloned();
+                    // R2b — cache std.io's harvested `Reader` method table (parallel to `io_writer_seed`;
+                    // a SEPARATE field so neither type's table clobbers the other).
+                    c.io_reader_seed = sig.struct_defs.get("Reader").cloned();
                 }
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
                 // module constants like math.pi/e, numeric-poly fns like math.abs, std.concurrency's
@@ -1582,7 +1587,7 @@ struct Checker {
     /// it's in this set (else an unknown-type error with the `import std.io` hint; values come from
     /// `create`/`append`/`stdout`/`stderr`/`buffered`, already real native fns). Per-module: cleared in
     /// `begin_module`. std/* modules are EXEMPT (may use `Writer` bare) via `current_module_is_stdlib`.
-    imported_io: std::collections::HashSet<String>,
+    imported_io: std::collections::HashSet<String>, // R2/R2b — licenses BOTH `Writer` and `Reader`
     /// The bare type names that an `import` licensed into the *current* module as a
     /// `StructOrigin::Builtin` struct layout (the std struct-modeled natives — `Ref`/`Match`/
     /// `Response`/`ProcResult` and every other import-gated std struct like `Token`/`Heap`/`Deque`).
@@ -1671,6 +1676,11 @@ struct Checker {
     /// annotation stays import-gated by `imported_io` + `resolve_type`'s reserved arm. `None` until
     /// std.io is harvested.
     io_writer_seed: Option<StructInfo>,
+    /// R2b — the harvested `StructInfo` (method table) for std.io's reserved `Reader` handle — a
+    /// SEPARATE field from `io_writer_seed` (one per type, so neither method table clobbers the other),
+    /// re-seeded bare into `self.structs["Reader"]` by `seed_stdlib_structs`. `None` until std.io is
+    /// harvested.
+    io_reader_seed: Option<StructInfo>,
     /// Phase 4c-concurrency — the harvested `StructInfo` (method table) for each of std.concurrency's
     /// four reserved GENERIC handles (`Shared`/`RwShared`/`Atomic`/`Executor`), keyed by bare name,
     /// captured from the file-backed `std/concurrency.chz` harvest (AFTER `attach_native_module_metadata`
@@ -3195,6 +3205,7 @@ const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "su
 const SOCKET_METHODS: &[&str] = &["read", "write", "read_bytes", "write_bytes", "close"];
 const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
 const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
+const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
@@ -3417,6 +3428,10 @@ fn builtin_type_doc(name: &str) -> Option<String> {
         "Writer" => (
             "write-only file/stream handle from std.io create()/append()/stdout()/stderr()/buffered()",
             Some(WRITER_METHODS),
+        ),
+        "Reader" => (
+            "read-only file handle from std.io open() — line/chunk streaming of a large file",
+            Some(READER_METHODS),
         ),
         // Types without a built-in method table (usage line only) --------------------------------
         "range" => (

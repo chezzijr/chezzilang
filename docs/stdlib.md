@@ -292,7 +292,7 @@ Constants: `math.pi`, `math.e`.
 | `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
 | `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
-| `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
+| `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB — larger files: stream with `open(...)` → `Reader`). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
 | `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
 | `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes; no size cap, like `write_file`. |
@@ -301,6 +301,7 @@ Constants: `math.pi`, `math.e`.
 | `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
 | `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (the Go `bufio.NewWriter` escape hatch; 8 KiB default). |
+| `open` | `(path: str) -> Result[Reader]` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). |
 
 **`Writer` (R2) — write-only file / stream handle.** A sendable native handle (like `Socket`), the
 buffered-output escape hatch Chezzi's unbuffered stdout default was missing. Two openers, not a mode
@@ -323,8 +324,23 @@ streams, and parity-checks identically. `buffered(...)` batches host/fd writes.
 - **Cross-task write ordering to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
   rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
   writes from different tasks is not guaranteed — join and write from one task if you need order.
-- Out of scope (v1): reader / line-streaming a large file, seek / random-access. Write-only append or
-  truncate handle only.
+- Out of scope (v1): seek / random-access.
+
+**`Reader` (R2b) — read-only file handle.** The read twin of `Writer` (same sendable native handle,
+opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of slurping it whole (the
+64 MB `read_file`/`read_bytes` cap does not apply). Sendable across the airlock like `Writer`.
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `read_line` | `() -> Option[str]` | One line; trailing `\n` (and a preceding `\r`) **stripped**; `None` at EOF. Matches the module-level `read_line()`. A mid-read I/O error or non-UTF-8 file is a clean **fault** pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). |
+| `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. |
+| `close` | `() -> Result[nil]` | Release the fd. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
+
+- **Cross-task read ordering to one shared `Reader` is unspecified** — two tasks reading one handle race
+  the file offset (Go's `bufio`-not-goroutine-safe rule). Each single read is one atomic critical section;
+  read from one task if you need order.
+- Out of scope (v1): a lazy `lines() -> Iterator[str]` cursor (the cursor model snapshots eagerly, which
+  would read the whole file — loop `read_line()` in a `while` for now); seek / random-access.
 
 **Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
 its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned
