@@ -241,6 +241,19 @@ impl Vm {
         if name == "connect" || name == "listen" {
             return self.net_connect_or_listen(name, args, span);
         }
+        // R2 — `std.io`'s Writer openers/handles (`create`/`append`/`stdout`/`stderr`/`buffered`) all
+        // resolve to the shared `io::intercepted` placeholder; intercept by FUNC-POINTER identity, NOT
+        // name — the `append` opener collides with `fs.append`'s bare name, and only the func pointer
+        // distinguishes them (`fs::append` is a distinct fn, so it falls through to the `is_blocking`
+        // offload unchanged). They allocate a heap `Writer` handle over an `Arc`'d core, which a pure
+        // off-heap native cannot. Placed AFTER the net name-check (so connect/listen never reach here)
+        // and BEFORE the `is_blocking` offload gate below.
+        if std::ptr::fn_addr_eq(
+            func,
+            crate::native::io::intercepted as crate::native::NativeFn,
+        ) {
+            return self.io_native(name, args, span);
+        }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
         // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
         // starvation). Gated on `native_reentry == 0`: a blocking native reached inside a native
@@ -984,6 +997,14 @@ impl Vm {
             if self.poll_park.is_some() {
                 return Ok(());
             }
+            self.push(result);
+            return Ok(());
+        }
+        // R2: `Writer` methods (`write`/`write_bytes`/`flush`/`close`) operate on the fd/buffer in the
+        // `Arc`'d core. File writes are synchronous blocking syscalls — no netpoller, no `poll_park`
+        // gate (unlike Socket).
+        if matches!(self.heap.get(h), Obj::Writer(_)) {
+            let result = self.writer_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }

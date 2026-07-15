@@ -177,6 +177,63 @@ pub fn new_in_flight() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// R2 — `Writer` core: a write-only file/stream handle, the shared half of an `Obj::Writer`. Same
+/// handle/core split as [`SocketCore`] — an `Arc`'d core outside every heap, so a `spawn`ed fiber can
+/// alias one handle. `Option` so `close()` can take + drop the backing (flushing + closing an fd)
+/// while aliasing handles observe `None` — a use-after-close is then a clean fault, never a panic.
+/// `key` is a stable identity (like `SocketCore.key`); there is NO netpoller registration (regular
+/// files are always epoll-ready, so file writes are synchronous blocking syscalls — no park).
+#[derive(Debug)]
+pub struct WriterCore {
+    pub inner: Mutex<Option<Backing>>,
+    pub key: usize,
+}
+
+/// R2 — where a [`WriterCore`] sends bytes.
+/// * `File` — a `create`/`append` file writer. The `BufWriter` gives OS-level write buffering for free
+///   and **flushes on drop**, so an unclosed file writer never silently loses data.
+/// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the parity
+///   oracle `Vm.out` / the streaming-CLI sink), NEVER a raw fd — else capture/parity/streaming break.
+/// * `Buffered` — the Go `bufio.NewWriter` escape hatch: accumulate in `buf`, drain to `inner` on
+///   flush / buffer-full / close. A `Buffered{ inner=File }` tail is best-effort drained on drop by
+///   [`WriterCore`]'s `Drop`; a `Buffered{ inner=Stdout/Stderr }` tail CANNOT reach `&mut Vm` from
+///   `Drop`, so it is lost on drop (documented ceiling — needs an explicit `flush()`/`close()`).
+#[derive(Debug)]
+pub enum Backing {
+    File(std::io::BufWriter<std::fs::File>),
+    Stdout,
+    Stderr,
+    Buffered {
+        inner: Arc<WriterCore>,
+        buf: Vec<u8>,
+        cap: usize,
+    },
+}
+
+impl Drop for WriterCore {
+    /// R2 — best-effort drop-flush for a `Buffered{ inner=File }` tail (the extra `Vec<u8>` std's
+    /// `BufWriter` drop can't see). A `Buffered{ inner=Stdout/Stderr }` tail is dropped silently — it
+    /// can't reach `&mut Vm` from here (`emit_out` needs it). Must NEVER panic (a failed flush at
+    /// GC/exit — ENOSPC — would abort the process): every error is swallowed.
+    fn drop(&mut self) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        if let Some(Backing::Buffered { inner, buf, .. }) = guard.as_mut() {
+            if buf.is_empty() {
+                return;
+            }
+            let drained = std::mem::take(buf);
+            if let Ok(mut ig) = inner.inner.lock()
+                && let Some(Backing::File(bw)) = ig.as_mut()
+            {
+                use std::io::Write;
+                let _ = bw.write_all(&drained).and_then(|()| bw.flush());
+            }
+        }
+    }
+}
+
 /// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock
 /// (one `Mutex` for both, so `submit`/`shutdown` see a consistent view and to avoid a `Mutex<bool>`).
 #[derive(Debug, Default)]
@@ -266,6 +323,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // An opaque `ptr` crosses by value (a raw address) — it roots no heap object.
         // A first-class builtin fn crosses by value (its name) — pure code, roots no heap object.
         // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
+        // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
         WireValue::Str(_)
         | WireValue::Bytes(_)
         | WireValue::ByteArray(_)
@@ -274,6 +332,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         | WireValue::Bool(_)
         | WireValue::Socket(_)
         | WireValue::Listener(_)
+        | WireValue::Writer(_)
         | WireValue::Ptr(_)
         | WireValue::Builtin(_)
         | WireValue::Func { .. }

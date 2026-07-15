@@ -16,7 +16,8 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, RwSharedCore, SharedCore, SocketCore,
+    AtomicCore, Backing, ChannelCore, ExecutorCore, ListenerCore, RwSharedCore, SharedCore,
+    SocketCore, WriterCore,
 };
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -3047,6 +3048,7 @@ struct OffloadReq {
 mod arith;
 mod call;
 mod exec;
+mod fileio;
 mod netio;
 mod sched;
 mod stmt;

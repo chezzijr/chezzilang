@@ -59,10 +59,10 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
   [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
 - [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
   still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
-- Untouched backlog headliners: **R2** (Writer/file handles), **R3** (package manager) — see their
-  sections. (**R4** runtime type tags and **L3** error-handling machinery were reviewed 2026-07-15 and
-  marked **won't-do**; **L1** `Result`/`Option` methods deprioritized — we're not imitating Rust's
-  method surface.)
+- Backlog headliners: **R2** (Writer/file handles) **DONE 2026-07-15**; **R3** (package manager) still
+  open — see their sections. (**R4** runtime type tags and **L3** error-handling machinery were reviewed
+  2026-07-15 and marked **won't-do**; **L1** `Result`/`Option` methods deprioritized — we're not
+  imitating Rust's method surface.)
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
@@ -154,29 +154,24 @@ Consumers wired, and the gaps that were filed separately as if each were its own
   **"download a file" is still impossible** → **still open, and it never was an R1 gap**: it needs
   reader plumbing + a `Response.body` type change inside `std.request`. Its own (small) task.
 
-### R2. There is no `Writer` / file-handle type — so no buffering, no streaming
-Files are read/written **whole** — `std.io`'s `read_file`/`read_bytes` cap the read at 64 MB
-(`MAX_READ_FILE_BYTES`, `src/native/io.rs`; the write side is uncapped). (`std.fs` has **no file-content
-API at all** — only metadata + mutations, `std/fs.chz`.) There is no `io.Writer`-equivalent anywhere.
-Binary whole-file write landed with R1 (`io.write_bytes`); what R2 owes is *handles*. Consequences:
-- **You cannot opt into buffered output.** Every `print` is one `Msg::Write` → one `write_all` +
-  `flush` (`src/vm/stream.rs`), i.e. **one syscall per print, with no way out**. `io.flush()` is a
-  genuine no-op (`Host::flush_stdout` is a defaulted no-op, `src/native/mod.rs`).
-- **Go gets away with unbuffered `os.Stdout` precisely because `bufio.NewWriter` exists**, and every Go
-  programmer reaches for it in a hot loop. Python block-buffers automatically when piped. **Chezzi took
-  Go's default without Go's escape hatch** — the worst corner of that design space. (Measured: 200k
-  lines piped = 0.108s unbuffered vs 0.068s for CPython's buffered; the writes are already off the VM
-  thread, so the gap is smaller than it looks, but the *capability* is missing.)
-- No line-streaming of a large file; no writing to anything that isn't stdout/stderr/whole-file.
-**The principled home:** a `Writer` native handle (the `Socket` userdata is the template) from
-`fs.open(path, mode)` / `io.stdout()`, with `write`/`write_bytes`/`flush`/`close`, plus a
-`buffered(w, size)` wrapper. Buffering then becomes *a value you hold*, not a global mode — and
-`io.flush()` keeps its honest no-op meaning for the process's (unbuffered) stdout. Lands together with
-R1 and with file handles: **one milestone, not three.**
+### R2. `Writer` / file-handle type — **DONE (2026-07-15)**
+Landed a write-only `Writer` native handle in `std.io` (the `Socket` handle is the template): openers
+`create` (truncate) / `append` (create-if-absent), stream handles `stdout()` / `stderr()` (routing
+through the same `Vm::emit_out`/`emit_err` sink as `print`, never a raw fd), a `buffered(w, size = 8192)`
+wrapper (the Go `bufio.NewWriter` escape hatch — one host/fd write per `flush`/buffer-full/`close`), and
+methods `write`/`write_bytes`/`flush`/`close`. Sendable across the airlock like `Socket`; cross-task
+write ordering to one shared handle is unspecified (Go's `bufio`-not-goroutine-safe rule). Runtime in
+`src/vm/fileio.rs` (blocking-classified, no netpoller); type `Ty::Writer` gated by `import std.io`. So:
+buffering is now **a value you hold**, not a global mode; `io.flush()` keeps its honest no-op meaning for
+the process's unbuffered stdout while `buffered(...).flush()` is the real thing. `std.fs`'s
+`fs.append(path, text)` whole-file appender is untouched (no collision — `std.io` owns the handle verbs).
+**Deliberately out of scope (still open, separate IO §4 gaps):** reader / line-streaming of a large
+file; seek / random-access.
 **Known ceiling (mapped in-tree):** the stream queue is **unbounded** (`src/vm/stream.rs:26-27`, a
 `ponytail:` comment naming the same upgrade path) — a program printing faster than a stalled consumer
 drains grows memory without limit. Deliberate (never pin a core worker), but it is a real ceiling;
-bounded `sync_channel` is the upgrade.
+bounded `sync_channel` is the upgrade. (Independent of R2 — buffering the *producer* does not bound the
+*queue*.)
 
 ### R3. No package manager — **the wall that keeps Chezzi author-only**
 `Manifest` is `{name, version, entrypoint}` (`src/manifest.rs`) and the parser **silently ignores**
@@ -314,12 +309,18 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   `Iterator[T]`. `std.iter` is all-eager `List`. Natural follow-up now that generators infer their
   element type (`-> Iterator[T]` optional).
 
-### 4. IO / files — *see **R2** (no `Writer` type) for the root cause*
+### 4. IO / files
 - **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`
   and `io.input(prompt)` exist, and a prompt appears before its blocking read.
-- **No way to BUFFER output** (R2). Unbuffered always, one syscall per `print`, `io.flush()` inert.
-- Files are **whole-file only** (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes`
-  uncapped) — binary IO landed with R1; what is still missing is **file handles + line-streaming** (R2).
+- **Buffered output — SHIPPED (R2).** `buffered(stdout())` (Go's `bufio.NewWriter` escape hatch) batches
+  writes; the module-level `io.flush()` stays an honest no-op for the unbuffered stdout sink, and the
+  *Writer*'s `flush()` is the real drain.
+- **Writer / file handles — SHIPPED (R2).** `create`/`append` openers + a write-only `Writer`
+  (`write`/`write_bytes`/`flush`/`close`) — append-to-an-open-file + streaming write now exist. Whole-file
+  read stays (`std.io`: `read_file`/`read_bytes` ≤64 MB, `write_file`/`write_bytes` uncapped); still
+  missing is **reader-side line-streaming** of a large file (a separate gap, below).
+- **No reader-side streaming** of a large file (whole-file read only) — the write side landed with R2; a
+  `Reader` line/chunk handle is a distinct follow-up.
 - Read-all-stdin; char read.
 - fs: no `canonicalize`/`realpath` (`path.normalize` is purely lexical — no symlink resolution), no
   `chmod`/executable bit, no atomic write (write-temp + rename).

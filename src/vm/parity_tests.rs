@@ -203,7 +203,14 @@ impl Drop for TmpDir {
 /// the full `build_graph` + `check_graph` CLI path.
 #[test]
 fn type_param_named_like_reserved_rejected_at_check() {
-    for name in ["Executor", "ptr", "Socket", "Listener", "owned_str"] {
+    for name in [
+        "Executor",
+        "ptr",
+        "Socket",
+        "Listener",
+        "Writer",
+        "owned_str",
+    ] {
         let src = format!(
             "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id(1))\nmain()\n"
         );
@@ -9165,4 +9172,200 @@ fn c5_limit_a_defer_that_recvs_from_a_live_sibling_cannot_park_on_serial() {
         format!("{err:?}").contains("deadlock"),
         "serial: reported as a deadlock at the recv site: {err:?}"
     );
+}
+
+// ===== R2 — std.io Writer / file-handle type (buffered + streaming file output) =====
+
+/// R2 — `create(path)` opens a truncating write handle; `write` + `close` land the bytes; `read_file`
+/// reads them back. Serial and M:N each.
+#[test]
+fn writer_create_roundtrip_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("out.txt");
+        let src = format!(
+            "import create, read_file from std.io\nfn main():\n    w := create(\"{}\")?\n    w.write(\"hi\")?\n    w.close()?\n    print(read_file(\"{}\")?)\nmain()\n",
+            f.display(),
+            f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "hi\n");
+    }
+}
+
+/// R2 — `append` never truncates: create+write "a", close; append+write "b", close; file == "ab".
+#[test]
+fn writer_append_no_truncate_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("log.txt");
+        let src = format!(
+            "import create, append, read_file from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write(\"a\")?\n    w.close()?\n    w2 := append(\"{f}\")?\n    w2.write(\"b\")?\n    w2.close()?\n    print(read_file(\"{f}\")?)\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "ab\n");
+    }
+}
+
+/// R2 — a method on a CLOSED writer is a clean `Result::Err` (contains "closed writer"), NOT a panic.
+#[test]
+fn writer_use_after_close_clean_err_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("x.txt");
+        let src = format!(
+            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        Ok(n): print(\"wrote \" + str(n))\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(
+            r.is_ok(),
+            "run faulted (should be a clean Err, not a fault): {r:?}"
+        );
+        assert!(
+            out.contains("closed writer"),
+            "want a clean closed-writer Err, got: {out:?}"
+        );
+    }
+}
+
+/// R2 — `write_bytes` round-trips arbitrary binary through `read_bytes`.
+#[test]
+fn writer_write_bytes_binary_roundtrip_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("bin");
+        let src = format!(
+            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(str(b.len()) + \":\" + str(b[0]) + \",\" + str(b[1]) + \",\" + str(b[2]))\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "3:0,1,255\n");
+    }
+}
+
+/// R2 — `buffered(stdout())`: N writes then one flush; the whole batch reaches stdout, and the output
+/// is BYTE-IDENTICAL serial vs M:N (single task → exact-match). Routes through `emit_out` (the oracle).
+#[test]
+fn buffered_stdout_one_flush_byte_identical() {
+    let t = TmpDir::new();
+    let src = "import stdout, buffered from std.io\nfn main():\n    bw := buffered(stdout())\n    bw.write(\"a\")?\n    bw.write(\"b\")?\n    bw.write(\"c\")?\n    bw.flush()?\nmain()\n";
+    let entry = t.write("main.chz", src);
+    let (serial, _se, sr, _sc) = run_file(&entry);
+    let (mn, _me, mr, _mc) = run_file_p(&entry);
+    assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
+    assert_eq!(serial, "abc");
+    assert_eq!(serial, mn, "serial vs M:N byte-identical");
+}
+
+/// R2 — a buffered file writer dropped WITHOUT close still lands its tail (best-effort drop-flush at
+/// program exit / heap teardown). Both engines.
+#[test]
+fn buffered_file_drop_flushes_best_effort_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("drop.txt");
+        // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
+        let src = format!(
+            "import create, buffered from std.io\nfn go():\n    bw := buffered(create(\"{f}\")?)\n    bw.write(\"tail\")?\nfn main():\n    go()\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (_out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        let got = std::fs::read_to_string(&f).unwrap_or_default();
+        assert_eq!(got, "tail", "drop-flush must land the buffered tail");
+    }
+}
+
+/// R2 — `import Writer from std.io` (a pure TYPE with no runtime member value) and `import buffered
+/// from std.io` in a RUNNING program: no runtime fault (the `bind_import` skip). Both engines.
+#[test]
+fn import_writer_type_and_buffered_runs_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let src = "import Writer, buffered, stdout from std.io\nfn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    bw := tag(buffered(stdout()))\n    bw.write(\"ok\")?\n    bw.flush()?\nmain()\n";
+        let entry = t.write("main.chz", src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
+        assert_eq!(out, "ok");
+    }
+}
+
+/// R2 — a shared `Writer` written by two spawned tasks: order is UNSPECIFIED (Fork A), so compare the
+/// line MULTISET (`assert_same_lines`), not exact-match. Both engines.
+#[test]
+fn shared_writer_across_tasks_same_lines() {
+    let t = TmpDir::new();
+    let f = t.0.join("shared.txt");
+    let src = format!(
+        "import create, read_file from std.io\nfn main():\n    w := create(\"{f}\")?\n    parallel:\n        spawn:\n            w.write(\"A\\n\")?\n        spawn:\n            w.write(\"B\\n\")?\n    w.close()?\n    print(read_file(\"{f}\")?)\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (serial, _se, sr, _sc) = run_file(&entry);
+    let (mn, _me, mr, _mc) = run_file_p(&entry);
+    assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
+    assert_same_lines(&serial, &mn);
+}
+
+/// R2 — `create` into a nonexistent directory is a clean `Result::Err`, not a panic. Both engines.
+#[test]
+fn create_into_missing_dir_clean_err_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("no_such_dir").join("x.txt");
+        let src = format!(
+            "import create from std.io\nfn main():\n    match create(\"{f}\"):\n        Ok(w): print(\"opened\")\n        Err(e): print(\"ERR\")\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
+        assert_eq!(out, "ERR\n");
+    }
+}
+
+/// R2 — a full `Writer` program TYPE-CHECKS clean through `check_graph` (run_file skips the checker, so
+/// this is the guard that the `Ty::Writer` method arm + the harvested method-table seed actually
+/// resolve `w.write(...)`/`w.close(...)` at check time — the CLI path).
+#[test]
+fn writer_program_type_checks_clean() {
+    let src = "import create, buffered, stdout, Writer from std.io\n\
+               fn tag(w: Writer) -> Writer:\n    return w\n\
+               fn main():\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let r = crate::checker::check_graph(&graph);
+    assert!(
+        r.is_ok(),
+        "a well-typed Writer program must check clean, got: {r:?}"
+    );
+}
+
+/// R2 — the bare `Writer` annotation is IMPORT-GATED: a program that names `Writer` WITHOUT importing
+/// std.io is rejected at check time with the `import std.io` hint (mirrors Socket/Listener gating).
+#[test]
+fn writer_annotation_requires_import() {
+    let src = "fn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    print(\"hi\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    match crate::checker::check_graph(&graph) {
+        Ok(()) => panic!("bare `Writer` without `import std.io` must be rejected"),
+        Err(errs) => assert!(
+            errs.iter().any(|e| e.message.contains("import std.io")
+                || e.message.contains("unknown type 'Writer'")),
+            "want an import-std.io hint, got: {errs:?}"
+        ),
+    }
 }

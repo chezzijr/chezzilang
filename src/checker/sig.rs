@@ -720,6 +720,7 @@ impl Checker {
             | Ty::Executor
             | Ty::Socket
             | Ty::Listener
+            | Ty::Writer
             | Ty::Ptr
             | Ty::Module(_) => t.clone(),
         }
@@ -782,6 +783,14 @@ impl Checker {
         self.imported_net.contains(n) || self.current_module_is_stdlib
     }
 
+    /// R2 — true iff the std.io `Writer` TYPE name is usable in the current module: either this module
+    /// imported it from `std.io` (whole-module `import std.io` or `import Writer from std.io`), or we're
+    /// inside a privileged stdlib module. `Writer` ALSO stays a reserved name (can't be shadowed by a
+    /// user `struct`); this gate is the SEPARATE "must import to USE" requirement. Mirrors `net_licensed`.
+    pub(super) fn io_licensed(&self, n: &str) -> bool {
+        self.imported_io.contains(n) || self.current_module_is_stdlib
+    }
+
     /// True iff the std.ffi type-license NAME `n` (the opaque `ptr` handle or a fixed-width `int8..
     /// uint64`) is usable in the current module: either this module imported it from `std.ffi`
     /// (whole-module or per-name), or we're inside a privileged stdlib module (std/* may use them bare
@@ -812,6 +821,7 @@ impl Checker {
             "Executor" => Some(Ty::Executor),
             "Socket" => Some(Ty::Socket),
             "Listener" => Some(Ty::Listener),
+            "Writer" => Some(Ty::Writer),
             "ptr" => Some(Ty::Ptr),
             _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(Ty::Int),
             _ => None,
@@ -1040,6 +1050,22 @@ impl Checker {
                                 span,
                                 format!(
                                     "unknown type '{n}' (import it from std.net: `import std.net`)"
+                                ),
+                            );
+                            Ty::Unknown
+                        }
+                    }
+                    // R2 — the std.io `Writer` handle, non-generic (bare `Writer` annotation). Like
+                    // `Socket`/`Listener` above, it resolves only in a module that imported `std.io`
+                    // (whole-module or per-name); the name STAYS reserved (no user `struct Writer`).
+                    n @ "Writer" => {
+                        if self.io_licensed(n) {
+                            Ty::Writer
+                        } else {
+                            self.error(
+                                span,
+                                format!(
+                                    "unknown type '{n}' (import it from std.io: `import std.io`)"
                                 ),
                             );
                             Ty::Unknown

@@ -839,6 +839,19 @@ mod tests {
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for module in modules {
             for (name, _) in native_members(module) {
+                // R2 — std.io's Writer openers (`create`/`append`/`stdout`/`stderr`/`buffered`) are
+                // FUNC-POINTER-intercepted in `Vm::invoke_native` BEFORE the `is_blocking` offload gate,
+                // so they never reach `is_blocking` — the bare-name soundness this guard protects is
+                // unaffected. `append` in particular collides with `fs.append` on purpose (the func-ptr
+                // intercept distinguishes them); exempt the five here so the collision isn't a false fail.
+                if module == "std.io"
+                    && matches!(
+                        *name,
+                        "create" | "append" | "stdout" | "stderr" | "buffered"
+                    )
+                {
+                    continue;
+                }
                 if let Some(prev) = seen.insert(name, module) {
                     panic!(
                         "native member name `{name}` is defined in both `{prev}` and `{module}` — \

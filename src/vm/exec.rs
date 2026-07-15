@@ -664,6 +664,14 @@ impl Vm {
                     {
                         continue;
                     }
+                    // R2 — `std.io`'s `Writer` is a TYPE-only import with NO runtime module-member value
+                    // (a `Writer` value comes from `create`/`append`/`stdout`/…; the type resolves
+                    // directly to `Ty::Writer`). Skip it — the module has no such global. Its openers
+                    // (`create`/`append`/`stdout`/`stderr`/`buffered`) DO bind normally (real MEMBERS
+                    // values). Without this, `import Writer from std.io` faults.
+                    if self.module_name(target_obj) == "std.io" && member == "Writer" {
+                        continue;
+                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no

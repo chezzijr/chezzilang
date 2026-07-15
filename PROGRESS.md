@@ -4,6 +4,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-15, `auto-task/writer-r2`) — `docs/gaps.md` R2 DONE: a write-only `Writer` /
+> file-handle type in `std.io`.** Buffered + streaming write output, the escape hatch Chezzi's unbuffered
+> stdout default was missing. Openers `create` (truncate) / `append` (create-if-absent), stream handles
+> `stdout()`/`stderr()` (routing through the same `Vm::emit_out`/`emit_err` sink as `print` — never a raw
+> fd, so capture/parity/streaming hold), a `buffered(w, size = 8192)` wrapper (Go's `bufio.NewWriter`:
+> one host/fd write per `flush`/buffer-full/`close`), and methods `write`/`write_bytes`/`flush`/`close`.
+> Modeled arm-for-arm on the `Socket` native handle: `WriterCore { Mutex<Option<Backing>>, key }` outside
+> every heap (`src/vm/core.rs`), `Obj::Writer`/`WireValue::Writer` (GC leaf, sendable across the airlock),
+> methods + openers in the new `src/vm/fileio.rs` (blocking-classified, NO netpoller — files are always
+> epoll-ready), func-pointer intercept in `invoke_native` (the `append` opener collides with `fs.append`'s
+> bare name; only the fn-ptr distinguishes them), `Ty::Writer` gated by `import std.io`. Use-after-close =
+> clean `Err` (the `Mutex<Option>`); a buffered **file** writer flushes its tail best-effort on drop
+> (buffered stdout/stderr can't reach `&mut Vm` from Drop — needs explicit `flush()`/`close()`, a
+> documented ceiling). Cross-task write order to one shared handle is unspecified (Go's bufio rule) — its
+> parity test uses `assert_same_lines`; single-task buffered stdout is byte-identical serial vs M:N.
+> `fs.append(path, text)` UNTOUCHED (no collision — `std.io` owns the handle verbs). 15 new tests (11
+> run-parity + 2 checker-level guarding the `Ty::Writer` method arm that `run_file` can't see, + the
+> reserved-name ratchet + the native uniqueness exemption). Docs: `docs/stdlib.md` (Writer surface),
+> `docs/gaps.md` (R2 retired + IO §4 refreshed). Full `cargo test`/`clippy` green.
+>
 > **✅ LANGUAGE SEMANTICS + FIX (2026-07-14, `auto-task/cancel-points`) — CANCELLATION POINTS; `docs/gaps.md`
 > N6 FIXED, N4's "defers now always run" overclaim corrected.** A cancel (sibling fault, `os.exit`, scope
 > teardown) is now delivered at **checkpoints — loop back-edges + blocking/park ops** — *not* at every

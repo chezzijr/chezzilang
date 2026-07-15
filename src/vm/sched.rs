@@ -2591,6 +2591,9 @@ impl Vm {
                 // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
                 Obj::Socket(core) => WireValue::Socket(Arc::clone(core)),
                 Obj::Listener(core) => WireValue::Listener(Arc::clone(core)),
+                // R2: a `Writer` handle crosses as its shared `Arc` core (a spawned fiber reaches the
+                // same output) — same shape as `Socket`. Cross-task write ordering is unspecified.
+                Obj::Writer(core) => WireValue::Writer(Arc::clone(core)),
                 // An opaque `ptr` handle crosses by value — its raw address is heap-independent, so a
                 // fresh `Obj::Ptr` on the other side is observationally identical (immutable +
                 // value-compared). Cross-safe for both the serial and M:N engines.
@@ -2743,6 +2746,9 @@ impl Vm {
             // in `to_wire`) — two fibers reach one fd.
             WireValue::Socket(core) => Value::Obj(self.heap.alloc(Obj::Socket(core))),
             WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
+            // R2: rebuild a fresh heap handle onto the SAME shared writer core (`Arc` cloned in
+            // `to_wire`) — two fibers reach one output.
+            WireValue::Writer(core) => Value::Obj(self.heap.alloc(Obj::Writer(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
             WireValue::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
             // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
@@ -3422,10 +3428,13 @@ impl Vm {
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_)
+            // R2: a `Writer` handle is always sendable (crosses by value as `WireValue::Writer` — an
+            // `Arc`'d core, no `GcRef`), like `Socket`.
+            | Obj::Writer(_)
             // An opaque `ptr` is always sendable (crosses by value as `WireValue::Ptr`); normally the
             // fast path catches it, but it is a valid leaf here too.
             | Obj::Ptr(_) => {
-                SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket / ptr is always sendable"))
+                SnapValue::Wire(self.to_wire(v).expect("str / bytes / bytearray / channel / shared / atomic / executor / socket / writer / ptr is always sendable"))
             }
             // Option B — a frame-holding generator resident in a module global is NOT sendable (its
             // parked frames reference the parent heap), but the eager module-global snapshot must NOT

@@ -65,6 +65,7 @@ impl Checker {
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
             imported_net: std::collections::HashSet::new(),
+            imported_io: std::collections::HashSet::new(),
             imported_builtin_types: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
@@ -73,6 +74,7 @@ impl Checker {
             ref_seed: None,
             net_socket_seed: None,
             net_listener_seed: None,
+            io_writer_seed: None,
             concurrency_seeds: HashMap::new(),
             container_seeds: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
@@ -281,6 +283,15 @@ impl Checker {
         }
         if let Some(info) = self.net_listener_seed.clone() {
             self.structs.insert("Listener".into(), info);
+        }
+        // R2 — re-seed std.io's `Writer` METHOD table (harvested from `std/io.chz`) under its bare name
+        // so `w.write(...)`/`w.close(...)` resolve via the normal method path (the `Ty::Writer` method
+        // arm looks the table up here). Like `Socket`/`Listener` — NO `struct_names`/`bare_types`
+        // licensing: `Writer` resolves to the RESERVED `Ty::Writer` (opaque handle) via `resolve_type`'s
+        // reserved arm, import-gated by `imported_io`. The method table is reached only from a value
+        // whose `Ty` is already `Ty::Writer`, so a bare unimported annotation still errors.
+        if let Some(info) = self.io_writer_seed.clone() {
+            self.structs.insert("Writer".into(), info);
         }
         // Phase 4c-concurrency — re-seed std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`
         // METHOD tables (harvested from `std/concurrency.chz`) under their bare names so `s.set(...)`/
@@ -878,6 +889,7 @@ impl Checker {
         self.imported_concurrency.clear();
         self.imported_time.clear();
         self.imported_net.clear();
+        self.imported_io.clear();
         self.imported_builtin_types.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
@@ -1174,6 +1186,12 @@ impl Checker {
                         self.imported_net.insert(tn.to_string());
                     }
                 }
+                // R2 — a whole-module `import std.io` licenses the bare `Writer` TYPE name. Keyed on the
+                // EXACT len-2 path. std.io is a REAL native module (its fns bind via `Import::Plain`); we
+                // only ADD the type licensing.
+                if path.as_slice() == ["std".to_string(), "io".to_string()] {
+                    self.imported_io.insert("Writer".to_string());
+                }
             }
             Import::From {
                 path,
@@ -1377,6 +1395,27 @@ impl Checker {
                                 );
                             } else {
                                 self.imported_net.insert(member.clone());
+                                self.record_native_type_import_hover(member, *name_span, path);
+                            }
+                        } else if member == "Writer"
+                            && path.as_slice() == ["std".to_string(), "io".to_string()]
+                        {
+                            // R2 — a selective `import Writer from std.io` licenses just the `Writer`
+                            // TYPE in THIS module. Like the net handles, `Writer` carries no runtime
+                            // value (the type resolves directly to `Ty::Writer`; a value comes from
+                            // `create`/`append`/`stdout`/…) AND the runtime `bind_import` skip keys on
+                            // the original member name — so an alias would bind nothing usable: reject
+                            // the rename.
+                            if alias.as_ref().is_some_and(|a| a != member) {
+                                self.error(
+                                    imp.span,
+                                    format!(
+                                        "io type '{member}' cannot be renamed on import — \
+                                         write `import {member} from std.io`"
+                                    ),
+                                );
+                            } else {
+                                self.imported_io.insert(member.clone());
                                 self.record_native_type_import_hover(member, *name_span, path);
                             }
                         } else if let Some(info) = sig.struct_defs.get(member) {

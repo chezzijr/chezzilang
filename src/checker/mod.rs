@@ -143,6 +143,9 @@ fn is_reserved_type(name: &str) -> bool {
         // as for the concurrency ctors below.
         || name == "Socket"
         || name == "Listener"
+        // R2 — the std.io `Writer` write-only file/stream handle. Reserved at declaration even though
+        // its USE is import-gated (std.io) — the two gates are independent, like Socket/Listener above.
+        || name == "Writer"
         || name == "ptr"
         || name == "owned_str"
         // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
@@ -982,6 +985,12 @@ impl Checker {
                     c.net_socket_seed = sig.struct_defs.get("Socket").cloned();
                     c.net_listener_seed = sig.struct_defs.get("Listener").cloned();
                 }
+                // R2 — cache std.io's harvested `Writer` method table so `seed_stdlib_structs` re-seeds
+                // it (bare, method-table only) for every subsequent module, letting `w.write(...)`/
+                // `w.close(...)` resolve via the normal method path.
+                if name == "std.io" {
+                    c.io_writer_seed = sig.struct_defs.get("Writer").cloned();
+                }
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
                 // module constants like math.pi/e, numeric-poly fns like math.abs, std.concurrency's
                 // `RwShared.read`/`Executor.submit` closure-param sigs). Run for EVERY native module
@@ -1567,6 +1576,13 @@ struct Checker {
     /// already real native fns). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
     /// may use the two bare) via `current_module_is_stdlib`.
     imported_net: std::collections::HashSet<String>,
+    /// R2 — the std.io `Writer` handle TYPE name licensed into the *current* module from `std.io`
+    /// (whole-module `import std.io` or selective `import Writer from std.io`). Like `imported_net`, not
+    /// a callable value — it only gates `resolve_type`, which accepts the bare `Writer` annotation iff
+    /// it's in this set (else an unknown-type error with the `import std.io` hint; values come from
+    /// `create`/`append`/`stdout`/`stderr`/`buffered`, already real native fns). Per-module: cleared in
+    /// `begin_module`. std/* modules are EXEMPT (may use `Writer` bare) via `current_module_is_stdlib`.
+    imported_io: std::collections::HashSet<String>,
     /// The bare type names that an `import` licensed into the *current* module as a
     /// `StructOrigin::Builtin` struct layout (the std struct-modeled natives — `Ref`/`Match`/
     /// `Response`/`ProcResult` and every other import-gated std struct like `Token`/`Heap`/`Deque`).
@@ -1647,6 +1663,14 @@ struct Checker {
     /// std.net is harvested (and on the single-module `check` path, which has no graph).
     net_socket_seed: Option<StructInfo>,
     net_listener_seed: Option<StructInfo>,
+    /// R2 — the harvested `StructInfo` (method table) for std.io's reserved `Writer` handle, captured
+    /// from the file-backed `std/io.chz` harvest the first time std.io is checked in the graph. Like
+    /// `net_socket_seed`, `Writer` resolves to the RESERVED `Ty::Writer` (opaque VM handle) — only the
+    /// METHOD table is re-seeded (bare, into `self.structs["Writer"]`) by `seed_stdlib_structs` so
+    /// `w.write(...)` / `w.close(...)` resolve via the normal method path in every module. Bare-name
+    /// annotation stays import-gated by `imported_io` + `resolve_type`'s reserved arm. `None` until
+    /// std.io is harvested.
+    io_writer_seed: Option<StructInfo>,
     /// Phase 4c-concurrency — the harvested `StructInfo` (method table) for each of std.concurrency's
     /// four reserved GENERIC handles (`Shared`/`RwShared`/`Atomic`/`Executor`), keyed by bare name,
     /// captured from the file-backed `std/concurrency.chz` harvest (AFTER `attach_native_module_metadata`
@@ -3170,6 +3194,7 @@ const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
 const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
 const SOCKET_METHODS: &[&str] = &["read", "write", "read_bytes", "write_bytes", "close"];
 const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
+const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
@@ -3388,6 +3413,10 @@ fn builtin_type_doc(name: &str) -> Option<String> {
         "Listener" => (
             "TCP listening socket from std.net listen()",
             Some(LISTENER_METHODS),
+        ),
+        "Writer" => (
+            "write-only file/stream handle from std.io create()/append()/stdout()/stderr()/buffered()",
+            Some(WRITER_METHODS),
         ),
         // Types without a built-in method table (usage line only) --------------------------------
         "range" => (

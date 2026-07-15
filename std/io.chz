@@ -21,3 +21,29 @@ native fn write_file(path: str, text: str) -> Result[nil]
 # like CPython's `bytes(ba)`; `bytearray` is deliberately NOT assignable to a `bytes` sink).
 native fn read_bytes(path: str) -> Result[bytes]
 native fn write_bytes(path: str, data: bytes) -> Result[nil]
+
+# Writer / file-handle type (R2) — buffered + streaming write-only output. `Writer` is a RESERVED
+# opaque VM handle (`Ty::Writer`, NOT a nominal struct — no field layout), and the openers + methods
+# stay VM-intercepted at runtime (they allocate a handle over an `Arc`'d core). The backends compile
+# NOTHING for a `native fn`/`native struct` — the front-end reads ONLY the signature.
+#
+# Two verbs, not a mode string: `create` = truncate+create, `append` = append (create-if-absent,
+# never truncates) — Go-consistent (`os.Create`). Text vs binary is per-CALL: `write(str)` UTF-8-
+# encodes, `write_bytes(bytes)` is raw. `stdout()`/`stderr()` route through the SAME sink as
+# `io.print` (byte-identical to `io.print(s, end="")`), NOT a raw fd. `buffered(w, size = 8192)` is
+# the Go `bufio.NewWriter` escape hatch: it accumulates in the VM and does ONE host/fd write per
+# `flush` / buffer-full / `close` (8 KiB default). Forgetting `flush`/`close` on a buffered writer
+# loses the tail (Go's footgun) — mitigated by a best-effort flush on the handle's drop, but explicit
+# `close()` is the contract. `flush()` on unbuffered `stdout` is an honest no-op; `buffered(...).flush()`
+# is the real thing. Every fallible entry returns a `Result` (open: perms/missing dir; write: ENOSPC).
+native struct Writer:
+    native fn write(self, data: str) -> Result[int]
+    native fn write_bytes(self, data: bytes) -> Result[int]
+    native fn flush(self) -> Result[nil]
+    native fn close(self) -> Result[nil]
+
+native fn create(path: str) -> Result[Writer]
+native fn append(path: str) -> Result[Writer]
+native fn stdout() -> Writer
+native fn stderr() -> Writer
+native fn buffered(w: Writer, size: int = 8192) -> Writer

@@ -7,6 +7,7 @@
 use super::chzstr::ChzStr;
 use super::core::{
     AtomicCore, ChannelCore, ExecutorCore, ListenerCore, RwSharedCore, SharedCore, SocketCore,
+    WriterCore,
 };
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
@@ -286,6 +287,10 @@ pub enum Obj {
     /// `Listener` (D6) — a *handle* to a non-blocking accepting socket [`ListenerCore`]. See
     /// [`Socket`](Obj::Socket).
     Listener(Arc<ListenerCore>),
+    /// `Writer` (R2) — a *handle* to a write-only file/stream [`WriterCore`]. Same handle/core split as
+    /// [`Socket`](Obj::Socket); the core holds an fd/buffer (no `WireValue`s, no `GcRef`s), so it traces
+    /// no GC children.
+    Writer(Arc<WriterCore>),
     /// Experimental generators (VM-only) — a suspendable coroutine produced by calling a `yield`-ing
     /// function. Holds its bytecode + home/closure + lifecycle state + parked execution context; its
     /// `.next()` is intrinsic (see `Vm::generator_next`). Boxed to keep `Obj` small (the core carries
@@ -468,8 +473,8 @@ impl Heap {
                     crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
                 }
             }
-            // D6: a socket/listener core holds only an OS fd + a poll key — no heap refs to trace.
-            Obj::Socket(_) | Obj::Listener(_) => {}
+            // D6/R2: a socket/listener/writer core holds only an fd/buffer + a key — no heap refs.
+            Obj::Socket(_) | Obj::Listener(_) | Obj::Writer(_) => {}
             // Experimental generators — root the suspended frames/stack/args (see `gc_roots`).
             Obj::Generator(g) => out.extend(g.gc_roots()),
         }

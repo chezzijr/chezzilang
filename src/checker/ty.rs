@@ -148,6 +148,9 @@ pub enum Ty {
     /// `Listener` — a non-blocking accepting TCP socket (D6), produced by `std.net.listen`. Non-generic
     /// and sendable, like `Socket`.
     Listener,
+    /// `Writer` — a write-only file/stream handle (R2), produced by `std.io.create`/`append`/`stdout`/
+    /// `stderr`/`buffered`. Non-generic; the handle is sendable (a `spawn`ed fiber can write to it).
+    Writer,
     /// `ptr` — an opaque C-ABI pointer handle (a raw `void*`). A builtin marshalling primitive (peer
     /// of `int`/`float`/`bool`/`str`) usable in `extern "lib":` signatures. Fully opaque: no methods,
     /// no fields; only `==`/`!=` against another `ptr` (incl. `std.ffi.null()`) and pass/return.
@@ -262,7 +265,11 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (NewType(a, aa), NewType(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
-        (Executor, Executor) | (Socket, Socket) | (Listener, Listener) | (Ptr, Ptr) => true,
+        (Executor, Executor)
+        | (Socket, Socket)
+        | (Listener, Listener)
+        | (Writer, Writer)
+        | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         // Labels are surface-only: two function types differing only in parameter labels are the SAME
         // type — `compatible` matches on arity + param/ret compatibility and IGNORES labels (`..`).
@@ -367,6 +374,7 @@ impl fmt::Display for Ty {
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),
+            Ty::Writer => write!(f, "Writer"),
             Ty::Ptr => write!(f, "ptr"),
             Ty::Protocol(n, args) => {
                 write!(f, "{n}")?;

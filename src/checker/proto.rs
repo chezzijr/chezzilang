@@ -528,6 +528,7 @@ impl Checker {
                 "Executor" => Ty::Executor,
                 "Socket" => Ty::Socket,
                 "Listener" => Ty::Listener,
+                "Writer" => Ty::Writer,
                 "ptr" => Ty::Ptr,
                 "owned_str" => Ty::Str,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
@@ -1379,6 +1380,9 @@ impl Checker {
             // fd lives in an `Arc`'d core outside every heap), so a `parallel:` accept-loop can
             // `spawn handle(conn)` onto a fiber.
             Ty::Socket | Ty::Listener => true,
+            // R2 — a `Writer` handle crosses the airlock like the socket handles (the fd/buffer lives
+            // in an `Arc`'d core outside every heap), so a `spawn`ed fiber can write to it.
+            Ty::Writer => true,
             // An opaque `ptr` is a plain raw address (a `usize`) — it crosses the airlock by value,
             // so it is always sendable (its referent, if any, is the foreign library's concern).
             Ty::Ptr => true,

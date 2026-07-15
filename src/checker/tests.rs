@@ -6394,7 +6394,33 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     let write_bytes = io.functions.get("write_bytes").expect("io.write_bytes");
     assert_eq!(write_bytes.params, vec![Ty::Str, Ty::Bytes]);
     assert_eq!(write_bytes.ret, Ty::result(Ty::Nil));
-    assert_eq!(io.functions.len(), 9);
+    // R2 — the Writer openers/handles. `create`/`append` -> Result[Writer]; `stdout`/`stderr` -> Writer;
+    // `buffered(w, size = 8192)` -> Writer (optional-tail size ⇒ min_params 1).
+    assert_eq!(io.functions.get("create").unwrap().params, vec![Ty::Str]);
+    assert_eq!(
+        io.functions.get("create").unwrap().ret,
+        Ty::result(Ty::Writer)
+    );
+    assert_eq!(
+        io.functions.get("append").unwrap().ret,
+        Ty::result(Ty::Writer)
+    );
+    assert_eq!(io.functions.get("stdout").unwrap().ret, Ty::Writer);
+    let buffered = io.functions.get("buffered").expect("io.buffered");
+    assert_eq!(buffered.params, vec![Ty::Writer, Ty::Int]);
+    assert_eq!(buffered.min_params, 1);
+    assert_eq!(buffered.ret, Ty::Writer);
+    // The Writer method table (harvested from the `native struct Writer`).
+    let writer = io.struct_defs.get("Writer").expect("io Writer struct_def");
+    assert_eq!(
+        writer.methods.get("write").unwrap().ret,
+        Ty::result(Ty::Int)
+    );
+    assert_eq!(
+        writer.methods.get("close").unwrap().ret,
+        Ty::result(Ty::Nil)
+    );
+    assert_eq!(io.functions.len(), 14);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6451,7 +6477,8 @@ fn math_io_os_fn_hover_doc_preserved() {
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 21);
-    assert_eq!(crate::native::native_members("std.io").len(), 9);
+    // std.io: 9 original + R2's 5 Writer openers (create/append/stdout/stderr/buffered → intercepted).
+    assert_eq!(crate::native::native_members("std.io").len(), 14);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 12);

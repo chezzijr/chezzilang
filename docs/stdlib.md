@@ -290,12 +290,41 @@ Constants: `math.pi`, `math.e`.
 | `print` | `(s: str) -> nil` | stdout + newline. |
 | `eprint` | `(s: str) -> nil` | stderr + newline. |
 | `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
-| `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. |
+| `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
 | `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |
 | `write_bytes` | `(path: str, data: bytes) -> Result[nil]` | Write / overwrite raw bytes; no size cap, like `write_file`. |
+| `create` | `(path: str) -> Result[Writer]` | Open a **truncating** write handle (create-or-truncate). |
+| `append` | `(path: str) -> Result[Writer]` | Open an **append** write handle (create-if-absent, never truncates). |
+| `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
+| `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
+| `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (the Go `bufio.NewWriter` escape hatch; 8 KiB default). |
+
+**`Writer` (R2) — write-only file / stream handle.** A sendable native handle (like `Socket`), the
+buffered-output escape hatch Chezzi's unbuffered stdout default was missing. Two openers, not a mode
+string (`create` = truncate, `append` = append). Text vs binary is **per-call**. `stdout()`/`stderr()`
+route through the *same* sink as `print`/`eprint` (never a raw fd), so a `Writer` over stdout captures,
+streams, and parity-checks identically. `buffered(...)` batches host/fd writes.
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `write` | `(data: str) -> Result[int]` | UTF-8-encode + write; returns bytes written. |
+| `write_bytes` | `(data: bytes) -> Result[int]` | Write raw bytes; returns bytes written. |
+| `flush` | `() -> Result[nil]` | Drain a `buffered` writer's in-VM buffer (one host/fd write). A no-op on unbuffered `stdout`/`stderr` (that sink is already unbuffered) and on a plain file writer beyond flushing its OS buffer. |
+| `close` | `() -> Result[nil]` | Flush + close the handle. Use-after-close is a clean `Err`, never a fault. |
+
+- **Forgetting `flush`/`close` on a `buffered` writer loses the tail** — Go's footgun. Mitigated
+  best-effort: a **file**-backed buffered writer flushes its tail when the handle is dropped (program
+  exit / GC). A **stdout/stderr**-backed buffered writer's tail is *not* recovered on drop — call
+  `flush()`/`close()` explicitly. A plain `create`/`append` writer never loses data (its `BufWriter`
+  flushes on drop).
+- **Cross-task write ordering to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
+  rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
+  writes from different tasks is not guaranteed — join and write from one task if you need order.
+- Out of scope (v1): reader / line-streaming a large file, seek / random-access. Write-only append or
+  truncate handle only.
 
 **Output contract (`chezzi run`).** The CLI **streams**: output appears when it happens (a prompt before
 its read; a long-running program prints incrementally; a killed program keeps what it printed; a spawned
