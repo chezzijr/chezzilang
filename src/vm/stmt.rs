@@ -1903,6 +1903,7 @@ impl Vm {
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
                 Obj::Writer(_) => "Writer",
+                Obj::Reader(_) => "Reader",
                 Obj::Generator(_) => "generator",
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively report its inner value's type.
@@ -2088,6 +2089,15 @@ impl Vm {
                         "closed"
                     }
                 )),
+                // R2b: render open/closed without exposing the fd (mirrors the Writer handle).
+                Obj::Reader(core) => Ok(format!(
+                    "Reader({})",
+                    if core.inner.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )),
                 Obj::Generator(_) => Ok("<generator>".to_string()),
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively display its inner value.
@@ -2225,6 +2235,17 @@ impl Vm {
             WireValue::Writer(core) => {
                 format!(
                     "Writer({})",
+                    if core.inner.lock().unwrap().is_some() {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )
+            }
+            // R2b: render open/closed without exposing the fd (mirrors the heap `Display`).
+            WireValue::Reader(core) => {
+                format!(
+                    "Reader({})",
                     if core.inner.lock().unwrap().is_some() {
                         "open"
                     } else {
@@ -2565,6 +2586,7 @@ impl Vm {
             | Obj::Socket(_)
             | Obj::Listener(_)
             | Obj::Writer(_)
+            | Obj::Reader(_)
             | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
             }

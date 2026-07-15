@@ -151,6 +151,9 @@ pub enum Ty {
     /// `Writer` — a write-only file/stream handle (R2), produced by `std.io.create`/`append`/`stdout`/
     /// `stderr`/`buffered`. Non-generic; the handle is sendable (a `spawn`ed fiber can write to it).
     Writer,
+    /// `Reader` — a read-only file handle (R2b), the input twin of `Writer`, produced by
+    /// `std.io.open`. Non-generic; the handle is sendable (a `spawn`ed fiber can read from it).
+    Reader,
     /// `ptr` — an opaque C-ABI pointer handle (a raw `void*`). A builtin marshalling primitive (peer
     /// of `int`/`float`/`bool`/`str`) usable in `extern "lib":` signatures. Fully opaque: no methods,
     /// no fields; only `==`/`!=` against another `ptr` (incl. `std.ffi.null()`) and pass/return.
@@ -269,6 +272,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         | (Socket, Socket)
         | (Listener, Listener)
         | (Writer, Writer)
+        | (Reader, Reader)
         | (Ptr, Ptr) => true,
         (Module(a), Module(b)) | (Param(a), Param(b)) => a == b,
         // Labels are surface-only: two function types differing only in parameter labels are the SAME
@@ -375,6 +379,7 @@ impl fmt::Display for Ty {
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),
             Ty::Writer => write!(f, "Writer"),
+            Ty::Reader => write!(f, "Reader"),
             Ty::Ptr => write!(f, "ptr"),
             Ty::Protocol(n, args) => {
                 write!(f, "{n}")?;

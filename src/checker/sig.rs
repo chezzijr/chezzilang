@@ -721,6 +721,7 @@ impl Checker {
             | Ty::Socket
             | Ty::Listener
             | Ty::Writer
+            | Ty::Reader
             | Ty::Ptr
             | Ty::Module(_) => t.clone(),
         }
@@ -822,6 +823,7 @@ impl Checker {
             "Socket" => Some(Ty::Socket),
             "Listener" => Some(Ty::Listener),
             "Writer" => Some(Ty::Writer),
+            "Reader" => Some(Ty::Reader),
             "ptr" => Some(Ty::Ptr),
             _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(Ty::Int),
             _ => None,
@@ -1061,6 +1063,21 @@ impl Checker {
                     n @ "Writer" => {
                         if self.io_licensed(n) {
                             Ty::Writer
+                        } else {
+                            self.error(
+                                span,
+                                format!(
+                                    "unknown type '{n}' (import it from std.io: `import std.io`)"
+                                ),
+                            );
+                            Ty::Unknown
+                        }
+                    }
+                    // R2b — the std.io `Reader` handle, non-generic (bare `Reader` annotation), the read
+                    // twin of `Writer` above. Import-gated by `imported_io`; the name STAYS reserved.
+                    n @ "Reader" => {
+                        if self.io_licensed(n) {
+                            Ty::Reader
                         } else {
                             self.error(
                                 span,

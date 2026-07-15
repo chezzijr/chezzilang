@@ -47,3 +47,25 @@ native fn append(path: str) -> Result[Writer]
 native fn stdout() -> Writer
 native fn stderr() -> Writer
 native fn buffered(w: Writer, size: int = 8192) -> Writer
+
+# Reader / file-handle type (R2b) — the READ twin of `Writer`: line/chunk streaming of a large file,
+# so a big file need not be slurped whole (unlike `read_file`/`read_bytes`, capped at 64 MiB). `Reader`
+# is a RESERVED opaque VM handle (`Ty::Reader`, NOT a nominal struct) opened read-only by `open(path)`.
+#
+# `read_line()` yields one line at a time — trailing `\n` (and a preceding `\r`) STRIPPED, `None` at
+# EOF — matching the module-level `read_line()` shape. It is `Option[str]`, NOT a `Result`: a mid-read
+# I/O error or a non-UTF-8 file surfaces as a runtime FAULT pointing at `read_bytes` (mirroring
+# `read_file`'s non-UTF-8 fault); `read_bytes(n) -> Result[bytes]` is the binary + error-distinguishing
+# escape hatch (at-most-n bytes; empty bytes = EOF; `Err` on a closed reader / I/O). `close()` releases
+# the fd (idempotent). A method on a closed reader is clean: `read_bytes`/`close` return `Result::Err` /
+# `Ok`, `read_line` faults cleanly (an `Option` can't carry the error).
+#
+# `lines() -> Iterator[str]` is deliberately NOT provided yet: the cursor model snapshots eagerly (would
+# read the whole file, defeating streaming), so a lazy file-backed cursor is a distinct follow-up. Loop
+# `read_line()` in a `while` for now.
+native struct Reader:
+    native fn read_line(self) -> Option[str]
+    native fn read_bytes(self, n: int) -> Result[bytes]
+    native fn close(self) -> Result[nil]
+
+native fn open(path: str) -> Result[Reader]

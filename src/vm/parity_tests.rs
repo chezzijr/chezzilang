@@ -209,6 +209,7 @@ fn type_param_named_like_reserved_rejected_at_check() {
         "Socket",
         "Listener",
         "Writer",
+        "Reader",
         "owned_str",
     ] {
         let src = format!(
@@ -9365,6 +9366,168 @@ fn writer_annotation_requires_import() {
         Err(errs) => assert!(
             errs.iter().any(|e| e.message.contains("import std.io")
                 || e.message.contains("unknown type 'Writer'")),
+            "want an import-std.io hint, got: {errs:?}"
+        ),
+    }
+}
+
+// ===== R2b — std.io Reader / file-handle type (line/chunk streaming file INPUT) =====
+
+/// R2b — `open(path)` opens a read-only handle; `read_line()` streams the file line-by-line
+/// (trailing newline stripped, `None` = EOF); `close()` releases the fd. Serial and M:N each.
+#[test]
+fn reader_open_read_line_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(ln)\n            None: break\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "one\ntwo\nthree\n");
+    }
+}
+
+/// R2b — a file whose last line has NO trailing newline: `read_line` still yields it, then `None`.
+#[test]
+fn reader_read_line_no_trailing_newline_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "a\nb").unwrap();
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "[a]\n[b]\n");
+    }
+}
+
+/// R2b — `read_bytes(n)` chunks the file: exactly-n bytes until the short final chunk, then empty
+/// bytes (`len == 0`) = EOF. Both engines.
+#[test]
+fn reader_read_bytes_chunk_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("bin");
+        std::fs::write(&f, [10u8, 20, 30, 40, 50, 60]).unwrap(); // 6 bytes
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    c1 := r.read_bytes(4)?\n    c2 := r.read_bytes(4)?\n    c3 := r.read_bytes(4)?\n    print(str(c1.len()) + \":\" + str(c1[0]) + \",\" + str(c1[3]))\n    print(str(c2.len()) + \":\" + str(c2[0]) + \",\" + str(c2[1]))\n    print(str(c3.len()))\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "4:10,40\n2:50,60\n0\n");
+    }
+}
+
+/// R2b — `read_bytes` on a CLOSED reader is a clean `Result::Err` (contains "closed reader"), NOT a
+/// panic. Both engines.
+#[test]
+fn reader_use_after_close_clean_err_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("x.txt");
+        std::fs::write(&f, "data").unwrap();
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        Ok(b): print(\"got \" + str(b.len()))\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(
+            r.is_ok(),
+            "run faulted (should be a clean Err, not a fault): {r:?}"
+        );
+        assert!(
+            out.contains("closed reader"),
+            "want a clean closed-reader Err, got: {out:?}"
+        );
+    }
+}
+
+/// R2b — `open` on a nonexistent file is a clean `Result::Err`, not a panic. Both engines.
+#[test]
+fn reader_open_missing_file_clean_err_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("no_such_dir").join("x.txt");
+        let src = format!(
+            "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        Ok(r): print(\"opened\")\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
+        assert!(
+            out.starts_with("ERR:"),
+            "want a clean open Err, got: {out:?}"
+        );
+    }
+}
+
+/// R2b — `import Reader from std.io` (a pure TYPE with no runtime member value) + send the handle
+/// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip + airlock
+/// sites). Both engines.
+#[test]
+fn import_reader_type_and_send_across_spawn_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let src = format!(
+            "import Reader, open from std.io\nfn first(r: Reader) -> Option[str]:\n    return r.read_line()\nfn main():\n    r := open(\"{f}\")?\n    parallel:\n        spawn:\n            match first(r):\n                Some(ln): print(ln)\n                None: print(\"empty\")\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(
+            r.is_ok(),
+            "run faulted (bind_import/airlock missing?): {r:?}"
+        );
+        assert_eq!(out, "hello\n");
+    }
+}
+
+/// R2b — a full `Reader` program TYPE-CHECKS clean through `check_graph` (the CLI path; `run_file`
+/// skips the checker). Guards that `Ty::Reader`'s method arm + the harvested method-table seed resolve
+/// `r.read_line()`/`r.read_bytes(..)`/`r.close()` at check time.
+#[test]
+fn reader_program_type_checks_clean() {
+    let src = "import open, Reader from std.io\n\
+               fn tag(r: Reader) -> Reader:\n    return r\n\
+               fn main():\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        Some(ln): print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let r = crate::checker::check_graph(&graph);
+    assert!(
+        r.is_ok(),
+        "a well-typed Reader program must check clean, got: {r:?}"
+    );
+}
+
+/// R2b — the bare `Reader` annotation is IMPORT-GATED: naming `Reader` WITHOUT importing std.io is
+/// rejected at check time with the `import std.io` hint (mirrors Writer gating).
+#[test]
+fn reader_annotation_requires_import() {
+    let src = "fn tag(r: Reader) -> Reader:\n    return r\nfn main():\n    print(\"hi\")\nmain()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    match crate::checker::check_graph(&graph) {
+        Ok(()) => panic!("bare `Reader` without `import std.io` must be rejected"),
+        Err(errs) => assert!(
+            errs.iter().any(|e| e.message.contains("import std.io")
+                || e.message.contains("unknown type 'Reader'")),
             "want an import-std.io hint, got: {errs:?}"
         ),
     }

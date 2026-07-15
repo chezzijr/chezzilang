@@ -4,6 +4,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-15, `auto-task/std-io-reader`) — `docs/gaps.md` R2b DONE: a read-only `Reader` /
+> file-handle type in `std.io`, the read twin of R2's `Writer`.** Line/chunk streaming of a large file
+> (past the 64 MB whole-file `read_file`/`read_bytes` cap). Opener `open(path)`, methods
+> `read_line()` / `read_bytes(n)` / `close()`. `read_line() -> Option[str]` streams one line at a time
+> (trailing `\n`/`\r\n` stripped, `None` = EOF) — matching the module-level `read_line()` shape
+> (anti-drift); a mid-read I/O error or non-UTF-8 file is a clean runtime **fault** pointing at
+> `read_bytes` (an `Option` can't carry the error, mirroring `read_file`). `read_bytes(n) -> Result[bytes]`
+> is the binary + error-distinguishing escape hatch (at-most-n bytes, empty = EOF, `Err` on closed/IO).
+> `close()` idempotent (fd closes on `BufReader` drop — no `Drop` impl, reads are flush-free). Modeled
+> arm-for-arm on `Writer`: `ReaderCore { Mutex<Option<BufReader<File>>>, key }` in `src/vm/core.rs`,
+> `Obj::Reader`/`WireValue::Reader` (GC leaf, sendable across the airlock), methods + opener in
+> `src/vm/fileio.rs` (blocking-classified, NO netpoller, NO `stream_halt` — a Reader never emits),
+> `Ty::Reader` gated by `import std.io` (3-touchpoint additive checker seam + `io_reader_seed` field,
+> SEPARATE from `io_writer_seed`). Cross-task read order to one shared handle is unspecified (offset race)
+> — no shared-read parity test (meaningless); sendability tested via send-across-`spawn`. `lines() ->
+> Iterator[str]` deferred (the cursor model snapshots eagerly — would defeat streaming; loop `read_line()`
+> for now). 10 new tests (6 run-parity both engines + 2 checker-level guarding the `Ty::Reader` method
+> arm + the reserved-name ratchet + the io member-count bump). Docs: `docs/stdlib.md` (Reader surface),
+> `docs/gaps.md` (R2b DONE + IO §4 refreshed). Full `cargo test`/`clippy` green.
+>
 > **✅ STDLIB (2026-07-15, `auto-task/writer-r2`) — `docs/gaps.md` R2 DONE: a write-only `Writer` /
 > file-handle type in `std.io`.** Buffered + streaming write output, the escape hatch Chezzi's unbuffered
 > stdout default was missing. Openers `create` (truncate) / `append` (create-if-absent), stream handles

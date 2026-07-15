@@ -3,10 +3,12 @@
 //! Whole-file I/O reads/writes files whole — as `str` (`read_file`/`write_file`, UTF-8) or raw `bytes`
 //! (`read_bytes`/`write_bytes`, R1). R2 adds a write-only `Writer` handle for buffered + streaming
 //! output: the openers `create`/`append`, the stream handles `stdout`/`stderr`, and the `buffered`
-//! wrapper. Those five allocate a heap handle over an `Arc`'d core, so they are ENGINE-INTERCEPTED in
-//! `Vm::invoke_native` (by func-pointer identity — the `append` opener collides with `fs.append`'s
-//! bare name) and their `intercepted` placeholder below never runs. Errors come back as `Result`
-//! values (the engine lowers `NativeRet::Err` to `Err(msg)`), never panics.
+//! wrapper. R2b adds the read twin — a read-only `Reader` handle (`open` opener; `read_line`/
+//! `read_bytes`/`close` methods) for line/chunk streaming of a large file. Those six openers allocate a
+//! heap handle over an `Arc`'d core, so they are ENGINE-INTERCEPTED in `Vm::invoke_native` (by func-
+//! pointer identity — the `append` opener collides with `fs.append`'s bare name) and their
+//! `intercepted` placeholder below never runs. Errors come back as `Result` values (the engine lowers
+//! `NativeRet::Err` to `Err(msg)`), never panics.
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::io::Read;
@@ -125,9 +127,10 @@ fn write_file(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-/// R2 — placeholder for an engine-intercepted Writer opener/handle (`create`/`append`/`stdout`/
-/// `stderr`/`buffered`): `Vm::invoke_native` handles these directly (they allocate a heap `Writer`
-/// handle over an `Arc`'d core), keying on THIS fn's pointer identity, so the body must never run.
+/// R2/R2b — placeholder for an engine-intercepted Writer/Reader opener/handle (`create`/`append`/
+/// `stdout`/`stderr`/`buffered`/`open`): `Vm::invoke_native` handles these directly (they allocate a
+/// heap `Writer`/`Reader` handle over an `Arc`'d core), keying on THIS fn's pointer identity, so the
+/// body must never run.
 pub fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Err(HostError {
         message:
@@ -136,8 +139,8 @@ pub fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
     })
 }
 
-/// Callable members. `(name, fn)`. The five Writer openers/handles resolve to the shared `intercepted`
-/// placeholder — the engine intercepts them by func-pointer identity (see `intercepted`).
+/// Callable members. `(name, fn)`. The six Writer/Reader openers/handles resolve to the shared
+/// `intercepted` placeholder — the engine intercepts them by func-pointer identity (see `intercepted`).
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("print", print),
     ("eprint", eprint),
@@ -153,4 +156,5 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("stdout", intercepted),
     ("stderr", intercepted),
     ("buffered", intercepted),
+    ("open", intercepted),
 ];

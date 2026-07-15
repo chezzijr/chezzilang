@@ -1017,6 +1017,14 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // R2b: `Reader` methods (`read_line`/`read_bytes`/`close`) operate on the `BufReader` in the
+        // `Arc`'d core. Like `Writer`, file reads are synchronous blocking syscalls — no netpoller, no
+        // `poll_park` gate; and NO `stream_halt` check (a Reader never emits to stdout/stderr).
+        if matches!(self.heap.get(h), Obj::Reader(_)) {
+            let result = self.reader_method(h, method, &args, span)?;
+            self.push(result);
+            return Ok(());
+        }
         // `.iter()` on a built-in collection (str/list/map/set/bytes/bytearray) → a FRESH cursor that
         // SNAPSHOTS the current contents in the SAME order/elements as `for x in X` (list/set elems,
         // map → keys, str → per-char str, bytes/bytearray → per-byte int). Reuses `drain_iterable`

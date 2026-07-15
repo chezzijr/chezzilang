@@ -6420,7 +6420,27 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         writer.methods.get("close").unwrap().ret,
         Ty::result(Ty::Nil)
     );
-    assert_eq!(io.functions.len(), 14);
+    // R2b — the Reader opener + method table. `open` -> Result[Reader]; `read_line` -> Option[str];
+    // `read_bytes(n)` -> Result[bytes]; `close` -> Result[nil].
+    assert_eq!(io.functions.get("open").unwrap().params, vec![Ty::Str]);
+    assert_eq!(
+        io.functions.get("open").unwrap().ret,
+        Ty::result(Ty::Reader)
+    );
+    let reader = io.struct_defs.get("Reader").expect("io Reader struct_def");
+    assert_eq!(
+        reader.methods.get("read_line").unwrap().ret,
+        Ty::option(Ty::Str)
+    );
+    assert_eq!(
+        reader.methods.get("read_bytes").unwrap().ret,
+        Ty::result(Ty::Bytes)
+    );
+    assert_eq!(
+        reader.methods.get("close").unwrap().ret,
+        Ty::result(Ty::Nil)
+    );
+    assert_eq!(io.functions.len(), 15);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6477,8 +6497,8 @@ fn math_io_os_fn_hover_doc_preserved() {
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 21);
-    // std.io: 9 original + R2's 5 Writer openers (create/append/stdout/stderr/buffered → intercepted).
-    assert_eq!(crate::native::native_members("std.io").len(), 14);
+    // std.io: 9 original + R2's 5 Writer openers + R2b's `open` (all → intercepted) = 15.
+    assert_eq!(crate::native::native_members("std.io").len(), 15);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 12);
