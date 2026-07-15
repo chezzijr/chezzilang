@@ -11,6 +11,54 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
+
+One session, driven off this backlog. Each item links to its full entry.
+
+**RESOLVED (merged to `main`, verified end-to-end on the real binary, both engines):**
+- **T1** — an installed `chezzi` couldn't find its own stdlib; `std/` is now `include_str!`'d into the
+  binary (`cda71b5`/`56ec7a7`). See [T1](#t1-installing-chezzi-produces-a-binary-that-cant-find-its-own-stdlib--fixed).
+- **T2** — `repl` was advertised in `--help`/`spec.md`/`CLAUDE.md` but never existed; de-advertised
+  (`e2e7707`). See [T2](#t2-chezzi-repl-is-a-stub-that-errors--while---help-advertises-it--fixed-de-advertised).
+- **B1** — `Socket.read` silently corrupted data via `from_utf8_lossy`. First **mitigated** (carry
+  split codepoints, `Err` on binary — `95f37ef`/`6477e45`/`d784031`/`26030f4`), then **fixed honestly**
+  by R1's `Socket.read_bytes`/`write_bytes`. See [B1](#b1-socketread-silently-corrupts-data-from_utf8_lossy--p0--fixed-2026-07-14-r1).
+- **R1** — the native seam couldn't carry `bytes`; added `NativeRet::Bytes` + `Host::arg_bytes` +
+  `NativeArg::Bytes` (the offload-path piece the entry omitted) and wired consumers: binary file IO,
+  binary sockets, `sha256`/base64 of bytes (`f09ede0`/`eb300bb`/`0b23703`). See [R1](#r1-the-native-seam-cannot-carry-bytes--done-2026-07-14).
+- **N1..N9 — the cancel-teardown cascade.** R1's post-merge gate flushed out a family of pre-existing
+  concurrency bugs around `defer`-on-cancel. The through-line: **`defer` is the language's only cleanup
+  mechanism, and a cancelled task was silently skipping it.** Fixed by adopting **cancellation points**
+  (a deliberate semantics change — cancel is delivered at loop back-edges + blocking ops, not every
+  instruction), so a *registered* `defer` now runs on a cancelled task deterministically on **both**
+  engines. Landed across `4ac04ce`→`e70fb5f`. Sub-fixes N4/N6/N6b–N6h each have their own entry below.
+  Suite grew 3450 → 3485 tests.
+
+**PROCESS NOTE (recorded so it isn't repeated):** the cancel work took **five** auto-task rounds, two of
+which I merged or nearly-merged on a green result from a repro I'd designed to pass — a channel-token that
+*sequenced* the fault and hid the race. The adversarial panel was right twice where my own verification
+was too easy on itself. Lesson: **a green result from a test you wrote to pass is not evidence of a race
+fix** — measure the natural (unsequenced) shape, ≥200 runs under CPU load. Two auto-task runs also leaked
+CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anything you spawn.
+
+**STILL OPEN after this session (ranked):**
+- [N8](#n8---serial-hangs-on-a-cpu-bound-sibling--cooperative-engine-never-preempts-it--open) — **`--serial`
+  HANGS on a CPU-bound sibling** (no preemption; the `reds` budget exists but isn't enforced at the
+  back-edge). Pre-existing. The one I'd take next — `--serial` is unsafe for CPU-bound concurrent tasks.
+- [N9](#n9-a-cancelled-tasks-output-line-set-differs-between-engines--inherent-open) — a cancelled task's
+  **line set** differs serial vs M:N (inherent to a cooperative engine; largely closed by fixing N8).
+- [N6g / C5](#n6g--open-c5-family-a-defer-that-recvs-from-a-live-sibling-cannot-park-on---serial) — a
+  `defer` that must **park** (recv from a live sibling) can't, on `--serial` — needs a VM-driven defer
+  drain, its own milestone.
+- [N1](#n1-a-last-print-into-a-just-closed-pipe-exits-0-or-1-nondeterministically--a-real-bug) — a last
+  `print` into a just-closed pipe exits 0-or-1 nondeterministically. Real, cheap, untouched this session.
+- [N2](#n2-socketwriteaccept-still-restart-their-timeout-budget-on-every-park),
+  [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals.
+- [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
+  still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
+- Untouched backlog headliners: **R2** (Writer/file handles), **R3** (package manager), **R4** (runtime
+  type tags), **L1** (`Result`/`Option` methods) — see their sections.
+
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
 ### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0 — **FIXED (2026-07-14, R1)**
