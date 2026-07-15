@@ -6184,6 +6184,12 @@ fn request_fn_sigs_exact() {
     let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
         ("get", vec![Ty::Str, Ty::Int], Ty::result(resp()), 1),
         (
+            "get_bytes",
+            vec![Ty::Str, Ty::Int],
+            Ty::result(Ty::Bytes),
+            1,
+        ),
+        (
             "post",
             vec![Ty::Str, Ty::Str, Ty::Int],
             Ty::result(resp()),
@@ -6307,7 +6313,7 @@ fn response_chz_matches_handbuilt_layouts() {
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
-    assert_eq!(sig.functions.len(), 7, "std/request.chz must harvest 7 fns");
+    assert_eq!(sig.functions.len(), 8, "std/request.chz must harvest 8 fns");
     let seeded = c.structs.get("Response").expect("Response seeded");
     assert_eq!(seeded.fields, expected, "seeded Response drifted");
     assert!(

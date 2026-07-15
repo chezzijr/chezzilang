@@ -26,6 +26,7 @@ native struct Response:
     headers: Map[str, str]
 
 native fn get(url: str, timeout_ms: int = 0) -> Result[Response]
+native fn get_bytes(url: str, timeout_ms: int = 0) -> Result[bytes]
 native fn post(url: str, body: str, timeout_ms: int = 0) -> Result[Response]
 native fn request(method: str, url: str, body: str, headers: Map[str, str], timeout_ms: int = 0) -> Result[Response]
 native fn put(url: str, body: str) -> Result[Response]

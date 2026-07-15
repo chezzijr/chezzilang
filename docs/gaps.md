@@ -150,9 +150,11 @@ Consumers wired, and the gaps that were filed separately as if each were its own
 - binary sockets → **DONE**: `Socket.read_bytes` / `write_bytes` — this is the fix for **B1** (above).
   A hand-rolled HTTP server can now accept an image.
 - `sha256` of a file / hashing binary data → **DONE**: `crypto.sha256_bytes(b)` over `io.read_bytes(p)`.
-- `std.request` cannot fetch a non-text body (`src/native/request.rs:62` → `into_string()`), i.e.
-  **"download a file" is still impossible** → **still open, and it never was an R1 gap**: it needs
-  reader plumbing + a `Response.body` type change inside `std.request`. Its own (small) task.
+- `std.request` binary fetch → **DONE (2026-07-15)**: `request.get_bytes(url, timeout_ms?) ->
+  Result[bytes]` reads the body via `into_reader().read_to_end` → the same immutable `bytes` value
+  `Socket.read_bytes`/`io.read_bytes` return, so an image/zip/pdf round-trips byte-exactly instead of
+  going through `into_string()`'s `from_utf8_lossy` corruption. GET-only + body-only (status/headers
+  dropped); 64MB download cap mirrors `io.read_bytes`. The text `get`/`post` path is unchanged.
 
 ### R2. `Writer` / file-handle type — **DONE (2026-07-15)**
 Landed a write-only `Writer` native handle in `std.io` (the `Socket` handle is the template): openers
@@ -385,8 +387,8 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - **The HTTP-server blocker was not "no framework"** — you *can* hand-roll one on `listen`/`accept`/
   `read`/`write`. The blocker was that the socket seam was **`str`-only**, so a hand-rolled server could
   serve JSON and could not accept an image. **FIXED by R1** (`Socket.read_bytes`/`write_bytes`, 2026-07-14):
-  binary sockets work byte-exactly. Missing HTTP *fetch* of a binary body is a separate, `std.request`-side
-  gap (`into_string()`), not a socket one.
+  binary sockets work byte-exactly. HTTP *fetch* of a binary body — a separate, `std.request`-side gap —
+  is now **also DONE** via `request.get_bytes` (2026-07-15, byte-exact `into_reader().read_to_end`).
 - **`std.net` requires the M:N engine**: off it, a would-block op returns `Err("read would block:
   std.net sockets require the --parallel engine")` (`src/vm/netio.rs`). So the same TCP program behaves
   differently on `--serial` vs the default engine. This is an *accepted design fallback*, not a bug —

@@ -13,7 +13,14 @@
 //! are still deferred.
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args, expect_args_range};
+use std::io::Read;
 use std::time::Duration;
+
+/// Cap on a `get_bytes` download. Mirrors `io::read_bytes`' `MAX_READ_FILE_BYTES` — the text path is
+/// already capped (ureq's ~10MB `into_string` limit), so the binary path needs its own guard or a
+/// hostile/huge download would OOM the engine.
+// ponytail: 64MB cap mirrors io.read_bytes; make configurable only if a real download needs more.
+const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 thread_local! {
     /// A process-lifetime agent with connect/read/write timeouts. The language is single-threaded
@@ -76,6 +83,35 @@ fn lower_result(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
     }
 }
 
+/// Read a `ureq::Response`'s body as raw bytes (byte-exact, no UTF-8 decode) into a `Result[bytes]`.
+/// A download exceeding `MAX_DOWNLOAD_BYTES` and a truncated/aborted read both lower to `Err` (never a
+/// lying empty-body success). Status + headers are intentionally dropped — a binary download is
+/// GET-only and body-only (see `get_bytes`).
+fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
+    let mut buf = Vec::new();
+    match resp
+        .into_reader()
+        .take(MAX_DOWNLOAD_BYTES + 1)
+        .read_to_end(&mut buf)
+    {
+        Ok(_) if buf.len() as u64 > MAX_DOWNLOAD_BYTES => NativeRet::Err(format!(
+            "download exceeds the {MAX_DOWNLOAD_BYTES}-byte limit"
+        )),
+        Ok(_) => NativeRet::Ok(Box::new(NativeRet::Bytes(buf))),
+        Err(e) => NativeRet::Err(format!("failed to read response body: {e}")),
+    }
+}
+
+/// Byte twin of [`lower_result`]: a `>= 400` status is a normal (byte) body, only transport failures
+/// become `Err`.
+fn lower_result_bytes(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
+    match r {
+        Ok(resp) => lower_response_bytes(resp),
+        Err(ureq::Error::Status(_, resp)) => lower_response_bytes(resp),
+        Err(ureq::Error::Transport(t)) => NativeRet::Err(t.to_string()),
+    }
+}
+
 fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
     AGENT.with(|a| {
         let mut req = a.get(url);
@@ -83,6 +119,16 @@ fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
             req = req.timeout(d);
         }
         lower_result(req.call())
+    })
+}
+
+fn do_get_bytes(url: &str, timeout: Option<Duration>) -> NativeRet {
+    AGENT.with(|a| {
+        let mut req = a.get(url);
+        if let Some(d) = timeout {
+            req = req.timeout(d);
+        }
+        lower_result_bytes(req.call())
     })
 }
 
@@ -144,6 +190,15 @@ fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(do_get(&url, timeout))
 }
 
+/// `get_bytes(url, timeout_ms?)` — download a body as raw `bytes` (byte-exact, no UTF-8 decode), the
+/// HTTP sibling of `io.read_bytes` / `Socket.read_bytes`. Status/headers are dropped (body-only).
+fn get_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args_range(h, "get_bytes", 1, 2)?;
+    let url = h.arg_str(0)?;
+    let timeout = read_timeout(h, 1)?;
+    Ok(do_get_bytes(&url, timeout))
+}
+
 fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args_range(h, "post", 2, 3)?;
     let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
@@ -189,6 +244,7 @@ fn head(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// Callable members. `(name, fn)`.
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("get", get),
+    ("get_bytes", get_bytes),
     ("post", post),
     ("request", request),
     ("put", put),
@@ -386,6 +442,81 @@ mod tests {
             "expected DELETE request line, got: {req:?}"
         );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    /// Byte-slice twin of [`serve_once`]: serves a raw (possibly non-UTF-8) body with an exact
+    /// Content-Length, so a test can assert a byte-for-byte binary round-trip.
+    fn serve_once_bytes(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    // A non-UTF-8 payload (0xff/0xfe/0x00 + a PNG-ish tail) — `from_utf8_lossy` mangles it.
+    const BINARY_PAYLOAD: &[u8] = b"\xff\xfe\x00PNG\x89";
+
+    #[test]
+    fn get_bytes_returns_body_byte_exact() {
+        let (url, handle) = serve_once_bytes(BINARY_PAYLOAD);
+        let ret = do_get_bytes(&url, None);
+        handle.join().unwrap();
+        assert_eq!(
+            ret,
+            NativeRet::Ok(Box::new(NativeRet::Bytes(BINARY_PAYLOAD.to_vec())))
+        );
+    }
+
+    #[test]
+    fn into_string_corrupts_but_get_bytes_is_exact() {
+        // TEXT path: the body comes back as a str that lost the non-UTF-8 bytes to U+FFFD.
+        let (url, handle) = serve_once_bytes(BINARY_PAYLOAD);
+        let text = do_get(&url, None);
+        handle.join().unwrap();
+        let NativeRet::Str(s) = field(&text, "body") else {
+            panic!("expected Str body");
+        };
+        assert_ne!(
+            s.as_bytes(),
+            BINARY_PAYLOAD,
+            "into_string was expected to corrupt the non-UTF-8 body"
+        );
+
+        // BYTES path: exact.
+        let (url2, handle2) = serve_once_bytes(BINARY_PAYLOAD);
+        let bytes = do_get_bytes(&url2, None);
+        handle2.join().unwrap();
+        assert_eq!(
+            bytes,
+            NativeRet::Ok(Box::new(NativeRet::Bytes(BINARY_PAYLOAD.to_vec())))
+        );
+    }
+
+    #[test]
+    fn get_bytes_truncated_body_is_err() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+                .unwrap();
+        });
+        let ret = do_get_bytes(&format!("http://{addr}/"), None);
+        handle.join().unwrap();
+        assert!(
+            matches!(ret, NativeRet::Err(_)),
+            "expected Err for truncated body, got {ret:?}"
+        );
     }
 
     #[test]

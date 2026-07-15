@@ -461,13 +461,19 @@ and as `regex.Match(...)`; or `import Match from std.regex`). The names are ther
 types — a user `struct Response` without `import std.request` is their own type. But importing the type
 **and** declaring a same-named `struct` in the same module is a collision, rejected at check (`type
 'Response' is reserved (builtin)`) — never accept-then-trap.
-`get(url, timeout_ms?: int) -> Result[Response]` · `post(url, body, timeout_ms?: int) -> Result[Response]` ·
+`get(url, timeout_ms?: int) -> Result[Response]` · `get_bytes(url, timeout_ms?: int) -> Result[bytes]` ·
+`post(url, body, timeout_ms?: int) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·
 `request(method, url, body, headers: Map[str, str], timeout_ms?: int) -> Result[Response]` (method in UPPERCASE).
 The optional trailing `timeout_ms` sets a **per-request total deadline** that overrides the agent's
 default caps (connect 10s / read 30s / write 30s) for that one call; `timeout_ms <= 0` or omitted falls
 back to the defaults. A timeout (like any transport failure) surfaces as a recoverable `Err`, never a
 panic. Build a query string with `std.encoding.query_encode` and compose `url + "?" + query_encode(params)`.
+**Binary download:** `get_bytes` fetches the body as raw `bytes` (byte-exact, no UTF-8 decode — the
+same immutable `bytes` value `Socket.read_bytes`/`io.read_bytes` return), so an image/zip/pdf survives
+where the text `get`'s `Response.body: str` would lossily mangle it. It is GET-only and body-only
+(status/headers dropped) and caps a download at 64MB (a larger body is an `Err`); for status/headers on
+a text response, use `get`.
 
 ### `std.net`
 Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·
