@@ -132,32 +132,32 @@ impl Checker {
                 enum_name,
                 module_name,
             } => {
-                self.check_pattern_qualifier(
-                    module_name,
-                    enum_name,
-                    name,
-                    Self::scrutinee_enum(ty),
-                    span,
-                );
                 // A USER struct sub-pattern (L2): `Line(Point(x, y), _)` binds a nested struct field
-                // positionally. Tried BEFORE the enum path — a struct is not an enum, so `variants_of`
-                // returns `None` and would otherwise hit the reject below. The constructor name must
-                // match the struct's own name; arity must match. Irrefutable iff every sub-pattern is
-                // (a struct has one constructor, so `Point(a, b)` always matches its type).
+                // positionally. Checked BEFORE `check_pattern_qualifier` + the enum path — a struct
+                // qualifier is a MODULE binder, not an enum, so the enum-qualifier validation would
+                // otherwise mis-fire (`enum 'geo' has no variant 'Point'`) on a valid `geo.Point(..)`.
+                // The constructor must name the struct (bare or module-qualified, via
+                // `resolve_struct_ctor`); a qualifier that is NOT a module (an ENUM-name collision like
+                // `E.Point`) is a clean reject here, NOT a VM crash — the compiler cannot lower it (bug
+                // #4). Irrefutable iff every sub-pattern is (a struct has one constructor).
                 if let Some(fields) = self.struct_fields_of(ty) {
                     let Ty::Struct(sname, _) = ty else {
                         unreachable!("struct_fields_of returned Some for a non-struct")
                     };
-                    // Bare pattern name → identity key (see the top-level Struct arm).
-                    let is_ctor = self.bare_key(name) == *sname;
-                    let shown = crate::compiler::bare_display(sname);
-                    if !is_ctor {
-                        self.error(span, format!("'{name}' is not a constructor of {shown}"));
+                    let ctor = self.resolve_struct_ctor(
+                        sname,
+                        name,
+                        enum_name.as_deref(),
+                        module_name.as_deref(),
+                    );
+                    if let Err(msg) = &ctor {
+                        self.error(span, msg.clone());
                     } else if fields.len() != bindings.len() {
                         self.error(
                             span,
                             format!(
-                                "struct '{shown}' binds {} field(s), but {} given",
+                                "struct '{}' binds {} field(s), but {} given",
+                                crate::compiler::bare_display(sname),
                                 fields.len(),
                                 bindings.len()
                             ),
@@ -167,8 +167,15 @@ impl Checker {
                     for (b, t) in bindings.iter().zip(fields.iter()) {
                         sub_irref &= self.bind_subpattern(b, t, span);
                     }
-                    return is_ctor && fields.len() == bindings.len() && sub_irref;
+                    return ctor.is_ok() && fields.len() == bindings.len() && sub_irref;
                 }
+                self.check_pattern_qualifier(
+                    module_name,
+                    enum_name,
+                    name,
+                    Self::scrutinee_enum(ty),
+                    span,
+                );
                 match self.variants_of(ty) {
                     Some(vmap) => {
                         // A nested variant sub-pattern is irrefutable ONLY when its enum has exactly
@@ -650,31 +657,24 @@ impl Checker {
                         enum_name,
                         module_name,
                     } => {
-                        // A struct has NO enum qualifier — a qualified `mod.Point(x, y)` /
-                        // `E.Point(x, y)` struct pattern is deferred (v1 is bare-only). Reject it
-                        // cleanly rather than silently mis-bind.
-                        if enum_name.is_some() || module_name.is_some() {
-                            self.error(
-                                span,
-                                format!(
-                                    "qualified struct patterns are not supported; write `{label}(...)`"
-                                ),
-                            );
-                            for b in bindings {
-                                self.bind_subpattern(b, &Ty::Unknown, span);
-                            }
-                            return false;
-                        }
-                        // The pattern name is BARE (`Point`); the `label` is the struct's module-
-                        // scoped identity key (`geo::Point` after a `check_graph` disambiguation) — so
-                        // resolve the bare name to its key before comparing (mirrors `variant_pair`).
-                        let is_ctor = self.bare_key(name) == *label;
                         let shown = crate::compiler::bare_display(label.as_str());
-                        // A bare non-constructor name binding nothing is a whole-scrutinee catch-all
+                        // The constructor spelling: BARE `Point` OR module-qualified `geo.Point` (the
+                        // only spelling for a whole-module-imported struct — the bare name isn't in
+                        // scope). `resolve_struct_ctor` accepts either against the scrutinee's identity;
+                        // a qualifier that is not a module (`E.Point`, an enum-name collision) or a
+                        // 3-part path is a clean reject, never a mis-bind (bugs #1, #2, #4).
+                        let ctor = self.resolve_struct_ctor(
+                            label,
+                            name,
+                            enum_name.as_deref(),
+                            module_name.as_deref(),
+                        );
+                        // A BARE non-constructor name binding nothing is a whole-scrutinee catch-all
                         // (`other:`), mirroring the literal/tuple bare-ident path — irrefutable, closes
                         // the match. A bare name that IS a variant collides and is rejected so all
                         // engines agree (same rule as the `MatchKind::Literal` path).
-                        if !is_ctor && bindings.is_empty() {
+                        let is_bare = enum_name.is_none() && module_name.is_none();
+                        if is_bare && ctor.is_err() && bindings.is_empty() {
                             if self.variant_owners.contains_key(name)
                                 || crate::checker::is_builtin_variant(name)
                             {
@@ -691,8 +691,9 @@ impl Checker {
                         }
                         // A constructor pattern: the name must be the struct's own name, and the
                         // field count must match (a clean checker error, never a runtime panic).
-                        if !is_ctor {
-                            self.error(span, format!("'{name}' is not a constructor of {shown}"));
+                        let is_ctor = ctor.is_ok();
+                        if let Err(msg) = &ctor {
+                            self.error(span, msg.clone());
                         } else if fields.len() != bindings.len() {
                             self.error(
                                 span,
@@ -709,6 +710,18 @@ impl Checker {
                         let mut irref = is_ctor && fields.len() == bindings.len();
                         for (b, t) in bindings.iter().zip(fields.iter()) {
                             irref &= self.bind_subpattern(b, t, span);
+                        }
+                        // Duplicate-arm detection (bug #3): a struct has ONE constructor, so an
+                        // UNGUARDED irrefutable arm CLOSES the match — a later constructor arm is dead
+                        // code, exactly like a repeated enum-variant/literal arm. Keyed on the struct
+                        // identity (`label`), which never collides with a literal key or a sibling
+                        // variant name (a struct match's `covered` holds only struct labels).
+                        if is_ctor {
+                            if covered.contains(label) {
+                                self.error(span, format!("duplicate match arm '{shown}'"));
+                            } else if !guarded && irref {
+                                covered.insert(label.clone());
+                            }
                         }
                         return irref;
                     }
@@ -779,6 +792,49 @@ impl Checker {
                 // here means every arm was refutable (a literal/nested field like `Point(0, y)`) with
                 // no `_` — non-exhaustive.
                 self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
+        }
+    }
+
+    /// Resolve a struct pattern's constructor spelling against the scrutinee struct identity `label`
+    /// (L2). A BARE `Point` resolves via `bare_key`; a QUALIFIED `mod.Point` resolves the module binder
+    /// to the struct's identity key — symmetric with qualified construction (`geo.Point(3, 4)`), and the
+    /// only spelling for a whole-module-imported struct (the bare name isn't in scope). `Ok(())` when it
+    /// names `label`; `Err(msg)` (already BARE-rendered — never the `::` identity key) otherwise. A
+    /// 3-part `a.b.Point` is rejected (structs are two-level). Shared by the top-level `MatchKind::Struct`
+    /// arm and the nested-struct sub-pattern arm so both engines agree on what lowers.
+    pub(super) fn resolve_struct_ctor(
+        &self,
+        label: &str,
+        name: &str,
+        enum_name: Option<&str>,
+        module_name: Option<&str>,
+    ) -> Result<(), String> {
+        let shown = crate::compiler::bare_display(label);
+        if module_name.is_some() {
+            return Err(format!(
+                "struct patterns use two-level paths; write `{shown}(...)` or `<module>.{shown}(...)`"
+            ));
+        }
+        match enum_name {
+            None => {
+                if self.bare_key(name) == label {
+                    Ok(())
+                } else {
+                    Err(format!("'{name}' is not a constructor of {shown}"))
+                }
+            }
+            Some(q) => {
+                let Some(mid) = self.imported_modules.get(q) else {
+                    return Err(format!(
+                        "'{q}' is not a module; write `{shown}(...)` or `<module>.{shown}(...)`"
+                    ));
+                };
+                if self.type_key(mid, name) == label {
+                    Ok(())
+                } else {
+                    Err(format!("'{q}.{name}' is not a constructor of {shown}"))
+                }
             }
         }
     }

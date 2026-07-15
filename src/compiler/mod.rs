@@ -2663,12 +2663,22 @@ impl Compiler {
         Some((en, name.to_string()))
     }
 
-    /// The IDENTITY KEY of a bare struct pattern `Point(x, y)` in the current module, if `name`
-    /// resolves (via `bare_types`) to a registered STRUCT (not an enum variant). `None` for a
-    /// qualified pattern (a struct pattern is bare-only in v1), an enum variant, or an unknown name.
-    /// This is what separates a struct pattern from an enum-variant pattern at lowering time (L2).
+    /// The IDENTITY KEY of a struct pattern in the current module (L2). Two spellings: BARE
+    /// `Point(x, y)` (`name` resolves via `bare_types` to a registered STRUCT, not an enum variant),
+    /// or QUALIFIED `geo.Point(x, y)` (the qualifier — the `enum_name` slot filled by the 2-part parse
+    /// — is an imported MODULE binder whose `type_key(mod, name)` is a registered struct; the only
+    /// spelling for a whole-module-imported struct, symmetric with qualified construction).
+    ///
+    /// `None` for an enum variant, an ENUM-name qualifier (`E.Point` — not a module), or an unknown
+    /// name. This is what separates a struct pattern from an enum-variant pattern at lowering time; it
+    /// must AGREE with the checker's `resolve_struct_ctor` so nothing check-accepted fails to lower.
     fn struct_key_of_pattern(&self, enum_name: Option<&str>, name: &str) -> Option<String> {
-        if enum_name.is_some() || self.variant_pair(enum_name, name).is_some() {
+        if let Some(q) = enum_name {
+            let &tidx = self.imported_modules.get(q)?;
+            let key = self.type_key(tidx, name);
+            return self.program.structs.contains_key(&key).then_some(key);
+        }
+        if self.variant_pair(None, name).is_some() {
             return None;
         }
         let key = self.bare_types.get(name)?;

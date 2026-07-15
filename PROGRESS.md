@@ -10,19 +10,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > asymmetry. A struct has exactly ONE constructor, so a lone all-binding `Point(x, y)` arm is
 > irrefutable ⇒ exhaustive with **no `_`**. Nested (`Line(Point(x, y), _)`), generic (`Box(v)` on
 > `Box[int]` binds `v: int`, instantiated not `Unknown`), literal fields (`Point(0, y)` — refutable,
-> needs `_`/catch-all), and a whole-value catch-all binding (`rest:`) all work. Arity mismatch, wrong
-> constructor, and a qualified `mod.Point(x, y)` pattern are clean **checker** errors, never runtime
-> panics; **bare-only** in v1; only **user** structs (`StructOrigin::User`) destructure — a native
-> handle (Socket/Ref/`regex.Match`) stays non-destructurable, so the checker never accepts a pattern
-> the compiler can't lower. **Reused the enum-variant `Pattern::Variant` node — NO new AST node / opcode
-> / parser change.** Seams: `MatchKind::Struct` (checker/mod.rs) + `match_kind` Ty::Struct arm +
-> `struct_fields_of` (checker/sig.rs, user-gated); Struct arms in `bind_match_arm` / `bind_subpattern` /
-> `check_exhaustive` (checker/pattern.rs, bare-name→key via `bare_key` for the `check_graph` module-
-> prefixed-key path); `struct_key_of_pattern` + `pattern_needs_enum` (refined `EnsureEnum` guard so a
-> struct-only match doesn't emit it and fault — the checker-superset trap) + the `emit_pattern` struct
-> branch emitting `GetField{name}` per field (compiler/mod.rs). Tests: dual-engine RUN
-> (`struct_match_binds_fields` / `_generic_and_nested` / `_literal_field_refutable` via `assert_mc_parity`
-> — the load-bearing check the parity oracle is blind to), 8 checker guards, `examples/match_struct.chz`
+> needs `_`/catch-all), and a whole-value catch-all binding (`rest:`) all work. **Both spellings:** BARE
+> `Point(x, y)` (local / `from`-imported struct) AND QUALIFIED `geo.Point(x, y)` (the only spelling for a
+> WHOLE-module-imported struct — the bare name isn't in scope — symmetric with qualified construction).
+> Arity mismatch, wrong constructor, an enum-name-collision qualifier (`E.Point`), a non-module qualifier,
+> and a 3-part path are clean **checker** errors, never runtime panics; a DUPLICATE constructor arm
+> (`Point(x,y): … / Point(a,b): …`) is now a `duplicate match arm` error like enum/literal arms. Only
+> **user** structs (`StructOrigin::User`) destructure — a native handle (Socket/Ref/`regex.Match`) stays
+> non-destructurable, so the checker never accepts a pattern the compiler can't lower. **Reused the
+> enum-variant `Pattern::Variant` node — NO new AST node / opcode / parser change.** Seams:
+> `MatchKind::Struct` (checker/mod.rs) + `match_kind` Ty::Struct arm + `struct_fields_of` (checker/sig.rs,
+> user-gated); Struct arms in `bind_match_arm` / `bind_subpattern` / `check_exhaustive` + the shared
+> `resolve_struct_ctor` (checker/pattern.rs — bare via `bare_key`, qualified via `imported_modules`+
+> `type_key`, unifying both arms); `struct_key_of_pattern` + `pattern_needs_enum` (refined `EnsureEnum`
+> guard so a struct-only match doesn't emit it and fault — the checker-superset trap) + the `emit_pattern`
+> struct branch emitting `GetField{name}` per field (compiler/mod.rs). Tests: dual-engine RUN
+> (`struct_match_binds_fields` / `_generic_and_nested` / `_literal_field_refutable` /
+> `_qualified_whole_module_runs_both_engines` via `assert_mc_parity` / `run_file`+`run_file_p` — the
+> load-bearing check the parity oracle is blind to), 11 checker guards, `examples/match_struct.chz`
 > golden (+ picked up by `all_shipped_examples_typecheck`, the real `check_graph` path). **Still
 > deferred:** `let Point(x, y) = p` (Let carries `names`, not a `Pattern` — separate seam) + fn-param
 > destructuring. Docs: `docs/syntax.md §8`, `docs/spec.md`, `docs/grammar.bnf` (prose — productions

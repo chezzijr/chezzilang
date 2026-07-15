@@ -380,8 +380,10 @@
 # literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
 # `"IDENT" "LPAREN" <subpatterns> "RPAREN"` primary ALSO destructures a USER STRUCT positionally when
-# the scrutinee is that struct type (L2 — `Point(x, y)` binds the fields in declaration order); the
-# productions already admit it, so only the disambiguation is checker-side (struct vs enum variant).
+# the scrutinee is that struct type (L2 — `Point(x, y)` binds the fields in declaration order). A
+# module-qualified struct pattern `geo.Point(x, y)` (the whole-module-import spelling) reuses the same
+# `"IDENT" "DOT" "IDENT" "LPAREN" …` production as a qualified variant; the productions already admit
+# both, so only the disambiguation is checker-side (module-qualified struct vs `Enum.Variant`).
 <pattern>     ::= <patternPrimary>
                 | <patternPrimary> "BITOR" <pattern>
 # A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped

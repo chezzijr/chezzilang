@@ -1875,11 +1875,14 @@ match p:
     rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
 ```
 
-Struct patterns are **bare-only** in v1 (a qualified `mod.Point(x, y)` pattern is a clean error), and
-only **user** structs destructure — a native/reserved struct handle (`Socket`, `Ref`, a `regex.Match`)
-does not. A wrong constructor name, or a field-count mismatch (`Point(x)` on a two-field struct), is a
-clean **checker** error, never a runtime panic. (`let`-destructuring of a struct — `let Point(x, y) =
-p` — and struct destructuring in **fn params** are not yet supported; use a `match`.)
+The constructor may be written **bare** (`Point(x, y)`, for a local or `from`-imported struct) or
+**module-qualified** (`geo.Point(x, y)` — the only spelling for a struct reached through a whole-module
+`import geo`, since the bare name isn't in scope; this mirrors qualified construction `geo.Point(3, 4)`).
+Only **user** structs destructure — a native/reserved struct handle (`Socket`, `Ref`, a `regex.Match`)
+does not. A wrong constructor name, a field-count mismatch (`Point(x)` on a two-field struct), a qualifier
+that is not a module (`E.Point`), and a duplicate constructor arm are all clean **checker** errors, never a
+runtime panic. (`let`-destructuring of a struct — `let Point(x, y) = p` — and struct destructuring in
+**fn params** are not yet supported; use a `match`.)
 
 **Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
 work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(1 | 2)`). Every alternative must

@@ -3436,11 +3436,35 @@ fn struct_match_nested_struct_field_ok() {
 }
 
 #[test]
-fn struct_match_qualified_pattern_rejected() {
-    // A qualified struct pattern is deferred (v1 is bare-only) — a clean error, not a mis-bind.
+fn struct_match_qualified_pattern_unknown_module_rejected() {
+    // A qualified struct pattern's qualifier must be an imported module binder. `Foo` is neither a
+    // module nor the struct's own name → a clean error, not a mis-bind (bug #2: the message must
+    // suggest valid syntax, never the internal `::` identity key).
     rejects(
         "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Foo.Point(a, b): print(a)\n",
-        "qualified struct patterns are not supported",
+        "'Foo' is not a module",
+    );
+}
+
+#[test]
+fn struct_match_duplicate_arm_rejected() {
+    // Bug #3: two `Point(x, y)` arms — the first is irrefutable and closes the match, so the second
+    // is dead code. Mirrors the enum/literal `duplicate match arm` diagnostic (was silently accepted).
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point) -> int:\n    match p:\n        Point(x, y): return x + y\n        Point(a, b): return a * b\n",
+        "duplicate match arm 'Point'",
+    );
+}
+
+#[test]
+fn struct_match_nested_enum_qualifier_rejected() {
+    // Bug #4: a NESTED struct sub-pattern qualified with an ENUM name (`E.Point`, a name collision)
+    // is check-accepted-then-VM-crashes without this guard (the compiler lowers it as an enum-variant
+    // MatchArm with no EnsureEnum guard → `unreachable!` in the VM). `E` is not a module binder, so
+    // it must be a clean checker reject (not a runtime panic) — the checker-superset trap.
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nstruct Line:\n    a: Point\n    b: Point\nenum E:\n    Point(int)\nfn f(l: Line) -> int:\n    match l:\n        Line(E.Point(x, y), _): return x + y\n",
+        "'E' is not a module",
     );
 }
 
@@ -14022,6 +14046,20 @@ fn files_reject(files: &[(&str, &str)], needle: &str) {
 fn files_ok(files: &[(&str, &str)]) {
     let errs = check_files(files);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+#[test]
+fn struct_match_qualified_whole_module_ok() {
+    // Bug #1: a struct reached via a WHOLE-module import (`import geo`, referenced `geo.Point`) is
+    // only spellable qualified — the bare name `Point` is not in scope. The qualified struct pattern
+    // `geo.Point(x, y)` must type-check (symmetric with qualified construction `geo.Point(3, 4)`).
+    files_ok(&[
+        ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+        (
+            "main.chz",
+            "import geo\nfn f(p: geo.Point) -> int:\n    match p:\n        geo.Point(x, y): return x + y\n",
+        ),
+    ]);
 }
 
 /// UNSOUND case: `import v from vmod` (a value) then `import v from fmod` (a fn) — checker resolved

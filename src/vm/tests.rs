@@ -4428,6 +4428,38 @@ fn match_module_qualified_variant_three_engine_parity() {
     assert_eq!(vo, io, "VM vs interp divergence");
 }
 
+/// Bug #1 (L2) — a struct reached via a WHOLE-module import (`import geo`) is destructured with a
+/// QUALIFIED struct pattern `geo.Point(x, y)` (the bare name is not in scope). Must RUN byte-identically
+/// on the serial VM AND the M:N engine (a checker-superset guard: check_graph is asserted first).
+#[test]
+fn struct_match_qualified_whole_module_runs_both_engines() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_sqwm_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("geo.chz"),
+        "struct Point:\n    x: int\n    y: int\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import geo\nfn f(p: geo.Point) -> int:\n    match p:\n        geo.Point(x, y): return x + y\nfn main():\n    print(f(geo.Point(3, 4)))\nmain()\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "serial VM faulted: {vr:?}");
+    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
+    assert_eq!(vo, "7\n", "serial VM output");
+    assert_eq!(vo, io, "serial vs M:N divergence");
+}
+
 /// Entry-last backstop — when the ENTRY file IS an always-injected prelude stub
 /// (`chezzi run std/prelude.chz` / `chezzi run std/ref.chz`), the resolver dedups the entry's own
 /// visit and the entry-last reorder must restore `modules.last() == entry` so the positional-entry
