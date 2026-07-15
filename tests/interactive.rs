@@ -360,6 +360,48 @@ fn broken_pipe_terminates_with_fault_serial() {
     broken_pipe_terminates_with_fault(true);
 }
 
+/// R2 (N1 for the `Writer` path): a `stdout()`-backed `Writer` routes `write()` through the same
+/// streaming sink `print` uses, so a write into a just-closed reader (`chezzi run x.chz | head -1`)
+/// must raise the SAME deterministic broken-pipe halt `print` does — spec claims `stdout().write(s)`
+/// is byte-identical to `io.print(s, end="")`. Without the `stream_halt` check at the `do_method_call`
+/// Writer arm, the writes silently no-op, the loop spins forever, and the unbounded stream queue grows
+/// without bound. `write`'s `Result` is deliberately IGNORED here: the halt is a VM fault raised at the
+/// call site (like `print`, which returns `Nil`), independent of the `Result` value.
+fn writer_stdout_broken_pipe_terminates_with_fault(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import stdout from std.io\n\nw := stdout()\nwhile true:\n    w.write(\"x\\n\")\n",
+    );
+    let mut child = spawn(&entry, serial);
+    drop(child.stdout.take()); // close the read end immediately
+    let mut err = String::new();
+    let mut stderr = child.stderr.take().unwrap();
+    let status = wait_timeout(&mut child, 20)
+        .expect("a stdout() Writer kept writing to a dead pipe (no stream_halt at the Writer arm)");
+    use std::io::Read;
+    let _ = stderr.read_to_string(&mut err);
+    assert!(status.code().is_some(), "killed by a signal: {status:?}");
+    assert!(
+        !status.success(),
+        "a dead stdout truncated the Writer output — the run must not report success: {status:?}"
+    );
+    assert!(
+        err.contains("stdout closed (broken pipe)"),
+        "the fault must name the cause; stderr was:\n{err}"
+    );
+}
+
+#[test]
+fn writer_stdout_broken_pipe_terminates_with_fault_mn() {
+    writer_stdout_broken_pipe_terminates_with_fault(false);
+}
+
+#[test]
+fn writer_stdout_broken_pipe_terminates_with_fault_serial() {
+    writer_stdout_broken_pipe_terminates_with_fault(true);
+}
+
 /// REGRESSION (the bug this milestone shipped in its first cut): a dead stdout must NEVER be signalled
 /// through `pending_exit` — that is the `std.os.exit` channel, and it OUTRANKS a fault everywhere
 /// (`run_file_with_entry` returns `Ok(())` + the code and discards the `Err`; `classify_mn_outcome`

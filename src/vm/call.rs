@@ -1005,6 +1005,15 @@ impl Vm {
         // gate (unlike Socket).
         if matches!(self.heap.get(h), Obj::Writer(_)) {
             let result = self.writer_method(h, method, &args, span)?;
+            // R2 / N1: a `stdout()`/`stderr()`-backed `write` routes through `emit_out`/`emit_err`,
+            // which is a NO-OP once the streamed reader has died (the writer thread dropped the bytes).
+            // `writer_method` then returns `Ok`, so — exactly like `print` (line ~186) and every native
+            // (invoke_native line ~331) — the deterministic broken-pipe halt must be raised HERE at the
+            // call site, or a `loop: w.write(...)` into a dead pipe spins forever, growing the unbounded
+            // stream queue without bound (6f8bb5c). `stream_halt` is inert off the streaming CLI path.
+            if let Some(halt) = self.stream_halt(span) {
+                return Err(halt);
+            }
             self.push(result);
             return Ok(());
         }
