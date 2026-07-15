@@ -290,12 +290,13 @@ impl Vm {
                             match br.read_line(&mut line) {
                                 Ok(0) => Ok(None), // EOF
                                 Ok(_) => {
-                                    if line.ends_with('\n') {
-                                        line.pop();
-                                        if line.ends_with('\r') {
-                                            line.pop();
-                                        }
-                                    }
+                                    // Strip the line terminator the same way the module-level
+                                    // io.read_line does (native/mod.rs): trailing '\n' then '\r'
+                                    // UNCONDITIONALLY — a bare/classic-Mac '\r' must not survive,
+                                    // or Reader.read_line drifts from its owning ancestor.
+                                    let end =
+                                        line.trim_end_matches('\n').trim_end_matches('\r').len();
+                                    line.truncate(end);
                                     Ok(Some(line))
                                 }
                                 Err(e) => Err(Some(e.to_string())),

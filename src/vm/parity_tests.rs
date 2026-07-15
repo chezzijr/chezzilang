@@ -9410,6 +9410,26 @@ fn reader_read_line_no_trailing_newline_parity() {
     }
 }
 
+/// R2b — line-terminator stripping matches the module-level `io.read_line` UNCONDITIONALLY: a CRLF
+/// (`\r\n`) line and a final bare-`\r` line (classic-Mac / no trailing `\n`) both come back with the
+/// `\r` gone. Guards the anti-drift contract (a nested `\r`-only-if-`\n` strip retained the bare `\r`).
+#[test]
+fn reader_read_line_strips_bare_cr_parity() {
+    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file_p] {
+        let t = TmpDir::new();
+        let f = t.0.join("in.txt");
+        std::fs::write(&f, "a\r\nb\r").unwrap(); // CRLF line, then a bare-CR final line (no \n)
+        let src = format!(
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+            f = f.display()
+        );
+        let entry = t.write("main.chz", &src);
+        let (out, _e, r, _c) = run(&entry);
+        assert!(r.is_ok(), "run faulted: {r:?}");
+        assert_eq!(out, "[a]\n[b]\n");
+    }
+}
+
 /// R2b — `read_bytes(n)` chunks the file: exactly-n bytes until the short final chunk, then empty
 /// bytes (`len == 0`) = EOF. Both engines.
 #[test]
