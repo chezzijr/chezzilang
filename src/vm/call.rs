@@ -1051,6 +1051,9 @@ impl Vm {
         // the other core handles; gate the result-push on `poll_park` (mirrors the channel `recv` park
         // gate just above, but routed to the poller — strictly separate from `suspend`).
         if matches!(self.heap.get(h), Obj::Socket(_)) {
+            if self.try_native_bodied_method("Socket", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.socket_method(h, method, &args, span)?;
             if self.poll_park.is_some() {
                 return Ok(()); // D6: the op `WouldBlock`ed and re-rooted the receiver itself.
@@ -1059,6 +1062,9 @@ impl Vm {
             return Ok(());
         }
         if matches!(self.heap.get(h), Obj::Listener(_)) {
+            if self.try_native_bodied_method("Listener", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.listener_method(h, method, &args, span)?;
             if self.poll_park.is_some() {
                 return Ok(());
@@ -1070,6 +1076,9 @@ impl Vm {
         // `Arc`'d core. File writes are synchronous blocking syscalls — no netpoller, no `poll_park`
         // gate (unlike Socket).
         if matches!(self.heap.get(h), Obj::Writer(_)) {
+            if self.try_native_bodied_method("Writer", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.writer_method(h, method, &args, span)?;
             // R2 / N1: a `stdout()`/`stderr()`-backed `write` routes through `emit_out`/`emit_err`,
             // which is a NO-OP once the streamed reader has died (the writer thread dropped the bytes).

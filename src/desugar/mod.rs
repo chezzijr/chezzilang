@@ -290,6 +290,9 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
             StmtKind::Struct { methods, .. } => methods,
             StmtKind::Enum { methods, .. } => methods,
             StmtKind::NewType { methods, .. } => methods,
+            // A native struct's BODIED methods compile like struct methods, so a caller using
+            // named/default args on one needs its param-spec registered here too.
+            StmtKind::NativeStruct { bodied_methods, .. } => bodied_methods,
             _ => continue,
         };
         for method in methods {
@@ -373,6 +376,11 @@ fn collect_methods_by_struct_into_standalone(
             StmtKind::Struct { name, methods, .. } => (name, methods),
             StmtKind::Enum { name, methods, .. } => (name, methods),
             StmtKind::NewType { name, methods, .. } => (name, methods),
+            StmtKind::NativeStruct {
+                name,
+                bodied_methods,
+                ..
+            } => (name, bodied_methods),
             _ => continue,
         };
         for method in methods {
@@ -1150,6 +1158,27 @@ impl Walker<'_> {
                     self.pop_scope();
                 }
             }
+            // A `native struct`'s BODIED Chezzi methods ARE compiled to bytecode, so their bodies +
+            // param defaults must be desugared exactly like an enum/struct method (default/named-arg
+            // normalization, `ref` lowering). The bodyless `native fn` sigs alongside them have nothing.
+            StmtKind::NativeStruct { bodied_methods, .. } => {
+                for m in bodied_methods.iter_mut() {
+                    for p in m.params.iter_mut() {
+                        if let Some(d) = &mut p.default {
+                            self.walk_expr(d)?;
+                        }
+                    }
+                    self.push_scope();
+                    for p in &m.params {
+                        self.bind_param(p);
+                        if p.is_ref && self.lower_refs {
+                            self.bind_ref(&p.name);
+                        }
+                    }
+                    self.walk_block(&mut m.body)?;
+                    self.pop_scope();
+                }
+            }
             // No nested expressions / bindings to rewrite.
             StmtKind::Return(None)
             | StmtKind::Break
@@ -1160,8 +1189,6 @@ impl Walker<'_> {
             | StmtKind::Extern { .. }
             // A `native fn`/`native ctor` decl is a body-less signature — no nested exprs/bindings.
             | StmtKind::Native(_)
-            // A `native struct` decl carries only body-less field type annotations — nothing to desugar.
-            | StmtKind::NativeStruct { .. }
             // A `native enum` decl carries only body-less variants/method sigs — nothing to desugar.
             | StmtKind::NativeEnum { .. }
             | StmtKind::TypeAlias { .. } => {}
@@ -1958,6 +1985,41 @@ mod tests {
     fn fills_trailing_default() {
         let s = desugar_ok("fn f(x: int, y: int = 10):\n    print(x)\nr := f(1)\n");
         assert_eq!(call_arg_ints(&s), vec![1, 10]);
+    }
+
+    /// A BODIED method on a `native struct` must go through desugar exactly like a struct/enum method.
+    /// Before the fix the `NativeStruct` desugar arm was a no-op, so a bodied method's body was never
+    /// walked and its call sites never got default-arg splicing. Here `compute`'s body calls
+    /// `helper(1)`; after desugar it must be `helper(1, 9)` — proving the body is now desugared.
+    #[test]
+    fn native_struct_bodied_method_body_is_desugared() {
+        let stmts = desugar_ok(
+            "fn helper(a: int, b: int = 9) -> int:\n    return a + b\n\
+             native struct R:\n    native fn read_line(self) -> str\n    \
+             fn compute(self) -> int:\n        return helper(1)\n",
+        );
+        let bodied = stmts
+            .iter()
+            .find_map(|s| match &s.kind {
+                StmtKind::NativeStruct { bodied_methods, .. } => bodied_methods.first(),
+                _ => None,
+            })
+            .expect("a native struct with a bodied method");
+        let ret = match &bodied.body.last().expect("a body statement").kind {
+            StmtKind::Return(Some(e)) => e,
+            other => panic!("expected a return, got {other:?}"),
+        };
+        let ExprKind::Call { args, .. } = &ret.kind else {
+            panic!("expected a call, got {:?}", ret.kind)
+        };
+        let ints: Vec<i64> = args
+            .iter()
+            .map(|a| match a.kind {
+                ExprKind::Int(n) => n,
+                ref other => panic!("expected an int arg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ints, vec![1, 9], "the bodied method body was not desugared");
     }
 
     #[test]

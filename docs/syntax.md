@@ -3063,9 +3063,14 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   `Socket`/`Listener` declare `read`/`write`/`accept`/`close`). A `native fn` inside the body **without**
   a leading `self` is a parse error (`native instance method must declare 'self' as its first parameter`)
   — the self-less form is **reserved** for a future native *static* method (not yet supported); a
-  module-level (free) `native fn` conversely may **not** take `self`. A **plain** `fn`/`test` method (with
-  a body) or a field `= default` inside the body is still a parse error — the runtime dispatch stays
-  native, so a native struct never carries a *compiled* method.
+  module-level (free) `native fn` conversely may **not** take `self`. A **plain** `fn` method WITH a body
+  IS now allowed (phase 4c-followup): it is **compiled** to bytecode (like an enum/struct method — no
+  `StructDef`/`tid`) and dispatched via `Program::native_methods`, so a native struct may **mix** bodyless
+  Rust-backed `native fn` sigs with pure-Chezzi bodied methods on one handle (first user: `std.io`'s
+  `Reader.lines()`, a generator over `read_line()`). A `test` method or a field `= default` inside the body
+  is still a parse error. **Asymmetry (deliberate, for now):** a **`native enum`** (`Option`/`Result`)
+  still rejects a bodied method (`native enum methods are not supported`) — extending bodied methods to
+  native enums is a symmetric follow-up, not yet wired (no native enum needs one today).
 - A `native struct` may be **generic** (`native struct Shared[T]:`, phase 4c-concurrency): its method
   sigs may reference the type params (`native fn get(self) -> T`, `native fn set(self, v: T) -> nil`), and each
   call site **substitutes** the value's element type (`Shared[int].set` expects `int`) — the same subst
