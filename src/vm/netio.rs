@@ -123,6 +123,31 @@ impl Vm {
         self.alloc_enum("Result", "Err", vec![ev])
     }
 
+    /// N3(a) — the ONE builder for the "read took a partial codepoint then could not finish it" error,
+    /// shared by every path that can hit it: the poll-once return, the netpoller-park timeout re-entry,
+    /// and the in-callback demote timeout. `owed` is the carried (retained) byte count. Distinct from
+    /// `Err("timeout")` — which is documented as "nothing arrived" — because 1-3 bytes ARE off the wire
+    /// (kept on the socket), so a retry finishes the codepoint byte-exactly.
+    pub(super) fn sock_incomplete_err(&mut self, owed: usize) -> Value {
+        self.sock_err(format!(
+            "incomplete utf-8: the read landed mid-codepoint ({owed} byte(s) carried and retained) — \
+             read this socket again to finish it"
+        ))
+    }
+
+    /// N2/N3(a) — drop the per-op fiber latches (`poll_deadline` timeout budget + `poll_partial`
+    /// taken-partial flag) once a socket op is over, UNLESS it parked (`poll_park` set ⇒ the very same
+    /// call resumes and still owns them). Called from every socket/listener op arm so the NEXT op on
+    /// this fiber starts with a fresh budget and no stale partial flag. Symmetric-clear is load-bearing:
+    /// a leaked `poll_deadline` would corrupt the next read's timeout, a leaked `poll_partial` would
+    /// make it lie "incomplete" when nothing arrived.
+    pub(super) fn drop_poll_latch(&mut self) {
+        if self.poll_park.is_none() {
+            self.poll_deadline = None;
+            self.poll_partial = None;
+        }
+    }
+
     /// B1 — decode ONE `read` chunk off a socket into the `Result[str]` the surface promises. The ONLY
     /// decode point on the socket path (both the fast path and the in-callback demote poller route here
     /// — a second copy is how the lossy decode got duplicated in the first place).
@@ -539,7 +564,14 @@ impl Vm {
         self.arity_range_err("read", args, 1, 2, span)?;
         if self.poll_timed_out {
             self.poll_timed_out = false;
-            return Ok(self.sock_err("timeout"));
+            // N3(a) — if this read took a partial codepoint off the wire before the deadline fired
+            // (`poll_partial` was latched at the NeedMore point and survived the park), classify it as
+            // `incomplete utf-8` (those bytes are carried/retained), NOT `timeout` (which means nothing
+            // arrived). Same rule as the poll-once path below.
+            return Ok(match self.poll_partial {
+                Some(owed) => self.sock_incomplete_err(owed),
+                None => self.sock_err("timeout"),
+            });
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
         // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly allocate
@@ -619,6 +651,12 @@ impl Vm {
                     None => {
                         // Incomplete codepoint carried; take the rest of it off the fd.
                         took_partial = true;
+                        // N3(a) — latch the taken-partial state on the fiber so a later timeout (the
+                        // netpoller-park re-entry, which re-executes this op after `took_partial` is
+                        // lost) reports `incomplete utf-8` instead of `timeout`. `owed` = the carried
+                        // (retained) bytes; a fresh short lock, like the poll-once path.
+                        self.poll_partial =
+                            Some(core.carry.lock().unwrap_or_else(|e| e.into_inner()).len());
                         continue;
                     }
                 },
@@ -631,10 +669,7 @@ impl Vm {
                     if timeout.is_some_and(|t| t.poll_once) {
                         if took_partial {
                             let owed = core.carry.lock().unwrap_or_else(|e| e.into_inner()).len();
-                            return Ok(self.sock_err(format!(
-                                "incomplete utf-8: the poll landed mid-codepoint ({owed} byte(s) \
-                                 carried and retained) — read this socket again to finish it"
-                            )));
+                            return Ok(self.sock_incomplete_err(owed));
                         }
                         return Ok(self.sock_err("timeout"));
                     }
@@ -700,7 +735,18 @@ impl Vm {
                                     // codepoint yet) just re-polls, like a would-block.
                                     Ok(d) => match vm.decoded_value(d) {
                                         Some(v) => SockPoll::Ready(Ok(v)),
-                                        None => SockPoll::WouldBlock,
+                                        None => {
+                                            // N3(a) — took a partial off the fd: latch it so the demote
+                                            // loop's timeout branch (sched.rs) reports `incomplete
+                                            // utf-8` rather than `timeout`.
+                                            vm.poll_partial = Some(
+                                                core.carry
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner())
+                                                    .len(),
+                                            );
+                                            SockPoll::WouldBlock
+                                        }
                                     },
                                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                         SockPoll::WouldBlock
@@ -716,6 +762,104 @@ impl Vm {
                 }
                 Err((e, _)) => return Ok(self.sock_err(format!("{e}"))),
             }
+        }
+    }
+
+    /// D6/R1 — `Socket.write(s) -> Result[int]` / `write_bytes(b) -> Result[int]` (+ optional
+    /// `timeout_ms`). One write path — only the byte extraction differs. On a would-block the fiber
+    /// PARKS on writability (M:N) or DEMOTE-polls it in-callback; off the M:N engine it fails loud.
+    ///
+    /// N2 — `timeout_ms` is LATCHED on the fiber ([`Vm::poll_deadline`]) exactly like `read`: a park
+    /// rewinds `ip` and re-executes the op, so an un-latched `now + timeout_ms` would re-arm on every
+    /// re-park and never expire. Extracted from `socket_method` so the `drop_poll_latch` clear on
+    /// completion has ONE seam catching every early return (closed socket, poll-once, would-block).
+    fn socket_write(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        // The optional trailing int bounds writability.
+        self.arity_range_err(method, args, 1, 2, span)?;
+        if self.poll_timed_out {
+            self.poll_timed_out = false;
+            return Ok(self.sock_err("timeout"));
+        }
+        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        let data = match (method, args.first()) {
+            ("write_bytes", Some(v)) => self.collect_bytes_arg("write_bytes", *v, span)?,
+            (_, Some(Value::Obj(sh))) => match self.heap.get(*sh) {
+                Obj::Str(s) => s.as_bytes().to_vec(),
+                _ => return Err(self.err("write expects a str".into(), span)),
+            },
+            _ => return Err(self.err("write expects a str".into(), span)),
+        };
+        // N2 — the per-call deadline, latched on the fiber so it survives a park's ip-rewind re-run
+        // (identical discipline to `socket_read`).
+        let deadline = timeout
+            .filter(|t| !t.poll_once)
+            .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
+        let core = self.socket_core(h);
+        let attempt = {
+            let mut guard = core.stream.lock().unwrap();
+            let Some(stream) = guard.as_mut() else {
+                return Ok(self.sock_err("write on a closed socket"));
+            };
+            match std::io::Write::write(stream, &data) {
+                Ok(got) => Ok(got),
+                Err(e) => Err((e, stream.as_raw_fd())),
+            }
+        };
+        match attempt {
+            Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
+            Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if timeout.is_some_and(|t| t.poll_once) {
+                    return Ok(self.sock_err("timeout"));
+                }
+                let target = PollPark {
+                    key: core.key,
+                    fd,
+                    interest: poller::Interest::Write,
+                    in_flight: Arc::clone(&core.in_flight),
+                    deadline,
+                };
+                if self.park_on_fd(h, args, target, span)? {
+                    return Ok(Value::Nil);
+                }
+                // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
+                if self.mn.is_some() && self.native_reentry > 0 {
+                    let core = Arc::clone(&core);
+                    return self.demote_block_socket(
+                        fd,
+                        poller::Interest::Write,
+                        deadline,
+                        span,
+                        move |vm| {
+                            let r = {
+                                let mut guard =
+                                    core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                                let Some(stream) = guard.as_mut() else {
+                                    return SockPoll::Ready(Ok(
+                                        vm.sock_err("write on a closed socket")
+                                    ));
+                                };
+                                std::io::Write::write(stream, &data)
+                            };
+                            match r {
+                                Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64)))),
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    SockPoll::WouldBlock
+                                }
+                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                            }
+                        },
+                    );
+                }
+                Ok(self
+                    .sock_err("write would block: std.net sockets require the --parallel engine"))
+            }
+            Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
     }
 
@@ -737,102 +881,24 @@ impl Vm {
                 // + ip-rewind re-execution keeps the ORIGINAL `timeout_ms` budget instead of restarting
                 // it. This logical `read` is over unless it parked (`poll_park` set ⇒ the very same call
                 // resumes) — so drop the latch here; the next `read` gets a fresh budget.
-                if self.poll_park.is_none() {
-                    self.poll_deadline = None;
-                }
+                self.drop_poll_latch();
                 r
             }
             "read_bytes" => {
                 let r = self.socket_read_bytes(h, args, span);
                 // Same latch discipline as `read`: drop the deadline unless the op PARKED (the very
                 // same call resumes) — a re-park must not re-arm the timeout budget.
-                if self.poll_park.is_none() {
-                    self.poll_deadline = None;
-                }
+                self.drop_poll_latch();
                 r
             }
             // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw `bytes`)
             // are the SAME write path — only the byte-extraction differs.
             "write" | "write_bytes" => {
-                // The optional trailing int bounds writability.
-                self.arity_range_err(method, args, 1, 2, span)?;
-                if self.poll_timed_out {
-                    self.poll_timed_out = false;
-                    return Ok(self.sock_err("timeout"));
-                }
-                let timeout = self.parse_timeout_ms(args.get(1), span)?;
-                let data = match (method, args.first()) {
-                    ("write_bytes", Some(v)) => self.collect_bytes_arg("write_bytes", *v, span)?,
-                    (_, Some(Value::Obj(sh))) => match self.heap.get(*sh) {
-                        Obj::Str(s) => s.as_bytes().to_vec(),
-                        _ => return Err(self.err("write expects a str".into(), span)),
-                    },
-                    _ => return Err(self.err("write expects a str".into(), span)),
-                };
-                let core = self.socket_core(h);
-                let attempt = {
-                    let mut guard = core.stream.lock().unwrap();
-                    let Some(stream) = guard.as_mut() else {
-                        return Ok(self.sock_err("write on a closed socket"));
-                    };
-                    match std::io::Write::write(stream, &data) {
-                        Ok(got) => Ok(got),
-                        Err(e) => Err((e, stream.as_raw_fd())),
-                    }
-                };
-                match attempt {
-                    Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
-                    Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if timeout.is_some_and(|t| t.poll_once) {
-                            return Ok(self.sock_err("timeout"));
-                        }
-                        let target = PollPark {
-                            key: core.key,
-                            fd,
-                            interest: poller::Interest::Write,
-                            in_flight: Arc::clone(&core.in_flight),
-                            deadline: timeout.map(|t| t.deadline),
-                        };
-                        if self.park_on_fd(h, args, target, span)? {
-                            return Ok(Value::Nil);
-                        }
-                        // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
-                        if self.mn.is_some() && self.native_reentry > 0 {
-                            let core = Arc::clone(&core);
-                            return self.demote_block_socket(
-                                fd,
-                                poller::Interest::Write,
-                                timeout.map(|t| t.deadline),
-                                span,
-                                move |vm| {
-                                    let r = {
-                                        let mut guard =
-                                            core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                                        let Some(stream) = guard.as_mut() else {
-                                            return SockPoll::Ready(Ok(
-                                                vm.sock_err("write on a closed socket")
-                                            ));
-                                        };
-                                        std::io::Write::write(stream, &data)
-                                    };
-                                    match r {
-                                        Ok(got) => {
-                                            SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64))))
-                                        }
-                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                            SockPoll::WouldBlock
-                                        }
-                                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                                    }
-                                },
-                            );
-                        }
-                        Ok(self.sock_err(
-                            "write would block: std.net sockets require the --parallel engine",
-                        ))
-                    }
-                    Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
-                }
+                let r = self.socket_write(h, method, args, span);
+                // N2 — `write` now latches its deadline on the fiber like `read` (a re-park must not
+                // re-arm the budget), so it MUST drop the latch on completion too.
+                self.drop_poll_latch();
+                r
             }
             "close" => {
                 self.arity_err("close", args, 0, span)?;
@@ -847,6 +913,95 @@ impl Vm {
         }
     }
 
+    /// D6/D6c — `Listener.accept() -> Result[Socket]` (+ optional `timeout_ms`). Parks on the listen
+    /// fd's readability (a pending connection) under the M:N engine, like `Socket::read`; demotes
+    /// in-callback; fails loud off the M:N engine.
+    ///
+    /// N2 — `timeout_ms` is LATCHED on the fiber ([`Vm::poll_deadline`]) like `read`/`write`: a park
+    /// re-executes the op, so an un-latched deadline would re-arm on every re-park. Extracted from
+    /// `listener_method` so the `drop_poll_latch` clear has ONE seam over every early return.
+    fn listener_accept(
+        &mut self,
+        h: GcRef,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to wait for
+        // an inbound connection (D6c). Mirrors `Socket::read`'s timeout handling.
+        self.arity_range_err("accept", args, 0, 1, span)?;
+        if self.poll_timed_out {
+            self.poll_timed_out = false;
+            return Ok(self.sock_err("timeout"));
+        }
+        let timeout = self.parse_timeout_ms(args.first(), span)?;
+        // N2 — the per-call deadline, latched on the fiber so it survives a park's ip-rewind re-run.
+        let deadline = timeout
+            .filter(|t| !t.poll_once)
+            .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
+        let core = self.listener_core(h);
+        let attempt = {
+            let guard = core.listener.lock().unwrap();
+            let Some(listener) = guard.as_ref() else {
+                return Ok(self.sock_err("accept on a closed listener"));
+            };
+            match listener.accept() {
+                Ok((stream, _peer)) => Ok(stream),
+                Err(e) => Err((e, listener.as_raw_fd())),
+            }
+        };
+        match attempt {
+            Ok(stream) => Ok(self.accept_socket_value(stream)),
+            Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if timeout.is_some_and(|t| t.poll_once) {
+                    return Ok(self.sock_err("timeout"));
+                }
+                let target = PollPark {
+                    key: core.key,
+                    fd,
+                    interest: poller::Interest::Read,
+                    in_flight: Arc::clone(&core.in_flight),
+                    deadline,
+                };
+                if self.park_on_fd(h, args, target, span)? {
+                    return Ok(Value::Nil);
+                }
+                // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
+                if self.mn.is_some() && self.native_reentry > 0 {
+                    let core = Arc::clone(&core);
+                    return self.demote_block_socket(
+                        fd,
+                        poller::Interest::Read,
+                        deadline,
+                        span,
+                        move |vm| {
+                            let r = {
+                                let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
+                                let Some(listener) = guard.as_ref() else {
+                                    return SockPoll::Ready(Ok(
+                                        vm.sock_err("accept on a closed listener")
+                                    ));
+                                };
+                                listener.accept()
+                            };
+                            match r {
+                                Ok((stream, _peer)) => {
+                                    SockPoll::Ready(Ok(vm.accept_socket_value(stream)))
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    SockPoll::WouldBlock
+                                }
+                                Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
+                            }
+                        },
+                    );
+                }
+                Ok(self
+                    .sock_err("accept would block: std.net sockets require the --parallel engine"))
+            }
+            Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
+        }
+    }
+
     /// D6 — `Listener` methods: `accept() -> Result[Socket]`, `close() -> nil`. `accept` parks on the
     /// listening fd's readability (a pending connection) under the M:N engine, like `Socket::read`.
     pub(super) fn listener_method(
@@ -858,78 +1013,11 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         match method {
             "accept" => {
-                // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to
-                // wait for an inbound connection (D6c). Mirrors `Socket::read`'s timeout handling.
-                self.arity_range_err("accept", args, 0, 1, span)?;
-                if self.poll_timed_out {
-                    self.poll_timed_out = false;
-                    return Ok(self.sock_err("timeout"));
-                }
-                let timeout = self.parse_timeout_ms(args.first(), span)?;
-                let core = self.listener_core(h);
-                let attempt = {
-                    let guard = core.listener.lock().unwrap();
-                    let Some(listener) = guard.as_ref() else {
-                        return Ok(self.sock_err("accept on a closed listener"));
-                    };
-                    match listener.accept() {
-                        Ok((stream, _peer)) => Ok(stream),
-                        Err(e) => Err((e, listener.as_raw_fd())),
-                    }
-                };
-                match attempt {
-                    Ok(stream) => Ok(self.accept_socket_value(stream)),
-                    Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if timeout.is_some_and(|t| t.poll_once) {
-                            return Ok(self.sock_err("timeout"));
-                        }
-                        let target = PollPark {
-                            key: core.key,
-                            fd,
-                            interest: poller::Interest::Read,
-                            in_flight: Arc::clone(&core.in_flight),
-                            deadline: timeout.map(|t| t.deadline),
-                        };
-                        if self.park_on_fd(h, args, target, span)? {
-                            return Ok(Value::Nil);
-                        }
-                        // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
-                        if self.mn.is_some() && self.native_reentry > 0 {
-                            let core = Arc::clone(&core);
-                            return self.demote_block_socket(
-                                fd,
-                                poller::Interest::Read,
-                                timeout.map(|t| t.deadline),
-                                span,
-                                move |vm| {
-                                    let r = {
-                                        let guard =
-                                            core.listener.lock().unwrap_or_else(|e| e.into_inner());
-                                        let Some(listener) = guard.as_ref() else {
-                                            return SockPoll::Ready(Ok(
-                                                vm.sock_err("accept on a closed listener")
-                                            ));
-                                        };
-                                        listener.accept()
-                                    };
-                                    match r {
-                                        Ok((stream, _peer)) => {
-                                            SockPoll::Ready(Ok(vm.accept_socket_value(stream)))
-                                        }
-                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                            SockPoll::WouldBlock
-                                        }
-                                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                                    }
-                                },
-                            );
-                        }
-                        Ok(self.sock_err(
-                            "accept would block: std.net sockets require the --parallel engine",
-                        ))
-                    }
-                    Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
-                }
+                let r = self.listener_accept(h, args, span);
+                // N2 — `accept` latches its deadline on the fiber like `read`, so it MUST drop the
+                // latch on completion too (a re-park must not re-arm the budget).
+                self.drop_poll_latch();
+                r
             }
             "addr" => {
                 self.arity_err("addr", args, 0, span)?;
@@ -988,11 +1076,12 @@ impl Vm {
     /// re-pops; unlike a 0-arg `recv` park, `read(n)`/`write(s)` must re-push their args), rewinds `ip`
     /// so the op re-executes on resume, and sets the `poll_park` sentinel for the worker loop.
     ///
-    /// D6c — `target.deadline` (the optional `timeout_ms`) is honored ONLY on this snapshot-park path:
-    /// the netpoller wakes the fiber on readiness OR at the deadline. The in-callback demote path
-    /// (`native_reentry > 0`, where this returns `Ok(false)`) does NOT honor it — a demoted op
-    /// backoff-polls in the kernel until readiness regardless of `timeout_ms` (a documented v1 gap;
-    /// in-callback socket timeouts are out of scope, matching the in-callback connect-blocks behavior).
+    /// D6c — `target.deadline` (the optional `timeout_ms`) is honored on this snapshot-park path (the
+    /// netpoller wakes the fiber on readiness OR at the deadline) AND, since the deadline was threaded
+    /// into [`Vm::demote_block_socket`], on the in-callback demote path too (`native_reentry > 0`, where
+    /// this returns `Ok(false)` — the demote loop caps its kernel wait by the remaining budget and
+    /// expires with the same timeout `Err`). Every socket op latches its deadline on the fiber the same
+    /// way (`Vm::poll_deadline`, N2), so a re-park does not re-arm the budget.
     pub(super) fn park_on_fd(
         &mut self,
         h: GcRef,

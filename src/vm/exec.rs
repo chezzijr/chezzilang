@@ -111,6 +111,7 @@ impl Vm {
             pending_connect: None,
             poll_timed_out: false,
             poll_deadline: None,
+            poll_partial: None,
             native_reentry: 0,
             reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
             yield_now: false,    // D3
@@ -195,6 +196,9 @@ impl Vm {
             // B1 — the in-flight `read`'s latched deadline belongs to the parked fiber's op (which
             // re-executes on wake), so it swaps with the fiber exactly like `poll_timed_out`.
             std::mem::swap(&mut self.poll_deadline, &mut ctx.poll_deadline);
+            // N3(a) — the taken-partial flag is set BEFORE the park and consulted at the re-entry, so
+            // it must travel with the fiber exactly like `poll_deadline`.
+            std::mem::swap(&mut self.poll_partial, &mut ctx.poll_partial);
         }
     }
 

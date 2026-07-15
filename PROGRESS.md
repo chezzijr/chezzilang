@@ -4990,11 +4990,17 @@ branch names) is in the git log.
   `read(n, ms)` alive forever — **and it is now threaded into `Vm::demote_block_socket`** (`sched.rs`),
   which took no deadline at all: an in-callback read (`native_reentry > 0` — a `list.map`, a
   `Shared.update`) waited on fd readiness forever, and a demoted op is accounted `inflight`, which VETOES
-  the deadlock predicate — so it hung with no fault and no `Err("timeout")`; **(iv)** a poll-once
-  `read(n, 0)` that TOOK bytes but completed no codepoint returns `Err("incomplete utf-8: …")`, not
-  `Err("timeout")` (which is documented as *nothing arrived*) — the bytes are off the wire and retained,
-  and saying "deadline expired" about a read that consumed data is the same lie-about-your-data class B1
-  exists to kill. Also: the decode's hot path (no carry, valid chunk) decodes the fd buffer BORROWED
+  the deadlock predicate — so it hung with no fault and no `Err("timeout")`; **`write`/`write_bytes` and
+  `accept` now latch the same way (N2, 2026-07-15)** — extracted to `Vm::socket_write`/`Vm::listener_accept`
+  and routed through `poll_deadline` + the shared `Vm::drop_poll_latch` clear, so they no longer recompute
+  `now + timeout_ms` on a re-park (a robustness/consistency fix — `write` is architecturally single-park so
+  the re-arm was only reachable on a spurious wake); **(iv)** a `read` that TOOK bytes but completed no
+  codepoint returns `Err("incomplete utf-8: …")`, not `Err("timeout")` (which is documented as *nothing
+  arrived*) — the bytes are off the wire and retained, and saying "deadline expired" about a read that
+  consumed data is the same lie-about-your-data class B1 exists to kill. **This classification is now
+  consistent across ALL timeout paths (N3a, 2026-07-15)** — poll-once, the netpoller park, and the
+  in-callback demote — via a fiber-latched `Vm::poll_partial` (the twin of `poll_deadline`) consulted at
+  both timeout sites through the shared `Vm::sock_incomplete_err`. Also: the decode's hot path (no carry, valid chunk) decodes the fd buffer BORROWED
   (`Cow`), so it costs one `String` alloc — exactly what `from_utf8_lossy(..).into_owned()` cost, no
   regression on the IO path. **Known v1 limit (unchanged): binary sockets are UNSUPPORTED** — they need
   `Socket.read_bytes`/`write_bytes`, which need the `bytes` native seam (`docs/gaps.md` R1, the honest
@@ -5004,8 +5010,10 @@ branch names) is in the git log.
   `net_read_zero_with_pending_carry_returns_empty_not_spin`, `net_read_zero_on_closed_socket_errs`,
   `net_read_shared_socket_two_fibers_decode_in_wire_order`,
   `net_read_poll_once_mid_codepoint_errs_incomplete_not_timeout`,
-  `net_read_timeout_bounds_whole_call_across_codepoint_parks`,
-  `net_read_timeout_bounds_the_in_callback_demote_path`); the serial engine's net path (immediate
+  `net_read_timeout_bounds_whole_call_across_codepoint_parks` (N3a: asserts `incomplete utf-8`),
+  `net_read_timeout_bounds_the_in_callback_demote_path` (N3a: asserts `incomplete utf-8`),
+  `net_read_partial_timeout_then_clean_timeout_is_not_incomplete` (N3a stale-latch clear guard),
+  `net_write_timeout_when_buffer_full` (N2)); the serial engine's net path (immediate
   "requires the --parallel engine" `Err`) is untouched, so no parity divergence.
 - **stdin is SHARED by every task (Go/Python) — the false EOF is dead (2026-07-14).** stdin belonged to
   the ENTRY task: every other task was handed `Stdin::Empty`, so `io.read_line()` / `io.input()` inside a

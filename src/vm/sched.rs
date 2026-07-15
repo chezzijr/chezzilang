@@ -1505,9 +1505,11 @@ impl Vm {
     /// returns `SockPoll::Ready` with the op's `Result`-shaped `Value`, or `SockPoll::WouldBlock`.
     ///
     /// `deadline` is the caller's `timeout_ms` (`None` = untimed): it bounds the WHOLE op here exactly
-    /// as it does on the netpoller-park path, and expiring yields the same `Err("timeout")` value. It is
-    /// the ONLY escape from the "never-ready fd" case above — an in-callback socket op is `inflight`, so
-    /// it can never self-fire the deadlock predicate.
+    /// as it does on the netpoller-park path, and expiring yields `Err("timeout")` — or, for a str `read`
+    /// whose demote closure took a partial codepoint off the wire (`poll_partial` latched, N3a), the
+    /// `Err("incomplete utf-8: …")` classification instead. It is the ONLY escape from the "never-ready
+    /// fd" case above — an in-callback socket op is `inflight`, so it can never self-fire the deadlock
+    /// predicate.
     pub(super) fn demote_block_socket(
         &mut self,
         fd: std::os::fd::RawFd,
@@ -1549,7 +1551,14 @@ impl Vm {
                         Some(dl) => {
                             let left = dl.saturating_duration_since(std::time::Instant::now());
                             if left.is_zero() {
-                                break Ok(self.sock_err("timeout"));
+                                // N3(a) — a str `read` that took a partial codepoint off the wire (its
+                                // demote closure latched `poll_partial`) reports the incomplete-utf-8
+                                // classification, not `timeout` (nothing arrived). `read_bytes`/`write`/
+                                // `accept` never latch it, so their demote timeout stays `timeout`.
+                                break Ok(match self.poll_partial {
+                                    Some(owed) => self.sock_incomplete_err(owed),
+                                    None => self.sock_err("timeout"),
+                                });
                             }
                             left.min(DEMOTE_POLL_BACKOFF)
                         }

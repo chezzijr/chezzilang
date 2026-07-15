@@ -214,11 +214,14 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
     tail). `timeout_ms` bounds the **whole call** on every path (a plain read, one that parks, and one
     reached inside a callback like `list.map`): the deadline is fixed when the call starts, so finishing
     a split codepoint never re-arms it. A timed-out read keeps the carried tail for the next read — no
-    bytes are lost.
-  - **`read(n, 0)` polls once.** `Err("timeout")` means *nothing arrived*. If the poll DID take bytes but
-    they did not complete a character, you get `Err("incomplete utf-8: …")` instead — a distinct error,
-    because those bytes are off the wire (retained on the socket); read the socket again to finish the
-    character. Both are benign "not ready yet" signals for a poll loop.
+    bytes are lost. **Timeout vs. incomplete-utf-8:** on **every** timeout path (poll-once, the netpoller
+    park, and the in-callback demote loop), `Err("timeout")` means *nothing arrived*, but if the call DID
+    take 1–3 bytes off the wire that did not complete a character you get `Err("incomplete utf-8: …")`
+    instead — a distinct error, because those bytes are retained on the socket; read again to finish the
+    character. (`read_bytes`/`write`/`accept` never decode, so their timeouts are always `"timeout"`.)
+  - **`read(n, 0)` polls once.** Same classification as above: `Err("timeout")` if nothing arrived,
+    `Err("incomplete utf-8: …")` if the poll took a partial character. Both are benign "not ready yet"
+    signals for a poll loop.
   - `read(0)` (or a negative / caller-computed-to-zero `n`) is a **no-op** `Ok("")`: it never touches the
     socket, never reports EOF, and leaves any carried tail for the next read. It *does* still report a
     closed socket (`Err("read on a closed socket")`).

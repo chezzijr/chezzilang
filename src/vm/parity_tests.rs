@@ -2887,10 +2887,13 @@ main()
     );
     let out = run_net_timeout_watchdog("demote_read_timeout", &src);
     server.join().unwrap();
+    // N3(a) — the demote loop took the lead byte `\xC3` off the wire before timing out, so its
+    // timeout reports `Err("incomplete utf-8: …")` (the poll-once classification), NOT `Err("timeout")`
+    // which is documented as "nothing arrived". The partial is retained on the socket for a retry.
     assert!(
-        out.contains("ERR:timeout"),
-        "the in-callback demote loop must honour timeout_ms instead of waiting on the fd forever: \
-         {out:?}"
+        out.contains("ERR:incomplete utf-8"),
+        "the in-callback demote loop must honour timeout_ms AND classify a taken-partial timeout as \
+         incomplete-utf-8, not 'timeout' (nothing arrived): {out:?}"
     );
 }
 
@@ -3143,10 +3146,138 @@ main()
     );
     let out = run_net_timeout_watchdog("read_timeout_midcodepoint", &src);
     server.join().unwrap();
+    // N3(a) — the read parked having taken 1-3 bytes of the emoji off the wire, so its latched-deadline
+    // timeout classifies as `Err("incomplete utf-8: …")` (the poll-once classification), not the
+    // `Err("timeout")` that means "nothing arrived". Still proves the deadline FIRED (both are only
+    // reachable on the timeout path) — i.e. the budget did not re-arm at every park.
+    assert!(
+        out.contains("ERR:incomplete utf-8"),
+        "a 400 ms read must time out against a 300 ms-per-byte dribbler (not re-arm its budget at \
+         every park) AND classify the taken-partial timeout as incomplete-utf-8: {out:?}"
+    );
+}
+
+/// N2 (B1 residual) — `write(s, timeout_ms)` honours the deadline when the send buffer is full. The
+/// server accepts then never reads, so the client's writes fill the kernel send buffer and the next
+/// `write` finds it full, parks on writability, and its deadline fires → `Err("timeout")`. This also
+/// exercises the new `poll_deadline` LATCH + `drop_poll_latch` clear on the write path (N2): the
+/// deadline is registered through the same fiber latch as `read`, and cleared on completion so the
+/// following op gets a fresh budget. (A `write` is architecturally single-park — it returns `Ok(got)`
+/// after the first partial write — so the multi-park re-arm the latch guards against is only reachable
+/// on a spurious `EPOLLOUT` wake, not deterministically; this test pins the ordinary timeout path.)
+#[test]
+fn net_write_timeout_when_buffer_full() {
+    let src = "\
+import std.net
+import std.time
+
+fn server(listener: Listener) -> int!:
+    _ := listener.accept()?
+    time.sleep_ms(3000)
+    listener.close()
+    return Ok(0)
+
+fn client(addr: str):
+    sock := net.connect(addr)?
+    payload := \"x\".repeat(4000000)
+    total := 0
+    i := 0
+    while i < 200:
+        match sock.write(payload, 300):
+            Ok(n): total = total + n
+            Err(e):
+                print(\"ERR:\" + e.message())
+                break
+        i = i + 1
+    sock.close()
+
+fn run() -> int!:
+    listener := net.listen(\"127.0.0.1:0\")?
+    addr := listener.addr()?
+    parallel:
+        spawn server(listener)
+        spawn client(addr)
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error:\" + e.message())
+
+main()
+";
+    let out = run_net_timeout_watchdog("write_timeout_full", src);
     assert!(
         out.contains("ERR:timeout"),
-        "a 400 ms read must time out against a 300 ms-per-byte dribbler, not re-arm its budget \
-         at every park: {out:?}"
+        "a write(_, 300) against a full send buffer must surface Err(\"timeout\"): {out:?}"
+    );
+    assert!(
+        out.contains("done"),
+        "the nursery joined (no hang): {out:?}"
+    );
+}
+
+/// N3(a) stale-latch guard — the taken-partial flag (`Vm::poll_partial`) that makes a mid-codepoint
+/// timeout report `incomplete utf-8` MUST be cleared on op completion, or it corrupts the NEXT read.
+/// First `read(8, 200)` takes the lone lead byte `\xC3` and times out → `Err("incomplete utf-8")`.
+/// The lead byte stays carried; a SECOND `read(8, 200)` takes NOTHING new off the wire (the peer is
+/// still stalled) and must report a plain `Err("timeout")` — proving `poll_partial` was cleared, not
+/// left `Some` from the first read (which would wrongly say "incomplete" again).
+#[test]
+fn net_read_partial_timeout_then_clean_timeout_is_not_incomplete() {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"\xC3").unwrap(); // one lone lead byte…
+        stream.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // …then stall past both budgets
+    });
+
+    let src = format!(
+        "\
+import std.net
+
+fn client() -> int!:
+    sock := net.connect(\"{addr}\")?
+    match sock.read(8, 200):
+        Ok(s): print(\"A-OK:\" + s)
+        Err(e): print(\"A:\" + e.message())
+    match sock.read(8, 200):
+        Ok(s): print(\"B-OK:\" + s)
+        Err(e): print(\"B:\" + e.message())
+    sock.close()
+    return Ok(0)
+
+fn run() -> int!:
+    parallel:
+        spawn client()
+    return Ok(0)
+
+fn main():
+    match run():
+        Ok(_): print(\"done\")
+        Err(e): print(\"net error:\" + e.message())
+
+main()
+"
+    );
+    let out = run_net_timeout_watchdog("partial_then_clean_timeout", &src);
+    server.join().unwrap();
+    assert!(
+        out.contains("A:incomplete utf-8"),
+        "the first read took the lead byte then timed out → incomplete utf-8: {out:?}"
+    );
+    assert!(
+        out.contains("B:timeout"),
+        "the second read took nothing new → plain timeout (poll_partial was cleared): {out:?}"
+    );
+    assert!(
+        !out.contains("B:incomplete"),
+        "a stale poll_partial must not make the second read lie about a partial: {out:?}"
     );
 }
 

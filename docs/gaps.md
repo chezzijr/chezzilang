@@ -54,8 +54,8 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
   drain, its own milestone.
 - [N1](#n1-a-last-print-into-a-just-closed-pipe-exits-0-or-1-nondeterministically--a-real-bug) — a last
   `print` into a just-closed pipe exits 0-or-1 nondeterministically. Real, cheap, untouched this session.
-- [N2](#n2-socketwriteaccept-still-restart-their-timeout-budget-on-every-park),
-  [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals.
+- [N2](#n2-socketwriteaccept-still-restart-their-timeout-budget-on-every-park--fixed-2026-07-15) **(FIXED)**,
+  [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
 - [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
   still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
 - Untouched backlog headliners: **R2** (Writer/file handles), **R3** (package manager), **R4** (runtime
@@ -606,23 +606,42 @@ manufacturing the broken pipe by dropping `ChildStdout` early, then asserting `s
 to EOF). **The product race is NOT fixed** and nothing pins it. Fix = check `stream_halt` (or make the
 write synchronous enough to observe EPIPE) *before* declaring the print done. Small; own task.
 
-### N2. `Socket.write`/`accept` still restart their timeout budget on every park
-`src/vm/netio.rs` `write` (~:658) and `accept` (~:755) still pass `timeout.map(|t| t.deadline)` — a
-deadline **recomputed on every `ip`-rewind re-execution**. That is exactly the budget-restart bug
-`Vm::poll_deadline` was added to kill for `read` (a park rewinds `ip` and re-runs the whole op, so a
-re-parking op re-arms `now + timeout_ms` forever). Pre-existing, and `read` parks far more often now that
-a split codepoint forces a re-park — but `write`/`accept` are the same class and should latch the same
-way. Mechanical; own task.
+### N2. `Socket.write`/`accept` still restart their timeout budget on every park — **FIXED (2026-07-15)**
+`write`/`write_bytes` and `accept` passed `timeout.map(|t| t.deadline)` — a deadline **recomputed on
+every `ip`-rewind re-execution** — exactly the budget-restart bug `Vm::poll_deadline` was added to kill
+for `read`. **Fix:** extracted `Vm::socket_write` + `Vm::listener_accept` from the inline match arms and
+routed their deadline through the SAME fiber latch as `read`
+(`timeout.filter(|t| !t.poll_once).map(|t| *self.poll_deadline.get_or_insert(t.deadline))`), used at both
+the netpoller-park and the in-callback demote sites. The extraction gives ONE `drop_poll_latch()` clear
+seam per op (called from `socket_method`/`listener_method`), so the latch is set on the first park,
+honored across re-parks, and cleared on completion — symmetric with `read`.
+
+> **Note on triggerability.** Unlike `read` — which re-parks internally to finish a split codepoint — a
+> `write` is architecturally **single-park**: `Socket::write` issues ONE non-blocking `write()` and
+> returns `Ok(got)` on any partial success, so it only parks when the send buffer is *already full*, and
+> a single park honors the deadline even with the old per-call recompute. The re-park re-arm is therefore
+> only reachable on a spurious `EPOLLOUT`/`EPOLLIN` wake, not deterministically. The latch is applied for
+> consistency with `read` and robustness to spurious wakes; the ordinary timeout path is pinned by
+> `net_write_timeout_when_buffer_full` (a full-buffer `write` times out).
 
 ### N3. Two cosmetic B1 leftovers
-- The in-callback demote path (`src/vm/sched.rs`) and the netpoller-park path (`src/vm/netio.rs`) return
-  `Err("timeout")` even when that call already took a **partial codepoint** off the wire — while the
-  poll-once path was deliberately changed to say `Err("incomplete utf-8: …")` for exactly that case, and
-  `docs/stdlib.md` now states `Err("timeout")` means *nothing arrived*. Non-destructive (the carry is
-  kept), but it contradicts the doc the same change just wrote. No test.
-- `read(0)` on a socket whose carry holds sticky **invalid** bytes still returns `Ok("")` (only a *closed*
-  socket errs), so a `read(want - have)` loop that computes `0` cannot observe the sticky `Err`. Matches
-  the documented contract, harmless, but it is the one hole in "every later read re-errs identically".
+- **(a) FIXED (2026-07-15).** The in-callback demote path (`src/vm/sched.rs`) and the netpoller-park path
+  (`src/vm/netio.rs`) returned `Err("timeout")` even when that call already took a **partial codepoint**
+  off the wire — while the poll-once path says `Err("incomplete utf-8: …")` for exactly that case, and
+  `docs/stdlib.md` states `Err("timeout")` means *nothing arrived*. **Fix:** a fiber-latched
+  `Vm::poll_partial: Option<usize>` (the twin of `poll_deadline` — Vm + `FiberCtx` + `swap_ctx` + init +
+  `drop_poll_latch` clear) is set at str `read`'s two NeedMore points (`owed` = carried byte count) and
+  consulted at both timeout sites, which now report the poll-once `incomplete utf-8` classification via
+  the shared `Vm::sock_incomplete_err(owed)`. `read_bytes`/`write`/`accept` never latch it, so their
+  timeouts stay `"timeout"`. Tests: `net_read_timeout_bounds_the_in_callback_demote_path` +
+  `net_read_timeout_bounds_whole_call_across_codepoint_parks` (flipped to assert `incomplete utf-8`) +
+  `net_read_partial_timeout_then_clean_timeout_is_not_incomplete` (stale-latch clear guard).
+- **(b) stays as-is (harmless, by design).** `read(0)` on a socket whose carry holds sticky **invalid**
+  bytes still returns `Ok("")` (only a *closed* socket errs), so a `read(want - have)` loop that computes
+  `0` cannot observe the sticky `Err`. This **matches the documented `read(0)` no-op contract**
+  (`read(0)` never touches the socket and never turns a pending carry into a false EOF); surfacing the
+  sticky `Err` on `read(0)` would risk that contract for no real benefit (any `read(n>0)` re-errs
+  identically). Left intentionally; not a bug.
 
 ### N4. A cancelled task's `defer` **silently did not run** on M:N (spurious-deadlock race) — **FOUND + FIXED (2026-07-14)**
 > **Scope correction (2026-07-14, cancellation points).** N4 fixed exactly ONE hole: an idle worker's

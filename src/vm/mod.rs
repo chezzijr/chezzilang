@@ -652,6 +652,16 @@ pub struct Vm {
     /// timeout budget on every park and could block forever. Latched on the first park of a `read` and
     /// cleared when that `read` finally returns a value. `None` = no read in flight.
     poll_deadline: Option<std::time::Instant>,
+    /// N3(a) — live mirror of [`FiberCtx::poll_partial`]: `Some(owed)` iff the in-flight str `read`
+    /// took 1-3 bytes off the fd that completed NO codepoint (they are carried, `owed` = carry len).
+    /// A subsequent timeout on that read (netpoller-park re-entry or the demote loop) then reports the
+    /// poll-once `Err("incomplete utf-8: …")` classification instead of `Err("timeout")` (which is
+    /// documented as "nothing arrived"). Set at the same NeedMore points as the poll-once path, twinned
+    /// with [`Vm::poll_deadline`] across [`Vm::swap_ctx`] (a park re-executes the op, so the flag must
+    /// survive the ip-rewind), and cleared alongside it by [`Vm::drop_poll_latch`] on completion — a
+    /// stale `Some` would make the NEXT read's timeout wrongly say "incomplete". Only str `read` sets
+    /// it; `read_bytes`/`write`/`accept` never do. `None` = no partial taken.
+    poll_partial: Option<usize>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -895,6 +905,12 @@ struct FiberCtx {
     /// `now + timeout_ms` and restart the budget. Cleared when the read returns. `None` = no read in
     /// flight. M:N-only.
     poll_deadline: Option<std::time::Instant>,
+    /// N3(a) — `Some(owed)` iff the in-flight str `read` took a partial codepoint off the fd (carried,
+    /// `owed` bytes). Travels WITH the fiber across [`Vm::swap_ctx`] like `poll_deadline`, so the
+    /// netpoller-park re-entry knows the taken-partial state after the op re-executes and reports
+    /// `incomplete utf-8` rather than `timeout`. Cleared when the read returns. `None` = no partial.
+    /// M:N-only.
+    poll_partial: Option<usize>,
 }
 
 /// Scheduling state of a child fiber within a [`Nursery`].
