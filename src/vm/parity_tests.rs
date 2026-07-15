@@ -4027,6 +4027,39 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
     assert_eq!(out, "got alpha\neof\n");
 }
 
+/// `io.read_all()` drains the WHOLE remaining stdin to EOF as one `str` (Python `sys.stdin.read()`).
+/// Over the injected `Lines` source it reconstructs each line + `\n` (the injected queue is newline-
+/// stripped), so two lines come back as "line0\nline1\n". Single entry task ⇒ deterministic exact
+/// assert. Also pins `read_all` is NOT in `is_blocking` (an offloaded call would hit `OffloadHost`'s
+/// stdio `unreachable!`).
+#[test]
+fn parity_std_io_read_all_drains_injected_stdin() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nfn main():\n    io.print(io.read_all())\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::lines(["héllo".to_string(), "wörld".to_string()]),
+        ..Default::default()
+    });
+    // read_all = "héllo\nwörld\n"; print adds one more \n.
+    assert_eq!(out, "héllo\nwörld\n\n");
+}
+
+/// `io.read_char()` yields ONE Unicode scalar (a 1-char `str` — Chezzi has no `char` scalar) per call,
+/// `None` at EOF. Over injected `Lines` the virtual stream is line0 chars + a reconstructed `\n` +
+/// line1 chars… — so "aé" reads as 'a', 'é' (a 2-byte scalar returned WHOLE), then '\n', then `None`.
+/// Single entry task ⇒ deterministic exact assert.
+#[test]
+fn parity_std_io_read_char_yields_scalars_then_eof() {
+    use crate::native::{HostConfig, Stdin};
+    let src = "import std.io\nfn main():\n    while true:\n        match io.read_char():\n            Some(c): io.print(\"[{c}]\")\n            None:\n                io.print(\"done\")\n                break\nmain()";
+    let out = parity_entry_cfg(src, || HostConfig {
+        stdin: Stdin::lines(["aé".to_string()]),
+        ..Default::default()
+    });
+    // 'a', 'é', then the reconstructed '\n' (prints `[`, newline, `]`), then None → done.
+    assert_eq!(out, "[a]\n[é]\n[\n]\ndone\n");
+}
+
 /// `io.input(prompt)` = print the prompt (no newline) + flush + `read_line`. Under the BUFFERED sink
 /// (every test helper + embedder) `flush` is a no-op and the prompt simply lands in the captured
 /// `out` — both engines identical. Also pins that neither fn is in `is_blocking` (an offloaded call

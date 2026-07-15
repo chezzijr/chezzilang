@@ -290,6 +290,8 @@ Constants: `math.pi`, `math.e`.
 | `print` | `(s: str) -> nil` | stdout + newline. |
 | `eprint` | `(s: str) -> nil` | stderr + newline. |
 | `read_line` | `() -> Option[str]` | Blocking stdin line, newline stripped (`None` at EOF). |
+| `read_all` | `() -> str` | Drain **all** remaining stdin to EOF as one `str` (Python `sys.stdin.read()`); `""` at a clean EOF. Shares the one stdin source with `read_line` (a later read then sees EOF). Non-UTF-8 stdin is a **fault** — there is no stdin `read_bytes` hatch. |
+| `read_char` | `() -> Option[str]` | Read one Unicode scalar as a 1-char `str` (Chezzi has no `char` scalar); `None` at a clean EOF, a **fault** on a partial/invalid UTF-8 sequence. |
 | `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB — larger files: stream with `open(...)` → `Reader`). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
@@ -372,9 +374,11 @@ task's line is visible before its nursery joins). Three rules follow:
   A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
   to kill a healthy program.
 
-**Input contract (`read_line` / `input`).** stdin is **ONE source, shared by every task** — exactly
-Go's `os.Stdin` and Python's `sys.stdin`. Any task may read it (`spawn:`/nursery, `Executor.submit`, the
-entry task); no task is ever handed a false EOF.
+**Input contract (`read_line` / `read_all` / `read_char` / `input`).** stdin is **ONE source, shared
+by every task** — exactly Go's `os.Stdin` and Python's `sys.stdin`. Any task may read it (`spawn:`/
+nursery, `Executor.submit`, the entry task); no task is ever handed a false EOF. `read_all` and
+`read_char` are siblings of `read_line`: same shared source, same task behavior — `read_all` drains
+the whole remainder (so a later read in any task sees EOF), `read_char` consumes one scalar at a time.
 
 - A line goes to **exactly one** task: never duplicated, never dropped.
 - **Which** task gets a given line is **nondeterministic**, on both engines — concurrent readers race
@@ -383,8 +387,8 @@ entry task); no task is ever handed a false EOF.
 - `None` means stdin is **genuinely exhausted** (a real EOF).
 - Concurrent `io.input(prompt)` calls may interleave prompt and answer (Python-identical): the prompt
   write and the read are not one atomic unit.
-- **v1 limit:** `read_line`/`input` are not offloaded, so a task blocked in a read **pins an M:N core
-  worker** — K blocked readers occupy K workers until stdin produces lines.
+- **v1 limit:** `read_line`/`read_all`/`read_char`/`input` are not offloaded, so a task blocked in a
+  read **pins an M:N core worker** — K blocked readers occupy K workers until stdin produces lines.
 
 ### `std.os`
 | Function | Signature | Notes |

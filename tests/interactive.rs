@@ -304,6 +304,72 @@ fn task_reads_piped_stdin_serial() {
     task_reads_piped_stdin(true);
 }
 
+const READ_ALL_PROG: &str = "\
+import std.io
+io.print(io.read_all())
+";
+
+/// `io.read_all()` on the REAL process stdin (`Stdin::Real`, not the injected `Lines` model): pipe a
+/// multi-line, multibyte-UTF-8 payload with NO trailing newline and assert the WHOLE stream comes
+/// back byte-exact (the injected-`Lines` parity test cannot observe this — it reconstructs a trailing
+/// `\n` the real stream lacks). `print` adds exactly one `\n`.
+fn read_all_reads_whole_stdin(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", READ_ALL_PROG);
+    let mut child = spawn(&entry, serial);
+    let mut stdin = child.stdin.take().unwrap();
+    // "héllo\nwörld" (é, ö multibyte), no trailing newline.
+    stdin.write_all(b"h\xc3\xa9llo\nw\xc3\xb6rld").unwrap();
+    drop(stdin); // EOF
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "héllo\nwörld\n");
+}
+
+#[test]
+fn read_all_reads_whole_stdin_mn() {
+    read_all_reads_whole_stdin(false);
+}
+
+#[test]
+fn read_all_reads_whole_stdin_serial() {
+    read_all_reads_whole_stdin(true);
+}
+
+const READ_CHAR_PROG: &str = "\
+import std.io
+while true:
+    match io.read_char():
+        Some(c): io.print(\"[{c}]\")
+        None:
+            io.print(\"done\")
+            break
+";
+
+/// `io.read_char()` on the REAL process stdin: pipe a multibyte payload and assert each Unicode
+/// scalar comes back WHOLE (the 2-byte `é` is one char, never split into bytes), then `None` at EOF.
+fn read_char_yields_whole_scalars(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", READ_CHAR_PROG);
+    let mut child = spawn(&entry, serial);
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"a\xc3\xa9").unwrap(); // "aé", no trailing newline
+    drop(stdin); // EOF
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[a]\n[é]\ndone\n");
+}
+
+#[test]
+fn read_char_yields_whole_scalars_mn() {
+    read_char_yields_whole_scalars(false);
+}
+
+#[test]
+fn read_char_yields_whole_scalars_serial() {
+    read_char_yields_whole_scalars(true);
+}
+
 /// `child.wait()` with a deadline: `None` if the child is still running after `secs` (it is killed).
 fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);

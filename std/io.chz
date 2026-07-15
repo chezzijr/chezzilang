@@ -11,6 +11,13 @@
 native fn print(s: str) -> nil
 native fn eprint(s: str) -> nil
 native fn read_line() -> Option[str]
+# Drain ALL remaining stdin to EOF as one str (Python `sys.stdin.read()`); "" at a clean EOF. Shares
+# the ONE stdin source with `read_line` (a later read then sees EOF). Non-UTF-8 real stdin is a
+# runtime FAULT — there is no stdin `read_bytes` hatch.
+native fn read_all() -> str
+# Read one Unicode scalar as a 1-char str (Chezzi has no `char` scalar); None at a clean EOF, a
+# runtime FAULT on a partial/invalid UTF-8 sequence at EOF.
+native fn read_char() -> Option[str]
 native fn flush() -> nil
 native fn input(prompt: str) -> Option[str]
 native fn read_file(path: str) -> Result[str]

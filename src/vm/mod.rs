@@ -3131,6 +3131,12 @@ impl crate::native::Host for OffloadHost {
     fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
         unreachable!("offloaded blocking native must not read stdin (off-heap host)")
     }
+    fn read_all(&mut self) -> Result<String, crate::native::HostError> {
+        unreachable!("offloaded blocking native must not read stdin (off-heap host)")
+    }
+    fn read_char(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        unreachable!("offloaded blocking native must not read stdin (off-heap host)")
+    }
     fn os_args(&self) -> Vec<String> {
         unreachable!("offloaded blocking native must not read os args (off-heap host)")
     }
@@ -3419,6 +3425,12 @@ impl crate::native::Host for VmHost<'_> {
         // core worker (the D5 invariant) for as long as a stalled reader cares to stall. See
         // [`stream`].
         self.vm.host.stdin.read_line()
+    }
+    fn read_all(&mut self) -> Result<String, crate::native::HostError> {
+        self.vm.host.stdin.read_all()
+    }
+    fn read_char(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.vm.host.stdin.read_char()
     }
     fn os_args(&self) -> Vec<String> {
         self.vm.host.args.clone()

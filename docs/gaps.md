@@ -361,7 +361,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   (`read_line`/`read_bytes`/`close`) — line/chunk streaming of a large file (past the 64 MB whole-file
   cap) now exists, the read twin of R2's `Writer`. Still missing: a lazy `lines() -> Iterator[str]`
   cursor (loop `read_line()` for now).
-- Read-all-stdin; char read.
+- **Read-all-stdin; char read — SHIPPED.** `io.read_all() -> str` drains all remaining stdin to EOF
+  as one `str` (Python `sys.stdin.read()`; `""` at clean EOF; non-UTF-8 = fault, no stdin `read_bytes`
+  hatch), and `io.read_char() -> Option[str]` reads one Unicode scalar as a 1-char `str` (`None` at
+  clean EOF; partial/invalid UTF-8 = fault). Both are siblings of `read_line` — same shared stdin
+  source, same task behavior (not offloaded; inherit the v1 pin-a-worker limit).
 - **fs grab-bag — SHIPPED.** `fs.canonicalize(path) -> Result[str]` (resolves symlinks + `.`/`..`
   against the real filesystem — requires the path to EXIST, distinct from the lexical `path.normalize`),
   `fs.chmod(path, mode: int) -> Result[nil]` (unix permission bits, unix-only), and

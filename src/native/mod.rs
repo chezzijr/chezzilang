@@ -35,6 +35,7 @@ pub mod time;
 pub mod uuid;
 
 use std::collections::HashMap;
+use std::io::Read as _;
 
 /// The source of lines for `std.io.read_line`. Tests inject a fixed buffer for determinism; the CLI
 /// uses the real process stdin (read lazily, one line at a time, so it never blocks until needed).
@@ -87,6 +88,108 @@ impl Stdin {
                 Ok(Some(trimmed.to_string()))
             }
         }
+    }
+
+    /// Read ALL remaining stdin to EOF as one `str` (Python's `sys.stdin.read()`); `""` at a clean
+    /// EOF. Drains the shared source, so a later read in ANY task then sees EOF. Non-UTF-8 real stdin
+    /// is a fault (there is no stdin `read_bytes` hatch). Over the injected `Lines` source it
+    /// reconstructs each line + `\n` (the queue is newline-stripped) — byte-exactness of the real
+    /// stream is only observable via `Stdin::Real` (see `tests/interactive.rs`).
+    pub fn read_all(&mut self) -> Result<String, HostError> {
+        match self {
+            Stdin::Empty => Ok(String::new()),
+            Stdin::Lines(q) => {
+                let mut q = q.lock().unwrap();
+                let mut out = String::new();
+                while let Some(line) = q.pop_front() {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+            Stdin::Real => {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        HostError {
+                            message: "stdin: stream is not valid UTF-8".into(),
+                        }
+                    } else {
+                        HostError {
+                            message: e.to_string(),
+                        }
+                    }
+                })?;
+                Ok(buf)
+            }
+        }
+    }
+
+    /// Read ONE Unicode scalar (a 1-char `str` — Chezzi has no `char`/`rune` scalar); `None` at a
+    /// clean EOF. Reads exactly the bytes of one UTF-8 scalar. A partial (truncated at EOF) or
+    /// invalid sequence is a fault, distinct from the clean `None`. Over the injected `Lines` source
+    /// the virtual stream is line0 chars + a reconstructed `\n` + line1 chars…, matching `read_all`.
+    pub fn read_char(&mut self) -> Result<Option<String>, HostError> {
+        match self {
+            Stdin::Empty => Ok(None),
+            Stdin::Lines(q) => {
+                let mut q = q.lock().unwrap();
+                match q.front_mut() {
+                    None => Ok(None),
+                    // A fully-drained front line stands for its terminating newline.
+                    Some(ln) if ln.is_empty() => {
+                        q.pop_front();
+                        Ok(Some("\n".to_string()))
+                    }
+                    Some(ln) => {
+                        let c = ln.chars().next().unwrap();
+                        ln.drain(..c.len_utf8());
+                        Ok(Some(c.to_string()))
+                    }
+                }
+            }
+            Stdin::Real => {
+                let mut stdin = std::io::stdin();
+                let mut first = [0u8; 1];
+                if stdin.read(&mut first).map_err(io_err)? == 0 {
+                    return Ok(None); // clean EOF
+                }
+                // Classify the leading byte → total scalar length (1..=4); a continuation/invalid
+                // byte at the START is undecodable.
+                let len = match first[0] {
+                    0x00..=0x7F => 1,
+                    0xC0..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF7 => 4,
+                    _ => return Err(not_utf8()),
+                };
+                let mut bytes = Vec::with_capacity(len);
+                bytes.push(first[0]);
+                for _ in 1..len {
+                    let mut cont = [0u8; 1];
+                    if stdin.read(&mut cont).map_err(io_err)? == 0 {
+                        return Err(not_utf8()); // truncated mid-scalar
+                    }
+                    bytes.push(cont[0]);
+                }
+                match std::str::from_utf8(&bytes) {
+                    Ok(s) => Ok(Some(s.to_string())),
+                    Err(_) => Err(not_utf8()),
+                }
+            }
+        }
+    }
+}
+
+fn io_err(e: std::io::Error) -> HostError {
+    HostError {
+        message: e.to_string(),
+    }
+}
+
+fn not_utf8() -> HostError {
+    HostError {
+        message: "stdin: stream is not valid UTF-8".into(),
     }
 }
 
@@ -298,6 +401,17 @@ pub trait Host {
     /// Read one line from the injected stdin source; `None` at EOF. The trailing newline is
     /// stripped.
     fn read_line(&mut self) -> Result<Option<String>, HostError>;
+    /// Read ALL remaining stdin to EOF as one `str`; `""` at a clean EOF. DEFAULTED to EOF-equivalent
+    /// (`""`) so a stdin-less test/embedder host needs no override; the real `VmHost` delegates to its
+    /// shared `Stdin` source (same seam as `read_line`, so it inherits shared-stdin behavior).
+    fn read_all(&mut self) -> Result<String, HostError> {
+        Ok(String::new())
+    }
+    /// Read ONE Unicode scalar as a 1-char `str`; `None` at a clean EOF, a fault on a partial/invalid
+    /// UTF-8 sequence. DEFAULTED to EOF (`None`) — same override story as `read_all`.
+    fn read_char(&mut self) -> Result<Option<String>, HostError> {
+        Ok(None)
+    }
     /// Flush this host's stdout. DEFAULTED to a no-op, and that default is what every host in-tree
     /// uses: the captured/buffered sink has nothing to flush, and the streaming CLI's stdout is
     /// UNBUFFERED (its writer thread `flush`es every message — see `vm::stream`), so there is nothing

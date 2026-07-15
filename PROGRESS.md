@@ -4,6 +4,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-15, `auto-task/stdin-read-all-char`) — `docs/gaps.md` R2 stdin grab-bag DONE:
+> `io.read_all()` + `io.read_char()`.** Two module-level stdin readers in `std.io`, plain name-dispatched
+> natives (siblings of `read_line`, NOT engine-intercepted), routed through the SAME shared `Stdin` seam
+> so they inherit shared-stdin / no-new-false-EOF task behavior for free. `read_all() -> str` drains ALL
+> remaining stdin to EOF as one `str` (Python `sys.stdin.read()`; `""` at clean EOF) — a bare `str`, not
+> `Result`/`Option`: stdin carries no open-error and `None`-vs-`""` is meaningless for a drain. `read_char()
+> -> Option[str]` reads ONE Unicode scalar as a 1-char `str` (Chezzi has no `char` scalar; `None` at clean
+> EOF). Both **fault** on non-UTF-8 (`"stdin: stream is not valid UTF-8"`) — there is no stdin `read_bytes`
+> hatch, so the message stands alone. Touch points: `Stdin::read_all`/`read_char` on all 3 variants
+> (`src/native/mod.rs` — Empty→EOF-equiv, injected `Lines`→line+`\n` reconstruction / front-char drain,
+> `Real`→`read_to_string` / raw-byte scalar read off the process-global `stdin()`); `Host` trait defaults
+> (EOF-equivalent `Ok("")`/`Ok(None)`, so the ~7 MockHosts need no edits); `VmHost` delegates, `OffloadHost`
+> `unreachable!` stubs; `io.rs` natives + MEMBERS (15→17); `std/io.chz` decls. NOT added to `is_blocking`
+> (host-stdio, runs inline like `read_line`; an offload would hit `OffloadHost`'s stdio `unreachable!`) —
+> so they inherit the accepted v1 "blocked reader pins an M:N worker" limit; the task-stdin false-EOF drift
+> is untouched (out of scope). 2 parity tests (single entry task → exact `assert_eq`: drain + scalar-by-
+> scalar-then-`None`) + 2 real-process `tests/interactive.rs` tests (byte-exact multibyte over `Stdin::Real`,
+> which the injected `Lines` model can't observe), each mn+serial. Ratchet `std.io` members 15→17. Docs:
+> `docs/stdlib.md` (table + input-contract + v1-limit), `docs/gaps.md` bullet closed.
+
 > **✅ STDLIB (2026-07-15, `auto-task/fs-trio`) — `docs/gaps.md` fs grab-bag DONE: `canonicalize` +
 > `chmod` + `atomic_write` in `std.fs`.** Three pure blocking-OS natives in `src/native/fs.rs`, each
 > mirroring an existing fs native's idiom. `canonicalize(path) -> Result[str]` resolves symlinks +

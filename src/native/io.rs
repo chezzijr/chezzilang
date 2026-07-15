@@ -41,6 +41,24 @@ fn read_line(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// `read_all()` — drain ALL remaining stdin to EOF as one `str` (Python's `sys.stdin.read()`); `""`
+/// at a clean EOF. Shares the ONE stdin source with `read_line`, so it inherits shared-stdin task
+/// behavior. Non-UTF-8 real stdin is a fault (no stdin `read_bytes` hatch), not a `Result`.
+fn read_all(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "read_all", 0)?;
+    Ok(NativeRet::Str(h.read_all()?))
+}
+
+/// `read_char()` — read one Unicode scalar as a 1-char `str` (Chezzi has no `char` scalar); `None` at
+/// a clean EOF, a fault on a partial/invalid UTF-8 sequence. Sibling of `read_line` (same source).
+fn read_char(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "read_char", 0)?;
+    match h.read_char()? {
+        Some(c) => Ok(NativeRet::Some(Box::new(NativeRet::Str(c)))),
+        None => Ok(NativeRet::None),
+    }
+}
+
 /// Flush this process's stdout. Effectively a no-op in both sinks — the captured sink has nothing to
 /// flush, and the streaming CLI's stdout is UNBUFFERED (its writer thread flushes every message, see
 /// `vm::stream`). It stays because it is the portable idiom, and it must NEVER wait on stdout's
@@ -145,6 +163,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("print", print),
     ("eprint", eprint),
     ("read_line", read_line),
+    ("read_all", read_all),
+    ("read_char", read_char),
     ("flush", flush),
     ("input", input),
     ("read_file", read_file),
