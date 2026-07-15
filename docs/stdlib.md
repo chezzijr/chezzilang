@@ -416,8 +416,11 @@ non-empty dir — there is intentionally no silent `rm -rf`) ·
 `chmod(path, mode: int) -> Result[nil]` — set unix permission bits (e.g. `0o755`). **Unix-only** (on a
 non-unix target it `Err`s `"chmod is unix-only"`); `mode` is passed unmasked to the OS ·
 `atomic_write(path, contents) -> Result[nil]` — write `contents` to a temp file in the **same
-directory** as `path`, then `rename` it over `path` (atomic within one filesystem). Crash-safe: a
-reader sees either the old contents or the new, never a half-written file.
+directory** as `path`, then `rename` it over `path` (atomic within one filesystem). A concurrent
+reader sees either the old contents or the new, never a half-written file, and an existing target's
+permission bits are preserved across the swap (a fresh temp would otherwise widen a `0o600` file). It
+is **not** `fsync`'d, so this is concurrent-observer atomicity, **not** crash/power-loss durability
+(same as `write_file`).
 
 **Limit (v1):** recursive directory removal (`remove_dir_all` / `rm -rf`) is intentionally **not**
 provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. Walk + remove in Chezzi

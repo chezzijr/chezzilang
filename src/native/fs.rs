@@ -109,7 +109,11 @@ fn chmod(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// Atomically replace a file: write the contents to a temp file in the SAME directory as the target,
 /// then `rename` it over the target. `rename` is atomic only WITHIN one filesystem, so the temp being
 /// a sibling (not in `/tmp`) is load-bearing. On any error the temp is cleaned up and the fault is
-/// returned; the target is either the old contents or the new — never a half-written file.
+/// returned; a concurrent reader sees either the old contents or the new — never a half-written file.
+/// (This is concurrent-observer atomicity via `rename`, NOT crash/power-loss durability: there is no
+/// `fsync`, so an OS crash mid-op can still lose the write. Matching `write_file`, that is out of scope.)
+/// When the target already exists its permission bits are carried onto the temp before the rename —
+/// otherwise the fresh umask-default temp inode would silently widen a restrictive (e.g. `0o600`) file.
 fn atomic_write(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "atomic_write", 2)?;
     let path = h.arg_str(0)?;
@@ -121,7 +125,14 @@ fn atomic_write(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let seq = ATOMIC_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".chezzi_tmp{}_{seq}", std::process::id()));
-    match std::fs::write(&tmp, contents.as_bytes()).and_then(|()| std::fs::rename(&tmp, &path)) {
+    match std::fs::write(&tmp, contents.as_bytes()).and_then(|()| {
+        // Preserve the target's mode across the inode swap. If the target does not exist yet, the
+        // temp keeps the umask default (a genuinely new file).
+        if let Ok(meta) = std::fs::metadata(&path) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        std::fs::rename(&tmp, &path)
+    }) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -549,5 +560,24 @@ mod tests {
         assert!(is_err(
             atomic_write(&mut host(&[&tmp.join("no/dir/x.txt"), "y"])).unwrap()
         ));
+    }
+
+    /// Overwriting an existing restrictive file must PRESERVE its mode — the rename swaps in a fresh
+    /// umask-default temp inode, which would otherwise silently widen a `0o600` file to `~0o644`.
+    #[cfg(unix)]
+    #[test]
+    fn fs_atomic_write_preserves_target_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TmpDir::new();
+        let f = tmp.join("secret");
+        std::fs::write(&f, "old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(is_ok(atomic_write(&mut host(&[&f, "new"])).unwrap()));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "atomic_write widened a 0o600 target"
+        );
     }
 }

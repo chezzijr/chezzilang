@@ -365,7 +365,8 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - **fs grab-bag — SHIPPED.** `fs.canonicalize(path) -> Result[str]` (resolves symlinks + `.`/`..`
   against the real filesystem — requires the path to EXIST, distinct from the lexical `path.normalize`),
   `fs.chmod(path, mode: int) -> Result[nil]` (unix permission bits, unix-only), and
-  `fs.atomic_write(path, contents) -> Result[nil]` (same-dir temp + `rename`, crash-safe) all now exist.
+  `fs.atomic_write(path, contents) -> Result[nil]` (same-dir temp + `rename`; observer-atomic +
+  mode-preserving, not fsync-durable) all now exist.
 
 ### 5. Numbers / math
 - `divmod`, `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`. `math.inf` / `math.nan` constants (only

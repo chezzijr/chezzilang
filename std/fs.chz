@@ -28,5 +28,6 @@ native fn copy(src: str, dst: str) -> Result[nil]
 native fn append(path: str, text: str) -> Result[nil]
 # chmod sets unix permission bits (e.g. 0o755); unix-only (errs "chmod is unix-only" elsewhere).
 native fn chmod(path: str, mode: int) -> Result[nil]
-# atomic_write = write a same-dir temp then rename over `path` (crash-safe: never a half-written file).
+# atomic_write = write a same-dir temp then rename over `path` (a concurrent reader sees old-or-new,
+# never a half-written file; preserves the target's mode). Not fsync'd — no crash-durability guarantee.
 native fn atomic_write(path: str, contents: str) -> Result[nil]
