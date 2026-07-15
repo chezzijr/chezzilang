@@ -59,8 +59,10 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
   [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
 - [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
   still skips defers (both engines agree, so parity holds — fixing one alone would diverge).
-- Untouched backlog headliners: **R2** (Writer/file handles), **R3** (package manager), **R4** (runtime
-  type tags), **L1** (`Result`/`Option` methods) — see their sections.
+- Untouched backlog headliners: **R2** (Writer/file handles), **R3** (package manager) — see their
+  sections. (**R4** runtime type tags and **L3** error-handling machinery were reviewed 2026-07-15 and
+  marked **won't-do**; **L1** `Result`/`Option` methods deprioritized — we're not imitating Rust's
+  method surface.)
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
@@ -190,12 +192,16 @@ is only needed for *native* packages). It has never been scheduled. That mis-seq
 stalled behind a native-ABI narrative it does not depend on — is the most consequential finding of the
 audit.
 
-### R4. No runtime type tags → no `cast[T]`, no `errors.As`
+### R4. No runtime type tags → no `cast[T]`, no `errors.As` — **WON'T-DO (2026-07-15)**
 `Any` (an empty protocol) lets values *in* and nothing *out*; there is no `type()`, no `isinstance`, no
 downcast. Protocol **existentials do** give real dynamic dispatch (`examples/poly_method.chz`), so the
 sharp edge is narrower than `future.md §14` implies — it is mostly **error discrimination** (see L3)
-and dynamic data-walking. **Size: large** (needs runtime type tags on heap objects); design already
-correct in `future.md §14`.
+and dynamic data-walking. **Size: large** (needs runtime type tags on heap objects).
+
+**DECISION: won't-do.** `cast[T]` was pushed back (a general runtime downcast is neither Python nor
+Go idiom); the only other use, `errors.As`, is avoidable — model errors as a typed enum and `match` to
+discriminate (static, no runtime tags). Large effort, no payoff for a Python-feel scripting language.
+Reopen only if dynamic data-walking becomes a real, recurring need.
 
 ## Language / concurrency
 
@@ -414,13 +420,14 @@ comprehensions, varargs, default args, keyword args, newtype, type aliases, stat
 methods — all shipped. The mutability model (`ref T`, by-reference capture, `Shared`/`Atomic`/`Channel`)
 is coherent.
 
-### L1. `Result` / `Option` have **ZERO methods** — highest hit-rate gap in the language
+### L1. `Result` / `Option` have **ZERO methods** — **DEPRIORITIZED (2026-07-15): not imitating Rust's method surface**
 `native enum Option[T]` / `Result[T, E]` (`std/prelude.chz`) declare no methods, and there is no
 `Ty::Result`/`Ty::Option` arm in the method-call checker. So there is no `unwrap_or`, `unwrap_or_else`,
 `is_ok`, `is_some`, `ok()`, `map`, `map_err`, `and_then`, `expect`. Verified: `Some(1).unwrap_or(0)` →
-*"type Option[int] has no method 'unwrap_or'"*. Every `Result` must be handled with `match` or `?`.
-**Small**: the `native enum … native fn` method-table machinery already exists (it is how `List` works).
-~8 native methods. This also unblocks half of L3.
+*"type Option[int] has no method 'unwrap_or'"*. Every `Result`/`Option` is handled with `match` or `?`.
+**Small** if ever wanted (the `native enum … native fn` method-table machinery already exists — it is how
+`List` works, ~8 native methods) — but **deprioritized**: `match`/`?` is the intended surface, and L3 (the
+one thing L1 methods would have "unblocked") is itself won't-do, so there is no downstream forcing it.
 
 ### L2. No struct patterns in `match`, no struct destructuring
 `match p: Point(x, y):` → *"variant pattern 'Point' cannot match a value of type Point"*. Patterns are
@@ -429,16 +436,22 @@ fn params. **Enums destructure and structs don't — the asymmetry is arbitrary.
 patterns; Rust/Go destructuring.) Medium, and cheap at the VM (struct fields are already a positional
 `Vec`).
 
-### L3. Error handling: no conversion, no wrapping, no discrimination
-Three holes, one seam — together these **block a class of program** (any library composing errors from
-two sources; today the choice is one god-enum or stringly-typed messages):
-- **No `?`-time conversion.** `?` requires the inner `E` be assignable to the enclosing `E`, so a
-  `T!IoErr` fn called from a `T!DbErr` fn is a hard error — and with no `map_err` (L1) you hand-write a
-  `match` at every call site. (Rust: `From`-based auto-conversion; Go: `fmt.Errorf("%w")`.)
-- **No wrapping / cause chain.** The `Error` protocol is one method, `message() -> str`. No `source()` /
-  `Unwrap()`.
-- **No downcast out of the `Error` existential.** Once laundered into `Error`, only `message()` is
-  callable. There is no `errors.As` / `except DbError` equivalent — that needs **R4**.
+### L3. Error handling: no conversion, no wrapping, no discrimination — **WON'T-DO (2026-07-15)**
+**FIRST, the correction that scoped this down (2026-07-15):** a concrete error type WIDENS to the
+built-in `Error` existential exactly like Go's `error` interface — a `struct`/`enum` with a
+`message(self) -> str` **method** (declared *inside* the block, not a free `fn`) flows into an `Error`
+param, into the `Result`-E position (`return Err(MyErr(..))` in a `-> int!` fn), and through `?`
+(`inner()? ` where `inner` is `-> int!MyErr` inside a `-> int!` fn). Verified by `check` + `run` on both
+engines. So the idiomatic `T!` (= `Result[T, Error]`) style already composes — `?` is NOT broadly broken.
+
+Given that, the three "holes" are narrow and NOT worth building:
+- **`?`-time conversion.** Only concrete-E1 → *different* concrete-E2 is closed (`T!IoErr` called from
+  `T!DbErr`). Concrete → `Error` widens fine (above). Cross-concrete auto-conversion is rare and
+  arguably SHOULD be explicit (that's a real decision, not boilerplate) — a Rust `From`-style machinery
+  is exactly the imitation we don't want. **Won't-do.**
+- **Wrapping / cause chain** (`source()`/`Unwrap()`). Nice-to-have, not blocking. **Defer.**
+- **Downcast out of the `Error` existential** (`errors.As`). Needs **R4**, which is won't-do — avoid by
+  keeping the error a typed enum and `match`ing it before laundering to `Error`. **Won't-do.**
 
 ### L4. No `const`, no visibility
 No `const`/`final` keyword (every module global and struct field is mutable); no `pub`/private (every
