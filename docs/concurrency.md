@@ -684,6 +684,18 @@ CPU sibling **diverges by engine** (this is why `examples/cancel_cpu.chz` carrie
 `.expected`, like `examples/parallel_cancel.chz`); a self-polling *timeout* does not. Guidance: **poll
 `cancelled()` in CPU loops; `wait:` on `done()` in IO loops** — exactly Go's `ctx.Done()` contract.
 
+The **same root** covers the *automatic* cancel that structured concurrency issues when a sibling
+faults (`docs/gaps.md` **N8/N9**): a `parallel:` with one task in an unbounded CPU loop and one that
+`panic`s **hangs on `--serial`** (the spinner never yields, so the faulting sibling never gets the
+thread to trip the cancel), and a task cancelled mid-loop emits a different **line set** per engine
+(how far it got before yielding is a scheduling fact). This is **not a bug to fix** — it is the
+cooperative oracle behaving cooperatively. `--serial` exists only as the byte-identical **parity
+oracle** for bug-finding; it is never the recommended runtime for CPU-bound concurrent tasks. For safe
+single-thread execution use **`--threads=1`** (still the OS-thread M:N engine — the kernel preempts the
+spinner, so it faults promptly, verified 0/15 hangs) or the default engine. Lifting the limit would
+require teaching the cooperative scheduler to time-slice a *running* fiber (its own milestone), which
+`--threads=1` already makes unnecessary for users.
+
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 
 `trip()` is the one native primitive `std.cancel` needs. It flips a permanent latch on a channel: the

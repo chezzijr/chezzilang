@@ -42,11 +42,13 @@ fix** — measure the natural (unsequenced) shape, ≥200 runs under CPU load. T
 CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anything you spawn.
 
 **STILL OPEN after this session (ranked):**
-- [N8](#n8---serial-hangs-on-a-cpu-bound-sibling--cooperative-engine-never-preempts-it--open) — **`--serial`
-  HANGS on a CPU-bound sibling** (no preemption; the `reds` budget exists but isn't enforced at the
-  back-edge). Pre-existing. The one I'd take next — `--serial` is unsafe for CPU-bound concurrent tasks.
-- [N9](#n9-a-cancelled-tasks-output-line-set-differs-between-engines--inherent-open) — a cancelled task's
-  **line set** differs serial vs M:N (inherent to a cooperative engine; largely closed by fixing N8).
+- [N8](#n8---serial-hangs-on-a-cpu-bound-sibling--cooperative-engine-never-preempts-it--open) / [N9](#n9-a-cancelled-tasks-output-line-set-differs-between-engines--inherent-open)
+  — **DOCUMENTED KNOWN-LIMIT, won't-fix** (2026-07-15): `--serial` HANGS on a CPU-bound sibling / a
+  cancelled task's line set differs by engine. `--serial` is only the parity **oracle** for
+  bug-finding, never the user runtime; `--threads=1` gives safe single-thread execution (OS-thread M:N,
+  kernel preempts — 0/15 hangs) and makes a cooperative-scheduler time-slicer unnecessary. Recorded in
+  `docs/concurrency.md` §"Cooperative contract (by design)". Reopen only if `--serial` ever becomes a
+  shipped user runtime.
 - [N6g / C5](#n6g--open-c5-family-a-defer-that-recvs-from-a-live-sibling-cannot-park-on---serial) — a
   `defer` that must **park** (recv from a live sibling) can't, on `--serial` — needs a VM-driven defer
   drain, its own milestone.
@@ -700,7 +702,7 @@ with a 30ms sleep probing the veto-free gap it printed `cleanup=0` **20/20** on 
 rules directly rather than a scenario. `reduce_task_slots`'s ranking is **not** touched: it is correct — the
 spurious `Deadlocked` simply must never be produced.
 
-### N8. `--serial` HANGS on a CPU-bound sibling — cooperative engine never preempts it — open
+### N8. `--serial` HANGS on a CPU-bound sibling — cooperative engine never preempts it — DOCUMENTED KNOWN-LIMIT (won't-fix 2026-07-15; use `--threads=1`)
 Found 2026-07-15 by the post-merge harness; **pre-existing** (reproduces identically on `09cb2af`, before the
 cancellation-points work). A `parallel:` with one task in a long CPU loop and one that faults:
 
@@ -711,11 +713,17 @@ cancellation-points work). A `parallel:` with one task in a long CPU loop and on
 
 Cancellation points put a checkpoint on every loop back-edge, but a checkpoint only *delivers* a cancel that
 someone already tripped. On the cooperative engine nothing can trip it while the spinner holds the thread.
-The serial scheduler needs a **preemption budget** (the `reds` reduction counter already exists — D3) that
-forces a yield at the back-edge so siblings get a turn. Until then `--serial` is not safe for CPU-bound
-concurrent tasks. Own task.
+The serial scheduler *could* be taught to preempt (the `reds` reduction counter already exists — D3, but is
+gated `if self.mn.is_some()` at `src/vm/exec.rs:858` and the cooperative scheduler has no time-slice path for
+a *running* fiber — a rearchitecture, its own milestone).
 
-### N9. A cancelled task's OUTPUT LINE SET differs between engines — inherent, open
+**DECISION (2026-07-15): won't-fix — documented known-limit.** `--serial` is only the byte-identical parity
+**oracle** for bug-finding, never the recommended user runtime; **`--threads=1`** already gives safe
+single-thread execution (OS-thread M:N — the kernel preempts the spinner, verified 0/15 hangs), which makes
+a cooperative time-slicer unnecessary for users. Recorded in `docs/concurrency.md` §"Cooperative contract
+(by design)". Reopen only if `--serial` ever ships as a user-facing runtime.
+
+### N9. A cancelled task's OUTPUT LINE SET differs between engines — inherent — DOCUMENTED KNOWN-LIMIT (won't-fix 2026-07-15; same root as N8)
 Same shape as N8 and also **pre-existing** (`09cb2af`: M:N emits 1 line, sometimes 0; serial emits 5). A task
 cancelled mid-loop emits *however far it got*, and "how far it got" is a scheduling fact:
 
