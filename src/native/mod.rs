@@ -155,15 +155,29 @@ impl Stdin {
                 // reader steals a continuation byte → a torn scalar / spurious not-UTF-8 fault under
                 // the M:N engine. The buffered bytes live on the global `Stdin`, shared with
                 // `read_line`, so unlocking at end of call loses nothing.
+                // Read exactly one byte, transparently retrying a signal-interrupted (EINTR) read the
+                // way std's buffered `read_line`/`read_to_string` do — `read_char` MUST NOT fault
+                // where its siblings silently retry (the anti-drift contract). `Ok(None)` = EOF.
+                fn read_one(r: &mut impl std::io::Read) -> std::io::Result<Option<u8>> {
+                    let mut b = [0u8; 1];
+                    loop {
+                        match r.read(&mut b) {
+                            Ok(0) => return Ok(None),
+                            Ok(_) => return Ok(Some(b[0])),
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
                 let stdin = std::io::stdin();
                 let mut lock = stdin.lock();
-                let mut first = [0u8; 1];
-                if lock.read(&mut first).map_err(io_err)? == 0 {
-                    return Ok(None); // clean EOF
-                }
+                let first = match read_one(&mut lock).map_err(io_err)? {
+                    None => return Ok(None), // clean EOF
+                    Some(b) => b,
+                };
                 // Classify the leading byte → total scalar length (1..=4); a continuation/invalid
                 // byte at the START is undecodable.
-                let len = match first[0] {
+                let len = match first {
                     0x00..=0x7F => 1,
                     0xC0..=0xDF => 2,
                     0xE0..=0xEF => 3,
@@ -171,13 +185,12 @@ impl Stdin {
                     _ => return Err(not_utf8()),
                 };
                 let mut bytes = Vec::with_capacity(len);
-                bytes.push(first[0]);
+                bytes.push(first);
                 for _ in 1..len {
-                    let mut cont = [0u8; 1];
-                    if lock.read(&mut cont).map_err(io_err)? == 0 {
-                        return Err(not_utf8()); // truncated mid-scalar
+                    match read_one(&mut lock).map_err(io_err)? {
+                        None => return Err(not_utf8()), // truncated mid-scalar
+                        Some(b) => bytes.push(b),
                     }
-                    bytes.push(cont[0]);
                 }
                 match std::str::from_utf8(&bytes) {
                     Ok(s) => Ok(Some(s.to_string())),
