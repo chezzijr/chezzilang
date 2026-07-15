@@ -6688,6 +6688,50 @@ main()
     assert_mc_parity(src, "on-y-axis\noff-axis\n");
 }
 
+#[test]
+fn struct_match_generic_catchall_keeps_targs() {
+    // Regression (bug #1): a generic-struct scrutinee `Box[int]` with a refutable field arm plus a
+    // whole-value catch-all `rest:` — the catch-all binding must keep the scrutinee's type args so
+    // `rest.v` resolves to the INSTANTIATED field type `int`, not the unsubstituted param `T`.
+    let src = "\
+struct Box[T]:
+    v: T
+fn f(b: Box[int]) -> int:
+    match b:
+        Box(0): return 100
+        rest: return rest.v + 1
+fn main():
+    print(f(Box(0)))
+    print(f(Box(41)))
+main()
+";
+    assert_mc_parity(src, "100\n42\n");
+}
+
+#[test]
+fn struct_match_catchall_name_shadows_struct() {
+    // Regression (bug #2): a whole-value catch-all binding whose NAME happens to resolve to another
+    // in-scope struct (`Node`) must bind the whole scrutinee — not be mis-lowered as a zero-field
+    // struct destructure that binds nothing (which panicked the compiler: `global has no slot`).
+    let src = "\
+struct Point:
+    x: int
+    y: int
+struct Node:
+    v: int
+fn describe(p: Point) -> str:
+    match p:
+        Point(1, y): return \"one-{y}\"
+        Node: return \"other-{Node.x}\"
+    return \"\"
+fn main():
+    print(describe(Point(1, 2)))
+    print(describe(Point(3, 4)))
+main()
+";
+    assert_mc_parity(src, "one-2\nother-3\n");
+}
+
 // ----- field / index -----
 
 #[test]

@@ -60,8 +60,14 @@ enum MatchKind {
     Tuple(Vec<Ty>),
     /// Struct scrutinee (L2) — arms are positional field patterns (`Point(x, y)`). A struct has
     /// exactly ONE constructor, so a single all-binding `label(..)` arm is irrefutable ⇒ exhaustive.
-    /// `fields` are the INSTANTIATED positional field types (generic params substituted).
-    Struct { label: String, fields: Vec<Ty> },
+    /// `fields` are the INSTANTIATED positional field types (generic params substituted). `targs`
+    /// carries the scrutinee's type arguments (`Box[int]` → `[int]`) so a whole-value catch-all
+    /// binding reconstructs the full `Ty::Struct(label, targs)` instead of stripping generics.
+    Struct {
+        label: String,
+        fields: Vec<Ty>,
+        targs: Vec<Ty>,
+    },
     /// Un-inferable (`Ty::Unknown`) scrutinee with only binding/`_` arms — skip exhaustiveness, bind
     /// permissively. A STRUCTURAL arm over an un-inferable scrutinee is rejected upstream (§4.1, in
     /// `reconstruct_unknown_kind` for the top-level arm and `bind_subpattern` for nested positions);

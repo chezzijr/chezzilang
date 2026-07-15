@@ -2950,7 +2950,14 @@ impl Compiler {
                 // tag test, no fail-jump of its own; refutable SUB-patterns (`Point(0, y)`) push their
                 // own fails when they recurse. Mirrors the `Pattern::Tuple` arm but keys `GetField` on
                 // the field name instead of a numeric index (the VM resolves both the same way).
-                if let Some(key) = self.struct_key_of_pattern(enum_name.as_deref(), name) {
+                // Gate on NON-empty bindings: a BARE name with no payload (`Node:`) is never a
+                // destructure — even when it happens to resolve to an in-scope struct — it is the
+                // whole-value catch-all binding the checker declared (`!is_ctor && bindings.is_empty()`
+                // in checker/pattern.rs). Taking the destructure branch here (type-blind, by NAME)
+                // would bind NOTHING, leaving the name unbound in the body → `global has no slot` panic.
+                if !bindings.is_empty()
+                    && let Some(key) = self.struct_key_of_pattern(enum_name.as_deref(), name)
+                {
                     let field_names = self.program.structs[&key].fields.clone();
                     for (b, fname) in bindings.iter().zip(field_names.iter()) {
                         fc.emit_hidden_get(scrut, span);

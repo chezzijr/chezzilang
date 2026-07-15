@@ -637,7 +637,11 @@ impl Checker {
                     "a tuple scrutinee requires a tuple pattern (or `_`)".to_string(),
                 );
             }
-            MatchKind::Struct { label, fields } => {
+            MatchKind::Struct {
+                label,
+                fields,
+                targs,
+            } => {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
@@ -682,7 +686,7 @@ impl Checker {
                                 );
                                 return false;
                             }
-                            self.declare(name, Ty::Struct(label.clone(), Vec::new()));
+                            self.declare(name, Ty::Struct(label.clone(), targs.clone()));
                             return true;
                         }
                         // A constructor pattern: the name must be the struct's own name, and the

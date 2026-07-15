@@ -3417,6 +3417,18 @@ fn struct_match_generic_field_binds_instantiated_type_ok() {
 }
 
 #[test]
+fn struct_match_generic_catchall_keeps_targs_ok() {
+    // Regression (bug #1): a generic-struct scrutinee `Box[int]` with a refutable field arm plus a
+    // whole-value catch-all `rest:` — the catch-all binding must reconstruct the FULL type
+    // `Box[int]` (keeping the scrutinee's type args), so `rest.v` resolves to the instantiated field
+    // type `int`, not the bare param `T`. Pre-fix the catch-all dropped the targs and this valid
+    // program was wrongly rejected with `cannot apply + to T and int`.
+    ok(
+        "struct Box[T]:\n    v: T\nfn f(b: Box[int]) -> int:\n    match b:\n        Box(0): return 100\n        rest: return rest.v + 1\n",
+    );
+}
+
+#[test]
 fn struct_match_nested_struct_field_ok() {
     ok(
         "struct Point:\n    x: int\n    y: int\nstruct Line:\n    a: Point\n    b: Point\nfn f(l: Line) -> int:\n    match l:\n        Line(Point(x, y), _): return x + y\n",

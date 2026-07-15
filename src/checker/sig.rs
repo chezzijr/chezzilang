@@ -3664,9 +3664,10 @@ impl Checker {
             // is NOT bare-destructurable by the compiler, so it stays on the `other =>` reject below —
             // never a pattern the checker accepts but the compiler can't lower (the checker-superset
             // trap). Fields are already instantiated (generic `Box[int]` → field `int`, not `T`).
-            Ty::Struct(name, _) if self.struct_fields_of(&sty).is_some() => MatchKind::Struct {
+            Ty::Struct(name, targs) if self.struct_fields_of(&sty).is_some() => MatchKind::Struct {
                 label: name.clone(),
                 fields: self.struct_fields_of(&sty).unwrap_or_default(),
+                targs: targs.clone(),
             },
             // Un-inferable scrutinee: rather than skip exhaustiveness outright (a soundness hole),
             // reconstruct a concrete kind from the arm patterns when they unambiguously name a single
