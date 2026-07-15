@@ -153,8 +153,9 @@ Consumers wired, and the gaps that were filed separately as if each were its own
 - `std.request` binary fetch → **DONE (2026-07-15)**: `request.get_bytes(url, timeout_ms?) ->
   Result[bytes]` reads the body via `into_reader().read_to_end` → the same immutable `bytes` value
   `Socket.read_bytes`/`io.read_bytes` return, so an image/zip/pdf round-trips byte-exactly instead of
-  going through `into_string()`'s `from_utf8_lossy` corruption. GET-only + body-only (status/headers
-  dropped); 64MB download cap mirrors `io.read_bytes`. The text `get`/`post` path is unchanged.
+  going through `into_string()`'s `from_utf8_lossy` corruption. GET-only + body-only: a non-2xx status
+  is an `Err` (a 404/500 error page can't pose as a successful download — `io.read_bytes` semantics),
+  headers dropped; 64MB download cap mirrors `io.read_bytes`. The text `get`/`post` path is unchanged.
 
 ### R2. `Writer` / file-handle type — **DONE (2026-07-15)**
 Landed a write-only `Writer` native handle in `std.io` (the `Socket` handle is the template): openers

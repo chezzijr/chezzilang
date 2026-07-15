@@ -4,6 +4,11 @@
 //! transport/DNS/TLS failures lower to `Err`. `Response` is the synthetic struct
 //! `{ status: int, body: str, headers: map[str, str] }` (header names are lowercased by `ureq`).
 //!
+//! `get_bytes(url, timeout_ms?)` is the binary-download sibling: it returns `Result[bytes]` (the body
+//! read byte-exact via `into_reader`, no `into_string` UTF-8 decode), GET-only + body-only, and — since
+//! it has no status channel — a non-2xx status becomes `Err` (a 404 error page can't pose as a
+//! successful download). See `io.read_bytes`, the file twin this mirrors.
+//!
 //! Surface: `get(url, timeout_ms?)` / `post(url, body, timeout_ms?)`, the verb wrappers
 //! `put(url, body)` / `patch(url, body)` / `delete(url)` / `head(url)`, and the general
 //! `request(method, url, body, headers, timeout_ms?)` carrying a `map[str, str]` of custom request
@@ -85,8 +90,9 @@ fn lower_result(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
 
 /// Read a `ureq::Response`'s body as raw bytes (byte-exact, no UTF-8 decode) into a `Result[bytes]`.
 /// A download exceeding `MAX_DOWNLOAD_BYTES` and a truncated/aborted read both lower to `Err` (never a
-/// lying empty-body success). Status + headers are intentionally dropped — a binary download is
-/// GET-only and body-only (see `get_bytes`).
+/// lying empty-body success). Called only for a 2xx response — a non-2xx status is turned into `Err`
+/// by [`lower_result_bytes`] before we get here, so the caller never mistakes a 404/500 error page for
+/// a successful download. Headers are dropped — a binary download is GET-only and body-only.
 fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
     let mut buf = Vec::new();
     match resp
@@ -102,12 +108,17 @@ fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
     }
 }
 
-/// Byte twin of [`lower_result`]: a `>= 400` status is a normal (byte) body, only transport failures
-/// become `Err`.
+/// Byte twin of [`lower_result`], but NOT status-transparent: `get_bytes` returns a bare
+/// `Result[bytes]` with no status channel, so unlike the text `get` (which surfaces a `>= 400` as a
+/// normal `Response` for the caller to inspect), a non-2xx status here MUST become `Err` — otherwise a
+/// 404/500 HTML error page comes back as `Ok(bytes)` and a caller writes it to disk as if the download
+/// succeeded. This matches `io.read_bytes` semantics (a failed read is `Err`, not empty `Ok`).
 fn lower_result_bytes(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
     match r {
         Ok(resp) => lower_response_bytes(resp),
-        Err(ureq::Error::Status(_, resp)) => lower_response_bytes(resp),
+        Err(ureq::Error::Status(code, resp)) => {
+            NativeRet::Err(format!("HTTP {code} {}", resp.status_text()))
+        }
         Err(ureq::Error::Transport(t)) => NativeRet::Err(t.to_string()),
     }
 }
@@ -191,7 +202,8 @@ fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `get_bytes(url, timeout_ms?)` — download a body as raw `bytes` (byte-exact, no UTF-8 decode), the
-/// HTTP sibling of `io.read_bytes` / `Socket.read_bytes`. Status/headers are dropped (body-only).
+/// HTTP sibling of `io.read_bytes` / `Socket.read_bytes`. Body-only: a non-2xx status is an `Err` (so
+/// a 404/500 error page can't masquerade as a successful download), headers are dropped.
 fn get_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args_range(h, "get_bytes", 1, 2)?;
     let url = h.arg_str(0)?;
@@ -516,6 +528,33 @@ mod tests {
         assert!(
             matches!(ret, NativeRet::Err(_)),
             "expected Err for truncated body, got {ret:?}"
+        );
+    }
+
+    #[test]
+    fn get_bytes_non_2xx_status_is_err() {
+        // A 404 with an HTML error-page body must NOT come back as Ok(bytes) — get_bytes has no
+        // status channel, so the failure has to surface as Err or a caller writes the error page to
+        // disk thinking the download succeeded.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let body = b"<html>not found</html>";
+            let head = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let ret = do_get_bytes(&format!("http://{addr}/"), None);
+        handle.join().unwrap();
+        assert!(
+            matches!(ret, NativeRet::Err(_)),
+            "expected Err for a 404, got {ret:?}"
         );
     }
 

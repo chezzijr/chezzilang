@@ -471,9 +471,10 @@ back to the defaults. A timeout (like any transport failure) surfaces as a recov
 panic. Build a query string with `std.encoding.query_encode` and compose `url + "?" + query_encode(params)`.
 **Binary download:** `get_bytes` fetches the body as raw `bytes` (byte-exact, no UTF-8 decode — the
 same immutable `bytes` value `Socket.read_bytes`/`io.read_bytes` return), so an image/zip/pdf survives
-where the text `get`'s `Response.body: str` would lossily mangle it. It is GET-only and body-only
-(status/headers dropped) and caps a download at 64MB (a larger body is an `Err`); for status/headers on
-a text response, use `get`.
+where the text `get`'s `Response.body: str` would lossily mangle it. It is GET-only and body-only: unlike
+`get` (which models a `>= 400` as a normal `Response` for you to inspect), a non-2xx status is an `Err`
+here — so a 404/500 error page can't masquerade as a successful download — and headers are dropped. It
+caps a download at 64MB (a larger body is an `Err`); for status/headers on a text response, use `get`.
 
 ### `std.net`
 Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket` ·

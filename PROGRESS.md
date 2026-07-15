@@ -8,10 +8,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `std.request`.** New `request.get_bytes(url, timeout_ms?) -> Result[bytes]` reads the body via
 > `into_reader().read_to_end` → the same immutable `bytes` value `Socket.read_bytes`/`io.read_bytes`
 > return, so an image/zip/pdf round-trips byte-exactly instead of `into_string()`'s `from_utf8_lossy`
-> corruption. GET-only + body-only (status/headers dropped — matches `io.read_bytes`), 64MB download
-> cap. Text `get`/`post` path unchanged. Parity is automatic (blocking ureq native, not netio-gated).
-> 3 new unit tests (byte-exact, corruption-contrast, truncated→Err). `docs/gaps.md:153` closed,
-> `docs/stdlib.md` binary-download note. Full `cargo test`/`clippy` green.
+> corruption. GET-only + body-only: a non-2xx status is an `Err` (a 404/500 error page can't pose as a
+> successful download — `io.read_bytes` semantics), headers dropped; 64MB download cap. Text
+> `get`/`post` path unchanged. `get_bytes` is in `native::is_blocking` so the M:N engine offloads it to
+> the dirty pool (never pins a core worker) + the cancel checkpoint fires before it — same as every
+> other request verb. Parity is automatic (blocking ureq native, not netio-gated). 5 new unit tests
+> (byte-exact, corruption-contrast, truncated→Err, 404→Err, every-request-member-is-blocking).
+> `docs/gaps.md:153` closed, `docs/stdlib.md` binary-download note. Full `cargo test`/`clippy` green.
 >
 > **✅ STDLIB (2026-07-15, `auto-task/writer-r2`) — `docs/gaps.md` R2 DONE: a write-only `Writer` /
 > file-handle type in `std.io`.** Buffered + streaming write output, the escape hatch Chezzi's unbuffered

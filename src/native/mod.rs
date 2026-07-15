@@ -368,9 +368,11 @@ pub fn is_blocking(name: &str) -> bool {
         // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
         // `request`/`put`/`patch`/`delete`/`head` are the verb wrappers + the general header-carrying
         // call; `request` offloads its `map[str, str]` headers via `NativeArg::Map` (off-heap-safe).
+        // `get_bytes` is the binary-download twin of `get` (str arg, `Ok(Bytes)`/`Err` primitive
+        // return — off-heap-safe); it MUST offload too or a slow/large download pins a core worker.
         // `run`/`run_args` are the structured subprocess forms (alongside `cmd`); `run_args` offloads
         // its `list[str]` argv via `NativeArg::List` (off-heap-safe).
-        | "get" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
+        | "get" | "get_bytes" | "post" | "request" | "put" | "patch" | "delete" | "head" | "cmd" | "run" | "run_args"
     )
 }
 
@@ -800,6 +802,20 @@ mod tests {
     fn is_blocking_flags_new_request_verbs() {
         for name in ["request", "put", "patch", "delete", "head"] {
             assert!(is_blocking(name), "{name} should be blocking");
+        }
+    }
+
+    /// EVERY `std.request` member does a blocking `ureq` HTTP call, so ALL of them must be flagged by
+    /// [`is_blocking`] — else the offload gate + cancel checkpoint skip them and they pin a core worker
+    /// under the M:N engine. Iterating MEMBERS (not a hand-copied name list) makes a future verb that
+    /// forgets the classifier fail here instead of silently starving the scheduler.
+    #[test]
+    fn is_blocking_flags_every_request_member() {
+        for (name, _) in native_members("std.request") {
+            assert!(
+                is_blocking(name),
+                "std.request member {name} must be blocking"
+            );
         }
     }
 
