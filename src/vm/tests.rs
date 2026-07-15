@@ -6627,6 +6627,67 @@ main()";
     assert_eq!(run(src), "5\n");
 }
 
+// ----- struct patterns in `match` (L2) -----
+
+#[test]
+fn struct_match_binds_fields() {
+    let src = "\
+struct Point:
+    x: int
+    y: int
+fn main():
+    p := Point(1, 2)
+    match p:
+        Point(a, b):
+            print(a)
+            print(b)
+main()
+";
+    assert_mc_parity(src, "1\n2\n");
+}
+
+#[test]
+fn struct_match_generic_and_nested() {
+    // Generic field (`Box[T]` → `v:int`) + nested struct field (`Line(Point(x,y), _)`) both bind.
+    let src = "\
+struct Box[T]:
+    v: T
+struct Point:
+    x: int
+    y: int
+struct Line:
+    a: Point
+    b: Point
+fn main():
+    match Box(7):
+        Box(v): print(v)
+    l := Line(Point(3, 4), Point(5, 6))
+    match l:
+        Line(Point(x, y), _): print(x + y)
+main()
+";
+    assert_mc_parity(src, "7\n7\n");
+}
+
+#[test]
+fn struct_match_literal_field_refutable() {
+    // A literal-field arm `Point(0, y)` is refutable → needs a trailing `_`.
+    let src = "\
+struct Point:
+    x: int
+    y: int
+fn describe(p: Point) -> str:
+    match p:
+        Point(0, y): return \"on-y-axis\"
+        _: return \"off-axis\"
+fn main():
+    print(describe(Point(0, 5)))
+    print(describe(Point(3, 5)))
+main()
+";
+    assert_mc_parity(src, "on-y-axis\noff-axis\n");
+}
+
 // ----- field / index -----
 
 #[test]
@@ -12499,6 +12560,18 @@ fn golden_match_nested_chz_matches_expected_and_interp() {
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
     assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
+}
+
+/// L2 golden: `examples/match_struct.chz` (struct positional destructuring in `match` — single-arm
+/// exhaustive, literal fields + a whole-value catch-all binding, a generic `Box[int]` field, and a
+/// nested `Line(Point(..), Point(..))`) is byte-identical on both VM engines and its `.expected`.
+#[test]
+fn golden_match_struct_chz_matches_expected_and_parity() {
+    let src = include_str!("../../examples/match_struct.chz");
+    let expected = include_str!("../../examples/match_struct.expected");
+    let vm_out = run_capture(src).expect("vm run");
+    assert_eq!(vm_out, expected);
+    assert_eq!(vm_out, run_capture_parallel(src).expect("M:N run"));
 }
 
 /// Match-guard golden: `examples/match_guard.chz` (`pattern if cond:` arms, expr + stmt forms)

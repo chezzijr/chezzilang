@@ -1831,10 +1831,11 @@ match safe_div(10, 2):
     Err(e): print("failed: {e}")
 ```
 
-A scrutinee can also be an **int/str/bool** (literal arms + a required `_` wildcard) or a **tuple**.
-Patterns **nest**: a variant payload or tuple element may itself be a binding, a literal, a wildcard,
-a tuple, or another variant — including a **nested nullary variant** like the `None` in `Some(None)`
-(a refutable variant match, not a binding).
+A scrutinee can also be an **int/str/bool** (literal arms + a required `_` wildcard), a **tuple**, or
+a **struct** (destructured positionally — see below). Patterns **nest**: a variant payload, tuple
+element, or struct field may itself be a binding, a literal, a wildcard, a tuple, a struct, or another
+variant — including a **nested nullary variant** like the `None` in `Some(None)` (a refutable variant
+match, not a binding).
 
 ```chezzi
 match point:                  # tuple scrutinee
@@ -1851,6 +1852,34 @@ match nested:                 # nested nullary variant — the bare `None` MATCH
     Some(Some(v)): "value {v}"  # (one arm per outer variant; refine the rest with `_`)
     _:             "outer none"
 ```
+
+A **struct** scrutinee destructures by **positional field binding**, mirroring an enum-variant pattern
+— the constructor name is the struct's own name, and each position binds the field in declaration
+order. A struct has exactly **one** constructor, so a lone all-binding `Point(x, y)` arm is
+**irrefutable** and closes the match with **no `_`** needed. Struct patterns **nest** (`Line(Point(x,
+y), _)`), instantiate generics (`Box(v)` on a `Box[int]` binds `v: int`), and admit refutable literal
+fields (`Point(0, y)` — which, like any refutable arm, needs a trailing `_` or a whole-value catch-all
+binding):
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+
+match p:
+    Point(x, y): "at {x},{y}"       # single all-binding arm — exhaustive, no `_`
+
+match p:
+    Point(0, 0): "origin"
+    Point(0, y): "on the y axis"
+    rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
+```
+
+Struct patterns are **bare-only** in v1 (a qualified `mod.Point(x, y)` pattern is a clean error), and
+only **user** structs destructure — a native/reserved struct handle (`Socket`, `Ref`, a `regex.Match`)
+does not. A wrong constructor name, or a field-count mismatch (`Point(x)` on a two-field struct), is a
+clean **checker** error, never a runtime panic. (`let`-destructuring of a struct — `let Point(x, y) =
+p` — and struct destructuring in **fn params** are not yet supported; use a `match`.)
 
 **Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
 work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(1 | 2)`). Every alternative must

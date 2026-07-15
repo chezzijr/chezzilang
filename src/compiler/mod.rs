@@ -2663,6 +2663,46 @@ impl Compiler {
         Some((en, name.to_string()))
     }
 
+    /// The IDENTITY KEY of a bare struct pattern `Point(x, y)` in the current module, if `name`
+    /// resolves (via `bare_types`) to a registered STRUCT (not an enum variant). `None` for a
+    /// qualified pattern (a struct pattern is bare-only in v1), an enum variant, or an unknown name.
+    /// This is what separates a struct pattern from an enum-variant pattern at lowering time (L2).
+    fn struct_key_of_pattern(&self, enum_name: Option<&str>, name: &str) -> Option<String> {
+        if enum_name.is_some() || self.variant_pair(enum_name, name).is_some() {
+            return None;
+        }
+        let key = self.bare_types.get(name)?;
+        self.program.structs.contains_key(key).then(|| key.clone())
+    }
+
+    /// Whether an arm pattern is a GENUINE enum-variant pattern (so `compile_match_general` must
+    /// emit the `EnsureEnum` scrutinee guard). A `Pattern::Variant` is NOT one when it resolves to a
+    /// struct (`Point(x, y)`, L2) or is a bare whole-value catch-all binding (`rest:` — no qualifier,
+    /// no payload, not a registered variant). Everything else (a payload/qualified/nullary-variant
+    /// arm) needs the guard.
+    fn pattern_needs_enum(&self, p: &Pattern) -> bool {
+        let Pattern::Variant {
+            name,
+            bindings,
+            enum_name,
+            ..
+        } = p
+        else {
+            return false;
+        };
+        if self
+            .struct_key_of_pattern(enum_name.as_deref(), name)
+            .is_some()
+        {
+            return false;
+        }
+        // Bare whole-value catch-all binding — binds, never tests an enum tag.
+        if enum_name.is_none() && bindings.is_empty() && self.variant_pair(None, name).is_none() {
+            return false;
+        }
+        true
+    }
+
     /// Whether `(enum_name, name)` is a registered NULLARY variant (`None`, a user enum's
     /// empty-payload variant). A nested bare `Ident` naming a built-in nullary variant is a refutable
     /// variant match (the checker has promoted it), not a binding — routed by the same registry the
@@ -2782,12 +2822,12 @@ impl Compiler {
         let scrut = fc.add_hidden();
         fc.emit_hidden_set(scrut, span);
         // Variant matches keep the `EnsureEnum` guard so a non-enum scrutinee (possible only when
-        // the checker couldn't infer the type) is a clean runtime error, not a panic. Tuple matches
-        // need no such guard.
-        if arms
-            .iter()
-            .any(|a| matches!(a.pattern(), Pattern::Variant { .. }))
-        {
+        // the checker couldn't infer the type) is a clean runtime error, not a panic. Tuple AND
+        // struct matches need no such guard — a struct pattern `Point(x, y)` AND a bare whole-value
+        // catch-all binding (`rest:`) are both `Pattern::Variant`, so only a GENUINE enum-variant arm
+        // arms the guard. Else a struct-only match would emit `Op::EnsureEnum` and fault at runtime
+        // (the checker-superset trap, L2).
+        if arms.iter().any(|a| self.pattern_needs_enum(a.pattern())) {
             fc.emit(Op::EnsureEnum(scrut), scrutinee.span);
         }
         let mut end_jumps = Vec::new();
@@ -2905,6 +2945,39 @@ impl Compiler {
                 enum_name,
                 ..
             } => {
+                // Struct pattern (L2): `Point(x, y)` destructures a struct by DECLARED FIELD NAME.
+                // A struct has one constructor, so this is structurally IRREFUTABLE — no `MatchArm`
+                // tag test, no fail-jump of its own; refutable SUB-patterns (`Point(0, y)`) push their
+                // own fails when they recurse. Mirrors the `Pattern::Tuple` arm but keys `GetField` on
+                // the field name instead of a numeric index (the VM resolves both the same way).
+                if let Some(key) = self.struct_key_of_pattern(enum_name.as_deref(), name) {
+                    let field_names = self.program.structs[&key].fields.clone();
+                    for (b, fname) in bindings.iter().zip(field_names.iter()) {
+                        fc.emit_hidden_get(scrut, span);
+                        fc.emit(
+                            Op::GetField {
+                                name: fname.clone(),
+                                ic: NO_IC,
+                            },
+                            span,
+                        );
+                        let elem = fc.add_hidden();
+                        fc.emit_hidden_set(elem, span);
+                        self.emit_pattern(fc, b, elem, fails, span)?;
+                    }
+                    return Ok(());
+                }
+                // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) — only
+                // reachable in a struct match (the checker gates the bare binding there; enum/tuple
+                // scrutinees require `_`). Bind the scrutinee like a plain `Pattern::Ident`.
+                if enum_name.is_none()
+                    && bindings.is_empty()
+                    && self.variant_pair(None, name).is_none()
+                {
+                    fc.emit_hidden_get(scrut, span);
+                    fc.emit_decl_named(name.clone(), span);
+                    return Ok(());
+                }
                 // One slot per payload element, written positionally by `MatchArm`. An UNBOXED plain
                 // `Ident` binding names its slot directly (so `Some(c)` binds `c` with no copy); a
                 // BOXED plain ident (captured by a closure in the arm) needs a cell, but `MatchArm`

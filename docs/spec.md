@@ -38,7 +38,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 `Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol).
 
 **Included:**
-- **Pattern matching** — `match` on enums (also int/str/bool + tuple scrutinees), exhaustiveness-checked.
+- **Pattern matching** — `match` on enums (also int/str/bool + tuple + **struct** scrutinees),
+  exhaustiveness-checked. A struct destructures **positionally** (`Point(x, y)` binds the fields in
+  declaration order); a struct has one constructor, so a lone all-binding arm is irrefutable (no `_`).
   Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
   alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, but the
   open int/str/bool domains — including `true | false` — still require a `_`). User-enum variants are

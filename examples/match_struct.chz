@@ -1,0 +1,50 @@
+# examples/match_struct.chz — struct patterns in `match` (L2).
+#
+# A struct value destructures in a match arm by positional field binding, mirroring enum-variant
+# patterns. A struct has exactly ONE constructor, so a lone all-binding `Point(x, y)` arm is
+# irrefutable — no `_` needed. Refutable arms (a literal field `Point(0, y)`) still need a catch-all.
+
+struct Point:
+    x: int
+    y: int
+
+# Single all-binding arm — irrefutable, exhaustive with no `_`.
+fn manhattan(p: Point) -> int:
+    match p:
+        Point(x, y): return x + y
+
+print(manhattan(Point(3, 4)))
+
+# Literal + nested-binding fields, with a whole-value catch-all binding.
+fn describe(p: Point) -> str:
+    return match p:
+        Point(0, 0): "origin"
+        Point(0, y): "on y at {y}"
+        Point(x, 0): "on x at {x}"
+        rest: "point {rest.x},{rest.y}"
+
+print(describe(Point(0, 0)))
+print(describe(Point(0, 5)))
+print(describe(Point(3, 0)))
+print(describe(Point(3, 4)))
+
+# Generic struct — the bound field takes the instantiated type (`Box[int]` ⇒ `v: int`).
+struct Box[T]:
+    v: T
+
+fn unbox(b: Box[int]) -> int:
+    match b:
+        Box(v): return v
+
+print(unbox(Box(42)))
+
+# Nested struct field: destructure a `Point` inside a `Line` in one arm.
+struct Line:
+    a: Point
+    b: Point
+
+fn span(l: Line) -> int:
+    match l:
+        Line(Point(x1, y1), Point(x2, y2)): return (x2 - x1) + (y2 - y1)
+
+print(span(Line(Point(1, 1), Point(4, 6))))

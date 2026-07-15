@@ -488,12 +488,22 @@ is coherent.
 `List` works, ~8 native methods) — but **deprioritized**: `match`/`?` is the intended surface, and L3 (the
 one thing L1 methods would have "unblocked") is itself won't-do, so there is no downstream forcing it.
 
-### L2. No struct patterns in `match`, no struct destructuring
-`match p: Point(x, y):` → *"variant pattern 'Point' cannot match a value of type Point"*. Patterns are
-variant / tuple / literal / range / binding only; let-destructuring is tuple-only; no destructuring in
-fn params. **Enums destructure and structs don't — the asymmetry is arbitrary.** (Python 3.10 class
-patterns; Rust/Go destructuring.) Medium, and cheap at the VM (struct fields are already a positional
-`Vec`).
+### L2. No struct patterns in `match` — **struct match-patterns FIXED (2026-07-15); let/fn-param destructuring still deferred**
+**Struct patterns in `match` now work**: `match p: Point(x, y):` binds the fields positionally, mirroring
+enum-variant patterns (a struct has exactly ONE constructor, so a lone all-binding `Point(x, y)` arm is
+irrefutable ⇒ exhaustive with no `_`). Nested (`Line(Point(x, y), _)`), generic (`Box(v)` on `Box[int]`
+binds `v: int`), literal fields (`Point(0, y)` — refutable, needs a `_`/catch-all), and a whole-value
+catch-all binding (`rest:`) all work. Arity/wrong-constructor/qualified-pattern are clean checker errors,
+never runtime panics. Bare-only (a qualified `mod.Point(x, y)` pattern is rejected). Reserved/native struct
+handles (Socket/Ref/Match/…) are **not** destructurable (checker-gated to `StructOrigin::User`, so the
+compiler never sees a struct pattern it can't lower). Example: `examples/match_struct.chz`. Landed as a
+checker + pattern-compile + VM-lowering change reusing the enum-variant `Pattern::Variant` node (no new AST
+node/opcode): `MatchKind::Struct` + `struct_fields_of` (checker/sig.rs), the Struct arms in
+`bind_match_arm`/`bind_subpattern`/`check_exhaustive` (checker/pattern.rs), and `struct_key_of_pattern` +
+the refined `EnsureEnum` guard + the `emit_pattern` struct branch (compiler/mod.rs).
+**Still deferred:** `let`-destructuring is tuple-only (`let Point(x, y) = p` — `StmtKind::Let` carries
+`names: Vec<String>`, not a `Pattern`, so it needs a separate parser+AST+let-lowering seam, not this one);
+no destructuring in fn params. (Python 3.10 class patterns; Rust/Go destructuring.)
 
 ### L3. Error handling: no conversion, no wrapping, no discrimination — **WON'T-DO (2026-07-15)**
 **FIRST, the correction that scoped this down (2026-07-15):** a concrete error type WIDENS to the

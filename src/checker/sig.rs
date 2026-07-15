@@ -3658,6 +3658,16 @@ impl Checker {
             Ty::Str => MatchKind::Literal(Ty::Str),
             Ty::Bool => MatchKind::Literal(Ty::Bool),
             Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
+            // A USER struct scrutinee (L2) matches positional field patterns (`Point(x, y)`). Gated
+            // to user-declared structs via `struct_fields_of`: a native/reserved handle
+            // (Socket/Ref/Iterator — a `Ty::Struct` with a `struct_shape` but `StructOrigin::Builtin`)
+            // is NOT bare-destructurable by the compiler, so it stays on the `other =>` reject below —
+            // never a pattern the checker accepts but the compiler can't lower (the checker-superset
+            // trap). Fields are already instantiated (generic `Box[int]` → field `int`, not `T`).
+            Ty::Struct(name, _) if self.struct_fields_of(&sty).is_some() => MatchKind::Struct {
+                label: name.clone(),
+                fields: self.struct_fields_of(&sty).unwrap_or_default(),
+            },
             // Un-inferable scrutinee: rather than skip exhaustiveness outright (a soundness hole),
             // reconstruct a concrete kind from the arm patterns when they unambiguously name a single
             // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
@@ -3800,5 +3810,23 @@ impl Checker {
             ])),
             _ => None,
         }
+    }
+
+    /// The INSTANTIATED positional field types of a USER struct (`Ty::Struct`) — the shape a struct
+    /// pattern `Point(x, y)` binds against (L2). Returns `None` for anything that is not a
+    /// user-declared struct: non-struct types, and — crucially — native/reserved struct handles
+    /// (`StructOrigin::Builtin`: Socket/Ref/Iterator/Match/…), whose fields the compiler cannot bare-
+    /// destructure. Gating here (not just in the compiler) keeps the checker from accepting a struct
+    /// pattern the compiler can't lower. Generic params are substituted (`Box[int]` → field `int`).
+    pub(super) fn struct_fields_of(&self, ty: &Ty) -> Option<Vec<Ty>> {
+        let Ty::Struct(name, targs) = ty else {
+            return None;
+        };
+        let info = self.struct_shape(name)?;
+        if info.origin != StructOrigin::User {
+            return None;
+        }
+        let map = struct_param_map(info, targs);
+        Some(info.fields.iter().map(|(_, t)| subst(t, &map)).collect())
     }
 }

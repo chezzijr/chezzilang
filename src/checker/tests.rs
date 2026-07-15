@@ -3364,6 +3364,74 @@ fn match_variant_arm_in_int_match_rejected() {
     );
 }
 
+// ----- struct patterns in `match` (L2) -----
+
+#[test]
+fn struct_match_single_arm_exhaustive_ok() {
+    // A struct has exactly ONE constructor, so a lone all-binding `Point(x, y)` arm is irrefutable
+    // ⇒ exhaustive with NO `_` needed.
+    ok(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point) -> int:\n    match p:\n        Point(a, b): return a + b\n",
+    );
+}
+
+#[test]
+fn struct_match_arity_short_rejected() {
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Point(a): print(a)\n",
+        "binds 2 field(s), but 1 given",
+    );
+}
+
+#[test]
+fn struct_match_arity_long_rejected() {
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Point(a, b, c): print(a)\n",
+        "binds 2 field(s), but 3 given",
+    );
+}
+
+#[test]
+fn struct_match_wrong_constructor_rejected() {
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Foo(a, b): print(a)\n",
+        "'Foo' is not a constructor of Point",
+    );
+}
+
+#[test]
+fn struct_match_literal_field_without_wildcard_rejected() {
+    // A refutable literal-field arm `Point(0, y)` does NOT close the domain — `_` is required.
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Point(0, y): print(y)\n",
+        "non-exhaustive match",
+    );
+}
+
+#[test]
+fn struct_match_generic_field_binds_instantiated_type_ok() {
+    // `Box[int]` field `v` must bind as `int` (not `Unknown`/`T`), so `v + 1` type-checks.
+    ok(
+        "struct Box[T]:\n    v: T\nfn f(b: Box[int]) -> int:\n    match b:\n        Box(v): return v + 1\n",
+    );
+}
+
+#[test]
+fn struct_match_nested_struct_field_ok() {
+    ok(
+        "struct Point:\n    x: int\n    y: int\nstruct Line:\n    a: Point\n    b: Point\nfn f(l: Line) -> int:\n    match l:\n        Line(Point(x, y), _): return x + y\n",
+    );
+}
+
+#[test]
+fn struct_match_qualified_pattern_rejected() {
+    // A qualified struct pattern is deferred (v1 is bare-only) — a clean error, not a mis-bind.
+    rejects(
+        "struct Point:\n    x: int\n    y: int\nfn f(p: Point):\n    match p:\n        Foo.Point(a, b): print(a)\n",
+        "qualified struct patterns are not supported",
+    );
+}
+
 #[test]
 fn match_literal_arm_in_enum_match_rejected() {
     let src = "enum Shape:\n    Circle(int)\n    Square(int)\n\

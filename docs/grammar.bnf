@@ -378,7 +378,10 @@
 # built-in Ok/Err/Some/None, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
 # (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
 # literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
-# nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>.
+# nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
+# `"IDENT" "LPAREN" <subpatterns> "RPAREN"` primary ALSO destructures a USER STRUCT positionally when
+# the scrutinee is that struct type (L2 — `Point(x, y)` binds the fields in declaration order); the
+# productions already admit it, so only the disambiguation is checker-side (struct vs enum variant).
 <pattern>     ::= <patternPrimary>
                 | <patternPrimary> "BITOR" <pattern>
 # A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped

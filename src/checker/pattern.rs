@@ -139,6 +139,36 @@ impl Checker {
                     Self::scrutinee_enum(ty),
                     span,
                 );
+                // A USER struct sub-pattern (L2): `Line(Point(x, y), _)` binds a nested struct field
+                // positionally. Tried BEFORE the enum path — a struct is not an enum, so `variants_of`
+                // returns `None` and would otherwise hit the reject below. The constructor name must
+                // match the struct's own name; arity must match. Irrefutable iff every sub-pattern is
+                // (a struct has one constructor, so `Point(a, b)` always matches its type).
+                if let Some(fields) = self.struct_fields_of(ty) {
+                    let Ty::Struct(sname, _) = ty else {
+                        unreachable!("struct_fields_of returned Some for a non-struct")
+                    };
+                    // Bare pattern name → identity key (see the top-level Struct arm).
+                    let is_ctor = self.bare_key(name) == *sname;
+                    let shown = crate::compiler::bare_display(sname);
+                    if !is_ctor {
+                        self.error(span, format!("'{name}' is not a constructor of {shown}"));
+                    } else if fields.len() != bindings.len() {
+                        self.error(
+                            span,
+                            format!(
+                                "struct '{shown}' binds {} field(s), but {} given",
+                                fields.len(),
+                                bindings.len()
+                            ),
+                        );
+                    }
+                    let mut sub_irref = true;
+                    for (b, t) in bindings.iter().zip(fields.iter()) {
+                        sub_irref &= self.bind_subpattern(b, t, span);
+                    }
+                    return is_ctor && fields.len() == bindings.len() && sub_irref;
+                }
                 match self.variants_of(ty) {
                     Some(vmap) => {
                         // A nested variant sub-pattern is irrefutable ONLY when its enum has exactly
@@ -607,6 +637,91 @@ impl Checker {
                     "a tuple scrutinee requires a tuple pattern (or `_`)".to_string(),
                 );
             }
+            MatchKind::Struct { label, fields } => {
+                self.push_scope();
+                match pattern {
+                    Pattern::Variant {
+                        name,
+                        bindings,
+                        enum_name,
+                        module_name,
+                    } => {
+                        // A struct has NO enum qualifier — a qualified `mod.Point(x, y)` /
+                        // `E.Point(x, y)` struct pattern is deferred (v1 is bare-only). Reject it
+                        // cleanly rather than silently mis-bind.
+                        if enum_name.is_some() || module_name.is_some() {
+                            self.error(
+                                span,
+                                format!(
+                                    "qualified struct patterns are not supported; write `{label}(...)`"
+                                ),
+                            );
+                            for b in bindings {
+                                self.bind_subpattern(b, &Ty::Unknown, span);
+                            }
+                            return false;
+                        }
+                        // The pattern name is BARE (`Point`); the `label` is the struct's module-
+                        // scoped identity key (`geo::Point` after a `check_graph` disambiguation) — so
+                        // resolve the bare name to its key before comparing (mirrors `variant_pair`).
+                        let is_ctor = self.bare_key(name) == *label;
+                        let shown = crate::compiler::bare_display(label.as_str());
+                        // A bare non-constructor name binding nothing is a whole-scrutinee catch-all
+                        // (`other:`), mirroring the literal/tuple bare-ident path — irrefutable, closes
+                        // the match. A bare name that IS a variant collides and is rejected so all
+                        // engines agree (same rule as the `MatchKind::Literal` path).
+                        if !is_ctor && bindings.is_empty() {
+                            if self.variant_owners.contains_key(name)
+                                || crate::checker::is_builtin_variant(name)
+                            {
+                                self.error(
+                                    span,
+                                    format!(
+                                        "'{name}' is a variant name and cannot bind a scrutinee of type {shown}; rename the binding"
+                                    ),
+                                );
+                                return false;
+                            }
+                            self.declare(name, Ty::Struct(label.clone(), Vec::new()));
+                            return true;
+                        }
+                        // A constructor pattern: the name must be the struct's own name, and the
+                        // field count must match (a clean checker error, never a runtime panic).
+                        if !is_ctor {
+                            self.error(span, format!("'{name}' is not a constructor of {shown}"));
+                        } else if fields.len() != bindings.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "struct '{shown}' binds {} field(s), but {} given",
+                                    fields.len(),
+                                    bindings.len()
+                                ),
+                            );
+                        }
+                        // Bind each positional field. A struct has ONE constructor, so a `label(..)`
+                        // arm whose every sub-pattern is irrefutable is itself irrefutable and closes
+                        // the match; a literal/nested-refutable field (`Point(0, y)`) keeps it open.
+                        let mut irref = is_ctor && fields.len() == bindings.len();
+                        for (b, t) in bindings.iter().zip(fields.iter()) {
+                            irref &= self.bind_subpattern(b, t, span);
+                        }
+                        return irref;
+                    }
+                    Pattern::Literal(_) => {
+                        self.error(span, format!("cannot match a literal against {label}"))
+                    }
+                    Pattern::Range { .. } => {
+                        self.error(span, format!("cannot match a range against {label}"))
+                    }
+                    Pattern::Tuple(_) => {
+                        self.error(span, format!("cannot match a tuple against {label}"))
+                    }
+                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
+                        unreachable!("ident/wildcard/or handled elsewhere")
+                    }
+                }
+            }
         }
         false
     }
@@ -652,6 +767,13 @@ impl Checker {
             MatchKind::Tuple(_) => {
                 // A tuple match is exhaustive only via an irrefutable arm (a `_`, or a tuple of
                 // all-binding sub-patterns). `has_wildcard` already captured that.
+                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+            }
+            MatchKind::Struct { .. } => {
+                // A struct has ONE constructor, so a single all-binding `Point(x, y)` arm is
+                // irrefutable and closes the match (`has_wildcard` already captured that). Reaching
+                // here means every arm was refutable (a literal/nested field like `Point(0, y)`) with
+                // no `_` — non-exhaustive.
                 self.error(span, "non-exhaustive match: add a `_` arm".to_string());
             }
         }
