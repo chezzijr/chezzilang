@@ -167,6 +167,22 @@ the process's unbuffered stdout while `buffered(...).flush()` is the real thing.
 `fs.append(path, text)` whole-file appender is untouched (no collision — `std.io` owns the handle verbs).
 **Deliberately out of scope (still open, separate IO §4 gaps):** reader / line-streaming of a large
 file; seek / random-access.
+**Follow-up — promote `Writer` to a structural protocol (Go `io.Writer` parity).** As shipped, `Writer`
+is a **sealed concrete native handle** (four `Backing` arms baked into the runtime), NOT an interface —
+so a user cannot implement their own writer (a `StringWriter`, `TeeWriter`, byte-count/limit wrapper, or
+test spy), which is one of the most-used Go patterns (`func(w io.Writer)` polymorphic over file /
+buffer / socket / gzip). This is **mild north-star drift** (Go's `io.Writer` is an interface; Chezzi's
+Go-analog is a structural protocol), not a bug — behavior is correct, the surface is just smaller. The
+right end state: a `protocol Writer` (write/write_bytes/flush/close) that the native handles *satisfy*,
+with `buffered(w: Writer)` polymorphic over the existential. **Cost, honestly:** the runtime is nearly
+free (method dispatch already keys on the heap variant `Obj::Writer`, `call.rs:1006` — not the static
+type, so an existential over a native handle dispatches unchanged); the work is checker-side —
+(1) the **unproven seam**: a native opaque handle satisfying a protocol *existential* + dispatching has
+no in-tree precedent (existentials today resolve over user structs + a `str→Error` intrinsic), so it
+could be a small arm or a rabbit hole — **spike it before committing**; (2) rewiring the ~7 reserved-name
+touch points (`Ty::Writer` → an internal concrete handle name, protocol `Writer` takes the name). **When
+to do it: YAGNI until a second implementer exists** (a user custom writer, or the `Reader` twin's
+symmetric design) — a protocol over a single native concrete family is ceremony with no payoff yet.
 **Known ceiling (mapped in-tree):** the stream queue is **unbounded** (`src/vm/stream.rs:26-27`, a
 `ponytail:` comment naming the same upgrade path) — a program printing faster than a stalled consumer
 drains grows memory without limit. Deliberate (never pin a core worker), but it is a real ceiling;
