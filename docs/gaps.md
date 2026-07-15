@@ -207,10 +207,17 @@ ordering to one shared handle is unspecified (two tasks race the file offset). R
 slow fifo, the same accepted ceiling `Writer.write` carries, `ponytail:` comment); type `Ty::Reader`
 gated by `import std.io`. So a big file can now be read **line/chunk-by-chunk** instead of slurped whole.
 Whole-file `read_file`/`read_bytes` (≤64 MB) untouched.
-**Deliberately out of scope (still open):** `lines() -> Iterator[str]` — the cursor model snapshots
-eagerly (would read the whole file, defeating streaming), so a lazy file-backed cursor is a distinct
-follow-up (a new `Obj` variant with its own GC/airlock story); loop `read_line()` for now. Also: seek /
-random-access; a `Reader` structural protocol (same YAGNI-until-a-second-implementer call as `Writer`).
+**Still open (small enabling work, NOT a new engine feature):** `lines() -> Iterator[str]`. Earlier
+notes claimed this needed "a new lazy `Obj` variant because the cursor snapshots eagerly" — that is
+**wrong**: a plain generator over `read_line()` (`fn lines(r): while true: match r.read_line(): ...
+yield`) streams lazily by construction and works TODAY in user code (verified, both engines). The real
+blocker to shipping it *in std.io* is packaging: std.io is a **file-backed native module that harvests
+only bodyless `native fn` decls**, so a real-bodied generator fn placed in `std/io.chz` isn't seen as a
+member; and a native struct can't carry a bodied method yet, so there's no `r.lines()` method form
+either. Enabling EITHER (harvest+run real-bodied fns from a file-backed native module, or bodied methods
+on native structs) is a small, bounded change that unblocks `lines()` and future std ergonomic wrappers.
+Also still open: seek / random-access; a `Reader` structural protocol (paired with the `Writer` one —
+that pairing is now the "second implementer", so schedule the protocol spike rather than YAGNI it).
 
 ### R3. No package manager — **the wall that keeps Chezzi author-only**
 `Manifest` is `{name, version, entrypoint}` (`src/manifest.rs`) and the parser **silently ignores**
