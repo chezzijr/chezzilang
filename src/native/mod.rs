@@ -149,9 +149,16 @@ impl Stdin {
                 }
             }
             Stdin::Real => {
-                let mut stdin = std::io::stdin();
+                // Take the process-stdin lock for the WHOLE scalar (as `read_line` does for a whole
+                // line): the lead byte and its continuation bytes MUST go to one reader atomically. A
+                // per-byte `std::io::stdin().read()` releases the lock between bytes, so a concurrent
+                // reader steals a continuation byte → a torn scalar / spurious not-UTF-8 fault under
+                // the M:N engine. The buffered bytes live on the global `Stdin`, shared with
+                // `read_line`, so unlocking at end of call loses nothing.
+                let stdin = std::io::stdin();
+                let mut lock = stdin.lock();
                 let mut first = [0u8; 1];
-                if stdin.read(&mut first).map_err(io_err)? == 0 {
+                if lock.read(&mut first).map_err(io_err)? == 0 {
                     return Ok(None); // clean EOF
                 }
                 // Classify the leading byte → total scalar length (1..=4); a continuation/invalid
@@ -167,7 +174,7 @@ impl Stdin {
                 bytes.push(first[0]);
                 for _ in 1..len {
                     let mut cont = [0u8; 1];
-                    if stdin.read(&mut cont).map_err(io_err)? == 0 {
+                    if lock.read(&mut cont).map_err(io_err)? == 0 {
                         return Err(not_utf8()); // truncated mid-scalar
                     }
                     bytes.push(cont[0]);

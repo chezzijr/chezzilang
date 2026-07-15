@@ -370,6 +370,62 @@ fn read_char_yields_whole_scalars_serial() {
     read_char_yields_whole_scalars(true);
 }
 
+const READ_CHAR_CONCURRENT_PROG: &str = "\
+import std.io
+fn drain():
+    while true:
+        match io.read_char():
+            Some(c): io.print(c)
+            None: break
+
+parallel:
+    spawn: drain()
+    spawn: drain()
+drain()
+";
+
+/// CONCURRENT `io.read_char()` on the REAL process stdin: three tasks each loop `read_char` over one
+/// shared stdin whose bytes are ALL multibyte scalars (`é` = 0xC3 0xA9). A read of one scalar must be
+/// atomic — the lead byte and its continuation go to ONE reader, never split across two. If `read_char`
+/// released the stdin lock between the lead and continuation byte, a second reader would grab the
+/// continuation (0xA9, a bare continuation byte) → a spurious `stdin: stream is not valid UTF-8` fault
+/// and/or a torn scalar. Assert: exit 0, and the multiset of emitted scalars is exactly N × `é`.
+/// M:N only (the race needs real worker threads); the serial engine runs natives atomically anyway.
+fn read_char_concurrent_atomic() {
+    const N: usize = 400;
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", READ_CHAR_CONCURRENT_PROG);
+    let mut child = spawn(&entry, false);
+    let mut stdin = child.stdin.take().unwrap();
+    let payload = "é".repeat(N).into_bytes(); // 0xC3 0xA9 × N, no ASCII, no newline
+    stdin.write_all(&payload).unwrap();
+    drop(stdin); // EOF
+    let out = child.wait_with_output().expect("wait");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a torn concurrent read faulted; exit: {:?}\nstderr:\n{stderr}",
+        out.status
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        N,
+        "lost/duplicated scalars; got {} lines",
+        lines.len()
+    );
+    assert!(
+        lines.iter().all(|l| *l == "é"),
+        "a scalar was torn into non-`é` output:\n{text}"
+    );
+}
+
+#[test]
+fn read_char_concurrent_atomic_mn() {
+    read_char_concurrent_atomic();
+}
+
 /// `child.wait()` with a deadline: `None` if the child is still running after `secs` (it is killed).
 fn wait_timeout(child: &mut Child, secs: u64) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
