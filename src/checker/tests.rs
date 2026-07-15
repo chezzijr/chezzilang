@@ -6473,7 +6473,20 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(fs.functions.get("exists").unwrap().ret, Ty::Bool);
     assert_eq!(fs.functions.get("size").unwrap().ret, Ty::result(Ty::Int));
     assert_eq!(fs.functions.get("mkdir").unwrap().ret, Ty::result(Ty::Nil));
-    assert_eq!(fs.functions.len(), 12);
+    // fs-trio (fs grab-bag): canonicalize -> Result[str], chmod(str,int) -> Result[nil], atomic_write.
+    assert_eq!(
+        fs.functions.get("canonicalize").unwrap().ret,
+        Ty::result(Ty::Str)
+    );
+    assert_eq!(
+        fs.functions.get("chmod").unwrap().params,
+        vec![Ty::Str, Ty::Int]
+    );
+    assert_eq!(
+        fs.functions.get("atomic_write").unwrap().ret,
+        Ty::result(Ty::Nil)
+    );
+    assert_eq!(fs.functions.len(), 15);
 }
 
 /// Hover doc preserved after migration: math.sqrt (and an io/os fn) still carry the authored blurb via
@@ -6507,7 +6520,7 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.io").len(), 15);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
-    assert_eq!(crate::native::native_members("std.fs").len(), 12);
+    assert_eq!(crate::native::native_members("std.fs").len(), 15);
     let consts: Vec<&str> = crate::native::native_consts("std.math")
         .iter()
         .map(|(n, _)| *n)

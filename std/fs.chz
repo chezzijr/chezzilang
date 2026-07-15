@@ -17,9 +17,16 @@ native fn is_file(path: str) -> bool
 native fn is_dir(path: str) -> bool
 native fn size(path: str) -> Result[int]
 native fn glob(pattern: str) -> Result[List[str]]
+# canonicalize resolves symlinks + `.`/`..` against the REAL filesystem (unlike the purely lexical
+# path.normalize) → an absolute real path; the path must EXIST (errs otherwise).
+native fn canonicalize(path: str) -> Result[str]
 native fn mkdir(path: str) -> Result[nil]
 native fn remove_file(path: str) -> Result[nil]
 native fn remove_dir(path: str) -> Result[nil]
 native fn rename(src: str, dst: str) -> Result[nil]
 native fn copy(src: str, dst: str) -> Result[nil]
 native fn append(path: str, text: str) -> Result[nil]
+# chmod sets unix permission bits (e.g. 0o755); unix-only (errs "chmod is unix-only" elsewhere).
+native fn chmod(path: str, mode: int) -> Result[nil]
+# atomic_write = write a same-dir temp then rename over `path` (crash-safe: never a half-written file).
+native fn atomic_write(path: str, contents: str) -> Result[nil]

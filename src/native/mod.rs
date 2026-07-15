@@ -361,8 +361,9 @@ pub fn is_blocking(name: &str) -> bool {
         // arg via `NativeArg::Bytes` (off-heap-safe: owned byte vec, primitive return).
         "read_file" | "write_file" | "read_bytes" | "write_bytes"
         // std.fs (all members are filesystem syscalls — reads + mutations)
-        | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob"
+        | "list_dir" | "exists" | "is_file" | "is_dir" | "size" | "glob" | "canonicalize"
         | "mkdir" | "remove_file" | "remove_dir" | "rename" | "copy" | "append"
+        | "chmod" | "atomic_write"
         // std.time
         | "sleep_ms"
         // std.request (network I/O) + std.process (subprocess) — D5 owe #1.
@@ -748,13 +749,17 @@ mod tests {
             "is_dir",
             "size",
             "glob",
-            // std.fs mutations — filesystem syscalls, off-heap-safe (only str args, primitive returns).
+            "canonicalize",
+            // std.fs mutations — filesystem syscalls, off-heap-safe (str args + `chmod`'s int mode,
+            // primitive returns; `NativeArg::Int`/`Str` both cross the off-heap boundary).
             "mkdir",
             "remove_file",
             "remove_dir",
             "rename",
             "copy",
             "append",
+            "chmod",
+            "atomic_write",
             "sleep_ms",
         ] {
             assert!(is_blocking(name), "{name} should be blocking");

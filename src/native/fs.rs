@@ -12,6 +12,11 @@
 
 use super::{Host, HostError, NativeFn, NativeRet, expect_args};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic sequence for `atomic_write`'s per-write temp filename (with the pid) — keeps concurrent
+/// atomic writes to the same directory from colliding on the temp name.
+static ATOMIC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Serializes the golden tests that drive `examples/fs_mutations.chz`, which all write the single
 /// fixed scratch dir `examples/.fs_scratch`. Held across a whole round-trip so the concurrent VM and
@@ -62,6 +67,66 @@ fn size(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     match std::fs::metadata(&path) {
         Ok(m) => Ok(NativeRet::Ok(Box::new(NativeRet::Int(m.len() as i64)))),
         Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+    }
+}
+
+/// Resolve symlinks and `.`/`..` to an absolute, real path via `std::fs::canonicalize`. Unlike the
+/// purely lexical `path.normalize` (no filesystem access), this hits the real filesystem and so
+/// REQUIRES the path to exist — a nonexistent path faults (recoverable `Result[str]` error).
+fn canonicalize(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "canonicalize", 1)?;
+    let path = h.arg_str(0)?;
+    match std::fs::canonicalize(&path) {
+        Ok(p) => Ok(NativeRet::Ok(Box::new(NativeRet::Str(
+            p.to_string_lossy().into_owned(),
+        )))),
+        Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+    }
+}
+
+/// Set a file's unix permission bits (e.g. `0o755`). Unix-only: the `mode` int is passed straight to
+/// `PermissionsExt::from_mode` (no masking — matches `std::fs`; caller owns out-of-range bits). On a
+/// non-unix target this always faults with "chmod is unix-only".
+fn chmod(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "chmod", 2)?;
+    let path = h.arg_str(0)?;
+    let mode = h.arg_int(1)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode as u32)) {
+            Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
+            Err(e) => Ok(NativeRet::Err(format!("{path}: {e}"))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        Ok(NativeRet::Err("chmod is unix-only".into()))
+    }
+}
+
+/// Atomically replace a file: write the contents to a temp file in the SAME directory as the target,
+/// then `rename` it over the target. `rename` is atomic only WITHIN one filesystem, so the temp being
+/// a sibling (not in `/tmp`) is load-bearing. On any error the temp is cleaned up and the fault is
+/// returned; the target is either the old contents or the new — never a half-written file.
+fn atomic_write(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "atomic_write", 2)?;
+    let path = h.arg_str(0)?;
+    let contents = h.arg_str(1)?;
+    let parent = Path::new(&path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let seq = ATOMIC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".chezzi_tmp{}_{seq}", std::process::id()));
+    match std::fs::write(&tmp, contents.as_bytes()).and_then(|()| std::fs::rename(&tmp, &path)) {
+        Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(NativeRet::Err(format!("{path}: {e}")))
+        }
     }
 }
 
@@ -213,7 +278,10 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("is_file", is_file),
     ("is_dir", is_dir),
     ("size", size),
+    ("canonicalize", canonicalize),
     ("glob", glob),
+    ("chmod", chmod),
+    ("atomic_write", atomic_write),
     ("mkdir", mkdir),
     ("remove_file", remove_file),
     ("remove_dir", remove_dir),
@@ -227,19 +295,22 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// A minimal str-only `Host` for exercising the fs mutation natives in isolation.
+    /// A minimal `Host` for exercising the fs natives in isolation. `strs` holds string args by
+    /// index; `ints` holds int args by index (only `chmod`'s mode arg today) so the same host serves
+    /// mixed str/int calls without a second type.
     #[derive(Default)]
     struct StrHost {
         strs: Vec<String>,
+        ints: std::collections::HashMap<usize, i64>,
     }
 
     impl Host for StrHost {
         fn arg_count(&self) -> usize {
-            self.strs.len()
+            self.strs.len() + self.ints.len()
         }
-        fn arg_int(&mut self, _i: usize) -> Result<i64, HostError> {
-            Err(HostError {
-                message: "no int args".into(),
+        fn arg_int(&mut self, i: usize) -> Result<i64, HostError> {
+            self.ints.get(&i).copied().ok_or(HostError {
+                message: "missing int arg".into(),
             })
         }
         fn arg_float(&mut self, _i: usize) -> Result<f64, HostError> {
@@ -247,8 +318,8 @@ mod tests {
                 message: "no float args".into(),
             })
         }
-        fn arg_is_int(&self, _i: usize) -> bool {
-            false
+        fn arg_is_int(&self, i: usize) -> bool {
+            self.ints.contains_key(&i)
         }
         fn arg_str(&mut self, i: usize) -> Result<String, HostError> {
             self.strs.get(i).cloned().ok_or(HostError {
@@ -279,6 +350,15 @@ mod tests {
     fn host(strs: &[&str]) -> StrHost {
         StrHost {
             strs: strs.iter().map(|s| s.to_string()).collect(),
+            ints: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Host for `chmod(path, mode)`: str at 0, int at 1.
+    fn host_path_mode(path: &str, mode: i64) -> StrHost {
+        StrHost {
+            strs: vec![path.to_string()],
+            ints: std::collections::HashMap::from([(1, mode)]),
         }
     }
 
@@ -392,5 +472,82 @@ mod tests {
         let name = "a".repeat(64); // no 'b' → never matches
         assert!(!wildcard_match(pat, &name));
         assert!(wildcard_match("*a*a*b", "aaaaaaab"));
+    }
+
+    /// Unwrap an `Ok(Str)` NativeRet's payload, else panic.
+    fn ok_str(r: NativeRet) -> String {
+        match r {
+            NativeRet::Ok(inner) => match *inner {
+                NativeRet::Str(s) => s,
+                other => panic!("expected Ok(Str), got Ok({other:?})"),
+            },
+            other => panic!("expected Ok(Str), got {other:?}"),
+        }
+    }
+
+    /// `canonicalize` resolves symlinks + `.`/`..` to the real absolute path (unlike the purely
+    /// lexical `path.normalize`). Unix-only symlink fixture.
+    #[cfg(unix)]
+    #[test]
+    fn fs_canonicalize_resolves_symlink() {
+        let tmp = TmpDir::new();
+        let target = tmp.join("target.txt");
+        std::fs::write(&target, "x").unwrap();
+        let link = tmp.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // canonicalize(link) resolves to the real target path.
+        let got = ok_str(canonicalize(&mut host(&[&link])).unwrap());
+        let want = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(got, want.to_string_lossy());
+        // A nonexistent path errs (canonicalize requires the path to exist).
+        assert!(is_err(
+            canonicalize(&mut host(&[&tmp.join("nope")])).unwrap()
+        ));
+    }
+
+    /// `chmod` sets the unix permission bits; a metadata read confirms them.
+    #[cfg(unix)]
+    #[test]
+    fn fs_chmod_sets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TmpDir::new();
+        let f = tmp.join("f");
+        std::fs::write(&f, "x").unwrap();
+        assert!(is_ok(chmod(&mut host_path_mode(&f, 0o644)).unwrap()));
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(is_ok(chmod(&mut host_path_mode(&f, 0o600)).unwrap()));
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // chmod on a missing path errs.
+        assert!(is_err(
+            chmod(&mut host_path_mode(&tmp.join("nope"), 0o644)).unwrap()
+        ));
+    }
+
+    /// `atomic_write` writes the contents via a same-dir temp + rename, leaving no stray temp file.
+    #[test]
+    fn fs_atomic_write_writes_and_leaves_no_temp() {
+        let tmp = TmpDir::new();
+        let f = tmp.join("out.txt");
+        assert!(is_ok(atomic_write(&mut host(&[&f, "hello"])).unwrap()));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "hello");
+        // Overwrite atomically.
+        assert!(is_ok(atomic_write(&mut host(&[&f, "world"])).unwrap()));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "world");
+        // Exactly one entry named out.txt — proves the temp was same-dir + got renamed, not stranded.
+        let names: Vec<String> = std::fs::read_dir(&tmp.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["out.txt".to_string()]);
+        // A nonexistent parent dir errs.
+        assert!(is_err(
+            atomic_write(&mut host(&[&tmp.join("no/dir/x.txt"), "y"])).unwrap()
+        ));
     }
 }

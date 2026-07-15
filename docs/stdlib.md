@@ -397,7 +397,10 @@ entry task); no task is ever handed a false EOF.
 ### `std.fs`
 **Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·
 `is_file(path) -> bool` · `is_dir(path) -> bool` · `size(path) -> Result[int]` ·
-`glob(pattern) -> Result[List[str]]` (`*`/`?` in the final path component).
+`glob(pattern) -> Result[List[str]]` (`*`/`?` in the final path component) ·
+`canonicalize(path) -> Result[str]` — resolve symlinks + `.`/`..` against the **real filesystem** to
+an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
+and so **requires the path to exist** (`Err` on a nonexistent path).
 
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
@@ -409,7 +412,12 @@ non-empty dir — there is intentionally no silent `rm -rf`) ·
 `rename(from, to) -> Result[nil]` — move/rename a path ·
 `copy(from, to) -> Result[nil]` — copy a file's contents (file-only; the byte count is dropped) ·
 `append(path, contents) -> Result[nil]` — append a string to a file, creating it if absent and
-**never truncating** (complements `std.io.write_file`, which overwrites).
+**never truncating** (complements `std.io.write_file`, which overwrites) ·
+`chmod(path, mode: int) -> Result[nil]` — set unix permission bits (e.g. `0o755`). **Unix-only** (on a
+non-unix target it `Err`s `"chmod is unix-only"`); `mode` is passed unmasked to the OS ·
+`atomic_write(path, contents) -> Result[nil]` — write `contents` to a temp file in the **same
+directory** as `path`, then `rename` it over `path` (atomic within one filesystem). Crash-safe: a
+reader sees either the old contents or the new, never a half-written file.
 
 **Limit (v1):** recursive directory removal (`remove_dir_all` / `rm -rf`) is intentionally **not**
 provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. Walk + remove in Chezzi

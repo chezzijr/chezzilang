@@ -4,6 +4,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-15, `auto-task/fs-trio`) — `docs/gaps.md` fs grab-bag DONE: `canonicalize` +
+> `chmod` + `atomic_write` in `std.fs`.** Three pure blocking-OS natives in `src/native/fs.rs`, each
+> mirroring an existing fs native's idiom. `canonicalize(path) -> Result[str]` resolves symlinks +
+> `.`/`..` against the REAL filesystem to an absolute real path (requires the path to EXIST — distinct
+> from the purely-lexical `path.normalize`). `chmod(path, mode: int) -> Result[nil]` sets unix
+> permission bits via `set_permissions`/`PermissionsExt::from_mode`, `#[cfg(unix)]`-gated (non-unix arm
+> `Err`s `"chmod is unix-only"`); mode passed unmasked to the OS. `atomic_write(path, contents) ->
+> Result[nil]` writes a temp file in the SAME dir as the target then `rename`s over it (atomic within
+> one filesystem — a `/tmp` temp would break atomicity; a per-write pid+seq temp name avoids collision).
+> All three are in `native::is_blocking` (+ the offloadable-set test) so the M:N engine offloads them to
+> the dirty pool + fires the cancel checkpoint; `chmod`'s int mode crosses the off-heap boundary via
+> `NativeArg::Int`. Two-engine parity is automatic (pure blocking native, no scheduler). 3 new unit
+> tests (canonicalize resolves a real symlink + errs on nonexistent; chmod sets then metadata-read
+> confirms 0o644/0o600; atomic_write writes/overwrites + leaves exactly one entry — no stray temp).
+> Registered in `std/fs.chz` decls. Docs: `docs/stdlib.md` (§std.fs surface), `docs/gaps.md` (fs
+> grab-bag SHIPPED + metadata-READ still-missing note). Full `cargo test`/`clippy` green.
+>
 > **✅ STDLIB (2026-07-15, `auto-task/std-io-reader`) — `docs/gaps.md` R2b DONE: a read-only `Reader` /
 > file-handle type in `std.io`, the read twin of R2's `Writer`.** Line/chunk streaming of a large file
 > (past the 64 MB whole-file `read_file`/`read_bytes` cap). Opener `open(path)`, methods

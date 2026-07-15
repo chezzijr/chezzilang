@@ -362,8 +362,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   cap) now exists, the read twin of R2's `Writer`. Still missing: a lazy `lines() -> Iterator[str]`
   cursor (loop `read_line()` for now).
 - Read-all-stdin; char read.
-- fs: no `canonicalize`/`realpath` (`path.normalize` is purely lexical — no symlink resolution), no
-  `chmod`/executable bit, no atomic write (write-temp + rename).
+- **fs grab-bag — SHIPPED.** `fs.canonicalize(path) -> Result[str]` (resolves symlinks + `.`/`..`
+  against the real filesystem — requires the path to EXIST, distinct from the lexical `path.normalize`),
+  `fs.chmod(path, mode: int) -> Result[nil]` (unix permission bits, unix-only), and
+  `fs.atomic_write(path, contents) -> Result[nil]` (same-dir temp + `rename`, crash-safe) all now exist.
 
 ### 5. Numbers / math
 - `divmod`, `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`. `math.inf` / `math.nan` constants (only
@@ -387,7 +389,8 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   shells out with the real inherited process env — so under a synthetic host config `os.env("X")` is
   `None` while `process.cmd("echo $X")` prints the real value. Nobody has written this down.
 - fs: recursive `walk`, `remove_dir_all` (intentionally omitted today — see `stdlib.md §std.fs`),
-  metadata (mtime / permissions / size-struct).
+  metadata READ (mtime / permissions / size-struct). `fs.chmod` now SETS permission bits, but there is
+  still no metadata *reader* returning mtime/mode/size as a struct (`size()` returns only byte length).
 
 ### 7. Crypto / encoding
 - crypto: `sha256` / `sha256_bytes` (R1: hash binary data / a file) / `md5`. Missing `sha1` / `sha512`,
