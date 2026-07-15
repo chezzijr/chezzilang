@@ -3052,7 +3052,7 @@ mod sched;
 mod stmt;
 mod stream;
 
-pub use stream::{flush_stream, stream_error};
+pub use stream::{flush_stream, out_dead_reason, stream_error};
 
 /// D5 — the off-heap [`crate::native::Host`] for a blocking native run on the dirty pool (no `Vm`,
 /// no heap). It serves the pre-extracted primitive args ([`crate::native::NativeArg`]) and *panics*

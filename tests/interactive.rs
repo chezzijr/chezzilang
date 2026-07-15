@@ -702,3 +702,81 @@ fn stalled_reader_flush_does_not_starve_other_tasks_mn() {
 fn stalled_reader_flush_does_not_starve_other_tasks_serial() {
     stalled_reader_flush_does_not_starve_other_tasks(true);
 }
+
+/// gap N1: a FINITE program whose print(s) land in a pipe the reader already closed drops bytes but
+/// has no next `print` site to fault at (the VM finished queueing before the writer's EPIPE). On the
+/// old code the exit status was a race — 0 (VM outran the EPIPE, bytes silently dropped, SUCCESS) or
+/// 1 (writer won). It must now be DETERMINISTIC non-zero, matching Python's `BrokenPipeError`: the
+/// post-`flush_stream()` `out_dead_reason()` check in `main`. The reader is dropped at time 0, so the
+/// write is GUARANTEED to EPIPE (no race in the test) and the run must fail every time.
+fn last_print_into_closed_pipe_is_deterministically_nonzero(serial: bool) {
+    let t = TmpDir::new();
+    // A single print → exactly one write, no next print site: purest exercise of the post-flush path.
+    let entry = t.write("main.chz", "print(\"bye\")\n");
+    for _ in 0..30 {
+        let mut child = spawn(&entry, serial);
+        drop(child.stdout.take()); // reader gone before any byte is written → the write must EPIPE
+        let mut err = String::new();
+        let mut stderr = child.stderr.take().unwrap();
+        let status =
+            wait_timeout(&mut child, 20).expect("hung after a last print into a dead pipe");
+        let _ = stderr.read_to_string(&mut err);
+        assert!(status.code().is_some(), "killed by a signal: {status:?}");
+        assert!(
+            !status.success(),
+            "a last print into a closed pipe dropped bytes but reported SUCCESS: {status:?}"
+        );
+        assert!(
+            err.contains("stdout closed (broken pipe)"),
+            "the failure must name the cause (same phrase as a mid-program break); stderr:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn last_print_into_closed_pipe_is_deterministically_nonzero_mn() {
+    last_print_into_closed_pipe_is_deterministically_nonzero(false);
+}
+
+#[test]
+fn last_print_into_closed_pipe_is_deterministically_nonzero_serial() {
+    last_print_into_closed_pipe_is_deterministically_nonzero(true);
+}
+
+/// N1 no-regression (risk a): when the reader DRAINS every byte to EOF before closing (the reader
+/// read everything — nothing was dropped), NO write fails, OUT_DEAD stays unset, and the run must
+/// still exit 0. Proves the N1 fix does not over-fire on a clean finite run.
+fn fully_drained_output_stays_success(serial: bool) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", "for i in range(5):\n    print(i)\n");
+    for _ in 0..30 {
+        let mut child = spawn(&entry, serial);
+        // Drain stdout fully to EOF on a helper thread — the reader reads EVERYTHING, so no write
+        // ever fails. (Not via read_line-then-drop: that would manufacture a broken pipe.)
+        let out = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let mut rd = out;
+            let _ = rd.read_to_string(&mut s);
+            let _ = tx.send(s);
+        });
+        let status = wait_timeout(&mut child, 20).expect("clean finite run hung");
+        let got = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
+        assert!(
+            status.success(),
+            "a fully-drained clean run reported failure: {status:?} (stdout: {got:?})"
+        );
+        assert_eq!(got.lines().count(), 5, "output truncated: {got:?}");
+    }
+}
+
+#[test]
+fn fully_drained_output_stays_success_mn() {
+    fully_drained_output_stays_success(false);
+}
+
+#[test]
+fn fully_drained_output_stays_success_serial() {
+    fully_drained_output_stays_success(true);
+}

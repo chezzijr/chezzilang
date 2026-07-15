@@ -5070,7 +5070,15 @@ branch names) is in the git log.
   that kills the process discards the run's real outcome): it records, and the VM raises an ORDINARY
   runtime fault at its next `print` (`stdout closed (broken pipe)`). Policy — a closed stdout reader
   (`| head -1`) fails the run non-zero with a trace on the still-live stderr (Python raises
-  `BrokenPipeError` identically), and an endless printer stops instead of spinning on a dead pipe. The
+  `BrokenPipeError` identically), and an endless printer stops instead of spinning on a dead pipe. A
+  program's **LAST** print into a just-closed pipe has no *next* print site to fault at, so the in-VM
+  `stream_halt` never fired — the exit status used to be a nanosecond RACE (exit 0 if the VM outran the
+  writer's EPIPE, dropping the bytes and reporting SUCCESS; 1 if the writer won). **Fixed (N1, 2026-07-15):**
+  `cmd_run` re-checks `vm::out_dead_reason()` AFTER `flush_stream()` (which blocks on the writer ack, so
+  `OUT_DEAD` is final) and fails deterministically — outranked by a non-broken-pipe `stream_error` and by
+  `os.exit`, skipped when the VM already faulted (no double-report). Pinned by
+  `last_print_into_closed_pipe_is_deterministically_nonzero_{mn,serial}` (+ `fully_drained_output_stays_success_*`
+  for the no-regression clean case). The
   dead pipe must NOT borrow the `os.exit` channel to halt: that channel outranks a fault everywhere
   (`run_file_with_entry` discards the `Err` when `pending_exit` is set; `classify_mn_outcome` ranks
   `Exit` above `Fault`), so the first cut of this milestone turned a *faulting* run under `| head -1`
@@ -5088,11 +5096,12 @@ branch names) is in the git log.
   `benches/run.chz` unmoved (all within noise); an ad-hoc 200k-line print loop goes **0.048 s →
   0.101 s** (~2.1×: one write syscall per line + the queue handoff — a `BufWriter` would hide the
   syscall but break "a killed program retains its output"). New real-binary suite `tests/interactive.rs`
-  (26 tests, both engines: prompt-before-stdin, killed-program output, partial line visible with no
+  (34 tests, both engines: prompt-before-stdin, killed-program output, partial line visible with no
   flush, spawned-task print before join, order-insensitive concurrent lines, `from std.io import input`,
-  broken-pipe clean exit, fault-after-broken-pipe still reported, unwritable stdout reported, unwritable
-  stderr does not kill the run, both pipes closed terminates, stalled reader does not starve — with or
-  without `io.flush()`).
+  broken-pipe clean exit, fault-after-broken-pipe still reported, last-print-into-closed-pipe
+  deterministically non-zero (N1) + fully-drained clean run stays success, unwritable stdout reported,
+  unwritable stderr does not kill the run, both pipes closed terminates, stalled reader does not starve
+  — with or without `io.flush()`).
 
 - **`regex.Match.start`/`.end` are now CODEPOINT offsets (observable stdlib behavior change).** They
   were the `regex` crate's raw **byte** offsets while Chezzi slicing/indexing is codepoint-based and

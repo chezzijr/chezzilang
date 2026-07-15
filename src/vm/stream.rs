@@ -89,7 +89,7 @@ pub(super) fn write_out(s: &str) {
 /// Why the streamed stdout is dead, as the message of the fault a print site raises — `None` while it
 /// is healthy. A closed reader (`| head -1`) is the common case and reads as such; any other failure
 /// (ENOSPC, EBADF…) carries the OS error, so a truncated redirect can never look like a clean run.
-pub(super) fn out_dead_reason() -> Option<String> {
+pub fn out_dead_reason() -> Option<String> {
     if !OUT_DEAD.load(Ordering::Acquire) {
         return None;
     }

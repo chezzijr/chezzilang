@@ -52,8 +52,9 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
 - [N6g / C5](#n6g--open-c5-family-a-defer-that-recvs-from-a-live-sibling-cannot-park-on---serial) — a
   `defer` that must **park** (recv from a live sibling) can't, on `--serial` — needs a VM-driven defer
   drain, its own milestone.
-- [N1](#n1-a-last-print-into-a-just-closed-pipe-exits-0-or-1-nondeterministically--a-real-bug) — a last
-  `print` into a just-closed pipe exits 0-or-1 nondeterministically. Real, cheap, untouched this session.
+- [N1](#n1-a-last-print-into-a-just-closed-pipe-exits-0-or-1-nondeterministically--fixed-2026-07-15) **(FIXED
+  2026-07-15)** — a last `print` into a just-closed pipe exited 0-or-1 nondeterministically; now
+  deterministically non-zero (Python-matching) via a post-`flush_stream()` `out_dead_reason()` check in `cmd_run`.
 - [N2](#n2-socketwriteaccept-still-restart-their-timeout-budget-on-every-park--fixed-2026-07-15) **(FIXED)**,
   [N3](#n3-two-cosmetic-b1-leftovers) — small B1/socket residuals: N2 + N3(a) fixed 2026-07-15; N3(b) stays as-is by design.
 - [N5](#n5-a-genuine-deadlock-tears-tasks-down-without-running-their-defers--open) — a *genuine* deadlock
@@ -594,17 +595,35 @@ separately locked, so a task's `print` and `eprint` may reorder relative to each
 Found by the post-merge adversarial panel on the B1 merge. **Not** caused by it; none are blockers;
 each is recorded rather than silently carried.
 
-### N1. A last `print` into a just-closed pipe exits **0 or 1 nondeterministically** — a real bug
+### N1. A last `print` into a just-closed pipe exits **0 or 1 nondeterministically** — **FIXED (2026-07-15)**
 `stream_halt` (`src/vm/exec.rs`) is consulted **after** `emit_out` queues the line, and the EPIPE is
 discovered asynchronously on the writer thread (`src/vm/stream.rs`). So for the *same* run, a program
-whose final `print` lands in a pipe the reader just closed exits **0** (the VM's `Acquire` load wins →
-bytes silently dropped) or **1** (the writer's EPIPE lands first → `stdout closed (broken pipe)` fault).
-A ~nanosecond race decides which. **Python raises `BrokenPipeError` deterministically at write/flush.**
-This is the `runtime lies to the program` family again — and it is what made `tests/interactive.rs` flake
-(~1-in-N loaded; 5/60 pinned to one core). The TEST bug is fixed (`read_bytes_timeout` was itself
+whose final `print` lands in a pipe the reader just closed exited **0** (the VM's `Acquire` load wins →
+bytes silently dropped, SUCCESS) or **1** (the writer's EPIPE lands first → `stdout closed (broken pipe)`
+fault) — a ~nanosecond race decided which. Same physical outcome (a write failed, `OUT_DEAD` set), two
+exit codes. **Python raises `BrokenPipeError` deterministically at write/flush.** This is the
+`runtime lies to the program` family again — and it is what made `tests/interactive.rs` flake
+(~1-in-N loaded; 5/60 pinned to one core). The TEST bug was fixed earlier (`read_bytes_timeout` was
 manufacturing the broken pipe by dropping `ChildStdout` early, then asserting `success()` — it now drains
-to EOF). **The product race is NOT fixed** and nothing pins it. Fix = check `stream_halt` (or make the
-write synchronous enough to observe EPIPE) *before* declaring the print done. Small; own task.
+to EOF).
+
+**Fix.** `flush_stream()` in `cmd_run` (`src/main.rs`) already BLOCKS on the writer ack, so immediately
+after it `OUT_DEAD` is FINAL. A last print has no *next* print site, so the in-VM `stream_halt` never
+fires and `errored` stays `None`; `cmd_run` now re-checks `vm::out_dead_reason()` right after the existing
+`stream_error()` check and, when the VM did not already fault (`errored.is_none()`) and no `os.exit` was
+requested (`exit_code.is_none()`), fails the run non-zero with the same `stdout closed (broken pipe)`
+phrase. Precedence is preserved by PLACEMENT: a non-broken-pipe `stream_error` (ENOSPC, `> /dev/full`)
+still wins one line above; `os.exit(code)` still outranks (the guard + the block below); a VM that
+already faulted skips the check → no double-report. `out_dead_reason` was promoted `pub(super)` → `pub`
+and re-exported at `src/vm/mod.rs`. The fiber path is untouched (the check runs once at process exit), so
+the D5 `is_blocking` invariant and two-engine parity are unaffected. Verified: pre-fix a guaranteed-drop
+`print("bye") | true` exited **0** 100/100 (bug: dropped byte → SUCCESS) and `range(200) | head -1`
+split 125/75; post-fix the guaranteed-drop case exits non-zero 100/100 (Python exits 120 identically),
+`range(200) | head -1` is now deterministic *per physical outcome* (exit 1 ⟺ a broken-pipe diagnostic;
+exit 0 only when the kernel buffer absorbed everything → nothing dropped, Python-identical), the clean
+fully-drained run and `os.exit(3)`-after-print both still exit as before. Pinned by
+`last_print_into_closed_pipe_is_deterministically_nonzero_{mn,serial}` +
+`fully_drained_output_stays_success_{mn,serial}` (`tests/interactive.rs`).
 
 ### N2. `Socket.write`/`accept` still restart their timeout budget on every park — **FIXED (2026-07-15)**
 `write`/`write_bytes` and `accept` passed `timeout.map(|t| t.deadline)` — a deadline **recomputed on

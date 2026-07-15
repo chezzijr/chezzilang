@@ -329,6 +329,20 @@ fn cmd_run(args: &[String]) -> ExitCode {
         eprintln!("chezzi run: cannot write stdout: {e}");
         return ExitCode::FAILURE;
     }
+    // A last `print` into a just-closed pipe drops bytes but has NO next print site to fault at, so
+    // the in-VM `stream_halt` never fired and `errored` is None (gap N1). `flush_stream()` above
+    // blocked on the writer ack, so OUT_DEAD is now FINAL: fail deterministically instead of the old
+    // race (exit 0 if the VM outran the writer's EPIPE, 1 if it lost) — matching Python's
+    // `BrokenPipeError`. Outranked by a non-broken-pipe `stream_error` (handled just above) and by
+    // `os.exit` (the `exit_code.is_none()` guard + the block below); skipped when the VM already
+    // faulted (`errored.is_none()`), so no double-report. Same phrase as the mid-program fault.
+    if errored.is_none()
+        && exit_code.is_none()
+        && let Some(why) = vm::out_dead_reason()
+    {
+        eprintln!("chezzi run: {why}");
+        return ExitCode::FAILURE;
+    }
     // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
     if let Some(code) = exit_code {
         return ExitCode::from(code as u8);
