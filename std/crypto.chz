@@ -13,4 +13,14 @@ native fn sha256(s: str) -> str
 # SHA-256 of raw binary data — e.g. io.read_bytes(p) |> sha256_bytes. Takes a `bytes`; convert a
 # `bytearray` buffer with `bytes(ba)`.
 native fn sha256_bytes(b: bytes) -> str
+# SHA-1 (FIPS 180-4). NOT collision-resistant (SHAttered, 2017) — for git object ids / legacy
+# protocol interop / non-security checksums only, never signatures or integrity vs an adversary.
+native fn sha1(s: str) -> str
+native fn sha1_bytes(b: bytes) -> str
+# SHA-512 (FIPS 180-4).
+native fn sha512(s: str) -> str
+native fn sha512_bytes(b: bytes) -> str
 native fn md5(s: str) -> str
+# HMAC-SHA-256 (RFC 2104) — keyed message authentication. Both args are raw `bytes`; convert a
+# `str` with `bytes(s.encode())` or use a `b"..."` byte literal.
+native fn hmac_sha256(key: bytes, msg: bytes) -> str

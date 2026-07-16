@@ -683,12 +683,19 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
 gzip/zlib yet (a new dependency).
 
 ### `std.crypto`
-Hand-rolled digests (zero dependencies). Each hashes the str's UTF-8 bytes and returns the
-lowercase-hex digest as a `str` (always valid UTF-8 → infallible, no `Result`).
-`sha256(s) -> str` (FIPS 180-4) · `sha256_bytes(b: bytes) -> str` (same digest over raw bytes — a
-`bytes`; e.g. `io.read_bytes(p)` → hash a file) · `md5(s) -> str` (RFC 1321).
-**Security:** MD5 is **cryptographically broken** — use it only for checksums / legacy interop, never
-for passwords, signatures, or integrity against an adversary. *Pure CPU (no I/O); inline on every engine.*
+Hand-rolled digests + HMAC (zero dependencies). Each `str`-taking fn hashes the str's UTF-8 bytes and
+returns the lowercase-hex digest as a `str` (always valid UTF-8 → infallible, no `Result`); the
+`_bytes` twins hash raw `bytes` (e.g. `io.read_bytes(p)` → hash a file).
+`sha256(s) -> str` / `sha256_bytes(b: bytes) -> str` (FIPS 180-4) ·
+`sha1(s) -> str` / `sha1_bytes(b: bytes) -> str` (FIPS 180-4) ·
+`sha512(s) -> str` / `sha512_bytes(b: bytes) -> str` (FIPS 180-4) ·
+`md5(s) -> str` (RFC 1321) ·
+`hmac_sha256(key: bytes, msg: bytes) -> str` (HMAC-SHA-256, RFC 2104 — keyed message authentication;
+convert a `str` key/msg with a `b"..."` literal).
+**Security:** MD5 **and SHA-1** are **cryptographically broken** — use them only for checksums / git
+object ids / legacy interop, never for passwords, signatures, or integrity against an adversary.
+Password hashing (bcrypt/argon2) and secure random bytes/tokens are not yet provided.
+*Pure CPU (no I/O); inline on every engine.*
 
 ### `std.uuid`
 RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char

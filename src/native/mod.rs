@@ -848,7 +848,19 @@ mod tests {
             .iter()
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(cry, ["sha256", "sha256_bytes", "md5"]);
+        assert_eq!(
+            cry,
+            [
+                "sha256",
+                "sha256_bytes",
+                "sha1",
+                "sha1_bytes",
+                "sha512",
+                "sha512_bytes",
+                "md5",
+                "hmac_sha256"
+            ]
+        );
         let uid: Vec<&str> = native_members("std.uuid").iter().map(|(n, _)| *n).collect();
         assert_eq!(uid, ["v4", "uuid_seed"]);
 

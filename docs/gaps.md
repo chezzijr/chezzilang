@@ -38,7 +38,7 @@ still open: `iter.min`/`max`, `unique`/`dedup`/`chunk`/`windows`/`group_by`/`par
 seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty` +
 `setenv`/`chdir`/`getpid`/`environ`/`platform`/`hostname`/`home_dir`/`temp_dir` SHIPPED; signals/atexit
 + metadata-reader still open), §7
-(`sha1`/`sha512`/`hmac`, gzip; CSV SHIPPED), §8 (net depth), §9
+(secure-random/token + bcrypt/argon2, gzip; sha1/sha512/hmac_sha256 + CSV SHIPPED), §8 (net depth), §9
 (`strptime`), §10 (`std.db`, config formats; `bisect` + `memoize` SHIPPED), §11 (`std.process` `Child`).
 
 ## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
@@ -465,9 +465,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   still no metadata *reader* returning mtime/mode/size as a struct (`size()` returns only byte length).
 
 ### 7. Crypto / encoding
-- crypto: `sha256` / `sha256_bytes` (R1: hash binary data / a file) / `md5`. Missing `sha1` / `sha512`,
-  **`hmac`**, secure-random-bytes / token,
-  password hashing (bcrypt/argon2). All hand-rolled zero-dep today, so each is real work.
+- crypto: `sha256` / `sha256_bytes` / `sha1` / `sha1_bytes` / `sha512` / `sha512_bytes` / `md5`, plus
+  `hmac_sha256(key, msg)` (RFC 2104, over the SHA-256 primitive). Missing: secure-random-bytes / token,
+  password hashing (bcrypt/argon2); `hmac_sha1`/`hmac_sha512` not shipped (add if a caller needs them —
+  they want a block-size param + `&[u8]` adapters). All hand-rolled zero-dep today, so each is real work.
 - encoding: no gzip / zlib (new dependency). ~~no CSV~~ — **CSV SHIPPED** as a NEW pure-Chezzi module
   `std.csv` (`parse(text) -> List[List[str]]` / `format(rows) -> str`, RFC 4180 quote state machine,
   round-trip proven; `std/csv.chz`, NOT `std.encoding` which is file-backed native). Deferred v1

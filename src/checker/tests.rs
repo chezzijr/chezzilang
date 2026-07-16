@@ -7272,7 +7272,12 @@ fn crypto_fn_sigs_exact() {
     let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
         ("sha256", vec![Ty::Str], Ty::Str),
         ("sha256_bytes", vec![Ty::Bytes], Ty::Str),
+        ("sha1", vec![Ty::Str], Ty::Str),
+        ("sha1_bytes", vec![Ty::Bytes], Ty::Str),
+        ("sha512", vec![Ty::Str], Ty::Str),
+        ("sha512_bytes", vec![Ty::Bytes], Ty::Str),
         ("md5", vec![Ty::Str], Ty::Str),
+        ("hmac_sha256", vec![Ty::Bytes, Ty::Bytes], Ty::Str),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");
     for (name, params, ret) in &expected {
