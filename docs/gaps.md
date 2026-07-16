@@ -341,8 +341,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   cautionary tale. It also largely **obsoletes** the next bullet (`"{s:^10}"` is `center`).
 - `str.pad_right` / `center` / `ljust` / `rjust` / `zfill` — now only *method spellings* of what format
   specs already do. Downgraded: alias sugar, not a gap.
-- `str.capitalize` / `title` / `swapcase`. No `rsplit`, no `split` with a limit, no split-on-whitespace-run.
-- `str.find(sub, from_index)` (only `index_of` from 0).
+- ~~`str.capitalize` / `title` / `swapcase`. No `rsplit`, no `split` with a limit, no split-on-whitespace-run.~~
+  **SHIPPED** as `std.string` free fns (`std/string.chz`): `capitalize` / `title` / `swapcase` /
+  `rsplit` / `split(s, sep, maxsplit=-1)` / `split_whitespace` — Python semantics, free-fn-only.
+- ~~`str.find(sub, from_index)` (only `index_of` from 0).~~ **SHIPPED** as `std.string.find(s, sub,
+  from_index)`; `index_of` is now `find(s, sub, 0)`.
 
 ### 2. List / iter ergonomics — many small additive holes
 - `List.min` / `max` / `min_by` / `max_by`; `iter.min` / `max` (neither exists — only `cmp.min/max` of two).

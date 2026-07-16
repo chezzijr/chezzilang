@@ -55,17 +55,9 @@ fn ends_with(s: str, suffix: str) -> bool:
     return s[s.len() - suffix.len() : s.len()] == suffix
 
 # First index at which `sub` occurs in `s`, or -1 if absent (mirrors the native list `index_of`).
-# The empty substring is found at 0.
+# The empty substring is found at 0. Thin wrapper over `find` (the generalized from-index search).
 fn index_of(s: str, sub: str) -> int:
-    m := sub.len()
-    if m == 0:
-        return 0
-    i := 0
-    while i + m <= s.len():
-        if s[i : i + m] == sub:
-            return i
-        i += 1
-    return -1
+    return find(s, sub, 0)
 
 # Number of non-overlapping occurrences of `sub` in `s` (`count("aaa", "aa") == 1`). The empty
 # substring counts as 0 (no progress would be made enumerating it).
@@ -111,3 +103,133 @@ fn strip_suffix(s: str, p: str) -> str:
     if ends_with(s, p):
         return s[0 : s.len() - p.len()]
     return s
+
+# Is codepoint `c` cased? (has distinct upper/lower forms). ASCII letters + accented letters are
+# cased; digits, punctuation and whitespace are not. Reused by title/swapcase for case-detection.
+fn is_cased(c: str) -> bool:
+    return c.upper() != c.lower()
+
+# Python `str.capitalize`: first char upper, the rest lower ("hello WORLD" -> "Hello world").
+# Empty string is unchanged.
+# ponytail: ASCII-guaranteed; exotic case-folding follows Rust Unicode (ß->SS, dotted-I), may differ
+# from Python's codepoint behavior on those.
+fn capitalize(s: str) -> str:
+    if s.len() == 0:
+        return s
+    return s[0 : 1].upper() + s[1 : s.len()].lower()
+
+# Python `str.title`: upper-case the first cased char of each word, lower-case the rest. A "word"
+# boundary is any uncased char (space, digit, apostrophe): "they're" -> "They'Re".
+# ponytail: ASCII-guaranteed; full-Unicode case-folding follows Rust, may differ from Python.
+fn title(s: str) -> str:
+    out := ""
+    prev_cased := false
+    i := 0
+    while i < s.len():
+        c := s[i : i + 1]
+        if is_cased(c):
+            if prev_cased:
+                out = out + c.lower()
+            else:
+                out = out + c.upper()
+            prev_cased = true
+        else:
+            out = out + c
+            prev_cased = false
+        i += 1
+    return out
+
+# Python `str.swapcase`: upper-case chars become lower and vice-versa; uncased chars unchanged.
+# ponytail: ASCII-guaranteed; full-Unicode case-folding follows Rust, may differ from Python.
+fn swapcase(s: str) -> str:
+    out := ""
+    i := 0
+    while i < s.len():
+        c := s[i : i + 1]
+        if is_cased(c):
+            if c == c.lower():
+                out = out + c.upper()
+            else:
+                out = out + c.lower()
+        else:
+            out = out + c
+        i += 1
+    return out
+
+# First index at which `sub` occurs in `s` at or after `from_index`, or -1 if absent (Python
+# `str.find` with a start). A negative `from_index` counts from the end (`len + from_index`), clamped
+# to 0 if still negative; a `from_index` past the end returns -1 (except the empty substring, found at
+# a `from_index` == len). `index_of` is `find(s, sub, 0)`.
+fn find(s: str, sub: str, from_index: int) -> int:
+    n := s.len()
+    start := from_index
+    if start < 0:
+        start = n + start
+        if start < 0:
+            start = 0
+    if start > n:
+        return -1
+    m := sub.len()
+    if m == 0:
+        return start
+    i := start
+    while i + m <= n:
+        if s[i : i + m] == sub:
+            return i
+        i += 1
+    return -1
+
+# Split `s` on `sep` into at most `maxsplit + 1` pieces, from the left (Python `str.split(sep,
+# maxsplit)`). `maxsplit < 0` (the default) is unlimited. Consecutive separators yield empty pieces.
+# An empty `sep` faults (Python raises ValueError; mirrors `pad_left`'s empty-fill panic).
+fn split(s: str, sep: str, maxsplit: int = -1) -> List[str]:
+    if sep.len() == 0:
+        panic("split: sep must not be empty")
+    parts := s.split(sep)
+    if maxsplit < 0 or maxsplit >= parts.len() - 1:
+        return parts
+    out: List[str] = []
+    i := 0
+    while i < maxsplit:
+        out.push(parts[i])
+        i += 1
+    out.push(sep.join(parts[maxsplit : parts.len()]))
+    return out
+
+# Split `s` on `sep` from the RIGHT, at most `maxsplit + 1` pieces (Python `str.rsplit(sep,
+# maxsplit)`). `maxsplit < 0` (default) is unlimited and identical to `split`. Empty `sep` faults.
+fn rsplit(s: str, sep: str, maxsplit: int = -1) -> List[str]:
+    if sep.len() == 0:
+        panic("rsplit: sep must not be empty")
+    parts := s.split(sep)
+    if maxsplit < 0 or maxsplit >= parts.len() - 1:
+        return parts
+    keep := parts.len() - maxsplit
+    out: List[str] = []
+    out.push(sep.join(parts[0 : keep]))
+    i := keep
+    while i < parts.len():
+        out.push(parts[i])
+        i += 1
+    return out
+
+# Split `s` on runs of whitespace, dropping empty pieces (Python no-arg `str.split()`):
+# "  a  b " -> ["a", "b"], "" -> []. Whitespace is what the native `trim` treats as blank.
+# ponytail: whitespace class is Rust's Unicode White_Space (native trim), not byte-identical to
+# Python's str.isspace on a few exotic codepoints; ASCII whitespace is identical.
+fn split_whitespace(s: str) -> List[str]:
+    out: List[str] = []
+    cur := ""
+    i := 0
+    while i < s.len():
+        c := s[i : i + 1]
+        if c.trim() == "":
+            if cur.len() > 0:
+                out.push(cur)
+                cur = ""
+        else:
+            cur = cur + c
+        i += 1
+    if cur.len() > 0:
+        out.push(cur)
+    return out

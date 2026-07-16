@@ -660,8 +660,18 @@ Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 `ends_with(s, suffix)` · `index_of(s, sub) -> int` (or `-1`) · `count(s, sub) -> int` ·
 `replace(s, old, new)` · `strip_prefix(s, p)` · `strip_suffix(s, p)`.
 
-All of these except `is_empty` are also available as receiver methods on `str` (no import needed):
-`s.ends_with(x)` ≡ `text.ends_with(s, x)`. See the `str` method table in §2.
+**Ergonomics (free-fn-only — NOT receiver-method aliases, unlike the set above; Python `str` semantics):**
+- `capitalize(s) -> str` — first char upper, rest lower (`"hello WORLD"` → `"Hello world"`); `""` unchanged.
+- `title(s) -> str` — upper the first cased char of each word, lower the rest; any uncased char (space, digit, apostrophe) is a word boundary (`"they're"` → `"They'Re"`).
+- `swapcase(s) -> str` — flip the case of each cased char; uncased chars unchanged.
+- `find(s, sub, from_index) -> int` — first codepoint index of `sub` at or after `from_index`, `-1` if absent. Negative `from_index` counts from the end (`len + from_index`, clamped to `0`); `from_index` past the end → `-1` (empty `sub` → `from_index` up to `len`). `index_of(s, sub)` is exactly `find(s, sub, 0)`.
+- `split(s, sep, maxsplit = -1) -> List[str]` — split from the left into at most `maxsplit + 1` pieces; `maxsplit < 0` (default) is unlimited. Empty `sep` raises a recoverable `split: sep must not be empty` fault (Python `ValueError`).
+- `rsplit(s, sep, maxsplit = -1) -> List[str]` — as `split` but from the RIGHT; unlimited `maxsplit` is identical to `split`. Empty `sep` faults.
+- `split_whitespace(s) -> List[str]` — split on runs of whitespace, dropping empty pieces (Python no-arg `str.split()`): `"  a  b "` → `["a", "b"]`, `""` → `[]`.
+
+The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust (e.g. `ß`→`SS`) and may differ from Python. `split_whitespace`'s blank class is Rust's Unicode `White_Space` (native `trim`), byte-identical to Python on ASCII whitespace.
+
+`is_empty` aside, the FIRST list (`repeat`…`strip_suffix`) is also available as receiver methods on `str` (no import needed): `s.ends_with(x)` ≡ `text.ends_with(s, x)`. See the `str` method table in §2. The ergonomics fns above are `std.string`-only.
 
 ### `std.path` — unix path-STRING manipulation
 Pure string ops on **unix `/` paths** — **NO filesystem I/O** (that is `std.fs`). Separator policy:

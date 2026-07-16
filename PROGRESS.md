@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/string-ergonomics`) — `docs/gaps.md` §1: STRING ERGONOMICS in
+> `std.string`.** Seven pure-Chezzi free fns (zero Rust, no native method-table change), Python `str`
+> semantics: `capitalize` / `title` / `swapcase` / `find(s, sub, from_index)` /
+> `split(s, sep, maxsplit=-1)` / `rsplit(s, sep, maxsplit=-1)` / `split_whitespace`. `find` generalizes
+> `index_of` (negative `from_index` clamps to 0; past-end → -1; empty `sub` → clamped `from_index`) and
+> `index_of` is now `find(s, sub, 0)` (behavior-preserving; `golden_str_methods` unchanged). `title`/
+> `swapcase` reuse a shared `is_cased(c)` (`c.upper() != c.lower()`) helper; `split`/`rsplit` fault on
+> empty `sep` (Python `ValueError`); `split_whitespace` drops empties on whitespace runs. Free-fn-only
+> (NOT receiver-method aliases — no Rust seam). ASCII-guaranteed; exotic Unicode case-fold follows Rust.
+> Pure-Chezzi ⇒ serial-VM == M:N structurally. Tests: `examples/str_more.chz` + `.expected` extended
+> (`golden_str_more_via_run_file` + `assert_file_parity`, both engines). Docs: `docs/stdlib.md §std.string`,
+> `docs/gaps.md §1` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-16, `auto-task/contains-protocol`) — `docs/gaps.md` L5: the `Contains` operator
 > protocol (`x in my_struct`).** A user struct/enum with a `contains(self, item) -> bool` method makes
 > `x in that_value` dispatch to it, yielding `bool` (Python's `__contains__`, Go's idiom). Registered

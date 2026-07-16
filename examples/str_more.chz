@@ -33,4 +33,45 @@ fn main():
     print(text.strip_suffix("file.tmp", ".tmp"))
     print(text.strip_suffix("file.txt", ".tmp"))
 
+    # capitalize: first upper + rest lower, empty unchanged, safe-accent unicode.
+    print(text.capitalize("hello WORLD"))
+    print(text.capitalize(""))
+    print(text.capitalize("éMIGRÉ"))
+
+    # title: word-per-cap, apostrophe is a boundary, empty unchanged.
+    print(text.title("hello world"))
+    print(text.title("they're"))
+    print(text.title(""))
+
+    # swapcase: flip each cased char, digits unchanged, empty unchanged.
+    print(text.swapcase("Hello"))
+    print(text.swapcase("aB3c"))
+    print(text.swapcase(""))
+
+    # find: from an index, past-end -> -1, empty sub at/after end, negative clamps, unicode.
+    print(text.find("abcabc", "bc", 1))
+    print(text.find("abcabc", "bc", 5))
+    print(text.find("abc", "", 3))
+    print(text.find("abc", "", 4))
+    print(text.find("abcabc", "a", -2))
+    print(text.find("abcabc", "bc", -3))
+    print(text.find("日本語", "本", 0))
+
+    # split with maxsplit (piped for visibility): limited, 0, unlimited, over-cap.
+    print("|".join(text.split("a.b.c.d", ".", 2)))
+    print("|".join(text.split("a.b.c", ".", 0)))
+    print("|".join(text.split("a.b.c", ".")))
+    print("|".join(text.split("a.b", ".", 5)))
+
+    # rsplit: from the right, 2, 0, unlimited.
+    print("|".join(text.rsplit("a.b.c.d", ".", 1)))
+    print("|".join(text.rsplit("a.b.c.d", ".", 2)))
+    print("|".join(text.rsplit("a.b.c", ".", 0)))
+    print("|".join(text.rsplit("a.b.c", ".")))
+
+    # split_whitespace: runs collapse + empties dropped, empty -> [], mixed blanks.
+    print("|".join(text.split_whitespace("  a  b ")))
+    print(text.split_whitespace("").len())
+    print("|".join(text.split_whitespace("one\ttwo\nthree")))
+
 main()
