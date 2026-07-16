@@ -5068,6 +5068,19 @@ fn golden_memoize_via_run_file() {
     assert_file_parity("examples/memoize.chz");
 }
 
+/// `std.duration` — Go-like time spans (pure-Chezzi). `to_string`/`parse` across the shape space,
+/// parse round-trips, malformed → Err, accessors + arithmetic. Deterministic (no clock) → runs
+/// end-to-end on the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+#[test]
+fn golden_duration_via_run_file() {
+    let path = fixture("examples/duration.chz");
+    let expected = std::fs::read_to_string(fixture("examples/duration.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/duration.chz");
+}
+
 // ----- std.csv (gaps §7) — separate labeled block to shrink the hand-resolved conflict with the
 // concurrent std.os task also editing this file. -----
 /// `std.csv` — RFC 4180 parse/format round-trip over every hard case (embedded comma, `""` escaped

@@ -1,0 +1,232 @@
+# std.duration — Go-like first-class time spans (pure-Chezzi, no native seam).
+#
+# A pure-Chezzi dogfood module: NO native Rust. `Duration` is a plain user struct over a single int
+# of MILLISECONDS. Millis (not nanos) is the base unit deliberately: it matches `sleep_ms`/`timer(ms)`,
+# and an i64 of ms overflows only at ~292 million years (a Go nanos i64 caps at ~292 YEARS). The cost
+# is a SUB-MILLISECOND CEILING: microseconds/nanoseconds are unrepresentable — `parse("1us")` /
+# `parse("1ns")` are a clean Err, and a fractional literal below 1ms (e.g. "0.0005s") floors to 0ms.
+#
+# `to_string` emits Go's `time.Duration.String()` decimal-seconds shape: "1h30m0s", "1.5s", "250ms",
+# "0s", "-1.5s". `parse` is its inverse and also accepts the looser forms Go accepts ("1h30m", ".5s",
+# "0.25s", unordered/summed units). Round-trips exactly because the source is integer ms (fractions are
+# at most 3 decimals, exact). See docs/stdlib.md §5 for the full contract.
+
+import std.string as s
+import std.time as time
+
+# ---- the Duration value (access as duration.Duration) ----
+
+struct Duration:
+    ms: int    # milliseconds; sub-ms is unrepresentable (see header)
+
+    # Whole milliseconds (the exact stored value).
+    fn as_millis(self) -> int:
+        return self.ms
+
+    # Seconds as a float (float-convert BEFORE dividing — int `/` would truncate).
+    fn as_seconds(self) -> float:
+        return float(self.ms) / 1000.0
+
+    fn as_minutes(self) -> float:
+        return float(self.ms) / 60000.0
+
+    fn as_hours(self) -> float:
+        return float(self.ms) / 3600000.0
+
+    # self + other.
+    fn add(self, other: Duration) -> Duration:
+        return Duration(self.ms + other.ms)
+
+    # self - other.
+    fn sub(self, other: Duration) -> Duration:
+        return Duration(self.ms - other.ms)
+
+    # self scaled by an integer factor.
+    fn scale(self, k: int) -> Duration:
+        return Duration(self.ms * k)
+
+    # Go time.Duration.String() shape: "0s", "250ms", "1.5s", "1m30s", "1h0m0s", negatives prefixed "-".
+    fn to_string(self) -> str:
+        if self.ms == 0:
+            return "0s"
+        if self.ms < 0:
+            return "-" + _fmt_pos(-self.ms)
+        return _fmt_pos(self.ms)
+
+# ---- constructors (free fns, like Go's time.Millisecond * n idiom) ----
+
+fn millis(n: int) -> Duration:
+    return Duration(n)
+
+fn seconds(n: int) -> Duration:
+    return Duration(n * 1000)
+
+fn minutes(n: int) -> Duration:
+    return Duration(n * 60000)
+
+fn hours(n: int) -> Duration:
+    return Duration(n * 3600000)
+
+# ---- to_string helpers ----
+
+# Strip trailing zeros from a fractional-digit string, keeping at least one char. "500"->"5",
+# "050"->"05", "005"->"005". Callers only pass a non-all-zero string (rem==0 is handled separately),
+# so this never empties.
+fn _trim_trailing_zeros(x: str) -> str:
+    end := x.len()
+    while end > 1 and x[end - 1 : end] == "0":
+        end = end - 1
+    return x[0:end]
+
+# Format a strictly-positive ms count (sign handled by the caller).
+fn _fmt_pos(ms: int) -> str:
+    if ms < 1000:
+        return str(ms) + "ms"
+    total := ms / 1000            # whole seconds
+    rem := ms % 1000              # leftover millis (0..999)
+    h := total / 3600
+    m := (total % 3600) / 60
+    sec := total % 60
+    out := ""
+    if h > 0:
+        out = out + str(h) + "h"
+    if h > 0 or m > 0:
+        out = out + str(m) + "m"
+    if rem == 0:
+        out = out + str(sec) + "s"
+    else:
+        frac := _trim_trailing_zeros(s.pad_left(str(rem), 3, "0"))
+        out = out + str(sec) + "." + frac + "s"
+    return out
+
+# ---- parse (inverse of to_string; also accepts Go's looser forms) ----
+
+# True iff x is one or more ASCII digits (no sign/dot/ws). Guards every to_uint. (Copied from
+# datetime.chz — ponytail: a shared std.string.is_digits could dedupe; copying keeps duration
+# depending only on std.string, not the whole civil-calendar module.)
+fn _all_digits(x: str) -> bool:
+    if x.len() == 0:
+        return false
+    for c in x:
+        if c < "0" or c > "9":
+            return false
+    return true
+
+# ASCII digits -> non-negative int. Caller MUST _all_digits-guard first.
+fn _to_uint(x: str) -> int:
+    n := 0
+    for c in x:
+        n = n * 10 + (ord(c) - 48)
+    return n
+
+# Convert one magnitude token ("1", "1.5", ".5", "0.25") in the given unit (ms per unit) to millis,
+# flooring any sub-ms fraction. Clean Err on malformed input or i64-overflow-sized magnitudes.
+fn _num_ms(numstr: str, unit_ms: int) -> Result[int]:
+    parts := numstr.split(".")
+    intpart := parts[0]
+    frac := ""
+    if parts.len() == 2:
+        frac = parts[1]
+    elif parts.len() != 1:
+        return Err("malformed number '" + numstr + "'")
+    # A bare dot, or a trailing dot ("1."), is malformed.
+    if intpart == "" and frac == "":
+        return Err("malformed number '" + numstr + "'")
+    if parts.len() == 2 and frac == "":
+        return Err("malformed number '" + numstr + "'")
+    # Bound the integer part BEFORE the *unit_ms multiply: an oversized magnitude would overflow i64
+    # (a fault, not the clean Err the contract requires). 12 digits * 3_600_000 stays < i64::MAX.
+    if intpart != "":
+        if not _all_digits(intpart):
+            return Err("malformed number '" + numstr + "'")
+        if intpart.len() > 12:
+            return Err("duration out of range '" + numstr + "'")
+    whole := 0
+    if intpart != "":
+        whole = _to_uint(intpart) * unit_ms
+    frac_ms := 0
+    if frac != "":
+        if not _all_digits(frac):
+            return Err("malformed number '" + numstr + "'")
+        # Cap fractional precision at 9 digits (below 1ms floors to 0 anyway); keeps the product
+        # unit_ms * frac_num (<= 3_600_000 * 1e9 = 3.6e15) inside i64.
+        fd := frac
+        if fd.len() > 9:
+            fd = fd[0:9]
+        denom := 1
+        for _c in fd:
+            denom = denom * 10
+        frac_ms = unit_ms * _to_uint(fd) / denom
+    return Ok(whole + frac_ms)
+
+# Parse a Go-style duration string -> Duration. Accepts an optional leading '+'/'-', one or more
+# `<number><unit>` groups (units h/m/s/ms, unordered and summed), decimal magnitudes ("1.5h", ".5s"),
+# and a bare "0". Sub-ms units (us/ns/µs) and anything malformed are a clean Err.
+fn parse(input: str) -> Result[Duration]:
+    if input.len() == 0:
+        return Err("empty duration string")
+    cs := input.chars()      # O(n) index; never re-slice per char (the pure-Chezzi O(n^2) trap)
+    n := cs.len()
+    i := 0
+    neg := false
+    if cs[0] == "-" or cs[0] == "+":
+        neg = cs[0] == "-"
+        i = 1
+    if i >= n:
+        return Err("no digits in duration '" + input + "'")
+    # Go accepts a lone "0" (no unit).
+    if input[i:] == "0":
+        return Ok(Duration(0))
+    total := 0
+    i64_max := 9223372036854775807   # i64::MAX — the ms range ceiling (Chezzi has no int-max const)
+    while i < n:
+        # 1. magnitude: ASCII digits and at most one '.'
+        start := i
+        dots := 0
+        while i < n and ((cs[i] >= "0" and cs[i] <= "9") or cs[i] == "."):
+            if cs[i] == ".":
+                dots = dots + 1
+            i = i + 1
+        if i == start:
+            return Err("expected a number in '" + input + "'")
+        if dots > 1:
+            return Err("malformed number in '" + input + "'")
+        numstr := input[start:i]
+        # 2. unit: lowercase ASCII letters (µ in µs is not a-z, so us/µs/ns all fall through to Err)
+        ustart := i
+        while i < n and cs[i] >= "a" and cs[i] <= "z":
+            i = i + 1
+        unit := input[ustart:i]
+        unit_ms := 0
+        if unit == "ms":
+            unit_ms = 1
+        elif unit == "s":
+            unit_ms = 1000
+        elif unit == "m":
+            unit_ms = 60000
+        elif unit == "h":
+            unit_ms = 3600000
+        elif unit == "":
+            return Err("missing unit in '" + input + "'")
+        else:
+            return Err("unknown unit '" + unit + "' in '" + input + "'")
+        part := _num_ms(numstr, unit_ms)?
+        # `total` and `part` are both >= 0 here; guard the SUM against i64 overflow (the per-token
+        # bound in _num_ms only caps ONE magnitude — summing several oversized groups still overflows,
+        # which would be a fault, not the clean Err the contract requires). MAX - total >= part is safe.
+        if part > i64_max - total:
+            return Err("duration out of range '" + input + "'")
+        total = total + part
+    if neg:
+        total = -total
+    return Ok(Duration(total))
+
+# ---- clock convenience (imports native std.time; NOT part of the deterministic round-trip surface) ----
+
+# Elapsed Duration since a `time.monotonic()` reading (seconds, float). Floors to whole ms.
+fn since(start: float) -> Duration:
+    return Duration(int((time.monotonic() - start) * 1000.0))
+
+# Sleep for the given Duration (delegates to native sleep_ms; sub-ms already unrepresentable).
+fn sleep(d: Duration):
+    time.sleep_ms(d.ms)

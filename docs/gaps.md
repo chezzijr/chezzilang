@@ -20,6 +20,7 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 **SHIPPED (each de-staled in its own section above):**
 - **§1** — `std.string` ergonomics: `capitalize`/`title`/`swapcase`/`find(s,sub,from_index)`/`split(s,sep,maxsplit)`/`rsplit`/`split_whitespace` (pure-Chezzi). Confirmed-bug fixed pre-merge: `find` negative `from_index` clamped to 0 instead of Python's `len+from_index`.
 - **§9** — `datetime.parse_iso8601` (pure-Chezzi); `datetime` is no longer write-only. Fixed pre-merge: an unbounded year overflowed i64 → a *fault*; now a clean `Err` (≤9-digit guard).
+- **§9** — `std.duration` (new pure-Chezzi module): Go-like first-class `Duration` (int-ms), unit constructors/accessors/arithmetic, `to_string`/`parse` round-trip, `since`/`sleep`. Sub-ms → clean `Err`; magnitude bounded (≤12-digit int) to keep an oversized parse a clean `Err` not an i64 fault.
 - **§10** — `std.flag` (new pure-Chezzi module). Fixed pre-merge: bool `=`-form only took `true`/`false`; now the full Go `strconv.ParseBool` set.
 - **§7** — `encoding.query_decode` + `url_parse` (**Rust native** — see the correction below). 0 charges.
 - **§10** — `std.log` (new pure-Chezzi module, leveled, stderr-default, deterministic `format_line`). 0 charges.
@@ -39,7 +40,7 @@ seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 
 `setenv`/`chdir`/`getpid`/`environ`/`platform`/`hostname`/`home_dir`/`temp_dir` SHIPPED; signals/atexit
 + metadata-reader still open), §7
 (secure-random/token + bcrypt/argon2, gzip; sha1/sha512/hmac_sha256 + CSV SHIPPED), §8 (net depth), §9
-(`strptime`, Go-like `Duration` — next-session candidate), §10 (`std.db`, config formats; `bisect` + `memoize` SHIPPED), §11 (`std.process` `Child`).
+(`strptime` — Go-like `Duration` SHIPPED as `std.duration`), §10 (`std.db`, config formats; `bisect` + `memoize` SHIPPED), §11 (`std.process` `Child`).
 
 ## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
 
@@ -516,22 +517,16 @@ scope). Known ceilings: sub-second precision dropped (`DateTime.second` is int),
 normalize to UTC rather than round-tripping. (Python: `fromisoformat` done, `strptime` pending; Go:
 `time.Parse` layout pending.)
 
-- **No Go-like first-class `Duration` type — NEXT-SESSION CANDIDATE (Go nailed this ergonomic).** Today a
-  "duration" is a **raw int of seconds** (`datetime.add_seconds`/`diff_seconds`/`add_days`/`diff_days`)
-  or a **float of seconds** from `time.monotonic()` deltas — no value type, no units, no human string.
-  Go's `time.Duration` (int64 nanos) gives: unit constructors/constants (`time.Second`/`Minute`/`Hour`),
-  accessors (`.Seconds()`/`.Minutes()`/`.Hours()`), a human `String()` (`"1h30m0s"`) + `ParseDuration("1h30m")`,
-  and sugar (`time.Since(start)`, `t.Sub(u)`, `t.Add(d)`). **Proposed scope — a PURE-CHEZZI `std.duration`
-  module** (deterministic, both-engines-trivial, vector-testable — same shape as `std.csv`/`std.bisect`):
-  a `Duration` newtype/struct over an int (choose **milliseconds** — matches `sleep_ms`/`timer(ms)` and
-  avoids i64-nanos overflow at ~292 yr; note the sub-ms ceiling), constructors `millis/seconds/minutes/hours(n)`,
-  accessors `as_millis/as_seconds(-> float)/as_minutes/as_hours`, arithmetic (`add`/`sub`/`scale`), a
-  `to_string()` Go-formatter (`"1h30m0s"`, `"250ms"`, `"0s"`) + `parse("1h30m")` (inverse — clean `Err`
-  on malformed, the fiddly bit), and a `time.since(start_monotonic) -> Duration` convenience. Keep
-  `sleep_ms`/`timer` int-ms as-is (additive; optionally add `time.sleep(d: Duration)` sugar over `sleep_ms`).
-  Seam: NEW pure-Chezzi `std/duration.chz` + one `include_str!` line in `std_embed.rs` (like bisect/memoize);
-  `Duration` is a plain user-style struct (no native seam). Correctness lives in `parse`/`to_string`
-  round-trip vectors. Est: one focused session, medium.
+- ~~**No Go-like first-class `Duration` type.**~~ **SHIPPED** as pure-Chezzi `std.duration`
+  (`std/duration.chz` + one `include_str!` in `std_embed.rs`; `Duration` is a plain user struct over an
+  int of **milliseconds** — no native seam). Constructors `millis/seconds/minutes/hours(n)`, accessors
+  `as_millis()/as_seconds()/as_minutes()/as_hours()`, arithmetic `add`/`sub`/`scale`, a Go
+  `time.Duration.String()` formatter `to_string()` (`"1h30m0s"`, `"1.5s"`, `"250ms"`, `"0s"`, `"-1.5s"`)
+  and its inverse `parse("1h30m")` (Go's looser forms + clean `Err` on malformed), plus `since(start:
+  float) -> Duration` and `sleep(d)` convenience over native `std.time`. `sleep_ms`/`timer` stay int-ms
+  (additive). Sub-ms ceiling documented (µs/ns → `Err`). Correctness = `parse`/`to_string` round-trip
+  vectors in `examples/duration_test.chz` + `examples/duration.chz` golden (both engines). See
+  `docs/stdlib.md §5`.
 
 ### 10. Missing modules a real script reaches for
 - ~~**`std.flag` — CLI arg parsing.**~~ **SHIPPED.** Pure-Chezzi `std/flag.chz`: a Go-`flag`-style

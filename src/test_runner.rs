@@ -491,6 +491,7 @@ struct Suite:
             "collections_test.chz",
             "concurrent_collection_test.chz",
             "datetime_test.chz",
+            "duration_test.chz",
             "path_test.chz",
         ] {
             let f = root.join(name);

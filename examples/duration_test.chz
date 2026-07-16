@@ -1,0 +1,81 @@
+# examples/duration_test.chz — TDD table for std.duration (pure-Chezzi Go-like time spans).
+# Load-bearing surface = to_string <-> parse round-trip. Run: `cargo run -- test examples/duration_test.chz`.
+
+import std.duration
+import std.time
+
+# construct -> to_string -> parse -> equal (integer-ms round-trip, incl. negatives).
+test fn t_roundtrip():
+    for ms in [0, 5, 50, 250, 500, 1000, 1500, 90000, 3600000, 5400000, 3661000, -1500, -250, -5400000]:
+        match duration.parse(duration.millis(ms).to_string()):
+            Ok(g):
+                assert g.as_millis() == ms, "roundtrip failed for " + str(ms)
+            Err(_e):
+                assert false, "parse errored for " + str(ms)
+
+# Parse-or-sentinel helper (test fn returns nil, so no `?`; a parse Err surfaces as -1 and fails the eq).
+fn pm(text: str) -> int:
+    match duration.parse(text):
+        Ok(g):
+            return g.as_millis()
+        Err(_e):
+            return -1
+
+# canonical (string, ms) pairs: parse yields the ms; the canonical-output forms also to_string back.
+test fn t_canonical():
+    assert pm("0s") == 0
+    assert pm("5ms") == 5
+    assert pm("250ms") == 250
+    assert pm("1s") == 1000
+    assert pm("1.5s") == 1500
+    assert pm("1m30s") == 90000
+    assert pm("1h0m0s") == 3600000
+    assert pm("1h30m0s") == 5400000
+    assert pm("-1.5s") == -1500
+    assert pm(".5s") == 500
+    assert pm("0.25s") == 250
+    assert pm("1h30m") == 5400000
+    # canonical to_string forms
+    assert duration.millis(0).to_string() == "0s"
+    assert duration.millis(5).to_string() == "5ms"
+    assert duration.millis(250).to_string() == "250ms"
+    assert duration.millis(1000).to_string() == "1s"
+    assert duration.millis(1500).to_string() == "1.5s"
+    assert duration.millis(90000).to_string() == "1m30s"
+    assert duration.millis(3600000).to_string() == "1h0m0s"
+    assert duration.millis(5400000).to_string() == "1h30m0s"
+    assert duration.millis(-1500).to_string() == "-1.5s"
+    # fractional-ms padding edges
+    assert duration.millis(5).to_string() == "5ms"
+    assert duration.millis(1005).to_string() == "1.005s"
+    assert duration.millis(1050).to_string() == "1.05s"
+    assert duration.millis(1500).to_string() == "1.5s"
+
+# malformed input -> clean Err (never a fault; esp. the overflow case).
+test fn t_malformed():
+    bad := ["", "abc", "1", "1x", "1.2.3s", "1us", "1ns", "1h30", "-", "+", "1.s", "s", ".5", "1..5s", "99999999999999h", "1h30mZ", "µs", "1µs"]
+    for b in bad:
+        match duration.parse(b):
+            Ok(_g):
+                assert false, "expected Err for '" + b + "'"
+            Err(_e):
+                assert true
+
+test fn t_accessors_arith():
+    assert duration.millis(1500).as_seconds() == 1.5
+    assert duration.millis(90000).as_minutes() == 1.5
+    assert duration.millis(3600000).as_hours() == 1.0
+    assert duration.millis(250).as_millis() == 250
+    assert duration.millis(-1500).as_seconds() == -1.5
+    assert duration.millis(1000).add(duration.millis(500)).as_millis() == 1500
+    assert duration.seconds(2).sub(duration.millis(500)).as_millis() == 1500
+    assert duration.millis(250).scale(4).as_millis() == 1000
+    assert duration.seconds(1).as_millis() == 1000
+    assert duration.minutes(1).as_millis() == 60000
+    assert duration.hours(1).as_millis() == 3600000
+
+# clock convenience: bounds-only (clock-dependent, not a deterministic vector).
+test fn t_since_smoke():
+    start := time.monotonic()
+    d := duration.since(start)
+    assert d.as_millis() >= 0

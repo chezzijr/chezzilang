@@ -989,6 +989,27 @@ persists across every call to the wrapped fn; `f` runs at most once per distinct
 the argument tuple, but tuples aren't Hashable map keys yet — until then curry, or pack args into a
 struct with `hash` and memoize the single-arg wrapper.
 
+### `std.duration` — Go-like first-class time spans
+Pure-Chezzi (no native seam). `import std.duration`. `Duration` (access as `duration.Duration`) is a
+plain struct over a single int of **milliseconds**.
+- **Constructors** (free fns): `millis(n)`, `seconds(n)`, `minutes(n)`, `hours(n)` → `Duration`.
+- **Accessors** (methods): `d.as_millis() -> int`, `d.as_seconds()/as_minutes()/as_hours() -> float`.
+- **Arithmetic** (methods): `d.add(o)`, `d.sub(o)`, `d.scale(k: int)` → `Duration`.
+- **`d.to_string() -> str`** — Go `time.Duration.String()` decimal-seconds shape: `"0s"`, `"250ms"`,
+  `"1.5s"`, `"1m30s"`, `"1h0m0s"`, negatives prefixed `"-"` (`"-1.5s"`).
+- **`parse(s: str) -> Result[Duration]`** — inverse of `to_string`; also accepts Go's looser forms:
+  optional leading `+`/`-`, one or more `<number><unit>` groups (units `h`/`m`/`s`/`ms`, unordered and
+  summed), decimal magnitudes (`"1.5h"`, `".5s"`, `"0.25s"`), and a bare `"0"`. Malformed input (empty,
+  no unit, unknown unit, multiple dots, trailing dot, oversized magnitude) is a **clean `Err`**, never a
+  fault. Round-trips exactly (`parse(d.to_string())` ⇒ `d`) because the source is integer ms.
+- **`since(start: float) -> Duration`** — elapsed since a `time.monotonic()` reading (imports native
+  `std.time`; floors to whole ms). **`sleep(d: Duration)`** — delegates to native `sleep_ms`.
+
+**Why milliseconds (and the sub-ms ceiling):** ms matches `sleep_ms`/`timer(ms)` and overflows an i64
+only at ~292 **million** years (a Go nanos i64 caps at ~292 years). The trade is that microseconds/
+nanoseconds are **unrepresentable** — `parse("1us")`/`parse("1ns")`/`parse("1µs")` are a clean `Err`,
+and a fractional literal below 1ms (e.g. `"0.0005s"`) floors to `0ms`.
+
 ### `std.flag` — Go-style CLI arg parsing
 Pure-Chezzi CLI parser over `os.args()` (already the program args **without** argv[0], so
 `fs.parse(os.args())` is the direct Go `flag.Parse(os.Args[1:])` analog). `import std.flag`.
