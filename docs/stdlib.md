@@ -871,6 +871,36 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.
 
+### `std.flag` — Go-style CLI arg parsing
+Pure-Chezzi CLI parser over `os.args()` (already the program args **without** argv[0], so
+`fs.parse(os.args())` is the direct Go `flag.Parse(os.Args[1:])` analog). `import std.flag`.
+
+`new() -> FlagSet` builds an empty set; register flags on it, then `parse` a `List[str]`:
+```chezzi
+fs := flag.new()
+fs.str_flag("name", "world", "who to greet")   # (name, default, help)
+fs.int_flag("count", 1, "how many times")
+fs.bool_flag("verbose", false, "chatty output")
+match fs.parse(os.args()):
+    Ok(rest): ...                               # rest = the leftover positionals
+    Err(e):   print(e.message())
+```
+Register: `str_flag(name, default, help)` · `bool_flag(name, default, help)` ·
+`int_flag(name, default, help)` (each mutates the set). Parse: `parse(args: List[str]) ->
+Result[List[str]]` — `Ok(positionals)` on success (folds Go's `Parse()` + `Args()` into one), a clean
+`Err` on an unknown flag / missing value / non-int (**never faults** on bad user input). Read back:
+`get_str(name) -> str` · `get_bool(name) -> bool` · `get_int(name) -> int` (the registered default
+until parse overwrites it; **panics** on an *unregistered* name — a Go-parity programmer error, not a
+user-input path) · `positionals() -> List[str]` · `usage() -> str` (Go `PrintDefaults`-style, one line
+per flag in registration order).
+
+Recognised syntax (Go conventions): `--name value` / `--name=value` / `--verbose` (bool presence) /
+`--verbose=false` (explicit; the `=`-value accepts Go's `strconv.ParseBool` set —
+`1 t T TRUE true True` / `0 f F FALSE false False`) / `--` terminator (every later token is a positional). A leading run of
+dashes is stripped, so a flag named `n` answers to **both** `-n` and `--n` — a deliberate v1
+simplification vs strict Go (which registers each spelling separately); a lone `-` is a positional.
+Deferred (not built): required-flag enforcement, subcommands, duplicate-registration detection.
+
 ### `std.iter` — list/iterator helpers
 `enumerate(xs) -> List[(int, T)]` · `zip(xs, ys) -> List[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
 `fold(xs, init, f)` · `reduce(xs, f) -> T` (**non-empty**: with no seed there is no accumulator to

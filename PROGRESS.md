@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/std-flag`) — `docs/gaps.md` §10: `std.flag`, a Go-`flag`-style
+> CLI arg parser.** NEW pure-Chezzi module `std/flag.chz` (zero native seam — consumes the existing
+> `os.args()`; only Rust touch = one `include_str!` line in `src/resolver/std_embed.rs`, guarded by
+> `embedded_std_table_matches_disk`). `flag.new()` → a `FlagSet` you register `str_flag`/`bool_flag`/
+> `int_flag` on, then `parse(args) -> Result[List[str]]` (`Ok(positionals)`), read back via
+> `get_str`/`get_bool`/`get_int`/`positionals()`/`usage()`. Syntax: `--name value` / `--name=value` /
+> bool-presence / `--` terminator; dash-insensitive lookup (`-n`==`--n`, a v1 simplification).
+> Unknown/missing-value/non-int → clean `Err` (never faults); `get_*` on an unregistered name panics
+> (Go-parity programmer error). Pure-Chezzi ⇒ serial-VM == M:N structurally. Tests: 4 inline
+> `parity_entry` cases (value/=-form, bool+terminator, 3 error paths, deterministic usage) +
+> `examples/flag_demo.chz`/`.expected` (`golden_flag_demo_via_run_file` + `assert_file_parity`).
+> Docs: `docs/stdlib.md §5 std.flag`, `docs/gaps.md §10` (SHIPPED). Deferred: required flags,
+> subcommands, dup-registration detection. Full `cargo test`/`clippy`/`conformance` green.
 > **✅ STDLIB (2026-07-16, `auto-task/string-ergonomics`) — `docs/gaps.md` §1: STRING ERGONOMICS in
 > `std.string`.** Seven pure-Chezzi free fns (zero Rust, no native method-table change), Python `str`
 > semantics: `capitalize` / `title` / `swapcase` / `find(s, sub, from_index)` /

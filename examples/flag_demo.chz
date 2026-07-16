@@ -1,0 +1,55 @@
+# std.flag demo — a Go-`flag`-style CLI parser, exercising every recognised shape in one program.
+import std.flag
+
+# A successful parse: `--name value`, `--count=3` (=-form), `--verbose` (bool presence), then the
+# `--` terminator makes the trailing dash-token a positional.
+fs := flag.new()
+fs.str_flag("name", "world", "who to greet")
+fs.int_flag("count", 1, "how many times")
+fs.bool_flag("verbose", false, "chatty output")
+
+match fs.parse(["--name", "alice", "--count=3", "--verbose", "--", "--extra", "pos"]):
+    Ok(pos):
+        print("name    = {fs.get_str(\"name\")}")
+        print("count   = {fs.get_int(\"count\")}")
+        print("verbose = {fs.get_bool(\"verbose\")}")
+        print("pos     = {\" \".join(pos)}")
+    Err(e):
+        print("parse failed: {e.message()}")
+
+# Unregistered flags/values before parse read their registered default.
+print("default name = {fs.get_str(\"name\")}")   # still "alice" after the parse above
+
+# bool `=`-form accepts the Go strconv.ParseBool set (1/t/T/TRUE/True, 0/f/F/FALSE/False).
+v1 := flag.new()
+v1.bool_flag("verbose", false, "v")
+match v1.parse(["--verbose=1"]):
+    Ok(p): print("verbose=1 -> {v1.get_bool(\"verbose\")}")
+    Err(e): print("err: {e.message()}")
+v0 := flag.new()
+v0.bool_flag("verbose", true, "v")
+match v0.parse(["--verbose=F"]):
+    Ok(p): print("verbose=F -> {v0.get_bool(\"verbose\")}")
+    Err(e): print("err: {e.message()}")
+
+# ----- error paths (a clean Err, never a fault) -----
+u := flag.new()
+match u.parse(["--nope"]):
+    Ok(p): print("unexpected ok")
+    Err(e): print("err: {e.message()}")
+
+m := flag.new()
+m.str_flag("name", "", "n")
+match m.parse(["--name"]):
+    Ok(p): print("unexpected ok")
+    Err(e): print("err: {e.message()}")
+
+b := flag.new()
+b.int_flag("count", 0, "c")
+match b.parse(["--count", "abc"]):
+    Ok(p): print("unexpected ok")
+    Err(e): print("err: {e.message()}")
+
+# ----- usage() -----
+print("--- usage ---")
+print(fs.usage())
