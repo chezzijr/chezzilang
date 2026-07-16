@@ -1201,6 +1201,74 @@ main()
 }
 
 #[test]
+fn math_number_fns_parity() {
+    // std.math number/integer surface (gap §5): gcd/lcm/sign/trunc/hypot/cbrt/factorial/comb/perm/
+    // parse_int_base + inf/nan constants. Both engines must agree; values match Python `math`.
+    let src = r#"
+import std.math
+
+fn main():
+    print(math.gcd(-12, 8))
+    print(math.gcd(0, 0))
+    print(math.lcm(4, 6))
+    print(math.lcm(0, 5))
+    print(math.sign(-5))
+    print(math.sign(0))
+    print(math.sign(3))
+    print(math.trunc(-2.7))
+    print(math.hypot(3.0, 4.0) == 5.0)
+    print(math.cbrt(27.0) == 3.0)
+    print(math.inf > 1e308)
+    print(math.nan != math.nan)
+    match math.factorial(0):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.factorial(20):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.factorial(21):
+        Ok(v): print("ok")
+        Err(e): print("f21 err")
+    match math.factorial(-1):
+        Ok(v): print("ok")
+        Err(e): print("fneg err")
+    match math.comb(5, 2):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.comb(5, 6):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.comb(200, 100):
+        Ok(v): print("ok")
+        Err(e): print("comb overflow err")
+    match math.perm(5, 2):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.parse_int_base("ff", 16):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.parse_int_base("0b101", 0):
+        Ok(v): print(v)
+        Err(e): print("err")
+    match math.parse_int_base("zz", 16):
+        Ok(v): print("ok")
+        Err(e): print("zz err")
+    match math.parse_int_base("-9223372036854775808", 10):
+        Ok(v): print(v)
+        Err(e): print("err")
+
+main()
+"#;
+    // `import std.math` needs the graph path (native module resolution), so use `parity_entry`
+    // (runs serial + M:N, asserts they agree) rather than the standalone `assert_parity_out`.
+    let out = parity_entry(src);
+    assert_eq!(
+        out,
+        "4\n0\n12\n0\n-1\n0\n1\n-2\ntrue\ntrue\ntrue\ntrue\n1\n2432902008176640000\nf21 err\nfneg err\n10\n0\ncomb overflow err\n20\n255\n5\nzz err\n-9223372036854775808\n",
+    );
+}
+
+#[test]
 fn parse_int_parity() {
     // `s.parse_int() -> Result[int, str]` — the error-message-carrying sibling of `to_int() -> int?`.
     let src = r#"

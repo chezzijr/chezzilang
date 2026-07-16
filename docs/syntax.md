@@ -3157,8 +3157,8 @@ native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE ME
   `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **both-engine
   byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
   hand-built `native_module_sig` arms for the five pure-function modules. (Checker-side metadata a
-  `native fn` decl can't express — `math.pi`/`e` module values, `math.abs`'s numeric polymorphism, and
-  hover docs — is re-attached post-harvest.)
+  `native fn` decl can't express — `math.pi`/`e`/`inf`/`nan` module values, `math.abs`/`sign`'s numeric
+  polymorphism, and hover docs — is re-attached post-harvest.)
 
 ## 12e. `native enum` — reserved builtin-enum variant shape in Chezzi (prelude/std-only)
 

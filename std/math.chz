@@ -36,3 +36,17 @@ native fn log(value: float, base: float) -> float
 native fn is_nan(x: float) -> bool
 native fn is_inf(x: float) -> bool
 native fn is_finite(x: float) -> bool
+
+# Number theory / integer math (Python `math` semantics). `sign` is numeric-polymorphic like `abs`
+# (int->int / float->float), reattached via MODULE_NUMERIC_POLY. `factorial`/`comb`/`perm`/
+# `parse_int_base` return `Result[int]` — a clean `Err` (never a fault) on a bad domain or i64 overflow.
+native fn gcd(a: int, b: int) -> int
+native fn lcm(a: int, b: int) -> int
+native fn sign(x: float) -> float
+native fn trunc(x: float) -> int
+native fn hypot(x: float, y: float) -> float
+native fn cbrt(x: float) -> float
+native fn factorial(n: int) -> Result[int]
+native fn comb(n: int, k: int) -> Result[int]
+native fn perm(n: int, k: int) -> Result[int]
+native fn parse_int_base(s: str, base: int) -> Result[int]

@@ -4,6 +4,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/gaps.md` §5: NUMBER/MATH surface in
+> `std.math`.** Ten native fns + two float constants added to the file-backed native module (mirroring
+> the existing `sqrt`/`abs`/`pi` pattern — zero new seam machinery): `gcd`/`lcm` (int; Python `math.gcd`
+> semantics, `lcm` divides-before-multiplies + overflow-faults like `abs`), `sign` (numeric-poly like
+> `abs`, -1/0/1), `trunc(float)->int` (toward-zero, ≡ `int(x)`), `hypot`/`cbrt` (total f64),
+> `factorial`/`comb`/`perm` → `Result[int]` (clean `Err` never a fault; `factorial` ceiling `20!` = i64
+> limit; `comb`/`perm` compute in i128 and Err only on true i64 overflow), and
+> `parse_int_base(s, base)->Result[int]` (base 0 or 2..=36, `0x`/`0o`/`0b` prefixes, Go `strconv`-style).
+> Constants `math.inf`/`math.nan` join `pi`/`e` via the existing `native_consts` path (both engines seed
+> identical f64 → free parity). Pure arithmetic lives in unit-tested free helpers (`gcd_u64`/`lcm_i64`/
+> `factorial_i64`/`comb_i64`/`perm_i64`/`parse_int_base_impl`); `sign` added to `MODULE_NUMERIC_POLY`.
+> **`divmod` DEFERRED** — no `NativeRet::Tuple` variant, and adding one to serve one fn isn't worth the
+> per-engine lowering (users have `//`/`%`). Tests: `src/native/math.rs` helper units + `math_number_fns_parity`
+> (graph path, serial==M:N). Docs: `docs/stdlib.md §std.math`, `docs/gaps.md §5` (SHIPPED + divmod deferral).
 > **✅ STDLIB (2026-07-16, `auto-task/encoding-url-parse`) — `docs/gaps.md` §7: URL PARSING read-half in
 > `std.encoding`.** Two native read-half members round out the module's existing write-half
 > (`url_encode`/`url_decode`/`query_encode`): `query_decode(q: str) -> Map[str,str]` (strips a leading

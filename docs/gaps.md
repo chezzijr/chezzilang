@@ -386,8 +386,14 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   mode-preserving, not fsync-durable) all now exist.
 
 ### 5. Numbers / math
-- `divmod`, `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`. `math.inf` / `math.nan` constants (only
-  `pi`/`e` today). Int-from-base (parse a hex/bin string). `factorial` / `comb` / `perm`.
+- **SHIPPED (Wave-3 Run E):** `gcd`, `lcm`, `sign`, `trunc`, `hypot`, `cbrt`, `factorial`, `comb`,
+  `perm`, `parse_int_base(s, base)` (int-from-base, base 0 or 2..=36 w/ `0x`/`0o`/`0b` prefixes), plus
+  `math.inf` / `math.nan` constants. Python `math` semantics; `factorial`/`comb`/`perm`/`parse_int_base`
+  return `Result[int]` (clean `Err`, never a fault, on bad domain or i64 overflow). See `stdlib.md §std.math`.
+- **`divmod` DEFERRED** — Python returns a `(q, r)` tuple, but the native seam (`NativeRet`) has no
+  `Tuple` variant; adding one is per-engine lowering + checker harvest = expanding the seam for a single
+  fn. Users have `//` and `%` (Chezzi `%` already carries the divisor's sign). Revisit if a `NativeRet::Tuple`
+  lands for another reason.
 - No **decimal / bigint**. `int` is a checked i64 (overflow FAULTS, never promotes), so a big-number or
   exact-money program simply cannot be written — there is no workaround. (Python: `int` is arbitrary
   precision + `decimal`; Go: `math/big`.) Rare in scripting; deferred, but it is a hard wall, not a

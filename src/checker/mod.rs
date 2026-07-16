@@ -1257,7 +1257,7 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
 /// `FnSig` in the module's `.chz` fixes only arity (`abs(x: float) -> float`); `infer_numeric_poly`
 /// does the real per-call typing when the fn is in its module's `numeric_poly` set. Parallels
 /// `MODULE_FN_DOCS`; applied by `attach_native_module_metadata`. (Was inline in the deleted math arm.)
-const MODULE_NUMERIC_POLY: &[(&str, &[&str])] = &[("std.math", &["abs"])];
+const MODULE_NUMERIC_POLY: &[(&str, &[&str])] = &[("std.math", &["abs", "sign"])];
 
 /// Editor hover (Tier C): concise one-line `(module, [(fn, doc)])` blurbs for native stdlib module
 /// functions, paraphrased from `docs/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`

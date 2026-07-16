@@ -6479,8 +6479,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert!(math.numeric_poly.contains("abs"));
     assert_eq!(
         math.functions.len(),
-        21,
-        "std.math must export exactly 21 fns"
+        31,
+        "std.math must export exactly 31 fns"
     );
 
     let io = native_module_sig_via_graph("io");
@@ -6619,7 +6619,7 @@ fn math_io_os_fn_hover_doc_preserved() {
 /// impls, name-keyed. (The `native fn` decl only feeds the front-end signature.)
 #[test]
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
-    assert_eq!(crate::native::native_members("std.math").len(), 21);
+    assert_eq!(crate::native::native_members("std.math").len(), 31);
     // std.io: 9 original + R2's 5 Writer openers + R2b's `open` (all → intercepted) + read_all +
     // read_char (R2 grab-bag stdin twins) = 17.
     assert_eq!(crate::native::native_members("std.io").len(), 17);
@@ -6630,7 +6630,7 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
         .iter()
         .map(|(n, _)| *n)
         .collect();
-    assert_eq!(consts, vec!["pi", "e"]);
+    assert_eq!(consts, vec!["pi", "e", "inf", "nan"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
     // std.net (4c-net) + std.ffi (4c-ffi) + std.concurrency (4c-concurrency) are FILE-BACKED now —
