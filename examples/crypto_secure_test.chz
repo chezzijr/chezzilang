@@ -1,0 +1,42 @@
+# examples/crypto_secure_test.chz — std.crypto CSPRNG (secure_bytes / token_hex).
+# Output is INTENTIONALLY non-deterministic (drawn from OS entropy), so there is NO byte-exact golden
+# and NO both-engine parity entry — serial and M:N each draw DIFFERENT bytes. We assert PROPERTIES
+# only: length, uniqueness, hex alphabet, empty-on-0, and the fail-closed fault on a negative n.
+# Run: `cargo run -- test examples/crypto_secure_test.chz` (serial) / `--parallel` (M:N) — both pass.
+
+import std.crypto
+
+test fn t_secure_bytes_len():
+    assert crypto.secure_bytes(0).len() == 0
+    assert crypto.secure_bytes(1).len() == 1
+    assert crypto.secure_bytes(32).len() == 32
+
+test fn t_secure_bytes_differ():
+    # Two draws differ with overwhelming probability.
+    assert crypto.secure_bytes(32) != crypto.secure_bytes(32)
+
+test fn t_token_hex_shape():
+    t := crypto.token_hex(16)
+    assert t.len() == 32          # 2n chars
+    for c in t:
+        assert c in "0123456789abcdef", "non-lowercase-hex char: {c}"
+    # token_hex(0) is the empty string.
+    assert crypto.token_hex(0) == ""
+
+test fn t_token_hex_differ():
+    assert crypto.token_hex(16) != crypto.token_hex(16)
+
+test fn t_secure_bytes_neg_fails_closed():
+    # A negative n must FAULT (fail closed), catchable by recover: — never weak/degraded bytes.
+    r := recover:
+        crypto.secure_bytes(-1)
+    match r:
+        Ok(_): assert false, "secure_bytes(-1) must fault"
+        Err(_): assert true
+
+test fn t_token_hex_neg_fails_closed():
+    r := recover:
+        crypto.token_hex(-1)
+    match r:
+        Ok(_): assert false, "token_hex(-1) must fault"
+        Err(_): assert true

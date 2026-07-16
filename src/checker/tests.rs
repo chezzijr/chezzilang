@@ -7291,6 +7291,8 @@ fn crypto_fn_sigs_exact() {
         ("sha512_bytes", vec![Ty::Bytes], Ty::Str),
         ("md5", vec![Ty::Str], Ty::Str),
         ("hmac_sha256", vec![Ty::Bytes, Ty::Bytes], Ty::Str),
+        ("secure_bytes", vec![Ty::Int], Ty::Bytes),
+        ("token_hex", vec![Ty::Int], Ty::Str),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");
     for (name, params, ret) in &expected {

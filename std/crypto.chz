@@ -24,3 +24,9 @@ native fn md5(s: str) -> str
 # HMAC-SHA-256 (RFC 2104) — keyed message authentication. Both args are raw `bytes`; convert a
 # `str` with `bytes(s.encode())` or use a `b"..."` byte literal.
 native fn hmac_sha256(key: bytes, msg: bytes) -> str
+# CSPRNG (Python `secrets`). Draws from the OS entropy source (`getrandom`) and FAILS CLOSED —
+# if the OS has no entropy it faults recoverably (catchable by `recover:`), NEVER weak/degraded
+# bytes. `n` must be 0..=1048576 (1 MiB cap); a negative or oversized `n` faults.
+native fn secure_bytes(n: int) -> bytes
+# `n` secure random bytes, lowercase-hex encoded → a `2n`-char `str` (Python `secrets.token_hex`).
+native fn token_hex(n: int) -> str

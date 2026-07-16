@@ -4,6 +4,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/crypto-secure-random`) — `docs/gaps.md` §7: CSPRNG in
+> `std.crypto`.** Two members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
+> in `std/crypto.chz`, impls in `src/native/crypto.rs`, zero new deps — libc `getrandom` like
+> `uuid.rs::auto_seed`): `secure_bytes(n: int) -> bytes` (Python `secrets.token_bytes`) and
+> `token_hex(n: int) -> str` (Python `secrets.token_hex`, 2n lowercase-hex chars, reuses the existing
+> `to_hex` helper). Both share `secure_random_bytes(n)` which **FAILS CLOSED** — unlike `uuid.rs` it has
+> NO weak `SystemTime` fallback: on `getrandom` `<0` (non-`EINTR`) / `0` it raises a recoverable
+> `HostError` (catchable by `recover:`), never degraded bytes; the fill-loop retries the remainder on
+> short reads + `EINTR`; `n<0` and `n>1<<20` (1 MiB cap) fault before allocating (no OOM); non-Linux
+> arm faults (never weaken). Not in `is_blocking` (fast syscall, inline like sha/uuid). Output is
+> INTENTIONALLY non-deterministic → NO byte-exact golden and NO `src/vm/parity_tests.rs` entry (serial
+> vs M:N draw different bytes); tests assert PROPERTIES only — a Rust unit test (`secure_random_props`:
+> length/uniqueness/empty/hex-alphabet/fail-closed) + `examples/crypto_secure_test.chz` (`chezzi test`,
+> in the `d1_dogfood` list), both engines run clean (verified via CLI: `run` M:N + `--serial`, incl. the
+> `recover:` fail-closed path). `token_urlsafe` (base64url) deferred. `crypto_fn_sigs_exact` 8→10, crypto
+> `MEMBERS` list test updated. Full `--lib` green, clippy clean, conformance green.
+
 > **✅ STDLIB HYGIENE (2026-07-16, `feat/timer-decl`) — `timer` now DECLARED in `std/time.chz`.**
 > BEHAVIOR-PRESERVING consistency fix. `std/time.chz` declared its 4 real fns
 > (now/monotonic/sleep_ms/format) but NOT `timer`, with a big NOTE calling it the exception —

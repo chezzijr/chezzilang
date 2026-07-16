@@ -858,7 +858,9 @@ mod tests {
                 "sha512",
                 "sha512_bytes",
                 "md5",
-                "hmac_sha256"
+                "hmac_sha256",
+                "secure_bytes",
+                "token_hex"
             ]
         );
         let uid: Vec<&str> = native_members("std.uuid").iter().map(|(n, _)| *n).collect();
