@@ -946,7 +946,12 @@ impl Vm {
         // Higher-order list methods (`map`/`filter`/`fold`) call a closure per element, which runs
         // nested VM frames that may GC at instruction boundaries. They keep the source + result
         // (and fold's accumulator) rooted on the operand stack across the loop — see `list_hof`.
-        if matches!(self.heap.get(h), Obj::List(_)) && matches!(method, "map" | "filter" | "fold") {
+        if matches!(self.heap.get(h), Obj::List(_))
+            && matches!(
+                method,
+                "map" | "filter" | "fold" | "take_while" | "drop_while" | "count" | "position"
+            )
+        {
             let result = self.list_hof(h, method, args, span)?;
             self.push(result);
             return Ok(());
@@ -1607,6 +1612,123 @@ impl Vm {
                 self.pop(); // unroot snapshot
                 self.pop(); // unroot source
                 Ok(acc)
+            }
+            // take_while: NEW list of the prefix while `pred` holds; stops (pred not called) at the
+            // first false. Reads the rooted SNAPSHOT — a pred that shrinks the receiver can't OOB.
+            "take_while" | "drop_while" => {
+                if args.len() != 1 {
+                    self.pop(); // unroot snapshot
+                    self.pop(); // unroot source
+                    return Err(self.err(
+                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
+                        span,
+                    ));
+                }
+                let f = args.swap_remove(0);
+                let is_drop = method == "drop_while";
+                let res_h = self.heap.alloc(Obj::List(Vec::new()));
+                self.push(Value::Obj(res_h)); // ROOT the result list
+                let mut cut = n; // first index where pred is false (n = all-true)
+                for i in 0..n {
+                    let elem = match self.heap.get(snap_h) {
+                        Obj::List(v) => v[i],
+                        _ => unreachable!(),
+                    };
+                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
+                    match out {
+                        Value::Bool(true) => {
+                            if !is_drop && let Obj::List(items) = self.heap.get_mut(res_h) {
+                                items.push(elem);
+                            }
+                        }
+                        Value::Bool(false) => {
+                            cut = i;
+                            break;
+                        }
+                        other => {
+                            self.pop(); // unroot result
+                            self.pop(); // unroot snapshot
+                            self.pop(); // unroot source
+                            return Err(self.err(
+                                format!(
+                                    "{method} predicate must return bool, got {}",
+                                    self.type_name(other)
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                }
+                if is_drop {
+                    // Collect the snapshot suffix from the first non-matching index.
+                    for i in cut..n {
+                        let elem = match self.heap.get(snap_h) {
+                            Obj::List(v) => v[i],
+                            _ => unreachable!(),
+                        };
+                        if let Obj::List(items) = self.heap.get_mut(res_h) {
+                            items.push(elem);
+                        }
+                    }
+                }
+                self.pop(); // unroot result
+                self.pop(); // unroot snapshot
+                self.pop(); // unroot source
+                Ok(Value::Obj(res_h))
+            }
+            // count: number of snapshot elements satisfying `pred`. position: index of the FIRST
+            // match as Option[int] (short-circuits), else None.
+            "count" | "position" => {
+                if args.len() != 1 {
+                    self.pop(); // unroot snapshot
+                    self.pop(); // unroot source
+                    return Err(self.err(
+                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
+                        span,
+                    ));
+                }
+                let f = args.swap_remove(0);
+                let is_pos = method == "position";
+                let mut count = 0_i64;
+                let mut found: Option<usize> = None;
+                for i in 0..n {
+                    let elem = match self.heap.get(snap_h) {
+                        Obj::List(v) => v[i],
+                        _ => unreachable!(),
+                    };
+                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
+                    match out {
+                        Value::Bool(true) => {
+                            if is_pos {
+                                found = Some(i);
+                                break;
+                            }
+                            count += 1;
+                        }
+                        Value::Bool(false) => {}
+                        other => {
+                            self.pop(); // unroot snapshot
+                            self.pop(); // unroot source
+                            return Err(self.err(
+                                format!(
+                                    "{method} predicate must return bool, got {}",
+                                    self.type_name(other)
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                }
+                self.pop(); // unroot snapshot
+                self.pop(); // unroot source
+                if is_pos {
+                    Ok(match found {
+                        Some(i) => self.alloc_enum("Option", "Some", vec![Value::Int(i as i64)]),
+                        None => self.alloc_enum("Option", "None", vec![]),
+                    })
+                } else {
+                    Ok(Value::Int(count))
+                }
             }
             _ => unreachable!("list_hof called with non-HOF method {method}"),
         }
@@ -2636,6 +2758,80 @@ impl Vm {
                 "min" | "max" => {
                     self.arity_err(method, args, 0, span)?;
                     self.list_reduce_extreme(h, method == "max", span)
+                }
+                // unique/dedup: NEW list, never mutate the receiver. Equality via `values_equal`
+                // (pure `&self`, no re-entry/GC — same primitive `contains` uses, works on floats),
+                // so no rooting is needed here.
+                "unique" | "dedup" => {
+                    self.arity_err(method, args, 0, span)?;
+                    let Obj::List(items) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let items = items.clone();
+                    let mut out: Vec<Value> = Vec::new();
+                    if method == "dedup" {
+                        // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element iff it
+                        // differs from the previously-kept one.
+                        for v in items {
+                            if out.last().is_none_or(|&p| !self.values_equal(p, v)) {
+                                out.push(v);
+                            }
+                        }
+                    } else {
+                        // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
+                        // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
+                        for v in items {
+                            if !out.iter().any(|&k| self.values_equal(k, v)) {
+                                out.push(v);
+                            }
+                        }
+                    }
+                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                }
+                // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
+                // list is ROOTED on the operand stack and every inner handle is pushed into it
+                // IMMEDIATELY after allocation (no intervening alloc), keeping prior inners reachable.
+                "chunk" | "windows" => {
+                    self.arity_err(method, args, 1, span)?;
+                    let Value::Int(n) = args[0] else {
+                        unreachable!()
+                    };
+                    if n <= 0 {
+                        let what = if method == "chunk" { "chunk" } else { "window" };
+                        return Err(
+                            self.err(format!("{what} size must be positive, got {n}"), span)
+                        );
+                    }
+                    let n = n as usize;
+                    let Obj::List(items) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let items = items.clone();
+                    let len = items.len();
+                    let outer = self.heap.alloc(Obj::List(Vec::new()));
+                    self.push(Value::Obj(outer)); // ROOT the outer list across inner allocs
+                    if method == "chunk" {
+                        let mut start = 0;
+                        while start < len {
+                            let end = (start + n).min(len);
+                            let inner = self.heap.alloc(Obj::List(items[start..end].to_vec()));
+                            if let Obj::List(o) = self.heap.get_mut(outer) {
+                                o.push(Value::Obj(inner));
+                            }
+                            start = end;
+                        }
+                    } else if n <= len {
+                        // windows: `n > len` → no windows → empty outer list (loop skipped).
+                        for start in 0..=len - n {
+                            let inner =
+                                self.heap.alloc(Obj::List(items[start..start + n].to_vec()));
+                            if let Obj::List(o) = self.heap.get_mut(outer) {
+                                o.push(Value::Obj(inner));
+                            }
+                        }
+                    }
+                    self.pop(); // unroot outer
+                    Ok(Value::Obj(outer))
                 }
                 _ => Err(self.err(format!("type list has no method '{method}'"), span)),
             },

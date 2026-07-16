@@ -78,6 +78,14 @@ native struct List[T]:
     native fn reversed(self) -> List[T]
     native fn insert(self, i: int, x: T) -> nil
     native fn remove_at(self, i: int) -> T
+    native fn unique(self) -> List[T]
+    native fn dedup(self) -> List[T]
+    native fn chunk(self, n: int) -> List[List[T]]
+    native fn windows(self, n: int) -> List[List[T]]
+    native fn take_while(self, pred: fn(T) -> bool) -> List[T]
+    native fn drop_while(self, pred: fn(T) -> bool) -> List[T]
+    native fn count(self, pred: fn(T) -> bool) -> int
+    native fn position(self, pred: fn(T) -> bool) -> Option[int]
 
 native struct Map[K: Hashable, V]:
     native fn len(self) -> int

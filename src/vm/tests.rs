@@ -732,6 +732,109 @@ fn min_max_shrinking_comparator_no_panic() {
     assert_mc_parity(max_src, "3\n");
 }
 
+// ---- gaps.md §2 wave-2: List iter-ergonomics (unique/dedup/chunk/windows/take_while/drop_while/count/position) ----
+
+/// `unique()` removes ALL duplicates (first-occurrence order preserved, Python `dict.fromkeys`);
+/// `dedup()` collapses only CONSECUTIVE runs (non-adjacent dupes survive, Rust `Vec::dedup`). Both
+/// return a NEW list and never mutate the receiver.
+#[test]
+fn list_unique_dedup_parity() {
+    let src = "print([3, 1, 3, 2, 1].unique())\n\
+               print([1, 1, 2, 2, 2, 1, 3, 3].dedup())\n\
+               empty: List[int] = []\n\
+               print(empty.unique())\n\
+               print([5].unique())\n\
+               print([2, 2, 2].unique())\n\
+               print(empty.dedup())\n\
+               xs := [3, 1, 3, 2, 1]\n\
+               u := xs.unique()\n\
+               print(xs)\n\
+               print([1.5, 1.5, 2.5].dedup())\n";
+    assert_mc_parity(
+        src,
+        "[3, 1, 2]\n[1, 2, 1, 3]\n[]\n[5]\n[2]\n[]\n[3, 1, 3, 2, 1]\n[1.5, 2.5]\n",
+    );
+}
+
+/// `chunk(n)` — consecutive fixed-size chunks (final short if not divisible); `windows(n)` — sliding
+/// windows; `n > len` yields an EMPTY list for windows; both keep first-occurrence element order.
+#[test]
+fn list_chunk_windows_parity() {
+    let src = "print([1, 2, 3, 4, 5].chunk(2))\n\
+               print([1, 2, 3].chunk(1))\n\
+               print([1, 2, 3].chunk(3))\n\
+               print([1, 2].chunk(5))\n\
+               empty: List[int] = []\n\
+               print(empty.chunk(2))\n\
+               print([1, 2, 3, 4].windows(2))\n\
+               print([1, 2, 3].windows(3))\n\
+               print([1, 2].windows(5))\n\
+               print([1, 2, 3].windows(1))\n\
+               print(empty.windows(2))\n";
+    assert_mc_parity(
+        src,
+        "[[1, 2], [3, 4], [5]]\n[[1], [2], [3]]\n[[1, 2, 3]]\n[[1, 2]]\n[]\n[[1, 2], [2, 3], [3, 4]]\n[[1, 2, 3]]\n[]\n[[1], [2], [3]]\n[]\n",
+    );
+}
+
+/// `chunk`/`windows` with `n <= 0` fault byte-identically on both engines with a clear message.
+#[test]
+fn list_chunk_windows_bad_n_faults() {
+    let c = "xs := [1, 2]\nprint(\"before\")\nxs.chunk(0)\n";
+    assert_fault_parity(c, "before\n");
+    assert_eq!(run_err(c), "chunk size must be positive, got 0");
+    let w = "xs := [1, 2]\nprint(\"before\")\nxs.windows(-1)\n";
+    assert_fault_parity(w, "before\n");
+    assert_eq!(run_err(w), "window size must be positive, got -1");
+}
+
+/// `take_while` — prefix while pred holds; `drop_while` — suffix after that prefix. Empty-prefix and
+/// full-prefix boundaries, plus the empty list.
+#[test]
+fn list_take_drop_while_parity() {
+    let src = "print([1, 2, 3, 4, 1].take_while(fn(x: int) -> bool: x < 3))\n\
+               print([1, 2, 3, 4, 1].drop_while(fn(x: int) -> bool: x < 3))\n\
+               print([1, 2].take_while(fn(x: int) -> bool: true))\n\
+               print([5, 1].take_while(fn(x: int) -> bool: x < 3))\n\
+               print([1, 2].drop_while(fn(x: int) -> bool: true))\n\
+               print([5, 1].drop_while(fn(x: int) -> bool: x < 3))\n\
+               empty: List[int] = []\n\
+               print(empty.take_while(fn(x: int) -> bool: true))\n\
+               print(empty.drop_while(fn(x: int) -> bool: true))\n";
+    assert_mc_parity(src, "[1, 2]\n[3, 4, 1]\n[1, 2]\n[]\n[]\n[5, 1]\n[]\n[]\n");
+}
+
+/// `count(pred)` — number of matching elements; `position(pred)` — index of the FIRST match as
+/// `Option[int]` (first-hit-wins, `None` if no match).
+#[test]
+fn list_count_position_parity() {
+    let src = "print([1, 2, 3, 2, 1].count(fn(x: int) -> bool: x == 2))\n\
+               print([1, 2, 3].count(fn(x: int) -> bool: false))\n\
+               empty: List[int] = []\n\
+               print(empty.count(fn(x: int) -> bool: true))\n\
+               fn showpos(o: Option[int]) -> int:\n    match o:\n        Some(i): return i\n        None: return -1\n\
+               print(showpos([1, 2, 3, 2].position(fn(x: int) -> bool: x == 2)))\n\
+               print(showpos([1, 3].position(fn(x: int) -> bool: x == 2)))\n\
+               print(showpos([2, 2].position(fn(x: int) -> bool: x == 2)))\n";
+    assert_mc_parity(src, "2\n0\n0\n1\n-1\n0\n");
+}
+
+/// The 4 predicate methods scan a SNAPSHOT: a predicate that SHRINKS the receiver mid-scan must not
+/// index past the live list's new length (no OOB panic), matching `map`/`filter`/`min`. The predicate
+/// sees the full original-length snapshot.
+#[test]
+fn list_predicate_shrinking_no_panic() {
+    // count: pred pops the receiver on the first element; snapshot still visits all 4 → all x>0 → 4.
+    let c = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    if x == 1:\n        xs.pop()\n    return x > 0\nprint(xs.count(f))\n";
+    assert_mc_parity(c, "4\n");
+    // position: pred shrinks the receiver; snapshot scan finds index 2 without OOB.
+    let p = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    xs.pop()\n    return x == 3\nfn showpos(o: Option[int]) -> int:\n    match o:\n        Some(i): return i\n        None: return -1\nprint(showpos(xs.position(f)))\n";
+    assert_mc_parity(p, "2\n");
+    // take_while: pred shrinks the receiver; snapshot scan is unaffected.
+    let t = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    xs.pop()\n    return x < 3\nprint(xs.take_while(f))\n";
+    assert_mc_parity(t, "[1, 2]\n");
+}
+
 // ---- list HOF: callback that shrinks the receiver (snapshot semantics) ----
 
 /// `map` iterates a SNAPSHOT of the receiver's elements at call time: a callback that pops the
@@ -11838,7 +11941,8 @@ fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
 }
 
-/// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum (int + float).
+/// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum + value/iter ergonomics
+/// (min/max/first/last/reversed/insert/remove_at, unique/dedup/chunk/windows/take_while/drop_while/count/position).
 #[test]
 fn golden_list_methods_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/list_methods.chz");
