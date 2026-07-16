@@ -6977,6 +6977,16 @@ fn enc_fn_sigs_exact() {
             vec![Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str))],
             Ty::Str,
         ),
+        (
+            "query_decode",
+            vec![Ty::Str],
+            Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+        ),
+        (
+            "url_parse",
+            vec![Ty::Str],
+            Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
+        ),
     ];
     assert_eq!(sig.functions.len(), expected.len(), "std.encoding fn count");
     for (name, params, ret) in &expected {

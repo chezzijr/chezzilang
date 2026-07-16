@@ -4,6 +4,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/encoding-url-parse`) — `docs/gaps.md` §7: URL PARSING read-half in
+> `std.encoding`.** Two native read-half members round out the module's existing write-half
+> (`url_encode`/`url_decode`/`query_encode`): `query_decode(q: str) -> Map[str,str]` (strips a leading
+> `?`, splits `&`/first-`=`, percent-decode + `+`→space, no-`=` key → `""`, DUPLICATE key = **last-wins**
+> — a Map can't hold `parse_qs` lists, the Go `url.Values.Get` analog; malformed escape kept RAW, never
+> faults) and `url_parse(u: str) -> Map[str,str]` (LEXICAL scheme/host/port/path/query/fragment, missing
+> → `""`, components stay encoded per Python `urlsplit`/Go `net/url`, port a STRING). Both return
+> `NativeRet::Map` — deliberately NOT a bespoke native struct (avoids reserved-type seeding). RUST task:
+> `std.encoding` is FILE-BACKED NATIVE (all members bodyless `native fn` in `std/encoding.chz` backed by
+> `src/native/encoding.rs`) — corrected the `gaps.md §7` "pure-Chezzi" mislabel. Extracted a shared
+> `percent_decode(bytes, plus_as_space)` reused by `url_decode` (false) + `query_decode` (true);
+> `url_decode` byte-identical after (regression test green). Tests: unit `percent_decode`/`query_decode`/
+> `url_parse` + `examples/encoding.chz`/`.expected` extended (`golden_encoding_crypto_via_run_file` +
+> `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md §std.encoding`, `docs/gaps.md §7` (SHIPPED +
+> label fix). Full `cargo test`/`clippy`/`conformance` green.
 > **✅ STDLIB (2026-07-16, `auto-task/std-flag`) — `docs/gaps.md` §10: `std.flag`, a Go-`flag`-style
 > CLI arg parser.** NEW pure-Chezzi module `std/flag.chz` (zero native seam — consumes the existing
 > `os.args()`; only Rust touch = one `include_str!` line in `src/resolver/std_embed.rs`, guarded by
