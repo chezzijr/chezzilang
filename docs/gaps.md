@@ -452,11 +452,14 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   only when not piped. Terminal size / echo-off (password prompts) remain a deliberate second step.
 - **`os.env` and `process.cmd` disagree** (PARTIALLY RESOLVED 2026-07-16): `os.env`, `os.environ`, and
   `os.setenv` are now mutually consistent — all three read/write the SAME injected `HostConfig` env map,
-  so a `setenv("X","V")` is observed by both `env("X")` and `environ()["X"]`. What remains is the
-  process-boundary axis: `process.cmd` shells out with the REAL inherited process env, so a `setenv`
-  (HostConfig-only) is NOT seen by a child, and under a synthetic host config `os.env("X")` can differ
-  from `process.cmd("echo $X")`. Bridging that would require writing the real process env at `setenv`
-  (racy, edition-2024-unsafe `std::env::set_var`) — deliberately not done.
+  so a `setenv("X","V")` is observed by both `env("X")` and `environ()["X"]`. The map is **shared**
+  (`Arc<Mutex<…>>`) across M:N workers, so a `setenv` from inside a task is visible to the parent +
+  siblings — process-global, matching the serial engine and Python/Go (serial == M:N, no parity break);
+  `environ` sorts by key so both engines emit identical output. What remains is the process-boundary
+  axis: `process.cmd` shells out with the REAL inherited process env, so a `setenv` (HostConfig-only) is
+  NOT seen by a child, and under a synthetic host config `os.env("X")` can differ from
+  `process.cmd("echo $X")`. Bridging that would require writing the real process env at `setenv` (racy,
+  edition-2024-unsafe `std::env::set_var`) — deliberately not done.
 - fs: recursive `walk`, `remove_dir_all` (intentionally omitted today — see `stdlib.md §std.fs`),
   metadata READ (mtime / permissions / size-struct). `fs.chmod` now SETS permission bits, but there is
   still no metadata *reader* returning mtime/mode/size as a struct (`size()` returns only byte length).

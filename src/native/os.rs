@@ -52,7 +52,9 @@ fn hostname(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "hostname", 0)?;
     // ponytail: small unsafe libc::gethostname (same shape as cffi/net's existing libc use); a fixed
     // 256-byte buffer covers HOST_NAME_MAX (64 on Linux), lossy-decoded, "" on nonzero return.
-    let mut buf = [0i8; 256];
+    // `libc::c_char` is i8 on x86_64 but u8 on aarch64/arm — use the platform alias so the buffer
+    // element type matches `gethostname`'s `*mut c_char` on every target (not just the x86_64 dev box).
+    let mut buf = [0 as libc::c_char; 256];
     let name = unsafe {
         if libc::gethostname(buf.as_mut_ptr(), buf.len() - 1) != 0 {
             String::new()
@@ -81,8 +83,9 @@ fn temp_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(std::env::temp_dir().display().to_string()))
 }
 
-/// `environ()` — ALL environment variables from the SAME per-VM HostConfig env map `env` reads. Paired
-/// with `setenv` (which writes that map), so a `setenv` is observed here too — one consistent source.
+/// `environ()` — ALL environment variables from the SAME HostConfig env map `env` reads (shared by
+/// `Arc` across M:N workers), sorted by key (see `VmHost::os_environ`). Paired with `setenv` (which
+/// writes that map), so a `setenv` is observed here too — one consistent source.
 fn environ(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "environ", 0)?;
     let pairs = h
@@ -93,8 +96,9 @@ fn environ(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Map(pairs))
 }
 
-/// `setenv(key, value)` — set an env var in the per-VM HostConfig env map (the source `env`/`environ`
-/// read). Does NOT touch `std::env::set_var` (a third disagreeing, process-global-racy source).
+/// `setenv(key, value)` — set an env var in the HostConfig env map (the source `env`/`environ` read),
+/// shared by `Arc` across M:N workers so the write is visible to the parent + sibling tasks. Does NOT
+/// touch `std::env::set_var` (a third disagreeing, process-global-racy source).
 fn setenv(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "setenv", 2)?;
     let key = h.arg_str(0)?;

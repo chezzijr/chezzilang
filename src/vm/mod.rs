@@ -3436,20 +3436,40 @@ impl crate::native::Host for VmHost<'_> {
         self.vm.host.args.clone()
     }
     fn os_env(&self, key: &str) -> Option<String> {
-        self.vm.host.env.get(key).cloned()
-    }
-    fn os_environ(&self) -> Vec<(String, String)> {
         self.vm
             .host
             .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
+    }
+    fn os_environ(&self) -> Vec<(String, String)> {
+        // Sort by key: the backing store is a `HashMap` (per-instance random iteration order), but
+        // every other Chezzi map is deterministic and the serial/M:N engines each build their own
+        // HashMap — an unsorted lowering would diverge run-to-run and between engines.
+        let mut pairs: Vec<(String, String)> = self
+            .vm
+            .host
+            .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        pairs
     }
     fn os_setenv(&mut self, key: String, value: String) {
-        // Writes the per-VM HostConfig env — the SAME map `os_env`/`os_environ` read — NOT
-        // `std::env::set_var` (a third, process-global-racy source). So `setenv` is observed by both.
-        self.vm.host.env.insert(key, value);
+        // Writes the SHARED HostConfig env — the SAME map `os_env`/`os_environ` read, shared by Arc
+        // across M:N workers — NOT `std::env::set_var` (a third, process-global-racy source). So a
+        // `setenv` from any task is observed by both readers AND by the parent/siblings.
+        self.vm
+            .host
+            .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, value);
     }
     fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
         std::env::current_dir()

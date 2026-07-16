@@ -23,9 +23,11 @@ native fn platform() -> str
 native fn hostname() -> str
 native fn home_dir() -> Option[str]
 native fn temp_dir() -> str
-# `environ()` reads the SAME per-VM HostConfig env map `env` reads, and `setenv` WRITES it — so a
-# `setenv` is observed by both `env` and `environ` (no third disagreeing source). Children spawned via
-# `std.process.cmd` still inherit the REAL process env (that axis is unchanged).
+# `environ()` (sorted by key) reads the SAME HostConfig env map `env` reads, and `setenv` WRITES it —
+# so a `setenv` is observed by both `env` and `environ` (no third disagreeing source). The map is
+# shared across M:N workers, so a `setenv` from inside a task is visible to the parent + siblings
+# (process-global, like Python/Go). Children spawned via `std.process.cmd` still inherit the REAL
+# process env (that axis is unchanged).
 native fn environ() -> Map[str, str]
 native fn setenv(key: str, value: str) -> nil
 # `chdir` mutates the REAL process cwd (like `getcwd` reads it). Process-global: shared by all M:N

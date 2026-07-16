@@ -220,7 +220,12 @@ fn not_utf8() -> HostError {
 #[derive(Debug, Default)]
 pub struct HostConfig {
     pub args: Vec<String>,
-    pub env: HashMap<String, String>,
+    /// The process environment. SHARED (`Arc<Mutex<…>>`), not deep-cloned, when an M:N worker is
+    /// spawned (`sched.rs`) — so `std.os.setenv` from inside a task is visible to the parent and
+    /// siblings, matching the serial engine (one Vm, one map) and process-global env semantics
+    /// (Python `os.environ` / Go `os.Setenv` are visible across threads). The `Mutex` guards the
+    /// concurrent access from real OS-thread workers.
+    pub env: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     pub stdin: Stdin,
     /// STREAM the program's stdout/stderr straight to the process's real streams (one locked write
     /// per `print` → line-atomic), instead of accumulating into the VM's captured buffers. Only the
@@ -235,7 +240,7 @@ impl HostConfig {
     pub fn from_process(args: Vec<String>) -> Self {
         HostConfig {
             args,
-            env: std::env::vars().collect(),
+            env: std::sync::Arc::new(std::sync::Mutex::new(std::env::vars().collect())),
             stdin: Stdin::Real,
             stream: false,
         }
@@ -446,8 +451,10 @@ pub trait Host {
     fn os_env(&self, key: &str) -> Option<String>;
     /// The current working directory.
     fn os_getcwd(&self) -> Result<String, HostError>;
-    /// ALL environment variables (from the same injected env `os_env` reads). DEFAULTED to empty so
-    /// only the real `VmHost` overrides — test/off-heap hosts inherit the inert default.
+    /// ALL environment variables (from the same injected env `os_env` reads), sorted by key so the
+    /// map is deterministic on both engines (the backing store is a `HashMap` with per-instance
+    /// random iteration order). DEFAULTED to empty so only the real `VmHost` overrides — test/off-heap
+    /// hosts inherit the inert default.
     fn os_environ(&self) -> Vec<(String, String)> {
         vec![]
     }

@@ -2865,9 +2865,12 @@ impl Vm {
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;
-        // B3.3-threads: thread the parent's **read-only** host state (process args + env) through so a
+        // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
-        // defaults (the B3.2 silent-divergence owe). `stdin` is SHARED, not copied: `Stdin`'s clone
+        // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
+        // SHARED (its `Arc::clone` hands over the same `Mutex`-guarded map, not a copy) so a task's
+        // `std.os.setenv` is visible to the parent + siblings — process-global env, matching the
+        // serial engine (one Vm, one map) and Python/Go. `stdin` is SHARED, not copied: `Stdin`'s clone
         // hands over the same source (an `Arc` queue / the process-global locked handle), so a task's
         // `read_line` reads the one stream — a line goes to exactly ONE task, and no task is ever
         // handed a false EOF (Go's `os.Stdin` / Python's `sys.stdin`; which task gets a given line is
