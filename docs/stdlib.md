@@ -714,10 +714,17 @@ returns the lowercase-hex digest as a `str` (always valid UTF-8 → infallible, 
 `md5(s) -> str` (RFC 1321) ·
 `hmac_sha256(key: bytes, msg: bytes) -> str` (HMAC-SHA-256, RFC 2104 — keyed message authentication;
 convert a `str` key/msg with a `b"..."` literal).
+**CSPRNG** (Python `secrets`): `secure_bytes(n: int) -> bytes` returns `n` cryptographically-secure
+random bytes; `token_hex(n: int) -> str` returns `n` secure random bytes as a `2n`-char lowercase-hex
+`str`. Both draw from the OS entropy source (`getrandom`) and **fail closed** — if the OS can't supply
+entropy they raise a **recoverable fault** (catchable by `recover:`), never weak or degraded bytes.
+`n` must be `0..=1048576` (a 1 MiB cap); a negative or oversized `n` faults. Output is
+**non-deterministic** — two draws differ, so it has no fixed golden. (`token_urlsafe` (base64url) is a
+deferred follow-up.)
 **Security:** MD5 **and SHA-1** are **cryptographically broken** — use them only for checksums / git
 object ids / legacy interop, never for passwords, signatures, or integrity against an adversary.
-Password hashing (bcrypt/argon2) and secure random bytes/tokens are not yet provided.
-*Pure CPU (no I/O); inline on every engine.*
+Password hashing (bcrypt/argon2) is not yet provided.
+*Pure CPU / a fast entropy syscall (no blocking I/O); inline on every engine.*
 
 ### `std.uuid`
 RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char

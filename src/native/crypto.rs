@@ -500,6 +500,89 @@ fn hmac_sha256_fn(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(to_hex(&hmac_sha256(&key, &msg))))
 }
 
+// ---- CSPRNG (secrets.token_bytes / token_hex) ----
+//
+// Fills exactly `n` bytes from the OS entropy source, FAILING CLOSED: unlike `uuid.rs::auto_seed`
+// there is NO weak `SystemTime` fallback — if the OS can't give us entropy we return a recoverable
+// `HostError` rather than degraded bytes. A CSPRNG that silently weakens is a security bug.
+const SECURE_BYTES_MAX: usize = 1 << 20; // 1 MiB — reject absurd n before allocating (no OOM).
+
+/// Draw exactly `n` cryptographically-secure random bytes. Linux: loops `getrandom(2)` to fill the
+/// whole buffer, retrying the remainder on short reads and `EINTR` (large / signal-interrupted draws),
+/// and faulting on any hard error or a `0` return (source exhausted → fail closed). Non-Linux: no
+/// wired entropy source → fault (never weaken).
+fn secure_random_bytes(n: usize) -> Result<Vec<u8>, HostError> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut buf = vec![0u8; n];
+        let mut filled = 0usize;
+        while filled < n {
+            // SAFETY: writing into our own heap buffer at `filled`, at most `n - filled` bytes; flags=0.
+            let r = unsafe {
+                libc::getrandom(
+                    buf.as_mut_ptr().add(filled) as *mut libc::c_void,
+                    n - filled,
+                    0,
+                )
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue; // interrupted before reading any bytes — retry the remainder.
+                }
+                return Err(HostError {
+                    message: format!("secure_bytes: getrandom failed: {err}"),
+                });
+            }
+            if r == 0 {
+                // Entropy source returned nothing — fail closed rather than spin or weaken.
+                return Err(HostError {
+                    message: "secure_bytes: getrandom returned no entropy".into(),
+                });
+            }
+            filled += r as usize;
+        }
+        Ok(buf)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = n;
+        Err(HostError {
+            message: "secure_bytes: no secure entropy source on this platform".into(),
+        })
+    }
+}
+
+/// Guard `n`: reject negative (fail closed) and oversized (no OOM) before allocating.
+fn secure_len(h: &mut dyn Host, name: &str) -> Result<usize, HostError> {
+    expect_args(h, name, 1)?;
+    let n = h.arg_int(0)?;
+    if n < 0 {
+        return Err(HostError {
+            message: format!("{name}: n must be >= 0, got {n}"),
+        });
+    }
+    if n as u64 > SECURE_BYTES_MAX as u64 {
+        return Err(HostError {
+            message: format!("{name}: n exceeds the {SECURE_BYTES_MAX}-byte cap, got {n}"),
+        });
+    }
+    Ok(n as usize)
+}
+
+/// `secure_bytes(n)` — `n` cryptographically-secure random bytes (Python `secrets.token_bytes`).
+fn secure_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    let n = secure_len(h, "secure_bytes")?;
+    Ok(NativeRet::Bytes(secure_random_bytes(n)?))
+}
+
+/// `token_hex(n)` — `n` secure random bytes as a `2n`-char lowercase-hex `str` (Python
+/// `secrets.token_hex`).
+fn token_hex(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    let n = secure_len(h, "token_hex")?;
+    Ok(NativeRet::Str(to_hex(&secure_random_bytes(n)?)))
+}
+
 /// Callable members. `(name, fn)`.
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("sha256", sha256),
@@ -510,6 +593,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("sha512_bytes", sha512_bytes),
     ("md5", md5),
     ("hmac_sha256", hmac_sha256_fn),
+    ("secure_bytes", secure_bytes),
+    ("token_hex", token_hex),
 ];
 
 #[cfg(test)]
@@ -662,6 +747,101 @@ mod tests {
             )),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
+    }
+
+    #[derive(Default)]
+    struct IntHost {
+        ints: Vec<i64>,
+    }
+    impl Host for IntHost {
+        fn arg_count(&self) -> usize {
+            self.ints.len()
+        }
+        fn arg_int(&mut self, i: usize) -> Result<i64, HostError> {
+            self.ints.get(i).copied().ok_or(HostError {
+                message: "missing arg".into(),
+            })
+        }
+        fn arg_float(&mut self, i: usize) -> Result<f64, HostError> {
+            Ok(self.arg_int(i)? as f64)
+        }
+        fn arg_is_int(&self, i: usize) -> bool {
+            i < self.ints.len()
+        }
+        fn arg_str(&mut self, _i: usize) -> Result<String, HostError> {
+            Err(HostError {
+                message: "no str args".into(),
+            })
+        }
+        fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
+            Err(HostError {
+                message: "no map args".into(),
+            })
+        }
+        fn write_stdout(&mut self, _s: &str) {}
+        fn write_stderr(&mut self, _s: &str) {}
+        fn read_line(&mut self) -> Result<Option<String>, HostError> {
+            Ok(None)
+        }
+        fn os_args(&self) -> Vec<String> {
+            vec![]
+        }
+        fn os_env(&self, _key: &str) -> Option<String> {
+            None
+        }
+        fn os_getcwd(&self) -> Result<String, HostError> {
+            Ok("/".into())
+        }
+    }
+
+    /// CSPRNG members are non-deterministic BY DESIGN, so no fixed vector — assert PROPERTIES only:
+    /// length, uniqueness across draws, hex alphabet, empty-on-0, and the fail-closed error path for a
+    /// negative / oversized `n`.
+    #[test]
+    fn secure_random_props() {
+        // secure_bytes(32): exactly 32 bytes.
+        let b32 = match secure_bytes(&mut IntHost { ints: vec![32] }).unwrap() {
+            NativeRet::Bytes(v) => v,
+            other => panic!("expected Bytes, got {other:?}"),
+        };
+        assert_eq!(b32.len(), 32);
+
+        // Two successive draws differ (overwhelming probability).
+        let b32b = match secure_bytes(&mut IntHost { ints: vec![32] }).unwrap() {
+            NativeRet::Bytes(v) => v,
+            other => panic!("expected Bytes, got {other:?}"),
+        };
+        assert_ne!(b32, b32b, "two CSPRNG draws must differ");
+
+        // secure_bytes(0) → empty.
+        match secure_bytes(&mut IntHost { ints: vec![0] }).unwrap() {
+            NativeRet::Bytes(v) => assert!(v.is_empty()),
+            other => panic!("expected empty Bytes, got {other:?}"),
+        }
+
+        // Fail closed: n < 0 → Err.
+        assert!(secure_bytes(&mut IntHost { ints: vec![-1] }).is_err());
+        // Fail closed: oversized n → Err (no OOM).
+        assert!(
+            secure_bytes(&mut IntHost {
+                ints: vec![(1 << 20) + 1]
+            })
+            .is_err()
+        );
+
+        // token_hex(16) → 32 lowercase-hex chars.
+        let tok = match token_hex(&mut IntHost { ints: vec![16] }).unwrap() {
+            NativeRet::Str(s) => s,
+            other => panic!("expected Str, got {other:?}"),
+        };
+        assert_eq!(tok.len(), 32);
+        assert!(
+            tok.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "token_hex must be lowercase hex: {tok}"
+        );
+        // token_hex(-1) → Err.
+        assert!(token_hex(&mut IntHost { ints: vec![-1] }).is_err());
     }
 
     /// RFC 1321 §A.5 MD5 test suite.
