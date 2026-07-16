@@ -1605,6 +1605,49 @@ fn fs_predicates_parity() {
     assert_eq!(out, "true\nfalse\ntrue\n");
 }
 
+/// gaps §6 — fs.stat/fs.walk + the FileInfo native struct across BOTH engines. Proves the
+/// reserved-type gate (`from fs import FileInfo`) + the `type_names` bind_import skip on serial + M:N,
+/// and that stat/walk read the real filesystem identically. Scratch tree is self-owned (file-dependent
+/// size — mtime is NOT asserted). Walk order is deterministic (per-dir sort) → exact stdout match.
+#[test]
+fn fs_stat_walk_fileinfo_parity() {
+    let scratch = TmpDir::new();
+    scratch.write("root/a.txt", "hello\n"); // 6 bytes
+    scratch.write("root/b.txt", "b");
+    scratch.write("root/sub/c.txt", "c");
+    let file = scratch.0.join("root/a.txt");
+    let file = file.to_string_lossy();
+    let root = scratch.0.join("root");
+    let root = root.to_string_lossy();
+    // `import FileInfo from std.fs` proves the reserved-type gate + `type_names` bind_import skip on
+    // BOTH engines (it runtime-traps if FileInfo is not registered). `import std.fs` licenses the
+    // `fs.stat`/`fs.walk` qualified calls.
+    let src = format!(
+        "import std.fs\n\
+         import FileInfo from std.fs\n\
+         match fs.stat(\"{file}\"):\n\
+         \x20   Ok(fi):\n\
+         \x20       print(str(fi.size))\n\
+         \x20       print(str(fi.is_file))\n\
+         \x20       print(str(fi.is_dir))\n\
+         \x20   Err(e): print(\"staterr\")\n\
+         match fs.walk(\"{root}\"):\n\
+         \x20   Ok(xs):\n\
+         \x20       for p in xs:\n\
+         \x20           print(p)\n\
+         \x20   Err(e): print(\"walkerr\")\n",
+    );
+    let out = parity_entry(&src);
+    let expected = format!(
+        "6\ntrue\nfalse\n{a}\n{b}\n{sub}\n{c}\n",
+        a = scratch.0.join("root/a.txt").to_string_lossy(),
+        b = scratch.0.join("root/b.txt").to_string_lossy(),
+        sub = scratch.0.join("root/sub").to_string_lossy(),
+        c = scratch.0.join("root/sub/c.txt").to_string_lossy(),
+    );
+    assert_eq!(out, expected);
+}
+
 #[test]
 fn time_format_parity() {
     let out = parity_entry(

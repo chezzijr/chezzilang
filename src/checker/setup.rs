@@ -258,6 +258,19 @@ impl Checker {
                 ("code", Ty::Int),
             ]),
         );
+        // gaps §6 — `FileInfo` from `std.fs` (returned by `fs.stat`). Field order load-bearing
+        // (matches `native/fs.rs` stat builder + compiler `Compiler::new` layout).
+        self.structs.insert(
+            "FileInfo".into(),
+            mk(vec![
+                ("size", Ty::Int),
+                ("mtime", Ty::Int),
+                ("mode", Ty::Int),
+                ("is_dir", Ty::Bool),
+                ("is_file", Ty::Bool),
+                ("is_symlink", Ty::Bool),
+            ]),
+        );
         // `Ref` is a reserved global backing the `ref` keyword: its layout+methods (harvested from the
         // always-linked std.ref module into `ref_seed`) are seeded BARE — unlike Match/Response/
         // ProcResult above, whose bare NAME stays import-gated. So both the keyword's lowered

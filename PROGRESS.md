@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/fs-stat-walk`) — `docs/gaps.md` §6: fs metadata READ + recursive
+> walk.** Two natives on the file-backed `std.fs` + a new native struct `FileInfo`. `fs.stat(path) ->
+> Result[FileInfo]` reads real filesystem metadata into `struct FileInfo { size, mtime, mode: int,
+> is_dir, is_file, is_symlink: bool }` — FOLLOWS symlinks for size/mtime/mode/is_dir/is_file (matches
+> `stat`/`os.stat`), `is_symlink` reported from a separate `symlink_metadata`; `mtime` = Unix-epoch
+> secs (`0` if pre-epoch/unsupported), `mode` = raw unix `st_mode` (`0` non-unix); `Err` (recoverable)
+> on a missing/unreadable path. `fs.walk(path) -> Result[List[str]]` recursively lists every entry
+> under `path` as full path strings in a **deterministic per-dir-sorted, dir-before-children** order
+> (required for serial==M:N parity — `read_dir` order is arbitrary); a symlinked dir is listed but NOT
+> descended (cycle guard). `FileInfo` is import-gated (module-owned, not program-global) via the same 3
+> layout copies + `assign_type_keys`/`type_names` bind_import-skip path as `Match`/`Response`/
+> `ProcResult` (no is_reserved_type entry, no bespoke exec.rs skip). Tests: `native/fs.rs` unit
+> (`fs_stat_reads_metadata`, `fs_stat_follows_symlink_but_flags_it`, `fs_walk_recursive_sorted`,
+> `fs_walk_does_not_follow_symlink_dirs`) + `fs_stat_walk_fileinfo_parity` (RUNS `import FileInfo from
+> std.fs` + stat/walk on BOTH engines — the reserved-type-hole regression guard). Docs: `docs/stdlib.md
+> § std.fs`, `docs/gaps.md §6` (SHIPPED). Field order is load-bearing across `std/fs.chz` /
+> `compiler/mod.rs` / `checker/setup.rs` / `native/fs.rs` — guarded by the parity test's size+is_file
+> asserts.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
 > module `std/csv.chz` (zero native seam — RFC 4180 quote state machine over the core `str` primitives
 > + `std.string.replace`/`index_of`; only Rust touch = one `include_str!` line in

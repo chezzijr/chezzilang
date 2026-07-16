@@ -11,11 +11,29 @@
 # Mutations are all `Result[nil]`. `mkdir` is recursive (mkdir -p); `remove_dir` is non-recursive
 # (faults on a non-empty dir); `append` creates-if-absent + never truncates.
 
+# FileInfo — filesystem metadata read by `stat`. FIELD ORDER IS LOAD-BEARING: it is positional across
+# the hand-built runtime layout copies (compiler `Compiler::new`, checker `seed_stdlib_structs`,
+# `native/fs.rs` stat builder). `mode` is the raw unix st_mode (perm + type bits; 0 on non-unix);
+# `mtime` is UNIX-epoch seconds (0 if pre-epoch/unsupported).
+native struct FileInfo:
+    size: int
+    mtime: int
+    mode: int
+    is_dir: bool
+    is_file: bool
+    is_symlink: bool
+
 native fn list_dir(path: str) -> Result[List[str]]
 native fn exists(path: str) -> bool
 native fn is_file(path: str) -> bool
 native fn is_dir(path: str) -> bool
 native fn size(path: str) -> Result[int]
+# stat reads filesystem metadata into a FileInfo (FOLLOWS symlinks like `stat`/os.stat; is_symlink is
+# reported separately). Errs (recoverable) on a missing/unreadable path.
+native fn stat(path: str) -> Result[FileInfo]
+# walk recursively lists every entry (files + dirs) under `path` as full path strings, in a
+# deterministic per-directory-sorted, dir-before-children order. Does NOT follow symlinked dirs.
+native fn walk(path: str) -> Result[List[str]]
 native fn glob(pattern: str) -> Result[List[str]]
 # canonicalize resolves symlinks + `.`/`..` against the REAL filesystem (unlike the purely lexical
 # path.normalize) → an absolute real path; the path must EXIST (errs otherwise).

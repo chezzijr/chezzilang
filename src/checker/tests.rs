@@ -6609,7 +6609,9 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         fs.functions.get("atomic_write").unwrap().ret,
         Ty::result(Ty::Nil)
     );
-    assert_eq!(fs.functions.len(), 15);
+    // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
+    // (FileInfo is a native struct, not a function — not counted here.)
+    assert_eq!(fs.functions.len(), 17);
 }
 
 /// Hover doc preserved after migration: math.sqrt (and an io/os fn) still carry the authored blurb via
@@ -6646,7 +6648,8 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     // (getpid/platform/hostname/home_dir/temp_dir/environ/setenv/chdir) = 12.
     assert_eq!(crate::native::native_members("std.os").len(), 12);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
-    assert_eq!(crate::native::native_members("std.fs").len(), 15);
+    // --- fs.stat/fs.walk (gaps §6): 15 original + stat + walk = 17 runtime members.
+    assert_eq!(crate::native::native_members("std.fs").len(), 17);
     let consts: Vec<&str> = crate::native::native_consts("std.math")
         .iter()
         .map(|(n, _)| *n)

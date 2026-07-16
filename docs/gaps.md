@@ -460,9 +460,12 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   NOT seen by a child, and under a synthetic host config `os.env("X")` can differ from
   `process.cmd("echo $X")`. Bridging that would require writing the real process env at `setenv` (racy,
   edition-2024-unsafe `std::env::set_var`) — deliberately not done.
-- fs: recursive `walk`, `remove_dir_all` (intentionally omitted today — see `stdlib.md §std.fs`),
-  metadata READ (mtime / permissions / size-struct). `fs.chmod` now SETS permission bits, but there is
-  still no metadata *reader* returning mtime/mode/size as a struct (`size()` returns only byte length).
+- fs: ~~recursive `walk`~~ — **`fs.walk(path) -> Result[List[str]]` SHIPPED** (deterministic per-dir
+  sorted flat list, does NOT follow symlinked dirs; `native/fs.rs`). `remove_dir_all` (intentionally
+  omitted today — see `stdlib.md §std.fs`). ~~metadata READ (mtime / permissions / size-struct)~~ —
+  **`fs.stat(path) -> Result[FileInfo]` SHIPPED**: a native `FileInfo` struct (size/mtime/mode/is_dir/
+  is_file/is_symlink), follows symlinks like `stat`/`os.stat`. `fs.chmod` still SETS permission bits
+  (`fs.stat().mode` now READS them).
 
 ### 7. Crypto / encoding
 - crypto: `sha256` / `sha256_bytes` (R1: hash binary data / a file) / `md5`. Missing `sha1` / `sha512`,

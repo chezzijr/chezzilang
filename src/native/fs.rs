@@ -70,6 +70,85 @@ fn size(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
+/// Read filesystem metadata into a `FileInfo` struct. FOLLOWS symlinks for size/mtime/mode/is_dir/
+/// is_file (matches `stat` / Python `os.stat`); `is_symlink` comes from a separate
+/// `symlink_metadata` (best-effort `false` if that errors). A missing/unreadable path (or a broken
+/// symlink, since the follow-`metadata` errors) returns a recoverable `Err`, never a fault. `mtime`
+/// is UNIX-epoch seconds, `0` if the file's mtime predates the epoch or the platform can't report it.
+/// `mode` is the raw unix `st_mode` (perm + type bits) on unix, `0` elsewhere.
+fn stat(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "stat", 1)?;
+    let path = h.arg_str(0)?;
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => return Ok(NativeRet::Err(format!("{path}: {e}"))),
+    };
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mode: i64 = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            m.mode() as i64
+        }
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    };
+    let is_symlink = std::fs::symlink_metadata(&path)
+        .map(|sm| sm.file_type().is_symlink())
+        .unwrap_or(false);
+    Ok(NativeRet::Ok(Box::new(NativeRet::Struct {
+        name: "FileInfo".into(),
+        fields: vec![
+            ("size".into(), NativeRet::Int(m.len() as i64)),
+            ("mtime".into(), NativeRet::Int(mtime)),
+            ("mode".into(), NativeRet::Int(mode)),
+            ("is_dir".into(), NativeRet::Bool(m.is_dir())),
+            ("is_file".into(), NativeRet::Bool(m.is_file())),
+            ("is_symlink".into(), NativeRet::Bool(is_symlink)),
+        ],
+    })))
+}
+
+/// Recursively list every entry (files + dirs) strictly under `path`, as a flat list of full path
+/// strings. Each directory's entries are SORTED by name before pushing/recursing — this makes the
+/// order deterministic (`read_dir` yields filesystem-arbitrary order), which is REQUIRED for
+/// serial==M:N parity. Pre-order: a directory is listed before its children. A symlinked directory is
+/// LISTED but NOT descended (cycle guard). An unreadable root (or subdir) returns a recoverable `Err`.
+fn walk(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "walk", 1)?;
+    let root = h.arg_str(0)?;
+    let mut out: Vec<String> = Vec::new();
+    if let Err(e) = walk_into(Path::new(&root), &mut out) {
+        return Ok(NativeRet::Err(format!("{root}: {e}")));
+    }
+    let items = out.into_iter().map(NativeRet::Str).collect();
+    Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
+}
+
+/// Recursion helper for [`walk`]: sort each directory's entries by file name, then push each entry's
+/// full path and recurse into it only if it is a real (non-symlink) directory.
+fn walk_into(dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let ft = e.file_type()?; // does NOT follow symlinks — is_symlink is accurate
+        let p = e.path();
+        out.push(p.to_string_lossy().into_owned());
+        if ft.is_dir() && !ft.is_symlink() {
+            walk_into(&p, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve symlinks and `.`/`..` to an absolute, real path via `std::fs::canonicalize`. Unlike the
 /// purely lexical `path.normalize` (no filesystem access), this hits the real filesystem and so
 /// REQUIRES the path to exist — a nonexistent path faults (recoverable `Result[str]` error).
@@ -289,6 +368,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("is_file", is_file),
     ("is_dir", is_dir),
     ("size", size),
+    ("stat", stat),
+    ("walk", walk),
     ("canonicalize", canonicalize),
     ("glob", glob),
     ("chmod", chmod),
@@ -560,6 +641,131 @@ mod tests {
         assert!(is_err(
             atomic_write(&mut host(&[&tmp.join("no/dir/x.txt"), "y"])).unwrap()
         ));
+    }
+
+    // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk) ---
+
+    /// Pull the `Ok(Struct)` fields out of a `NativeRet`, else panic.
+    fn ok_struct_fields(r: NativeRet) -> (String, Vec<(String, NativeRet)>) {
+        match r {
+            NativeRet::Ok(inner) => match *inner {
+                NativeRet::Struct { name, fields } => (name, fields),
+                other => panic!("expected Ok(Struct), got Ok({other:?})"),
+            },
+            other => panic!("expected Ok(Struct), got {other:?}"),
+        }
+    }
+
+    /// `stat` reads real filesystem metadata into a `FileInfo` struct: known byte size, positive
+    /// mtime, nonzero mode (unix), and the is_dir/is_file/is_symlink flags.
+    #[test]
+    fn fs_stat_reads_metadata() {
+        let tmp = TmpDir::new();
+        let f = tmp.join("hello.txt");
+        std::fs::write(&f, "hello\n").unwrap(); // 6 bytes
+        let (name, fields) = ok_struct_fields(stat(&mut host(&[&f])).unwrap());
+        assert_eq!(name, "FileInfo");
+        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["size", "mtime", "mode", "is_dir", "is_file", "is_symlink"]
+        );
+        assert_eq!(fields[0].1, NativeRet::Int(6)); // size
+        assert!(matches!(fields[1].1, NativeRet::Int(t) if t > 0)); // mtime
+        #[cfg(unix)]
+        assert!(matches!(fields[2].1, NativeRet::Int(m) if m != 0)); // mode
+        assert_eq!(fields[3].1, NativeRet::Bool(false)); // is_dir
+        assert_eq!(fields[4].1, NativeRet::Bool(true)); // is_file
+        assert_eq!(fields[5].1, NativeRet::Bool(false)); // is_symlink
+
+        // stat a directory → is_dir true / is_file false.
+        let (_, dfields) = ok_struct_fields(stat(&mut host(&[&tmp.join(".")])).unwrap());
+        assert_eq!(dfields[3].1, NativeRet::Bool(true)); // is_dir
+        assert_eq!(dfields[4].1, NativeRet::Bool(false)); // is_file
+
+        // stat a missing path → Err (recoverable, not a fault).
+        assert!(is_err(stat(&mut host(&[&tmp.join("nope")])).unwrap()));
+    }
+
+    /// `stat` follows symlinks for size/is_file (matches `stat`/os.stat default) but reports
+    /// is_symlink=true from a separate symlink_metadata check.
+    #[cfg(unix)]
+    #[test]
+    fn fs_stat_follows_symlink_but_flags_it() {
+        let tmp = TmpDir::new();
+        let target = tmp.join("t.txt");
+        std::fs::write(&target, "abcd").unwrap(); // 4 bytes
+        let link = tmp.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_, fields) = ok_struct_fields(stat(&mut host(&[&link])).unwrap());
+        assert_eq!(fields[0].1, NativeRet::Int(4)); // size = target (followed)
+        assert_eq!(fields[4].1, NativeRet::Bool(true)); // is_file (target)
+        assert_eq!(fields[5].1, NativeRet::Bool(true)); // is_symlink
+    }
+
+    /// Unwrap `Ok(List(Str…))` into the path strings, else panic.
+    fn ok_str_list(r: NativeRet) -> Vec<String> {
+        match r {
+            NativeRet::Ok(inner) => match *inner {
+                NativeRet::List(items) => items
+                    .into_iter()
+                    .map(|it| match it {
+                        NativeRet::Str(s) => s,
+                        other => panic!("expected Str item, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected Ok(List), got Ok({other:?})"),
+            },
+            other => panic!("expected Ok(List), got {other:?}"),
+        }
+    }
+
+    /// `walk` recursively lists every entry under a root in a deterministic per-dir-sorted, dir-before-
+    /// children order (required for serial==M:N parity). The root itself is excluded.
+    #[test]
+    fn fs_walk_recursive_sorted() {
+        let tmp = TmpDir::new();
+        let root = tmp.join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(tmp.join("root/a.txt"), "a").unwrap();
+        std::fs::write(tmp.join("root/b.txt"), "b").unwrap();
+        std::fs::create_dir(tmp.join("root/sub")).unwrap();
+        std::fs::write(tmp.join("root/sub/c.txt"), "c").unwrap();
+        let got = ok_str_list(walk(&mut host(&[&root])).unwrap());
+        assert_eq!(
+            got,
+            vec![
+                tmp.join("root/a.txt"),
+                tmp.join("root/b.txt"),
+                tmp.join("root/sub"),
+                tmp.join("root/sub/c.txt"),
+            ]
+        );
+        // walk a missing root → Err.
+        assert!(is_err(walk(&mut host(&[&tmp.join("nope")])).unwrap()));
+    }
+
+    /// `walk` lists a symlinked directory entry but does NOT recurse into it (cycle guard).
+    #[cfg(unix)]
+    #[test]
+    fn fs_walk_does_not_follow_symlink_dirs() {
+        let tmp = TmpDir::new();
+        let root = tmp.join("r");
+        std::fs::create_dir(&root).unwrap();
+        let real = tmp.join("r/real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(tmp.join("r/real/x.txt"), "x").unwrap();
+        // A symlink to the sibling dir — must be listed but NOT descended.
+        std::os::unix::fs::symlink(&real, tmp.join("r/lnk")).unwrap();
+        let got = ok_str_list(walk(&mut host(&[&root])).unwrap());
+        assert_eq!(
+            got,
+            vec![
+                tmp.join("r/lnk"), // symlink entry listed, not recursed
+                tmp.join("r/real"),
+                tmp.join("r/real/x.txt"),
+            ]
+        );
     }
 
     /// Overwriting an existing restrictive file must PRESERVE its mode — the rename swaps in a fresh
