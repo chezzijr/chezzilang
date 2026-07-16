@@ -1812,10 +1812,10 @@ impl Vm {
     }
 
     /// `xs.min()` / `xs.max()` — the extremal element by natural order. A Comparable-struct element's
-    /// `compare` re-enters the VM (may GC), so the source list is ROOTED on the operand stack and each
-    /// element is re-fetched from the heap per comparison (mirrors [`Vm::list_sort_structs`]). Empty
-    /// list faults. First-seen tie-break (an equal element never displaces the earlier best), matching
-    /// Python's `min`/`max`.
+    /// `compare` re-enters the VM (may GC AND may mutate the source list), so the scan runs over a
+    /// GC-rooted SNAPSHOT (mirrors [`Vm::list_sort_by_key`]/[`Vm::list_min_max_by`]) — never the live
+    /// source, whose length can change under a re-entrant comparator. Empty list faults. First-seen
+    /// tie-break (an equal element never displaces the earlier best), matching Python's `min`/`max`.
     pub(super) fn list_reduce_extreme(
         &mut self,
         src_h: GcRef,
@@ -1830,11 +1830,23 @@ impl Vm {
             let name = if is_max { "max" } else { "min" };
             return Err(self.err(format!("{name}() of empty list"), span));
         }
-        self.push(Value::Obj(src_h)); // ROOT the source across `order_key` (struct compare may GC)
+        // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
+        // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
+        // indexing the live source post-user-code would panic out of bounds. GC-rooted so its elements
+        // survive `order_key`'s struct-compare allocations.
+        self.push(Value::Obj(src_h)); // ROOT the source list
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!(),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
         let mut best = 0usize;
         let mut err = None;
         for i in 1..n {
-            let (cur, best_v) = match self.heap.get(src_h) {
+            let (cur, best_v) = match self.heap.get(snap_h) {
                 Obj::List(v) => (v[i], v[best]),
                 _ => unreachable!(),
             };
@@ -1851,14 +1863,16 @@ impl Vm {
                 }
             }
         }
+        let result = match self.heap.get(snap_h) {
+            Obj::List(v) => v[best],
+            _ => unreachable!(),
+        };
+        self.pop(); // unroot snapshot
         self.pop(); // unroot source
         if let Some(e) = err {
             return Err(e);
         }
-        Ok(match self.heap.get(src_h) {
-            Obj::List(v) => v[best],
-            _ => unreachable!(),
-        })
+        Ok(result)
     }
 
     /// `xs.min_by(f)` / `xs.max_by(f)` — the ELEMENT whose derived key `f: fn(T) -> K` is extremal.

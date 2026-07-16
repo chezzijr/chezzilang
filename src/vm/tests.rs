@@ -714,6 +714,24 @@ fn min_max_by_empty_faults() {
     assert_eq!(run_err(src), "min_by() of empty list");
 }
 
+/// `min`/`max` scan a SNAPSHOT: a Comparable-struct element's `compare` that SHRINKS the receiver
+/// mid-scan must not index past the live list's new length (no OOB panic), matching `sort`/`min_by`.
+/// Regression for `list_reduce_extreme` re-indexing the live source after user code mutated it.
+#[test]
+fn min_max_shrinking_comparator_no_panic() {
+    // `compare` shrinks the module-global list it is invoked on (the receiver) each comparison; the
+    // snapshot scan still visits all three original elements → min by x = 1, on both engines.
+    let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n\
+               pts: List[Point] = [Point(3), Point(1), Point(2)]\n\
+               print(pts.min().x)\n";
+    assert_mc_parity(min_src, "1\n");
+    // Same for `max` (same `list_reduce_extreme` scan, is_max flipped) → max by x = 3.
+    let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n\
+               qs: List[Q] = [Q(3), Q(1), Q(2)]\n\
+               print(qs.max().x)\n";
+    assert_mc_parity(max_src, "3\n");
+}
+
 // ---- list HOF: callback that shrinks the receiver (snapshot semantics) ----
 
 /// `map` iterates a SNAPSHOT of the receiver's elements at call time: a callback that pops the
