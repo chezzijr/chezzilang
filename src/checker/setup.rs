@@ -77,6 +77,7 @@ impl Checker {
             io_writer_seed: None,
             io_reader_seed: None,
             concurrency_seeds: HashMap::new(),
+            time_timer_sig: None,
             container_seeds: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
@@ -487,8 +488,17 @@ impl Checker {
         // PASS 2 — native fns (module members, sig from the parsed decl; runtime value name-keyed).
         for s in &ast.stmts {
             if let StmtKind::Native(decl) = &s.kind {
-                sig.functions
-                    .insert(decl.name.clone(), self.harvest_native_fn_sig(decl, false));
+                let fsig = self.harvest_native_fn_sig(decl, false);
+                // `timer` is an opcode-backed BARE-callable builtin (lowers to `Op::NewTimer`, no runtime
+                // value): keep it OUT of `sig.functions` (else the From-import arm binds it as a normal
+                // callable, breaking bare-callability). Stash its sig for the bare `timer(...)` expr arm;
+                // the license stays in the `native_module_sig` `sig.types` insert. `timer` is a reserved
+                // name declared in exactly one `.chz`, so this name match is unambiguous and self-scoping.
+                if decl.name == "timer" {
+                    self.time_timer_sig = Some(fsig);
+                } else {
+                    sig.functions.insert(decl.name.clone(), fsig);
+                }
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.

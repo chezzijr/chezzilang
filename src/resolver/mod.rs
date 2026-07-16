@@ -1219,14 +1219,15 @@ mod tests {
                     .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == a_fn)),
                 "{label} AST must carry the `native fn {a_fn}` decl"
             );
-            // std.time's file must NOT declare `timer` as a native fn (it's opcode-backed; the license
-            // lives in the native_module_sig arm's sig.types, not as a bound runtime member).
+            // std.time's file DECLARES `timer` as a native fn (signature source). It stays opcode-backed
+            // — harvest routes its sig to `time_timer_sig` (not `sig.functions`) so it keeps its
+            // bare-callable / `Op::NewTimer` / reserved semantics; the license lives in sig.types.
             if label == "std.time" {
                 assert!(
-                    !m.ast.stmts.iter().any(
+                    m.ast.stmts.iter().any(
                         |s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == "timer")
                     ),
-                    "std.time.chz must NOT declare `native fn timer` (opcode-backed, no runtime value)"
+                    "std.time.chz must declare `native fn timer` (signature source; harvested to time_timer_sig)"
                 );
             }
         }

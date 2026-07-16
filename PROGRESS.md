@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB HYGIENE (2026-07-16, `feat/timer-decl`) — `timer` now DECLARED in `std/time.chz`.**
+> BEHAVIOR-PRESERVING consistency fix. `std/time.chz` declared its 4 real fns
+> (now/monotonic/sleep_ms/format) but NOT `timer`, with a big NOTE calling it the exception —
+> inconsistent with `Shared`/`Executor` which ARE declared (as `native struct`) despite being
+> opcode-backed. Now `native fn timer(ms: int) -> Channel[bool]` sits next to its siblings. It stays a
+> BARE-callable (`timer(50)`, not `time.timer(50)`), import-gated, `Op::NewTimer`-lowered, reserved,
+> non-renamable builtin — so harvest (`harvest_native_module` PASS 2) routes its sig to a new
+> `Checker.time_timer_sig` field, NOT `sig.functions` (which the From-import arm would bind as a normal
+> callable, breaking bare-callability). The bare `timer(...)` expr arm now single-sources its arg/return
+> types from that field (fallback = the old `[int] -> Channel[bool]` for the no-graph path); the
+> import-license stays in the `native_module_sig("std.time")` `sig.types` insert. **Supersedes** the
+> phase-4e note below ("timer DELIBERATELY NOT declared … would fault") — the fault only happens if it
+> lands in `sig.functions`, which the harvest branch now prevents. Honest caveat: this RELOCATES the
+> one-line special-case (into the harvest name-match), it doesn't remove it — `timer` is a category-of-
+> one. Zero observable behavior change: only the resolver native-marker assertion
+> (`enc_crypto_uuid_time_are_file_backed_with_native_marker`) flipped (must-declare); every sig-shape
+> (`time_fn_sigs_exact`: functions still exactly 4) + both-engine runtime + golden timer test stays green
+> unchanged. Full suite 3599 green, clippy clean, conformance green.
+
 > **✅ STDLIB (2026-07-16, `auto-task/crypto-hash-hmac`) — `docs/gaps.md` §7: sha1 / sha512 / HMAC in
 > `std.crypto`.** Five members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
 > in `std/crypto.chz`, hand-rolled impls in `src/native/crypto.rs`, zero new deps — same seam as the

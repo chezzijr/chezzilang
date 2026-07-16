@@ -1698,16 +1698,24 @@ impl Checker {
                 // builtin: requires `import std.time` (the arg is still checked on the unlicensed path
                 // so a nested error surfaces; the name STAYS reserved). Returns `Channel[bool]` even on
                 // the unlicensed path so a chained `.recv()` doesn't emit a confusing secondary error.
-                self.check_args("timer", &[Ty::Int], args, span);
+                // The arg/return types are single-sourced from the `native fn timer` decl in
+                // `std/time.chz` (harvested to `time_timer_sig`); the fallback reproduces that exact shape
+                // for the no-graph / unimported path where std.time was never harvested.
+                let (params, ret) = self
+                    .time_timer_sig
+                    .as_ref()
+                    .map(|s| (s.params.clone(), s.ret.clone()))
+                    .unwrap_or_else(|| (vec![Ty::Int], Ty::channel(Ty::Bool)));
+                self.check_args("timer", &params, args, span);
                 if self.time_licensed("timer") {
-                    Some(Ty::channel(Ty::Bool))
+                    Some(ret)
                 } else {
                     self.error(
                         span,
                         "unknown function 'timer' (import it from std.time: `import std.time`)"
                             .to_string(),
                     );
-                    Some(Ty::channel(Ty::Bool))
+                    Some(ret)
                 }
             }
             "Executor" => {

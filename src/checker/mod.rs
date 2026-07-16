@@ -1137,13 +1137,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
         "std.time" => {
             // std.time is FILE-BACKED (phase 4e): its 4 callable fns (now/monotonic/sleep_ms/format) are
             // declared in `std/time.chz` and harvested via `harvest_native_module` on top of this sig.
-            // This arm is retained ONLY for `timer` — an opcode-backed builtin (NOT a callable native
-            // member): it carries NO runtime value — it lowers via the compiler's name→opcode dispatch.
-            // It lives in `sig.types` ONLY so `import timer from std.time` validates membership and the
-            // checker's `bind_import` records it into the per-module `imported_time` set; `infer_named_call`
-            // then accepts the bare `timer(ms)` call only in a module that imported it. NOT a `native fn` /
-            // `func()` — that would add it to `sig.functions` and bind a (nonexistent) runtime value that
-            // faults at runtime.
+            // `timer` is ALSO declared there (as `native fn timer`) — but it's an opcode-backed builtin
+            // (NOT a callable native member): it carries NO runtime value and lowers via the compiler's
+            // name→opcode dispatch. Harvest routes its sig to the `time_timer_sig` field (NOT
+            // `sig.functions`, which the From-import arm would bind as a real callable). This arm keeps
+            // `timer` in `sig.types` ONLY so `import timer from std.time` validates membership and
+            // `bind_import` records it into the per-module `imported_time` set; `infer_named_call` then
+            // accepts the bare `timer(ms)` call only in a module that imported it. (Its `sig.functions`
+            // entry stays absent by design — see `harvest_native_module` PASS 2.)
             sig.types.insert("timer".to_string());
         }
         // std.regex is FILE-BACKED (phase 4b): its whole signature (the `native struct Match` + the 5
@@ -1704,6 +1705,15 @@ struct Checker {
     /// substituted with the value's element type at the call site. Bare-name annotation stays
     /// import-gated by `imported_concurrency` + `resolve_type`'s reserved arm. Empty until harvested.
     concurrency_seeds: HashMap<String, StructInfo>,
+    /// The harvested `FnSig` for `std.time`'s `timer(ms) -> Channel[bool]`, captured from the
+    /// file-backed `std/time.chz` harvest. `timer` is a BARE-CALLABLE opcode builtin (lowers to
+    /// `Op::NewTimer`, carries no runtime value), so — unlike now/monotonic/sleep_ms/format — its sig is
+    /// routed HERE by `harvest_native_module` rather than into `sig.functions` (which the From-import arm
+    /// would bind as a normal callable, breaking bare-callability). The bare `timer(...)` expr arm reads
+    /// its arg/return types from this field; the import-license stays in `sig.types`. `None` until
+    /// std.time is harvested (and on the lone single-module `check` path with no graph — the arm falls
+    /// back to the built-in `[int] -> Channel[bool]` shape).
+    time_timer_sig: Option<FnSig>,
     /// Phase 5a-containers — the harvested `StructInfo` (method table) for each of the three RESERVED
     /// UNIVERSE container types (`List`/`Map`/`Set`), keyed by bare name, captured from the always-linked
     /// `std/prelude.chz`'s `native struct` decls the first time the prelude module is checked in the graph
