@@ -10,8 +10,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > a CLI colorize only when not piped (Python `sys.stdout.isatty()` / Go `isatty`). Engine-agnostic (an
 > env fd query, not a VM-sink query → serial==M:N trivially; captured under `cargo test` → false).
 > Seam reused as-is: `NativeRet::Bool` → `Value::Bool`, no new plumbing. Test `golden_isatty_via_run_file`
-> asserts bool-shape + engine agreement (not a fixed value). Manual eyeball: terminal → true, `| cat` →
-> stdout/stderr false, stdin true. Docs: `docs/stdlib.md §std.io`, `docs/gaps.md §6` (SHIPPED). Deferred
+> asserts bool-shape + engine agreement (not a fixed value). Manual eyeball: terminal → all true; `| cat`
+> pipes fd1 only → stdout false, stdin/stderr true. Docs: `docs/stdlib.md §std.io`, `docs/gaps.md §6` (SHIPPED). Deferred
 > (deliberate second step): terminal-size / echo-off / raw-mode.
 > **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/gaps.md` §10: `std.bisect` +
 > `std.memoize`, two pure-Chezzi modules.** Both are NEW pure-Chezzi files (zero native seam — the only

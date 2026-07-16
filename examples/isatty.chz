@@ -1,4 +1,5 @@
-# TTY detection demo (gaps §6). Run in a terminal → all true; pipe (`| cat`) → stdout/stderr false.
+# TTY detection demo (gaps §6). Run in a terminal → all true; `| cat` pipes only fd1, so → stdout
+# false, stdin/stderr still true. (A shell pipe redirects stdout alone; stderr stays on the terminal.)
 # No .expected fixture: the result is environment-dependent (how this process's fds are wired).
 import std.io
 

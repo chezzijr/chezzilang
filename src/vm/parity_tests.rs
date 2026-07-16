@@ -4869,8 +4869,9 @@ fn golden_std_demo_via_run_file() {
 // ----- std.io TTY detection (gaps §6) — separated block near golden_std_demo to shrink the
 // hand-resolved conflict with the concurrent List-methods task also editing this file. -----
 /// `io.isatty()`/`isatty_stdin()`/`isatty_stderr()` each return a plain `bool` without faulting, and
-/// serial==M:N (an env fd query is engine-agnostic). Under `cargo test` stdout is captured → the
-/// value is `false` here, so we assert bool-SHAPE + engine agreement, NOT a fixed value.
+/// serial==M:N (an env fd query is engine-agnostic). The value depends on how the harness's real fds
+/// are wired (a terminal → true, a pipe/redirect → false — libtest's capture doesn't touch the fd),
+/// so we assert bool-SHAPE + engine agreement, NOT a fixed value.
 #[test]
 fn golden_isatty_via_run_file() {
     let out = parity_entry(

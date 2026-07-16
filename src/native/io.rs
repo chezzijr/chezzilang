@@ -71,7 +71,9 @@ fn flush(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// TTY detection (gaps §6) — query the REAL process fd via `std::io::IsTerminal`, so a CLI can
 /// colorize only when its output is a terminal (not piped/redirected). Environment queries, not VM
-/// sink queries, so engine-agnostic (serial == M:N); under `cargo test` stdout is captured → false.
+/// sink queries, so engine-agnostic (serial == M:N). `is_terminal()` reads the REAL OS fd (libtest's
+/// capture only redirects the print macros thread-locally, not fd 0/1/2), so the value reflects how
+/// this process's fds were wired at launch — a pipe/redirect → false, an attached terminal → true.
 fn isatty(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "isatty", 0)?;
     use std::io::IsTerminal;
