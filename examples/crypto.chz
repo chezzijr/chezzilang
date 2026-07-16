@@ -1,7 +1,7 @@
-# examples/crypto.chz — std.crypto digests (sha256, md5) of fixed inputs. Digests are deterministic
-# lowercase-hex strings (published FIPS-180 / RFC 1321 vectors), so the golden is byte-identical
-# across run / --serial / --parallel and on both engines. MD5 is here for checksums/interop only —
-# it is NOT cryptographically secure.
+# examples/crypto.chz — std.crypto digests (sha256, sha1, sha512, md5) + HMAC-SHA256 of fixed inputs.
+# Digests are deterministic lowercase-hex strings (published FIPS-180 / RFC 1321 / RFC 4231 vectors),
+# so the golden is byte-identical across run / --serial / --parallel and on both engines. MD5 and
+# SHA-1 are here for checksums/interop only — they are NOT cryptographically secure.
 
 import std.crypto
 import std.io
@@ -9,6 +9,13 @@ import std.io
 print("sha256('')    = " + crypto.sha256(""))
 print("sha256('abc') = " + crypto.sha256("abc"))
 print("sha256('Chezzi') = " + crypto.sha256("Chezzi"))
+print("sha1('')      = " + crypto.sha1(""))
+print("sha1('abc')   = " + crypto.sha1("abc"))
+print("sha1_bytes(b'abc') = " + crypto.sha1_bytes(b"abc"))
+print("sha512('')    = " + crypto.sha512(""))
+print("sha512('abc') = " + crypto.sha512("abc"))
+print("sha512_bytes(b'abc') = " + crypto.sha512_bytes(b"abc"))
 print("md5('')       = " + crypto.md5(""))
 print("md5('abc')    = " + crypto.md5("abc"))
 print("md5('message digest') = " + crypto.md5("message digest"))
+print("hmac_sha256(Jefe, ...) = " + crypto.hmac_sha256(b"Jefe", b"what do ya want for nothing?"))

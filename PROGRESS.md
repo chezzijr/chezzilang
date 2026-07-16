@@ -4,6 +4,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/crypto-hash-hmac`) — `docs/gaps.md` §7: sha1 / sha512 / HMAC in
+> `std.crypto`.** Five members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
+> in `std/crypto.chz`, hand-rolled impls in `src/native/crypto.rs`, zero new deps — same seam as the
+> existing `sha256`/`md5`): `sha1(s)`/`sha1_bytes(b)` (FIPS 180-4, 5×u32 80-round; NOT
+> collision-resistant — git/legacy only), `sha512(s)`/`sha512_bytes(b)` (FIPS 180-4, 8×u64, 128-byte
+> block + 128-bit BE length pad — NOT sha256's 64/56/8), and `hmac_sha256(key: bytes, msg: bytes)`
+> (RFC 2104, built over the existing `sha256_digest` primitive, block size 64, key-hash-first when
+> >64). All hash → lowercase-hex `str`; `_bytes` twins via the `arg_bytes` seam; str inputs hash their
+> UTF-8. Pure CPU ⇒ serial==M:N==interp trivially at the NativeFn seam. Tested against PUBLISHED
+> vectors, not round-trips: `sha1_fips180_vectors`/`sha512_fips180_vectors` (incl multi-block pad
+> guards) + `hmac_sha256_rfc4231_vectors` (RFC 4231 TC1/TC2 + TC6 131-byte key for the >64 hash-first
+> branch) unit tests; `examples/crypto.chz`/`.expected` extended (`golden_encoding_crypto_via_run_file`
+> + `assert_file_parity` = serial==M:N). Count-asserts bumped: `native::mod` name-list +
+> `crypto_fn_sigs_exact`. **NOT shipped** (ponytail follow-up note in the module docstring):
+> `hmac_sha1`/`hmac_sha512` (want a block-size param + `&[u8]` adapters — add if a caller needs them).
+> **STILL OPEN §7**: secure-random-bytes / token, password hashing (bcrypt/argon2). Docs:
+> `docs/stdlib.md §std.crypto`, `docs/gaps.md §7` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
 > module `std/csv.chz` (zero native seam — RFC 4180 quote state machine over the core `str` primitives
 > + `std.string.replace`/`index_of`; only Rust touch = one `include_str!` line in
