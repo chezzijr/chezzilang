@@ -457,8 +457,11 @@ normalize to UTC rather than round-tripping. (Python: `fromisoformat` done, `str
   `get_str`/`get_bool`/`get_int`/`positionals()`/`usage()`) over `os.args()`. `--name value` /
   `--name=value` / bool-presence / `--` terminator; unknown/missing/non-int → clean `Err`. See
   `docs/stdlib.md §5 std.flag`.
-- **`std.log` — levels + timestamps + stderr default.** Does not exist; every script reimplements it.
-  ~80 lines pure Chezzi. (Python: `logging`; Go: `log`/`slog`.)
+- ~~**`std.log` — levels + timestamps + stderr default.**~~ **SHIPPED.** Pure-Chezzi `std/log.chz`:
+  `log.new(min_level=INFO, to_stderr=true) -> Logger` with `debug/info/warn/error(msg)` gated by
+  `set_level`, formatting `"LEVEL message"` (Go `slog` levels `DEBUG<INFO<WARN<ERROR`) to stderr by
+  default. Timestamps are opt-in/injectable via `set_prefix` (the pure `format_line` core stays
+  deterministic — no baked-in clock). See `docs/stdlib.md § std.log`.
 - **`std.db` (sqlite).** Absent. Reachable *in theory* via FFI to `libsqlite3` (the opaque `ptr` type
   names `sqlite3*` as its motivating case) but that is a research project, not a workaround. Blocks
   persistence-shaped scripts. **Large.**

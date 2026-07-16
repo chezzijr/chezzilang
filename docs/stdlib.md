@@ -915,6 +915,34 @@ dashes is stripped, so a flag named `n` answers to **both** `-n` and `--n` — a
 simplification vs strict Go (which registers each spelling separately); a lone `-` is a positional.
 Deferred (not built): required-flag enforcement, subcommands, duplicate-registration detection.
 
+### `std.log` — leveled logging
+Pure-Chezzi leveled logger over `std.io` (Go `log`/`slog` + Python `logging`). `import std.log`.
+
+Levels (Go `slog` order + NAMES — `WARN`, not Python's `WARNING`): `DEBUG(0) < INFO(1) < WARN(2) <
+ERROR(3)`, exposed as module fns (`log.DEBUG()` … `log.ERROR()`) so callers pass them explicitly.
+
+```chezzi
+lg := log.new()              # min level INFO, output to stderr (both are the Python/Go defaults)
+lg.debug("noisy")            # DROPPED — below INFO
+lg.info("served")            # → stderr: "INFO served"
+lg.warn("careful")           # → stderr: "WARN careful"
+lg.set_level(log.DEBUG())    # now debug() passes
+```
+`new(min_level: int = 1, to_stderr: bool = true) -> Logger` (default min = `INFO`, output to
+**stderr** — the anti-drift default of both Python `logging` and Go `log`/`slog`; pass
+`to_stderr=false` to route to stdout). Methods (mutable-self): `debug/info/warn/error(msg)` format
+`"LEVEL message"` and write to the target, gated by the min level (a message below it is dropped);
+`set_level(level)` · `set_prefix(p)`.
+
+**Timestamps are opt-in and injectable, never baked in** — a live clock makes output
+non-deterministic (ungoldenable). The core is a pure, deterministic `format_line(level, msg) -> str`
+("LEVEL message") that a golden pins. For a real timestamp, `set_prefix(stamp)` with a **caller-owned**
+value (e.g. from `std.time` / `std.datetime`) — it is prepended (with a space) to every line;
+`set_prefix("")` clears it. std.log itself imports no clock, so the default path stays deterministic.
+
+Deferred (not built): handlers/formatters, hierarchical (named) loggers, structured key/value fields —
+the full Python `logging` / Go `slog` machinery.
+
 ### `std.iter` — list/iterator helpers
 `enumerate(xs) -> List[(int, T)]` · `zip(xs, ys) -> List[(A, B)]` · `map(xs, f)` · `filter(xs, pred)` ·
 `fold(xs, init, f)` · `reduce(xs, f) -> T` (**non-empty**: with no seed there is no accumulator to

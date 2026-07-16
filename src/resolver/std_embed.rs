@@ -29,6 +29,7 @@ pub const STD_FILES: &[(&str, &str)] = &[
     ("io.chz", include_str!("../../std/io.chz")),
     ("iter.chz", include_str!("../../std/iter.chz")),
     ("json.chz", include_str!("../../std/json.chz")),
+    ("log.chz", include_str!("../../std/log.chz")),
     ("math.chz", include_str!("../../std/math.chz")),
     ("net.chz", include_str!("../../std/net.chz")),
     ("os.chz", include_str!("../../std/os.chz")),
