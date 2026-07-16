@@ -602,6 +602,118 @@ fn run_err(src: &str) -> String {
     }
 }
 
+// ---- gaps.md §2 wave-1: List value/ergonomics methods ----
+
+/// `first`/`last` return `Option[T]` (None on empty); `reversed()` returns a NEW list and must NOT
+/// mutate the receiver (distinct from in-place `reverse`).
+#[test]
+fn list_first_last_reversed_parity() {
+    let src = "xs := [3, 1, 2]\n\
+               match xs.first():\n    Some(v): print(\"first {v}\")\n    None: print(\"none\")\n\
+               match xs.last():\n    Some(v): print(\"last {v}\")\n    None: print(\"none\")\n\
+               rev := xs.reversed()\n\
+               print(rev)\n\
+               print(xs)\n\
+               empty: List[int] = []\n\
+               match empty.first():\n    Some(v): print(\"first {v}\")\n    None: print(\"efirst\")\n\
+               match empty.last():\n    Some(v): print(\"last {v}\")\n    None: print(\"elast\")\n";
+    assert_mc_parity(
+        src,
+        "first 3\nlast 2\n[2, 1, 3]\n[3, 1, 2]\nefirst\nelast\n",
+    );
+}
+
+/// `insert` Python-clamps (i>len appends, negatives Python-relative, never faults); `remove_at`
+/// returns the removed element (negatives Python-relative).
+#[test]
+fn list_insert_remove_at_parity() {
+    let src = "xs := [1, 2, 3]\n\
+               xs.insert(0, 9)\n\
+               print(xs)\n\
+               xs.insert(2, 8)\n\
+               print(xs)\n\
+               xs.insert(100, 7)\n\
+               print(xs)\n\
+               xs.insert(-1, 5)\n\
+               print(xs)\n\
+               r := xs.remove_at(0)\n\
+               print(\"removed {r}\")\n\
+               print(xs)\n\
+               last := xs.remove_at(-1)\n\
+               print(\"removed {last}\")\n\
+               print(xs)\n";
+    assert_mc_parity(
+        src,
+        "[9, 1, 2, 3]\n[9, 1, 8, 2, 3]\n[9, 1, 8, 2, 3, 7]\n[9, 1, 8, 2, 3, 5, 7]\nremoved 9\n[1, 8, 2, 3, 5, 7]\nremoved 7\n[1, 8, 2, 3, 5]\n",
+    );
+}
+
+/// `remove_at` on a true out-of-range index faults byte-identically on both engines.
+#[test]
+fn remove_at_oob_faults_both_engines() {
+    let src = "xs := [1, 2, 3]\nprint(\"before\")\nxs.remove_at(9)\n";
+    assert_fault_parity(src, "before\n");
+    assert_eq!(run_err(src), "index 9 out of bounds (len 3)");
+}
+
+/// `min`/`max` over int/float(incl NaN, no fault)/str and a Comparable struct list; first-seen
+/// tie-break for equal minima.
+#[test]
+fn list_min_max_parity() {
+    let src = "print([3, 1, 2].min())\n\
+               print([3, 1, 2].max())\n\
+               print([1.5, 0.5, 2.5].min())\n\
+               print([1.5, 0.5, 2.5].max())\n\
+               print([\"pear\", \"apple\", \"kiwi\"].min())\n\
+               print([\"pear\", \"apple\", \"kiwi\"].max())\n";
+    assert_mc_parity(src, "1\n3\n0.5\n2.5\napple\npear\n");
+}
+
+/// `min`/`max` over a list of Comparable structs (re-enters the VM per compare → GC-safe rooting),
+/// with a first-seen tie-break check.
+#[test]
+fn list_min_max_struct_parity() {
+    let src = "struct P:\n    k: int\n    tag: str\n    fn compare(self, o: P) -> int:\n        return self.k - o.k\n\
+               xs := [P(2, \"a\"), P(1, \"b\"), P(1, \"c\"), P(3, \"d\")]\n\
+               lo := xs.min()\n\
+               print(lo.tag)\n\
+               hi := xs.max()\n\
+               print(hi.tag)\n";
+    assert_mc_parity(src, "b\nd\n");
+}
+
+/// `min`/`max` on an empty list faults byte-identically on both engines.
+#[test]
+fn min_max_empty_faults() {
+    let src = "xs: List[int] = []\nprint(\"before\")\nxs.min()\n";
+    assert_fault_parity(src, "before\n");
+    assert_eq!(run_err(src), "min() of empty list");
+    let src2 = "xs: List[int] = []\nprint(\"before\")\nxs.max()\n";
+    assert_fault_parity(src2, "before\n");
+    assert_eq!(run_err(src2), "max() of empty list");
+}
+
+/// `min_by`/`max_by` take a key extractor and return the ELEMENT with the extremal key (first-seen
+/// tie); empty faults on both engines.
+#[test]
+fn list_min_max_by_parity() {
+    let src = "struct P:\n    k: int\n    tag: str\n\
+               xs := [P(2, \"a\"), P(1, \"b\"), P(1, \"c\"), P(3, \"d\")]\n\
+               fn key(p: P) -> int:\n    return p.k\n\
+               lo := xs.min_by(key)\n\
+               print(lo.tag)\n\
+               hi := xs.max_by(key)\n\
+               print(hi.tag)\n";
+    assert_mc_parity(src, "b\nd\n");
+}
+
+#[test]
+fn min_max_by_empty_faults() {
+    let src = "xs: List[int] = []\nfn key(x: int) -> int:\n    return x\nprint(\"before\")\nxs.min_by(key)\n";
+    assert_fault_parity(src, "before\n");
+    assert_eq!(run_err(src), "min_by() of empty list");
+}
+
 // ---- list HOF: callback that shrinks the receiver (snapshot semantics) ----
 
 /// `map` iterates a SNAPSHOT of the receiver's elements at call time: a callback that pops the

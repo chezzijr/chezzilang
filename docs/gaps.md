@@ -374,8 +374,12 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   from_index)`; `index_of` is now `find(s, sub, 0)`.
 
 ### 2. List / iter ergonomics — many small additive holes
-- `List.min` / `max` / `min_by` / `max_by`; `iter.min` / `max` (neither exists — only `cmp.min/max` of two).
-- `List.first` / `last`; non-mutating `reversed()` (only in-place `reverse`); `insert(i,x)` / `remove_at(i)`.
+- ~~`List.min` / `max` / `min_by` / `max_by`~~ **SHIPPED** (methods on `List[T]`, `where T: Comparable`;
+  `min_by`/`max_by` take a `fn(T) -> K` key; empty faults `min()/max() of empty list`). `iter.min` / `max`
+  still open (only `cmp.min/max` of two) — separate wave.
+- ~~`List.first` / `last`; non-mutating `reversed()` (only in-place `reverse`); `insert(i,x)` /
+  `remove_at(i)`~~ **SHIPPED** (`first`/`last` → `Option[T]`; `reversed()` returns a NEW list;
+  `insert` Python-clamps; `remove_at` returns the element, faults OOB).
 - `unique` / `dedup`, `chunk(n)` / `windows(n)`, `group_by`, `partition`, `flat_map`, `take_while` /
   `drop_while`, `count(pred)`, `position(pred)`.
 - Map: `get_or(k, default)` / `setdefault`, `items()`, `map_values`, `filter`. Set: `is_subset` /

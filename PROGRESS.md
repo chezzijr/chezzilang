@@ -4,6 +4,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/gaps.md` §2 wave-1: LIST value/ergonomics
+> methods.** Nine methods added to the file-backed `native struct List[T]` seam (bodyless sigs in
+> `std/prelude.chz` → name-keyed VM dispatch in `src/vm/call.rs`; zero new checker code — the generic
+> `Ty::List` arm harvests sigs, `where T: Comparable` enforced via `enforce_bounds`, `min_by`/`max_by`'s
+> `[K: Comparable]` routes through `infer_generic_method` exactly like `sort_by_key`): `min`/`max`
+> (`where T: Comparable`; first-seen tie; empty faults `min()/max() of empty list`; `NaN` uses `sort()`'s
+> total order, never faults), `min_by`/`max_by` (`fn(T)->K` key, returns the extremal **element**),
+> `first`/`last` (`-> Option[T]`, `None` on empty), `reversed` (**new** list, receiver untouched — distinct
+> from in-place `reverse`), `insert(i,x)` (Python-clamps, never faults), `remove_at(i)` (returns the element,
+> Python-relative negatives, true-OOB faults with the shared `index {i} out of bounds (len {n})` message).
+> GC discipline: `min`/`max` (struct compare re-enters the VM) + `min_by`/`max_by` (key extractor re-enters)
+> root the source/snapshot/keys on the operand stack and re-fetch per iteration, mirroring
+> `list_sort_structs`/`list_sort_by_key`. Tests: 8 inline dual-engine parity/fault tests (`assert_mc_parity`
+> + `assert_fault_parity`) + extended `examples/list_methods.chz` golden (serial==M:N). Docs:
+> `docs/stdlib.md § List[T]`, `docs/gaps.md §2` (SHIPPED bullets struck). **STILL OPEN §2**: `iter.min`/`max`,
+> `unique`/`dedup`/`chunk`/`windows`/`group_by`/`partition`/`flat_map`/`take_while`/`drop_while`, Map/Set
+> ergonomics — separate waves.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/gaps.md` §5: NUMBER/MATH surface in
 > `std.math`.** Ten native fns + two float constants added to the file-backed native module (mirroring
 > the existing `sqrt`/`abs`/`pi` pattern — zero new seam machinery): `gcd`/`lcm` (int; Python `math.gcd`
