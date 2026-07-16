@@ -8,11 +8,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > module-level bool natives on the file-backed `std.io` module: `io.isatty()` / `io.isatty_stdin()` /
 > `io.isatty_stderr()` `-> bool`, each one line via `std::io::IsTerminal` on stdout/stdin/stderr. Lets
 > a CLI colorize only when not piped (Python `sys.stdout.isatty()` / Go `isatty`). Engine-agnostic (an
-> env fd query, not a VM-sink query → serial==M:N trivially; captured under `cargo test` → false).
+> env fd query on the REAL OS fd, not a VM-sink query → serial==M:N trivially; value reflects the
+> launching fds — a pipe/redirect → false, an attached terminal → true; libtest capture doesn't touch the fd).
 > Seam reused as-is: `NativeRet::Bool` → `Value::Bool`, no new plumbing. Test `golden_isatty_via_run_file`
 > asserts bool-shape + engine agreement (not a fixed value). Manual eyeball: terminal → all true; `| cat`
 > pipes fd1 only → stdout false, stdin/stderr true. Docs: `docs/stdlib.md §std.io`, `docs/gaps.md §6` (SHIPPED). Deferred
 > (deliberate second step): terminal-size / echo-off / raw-mode.
+>
+> **✅ STDLIB (2026-07-16, `auto-task/lazy-iter`) — `docs/gaps.md` §3: LAZY ITERATORS (itertools) in
+> `std.iter`.** `std.iter` was all-eager (returns `List`); added lazy `Iterator[T]` adapters as
+> pure-Chezzi **generators** (`yield`) in the existing `std/iter.chz` (it is pure-Chezzi — no native
+> seam, no dead-code hazard): `count(start=0, step=1) -> Iterator[int]` (infinite counter),
+> `repeat(x, n=-1)` (`x` forever if `n<0`, else `n` times), `cycle(xs)` (endlessly repeat a list;
+> **empty list = immediately-done, not an infinite spin**), `chain(a, b)` (a then b; two-arg only in
+> v1), `islice(it, stop)` (lazy prefix; `stop<=0` = empty — the terminator, via `break` inside the
+> generator's `for`), and the lazy `imap`/`ifilter` (named to dodge the eager `map`/`filter` — Chezzi
+> has no overloading). The `it`-taking adapters use the proven `[S: Iterator[T], T]` bound so they
+> accept any iterable (list/set/str/user-`next()`/generator). Laziness proven: `count()` (infinite) →
+> `islice(_, 5)` terminates; `imap`/`ifilter` compose over `count()` and terminate under `islice`.
+> Pure-Chezzi ⇒ serial-VM == M:N automatically; 5 inline `parity_entry` tests (both engines) in a
+> labeled block. Dropped: `take(it, n)` alias (collides with eager `take`; `islice` covers it). Docs:
+> `docs/stdlib.md § std.iter`, `docs/gaps.md §3` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/gaps.md` §10: `std.bisect` +
 > `std.memoize`, two pure-Chezzi modules.** Both are NEW pure-Chezzi files (zero native seam — the only
 > Rust touch = two `include_str!` lines in `src/resolver/std_embed.rs`, guarded by
