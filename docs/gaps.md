@@ -32,9 +32,9 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 `datetime`, `flag`, `log`) take plain `.chz` fns + one `include_str!` line in `src/resolver/std_embed.rs`
 (guarded by `embedded_std_table_matches_disk`). Check which kind a module is before scoping a gap-fill.
 
-**STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — List wave-1 SHIPPED;
-still open: `iter.min`/`max`, `unique`/`dedup`/`chunk`/`windows`/`group_by`/`partition`/`flat_map`/
-`take_while`/`drop_while`, Map/Set ergonomics — later waves), §3 (lazy itertools — SHIPPED), §4 (IO
+**STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — List wave-1 + wave-2
+SHIPPED; still open: `iter.min`/`max`, `group_by`/`partition`/`flat_map`, Map/Set ergonomics — later
+waves), §3 (lazy itertools — SHIPPED), §4 (IO
 seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty` +
 `setenv`/`chdir`/`getpid`/`environ`/`platform`/`hostname`/`home_dir`/`temp_dir` SHIPPED; signals/atexit
 + metadata-reader still open), §7
@@ -384,8 +384,12 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - ~~`List.first` / `last`; non-mutating `reversed()` (only in-place `reverse`); `insert(i,x)` /
   `remove_at(i)`~~ **SHIPPED** (`first`/`last` → `Option[T]`; `reversed()` returns a NEW list;
   `insert` Python-clamps; `remove_at` returns the element, faults OOB).
-- `unique` / `dedup`, `chunk(n)` / `windows(n)`, `group_by`, `partition`, `flat_map`, `take_while` /
-  `drop_while`, `count(pred)`, `position(pred)`.
+- ~~`unique` / `dedup`, `chunk(n)` / `windows(n)`, `take_while` / `drop_while`, `count(pred)`,
+  `position(pred)`~~ **SHIPPED** (`unique`/`dedup` return a NEW list — first-occurrence dedup vs
+  consecutive-run collapse; `chunk`/`windows` return `List[List[T]]`, `n<=0` faults, `windows` `n>len`
+  empty; `take_while`/`drop_while`/`count`/`position` are predicate methods that snapshot the receiver).
+  Still open: `group_by`, `partition`, `flat_map` (need method-own type args / Map / tuple returns — a
+  separate higher-risk wave).
 - Map: `get_or(k, default)` / `setdefault`, `items()`, `map_values`, `filter`. Set: `is_subset` /
   `is_superset` / `is_disjoint`.
 

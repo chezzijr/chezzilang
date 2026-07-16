@@ -104,10 +104,19 @@ fault, by contrast, is raised identically by both.)
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list — the receiver is untouched (contrast in-place `reverse`). |
 | `insert` | `(i: int, x: T) -> nil` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
 | `remove_at` | `(i: int) -> T` | *mutates* — remove & return the element at index `i` (Python-relative negatives). A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
+| `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order preserved (Python `dict.fromkeys`). Structural equality; never mutates the receiver. |
+| `dedup` | `() -> List[T]` | Returns a **new** list collapsing only **consecutive** duplicate runs (Rust `Vec::dedup`) — non-adjacent duplicates survive. |
+| `chunk` | `(n: int) -> List[List[T]]` | Consecutive fixed-size chunks (final chunk short if `len` not divisible). `n <= 0` **faults** (`chunk size must be positive, got {n}`). |
+| `windows` | `(n: int) -> List[List[T]]` | Sliding windows of size `n` (Rust `slice::windows`). `n > len` yields an **empty** list; `n <= 0` **faults** (`window size must be positive, got {n}`). |
+| `take_while` | `(pred: fn(T) -> bool) -> List[T]` | Returns a **new** list of the leading prefix while `pred` holds (stops at the first false). |
+| `drop_while` | `(pred: fn(T) -> bool) -> List[T]` | Returns a **new** list of the suffix after the leading prefix where `pred` holds. |
+| `count` | `(pred: fn(T) -> bool) -> int` | Number of elements satisfying `pred`. |
+| `position` | `(pred: fn(T) -> bool) -> Option[int]` | Index of the **first** element satisfying `pred` (`None` if none). |
 
-`map`/`filter`/`fold` iterate over a **snapshot** of the receiver's elements taken at call time: a
-callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration
-sequence (and never faults). Same as comprehensions and Python `map`/`filter`.
+The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position` —
+iterate over a **snapshot** of the receiver's elements taken at call time: a callback that mutates the
+receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration sequence (and never faults).
+Same as comprehensions and Python `map`/`filter`.
 
 ### `Map[K, V]`
 | Method | Signature | Notes |

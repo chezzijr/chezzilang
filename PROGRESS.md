@@ -157,6 +157,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `unique`/`dedup`/`chunk`/`windows`/`group_by`/`partition`/`flat_map`/`take_while`/`drop_while`, Map/Set
 > ergonomics — separate waves.
 >
+> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/gaps.md` §2 wave-2: LIST iter-ergonomics
+> methods.** Eight more methods on the same file-backed `native struct List[T]` seam (bodyless sigs in
+> `std/prelude.chz` → name-keyed VM dispatch in `src/vm/call.rs`, appended to `LIST_METHODS`; zero new
+> checker logic): `unique`/`dedup` (NEW list — first-occurrence dedup via `values_equal` vs
+> consecutive-run collapse; no `where` bound, matching bound-free `contains`, so `List[float]` works),
+> `chunk(n)`/`windows(n)` (`-> List[List[T]]`; `n<=0` faults `chunk/window size must be positive, got {n}`;
+> `windows` `n>len` → empty; outer list rooted, inner handles pushed immediately after alloc for GC-safety),
+> `take_while`/`drop_while`/`count`/`position` (predicate methods routed through `list_hof`'s snapshot+root
+> discipline — a re-entrant pred that shrinks the receiver can't OOB; `position` → `Option[int]`).
+> Tests: 5 inline dual-engine parity/fault tests incl. `list_predicate_shrinking_no_panic` +
+> extended `examples/list_methods.chz` golden (serial==M:N). Docs: `docs/stdlib.md § List[T]`,
+> `docs/gaps.md §2` (wave-2 bullet struck). **STILL OPEN §2**: `iter.min`/`max`, `group_by`/`partition`/
+> `flat_map`, Map/Set ergonomics — later waves.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/gaps.md` §5: NUMBER/MATH surface in
 > `std.math`.** Ten native fns + two float constants added to the file-backed native module (mirroring
 > the existing `sqrt`/`abs`/`pi` pattern — zero new seam machinery): `gcd`/`lcm` (int; Python `math.gcd`

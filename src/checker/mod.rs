@@ -3229,6 +3229,14 @@ const LIST_METHODS: &[&str] = &[
     "reversed",
     "insert",
     "remove_at",
+    "unique",
+    "dedup",
+    "chunk",
+    "windows",
+    "take_while",
+    "drop_while",
+    "count",
+    "position",
 ];
 const MAP_METHODS: &[&str] = &[
     "len", "has", "get", "keys", "values", "remove", "merge", "update",
