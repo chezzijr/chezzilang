@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/datetime-parse`) — `docs/gaps.md` §9: `datetime.parse_iso8601`,
+> the string→`DateTime` half (`datetime` was write-only).** Pure-Chezzi, single-file seam (NO Rust) —
+> `parse_iso8601(s: str) -> Result[DateTime]`, the exact inverse of `to_iso8601`, reusing the existing
+> `to_epoch`/`from_epoch`/`days_in_month` machinery. Parses ISO-8601 / RFC-3339 (matches Python
+> `datetime.fromisoformat`): `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"`, a `'T'` **or**
+> `' '` separator, an optional trailing `Z` or `±HH:MM` offset (**normalized to UTC**, per Go
+> `time.Parse`), and an optional `.fff` fractional part (validated then **truncated** — `DateTime.second`
+> is int). Split-based + clamped-slicing, cursor-free (json.chz style); strict local `all_digits`/
+> `to_uint`/`field2` guards every fixed-width field to exactly-N ASCII digits BEFORE any conversion (never
+> trusts lenient `int()`), and range-validates month/day/hour/min/sec/offset BEFORE civil math — so a
+> malformed / out-of-range string is a clean `Err`, **never a fault/abort**. Round-trip `parse_iso8601(
+> to_iso8601(dt)) == dt` (weekday included, rebuilt via `from_epoch`). **Known ceilings** (deliberate,
+> UTC-only contract): sub-second precision dropped, non-`Z` offset normalizes to UTC not itself. Tests:
+> 5 `test fn` vectors (round-trip, forms, tz, frac, 8 Err cases) + `examples/datetime.chz` parse-tour
+> extended (golden `golden_datetime_via_run_file` runs serial VM **and** M:N via `assert_file_parity` —
+> the checker-superset gate). **Remaining follow-up:** `strftime`/`strptime`/`from_string` (format-token
+> vocabulary) deferred. Docs: `docs/stdlib.md` (§std.datetime table + ceilings), `docs/gaps.md` §9
+> (parse landed, write-only de-stale'd). Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-16, `auto-task/contains-protocol`) — `docs/gaps.md` L5: the `Contains` operator
 > protocol (`x in my_struct`).** A user struct/enum with a `contains(self, item) -> bool` method makes
 > `x in that_value` dispatch to it, yielding `bool` (Python's `__contains__`, Go's idiom). Registered
