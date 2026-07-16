@@ -450,9 +450,11 @@ normalize to UTC rather than round-tripping. (Python: `fromisoformat` done, `str
 `time.Parse` layout pending.)
 
 ### 10. Missing modules a real script reaches for
-- **`std.flag` — CLI arg parsing.** `os.args() -> List[str]` and nothing else. Every tool hand-rolls a
-  `for` over argv (Chezzi's own `src/main.rs` does exactly that). Go-style `flag.str/bool/int` +
-  positionals is ~120 lines of pure Chezzi, no native seam. (Python: `argparse`; Go: `flag`.)
+- ~~**`std.flag` — CLI arg parsing.**~~ **SHIPPED.** Pure-Chezzi `std/flag.chz`: a Go-`flag`-style
+  `FlagSet` (`flag.new()` → `str_flag`/`bool_flag`/`int_flag` → `parse(args) -> Result[List[str]]` →
+  `get_str`/`get_bool`/`get_int`/`positionals()`/`usage()`) over `os.args()`. `--name value` /
+  `--name=value` / bool-presence / `--` terminator; unknown/missing/non-int → clean `Err`. See
+  `docs/stdlib.md §5 std.flag`.
 - **`std.log` — levels + timestamps + stderr default.** Does not exist; every script reimplements it.
   ~80 lines pure Chezzi. (Python: `logging`; Go: `log`/`slog`.)
 - **`std.db` (sqlite).** Absent. Reachable *in theory* via FFI to `libsqlite3` (the opaque `ptr` type

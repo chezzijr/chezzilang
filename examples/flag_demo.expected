@@ -1,0 +1,14 @@
+name    = alice
+count   = 3
+verbose = true
+pos     = --extra pos
+default name = alice
+verbose=1 -> true
+verbose=F -> false
+err: unknown flag --nope
+err: flag --name: missing value
+err: flag --count: cannot parse 'abc' as an integer
+--- usage ---
+  --name (str) default=alice: who to greet
+  --count (int) default=3: how many times
+  --verbose (bool) default=true: chatty output

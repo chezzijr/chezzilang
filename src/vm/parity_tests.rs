@@ -5136,6 +5136,106 @@ fn golden_stdlib_cmp_via_run_file() {
     assert_file_parity("examples/stdlib_cmp.chz");
 }
 
+/// std.flag: `--name value` + `--count=3` `=`-form + a trailing positional, both engines.
+#[test]
+fn flag_parse_value_and_eq_form_parity() {
+    let out = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         fs.str_flag(\"name\", \"def\", \"the name\")\n\
+         fs.int_flag(\"count\", 0, \"how many\")\n\
+         match fs.parse([\"--name\", \"alice\", \"--count=3\", \"pos1\"]):\n\
+         \x20   Ok(p):\n\
+         \x20       print(fs.get_str(\"name\"))\n\
+         \x20       print(fs.get_int(\"count\"))\n\
+         \x20       print(p[0])\n\
+         \x20   Err(e):\n\
+         \x20       print(e.message())\n",
+    );
+    assert_eq!(out, "alice\n3\npos1\n");
+}
+
+/// std.flag: bool-as-presence + the `--` terminator makes later dash tokens positional.
+#[test]
+fn flag_bool_presence_and_terminator_parity() {
+    let out = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         fs.bool_flag(\"verbose\", false, \"v\")\n\
+         match fs.parse([\"--verbose\", \"--\", \"--notaflag\", \"x\"]):\n\
+         \x20   Ok(p):\n\
+         \x20       print(fs.get_bool(\"verbose\"))\n\
+         \x20       print(\" \".join(fs.positionals()))\n\
+         \x20   Err(e):\n\
+         \x20       print(e.message())\n",
+    );
+    assert_eq!(out, "true\n--notaflag x\n");
+}
+
+/// std.flag: unknown flag / missing value / non-int are clean `Err`, never a fault, both engines.
+#[test]
+fn flag_error_paths_parity() {
+    let unknown = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         match fs.parse([\"--nope\"]):\n\
+         \x20   Ok(p): print(\"ok\")\n\
+         \x20   Err(e): print(e.message())\n",
+    );
+    assert_eq!(unknown, "unknown flag --nope\n");
+
+    let missing = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         fs.str_flag(\"name\", \"\", \"n\")\n\
+         match fs.parse([\"--name\"]):\n\
+         \x20   Ok(p): print(\"ok\")\n\
+         \x20   Err(e): print(e.message())\n",
+    );
+    assert_eq!(missing, "flag --name: missing value\n");
+
+    let badint = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         fs.int_flag(\"count\", 0, \"c\")\n\
+         match fs.parse([\"--count\", \"abc\"]):\n\
+         \x20   Ok(p): print(\"ok\")\n\
+         \x20   Err(e): print(\"errored\")\n",
+    );
+    assert_eq!(badint, "errored\n");
+}
+
+/// std.flag: `usage()` is a byte-exact multi-line string in REGISTRATION order (parity-safe).
+#[test]
+fn flag_usage_deterministic_parity() {
+    let out = parity_entry(
+        "import std.flag\n\
+         fs := flag.new()\n\
+         fs.str_flag(\"name\", \"def\", \"the name\")\n\
+         fs.bool_flag(\"verbose\", false, \"be loud\")\n\
+         fs.int_flag(\"count\", 5, \"how many\")\n\
+         print(fs.usage())\n",
+    );
+    assert_eq!(
+        out,
+        "  --name (str) default=def: the name\n  \
+         --verbose (bool) default=false: be loud\n  \
+         --count (int) default=5: how many\n"
+    );
+}
+
+/// std.flag golden: `examples/flag_demo.chz` exercises every case in one program, byte-matches
+/// `.expected`, and stays identical on the serial + M:N engines.
+#[test]
+fn golden_flag_demo_via_run_file() {
+    let path = fixture("examples/flag_demo.chz");
+    let expected = std::fs::read_to_string(fixture("examples/flag_demo.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/flag_demo.chz");
+}
+
 /// std.string helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
 /// replace/strip_prefix/strip_suffix funcs, end-to-end on the VM, byte-identical to `.expected`
 /// and the interpreter.
