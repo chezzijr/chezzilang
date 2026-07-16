@@ -12521,6 +12521,58 @@ print(P(5) >= P(5))
     assert_eq!(run(src), "true\nfalse\ntrue\n");
 }
 
+/// `Contains` operator protocol (L5): `x in some_struct` dispatches to a user
+/// `contains(self, item) -> bool` method on BOTH engines. A checker-only change would `check` OK
+/// then trap at runtime in `op_contains`'s reject arm — so this RUN test is the safety net.
+#[test]
+fn contains_protocol_struct_dispatches() {
+    let src = "\
+struct Bag:
+    items: List[int]
+    fn contains(self, x: int) -> bool:
+        for it in self.items:
+            if it == x:
+                return true
+        return false
+b := Bag([1, 2, 3])
+print(2 in b)
+print(9 in b)
+";
+    assert_mc_parity(src, "true\nfalse\n");
+}
+
+/// `Contains` on a generic `Box[T]` — the `contains` param type must be the INSTANTIATED `int`,
+/// and BOTH engines must lower the generic instantiation to the method call.
+#[test]
+fn contains_generic_box_runs() {
+    let src = "\
+struct Box[T]:
+    v: T
+    fn contains(self, x: T) -> bool:
+        return x == self.v
+b := Box[int](2)
+print(2 in b)
+print(3 in b)
+";
+    assert_mc_parity(src, "true\nfalse\n");
+}
+
+/// `Contains` also dispatches on enums (protocol-satisfaction machinery already covers them).
+#[test]
+fn contains_protocol_enum_dispatches() {
+    let src = "\
+enum Dir:
+    N
+    S
+    fn contains(self, x: int) -> bool:
+        return x == 0
+d := Dir.N
+print(0 in d)
+print(1 in d)
+";
+    assert_mc_parity(src, "true\nfalse\n");
+}
+
 #[test]
 fn primitive_compare_method_on_vm() {
     let src = "fn c[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(c(2, 5))\nprint(c(5, 2))\n";

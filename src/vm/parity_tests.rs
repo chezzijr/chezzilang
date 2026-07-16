@@ -4746,6 +4746,19 @@ fn golden_self_method_via_run_file() {
     assert_file_parity("examples/self_method.chz");
 }
 
+/// Golden: the `Contains` operator protocol (L5) — `x in obj` dispatches to a user
+/// `contains(self, item) -> bool` on structs (incl. generic `Box[T]`) and enums. Byte-matches the
+/// `.expected` file and the M:N engine (parity via `assert_file_parity`).
+#[test]
+fn golden_contains_protocol_via_run_file() {
+    let path = fixture("examples/contains_protocol.chz");
+    let expected = std::fs::read_to_string(fixture("examples/contains_protocol.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/contains_protocol.chz");
+}
+
 /// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum/newtype operator overloading —
 /// `a += V(10)` produces the same value as `a = a + V(10)`. Byte-matches the `.expected` file and
 /// the M:N engine (parity via `assert_file_parity`).

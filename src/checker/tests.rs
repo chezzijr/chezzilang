@@ -18190,3 +18190,56 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
         "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(bytes(ba))?\n    return Ok(n)\n\nfn main():\n    pass\nmain()\n",
     );
 }
+
+// ----- Contains operator protocol (L5): `x in some_struct` -----
+
+/// A struct with a `contains(self, item) -> bool` method accepts `x in it` when the LHS type
+/// matches the declared item type.
+#[test]
+fn contains_protocol_struct_ok() {
+    ok(
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(2 in b)\nmain()\n",
+    );
+}
+
+/// Item-type mismatch (`"s" in bag_of_int`) is a CLEAN checker error, never a runtime panic (req 2).
+#[test]
+fn contains_item_type_mismatch_rejects() {
+    rejects(
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(\"s\" in b)\nmain()\n",
+        "membership",
+    );
+}
+
+/// A struct WITHOUT a `contains` method still cleanly rejects `in`, with a message that hints at the
+/// `contains` protocol (req 4).
+#[test]
+fn contains_missing_method_rejects_with_hint() {
+    rejects(
+        "struct NoC:\n    n: int\nfn main():\n    print(2 in NoC(0))\nmain()\n",
+        "contains",
+    );
+}
+
+/// A `contains` whose return type is not `bool` does not satisfy the protocol — `in` rejects with the
+/// same protocol hint rather than green-lighting a non-bool result.
+#[test]
+fn contains_wrong_return_rejects_with_hint() {
+    rejects(
+        "struct Bag:\n    n: int\n    fn contains(self, x: int) -> int:\n        return 0\nfn main():\n    print(2 in Bag(0))\nmain()\n",
+        "contains",
+    );
+}
+
+/// Generic `Box[T]`: the `contains` param type is INSTANTIATED to `int` — `2 in Box[int](5)` is OK
+/// but `"s" in Box[int](5)` is rejected (subst must not leave `Param(T)`/`Unknown`) (req 3).
+#[test]
+fn contains_generic_struct_substitutes_item() {
+    ok(
+        "struct Box[T]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
+    );
+    rejects(
+        "struct Box[T]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
+        "membership",
+    );
+}

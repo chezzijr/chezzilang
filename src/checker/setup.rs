@@ -804,6 +804,7 @@ impl Checker {
             "IndexSet",
             "Slice",
             "Convert",
+            "Contains",
         ] {
             let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
                 panic!("reserved protocol '{name}' missing from std/prelude.chz")

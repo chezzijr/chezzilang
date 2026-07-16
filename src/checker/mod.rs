@@ -471,6 +471,7 @@ fn is_reserved_protocol(name: &str) -> bool {
             | "IndexSet"
             | "Slice"
             | "Convert"
+            | "Contains"
     )
 }
 
@@ -2699,6 +2700,21 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                 sig.is_static = true;
                 sig
             })],
+        },
+    );
+    // `Contains[Item]` — the membership protocol (Python `__contains__`): `x in obj` dispatches to
+    // `contains(self, item: Item) -> bool`. Built-in list/set/map/str test membership intrinsically
+    // (see `op_contains`); a user struct/enum satisfies it structurally. `Item` (the element type) is
+    // recovered at the `in` site by `contains_item_ty` (mirrors `Index[K,V]`).
+    m.insert(
+        "Contains".to_string(),
+        ProtocolInfo {
+            type_params: vec!["Item".to_string()],
+            embeds: Vec::new(),
+            methods: vec![(
+                "contains".to_string(),
+                FnSig::plain(vec![Ty::Unknown, Ty::Param("Item".into())], Ty::Bool),
+            )],
         },
     );
     m

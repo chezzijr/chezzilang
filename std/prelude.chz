@@ -206,3 +206,9 @@ protocol Slice[R]:
 # slice 3. The shape mirrors the Rust seed in `prebuilt_protocols` (`is_static`, `[S]`).
 protocol Convert[S]:
     fn convert(x: S) -> Self
+
+# `Contains[Item]` — the membership protocol (Python `__contains__`, L5): `x in obj` dispatches to
+# `contains(self, item) -> bool`. Built-in list/set/map/str test membership intrinsically; a user
+# struct/enum satisfies it structurally. `Item` (the element type) is recovered at the `in` site.
+protocol Contains[Item]:
+    fn contains(self, item: Item) -> bool

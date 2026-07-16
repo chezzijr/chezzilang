@@ -1,0 +1,40 @@
+# `Contains` operator protocol (L5) — Python's `__contains__`: a type with a
+# `contains(self, item) -> bool` method makes `x in that_value` dispatch to it, yielding `bool`.
+# Built-in list/set/map/str `in` is unchanged; this adds user structs/enums.
+
+# A struct membership test over its own field.
+struct Bag:
+    items: List[int]
+    fn contains(self, x: int) -> bool:
+        for it in self.items:
+            if it == x:
+                return true
+        return false
+
+# Generic: the `contains` param type is the INSTANTIATED type arg (`Box[str]` → `str`).
+struct Box[T]:
+    v: T
+    fn contains(self, x: T) -> bool:
+        return x == self.v
+
+# Enums satisfy `Contains` for free via the shared protocol machinery.
+enum Palette:
+    RGB
+    Gray
+    fn contains(self, name: str) -> bool:
+        return name == "red" or name == "green" or name == "blue"
+
+fn main():
+    b := Bag([1, 2, 3])
+    print(2 in b)          # true
+    print(9 in b)          # false
+
+    s := Box[str]("hi")
+    print("hi" in s)       # true
+    print("no" in s)       # false
+
+    p := Palette.RGB
+    print("red" in p)      # true
+    print("teal" in p)     # false
+
+main()

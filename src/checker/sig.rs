@@ -3407,6 +3407,31 @@ impl Checker {
         }
     }
 
+    /// The `item` type of `x in obj` when `obj` is a user type satisfying the `Contains` protocol —
+    /// a struct/enum with `contains(self, item) -> bool`. Single source of truth for the `in`
+    /// operator's LHS↔item compatibility check (`pattern.rs`). `None` ⇒ no valid `Contains` impl
+    /// (unknown type, missing/wrong-arity/non-`bool` `contains`), so the `in` arm falls through to its
+    /// reject-with-hint. The item type is generic-substituted (`Box[int]`'s `T` → `int`), mirroring
+    /// `index_kv`.
+    pub(super) fn contains_item_ty(&self, ty: &Ty) -> Option<Ty> {
+        let (sig, map) = match ty {
+            Ty::Struct(name, targs) => {
+                let info = self.structs.get(name)?;
+                (info.methods.get("contains")?, struct_param_map(info, targs))
+            }
+            Ty::Enum(name, targs) => (
+                self.enum_methods_of(name)?.get("contains")?,
+                self.enum_param_map(name, targs),
+            ),
+            _ => return None,
+        };
+        // A valid `Contains` impl is `contains(self, item) -> bool`: arity 2, `bool` return.
+        if sig.params.len() != 2 || sig.ret != Ty::Bool {
+            return None;
+        }
+        Some(subst(&sig.params[1], &map))
+    }
+
     /// The `(key, value)` types of a mutable `obj[k] = v` — the `IndexSet` protocol's args. Built-in
     /// `list`/`map` are mutable intrinsically (handled directly in `check_assign`); this resolves the
     /// struct case via `set_index(self, K, V)`. `IndexSet` *requires* `index` too (Rust `IndexMut: Index`):

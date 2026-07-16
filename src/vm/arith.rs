@@ -745,6 +745,35 @@ impl Vm {
     pub(super) fn op_contains(&mut self, span: Span) -> Result<(), RuntimeError> {
         let container = self.pop();
         let needle = self.pop();
+        // `Contains` protocol (L5): a struct/enum with a `contains(self, item) -> bool` method
+        // dispatches `x in obj` to that method. The `matches!` peek ENDS the immutable `self.heap`
+        // borrow before `resolve_overload_method`/`run_proto` need `&mut self` (mirrors
+        // `struct_compare`). Containers (list/set/map/str) skip this and take the fast path below.
+        if let Value::Obj(h) = container
+            && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
+        {
+            let (proto, home) = self.resolve_overload_method(container, "contains", span)?;
+            return match self.guarded(|vm| {
+                vm.run_proto(
+                    proto,
+                    home,
+                    None,
+                    vec![container, needle],
+                    true,
+                    false,
+                    span,
+                )
+            })? {
+                Value::Bool(b) => {
+                    self.push(Value::Bool(b));
+                    Ok(())
+                }
+                other => Err(self.err(
+                    format!("contains() must return bool, got {}", self.type_name(other)),
+                    span,
+                )),
+            };
+        }
         let found = match container {
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::List(items) => {

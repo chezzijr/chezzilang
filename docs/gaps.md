@@ -534,10 +534,12 @@ filter). Matters much more once **R3** lands and people publish libraries with a
 
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet
-Slice Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing, iteration,
-hashing, display. Missing: **`Eq`** (`==`/`!=` cannot be overloaded — and see **B2**, the checker is
-*permissive* about them), **`Contains`** (`x in my_struct` is a hard error — Python's `__contains__`),
-bitwise/shift protocols, and a call operator. Small each.
+Slice Contains Iterator Iterable Convert Any Error`) covers arithmetic, ordering, indexing, slicing,
+membership, iteration, hashing, display. Missing: **`Eq`** (`==`/`!=` cannot be overloaded — and see
+**B2**, the checker is *permissive* about them), bitwise/shift protocols, and a call operator. Small
+each. **`Contains`** (`x in my_struct` via `contains(self, item) -> bool`, Python's `__contains__`) —
+**FIXED**: a user struct/enum with a `contains(self, item) -> bool` method makes `x in that_value`
+dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
 
 ### L6. Smaller, confirmed
 - Enums carry **no discriminant/value**, no variant iteration, no int conversion (Go's `iota`, Python's

@@ -2217,8 +2217,9 @@ impl Checker {
             Eq | NotEq => Ty::Bool, // equality is permissive (matches the interpreter)
             // `x in xs` — membership, type-directed on the RHS container. List/Set test element
             // membership, Map tests KEY membership (Python-style), Str tests substring. Always
-            // yields `bool`. No user-`Contains` overload (reject anything else). The element/key
-            // type must be compatible with the LHS.
+            // yields `bool`. A user struct/enum with a `contains(self, item) -> bool` method (the
+            // `Contains` protocol, L5) dispatches to that method; anything else rejects. The
+            // element/key/item type must be compatible with the LHS.
             In => {
                 // (A range RHS needs no special case here: `r = self.infer(rhs)` above already
                 // rejected it generically — see `infer_kind`'s `ExprKind::Range` arm — and lands
@@ -2249,12 +2250,22 @@ impl Checker {
                     }
                     Ty::Unknown => {}
                     other => {
-                        self.error(
-                            rhs.span,
-                            format!(
-                                "cannot use `in` on {other} (expected a list, set, map, or str)"
-                            ),
-                        );
+                        // `Contains` protocol: a struct/enum with `contains(self, item) -> bool`.
+                        if let Some(item) = self.contains_item_ty(other) {
+                            if !either_unknown && !compatible(&item, &l) {
+                                self.error(
+                                    lhs.span,
+                                    format!("cannot test membership of {l} in {r}"),
+                                );
+                            }
+                        } else {
+                            self.error(
+                                rhs.span,
+                                format!(
+                                    "cannot use `in` on {other} (expected a list, set, map, str, or a type with `contains(self, item) -> bool`)"
+                                ),
+                            );
+                        }
                     }
                 }
                 Ty::Bool

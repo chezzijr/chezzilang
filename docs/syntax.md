@@ -1424,6 +1424,22 @@ fn first[C: Index[int, V], V](c: C) -> V:   # works over a list OR a Ring
     return c[0]
 ```
 
+**Membership (`in`)** is overloaded through the prebuilt **`Contains[Item]`** protocol (Python's
+`__contains__`): a struct/enum defining `contains(self, item: Item) -> bool` makes `x in that_value`
+dispatch to it, yielding `bool`. Built-in `list`/`set`/`str` test element/substring membership and
+`map` tests **key** membership intrinsically (unchanged); the item type must be compatible with `x`.
+
+```chezzi
+struct Bag:
+    items: List[int]
+    fn contains(self, x: int) -> bool:
+        return x in self.items
+
+b := Bag([1, 2, 3])
+print(2 in b)          # true   — `contains` dispatched
+print(9 in b)          # false
+```
+
 A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`
 requires `T` to satisfy both.
 

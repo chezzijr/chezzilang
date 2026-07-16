@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE (2026-07-16, `auto-task/contains-protocol`) — `docs/gaps.md` L5: the `Contains` operator
+> protocol (`x in my_struct`).** A user struct/enum with a `contains(self, item) -> bool` method makes
+> `x in that_value` dispatch to it, yielding `bool` (Python's `__contains__`, Go's idiom). Registered
+> `Contains[Item]` as a reserved operator protocol mirroring `Index[K,V]` — 4 drift-locked sites
+> (`is_reserved_protocol` + `prebuilt_protocols` seed + `assert_native_protocol_shape_matches` array +
+> `std/prelude.chz`). The `in` operator recovers the item type directly via a new `contains_item_ty`
+> helper (modeled on `index_kv`: struct + enum arms, arity==2 + `ret==bool` shape gate,
+> `struct_param_map`/`enum_param_map` generic subst so `Box[int]`'s item is `int` not `Param(T)`), then
+> checks LHS↔item compatibility. **NO new opcode / compiler change:** `op_contains` (vm/arith.rs) peeks
+> `matches!(Obj::Struct|Obj::Enum)` (ends the heap borrow) then dispatches via `resolve_overload_method` +
+> `guarded(run_proto)` — the `struct_compare` template — validating the result is `Value::Bool`. Single
+> VM change covers cooperative + M:N. Container `in` (list/set/map/str) is byte-identical. Clean checker
+> errors (never runtime panics) for item-type mismatch (`"s" in bag_of_int`), a missing/wrong-return
+> `contains` (hint names `contains(self, item) -> bool`), and generic subst. Tests: 3 dual-engine RUN
+> (`assert_mc_parity`: struct true/false, generic `Box[int]`, enum), 5 checker guards, +
+> `examples/contains_protocol.chz` golden (`golden_contains_protocol_via_run_file` + `assert_file_parity`).
+> Newtypes deliberately out of scope (consistent with the proto.rs method-operator-on-newtype carve-out).
+> Docs: `docs/syntax.md §7b`, `docs/spec.md`, `docs/gaps.md` L5 (FIXED). Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-15, `auto-task/struct-match-patterns`) — `docs/gaps.md` L2: STRUCT PATTERNS in
 > `match` (positional field destructuring).** `match p: Point(x, y):` now binds a struct's fields
 > positionally, mirroring enum-variant patterns — closing the "enums destructure, structs don't"
