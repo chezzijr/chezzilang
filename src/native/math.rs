@@ -140,6 +140,226 @@ fn is_finite(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Bool(h.arg_float(0)?.is_finite()))
 }
 
+// ---- Number theory / integer math (gap §5). Python `math` semantics are the anti-drift reference. ----
+
+/// Euclid's GCD on unsigned magnitudes (callers pass `x.unsigned_abs()`). `gcd(0,0)=0`. Working in
+/// `u64` avoids the `i64::MIN.abs()` panic — the sign is irrelevant to GCD (Python's `math.gcd` is
+/// always non-negative).
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+/// `lcm(a,b) = |a|/gcd * |b|`, computed on magnitudes to reduce overflow risk (divide before multiply).
+/// `lcm(0,·)=0` (Python). Errs — never faults — when the representable result exceeds i64.
+fn lcm_i64(a: i64, b: i64) -> Result<i64, String> {
+    if a == 0 || b == 0 {
+        return Ok(0);
+    }
+    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
+    let g = gcd_u64(a, b);
+    let l = (a / g)
+        .checked_mul(b)
+        .ok_or_else(|| "integer overflow in lcm".to_string())?;
+    i64::try_from(l).map_err(|_| "integer overflow in lcm".to_string())
+}
+
+/// `n!` for `0 <= n <= 20` (21! > i64::MAX, so the ceiling is the i64 limit not a design choice).
+/// Errs on negative or `n > 20` — never faults.
+fn factorial_i64(n: i64) -> Result<i64, String> {
+    if n < 0 {
+        return Err(format!("factorial: n must be non-negative, got {n}"));
+    }
+    if n > 20 {
+        return Err(format!("factorial: {n}! overflows i64 (max is 20!)"));
+    }
+    Ok((1..=n).product())
+}
+
+/// `C(n,k)` — number of k-combinations. `k>n` or `k<0`... Python raises on negative; we Err. `k>n`
+/// yields 0 (Python). Computes multiplicatively in i128 (worst intermediate « i128 max), Erring only
+/// when the true result exceeds i64.
+fn comb_i64(n: i64, k: i64) -> Result<i64, String> {
+    if n < 0 || k < 0 {
+        return Err(format!(
+            "comb: n and k must be non-negative, got n={n} k={k}"
+        ));
+    }
+    if k > n {
+        return Ok(0);
+    }
+    // Symmetry: C(n,k) == C(n,n-k); use the smaller k for fewer, smaller multiplications.
+    let k = k.min(n - k);
+    let mut acc: i128 = 1;
+    for i in 0..k {
+        acc = acc * (n - i) as i128 / (i + 1) as i128;
+    }
+    i64::try_from(acc).map_err(|_| format!("comb: C({n},{k}) exceeds i64 range"))
+}
+
+/// `P(n,k)` — number of k-permutations. `k>n` yields 0; negative Errs. i128 intermediate, Errs on
+/// i64 overflow (never faults).
+fn perm_i64(n: i64, k: i64) -> Result<i64, String> {
+    if n < 0 || k < 0 {
+        return Err(format!(
+            "perm: n and k must be non-negative, got n={n} k={k}"
+        ));
+    }
+    if k > n {
+        return Ok(0);
+    }
+    let mut acc: i128 = 1;
+    for i in 0..k {
+        acc *= (n - i) as i128;
+        if acc > i64::MAX as i128 {
+            return Err(format!("perm: P({n},{k}) exceeds i64 range"));
+        }
+    }
+    i64::try_from(acc).map_err(|_| format!("perm: P({n},{k}) exceeds i64 range"))
+}
+
+/// Parse `s` in `base` (Go `strconv.ParseInt` / Python `int(s, base)`). `base` is 0 or 2..=36; base 0
+/// auto-detects a `0x`/`0o`/`0b` prefix (else decimal), and bases 2/8/16 accept the matching prefix.
+/// Leading `+`/`-` sign allowed; empty/malformed digits Err (never fault).
+fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
+    if base != 0 && !(2..=36).contains(&base) {
+        return Err(format!(
+            "parse_int_base: base must be 0 or 2..=36, got {base}"
+        ));
+    }
+    let (neg, rest) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let lower = rest.to_ascii_lowercase();
+    let (radix, digits): (u32, &str) = if base == 0 {
+        if lower.starts_with("0x") {
+            (16, &rest[2..])
+        } else if lower.starts_with("0o") {
+            (8, &rest[2..])
+        } else if lower.starts_with("0b") {
+            (2, &rest[2..])
+        } else {
+            (10, rest)
+        }
+    } else {
+        let radix = base as u32;
+        let stripped = match radix {
+            16 => lower.strip_prefix("0x").map(|_| &rest[2..]),
+            8 => lower.strip_prefix("0o").map(|_| &rest[2..]),
+            2 => lower.strip_prefix("0b").map(|_| &rest[2..]),
+            _ => None,
+        };
+        (radix, stripped.unwrap_or(rest))
+    };
+    let val = i64::from_str_radix(digits, radix)
+        .map_err(|_| format!("parse_int_base: cannot parse '{s}' in base {radix}"))?;
+    Ok(if neg { -val } else { val })
+}
+
+fn gcd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "gcd", 2)?;
+    let g = gcd_u64(h.arg_int(0)?.unsigned_abs(), h.arg_int(1)?.unsigned_abs());
+    // Only the 2^63 corner (an input is i64::MIN, the other 0/i64::MIN) overflows i64 — fault like abs.
+    let v = i64::try_from(g).map_err(|_| HostError {
+        message: "integer overflow in gcd".to_string(),
+    })?;
+    Ok(NativeRet::Int(v))
+}
+
+fn lcm(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "lcm", 2)?;
+    let a = h.arg_int(0)?;
+    let b = h.arg_int(1)?;
+    lcm_i64(a, b)
+        .map(NativeRet::Int)
+        .map_err(|message| HostError { message })
+}
+
+// `sign` is numeric-polymorphic (like `abs`): int→int, float→float. numpy/Go convention -1/0/1.
+fn sign(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "sign", 1)?;
+    if h.arg_is_int(0) {
+        Ok(NativeRet::Int(h.arg_int(0)?.signum()))
+    } else {
+        let x = h.arg_float(0)?;
+        // f64::signum returns ±1.0 for ±0.0 and NaN for NaN — override to 0.0 / NaN-passthrough.
+        let s = if x == 0.0 || x.is_nan() {
+            x
+        } else {
+            x.signum()
+        };
+        Ok(NativeRet::Float(s))
+    }
+}
+
+// `trunc(x) -> int`: toward-zero truncation. Equivalent to `int(x)`; faults on non-finite / out-of-range
+// with the same message shape as the `int()` builtin (no intra-language drift).
+fn trunc(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "trunc", 1)?;
+    let x = h.arg_float(0)?;
+    if !x.is_finite() || x < i64::MIN as f64 || x >= 9_223_372_036_854_775_808.0 {
+        return Err(HostError {
+            message: format!("trunc(): {x} is out of integer range"),
+        });
+    }
+    Ok(NativeRet::Int(x.trunc() as i64))
+}
+
+fn hypot(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "hypot", 2)?;
+    let x = h.arg_float(0)?;
+    let y = h.arg_float(1)?;
+    Ok(NativeRet::Float(x.hypot(y)))
+}
+
+fn cbrt(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "cbrt", 1)?;
+    Ok(NativeRet::Float(h.arg_float(0)?.cbrt()))
+}
+
+fn factorial(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "factorial", 1)?;
+    Ok(match factorial_i64(h.arg_int(0)?) {
+        Ok(v) => NativeRet::Ok(Box::new(NativeRet::Int(v))),
+        Err(msg) => NativeRet::Err(msg),
+    })
+}
+
+fn comb(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "comb", 2)?;
+    let n = h.arg_int(0)?;
+    let k = h.arg_int(1)?;
+    Ok(match comb_i64(n, k) {
+        Ok(v) => NativeRet::Ok(Box::new(NativeRet::Int(v))),
+        Err(msg) => NativeRet::Err(msg),
+    })
+}
+
+fn perm(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "perm", 2)?;
+    let n = h.arg_int(0)?;
+    let k = h.arg_int(1)?;
+    Ok(match perm_i64(n, k) {
+        Ok(v) => NativeRet::Ok(Box::new(NativeRet::Int(v))),
+        Err(msg) => NativeRet::Err(msg),
+    })
+}
+
+fn parse_int_base(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "parse_int_base", 2)?;
+    let s = h.arg_str(0)?;
+    let base = h.arg_int(1)?;
+    Ok(match parse_int_base_impl(&s, base) {
+        Ok(v) => NativeRet::Ok(Box::new(NativeRet::Int(v))),
+        Err(msg) => NativeRet::Err(msg),
+    })
+}
+
 /// Callable members. `(name, fn)`.
 pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("abs", abs),
@@ -163,10 +383,25 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("is_nan", is_nan),
     ("is_inf", is_inf),
     ("is_finite", is_finite),
+    ("gcd", gcd),
+    ("lcm", lcm),
+    ("sign", sign),
+    ("trunc", trunc),
+    ("hypot", hypot),
+    ("cbrt", cbrt),
+    ("factorial", factorial),
+    ("comb", comb),
+    ("perm", perm),
+    ("parse_int_base", parse_int_base),
 ];
 
 /// Constant members. `(name, value)`.
-pub const CONSTS: &[(&str, f64)] = &[("pi", std::f64::consts::PI), ("e", std::f64::consts::E)];
+pub const CONSTS: &[(&str, f64)] = &[
+    ("pi", std::f64::consts::PI),
+    ("e", std::f64::consts::E),
+    ("inf", f64::INFINITY),
+    ("nan", f64::NAN),
+];
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +473,62 @@ mod tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "expected {a} ~ {b}");
+    }
+
+    #[test]
+    fn gcd_lcm_helpers() {
+        assert_eq!(gcd_u64(0, 0), 0);
+        assert_eq!(gcd_u64(12, 8), 4);
+        assert_eq!(gcd_u64(0, 5), 5);
+        assert_eq!(gcd_u64(5, 0), 5);
+        assert_eq!(gcd_u64(17, 5), 1);
+        // negatives via unsigned_abs at the seam
+        assert_eq!(gcd_u64((-12i64).unsigned_abs(), 8u64), 4);
+        assert_eq!(gcd_u64(12u64, (-8i64).unsigned_abs()), 4);
+        assert_eq!(lcm_i64(4, 6), Ok(12));
+        assert_eq!(lcm_i64(0, 0), Ok(0));
+        assert_eq!(lcm_i64(0, 5), Ok(0));
+        assert_eq!(lcm_i64(-4, 6), Ok(12));
+        assert!(lcm_i64(i64::MAX, i64::MAX - 1).is_err());
+    }
+
+    #[test]
+    fn factorial_comb_perm_helpers() {
+        assert_eq!(factorial_i64(0), Ok(1));
+        assert_eq!(factorial_i64(1), Ok(1));
+        assert_eq!(factorial_i64(20), Ok(2_432_902_008_176_640_000));
+        assert!(factorial_i64(21).is_err());
+        assert!(factorial_i64(-1).is_err());
+        assert_eq!(comb_i64(5, 2), Ok(10));
+        assert_eq!(comb_i64(5, 6), Ok(0));
+        assert_eq!(comb_i64(5, 0), Ok(1));
+        assert!(comb_i64(-1, 0).is_err());
+        assert!(comb_i64(5, -1).is_err());
+        assert_eq!(comb_i64(62, 31), Ok(465_428_353_255_261_088));
+        assert!(comb_i64(68, 34).is_err());
+        assert_eq!(perm_i64(5, 2), Ok(20));
+        assert_eq!(perm_i64(5, 6), Ok(0));
+        assert_eq!(perm_i64(5, 0), Ok(1));
+        assert!(perm_i64(-1, 0).is_err());
+        assert!(perm_i64(21, 21).is_err());
+    }
+
+    #[test]
+    fn parse_int_base_helper() {
+        assert_eq!(parse_int_base_impl("ff", 16), Ok(255));
+        assert_eq!(parse_int_base_impl("0xff", 16), Ok(255));
+        assert_eq!(parse_int_base_impl("0xff", 0), Ok(255));
+        assert_eq!(parse_int_base_impl("0b101", 0), Ok(5));
+        assert_eq!(parse_int_base_impl("0o17", 0), Ok(15));
+        assert_eq!(parse_int_base_impl("101", 2), Ok(5));
+        assert_eq!(parse_int_base_impl("-2a", 16), Ok(-42));
+        assert_eq!(parse_int_base_impl("+10", 10), Ok(10));
+        assert_eq!(parse_int_base_impl("42", 0), Ok(42));
+        assert!(parse_int_base_impl("  ", 10).is_err());
+        assert!(parse_int_base_impl("g", 16).is_err());
+        assert!(parse_int_base_impl("0b2", 2).is_err());
+        assert!(parse_int_base_impl("10", 37).is_err());
+        assert!(parse_int_base_impl("10", 1).is_err());
     }
 
     #[test]

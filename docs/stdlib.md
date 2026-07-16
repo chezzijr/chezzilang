@@ -282,7 +282,25 @@ Math is **total IEEE-754**: out-of-domain inputs return `NaN`/`inf` instead of f
 still overflow-faults — that's integer.)
 Predicates (`float -> bool`, IEEE-754 classification): `is_nan(x)`, `is_inf(x)` (±infinity),
 `is_finite(x)` (neither `NaN` nor infinite).
-Constants: `math.pi`, `math.e`.
+
+Number / integer functions (Python `math` semantics):
+- `gcd(a, b) -> int`, `lcm(a, b) -> int` — greatest common divisor / least common multiple.
+  `gcd(0, 0)` is `0`; negatives use absolute value (`gcd(-12, 8)` → `4`). `lcm` involving `0` is `0`.
+  `lcm` is computed as `|a|/gcd * |b|`; a result that overflows i64 faults (integer, like `abs`).
+- `sign(x)` — numeric-polymorphic like `abs` (`int`→`int`, `float`→`float`); returns `-1`/`0`/`1`
+  (numpy/Go convention). `sign(0.0)` is `0.0`, `sign(NaN)` is `NaN`.
+- `trunc(x: float) -> int` — truncate toward zero. Equivalent to the `int(x)` builtin; faults on a
+  non-finite or out-of-i64-range input (same as `int()`).
+- `hypot(x, y) -> float` — `sqrt(x*x + y*y)`. `cbrt(x) -> float` — real cube root (total; `cbrt(-8.0)` → `-2.0`).
+- `factorial(n) -> Result[int]`, `comb(n, k) -> Result[int]`, `perm(n, k) -> Result[int]` — return a
+  clean `Err` (never a fault) on a bad domain (negative `n`/`k`) or i64 overflow. `factorial` tops out
+  at `20!` (`21!` exceeds i64, so it Errs — the ceiling is the i64 limit, not a design choice). `comb`/`perm`
+  yield `0` when `k > n` (Python), compute in i128 internally, and Err only when the true result exceeds i64.
+- `parse_int_base(s: str, base: int) -> Result[int]` — parse `s` in `base` (`0` or `2..=36`); malformed
+  input Errs (never faults). `base 0` auto-detects a `0x`/`0o`/`0b` prefix (else decimal); bases `2`/`8`/`16`
+  also accept the matching prefix. A leading `+`/`-` sign is allowed (`parse_int_base("-2a", 16)` → `-42`).
+
+Constants: `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN; `math.nan != math.nan`).
 
 ### `std.io`
 | Function | Signature | Notes |
