@@ -11,6 +11,32 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-16 (stdlib gap-fill, waves 1–3: six gaps shipped)
+
+One session, six gaps off this backlog's *ranked stdlib* list, run as three concurrent-pair waves
+(auto-task → fix confirmed bugs → serial merge → post-merge-gate → worktree cleanup). All merged to
+`main`, verified end-to-end on the real binary, both engines; final HEAD `6bd2348`, lib suite 3566 green.
+
+**SHIPPED (each de-staled in its own section above):**
+- **§1** — `std.string` ergonomics: `capitalize`/`title`/`swapcase`/`find(s,sub,from_index)`/`split(s,sep,maxsplit)`/`rsplit`/`split_whitespace` (pure-Chezzi). Confirmed-bug fixed pre-merge: `find` negative `from_index` clamped to 0 instead of Python's `len+from_index`.
+- **§9** — `datetime.parse_iso8601` (pure-Chezzi); `datetime` is no longer write-only. Fixed pre-merge: an unbounded year overflowed i64 → a *fault*; now a clean `Err` (≤9-digit guard).
+- **§10** — `std.flag` (new pure-Chezzi module). Fixed pre-merge: bool `=`-form only took `true`/`false`; now the full Go `strconv.ParseBool` set.
+- **§7** — `encoding.query_decode` + `url_parse` (**Rust native** — see the correction below). 0 charges.
+- **§10** — `std.log` (new pure-Chezzi module, leveled, stderr-default, deterministic `format_line`). 0 charges.
+- **§5** — `std.math` number fns: `gcd`/`lcm`/`sign`/`trunc`/`hypot`/`cbrt`/`factorial`/`comb`/`perm`/`parse_int_base` + `inf`/`nan` (**Rust native**). Fixed pre-merge: a `comb` i128-intermediate overflow and `parse_int_base` accepting an embedded/non-leading sign (`"+-5"`/`"0x-5"` → `Ok`).
+
+**SEAM LESSON (bit two runs — record so it isn't re-learned):** `encoding`, `math`, `regex`, `io`,
+`crypto` are **file-backed NATIVE** modules — every member is a bodyless `native fn` decl in
+`std/<m>.chz` implemented in `src/native/<m>.rs`; a free pure-Chezzi fn added there is **dead code**
+(never harvested/compiled). Additions to those modules are Rust. Pure-Chezzi modules (`string`, `cmp`,
+`datetime`, `flag`, `log`) take plain `.chz` fns + one `include_str!` line in `src/resolver/std_embed.rs`
+(guarded by `embedded_std_table_matches_disk`). Check which kind a module is before scoping a gap-fill.
+
+**STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — largest), §3 (lazy
+itertools), §4 (IO seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6
+(os/system — `isatty` the cheapest win), §7 (`sha1`/`sha512`/`hmac`, gzip, CSV), §8 (net depth), §9
+(`strptime`), §10 (`std.db`, config formats, `bisect`, `memoize`), §11 (`std.process` `Child`).
+
 ## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
 
 One session, driven off this backlog. Each item links to its full entry.
