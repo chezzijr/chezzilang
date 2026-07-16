@@ -1,0 +1,66 @@
+# std.csv golden — RFC 4180 round-trip over every hard case + direct parse asserts.
+
+import std.io
+import std.csv
+
+# Element-wise equality over List[List[str]] (dims + each field).
+fn eq2(a: List[List[str]], b: List[List[str]]) -> bool:
+    if a.len() != b.len():
+        return false
+    i := 0
+    while i < a.len():
+        ra := a[i]
+        rb := b[i]
+        if ra.len() != rb.len():
+            return false
+        j := 0
+        while j < ra.len():
+            if ra[j] != rb[j]:
+                return false
+            j += 1
+        i += 1
+    return true
+
+fn main():
+    # Every hard case: embedded comma, embedded quote, embedded newline, empty field,
+    # a sandwiched empty record, leading/trailing spaces, unicode.
+    rows: List[List[str]] = [
+        ["a,b", "plain", "he said \"hi\""],
+        ["line1\nline2", "", " padded "],
+        [""],
+        ["café☃", "1", "2"],
+    ]
+
+    encoded := csv.format(rows)
+    decoded := csv.parse(encoded)
+    io.print("roundtrip: " + str(eq2(rows, decoded)))
+
+    # Direct parse asserts.
+    # Quoted field with an embedded comma stays ONE field.
+    c := csv.parse("\"a,b\",c")
+    io.print("comma_fields: " + str(c[0].len()))          # 2
+    io.print("comma_first: " + c[0][0])                   # a,b
+
+    # "" inside a quoted field -> one literal quote.
+    q := csv.parse("\"he said \"\"hi\"\"\"")
+    io.print("escq: " + q[0][0])                          # he said "hi"
+
+    # Embedded newline in a quoted field stays ONE field / ONE record.
+    nl := csv.parse("\"line1\nline2\",x")
+    io.print("nl_rows: " + str(nl.len()))                 # 1
+    io.print("nl_first: " + str(nl[0][0].len()))          # 11 (line1\nline2)
+
+    # Empty input -> [].
+    io.print("empty_len: " + str(csv.parse("").len()))    # 0
+
+    # Trailing separator -> no spurious final record.
+    io.print("trail_rows: " + str(csv.parse("a,b\r\n").len()))   # 1
+
+    # Blank interior line -> a single-empty-field record.
+    io.print("blank_mid: " + str(csv.parse("a\n\nb").len()))     # 3
+
+    # format([]) -> "".
+    empty_rows: List[List[str]] = []
+    io.print("fmt_empty: '" + csv.format(empty_rows) + "'")      # ''
+
+main()
