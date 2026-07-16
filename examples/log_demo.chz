@@ -1,0 +1,25 @@
+# std.log demo — leveled logging, exercising gating, all 4 formats, set_level, an injectable
+# prefix, the pure format_line, and the stderr-default + stdout target in one program.
+import std.log
+
+# (1) Default logger: min level INFO, output to stderr. debug() is dropped; info/warn/error land.
+lg := log.new()
+lg.debug("served-noise")   # DROPPED (below INFO)
+lg.info("served")
+lg.warn("careful")
+lg.error("boom")
+
+# (2) Lower the level: debug now passes.
+lg.set_level(log.DEBUG())
+lg.debug("now-visible")
+
+# (3) Injectable, caller-owned prefix (the deterministic opt-in timestamp seam).
+lg.set_prefix("[2020-01-01T00:00:00Z]")
+lg.error("stamped")
+
+# (4) The pure, deterministic core → STDOUT (the golden pins this on stdout, not stderr).
+print(log.format_line(log.WARN(), "pure"))
+
+# (5) A stdout-target logger (to_stderr=false) → STDOUT.
+so := log.new(log.DEBUG(), false)
+so.info("stdout-line")

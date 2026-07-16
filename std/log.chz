@@ -1,0 +1,84 @@
+# std.log — leveled logging, written entirely in Chezzi over `std.io`. Go `log/slog` + Python `logging`.
+#
+# Build a `Logger` with `log.new()`, set a minimum level, and call `debug`/`info`/`warn`/`error`.
+# A message below the logger's minimum level is dropped; the rest are formatted "LEVEL message" and
+# written to stderr by default (the Python-`logging` + Go-`log`/`slog` default), or to stdout if the
+# logger is constructed with `to_stderr=false`.
+#
+# Levels (Go `slog` order + NAMES — note `WARN`, not Python's `WARNING`, for brevity):
+#   DEBUG(0) < INFO(1) < WARN(2) < ERROR(3)
+# exposed as module fns so callers pass them explicitly: `lg.set_level(log.WARN())`.
+#
+# TIMESTAMPS are OPT-IN and INJECTABLE, never baked in: a live clock makes output non-deterministic
+# (ungoldenable). The core `format_line(level, msg) -> str` is a pure, deterministic function the
+# golden pins. For a real timestamp, `set_prefix(...)` with a caller-owned stamp (from `std.time` /
+# `std.datetime`) — std.log itself imports no clock, so the default path stays deterministic.
+#
+# ponytail: v1 scope is levels + min-level gating + stderr/stdout target + a deterministic format +
+# an injectable prefix. Deferred (add when a real need appears): handlers/formatters, hierarchical
+# (named) loggers, structured key/value fields — the full Python `logging` / Go `slog` machinery.
+
+import std.io
+
+# --- level constants, as module fns (module-level `:=` bindings are not exported by the resolver) ---
+fn DEBUG() -> int: return 0
+fn INFO() -> int: return 1
+fn WARN() -> int: return 2
+fn ERROR() -> int: return 3
+
+# The name of a level int, for the log-line prefix.
+fn level_name(level: int) -> str:
+    if level <= 0:
+        return "DEBUG"
+    if level == 1:
+        return "INFO"
+    if level == 2:
+        return "WARN"
+    return "ERROR"
+
+# The pure, deterministic core — "LEVEL message". The golden pins THIS (no timestamp, no now()).
+fn format_line(level: int, msg: str) -> str:
+    return level_name(level) + " " + msg
+
+struct Logger:
+    min_level: int      # messages below this level are dropped
+    to_stderr: bool     # true → write to stderr (default), false → stdout
+    prefix: str         # optional injectable prefix (e.g. a caller-owned timestamp); "" = none
+
+    # Set the minimum level; messages below it are dropped.
+    fn set_level(self, level: int):
+        self.min_level = level
+
+    # Set an injectable prefix prepended (with a space) to every line — the opt-in timestamp/label
+    # seam. Pass "" to clear it. The caller owns the value, so std.log stays clock-free/deterministic.
+    fn set_prefix(self, p: str):
+        self.prefix = p
+
+    # The gated write: drop below min_level, else format + optional prefix, route to the target.
+    fn log_at(self, level: int, msg: str):
+        if level < self.min_level:
+            return
+        line := format_line(level, msg)
+        if self.prefix != "":
+            line = self.prefix + " " + line
+        if self.to_stderr:
+            io.eprint(line)
+        else:
+            io.print(line)
+
+    fn debug(self, msg: str):
+        self.log_at(DEBUG(), msg)
+
+    fn info(self, msg: str):
+        self.log_at(INFO(), msg)
+
+    fn warn(self, msg: str):
+        self.log_at(WARN(), msg)
+
+    fn error(self, msg: str):
+        self.log_at(ERROR(), msg)
+
+# Construct a Logger. Defaults: min level INFO (Go `slog` default), output to stderr (Python/Go
+# default), no prefix. Pass `to_stderr=false` to route to stdout instead.
+fn new(min_level: int = 1, to_stderr: bool = true) -> Logger:   # 1 == INFO()
+    return Logger(min_level, to_stderr, "")

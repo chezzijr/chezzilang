@@ -1,0 +1,5 @@
+INFO served
+WARN careful
+ERROR boom
+DEBUG now-visible
+[2020-01-01T00:00:00Z] ERROR stamped

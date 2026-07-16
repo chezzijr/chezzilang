@@ -19,6 +19,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `url_parse` + `examples/encoding.chz`/`.expected` extended (`golden_encoding_crypto_via_run_file` +
 > `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md §std.encoding`, `docs/gaps.md §7` (SHIPPED +
 > label fix). Full `cargo test`/`clippy`/`conformance` green.
+> **✅ STDLIB (2026-07-16, `auto-task/std-log`) — `docs/gaps.md` §10: `std.log`, leveled logging.**
+> NEW pure-Chezzi module `std/log.chz` over `std.io` (only Rust touch = one `include_str!` line in
+> `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `log.new(min_level=INFO,
+> to_stderr=true) -> Logger`; `debug/info/warn/error(msg)` format `"LEVEL message"` gated by
+> `set_level` (Go `slog` levels `DEBUG<INFO<WARN<ERROR`, exposed as module fns `log.DEBUG()`…), written
+> to **stderr** by default (Python `logging` + Go `log`/`slog` default; `to_stderr=false` → stdout).
+> Timestamps opt-in/injectable via `set_prefix` — the pure deterministic `format_line(level,msg)` core
+> bakes in no clock (ungoldenable), so the default path stays golden-able. Pure-Chezzi ⇒ serial-VM ==
+> M:N. Tests: `parity_std_log_defaults_to_stderr` (gating+stderr routing) + `examples/log_demo.chz`/
+> `.expected` (`golden_log_demo_via_run_file` pins the STDERR stream + stream-discrimination asserts +
+> `assert_file_parity`). Docs: `docs/stdlib.md § std.log`, `docs/gaps.md §10` (SHIPPED). Deferred:
+> handlers/formatters, hierarchical loggers, structured fields. Full `cargo test`/`clippy`/`conformance` green.
 > **✅ STDLIB (2026-07-16, `auto-task/std-flag`) — `docs/gaps.md` §10: `std.flag`, a Go-`flag`-style
 > CLI arg parser.** NEW pure-Chezzi module `std/flag.chz` (zero native seam — consumes the existing
 > `os.args()`; only Rust touch = one `include_str!` line in `src/resolver/std_embed.rs`, guarded by

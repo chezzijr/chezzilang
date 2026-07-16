@@ -4125,6 +4125,20 @@ fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
 }
 
 #[test]
+fn parity_std_log_defaults_to_stderr() {
+    // std.log: default min level INFO → debug() dropped, info/warn land on STDERR (not stdout),
+    // formatted "LEVEL message" in order. Both engines identical.
+    let src = "import std.log\nfn main():\n    lg := log.new()\n    lg.info(\"served\")\n    lg.debug(\"noisy\")\n    lg.warn(\"careful\")\nmain()";
+    assert_eq!(parity_entry(src), ""); // nothing on stdout
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (out, err, res, _) = run_file(&entry);
+    assert!(res.is_ok());
+    assert_eq!(out, "");
+    assert_eq!(err, "INFO served\nWARN careful\n");
+}
+
+#[test]
 fn parity_std_os_args_and_env() {
     use crate::native::HostConfig;
     let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"no var\")\nmain()";
@@ -5234,6 +5248,24 @@ fn golden_flag_demo_via_run_file() {
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
     assert_file_parity("examples/flag_demo.chz");
+}
+
+/// std.log golden: `examples/log_demo.chz` exercises gating, all 4 level formats, set_level, an
+/// injectable prefix, the pure `format_line`, and stderr-default + stdout target in one program.
+/// Log lines land on STDERR, so `.expected` pins the STDERR stream; discrimination asserts prove the
+/// stream routing; and it stays identical on the serial + M:N engines (parity compares both streams).
+#[test]
+fn golden_log_demo_via_run_file() {
+    let path = fixture("examples/log_demo.chz");
+    let expected = std::fs::read_to_string(fixture("examples/log_demo.expected")).unwrap();
+    let (out, err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(err, expected); // the pinned STDERR stream
+    // Discrimination: the pure format_line + the stdout-target logger land on STDOUT, the default
+    // (stderr) logger's messages do NOT — and vice versa.
+    assert!(out.contains("WARN pure") && out.contains("INFO stdout-line"));
+    assert!(!out.contains("served") && !err.contains("stdout-line"));
+    assert_file_parity("examples/log_demo.chz");
 }
 
 /// std.string helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
