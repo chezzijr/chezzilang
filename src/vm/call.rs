@@ -963,6 +963,13 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // `min_by`/`max_by` call a key extractor once per element (re-entrant, may GC), then return the
+        // ELEMENT with the extremal key — same rooting discipline as `sort_by_key`.
+        if matches!(self.heap.get(h), Obj::List(_)) && matches!(method, "min_by" | "max_by") {
+            let result = self.list_min_max_by(h, args, method == "max_by", span)?;
+            self.push(result);
+            return Ok(());
+        }
         // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
         if matches!(self.heap.get(h), Obj::Channel(_)) {
@@ -1804,6 +1811,161 @@ impl Vm {
         Ok(Value::Nil)
     }
 
+    /// `xs.min()` / `xs.max()` — the extremal element by natural order. A Comparable-struct element's
+    /// `compare` re-enters the VM (may GC AND may mutate the source list), so the scan runs over a
+    /// GC-rooted SNAPSHOT (mirrors [`Vm::list_sort_by_key`]/[`Vm::list_min_max_by`]) — never the live
+    /// source, whose length can change under a re-entrant comparator. Empty list faults. First-seen
+    /// tie-break (an equal element never displaces the earlier best), matching Python's `min`/`max`.
+    pub(super) fn list_reduce_extreme(
+        &mut self,
+        src_h: GcRef,
+        is_max: bool,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let n = match self.heap.get(src_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!("list_reduce_extreme on non-list"),
+        };
+        if n == 0 {
+            let name = if is_max { "max" } else { "min" };
+            return Err(self.err(format!("{name}() of empty list"), span));
+        }
+        // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
+        // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
+        // indexing the live source post-user-code would panic out of bounds. GC-rooted so its elements
+        // survive `order_key`'s struct-compare allocations.
+        self.push(Value::Obj(src_h)); // ROOT the source list
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!(),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        let mut best = 0usize;
+        let mut err = None;
+        for i in 1..n {
+            let (cur, best_v) = match self.heap.get(snap_h) {
+                Obj::List(v) => (v[i], v[best]),
+                _ => unreachable!(),
+            };
+            match self.order_key(cur, best_v, span) {
+                // min: strict `<` displaces; max: strict `>` displaces. Equal never displaces → first-seen.
+                Ok(ord) => {
+                    if (is_max && ord.is_gt()) || (!is_max && ord.is_lt()) {
+                        best = i;
+                    }
+                }
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        let result = match self.heap.get(snap_h) {
+            Obj::List(v) => v[best],
+            _ => unreachable!(),
+        };
+        self.pop(); // unroot snapshot
+        self.pop(); // unroot source
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(result)
+    }
+
+    /// `xs.min_by(f)` / `xs.max_by(f)` — the ELEMENT whose derived key `f: fn(T) -> K` is extremal.
+    /// Same GC discipline as [`Vm::list_sort_by_key`]: source, an element snapshot, AND a parallel
+    /// keys list are rooted so the re-entrant extractor (and a Comparable-struct key's `compare`) can
+    /// GC freely. Keys are computed once per element; a linear argmin/argmax over the rooted keys picks
+    /// the extremal index (first-seen tie), then the element at that index is read from the rooted
+    /// snapshot. Empty list faults.
+    pub(super) fn list_min_max_by(
+        &mut self,
+        src_h: GcRef,
+        mut args: Vec<Value>,
+        is_max: bool,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let name = if is_max { "max_by" } else { "min_by" };
+        if args.len() != 1 {
+            return Err(self.err(
+                format!("'{name}' expects 1 argument(s), got {}", args.len()),
+                span,
+            ));
+        }
+        let f = args.swap_remove(0);
+        let n = match self.heap.get(src_h) {
+            Obj::List(v) => v.len(),
+            _ => unreachable!("list_min_max_by on non-list"),
+        };
+        if n == 0 {
+            return Err(self.err(format!("{name}() of empty list"), span));
+        }
+        self.push(Value::Obj(src_h)); // ROOT the source list
+        let snap_h = {
+            let elems = match self.heap.get(src_h) {
+                Obj::List(v) => v.clone(),
+                _ => unreachable!(),
+            };
+            self.heap.alloc(Obj::List(elems))
+        };
+        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
+        self.push(Value::Obj(keys_h)); // ROOT the keys
+        for i in 0..n {
+            let e = match self.heap.get(snap_h) {
+                Obj::List(v) => v[i],
+                _ => unreachable!(),
+            };
+            match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
+                Ok(k) => {
+                    if let Obj::List(v) = self.heap.get_mut(keys_h) {
+                        v.push(k);
+                    }
+                }
+                Err(err) => {
+                    self.pop(); // unroot keys
+                    self.pop(); // unroot snapshot
+                    self.pop(); // unroot source
+                    return Err(err);
+                }
+            }
+        }
+        // Linear argmin/argmax over the rooted keys (first-seen tie-break).
+        let mut best = 0usize;
+        let mut err = None;
+        for i in 1..n {
+            let (cur, best_k) = match self.heap.get(keys_h) {
+                Obj::List(v) => (v[i], v[best]),
+                _ => unreachable!(),
+            };
+            match self.order_key(cur, best_k, span) {
+                Ok(ord) => {
+                    if (is_max && ord.is_gt()) || (!is_max && ord.is_lt()) {
+                        best = i;
+                    }
+                }
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        let result = match self.heap.get(snap_h) {
+            Obj::List(v) => v[best],
+            _ => unreachable!(),
+        };
+        self.pop(); // unroot keys
+        self.pop(); // unroot snapshot
+        self.pop(); // unroot source
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(result)
+    }
+
     /// Stable top-down merge sort over `idx` (positions into the rooted keys list `keys_h`), ordering
     /// by each key's natural order via [`order_key`].
     pub(super) fn msort_indices_by_key(
@@ -2413,6 +2575,67 @@ impl Vm {
                         }
                         Ok(Value::Int(acc))
                     }
+                }
+                "first" | "last" => {
+                    self.arity_err(method, args, 0, span)?;
+                    let Obj::List(items) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let picked = if method == "first" {
+                        items.first().copied()
+                    } else {
+                        items.last().copied()
+                    };
+                    Ok(match picked {
+                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                        None => self.alloc_enum("Option", "None", vec![]),
+                    })
+                }
+                "reversed" => {
+                    // A NEW list (clone then reverse) — never mutate the receiver (that is `reverse`).
+                    self.arity_err("reversed", args, 0, span)?;
+                    let Obj::List(items) = self.heap.get(h) else {
+                        unreachable!()
+                    };
+                    let mut out = items.clone();
+                    out.reverse();
+                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                }
+                "insert" => {
+                    // Python-clamp: i>len appends, negatives are len-relative and clamp to 0. Never faults.
+                    self.arity_err("insert", args, 2, span)?;
+                    let Value::Int(i) = args[0] else {
+                        unreachable!()
+                    };
+                    let x = args[1];
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
+                    let len = items.len() as i64;
+                    let idx = if i < 0 { (i + len).max(0) } else { i.min(len) } as usize;
+                    items.insert(idx, x);
+                    Ok(Value::Nil)
+                }
+                "remove_at" => {
+                    // Returns the removed element; Python-relative negatives; true OOB faults.
+                    self.arity_err("remove_at", args, 1, span)?;
+                    let Value::Int(i) = args[0] else {
+                        unreachable!()
+                    };
+                    let Obj::List(items) = self.heap.get_mut(h) else {
+                        unreachable!()
+                    };
+                    let len = items.len();
+                    match crate::slice::norm_index(i, len) {
+                        Some(idx) => Ok(items.remove(idx)),
+                        None => Err(self.err(format!("index {i} out of bounds (len {len})"), span)),
+                    }
+                }
+                // min/max may re-enter the VM (a Comparable-struct `compare` → GC), which invalidates
+                // the `items` borrow — route to a rooted, index-based helper (mirrors `sort`'s struct path).
+                "min" | "max" => {
+                    self.arity_err(method, args, 0, span)?;
+                    self.list_reduce_extreme(h, method == "max", span)
                 }
                 _ => Err(self.err(format!("type list has no method '{method}'"), span)),
             },

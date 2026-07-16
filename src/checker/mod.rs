@@ -3209,6 +3209,15 @@ const LIST_METHODS: &[&str] = &[
     "fold",
     "sort_by",
     "sort_by_key",
+    "min",
+    "max",
+    "min_by",
+    "max_by",
+    "first",
+    "last",
+    "reversed",
+    "insert",
+    "remove_at",
 ];
 const MAP_METHODS: &[&str] = &[
     "len", "has", "get", "keys", "values", "remove", "merge", "update",

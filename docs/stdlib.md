@@ -98,6 +98,12 @@ fault, by contrast, is raised identically by both.)
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
 | `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
+| `min` / `max` | `() -> T` | Smallest / largest element by natural order (`int`/`float`/`str` or a `Comparable` struct). Ties resolve to the first-seen element. Empty list **faults** (`min()`/`max() of empty list`). Float `NaN` uses the same total order as `sort()` — never faults. |
+| `min_by` / `max_by` | `(key: fn(T) -> K) -> T` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest; first-seen ties. Empty list faults. |
+| `first` / `last` | `() -> Option[T]` | The first / last element, `None` if empty. Non-mutating. |
+| `reversed` | `() -> List[T]` | Returns a **new** reversed list — the receiver is untouched (contrast in-place `reverse`). |
+| `insert` | `(i: int, x: T) -> nil` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
+| `remove_at` | `(i: int) -> T` | *mutates* — remove & return the element at index `i` (Python-relative negatives). A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
 
 `map`/`filter`/`fold` iterate over a **snapshot** of the receiver's elements taken at call time: a
 callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration

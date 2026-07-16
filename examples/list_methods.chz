@@ -17,3 +17,32 @@ print(ys.index_of(99))
 
 print([1, 2, 3, 4].sum())
 print([1.0, 2.5, 0.5].sum())
+
+# value/ergonomics methods (gaps.md §2)
+print([3, 1, 2].min())
+print([3, 1, 2].max())
+
+struct Item:
+    weight: int
+    name: str
+items := [Item(3, "box"), Item(1, "pin"), Item(2, "cup")]
+print(items.min_by(fn(it: Item) -> int: it.weight).name)
+print(items.max_by(fn(it: Item) -> int: it.weight).name)
+
+zs := [10, 20, 30]
+match zs.first():
+    Some(v): print("first {v}")
+    None: print("none")
+match zs.last():
+    Some(v): print("last {v}")
+    None: print("none")
+
+# reversed() returns a NEW list; the original is untouched
+print(zs.reversed())
+print(zs)
+
+zs.insert(1, 15)
+print(zs)
+removed := zs.remove_at(0)
+print("removed {removed}")
+print(zs)
