@@ -257,30 +257,142 @@ fn query_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(out))
 }
 
-fn url_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "url_decode", 1)?;
-    let s = h.arg_str(0)?;
-    let bytes = s.as_bytes();
+/// Percent-decode `bytes`: `%XX` → the byte value. When `plus_as_space`, a literal `+` decodes to a
+/// space (the `application/x-www-form-urlencoded` rule Chezzi's `query_decode` follows; RFC 3986
+/// `url_decode` leaves `+` literal). Returns `Err` (never panics) on a truncated (`%` with < 2
+/// trailing chars) or non-hex escape. Shared by `url_decode` (`false`) and `query_decode` (`true`) —
+/// the single percent-decoder, mirroring [`percent_encode`].
+fn percent_decode(bytes: &[u8], plus_as_space: bool) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if i + 2 >= bytes.len() {
-                return Ok(NativeRet::Err("url: truncated percent-escape".into()));
+                return Err("url: truncated percent-escape".into());
             }
             let hi = (bytes[i + 1] as char).to_digit(16);
             let lo = (bytes[i + 2] as char).to_digit(16);
             match (hi, lo) {
                 (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
-                _ => return Ok(NativeRet::Err("url: invalid percent-escape".into())),
+                _ => return Err("url: invalid percent-escape".into()),
             }
             i += 3;
+        } else if plus_as_space && bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
         } else {
             out.push(bytes[i]);
             i += 1;
         }
     }
-    bytes_to_result_url(out)
+    Ok(out)
+}
+
+fn url_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "url_decode", 1)?;
+    let s = h.arg_str(0)?;
+    match percent_decode(s.as_bytes(), false) {
+        Ok(bytes) => bytes_to_result_url(bytes),
+        Err(m) => Ok(NativeRet::Err(m)),
+    }
+}
+
+/// `query_decode(q: str) -> Map[str, str]` — parse an `x-www-form-urlencoded` query. Strips a single
+/// leading `?`; splits on `&` (skipping empty segments — trailing/double `&`); each segment splits on
+/// the FIRST `=` (a no-`=` segment maps its key to `""`). Both key and value are percent-decoded with
+/// `+`→space. DUPLICATE keys are LAST-WINS keeping first-seen position — a Map can't hold Python
+/// `parse_qs` lists (Go `url.Values.Get` analog). A malformed escape / non-UTF-8 field keeps its RAW
+/// substring (best-effort, no fault, no data loss). Empty input → empty map.
+fn query_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "query_decode", 1)?;
+    let q = h.arg_str(0)?;
+    let q = q.strip_prefix('?').unwrap_or(&q);
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for seg in q.split('&') {
+        if seg.is_empty() {
+            continue;
+        }
+        let (k_raw, v_raw) = seg.split_once('=').unwrap_or((seg, ""));
+        let k = decode_field(k_raw);
+        let v = decode_field(v_raw);
+        // ponytail: O(n²) linear scan for last-wins dedup — a query has few keys, and NativeRet::Map
+        // lowering does NOT dedup, so the unique-key invariant must hold before we hand it over.
+        match pairs.iter_mut().find(|(ek, _)| *ek == k) {
+            Some(slot) => slot.1 = v,
+            None => pairs.push((k, v)),
+        }
+    }
+    Ok(NativeRet::Map(
+        pairs
+            .into_iter()
+            .map(|(k, v)| (NativeRet::Str(k), NativeRet::Str(v)))
+            .collect(),
+    ))
+}
+
+/// Percent+plus-decode one query field. `raw` is a valid-UTF-8 `str` slice, so on ANY decode failure
+/// (bad escape or non-UTF-8 result) we fall back to the raw text — best-effort, never a fault.
+fn decode_field(raw: &str) -> String {
+    match percent_decode(raw.as_bytes(), true) {
+        Ok(b) => String::from_utf8(b).unwrap_or_else(|_| raw.to_string()),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// `url_parse(u: str) -> Map[str, str]` — LEXICAL URL decomposition into keys `scheme`, `host`,
+/// `port`, `path`, `query`, `fragment` (fixed order). NO percent-decoding of components (Python
+/// `urlsplit` / Go `net/url` leave them encoded). Missing components → `""` (port is a STRING, `""`
+/// when absent, since the map is str→str — Go `url.Port()` / Python analog). Best-effort, never faults.
+/// ponytail: the last-`:` host:port split folds userinfo (`user:pass@host`) and IPv6 (`[::1]:8080`)
+/// into `host`, and a `//`-less scheme (`mailto:x`) lands the remainder in `path` — documented ceilings.
+fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "url_parse", 1)?;
+    let u = h.arg_str(0)?;
+    let mut rest = u.as_str();
+    let fragment = match rest.split_once('#') {
+        Some((before, frag)) => {
+            rest = before;
+            frag.to_string()
+        }
+        None => String::new(),
+    };
+    let query = match rest.split_once('?') {
+        Some((before, q)) => {
+            rest = before;
+            q.to_string()
+        }
+        None => String::new(),
+    };
+    let (scheme, host, port, path) = match rest.find("://") {
+        Some(idx) => {
+            let scheme = rest[..idx].to_string();
+            let after = &rest[idx + 3..];
+            let (authority, path) = match after.find('/') {
+                Some(p) => (&after[..p], after[p..].to_string()),
+                None => (after, String::new()),
+            };
+            let (host, port) = match authority.rfind(':') {
+                Some(c) => (authority[..c].to_string(), authority[c + 1..].to_string()),
+                None => (authority.to_string(), String::new()),
+            };
+            (scheme, host, port, path)
+        }
+        None => (
+            String::new(),
+            String::new(),
+            String::new(),
+            rest.to_string(),
+        ),
+    };
+    let str_pair = |k: &str, v: String| (NativeRet::Str(k.to_string()), NativeRet::Str(v));
+    Ok(NativeRet::Map(vec![
+        str_pair("scheme", scheme),
+        str_pair("host", host),
+        str_pair("port", port),
+        str_pair("path", path),
+        str_pair("query", query),
+        str_pair("fragment", fragment),
+    ]))
 }
 
 /// url_decode lowering (same UTF-8 validation, distinct codec label).
@@ -301,6 +413,8 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("url_encode", url_encode),
     ("url_decode", url_decode),
     ("query_encode", query_encode),
+    ("query_decode", query_decode),
+    ("url_parse", url_parse),
 ];
 
 #[cfg(test)]
@@ -497,5 +611,90 @@ mod tests {
     #[test]
     fn query_encode_empty_value() {
         assert_eq!(qe(&[("k", "")]), "k=");
+    }
+
+    #[test]
+    fn percent_decode_shared_helper() {
+        assert_eq!(percent_decode(b"a%20b", false).unwrap(), b"a b");
+        assert_eq!(percent_decode(b"a+b", false).unwrap(), b"a+b"); // '+' literal (RFC 3986)
+        assert_eq!(percent_decode(b"a+b", true).unwrap(), b"a b"); // '+' -> space (form)
+        assert!(percent_decode(b"%2G", false).is_err()); // bad hex
+        assert!(percent_decode(b"%2", false).is_err()); // truncated
+    }
+
+    /// Run `query_decode` on `q`, returning the decoded `(k, v)` pairs in insertion order.
+    fn qd(q: &str) -> Vec<(String, String)> {
+        match query_decode(&mut host(q)).unwrap() {
+            NativeRet::Map(entries) => entries
+                .into_iter()
+                .map(|(k, v)| match (k, v) {
+                    (NativeRet::Str(k), NativeRet::Str(v)) => (k, v),
+                    other => panic!("expected (Str, Str), got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_decode_cases() {
+        // round-trip: query_encode emits %20 (never '+'), so single-value maps survive.
+        assert_eq!(qd(&qe(&[("a", "b c")])), vec![("a".into(), "b c".into())]);
+        assert_eq!(qd(""), Vec::<(String, String)>::new()); // empty -> empty map
+        assert_eq!(qd("flag"), vec![("flag".into(), "".into())]); // no '=' -> ""
+        assert_eq!(qd("q=a+b"), vec![("q".into(), "a b".into())]); // '+' -> space
+        assert_eq!(qd("q=a%20b"), vec![("q".into(), "a b".into())]); // %20 -> space
+        assert_eq!(qd("a=1&a=2"), vec![("a".into(), "2".into())]); // dup last-wins, one entry
+        assert_eq!(qd("?x=1"), vec![("x".into(), "1".into())]); // leading '?' stripped
+        assert_eq!(qd("k=%2G"), vec![("k".into(), "%2G".into())]); // malformed escape -> raw kept
+    }
+
+    /// Run `url_parse` on `u`, returning the component map as `(key, value)` pairs.
+    fn up(u: &str) -> Vec<(String, String)> {
+        match url_parse(&mut host(u)).unwrap() {
+            NativeRet::Map(entries) => entries
+                .into_iter()
+                .map(|(k, v)| match (k, v) {
+                    (NativeRet::Str(k), NativeRet::Str(v)) => (k, v),
+                    other => panic!("expected (Str, Str), got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    fn field(pairs: &[(String, String)], key: &str) -> String {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("missing key {key}"))
+    }
+
+    #[test]
+    fn url_parse_cases() {
+        let full = up("https://host.test:8080/a/b?x=1#frag");
+        assert_eq!(field(&full, "scheme"), "https");
+        assert_eq!(field(&full, "host"), "host.test");
+        assert_eq!(field(&full, "port"), "8080");
+        assert_eq!(field(&full, "path"), "/a/b");
+        assert_eq!(field(&full, "query"), "x=1");
+        assert_eq!(field(&full, "fragment"), "frag");
+
+        let host_only = up("https://example.com");
+        assert_eq!(field(&host_only, "host"), "example.com");
+        assert_eq!(field(&host_only, "port"), ""); // absent port -> ""
+        assert_eq!(field(&host_only, "path"), "");
+
+        let no_port = up("https://example.com/p");
+        assert_eq!(field(&no_port, "path"), "/p");
+        assert_eq!(field(&no_port, "port"), "");
+
+        let scheme_less = up("/local?y=2");
+        assert_eq!(field(&scheme_less, "scheme"), "");
+        assert_eq!(field(&scheme_less, "host"), "");
+        assert_eq!(field(&scheme_less, "port"), "");
+        assert_eq!(field(&scheme_less, "path"), "/local");
+        assert_eq!(field(&scheme_less, "query"), "y=2");
     }
 }

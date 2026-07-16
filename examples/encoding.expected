@@ -15,3 +15,16 @@ query 3     = a%26b=c%3Dd&q=a%20b&x=1
 query empty = ''
 query kv    = k=
 query url   = https://x.test/s?lang=C%2B%2B&name=John%20Doe
+qd round    = a b
+qd plus     = a b
+qd pct      = a b
+qd no-eq    = ''
+qd dup-last = 2
+up scheme   = https
+up host     = host.test
+up port     = 8080
+up path     = /a/b
+up query    = x=1
+up frag     = frag
+up hostonly = example.com port=''
+up rel      = /local/path q=y=2 scheme=''

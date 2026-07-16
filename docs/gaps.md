@@ -417,10 +417,12 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - encoding: no gzip / zlib (new dependency), no CSV. Arbitrary-**bytes** base64 round-trip →
   **DONE (R1)** (`base64_encode_bytes`/`base64_decode_bytes`); hashing a *file* → **DONE (R1)**
   (`io.read_bytes` + `crypto.sha256_bytes`). Not added: hex / URL-safe bytes twins (~6 lines each, on demand).
-- **URL parsing is the missing half of an already-built module**: `url_encode` / `url_decode` /
-  `query_encode` exist — but **no `query_decode`** (query string → `Map[str,str]`) and no `url_parse`
-  (scheme/host/port/path/query). You can build a query string and not read one back. Blocks anything
-  webhook- or server-shaped. Small, pure-Chezzi.
+- **URL parsing read-half — SHIPPED**: `query_decode(q) -> Map[str,str]` (dup key last-wins, `+`/`%20`
+  → space, malformed escape kept raw) and `url_parse(u) -> Map[str,str]` (lexical
+  scheme/host/port/path/query/fragment, components stay encoded, port a string) now round out
+  `url_encode` / `url_decode` / `query_encode`. (Correction: the "Small, pure-Chezzi" label here was
+  wrong — `std.encoding` is a FILE-BACKED NATIVE module; all members are bodyless `native fn` decls in
+  `std/encoding.chz` implemented in `src/native/encoding.rs`. A pure-Chezzi fn there is dead code.)
 
 ### 8. Net — *and `std.net` is `--parallel`-only, which is a standing serial≠M:N divergence*
 - TCP (`std.net`) + HTTP-client (`std.request`) only. No UDP, no HTTP **server**, no DNS-resolve

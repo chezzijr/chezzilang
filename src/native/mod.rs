@@ -825,6 +825,8 @@ mod tests {
                 "url_encode",
                 "url_decode",
                 "query_encode",
+                "query_decode",
+                "url_parse",
             ]
         );
         let cry: Vec<&str> = native_members("std.crypto")

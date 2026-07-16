@@ -28,3 +28,11 @@ native fn url_decode(s: str) -> Result[str]
 # `query_encode(params) -> str` — build a `k=v&...` query string with sorted keys + both sides
 # percent-encoded (pure CPU, infallible).
 native fn query_encode(params: Map[str, str]) -> str
+# `query_decode(q) -> Map[str, str]` — parse `k=v&...` (strips a leading `?`, `+`/`%20` → space,
+# no-`=` key → "", duplicate key = last-wins, malformed escape kept raw). A Map can't hold repeated
+# keys as a list (Go `url.Values.Get` analog), so duplicates collapse last-wins.
+native fn query_decode(q: str) -> Map[str, str]
+# `url_parse(u) -> Map[str, str]` — LEXICAL split into keys scheme/host/port/path/query/fragment
+# (missing → ""). NO percent-decoding of components (Python `urlsplit` / Go `net/url` leave them
+# encoded); `port` is a STRING ("" when absent). Best-effort, never faults.
+native fn url_parse(u: str) -> Map[str, str]

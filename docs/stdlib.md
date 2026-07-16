@@ -625,6 +625,20 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   **sorted by their RAW (pre-encoding) value** so the output is deterministic regardless of map
   iteration order (a stable golden + 3-engine parity). An empty map yields `""` (no leading `?`);
   `{"k": ""}` yields `"k="`. Compose `url + "?" + query_encode(params)`.
+- query parser (read-half): `query_decode(q: str) -> Map[str, str]` reverses `query_encode` for
+  single-valued keys. Strips one leading `?`; splits on `&` (empty segments skipped); each segment
+  splits on the FIRST `=` (a no-`=` segment maps its key to `""`); both key and value are
+  percent-decoded with `+` → space (the `x-www-form-urlencoded` rule — note this is *looser* than
+  `url_decode`, which leaves `+` literal). DUPLICATE keys are **last-wins** — a `Map[str,str]` cannot
+  hold Python `parse_qs` value lists, so this is the Go `url.Values.Get` analog (ceiling). A malformed
+  `%`-escape (or non-UTF-8 result) keeps the field's RAW substring — best-effort, never a fault.
+- URL splitter (read-half): `url_parse(u: str) -> Map[str, str]` LEXICALLY decomposes a URL into the
+  keys `scheme`, `host`, `port`, `path`, `query`, `fragment` (missing components → `""`). It does **not**
+  percent-decode the components (matching Python `urlsplit` / Go `net/url` — call `url_decode` /
+  `query_decode` on the pieces you need). `port` is a **string** (`""` when absent — the map is
+  str→str, the Go `url.Port()` / Python analog). Best-effort, never faults. Ceilings: the last-`:`
+  host:port split folds userinfo (`user:pass@host`) and IPv6 (`[::1]:8080`) into `host`, and a `//`-less
+  scheme (`mailto:x`) lands the remainder in `path`.
 
 **Seam note:** the `str` members UTF-8-validate their decoded output, so a non-UTF-8 result is an `Err`
 (that is the *str* contract, not a limitation). Arbitrary binary round-trips through

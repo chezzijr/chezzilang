@@ -46,3 +46,28 @@ print("query empty = '" + enc.query_encode({}) + "'")
 empty_val: Map[str, str] = {"k": ""}
 print("query kv    = " + enc.query_encode(empty_val))
 print("query url   = https://x.test/s?" + enc.query_encode({"name": "John Doe", "lang": "C++"}))
+
+# --- query parsing (read-half): +/%20 -> space, leading '?', no-'=' key, dup last-wins ---
+rt: Map[str, str] = enc.query_decode(enc.query_encode({"greeting": "a b"}))
+print("qd round    = " + rt["greeting"])
+plus: Map[str, str] = enc.query_decode("?q=a+b")
+print("qd plus     = " + plus["q"])
+pct: Map[str, str] = enc.query_decode("q=a%20b")
+print("qd pct      = " + pct["q"])
+flag: Map[str, str] = enc.query_decode("flag")
+print("qd no-eq    = '" + flag["flag"] + "'")
+dup: Map[str, str] = enc.query_decode("a=1&a=2")
+print("qd dup-last = " + dup["a"])
+
+# --- url_parse (lexical decomposition, components stay encoded) ---
+full: Map[str, str] = enc.url_parse("https://host.test:8080/a/b?x=1#frag")
+print("up scheme   = " + full["scheme"])
+print("up host     = " + full["host"])
+print("up port     = " + full["port"])
+print("up path     = " + full["path"])
+print("up query    = " + full["query"])
+print("up frag     = " + full["fragment"])
+hostonly: Map[str, str] = enc.url_parse("https://example.com")
+print("up hostonly = " + hostonly["host"] + " port='" + hostonly["port"] + "'")
+rel: Map[str, str] = enc.url_parse("/local/path?y=2")
+print("up rel      = " + rel["path"] + " q=" + rel["query"] + " scheme='" + rel["scheme"] + "'")
