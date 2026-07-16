@@ -11,13 +11,11 @@
 # * SPACES are significant — never trimmed (leading/trailing spaces are ordinary chars).
 # * A trailing record separator does NOT produce a spurious empty final record.
 # * EMPTY input -> [] (empty list); format([]) -> "".
-# * BLANK interior line -> a single-empty-field record [""] (this is what round-trips through
-#   format's field model). NOTE: this differs from Python's csv, which maps a blank line to []
-#   (an empty record) — chosen so parse(format(rows)) == rows holds.
-# * ROUND-TRIP LIMIT (property of CSV, not a bug): a SOLE or TRAILING all-empty record cannot
-#   round-trip — format([[""]]) == "" and parse("") == [], because CSV cannot encode a trailing
-#   blank line distinctly from no trailing newline. An empty record round-trips only when
-#   sandwiched between non-empty records.
+# * BLANK line -> a single-empty-field record [""] (this is what round-trips through format's field
+#   model). NOTE: this differs from Python's csv, which maps a blank line to [] (an empty record) —
+#   chosen so parse(format(rows)) == rows holds.
+# * ROUND-TRIP is TOTAL: format TERMINATES each record with CRLF (not separator-joins), so a sole or
+#   trailing empty record `[""]` round-trips too (format([[""]]) == "\r\n", parse("\r\n") == [[""]]).
 #
 # ponytail: no streaming/Reader, no header->Map mapping, no custom-delimiter/TSV arg (v1 YAGNI).
 # A `sep` param would thread through both the parser branch and needs_quote and complicate the
@@ -33,13 +31,20 @@ fn parse(text: str) -> List[List[str]]:
     field := ""
     in_quotes := false
     started := false   # governs ONLY the EOF flush: a trailing separator leaves started=false
-    n := text.len()
+    # Pre-collect codepoints into a List once so indexing is O(1). Slicing `text[i:i+1]` per char
+    # re-collects the whole char vec each time → O(n^2); a moderately large CSV would hang.
+    # (A single enormous field still costs O(k^2) from repeated `field + c` concat — v1 accepts that;
+    #  ponytail: a field-buffer + one join would make it O(k) if giant single fields ever matter.)
+    chars: List[str] = []
+    for ch in text:
+        chars.push(ch)
+    n := chars.len()
     i := 0
     while i < n:
-        c := text[i : i + 1]
+        c := chars[i]
         if in_quotes:
             if c == "\"":
-                if i + 1 < n and text[i + 1 : i + 2] == "\"":
+                if i + 1 < n and chars[i + 1] == "\"":
                     field = field + "\""   # "" -> one literal quote
                     i += 2
                 else:
@@ -64,7 +69,7 @@ fn parse(text: str) -> List[List[str]]:
                 rows.push(row)
                 row = []
                 started = false
-                if i + 1 < n and text[i + 1 : i + 2] == "\n":
+                if i + 1 < n and chars[i + 1] == "\n":
                     i += 2                 # consume the LF of a CRLF pair
                 else:
                     i += 1
@@ -94,13 +99,15 @@ fn quote_field(f: str) -> str:
         return "\"" + s.replace(f, "\"", "\"\"") + "\""
     return f
 
-# Serialize records to RFC 4180 CSV text (records joined by CRLF; parse accepts CRLF or LF, so
-# either separator round-trips).
+# Serialize records to RFC 4180 CSV text. Each record is TERMINATED by CRLF (not separator-joined),
+# so a sole/trailing empty record round-trips and parse's "trailing separator = no spurious record"
+# rule keeps format([["a","b"]]) == "a,b\r\n" exact. parse accepts CRLF or LF either way.
 fn format(rows: List[List[str]]) -> str:
-    lines: List[str] = []
+    parts: List[str] = []
     for row in rows:
         fields: List[str] = []
         for field in row:
             fields.push(quote_field(field))
-        lines.push(",".join(fields))
-    return "\r\n".join(lines)
+        parts.push(",".join(fields))
+        parts.push("\r\n")
+    return "".join(parts)

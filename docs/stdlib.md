@@ -725,14 +725,13 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
   line → a single-empty-field record `[""]` (this differs from Python's `csv`, which maps a blank line
   to `[]` — chosen so `parse(format(rows)) == rows` holds).
 - `format` — the inverse. A field is quoted **iff** it contains a `,`, `"`, CR, or LF; embedded quotes
-  are doubled. Records are joined by CRLF (`\r\n`, per RFC 4180); since `parse` accepts CRLF or LF it
-  round-trips either way. `format([])` → `""`.
-- **Round-trip guarantee:** `parse(format(rows)) == rows` for rows covering every hard case (embedded
-  comma, embedded escaped quote, embedded newline, empty field, unicode). **Limit** (a property of the
-  CSV format, not a bug): a SOLE or TRAILING all-empty record does **not** round-trip
-  (`format([[""]])` == `""` and `parse("")` == `[]`) — CSV cannot encode a trailing blank line
-  distinctly from no trailing newline. An empty record round-trips only when sandwiched between
-  non-empty records.
+  are doubled. Each record is **terminated** by CRLF (`\r\n`, per RFC 4180) — not separator-joined —
+  so `format([["a","b"]])` == `"a,b\r\n"`; `parse` accepts CRLF or LF either way. `format([])` → `""`.
+- **Round-trip guarantee:** `parse(format(rows)) == rows` is **total** — proven for rows covering every
+  hard case (embedded comma, escaped quote, embedded newline, empty field, unicode) **including** a sole
+  or trailing all-empty record `[""]` (`format([[""]])` == `"\r\n"`, `parse("\r\n")` == `[[""]]`).
+  CRLF-*termination* (vs joining) plus parse's "a trailing separator yields no spurious record" rule is
+  what makes the empty-record case round-trip.
 - **Deferred v1 follow-ups** (YAGNI): streaming/Reader-based parsing, header→`Map` row mapping, and a
   custom-delimiter/TSV `parse_sep(text, sep)`.
 

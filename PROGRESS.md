@@ -10,10 +10,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `parse(text) ->
 > List[List[str]]` (comma sep, CRLF **or** LF records, `""`→literal quote in quoted fields, spaces
 > significant, trailing sep → no spurious record, empty input → `[]`, blank interior line → `[""]`) +
-> `format(rows) -> str` (quote iff `,`/`"`/CR/LF, double embedded quotes, CRLF-joined). Round-trip
-> `parse(format(rows)) == rows` proven in-Chezzi over every hard case (embedded comma/quote/newline,
-> empty field, sandwiched empty record, unicode). Known format limit (ponytail-noted): sole/trailing
-> all-empty record can't round-trip. Tests: `golden_csv_via_run_file` (`examples/csv.chz`/`.expected` +
+> `format(rows) -> str` (quote iff `,`/`"`/CR/LF, double embedded quotes, each record CRLF-**terminated**).
+> Round-trip `parse(format(rows)) == rows` is TOTAL — proven in-Chezzi over every hard case (embedded
+> comma/quote/newline, empty field, unicode) INCLUDING a sole/trailing empty record `[""]` (CRLF
+> termination + parse's "trailing sep = no spurious record" rule; the earlier separator-join couldn't
+> and was fixed pre-merge). `parse` pre-collects codepoints into a `List` for O(1) indexing (the
+> per-char `s[i:i+1]` slice was O(n²) — a large CSV hung; also fixed pre-merge). Tests:
+> `golden_csv_via_run_file` (`examples/csv.chz`/`.expected` +
 > `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md § std.csv`, `docs/gaps.md §7` (SHIPPED).
 > Deferred v1: streaming/Reader, header→Map mapping, custom-delimiter/TSV `parse_sep`.
 >

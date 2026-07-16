@@ -63,4 +63,22 @@ fn main():
     empty_rows: List[List[str]] = []
     io.print("fmt_empty: '" + csv.format(empty_rows) + "'")      # ''
 
+    # TRAILING empty record round-trips (format terminates each record with CRLF).
+    trail: List[List[str]] = [["a", "b"], [""]]
+    io.print("trail_rt: " + str(eq2(trail, csv.parse(csv.format(trail)))))   # true
+    # SOLE empty record round-trips too.
+    sole: List[List[str]] = [[""]]
+    io.print("sole_fmt: " + str(csv.format(sole).len()))         # 2  (== "\r\n")
+    io.print("sole_rt: " + str(eq2(sole, csv.parse(csv.format(sole)))))      # true
+
+    # Perf sanity: a 20k-field row parses fast (would hang under the old O(n^2) per-char slice).
+    bparts: List[str] = []
+    k := 0
+    while k < 20000:
+        bparts.push("x")
+        k += 1
+    bparts.push("end")
+    big := ",".join(bparts)
+    io.print("big_fields: " + str(csv.parse(big)[0].len()))      # 20001
+
 main()
