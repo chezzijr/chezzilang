@@ -42,4 +42,16 @@ fn main():
     print("== weekday ==")
     print("weekday(0)={dt.weekday(0)} weekday(-1)={dt.weekday(-1)} weekday(1700000000)={dt.weekday(1700000000)}")
 
+    print("== parse_iso8601 (string -> DateTime) ==")
+    show_parse("2023-11-14T22:13:20Z")     # Z suffix
+    show_parse("2023-11-14")               # date-only -> midnight
+    show_parse("1970-01-01T05:00:00+05:00")  # +offset normalizes to UTC epoch 0
+    show_parse("2023-11-14T22:13:20.5Z")   # fractional seconds truncated
+    show_parse("2023-13-01")               # out-of-range month -> Err
+
+fn show_parse(iso: str):
+    match dt.parse_iso8601(iso):
+        Ok(d): print("{iso} -> epoch {dt.to_epoch(d)}  ({dt.weekday_name(d.weekday)})")
+        Err(msg): print("{iso} -> Err: {msg}")
+
 main()

@@ -732,12 +732,17 @@ struct DateTime:
 | `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
 | `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
 | `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
+| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 (matches Python `datetime.fromisoformat`). Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt`. |
 | `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
 | `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
 | `diff_seconds` | `(a, b) -> int` | `a - b`. |
 | `diff_days` | `(a, b) -> int` | Whole days `b`→`a`, **floored**: `diff_days(-1, 0)` → -1. |
 
-Formatters are **fixed** (no `strftime` pattern in v1). The `DateTime` struct lives in the module
+The string→`DateTime` half is `parse_iso8601` (above); `strftime`-pattern formatting and a general
+`strptime`/`from_string` are still deferred (no format-token vocabulary in v1). Two `parse_iso8601`
+ceilings, both deliberate under the UTC-only contract: sub-second precision is dropped (`.fff` is
+truncated), and a non-`Z` offset normalizes to a UTC epoch rather than round-tripping to itself.
+The `DateTime` struct lives in the module
 (`datetime.DateTime`); a user program also defining its own top-level `struct DateTime` could collide
 — use the module-qualified name.
 

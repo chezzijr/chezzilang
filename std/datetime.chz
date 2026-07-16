@@ -170,6 +170,135 @@ fn to_time_string(dt: DateTime) -> str:
 fn to_string(dt: DateTime) -> str:
     return to_date_string(dt) + " " + to_time_string(dt)
 
+# ---- ISO-8601 / RFC-3339 parsing (string -> DateTime; the inverse of to_iso8601) ----
+#
+# Accepts "YYYY-MM-DD" (date-only, midnight), "YYYY-MM-DDTHH:MM:SS" (naive == UTC), an optional
+# '.fff' fractional part (validated then TRUNCATED — DateTime.second is an int, no sub-second storage),
+# and an optional trailing 'Z' or '+HH:MM' / '-HH:MM' offset (normalized to UTC, per RFC-3339 / Go
+# time.Parse). Date and time may be separated by 'T' (to_iso8601) or ' ' (to_string), matching Python
+# datetime.fromisoformat. A malformed / out-of-range string is a clean Err — never a fault/abort.
+# Round-trips: parse_iso8601(to_iso8601(dt)) == dt (weekday included, rebuilt via from_epoch).
+
+# True iff x is one or more ASCII digits (no sign, no whitespace) — strict guard before any to_uint.
+fn all_digits(x: str) -> bool:
+    if x.len() == 0:
+        return false
+    for c in x:
+        if c < "0" or c > "9":
+            return false
+    return true
+
+# ASCII digits -> non-negative int. Caller MUST all_digits-guard first (no sign/ws handling, unlike
+# int(), which trims whitespace + accepts a leading +/- — too lenient for a fixed-width ISO field).
+fn to_uint(x: str) -> int:
+    n := 0
+    for c in x:
+        n = n * 10 + (ord(c) - 48)
+    return n
+
+# Exactly-2-ASCII-digit field -> int, else Err (guards every fixed-width ISO field before conversion).
+fn field2(x: str) -> Result[int]:
+    if x.len() != 2 or not all_digits(x):
+        return Err("invalid 2-digit field '" + x + "'")
+    return Ok(to_uint(x))
+
+fn parse_iso8601(input: str) -> Result[DateTime]:
+    # 1. split date from time on the first 'T' (to_iso8601) or ' ' (to_string); no separator = date-only
+    date_part := input
+    time_part := ""
+    has_time := false
+    dt_parts := input.split("T")
+    if dt_parts.len() == 1:
+        dt_parts = input.split(" ")
+    if dt_parts.len() == 2:
+        date_part = dt_parts[0]
+        time_part = dt_parts[1]
+        has_time = true
+    elif dt_parts.len() != 1:
+        return Err("malformed date/time separator in '" + input + "'")
+
+    # 2. date: optional leading '-' (proleptic negative year, as pad_year emits), then YYYY-MM-DD
+    neg := false
+    dp := date_part
+    if dp.starts_with("-"):
+        neg = true
+        dp = dp[1:]
+    dc := dp.split("-")
+    if dc.len() != 3:
+        return Err("date must be YYYY-MM-DD, got '" + date_part + "'")
+    if not all_digits(dc[0]):
+        return Err("invalid year '" + dc[0] + "'")
+    # Bound the year before conversion: an oversized all-digit year would overflow i64 in `to_uint`
+    # or downstream `to_epoch` (days * 86400) — a fault, not the clean Err the contract requires.
+    # <=9 digits (max 999_999_999) can never overflow to_epoch; every realistic/padded year fits.
+    if dc[0].len() > 9:
+        return Err("year out of range '" + dc[0] + "'")
+    y := to_uint(dc[0])
+    if neg:
+        y = -y
+    m := field2(dc[1])?
+    d := field2(dc[2])?
+
+    # 3. time (default midnight); optional tz offset + fractional seconds
+    hh := 0
+    mm := 0
+    ss := 0
+    off := 0
+    if has_time:
+        tp := time_part
+        # 3a. peel a trailing tz: 'Z' (UTC) or '+HH:MM' / '-HH:MM' offset. The time itself has only
+        #     digits, ':' and '.', so the first '+'/'-' unambiguously marks the offset.
+        if tp.ends_with("Z"):
+            tp = tp[0 : tp.len() - 1]
+        else:
+            pi := s.index_of(tp, "+")
+            sign := 1
+            if pi < 0:
+                pi = s.index_of(tp, "-")
+                sign = -1
+            if pi >= 0:
+                oc := tp[pi + 1 :].split(":")
+                tp = tp[0:pi]
+                if oc.len() != 2:
+                    return Err("offset must be +HH:MM / -HH:MM")
+                oh := field2(oc[0])?
+                om := field2(oc[1])?
+                if oh > 23 or om > 59:
+                    return Err("offset field out of range")
+                off = sign * (oh * 3600 + om * 60)
+        # 3b. peel + DISCARD fractional seconds (no sub-second storage — a real ceiling)
+        fc := tp.split(".")
+        if fc.len() == 2:
+            if not all_digits(fc[1]):
+                return Err("invalid fractional seconds")
+            tp = fc[0]
+        elif fc.len() != 1:
+            return Err("malformed fractional seconds")
+        # 3c. HH:MM:SS
+        tc := tp.split(":")
+        if tc.len() != 3:
+            return Err("time must be HH:MM:SS, got '" + time_part + "'")
+        hh = field2(tc[0])?
+        mm = field2(tc[1])?
+        ss = field2(tc[2])?
+
+    # 4. range-validate BEFORE any civil math (days_from_civil computes garbage for month 13 / day 32).
+    #    field2/to_uint are non-negative, so only upper bounds (+ the m<1 / d<1 zero cases) need checks.
+    if m < 1 or m > 12:
+        return Err("month out of range: " + str(m))
+    if d < 1 or d > days_in_month(y, m):
+        return Err("day out of range: " + str(d))
+    if hh > 23:
+        return Err("hour out of range: " + str(hh))
+    if mm > 59:
+        return Err("minute out of range: " + str(mm))
+    if ss > 59:
+        return Err("second out of range: " + str(ss))
+
+    # 5. reuse to_epoch/from_epoch: normalizes any non-Z offset to UTC + fills the contractual weekday.
+    epoch := to_epoch(DateTime(y, m, d, hh, mm, ss, 0)) - off
+    return Ok(from_epoch(epoch))
+
 # ---- duration arithmetic (epoch ints, seconds) ----
 
 # Add `n` seconds to an epoch value.

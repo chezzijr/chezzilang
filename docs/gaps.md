@@ -438,13 +438,16 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   but it must be written down, because §"Audited residuals" previously claimed the task-stdin bug was
   "the only known serial≠M:N divergence", and that was **wrong as written**.
 
-### 9. Date/time — `datetime` is **write-only** (no parsers)
-`std/datetime.chz` has 21 functions and **every one is a formatter or epoch-math helper**: `from_epoch`,
-`to_iso8601`, `to_date_string`… There is **no `parse_iso8601` / `strptime` / `from_string`**, and
-`std.time` is `now`/`monotonic`/`sleep_ms`/`format` — also format-only. So a script **cannot turn a
-timestamp from JSON, an HTTP header, a CSV or a log line into a `DateTime`**. The inverse is fully
-built. (Python: `fromisoformat`/`strptime`; Go: `time.Parse`.) **Small** — `days_from_civil` already
-exists; this is only the string→ints half. Blocks a very common script shape.
+### 9. Date/time — `parse_iso8601` LANDED; `strptime`/`from_string` remain
+**`datetime.parse_iso8601(s: str) -> Result[DateTime]` shipped** (pure-Chezzi, the exact inverse of
+`to_iso8601`): parses ISO-8601 / RFC-3339 — date-only, `'T'`/`' '` separator, optional `Z` or
+`±HH:MM` offset (normalized to UTC), optional truncated `.fff` — with clean `Err` on malformed /
+out-of-range fields. So a script **can** now turn a JSON / HTTP-header / CSV / log timestamp into a
+`DateTime`. **Remaining follow-up:** a `strftime`-pattern formatter and a general
+`strptime`/`from_string` (format-token vocabulary) — deferred (no token surface in v1, would balloon
+scope). Known ceilings: sub-second precision dropped (`DateTime.second` is int), non-`Z` offsets
+normalize to UTC rather than round-tripping. (Python: `fromisoformat` done, `strptime` pending; Go:
+`time.Parse` layout pending.)
 
 ### 10. Missing modules a real script reaches for
 - **`std.flag` — CLI arg parsing.** `os.args() -> List[str]` and nothing else. Every tool hand-rolls a

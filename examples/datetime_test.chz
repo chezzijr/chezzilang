@@ -96,3 +96,48 @@ test fn t_now():
     assert n.minute >= 0 and n.minute <= 59
     assert n.second >= 0 and n.second <= 59
     assert n.weekday >= 0 and n.weekday <= 6
+
+test fn t_parse_roundtrip():
+    # parse_iso8601(to_iso8601(dt)) == dt for representative from_epoch-derived values.
+    for e in [0, 1700000000, -1, 951782400, 86399]:
+        dt := datetime.from_epoch(e)
+        match datetime.parse_iso8601(datetime.to_iso8601(dt)):
+            Ok(got): assert got == dt, "roundtrip failed for epoch {e}"
+            Err(msg): assert false, "unexpected Err for epoch {e}: {msg}"
+
+test fn t_parse_forms():
+    # date-only -> midnight, correct weekday
+    match datetime.parse_iso8601("2023-11-14"):
+        Ok(d): assert d.year == 2023 and d.month == 11 and d.day == 14 and d.hour == 0 and d.minute == 0 and d.second == 0 and d.weekday == 2
+        Err(_): assert false, "date-only should parse"
+    # 'T' separator, no tz (naive == UTC)
+    match datetime.parse_iso8601("2023-11-14T22:13:20"):
+        Ok(d): assert datetime.to_epoch(d) == 1700000000
+        Err(_): assert false, "T-form should parse"
+    # ' ' (space) separator, equals the 'T' form
+    match datetime.parse_iso8601("2023-11-14 22:13:20"):
+        Ok(d): assert datetime.to_epoch(d) == 1700000000
+        Err(_): assert false, "space-form should parse"
+
+test fn t_parse_tz():
+    match datetime.parse_iso8601("1970-01-01T00:00:00Z"):
+        Ok(d): assert datetime.to_epoch(d) == 0
+        Err(_): assert false, "Z should parse"
+    match datetime.parse_iso8601("1970-01-01T05:00:00+05:00"):
+        Ok(d): assert datetime.to_epoch(d) == 0
+        Err(_): assert false, "+offset should normalize to UTC"
+    match datetime.parse_iso8601("1970-01-01T00:00:00-05:00"):
+        Ok(d): assert datetime.to_epoch(d) == 18000
+        Err(_): assert false, "-offset should normalize to UTC"
+
+test fn t_parse_frac():
+    match datetime.parse_iso8601("2023-11-14T22:13:20.5Z"):
+        Ok(d): assert datetime.to_epoch(d) == 1700000000
+        Err(_): assert false, "fractional seconds should be accepted+truncated"
+
+test fn t_parse_err():
+    # every malformed / out-of-range input must be a clean Err (never a fault/abort)
+    for bad in ["2023-13-01", "2023-01-32", "2023-01-01T25:00:00Z", "2023-01-01T00:00:60Z", "2023-1x-01", "2023-1-1", "hello", "", "999999999999-01-01", "99999999999999999999-01-01"]:
+        match datetime.parse_iso8601(bad):
+            Ok(_): assert false, "expected Err for '{bad}'"
+            Err(_): assert true
