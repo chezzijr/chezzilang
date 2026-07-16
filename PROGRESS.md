@@ -60,6 +60,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `compiler/mod.rs` / `checker/setup.rs` / `native/fs.rs` — guarded by the parity test's size+is_file
 > asserts.
 >
+> **✅ STDLIB (2026-07-16, `auto-task/std-duration`) — `docs/gaps.md` §9: Go-like first-class `Duration`.**
+> NEW pure-Chezzi module `std/duration.chz` (zero native seam; only Rust touch = one `include_str!` line
+> in `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `Duration` is a plain
+> user struct over an int of **milliseconds** (matches `sleep_ms`/`timer(ms)`; i64-ms overflows at ~292M
+> yr vs Go nanos' ~292 yr — the trade is a documented sub-ms ceiling: µs/ns `parse` → clean `Err`).
+> Surface: constructors `millis/seconds/minutes/hours(n)`, method accessors
+> `as_millis()/as_seconds()/as_minutes()/as_hours()`, arithmetic `add`/`sub`/`scale`, a Go
+> `time.Duration.String()` formatter `to_string()` (`"1h30m0s"`/`"1.5s"`/`"250ms"`/`"0s"`/`"-1.5s"`) and
+> its inverse `parse` (Go's looser forms — optional `+`/`-`, unordered summed `h`/`m`/`s`/`ms` groups,
+> decimal/leading-dot magnitudes, bare `"0"`; clean `Err` on empty/no-unit/unknown-unit/multi-dot/
+> trailing-dot, and a ≤12-digit int-part bound so an oversized magnitude is an `Err` not an i64 fault),
+> plus `since(start: float)`/`sleep(d)` over native `std.time`. `parse`/`to_string` round-trip is the
+> load-bearing surface (exact because source is integer ms). Tests: `examples/duration_test.chz`
+> (5 `test fn`s, wired into `d1_dogfood_example_tests_pass`) + `golden_duration_via_run_file`
+> (`examples/duration.chz`/`.expected` + `assert_file_parity` = serial==M:N). `parse` pre-collects
+> codepoints into a `List` for O(1) indexing (avoids the pure-Chezzi `s[i:i+1]` O(n²) trap). Docs:
+> `docs/stdlib.md § std.duration`, `docs/gaps.md §9` (SHIPPED). `sleep_ms`/`timer` stay int-ms (additive).
+>
 > **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
 > module `std/csv.chz` (zero native seam — RFC 4180 quote state machine over the core `str` primitives
 > + `std.string.replace`/`index_of`; only Rust touch = one `include_str!` line in

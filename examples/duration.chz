@@ -1,0 +1,41 @@
+# examples/duration.chz — deterministic std.duration demo (NO clock/since/sleep; golden + parity).
+
+import std.duration
+
+fn show(d: duration.Duration):
+    print(d.to_string())
+
+# to_string across the shape space
+show(duration.millis(0))
+show(duration.millis(5))
+show(duration.millis(250))
+show(duration.seconds(1))
+show(duration.millis(1500))
+show(duration.minutes(1).add(duration.seconds(30)))
+show(duration.hours(1))
+show(duration.hours(1).add(duration.minutes(30)))
+show(duration.millis(-1500))
+show(duration.millis(3661000))
+
+# parse round-trips
+for txt in ["1h30m", "250ms", ".5s", "0.25s", "1h30m0s"]:
+    match duration.parse(txt):
+        Ok(g):
+            print(txt + " -> " + str(g.as_millis()) + "ms -> " + g.to_string())
+        Err(_e):
+            print(txt + " -> ERR")
+
+# malformed -> Err
+for bad in ["1us", "1.2.3s", "99999999999999h", ""]:
+    match duration.parse(bad):
+        Ok(_g):
+            print(bad + " -> unexpected Ok")
+        Err(_e):
+            print(bad + " -> Err")
+
+# accessors + arithmetic
+print(str(duration.millis(1500).as_seconds()))
+print(str(duration.millis(90000).as_minutes()))
+print(str(duration.millis(3600000).as_hours()))
+print(str(duration.seconds(2).sub(duration.millis(500)).as_millis()))
+print(str(duration.millis(250).scale(4).as_millis()))
