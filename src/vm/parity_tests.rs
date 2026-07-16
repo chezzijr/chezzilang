@@ -4212,9 +4212,11 @@ fn parity_std_os_args_and_env() {
     let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"no var\")\nmain()";
     let out = parity_entry_cfg(src, || HostConfig {
         args: vec!["x".to_string(), "y".to_string()],
-        env: [("CHEZZI_TEST_VAR".to_string(), "hi".to_string())]
-            .into_iter()
-            .collect(),
+        env: std::sync::Arc::new(std::sync::Mutex::new(
+            [("CHEZZI_TEST_VAR".to_string(), "hi".to_string())]
+                .into_iter()
+                .collect(),
+        )),
         ..Default::default()
     });
     assert_eq!(out, "x\ny\nhi\n");
@@ -4885,6 +4887,104 @@ fn golden_isatty_via_run_file() {
             "isatty must return a bool, got {line:?}"
         );
     }
+}
+
+// ----- std.os system query + mutation fns (gaps §6) — separated block to shrink the hand-resolved
+// conflict with the concurrent std.csv task also editing this file. -----
+/// setenv writes and environ/env READ the SAME per-VM HostConfig env map (gaps §6 drift-fix): after
+/// `os.setenv("K","V")`, BOTH `os.env("K")` and `os.environ()["K"]` observe "V", and a seeded var
+/// survives — proving one consistent env source. serial==M:N (per-VM HostConfig, deterministic).
+#[test]
+fn golden_os_setenv_environ_consistency() {
+    let src = "import std.os\nos.setenv(\"K\", \"V\")\nmatch os.env(\"K\"):\n    Some(v): print(v)\n    None: print(\"NONE\")\nprint(os.environ()[\"K\"])\nprint(os.environ()[\"SEED\"])\n";
+    let out = parity_entry_cfg(src, || {
+        let mut env = std::collections::HashMap::new();
+        env.insert("SEED".to_string(), "1".to_string());
+        crate::native::HostConfig {
+            env: std::sync::Arc::new(std::sync::Mutex::new(env)),
+            ..Default::default()
+        }
+    });
+    assert_eq!(out, "V\nV\n1\n");
+}
+
+/// getpid/platform/temp_dir/home_dir are engine-agnostic queries: assert SHAPE + serial==M:N
+/// agreement (values are machine-dependent — no fixed literal). pid>0, platform nonempty, temp_dir
+/// nonempty, home_dir is Some/None-shaped.
+#[test]
+fn golden_os_queries() {
+    let out = parity_entry(
+        "import std.os\nprint(str(os.getpid() > 0))\nprint(os.platform())\nprint(str(os.temp_dir() != \"\"))\nmatch os.home_dir():\n    Some(_): print(\"H\")\n    None: print(\"NH\")\n",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "expected 4 os-query lines, got {out:?}");
+    assert_eq!(lines[0], "true", "getpid() must be > 0");
+    assert!(!lines[1].is_empty(), "platform() must be nonempty");
+    assert_eq!(lines[2], "true", "temp_dir() must be nonempty");
+    assert!(
+        lines[3] == "H" || lines[3] == "NH",
+        "home_dir() must be Some/None-shaped, got {:?}",
+        lines[3]
+    );
+}
+
+/// chdir(abs) -> Ok on a real dir, Err on a missing one; serial==M:N (both run the same
+/// absolute `set_current_dir` in the same process, so the second sequential engine run is
+/// idempotent). Takes the fs scratch lock + restores cwd (chdir mutates PROCESS-GLOBAL cwd).
+#[test]
+fn golden_os_chdir() {
+    let _g = crate::native::fs::FS_SCRATCH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::current_dir().expect("cwd");
+    let out = parity_entry(
+        "import std.os\nmatch os.chdir(os.temp_dir()):\n    Ok(_): print(\"OK\")\n    Err(_): print(\"ERR\")\nmatch os.chdir(\"/no/such/chezzi/dir\"):\n    Ok(_): print(\"OK\")\n    Err(_): print(\"ERR\")\n",
+    );
+    std::env::set_current_dir(&saved).expect("restore cwd");
+    assert_eq!(out, "OK\nERR\n");
+}
+
+/// environ() must yield keys in a DETERMINISTIC (sorted) order. The source is a std HashMap whose
+/// iteration order is randomized per-instance, so `os_environ` sorts before lowering — otherwise the
+/// two engines (each a separate HashMap) diverge in key order. This ITERATES the map (not key-index),
+/// exercising the ordering the three key-lookup tests never touch.
+#[test]
+fn golden_os_environ_deterministic_order() {
+    let src = "import std.os\nfor k in os.environ().keys():\n    print(k)\n";
+    let out = parity_entry_cfg(src, || {
+        let mut env = std::collections::HashMap::new();
+        for (k, v) in [
+            ("zed", "1"),
+            ("alpha", "2"),
+            ("mid", "3"),
+            ("beta", "4"),
+            ("qux", "5"),
+            ("cee", "6"),
+            ("dee", "7"),
+            ("eff", "8"),
+        ] {
+            env.insert(k.to_string(), v.to_string());
+        }
+        crate::native::HostConfig {
+            env: std::sync::Arc::new(std::sync::Mutex::new(env)),
+            ..Default::default()
+        }
+    });
+    assert_eq!(out, "alpha\nbeta\ncee\ndee\neff\nmid\nqux\nzed\n");
+}
+
+/// setenv inside a spawned task must be visible to the parent after the nursery joins — on BOTH
+/// engines. The serial engine runs tasks on the shared parent Vm, so the write lands directly; the
+/// M:N engine gives each worker a SHARED (Arc) handle to the one env map, not a per-worker clone, so
+/// the write survives back to the parent. Process-global env, like Python `os.environ` / Go
+/// `os.Setenv` (visible across threads). Without sharing, M:N prints "unset" and diverges from serial.
+#[test]
+fn golden_os_setenv_visible_across_tasks() {
+    let src = "import std.io\nimport std.os\nfn t():\n    os.setenv(\"TASKVAR\", \"fromtask\")\nfn main():\n    parallel:\n        spawn: t()\n    match os.env(\"TASKVAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"unset\")\nmain()";
+    assert_eq!(
+        parity_entry_cfg(src, crate::native::HostConfig::default),
+        "fromtask\n"
+    );
 }
 
 /// Additive std.math trig/exp/log intrinsics run end-to-end on the VM and byte-match both the

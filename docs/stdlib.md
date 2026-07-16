@@ -421,9 +421,19 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `args` | `() -> List[str]` | Program args (the positionals after the script path). |
-| `env` | `(key: str) -> Option[str]` | Environment variable. |
-| `getcwd` | `() -> Result[str]` | |
+| `env` | `(key: str) -> Option[str]` | Environment variable (reads the injected env — see note). |
+| `environ` | `() -> Map[str, str]` | ALL environment variables, **sorted by key** (deterministic across runs + engines). Same source as `env`. |
+| `setenv` | `(key: str, value: str) -> nil` | Set an env var. Observed by both `env` and `environ`, and **visible across tasks** (the env map is shared by all M:N workers — process-global, like Python `os.environ` / Go `os.Setenv`). Writes the injected env map — **not** a child's real env; `process.cmd` still inherits the real process env. |
+| `getpid` | `() -> int` | Current process id. |
+| `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
+| `hostname` | `() -> str` | System hostname (`""` on the rare failure). |
+| `home_dir` | `() -> Option[str]` | User home (`$HOME`; `None` if unset). Unix-focused. |
+| `temp_dir` | `() -> str` | System temp directory. |
+| `getcwd` | `() -> Result[str]` | Current working directory (real process cwd). |
+| `chdir` | `(path: str) -> Result[nil]` | Change the **real process cwd** (`Err` on failure). **Process-global** — shared by all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same ceiling). |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), exactly like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp — a negative code must never report SUCCESS.) |
+
+**Env source:** `env` / `environ` / `setenv` all read/write the engine's injected env config (deterministic + testable). The env map is **shared** across M:N workers (an `Arc<Mutex<…>>`, not a per-worker copy), so a `setenv` from inside a task is visible to the parent + siblings — process-global, matching the serial engine (one Vm, one map) and Python/Go. `environ` sorts by key so both engines emit identical output. A `setenv` is **not** seen by a child spawned via `process.cmd` (which inherits the real process env). `getpid` / `platform` / `hostname` / `home_dir` / `temp_dir` are engine-agnostic queries (serial == M:N).
 
 ### `std.fs`
 **Queries:** `list_dir(path) -> Result[List[str]]` (sorted names) · `exists(path) -> bool` ·

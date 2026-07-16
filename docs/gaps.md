@@ -35,8 +35,9 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 **STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — List wave-1 SHIPPED;
 still open: `iter.min`/`max`, `unique`/`dedup`/`chunk`/`windows`/`group_by`/`partition`/`flat_map`/
 `take_while`/`drop_while`, Map/Set ergonomics — later waves), §3 (lazy itertools — SHIPPED), §4 (IO
-seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty`
-SHIPPED; `setenv`/`chdir`/`getpid`/`environ`/`platform`/metadata-reader still open), §7
+seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty` +
+`setenv`/`chdir`/`getpid`/`environ`/`platform`/`hostname`/`home_dir`/`temp_dir` SHIPPED; signals/atexit
++ metadata-reader still open), §7
 (`sha1`/`sha512`/`hmac`, gzip; CSV SHIPPED), §8 (net depth), §9
 (`strptime`), §10 (`std.db`, config formats; `bisect` + `memoize` SHIPPED), §11 (`std.process` `Child`).
 
@@ -437,8 +438,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   slow path.
 
 ### 6. OS / system
-- os: `setenv`, `chdir`, `getpid`, `platform` / `os_name`, `hostname`, `environ()` (all vars),
-  `home_dir` / `temp_dir`.
+- ~~os: `setenv`, `chdir`, `getpid`, `platform`, `hostname`, `environ()`, `home_dir`, `temp_dir`~~ —
+  **SHIPPED** (2026-07-16): all eight in `std.os`. Queries (`getpid`/`platform`/`hostname`/`home_dir`/
+  `temp_dir`/`environ`) are engine-agnostic; `setenv`/`chdir` mutate global state (see below). Still
+  open: `os_name` alias for `platform` (trivial follow-up), Windows `USERPROFILE` fallback for
+  `home_dir` (unix-focused today), metadata-reader.
 - **No cleanup story at all** (three bullets that are really one): no temp-file/temp-dir creation, **no
   signal handling / `atexit` hook**, and `os.exit` does **not** run `defer`s. So a program that must
   clean up on Ctrl-C or on exit has no reliable path. (Python: `tempfile` + `atexit` + context managers;
@@ -446,9 +450,16 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - ~~**No TTY detection**~~ — **SHIPPED** (2026-07-16): `io.isatty()` / `io.isatty_stdin()` /
   `io.isatty_stderr()` `-> bool` (via `std::io::IsTerminal` on stdout/stdin/stderr) let a CLI colorize
   only when not piped. Terminal size / echo-off (password prompts) remain a deliberate second step.
-- **`os.env` and `process.cmd` disagree**: `os.env` reads the injected `HostConfig`, while `process.cmd`
-  shells out with the real inherited process env — so under a synthetic host config `os.env("X")` is
-  `None` while `process.cmd("echo $X")` prints the real value. Nobody has written this down.
+- **`os.env` and `process.cmd` disagree** (PARTIALLY RESOLVED 2026-07-16): `os.env`, `os.environ`, and
+  `os.setenv` are now mutually consistent — all three read/write the SAME injected `HostConfig` env map,
+  so a `setenv("X","V")` is observed by both `env("X")` and `environ()["X"]`. The map is **shared**
+  (`Arc<Mutex<…>>`) across M:N workers, so a `setenv` from inside a task is visible to the parent +
+  siblings — process-global, matching the serial engine and Python/Go (serial == M:N, no parity break);
+  `environ` sorts by key so both engines emit identical output. What remains is the process-boundary
+  axis: `process.cmd` shells out with the REAL inherited process env, so a `setenv` (HostConfig-only) is
+  NOT seen by a child, and under a synthetic host config `os.env("X")` can differ from
+  `process.cmd("echo $X")`. Bridging that would require writing the real process env at `setenv` (racy,
+  edition-2024-unsafe `std::env::set_var`) — deliberately not done.
 - fs: recursive `walk`, `remove_dir_all` (intentionally omitted today — see `stdlib.md §std.fs`),
   metadata READ (mtime / permissions / size-struct). `fs.chmod` now SETS permission bits, but there is
   still no metadata *reader* returning mtime/mode/size as a struct (`size()` returns only byte length).

@@ -20,6 +20,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md § std.csv`, `docs/gaps.md §7` (SHIPPED).
 > Deferred v1: streaming/Reader, header→Map mapping, custom-delimiter/TSV `parse_sep`.
 >
+> **✅ STDLIB (2026-07-16, `auto-task/std-os-sysfns`) — `docs/gaps.md` §6: OS / system fns.** Eight
+> module-level natives on the file-backed `std.os`: queries `getpid() -> int`, `platform() -> str`
+> (`std::env::consts::OS`), `hostname() -> str` (libc `gethostname`, `""` on failure — no new dep),
+> `home_dir() -> Option[str]` (`$HOME` via the injected env), `temp_dir() -> str`, `environ() -> Map[str,str]`;
+> mutations `setenv(key,value) -> nil` and `chdir(path) -> Result[nil]`. **Env-source consistency (the
+> §6 point):** `env` / `environ` / `setenv` all read/write the SAME injected `HostConfig` env map — a
+> `setenv` is observed by both `env` AND `environ` (two new DEFAULTED `Host` methods `os_environ`/`os_setenv`,
+> overridden only in `VmHost`; no `std::env::set_var` third source). The env map is **shared** across M:N
+> workers (`Arc<Mutex<…>>`, not a per-worker clone), so a `setenv` from inside a task is visible to the
+> parent + siblings — process-global, matching the serial engine and Python/Go (serial==M:N, no parity
+> break); `environ` sorts by key so both engines emit byte-identical output. `chdir` mutates the REAL
+> process cwd (like `getcwd` reads it) — **process-global**, shared by all M:N workers (ponytail ceiling,
+> same as Python/Go). Queries are engine-agnostic (serial==M:N). Tests: `golden_os_setenv_environ_consistency`
+> (proves setenv↔env↔environ), `golden_os_setenv_visible_across_tasks` (setenv-in-task visible to the parent,
+> both engines), `golden_os_environ_deterministic_order` (sorted, serial==M:N), `golden_os_queries` (shape +
+> engine agreement), `golden_os_chdir` (Ok/Err under `FS_SCRATCH_LOCK` + cwd-restore). Example
+> `examples/os_info.chz` (no `.expected`). Docs: `docs/stdlib.md §std.os`, `docs/gaps.md §6` (SHIPPED; the
+> os.env/process.cmd note reworded — os.env axis resolved, child-process axis unchanged by design). Deferred:
+> `os_name` alias, Windows `USERPROFILE`, signals/atexit, metadata-reader.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/io-isatty`) — `docs/gaps.md` §6: TTY detection.** Three
 > module-level bool natives on the file-backed `std.io` module: `io.isatty()` / `io.isatty_stdin()` /
 > `io.isatty_stderr()` `-> bool`, each one line via `std::io::IsTerminal` on stdout/stdin/stderr. Lets

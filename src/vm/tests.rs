@@ -5926,14 +5926,21 @@ fn worker_runs_in_distinct_heap() {
 fn worker_inherits_host_args_and_env() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.host.args = vec!["prog".into(), "--flag".into()];
-    vm.host.env.insert("KEY".into(), "val".into());
+    vm.host
+        .env
+        .lock()
+        .unwrap()
+        .insert("KEY".into(), "val".into());
     vm.host.stdin = crate::native::Stdin::Real;
     let worker = vm.spawn_worker();
     assert_eq!(
         worker.host.args,
         vec!["prog".to_string(), "--flag".to_string()]
     );
-    assert_eq!(worker.host.env.get("KEY").map(String::as_str), Some("val"));
+    assert_eq!(
+        worker.host.env.lock().unwrap().get("KEY").cloned(),
+        Some("val".to_string())
+    );
     assert!(
         matches!(worker.host.stdin, crate::native::Stdin::Real),
         "the one stdin source must be shared with workers (no false EOF in a task)"
