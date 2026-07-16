@@ -12573,6 +12573,27 @@ print(1 in d)
     assert_mc_parity(src, "true\nfalse\n");
 }
 
+/// `in` resolves through a `Contains[T]` generic bound — the exact analog of `<` through a
+/// `Comparable` bound. `contains_item_ty` recovers the item type from the bound; at runtime the
+/// value is a concrete monomorphized struct/enum, so BOTH engines dispatch via `op_contains`.
+#[test]
+fn contains_through_generic_bound_runs() {
+    let src = "\
+struct Bag:
+    xs: List[int]
+    fn contains(self, x: int) -> bool:
+        for e in self.xs:
+            if e == x:
+                return true
+        return false
+fn has[C: Contains[int]](c: C, n: int) -> bool:
+    return n in c
+print(has(Bag([4, 5, 6]), 5))
+print(has(Bag([4, 5, 6]), 9))
+";
+    assert_mc_parity(src, "true\nfalse\n");
+}
+
 #[test]
 fn primitive_compare_method_on_vm() {
     let src = "fn c[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(c(2, 5))\nprint(c(5, 2))\n";

@@ -18243,3 +18243,17 @@ fn contains_generic_struct_substitutes_item() {
         "membership",
     );
 }
+
+/// `in` through a `Contains[int]` generic bound is accepted (analog of `<` through `Comparable`),
+/// and a mismatched item type (`str` LHS against a `Contains[int]` bound) is still cleanly rejected —
+/// the bound's item arg is recovered, not left `Unknown`.
+#[test]
+fn contains_through_bound_ok_and_item_mismatch_rejects() {
+    ok(
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, n: int) -> bool:\n    return n in c\nfn main():\n    print(has(Bag([1]), 1))\nmain()\n",
+    );
+    rejects(
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, s: str) -> bool:\n    return s in c\nfn main():\n    print(has(Bag([1]), \"x\"))\nmain()\n",
+        "membership",
+    );
+}

@@ -3414,6 +3414,31 @@ impl Checker {
     /// reject-with-hint. The item type is generic-substituted (`Box[int]`'s `T` → `int`), mirroring
     /// `index_kv`.
     pub(super) fn contains_item_ty(&self, ty: &Ty) -> Option<Ty> {
+        // A `Contains`-bounded type parameter (`fn f[C: Contains[int]](...)`): recover the item type
+        // from the bound, mirroring `ordering_allowed`'s `Comparable`-bound arm — `in` resolves
+        // through a bound just as `<` does. At runtime the value is always a concrete monomorphized
+        // struct/enum, which `op_contains` already dispatches, so this is a checker-only widening.
+        if let Ty::Param(pname) = ty {
+            for b in self.type_params.get(pname)? {
+                let Some(pinfo) = self.protocols.get(&b.name) else {
+                    continue;
+                };
+                let Some((_, sig)) = pinfo.methods.iter().find(|(n, _)| n == "contains") else {
+                    continue;
+                };
+                if sig.params.len() != 2 || sig.ret != Ty::Bool {
+                    continue;
+                }
+                let map: HashMap<String, Ty> = pinfo
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(b.args.iter().map(|a| self.resolve_ty_ro(a)))
+                    .collect();
+                return Some(subst(&sig.params[1], &map));
+            }
+            return None;
+        }
         let (sig, map) = match ty {
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
