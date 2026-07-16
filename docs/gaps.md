@@ -36,7 +36,7 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 **STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — List wave-1 + wave-2
 SHIPPED; still open: `iter.min`/`max`, `group_by`/`partition`/`flat_map`, Map/Set ergonomics — later
 waves), §3 (lazy itertools — SHIPPED), §4 (IO
-seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty` +
+seek), §5 (`divmod` SHIPPED as a bodied Chezzi fn — no `NativeRet::Tuple` needed; decimal/bigint hard wall), §6 (os/system — `isatty` +
 `setenv`/`chdir`/`getpid`/`environ`/`platform`/`hostname`/`home_dir`/`temp_dir` SHIPPED; signals/atexit
 + metadata-reader still open), §7
 (bcrypt/argon2, gzip; secure-random/token + sha1/sha512/hmac_sha256 + CSV SHIPPED), §8 (net depth), §9
@@ -437,10 +437,11 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   `perm`, `parse_int_base(s, base)` (int-from-base, base 0 or 2..=36 w/ `0x`/`0o`/`0b` prefixes), plus
   `math.inf` / `math.nan` constants. Python `math` semantics; `factorial`/`comb`/`perm`/`parse_int_base`
   return `Result[int]` (clean `Err`, never a fault, on bad domain or i64 overflow). See `stdlib.md §std.math`.
-- **`divmod` DEFERRED** — Python returns a `(q, r)` tuple, but the native seam (`NativeRet`) has no
-  `Tuple` variant; adding one is per-engine lowering + checker harvest = expanding the seam for a single
-  fn. Users have `//` and `%` (Chezzi `%` already carries the divisor's sign). Revisit if a `NativeRet::Tuple`
-  lands for another reason.
+- **`divmod` SHIPPED** — Python `(q, r)`. Landed NOT by expanding the native seam (`NativeRet` still has
+  no `Tuple`) but as a **bodied Chezzi fn** in `std/math.chz` (`fn divmod(a, b) -> (int, int): return
+  (a / b, a % b)`) — the first user of the hybrid native+Chezzi module form (bodyless `native fn`s and a
+  bodied `fn` in one std file; see `syntax.md`). Int `/` is truncating and `%` carries the divisor's sign,
+  matching Python's `(a // b, a % b)`.
 - No **decimal / bigint**. `int` is a checked i64 (overflow FAULTS, never promotes), so a big-number or
   exact-money program simply cannot be written — there is no workaround. (Python: `int` is arbitrary
   precision + `decimal`; Go: `math/big`.) Rare in scripting; deferred, but it is a hard wall, not a

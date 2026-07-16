@@ -465,9 +465,10 @@ impl Checker {
                 // Phase 4c-followup — a BODIED method (`fn lines(self) -> …: <body>`) is checked via
                 // the same method-resolution path as a bodyless `native fn`, so its sig must land in the
                 // SAME table with the SAME shape (leading `self` stripped). `fn_sig` leaves `self` on;
-                // drop the first param to match `harvest_native_fn_sig(_, true)`. The body itself is NOT
-                // checked (the native module skips `check_module`) — the mandated dual-engine RUN test
-                // is the safety net for that.
+                // drop the first param to match `harvest_native_fn_sig(_, true)`. The body itself is
+                // type-checked back in the graph loop's native arm (which now runs `check_fn_body` on a
+                // FRESH self-carrying `fn_sig` — NOT this stripped table sig); this harvest only supplies
+                // the call-arg method-table shape.
                 for m in bodied_methods {
                     let mut fsig = self.fn_sig(m, m.name_span);
                     if !fsig.params.is_empty() {
@@ -499,6 +500,19 @@ impl Checker {
                 } else {
                     sig.functions.insert(decl.name.clone(), fsig);
                 }
+            }
+        }
+        // PASS 2b — module-level BODIED fns (the hybrid native+Chezzi module form). A `native` std
+        // file may carry ordinary `fn foo(): <body>` alongside its bodyless `native fn` decls; harvest
+        // its sig as a module member so `mod.foo()` / `from mod import foo` resolve. Runtime binding
+        // comes from RUNNING the native module's toplevel (see `run_module`); the BODY is type-checked
+        // back in the graph loop (the native arm now runs `check_fn_body` — this harvest only supplies
+        // the member sig). Runs while PASS 1's transient struct visibility is still installed, so a
+        // bodied fn may name a sibling native struct in its signature (`-> Reader`).
+        for s in &ast.stmts {
+            if let StmtKind::Fn(decl) = &s.kind {
+                sig.functions
+                    .insert(decl.name.clone(), self.fn_sig(decl, decl.name_span));
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.

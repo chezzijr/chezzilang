@@ -42,6 +42,11 @@ native fn is_finite(x: float) -> bool
 # `parse_int_base` return `Result[int]` — a clean `Err` (never a fault) on a bad domain or i64 overflow.
 native fn gcd(a: int, b: int) -> int
 native fn lcm(a: int, b: int) -> int
+# `divmod` is a BODIED Chezzi fn living alongside the native decls in this same file (the hybrid
+# native+Chezzi module form — Rust-backed `native fn` sigs and a pure-Chezzi `fn` in one `.chz`).
+# Python `divmod`: returns the pair `(a // b, a % b)`; `b == 0` faults cleanly like `a / b`.
+fn divmod(a: int, b: int) -> (int, int):
+    return (a / b, a % b)
 native fn sign(x: float) -> float
 native fn trunc(x: float) -> int
 native fn hypot(x: float, y: float) -> float

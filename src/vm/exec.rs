@@ -567,8 +567,13 @@ impl Vm {
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
 
-        // A native std module: populate its globals with Rust `NativeFn`s + float constants and
-        // skip running a toplevel. Mirrors the interpreter's `eval_module` native arm.
+        // A native std module: populate its globals with Rust `NativeFn`s + float constants. It then
+        // FALLS THROUGH to `run_proto` below so a HYBRID native module's BODIED Chezzi fns (e.g.
+        // `math.divmod`) get their globals bound by running the module toplevel — the compiler emits
+        // `MakeFunc`/`DefineGlobalSlot` for them into their own reserved slots, distinct from the
+        // name-keyed native members appended here. A pure-native module has no bodied decls, so its
+        // compiled toplevel is empty and `run_proto` is a no-op. (Native modules have no imports, so
+        // the import loop below is also a no-op for them.)
         if let Some(name) = m.native {
             for (mname, func) in crate::native::native_members(name) {
                 let nat = self.heap.alloc(Obj::Native {
@@ -580,7 +585,6 @@ impl Vm {
             for (cname, cval) in crate::native::native_consts(name) {
                 self.module_define(mod_obj, cname, Value::Float(*cval));
             }
-            return Ok(());
         }
 
         // Bind imports (dependencies already ran, so their namespaces are populated).

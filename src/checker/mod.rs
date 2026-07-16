@@ -1028,6 +1028,84 @@ impl Checker {
                         }
                     }
                 }
+                // A HYBRID native module carries BODIED Chezzi decls alongside its bodyless native
+                // ones: module-level `fn`s (PASS 2b harvested them into `sig.functions`) and
+                // native-struct `bodied_methods` (`Reader.lines`, in the struct method table). The
+                // native arm skips `check_module`, so those bodies would go UNCHECKED — a `str`
+                // returned under an `int` sig would slip straight through. Type-check them here via the
+                // same `check_fn_body` a normal module uses, on a clean `begin_module` env. Gated on
+                // actually having a bodied decl so a pure-native module (os/fs/regex/…) pays nothing
+                // and its live-table state is left exactly as the harvest above produced it.
+                let has_bodied = lm.ast.stmts.iter().any(|s| {
+                    matches!(&s.kind, StmtKind::Fn(_))
+                        || matches!(&s.kind, StmtKind::NativeStruct { bodied_methods, .. } if !bodied_methods.is_empty())
+                });
+                if has_bodied {
+                    c.begin_module(Some(lm.label()));
+                    c.current_module_is_stdlib = true;
+                    c.push_scope();
+                    // Bind this native module's own imports so a bodied fn body can use them (a native
+                    // `.chz` may `import` like any other module; deps are checked earlier in graph order,
+                    // so their sigs are already in `module_sigs`).
+                    for imp in &lm.imports {
+                        c.bind_import(imp);
+                    }
+                    // `begin_module` cleared the live tables; repopulate the callables/types the
+                    // harvested `sig` holds so a bodied body can call a sibling fn or name a sibling
+                    // native struct (`-> Reader`).
+                    for (n, f) in &sig.functions {
+                        c.functions.insert(n.clone(), f.clone());
+                    }
+                    for (n, info) in &sig.struct_defs {
+                        c.structs.insert(n.clone(), info.clone());
+                        c.bare_types.insert(n.clone(), n.clone());
+                        c.struct_names.insert(n.clone());
+                    }
+                    // Module-level bodied fns (`divmod`): free-fn sig, no `self`, decl↔sig params
+                    // align by index exactly as `check_module`'s top-level-fn path.
+                    for s in &lm.ast.stmts {
+                        if let StmtKind::Fn(decl) = &s.kind
+                            && let Some(fsig) = sig.functions.get(&decl.name).cloned()
+                        {
+                            c.check_fn_body(decl, None, fsig);
+                        }
+                    }
+                    // Native-struct bodied methods (`Reader.lines`): use a FRESH `fn_sig` (which keeps
+                    // the leading `self`), NOT the leading-`self`-STRIPPED method-table sig — else
+                    // `check_fn_body`'s positional decl↔sig param map (self at decl index 0) shifts
+                    // every real param to `Unknown`.
+                    for s in &lm.ast.stmts {
+                        if let StmtKind::NativeStruct {
+                            name,
+                            type_params,
+                            bodied_methods,
+                            ..
+                        } = &s.kind
+                            && !bodied_methods.is_empty()
+                        {
+                            let saved = c.enter_type_params(type_params);
+                            // A native struct's `self` is usually a RESERVED opaque handle
+                            // (`Reader`→`Ty::Reader`, `Socket`→`Ty::Socket`, …) whose method dispatch
+                            // goes through the reserved-`Ty` arm (which reads the leading-`self`-stripped
+                            // method table correctly). Use that Ty for `self` so `self.read_line()`
+                            // resolves — `Ty::Struct("Reader")` would route to the generic struct arm and
+                            // wrongly demand a receiver slot. Fall back to the nominal struct type for a
+                            // plain (non-reserved) native struct.
+                            let args: Vec<Ty> = type_params
+                                .iter()
+                                .map(|tp| Ty::Param(tp.name.clone()))
+                                .collect();
+                            let self_ty = c
+                                .qualified_builtin_ty(name, &args)
+                                .unwrap_or_else(|| c.struct_self_ty(name));
+                            for m in bodied_methods {
+                                let msig = c.fn_sig(m, m.name_span);
+                                c.check_fn_body(m, Some(self_ty.clone()), msig);
+                            }
+                            c.exit_type_params(saved);
+                        }
+                    }
+                }
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
             }

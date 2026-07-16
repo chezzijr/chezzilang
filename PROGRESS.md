@@ -4,6 +4,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ ENGINE + STDLIB (2026-07-17) — HYBRID native+Chezzi std module (a `std/*.chz` may mix bodyless
+> `native fn` decls with BODIED Chezzi `fn`s); first user: `math.divmod`.** Resolves the architectural
+> fork where a native module was harvested for SIGNATURES only then `continue`d past `check_module`
+> (`src/checker/mod.rs`) — so a top-level bodied `fn` was dropped and native-struct `bodied_methods`
+> (`io.Reader.lines`) had their bodies UNCHECKED (a `str`-under-`int` return slipped through — the
+> soundness hole a prior spike found). Three seams: (1) harvest PASS 2b reads module-level `StmtKind::Fn`
+> into `sig.functions` (`setup.rs`); (2) the native arm now runs `check_fn_body` on a clean `begin_module`
+> env for BOTH module-level bodied fns AND native-struct bodied methods — the method case uses the
+> RESERVED self-Ty (`qualified_builtin_ty`, `Reader`→`Ty::Reader`) so `self.read_line()` dispatches via
+> the reserved-handle arm, and a FRESH self-carrying `fn_sig` (not the leading-`self`-stripped table sig,
+> which would shift every param to `Unknown`); (3) `run_module` (`src/vm/exec.rs`) falls through to
+> `run_proto` after injecting native members so the bodied fn's global binds (empty no-op for pure-native
+> modules). `math.divmod(a,b) -> (int,int)` = `(a / b, a % b)` — no `NativeRet::Tuple` needed, closing
+> `gaps.md §5`'s divmod deferral. IN scope both soundness sites. **Native files can now `import` too**
+> (a native `.chz` is still a real file): `visit_native_file` resolves its imports via a new shared
+> `resolve_ast_imports` helper (extracted from `visit`), the native-arm body-check binds them, and the
+> compiler already carried `lm.imports` — a bodied fn there can `import std.string` and use it. Tests: in-process `entry_ok`
+> (member/from-import resolution) + `tests/hybrid_native_module.rs` (5: divmod run-parity, `Reader.lines`
+> run-parity, and TWO `$CHEZZI_STD`-corrupted-copy RED soundness tests in an isolated CHILD PROCESS —
+> env is process-global, must NOT be set in-library). `math_..._representative_sigs_exact` 31→32. Full
+> `--lib` 3608 green, `hybrid_native_module` 5 green, clippy clean. Docs: `syntax.md` (native-struct-mix
+> note extended + module-level hybrid), `stdlib.md §std.math`, `gaps.md §5`.
+
 > **✅ STDLIB (2026-07-16, `auto-task/crypto-secure-random`) — `docs/gaps.md` §7: CSPRNG in
 > `std.crypto`.** Two members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
 > in `std/crypto.chz`, impls in `src/native/crypto.rs`, zero new deps — libc `getrandom` like
@@ -217,8 +240,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Constants `math.inf`/`math.nan` join `pi`/`e` via the existing `native_consts` path (both engines seed
 > identical f64 → free parity). Pure arithmetic lives in unit-tested free helpers (`gcd_u64`/`lcm_i64`/
 > `factorial_i64`/`comb_i64`/`perm_i64`/`parse_int_base_impl`); `sign` added to `MODULE_NUMERIC_POLY`.
-> **`divmod` DEFERRED** — no `NativeRet::Tuple` variant, and adding one to serve one fn isn't worth the
-> per-engine lowering (users have `//`/`%`). Tests: `src/native/math.rs` helper units + `math_number_fns_parity`
+> **`divmod` — SHIPPED 2026-07-17 (see top entry)** as a bodied Chezzi fn via the hybrid module form; no
+> `NativeRet::Tuple` was needed. (Originally deferred here for lack of that seam.) Tests: `src/native/math.rs` helper units + `math_number_fns_parity`
 > (graph path, serial==M:N). Docs: `docs/stdlib.md §std.math`, `docs/gaps.md §5` (SHIPPED + divmod deferral).
 > **✅ STDLIB (2026-07-16, `auto-task/encoding-url-parse`) — `docs/gaps.md` §7: URL PARSING read-half in
 > `std.encoding`.** Two native read-half members round out the module's existing write-half

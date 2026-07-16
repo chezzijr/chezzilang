@@ -500,8 +500,30 @@ impl Builder {
             },
         };
         let ast = self.parse(&source, dotted)?;
-        let imports = self.scan_imports(&ast);
+        let resolved = self.resolve_ast_imports(id, dotted, &ast)?;
 
+        self.visited.insert(id.clone(), ());
+        self.order.push(LoadedModule {
+            id: id.clone(),
+            dotted: dotted.to_vec(),
+            ast,
+            imports: resolved,
+            native: None,
+        });
+        Ok(())
+    }
+
+    /// Resolve a module's `import` statements into [`ResolvedImport`]s, recursively visiting each
+    /// target (managing the DFS `on_stack` for cycle detection). Shared by the normal file path
+    /// ([`visit`]) and the file-backed native path ([`visit_native_file`]) — a native `std/*.chz` is
+    /// still a real `.chz` file and may `import` like any other module.
+    fn resolve_ast_imports(
+        &mut self,
+        id: &ModuleId,
+        dotted: &[String],
+        ast: &Module,
+    ) -> Result<Vec<ResolvedImport>, ResolveError> {
+        let imports = self.scan_imports(ast);
         self.on_stack.push((id.clone(), dotted.to_vec()));
         let mut resolved = Vec::with_capacity(imports.len());
         for (import, span) in imports {
@@ -562,16 +584,7 @@ impl Builder {
             });
         }
         self.on_stack.pop();
-
-        self.visited.insert(id.clone(), ());
-        self.order.push(LoadedModule {
-            id: id.clone(),
-            dotted: dotted.to_vec(),
-            ast,
-            imports: resolved,
-            native: None,
-        });
-        Ok(())
+        Ok(resolved)
     }
 
     /// Emit a native (virtual) std module: no file read, no recursion, deduped like any other.
@@ -593,9 +606,10 @@ impl Builder {
     /// Emit a FILE-BACKED native std module (phase 4b: `std.regex`). Like [`visit_native`] it carries
     /// the `native` marker (so the engines dispatch its members name-keyed via `native_members`) and a
     /// synthetic `<native:…>` id, but its AST is the REAL `.chz` file under `std_root` (its `native
-    /// struct`/`native fn` decls are the checker's SIGNATURE source), not an injected empty module. The
-    /// file declares only bodyless native members and imports nothing, so its imports are empty and it
-    /// never runs top-level. Fallible: a missing/unparseable file is a hard error (like the prelude).
+    /// struct`/`native fn` decls are the checker's SIGNATURE source), not an injected empty module.
+    /// Unlike [`visit_native`] it may carry BODIED Chezzi decls (the hybrid module form) and — like any
+    /// `.chz` — may itself `import` other modules (resolved via [`resolve_ast_imports`]). Fallible: a
+    /// missing/unparseable file is a hard error (like the prelude).
     fn visit_native_file(
         &mut self,
         id: &ModuleId,
@@ -616,12 +630,17 @@ impl Builder {
             module: Some(dotted_label(&dotted)),
         })?;
         let ast = self.parse(&source, &dotted)?;
+        // Mark visited BEFORE resolving imports so a (pathological) native↔native import cycle dedups
+        // to an early return instead of recursing forever — normal-file cycles are still reported via
+        // `on_stack` in `visit`. `resolve_ast_imports` pushes each dependency to `order` first, so the
+        // `order.push` below keeps the deps-first invariant.
         self.visited.insert(id.clone(), ());
+        let imports = self.resolve_ast_imports(id, &dotted, &ast)?;
         self.order.push(LoadedModule {
             id: id.clone(),
             dotted,
             ast,
-            imports: Vec::new(),
+            imports,
             native: Some(name),
         });
         Ok(())

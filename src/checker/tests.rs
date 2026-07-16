@@ -6477,10 +6477,15 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(math.values.get("e"), Some(&Ty::Float));
     // math.abs is numeric-polymorphic — reattached from MODULE_NUMERIC_POLY.
     assert!(math.numeric_poly.contains("abs"));
+    // `divmod` is a BODIED Chezzi fn harvested as a module member alongside the native decls (the
+    // hybrid native+Chezzi module form) — it counts as an exported fn.
+    let divmod = math.functions.get("divmod").expect("math.divmod");
+    assert_eq!(divmod.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(divmod.ret, Ty::Tuple(vec![Ty::Int, Ty::Int]));
     assert_eq!(
         math.functions.len(),
-        31,
-        "std.math must export exactly 31 fns"
+        32,
+        "std.math must export exactly 32 fns (31 native + bodied `divmod`)"
     );
 
     let io = native_module_sig_via_graph("io");
@@ -6612,6 +6617,19 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
     // (FileInfo is a native struct, not a function — not counted here.)
     assert_eq!(fs.functions.len(), 17);
+}
+
+/// Hybrid native+Chezzi module: a BODIED `fn` (`math.divmod`) declared alongside the bodyless
+/// `native fn`s in `std/math.chz` is harvested as a real module member — callable qualified, via
+/// `import NAME from PATH`, and coexisting with a native sibling in the same module. (Its body's type
+/// safety is guarded end-to-end in `tests/hybrid_native_module.rs`; here we pin that it resolves as a
+/// member at all — the harvest PASS 2b + native-arm body-check wiring.)
+#[test]
+fn hybrid_native_module_bodied_fn_is_a_member() {
+    entry_ok("import std.math\nx := math.divmod(17, 5)\nprint(x)\n");
+    entry_ok("import divmod from std.math\nprint(divmod(20, 6))\n");
+    // coexists with a native sibling fn (`gcd`) in the SAME module.
+    entry_ok("import std.math\nprint(math.divmod(9, 2))\nprint(math.gcd(12, 18))\n");
 }
 
 /// Hover doc preserved after migration: math.sqrt (and an io/os fn) still carry the authored blurb via
