@@ -6550,7 +6550,9 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         reader.methods.get("close").unwrap().ret,
         Ty::result(Ty::Nil)
     );
-    assert_eq!(io.functions.len(), 17);
+    assert_eq!(io.functions.get("isatty").unwrap().params, Vec::<Ty>::new());
+    assert_eq!(io.functions.get("isatty").unwrap().ret, Ty::Bool);
+    assert_eq!(io.functions.len(), 20);
 
     let os = native_module_sig_via_graph("os");
     assert_eq!(os.functions.get("getcwd").unwrap().ret, Ty::result(Ty::Str));
@@ -6621,8 +6623,8 @@ fn math_io_os_fn_hover_doc_preserved() {
 fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.math").len(), 31);
     // std.io: 9 original + R2's 5 Writer openers + R2b's `open` (all → intercepted) + read_all +
-    // read_char (R2 grab-bag stdin twins) = 17.
-    assert_eq!(crate::native::native_members("std.io").len(), 17);
+    // read_char (R2 grab-bag stdin twins) + 3 isatty TTY-detection variants (gaps §6) = 20.
+    assert_eq!(crate::native::native_members("std.io").len(), 20);
     assert_eq!(crate::native::native_members("std.os").len(), 4);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 15);

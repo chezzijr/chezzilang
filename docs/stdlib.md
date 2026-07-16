@@ -312,6 +312,9 @@ Constants: `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN;
 | `read_char` | `() -> Option[str]` | Read one Unicode scalar as a 1-char `str` (Chezzi has no `char` scalar); `None` at a clean EOF, a **fault** on a partial/invalid UTF-8 sequence. |
 | `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
 | `input` | `(prompt: str) -> Option[str]` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
+| `isatty` | `() -> bool` | `true` when **stdout** is a real terminal, `false` when piped/redirected (via `std::io::IsTerminal`). Python `sys.stdout.isatty()` / Go `isatty`. Lets a CLI colorize only when not piped. |
+| `isatty_stdin` | `() -> bool` | Same, over **stdin**. |
+| `isatty_stderr` | `() -> bool` | Same, over **stderr**. |
 | `read_file` | `(path: str) -> Result[str]` | Whole file as text (≤ 64 MB — larger files: stream with `open(...)` → `Reader`). **Decodes UTF-8** — a binary file is an `Err` pointing at `read_bytes`. |
 | `write_file` | `(path: str, contents: str) -> Result[nil]` | Write / overwrite. |
 | `read_bytes` | `(path: str) -> Result[bytes]` | Whole file as raw bytes (≤ 64 MB) — binary files. |

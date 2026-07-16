@@ -19,6 +19,11 @@ native fn read_all() -> str
 # runtime FAULT on a partial/invalid UTF-8 sequence at EOF.
 native fn read_char() -> Option[str]
 native fn flush() -> nil
+# TTY detection (gaps §6) — true when the given stream is a real terminal, false when piped/redirected
+# (Python `sys.stdout.isatty()`, Go `isatty`-equivalent). Lets a CLI colorize only when not piped.
+native fn isatty() -> bool
+native fn isatty_stdin() -> bool
+native fn isatty_stderr() -> bool
 native fn input(prompt: str) -> Option[str]
 native fn read_file(path: str) -> Result[str]
 native fn write_file(path: str, text: str) -> Result[nil]
