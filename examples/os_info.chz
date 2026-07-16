@@ -1,0 +1,24 @@
+# std.os system queries + mutation (gaps §6). No `.expected` — values are machine-dependent.
+import std.os
+
+print("pid: {os.getpid()}")
+print("platform: {os.platform()}")
+print("hostname: {os.hostname()}")
+print("temp_dir: {os.temp_dir()}")
+print("cwd: {os.getcwd()}")
+
+match os.home_dir():
+    Some(h): print("home: {h}")
+    None:    print("home: (unset)")
+
+# setenv is observed by env AND environ (same injected HostConfig env source).
+os.setenv("CHEZZI_DEMO", "42")
+match os.env("CHEZZI_DEMO"):
+    Some(v): print("env CHEZZI_DEMO: {v}")
+    None:    print("env CHEZZI_DEMO: (unset)")
+print("environ CHEZZI_DEMO: {os.environ()[\"CHEZZI_DEMO\"]}")
+
+# chdir mutates the real (process-global) cwd.
+match os.chdir(os.temp_dir()):
+    Ok(_):   print("chdir temp: ok")
+    Err(e):  print("chdir temp: {e}")

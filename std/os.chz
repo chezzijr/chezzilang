@@ -15,3 +15,19 @@ native fn args() -> List[str]
 native fn env(key: str) -> Option[str]
 native fn getcwd() -> Result[str]
 native fn exit(code: int) -> nil
+
+# System queries (gaps §6). getpid/platform/hostname/temp_dir are engine-agnostic process reads;
+# home_dir reads the HostConfig `HOME` (same source as `env`), so it's None when unset.
+native fn getpid() -> int
+native fn platform() -> str
+native fn hostname() -> str
+native fn home_dir() -> Option[str]
+native fn temp_dir() -> str
+# `environ()` reads the SAME per-VM HostConfig env map `env` reads, and `setenv` WRITES it — so a
+# `setenv` is observed by both `env` and `environ` (no third disagreeing source). Children spawned via
+# `std.process.cmd` still inherit the REAL process env (that axis is unchanged).
+native fn environ() -> Map[str, str]
+native fn setenv(key: str, value: str) -> nil
+# `chdir` mutates the REAL process cwd (like `getcwd` reads it). Process-global: shared by all M:N
+# workers, so a task's `chdir` affects sibling tasks' relative paths (Python/Go have the same ceiling).
+native fn chdir(path: str) -> Result[nil]

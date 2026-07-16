@@ -6561,7 +6561,24 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     let exit = os.functions.get("exit").expect("os.exit");
     assert_eq!(exit.params, vec![Ty::Int]);
     assert_eq!(exit.ret, Ty::Nil);
-    assert_eq!(os.functions.len(), 4);
+    // gaps §6 system query + mutation fns.
+    assert_eq!(os.functions.get("getpid").unwrap().ret, Ty::Int);
+    assert_eq!(os.functions.get("platform").unwrap().ret, Ty::Str);
+    assert_eq!(os.functions.get("hostname").unwrap().ret, Ty::Str);
+    assert_eq!(
+        os.functions.get("home_dir").unwrap().ret,
+        Ty::option(Ty::Str)
+    );
+    assert_eq!(os.functions.get("temp_dir").unwrap().ret, Ty::Str);
+    assert_eq!(
+        os.functions.get("environ").unwrap().ret,
+        Ty::map(Ty::Str, Ty::Str)
+    );
+    let setenv = os.functions.get("setenv").expect("os.setenv");
+    assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
+    assert_eq!(setenv.ret, Ty::Nil);
+    assert_eq!(os.functions.get("chdir").unwrap().ret, Ty::result(Ty::Nil));
+    assert_eq!(os.functions.len(), 12);
 
     let rand = native_module_sig_via_graph("rand");
     let ri = rand.functions.get("int").expect("rand.int");
@@ -6625,7 +6642,9 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     // std.io: 9 original + R2's 5 Writer openers + R2b's `open` (all → intercepted) + read_all +
     // read_char (R2 grab-bag stdin twins) + 3 isatty TTY-detection variants (gaps §6) = 20.
     assert_eq!(crate::native::native_members("std.io").len(), 20);
-    assert_eq!(crate::native::native_members("std.os").len(), 4);
+    // std.os: 4 original (args/env/getcwd/exit) + gaps §6's 8 system fns
+    // (getpid/platform/hostname/home_dir/temp_dir/environ/setenv/chdir) = 12.
+    assert_eq!(crate::native::native_members("std.os").len(), 12);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     assert_eq!(crate::native::native_members("std.fs").len(), 15);
     let consts: Vec<&str> = crate::native::native_consts("std.math")

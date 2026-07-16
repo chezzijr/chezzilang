@@ -446,6 +446,14 @@ pub trait Host {
     fn os_env(&self, key: &str) -> Option<String>;
     /// The current working directory.
     fn os_getcwd(&self) -> Result<String, HostError>;
+    /// ALL environment variables (from the same injected env `os_env` reads). DEFAULTED to empty so
+    /// only the real `VmHost` overrides — test/off-heap hosts inherit the inert default.
+    fn os_environ(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    /// Set an environment variable in the injected env (the SAME map `os_env`/`os_environ` read), so a
+    /// `std.os.setenv` is observed by both. DEFAULTED to a no-op (test/off-heap hosts).
+    fn os_setenv(&mut self, _key: String, _value: String) {}
 
     /// Record a cooperative-exit request (`std.os.exit(code)`). The engine stores the code and the
     /// native fn returns an error sentinel that unwinds past any `recover:` to the top level, where

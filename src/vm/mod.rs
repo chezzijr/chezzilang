@@ -3438,6 +3438,19 @@ impl crate::native::Host for VmHost<'_> {
     fn os_env(&self, key: &str) -> Option<String> {
         self.vm.host.env.get(key).cloned()
     }
+    fn os_environ(&self) -> Vec<(String, String)> {
+        self.vm
+            .host
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+    fn os_setenv(&mut self, key: String, value: String) {
+        // Writes the per-VM HostConfig env — the SAME map `os_env`/`os_environ` read — NOT
+        // `std::env::set_var` (a third, process-global-racy source). So `setenv` is observed by both.
+        self.vm.host.env.insert(key, value);
+    }
     fn os_getcwd(&self) -> Result<String, crate::native::HostError> {
         std::env::current_dir()
             .map(|p| p.display().to_string())
