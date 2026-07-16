@@ -402,6 +402,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   sources (`count`/`repeat`/`cycle`) terminate under `islice`. Follow-ups: `chain` is two-arg only
   (varargs / list-of-iters later); `take(it, n)` alias dropped (collides with eager `take`; `islice`
   covers it).
+- **OPEN — lazy `itakewhile`/`idropwhile` over `Iterator[T]`.** The eager `take_while`/`drop_while`
+  shipped as `List[T]` methods (§2, 2026-07-16), but `std.iter` has no lazy while-adapters (it has lazy
+  `imap`/`ifilter`/`islice` but no while-form). Python `itertools.takewhile`/`dropwhile` are lazy;
+  add the `i`-prefixed generators here in a later §3 wave (same pure-Chezzi generator shape as `imap`).
 
 ### 4. IO / files
 - **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`
