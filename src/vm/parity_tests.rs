@@ -1238,6 +1238,9 @@ fn main():
     match math.comb(5, 6):
         Ok(v): print(v)
         Err(e): print("err")
+    match math.comb(200, 100):
+        Ok(v): print("ok")
+        Err(e): print("comb overflow err")
     match math.perm(5, 2):
         Ok(v): print(v)
         Err(e): print("err")
@@ -1250,6 +1253,9 @@ fn main():
     match math.parse_int_base("zz", 16):
         Ok(v): print("ok")
         Err(e): print("zz err")
+    match math.parse_int_base("-9223372036854775808", 10):
+        Ok(v): print(v)
+        Err(e): print("err")
 
 main()
 "#;
@@ -1258,7 +1264,7 @@ main()
     let out = parity_entry(src);
     assert_eq!(
         out,
-        "4\n0\n12\n0\n-1\n0\n1\n-2\ntrue\ntrue\ntrue\ntrue\n1\n2432902008176640000\nf21 err\nfneg err\n10\n0\n20\n255\n5\nzz err\n",
+        "4\n0\n12\n0\n-1\n0\n1\n-2\ntrue\ntrue\ntrue\ntrue\n1\n2432902008176640000\nf21 err\nfneg err\n10\n0\ncomb overflow err\n20\n255\n5\nzz err\n-9223372036854775808\n",
     );
 }
 

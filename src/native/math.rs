@@ -181,8 +181,8 @@ fn factorial_i64(n: i64) -> Result<i64, String> {
 }
 
 /// `C(n,k)` — number of k-combinations. `k>n` or `k<0`... Python raises on negative; we Err. `k>n`
-/// yields 0 (Python). Computes multiplicatively in i128 (worst intermediate « i128 max), Erring only
-/// when the true result exceeds i64.
+/// yields 0 (Python). Computes multiplicatively in i128, Erring only when the true result exceeds
+/// i64 — never faults, never hangs.
 fn comb_i64(n: i64, k: i64) -> Result<i64, String> {
     if n < 0 || k < 0 {
         return Err(format!(
@@ -194,9 +194,16 @@ fn comb_i64(n: i64, k: i64) -> Result<i64, String> {
     }
     // Symmetry: C(n,k) == C(n,n-k); use the smaller k for fewer, smaller multiplications.
     let k = k.min(n - k);
+    // `acc` holds C(n,i) exactly at the top of each step, kept <= i64::MAX by the in-loop guard
+    // (like perm_i64). That bounds the intermediate `acc*(n-i)` to ~i64::MAX^2 (~8.5e37) < i128::MAX
+    // (~1.7e38), so the multiply can't overflow i128, and any oversized result Errs early — which
+    // also bounds the iteration count (C(n,·) climbs past i64::MAX within a few steps for large n).
     let mut acc: i128 = 1;
     for i in 0..k {
         acc = acc * (n - i) as i128 / (i + 1) as i128;
+        if acc > i64::MAX as i128 {
+            return Err(format!("comb: C({n},{k}) exceeds i64 range"));
+        }
     }
     i64::try_from(acc).map_err(|_| format!("comb: C({n},{k}) exceeds i64 range"))
 }
@@ -256,9 +263,23 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
         };
         (radix, stripped.unwrap_or(rest))
     };
-    let val = i64::from_str_radix(digits, radix)
-        .map_err(|_| format!("parse_int_base: cannot parse '{s}' in base {radix}"))?;
-    Ok(if neg { -val } else { val })
+    // Reject a second/embedded sign: after the one leading sign + optional base prefix, `digits`
+    // must be bare radix digits. `from_str_radix` would otherwise re-accept a leading +/- here
+    // ("+-5", "0x-5", "0b+1"), which Python int()/Go ParseInt reject.
+    if digits.starts_with('+') || digits.starts_with('-') {
+        return Err(format!(
+            "parse_int_base: cannot parse '{s}' in base {radix}"
+        ));
+    }
+    // Re-attach the sign and let `from_str_radix` parse it directly, so i64::MIN (whose magnitude
+    // is i64::MAX+1 and cannot be parsed-then-negated) round-trips like Python/Go.
+    let signed = if neg {
+        format!("-{digits}")
+    } else {
+        digits.to_string()
+    };
+    i64::from_str_radix(&signed, radix)
+        .map_err(|_| format!("parse_int_base: cannot parse '{s}' in base {radix}"))
 }
 
 fn gcd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -506,6 +527,12 @@ mod tests {
         assert!(comb_i64(5, -1).is_err());
         assert_eq!(comb_i64(62, 31), Ok(465_428_353_255_261_088));
         assert!(comb_i64(68, 34).is_err());
+        // Large-n / small-k: true result « i64 but the pre-fix code's unguarded `acc*(n-i)`
+        // overflowed i128 (panic in debug / wrap in release). Must be a clean Err, never a fault.
+        assert!(comb_i64(10_000_000_000_000, 3).is_err());
+        // Huge central binomial (n>=131 => C(n,k) > i128::MAX): clean Err, no i128 overflow.
+        assert!(comb_i64(200, 100).is_err());
+        assert!(comb_i64(100_000, 50_000).is_err());
         assert_eq!(perm_i64(5, 2), Ok(20));
         assert_eq!(perm_i64(5, 6), Ok(0));
         assert_eq!(perm_i64(5, 0), Ok(1));
@@ -529,6 +556,19 @@ mod tests {
         assert!(parse_int_base_impl("0b2", 2).is_err());
         assert!(parse_int_base_impl("10", 37).is_err());
         assert!(parse_int_base_impl("10", 1).is_err());
+        // i64::MIN boundary — parse-magnitude-then-negate rejected it (magnitude is i64::MAX+1).
+        assert_eq!(
+            parse_int_base_impl("-9223372036854775808", 10),
+            Ok(i64::MIN)
+        );
+        assert_eq!(parse_int_base_impl("-8000000000000000", 16), Ok(i64::MIN));
+        assert_eq!(parse_int_base_impl("9223372036854775807", 10), Ok(i64::MAX));
+        // Embedded/second sign is rejected (Python int()/Go ParseInt), not silently re-accepted.
+        assert!(parse_int_base_impl("+-5", 10).is_err());
+        assert!(parse_int_base_impl("-+5", 10).is_err());
+        assert!(parse_int_base_impl("0x-5", 0).is_err());
+        assert!(parse_int_base_impl("0b+1", 0).is_err());
+        assert!(parse_int_base_impl("--5", 10).is_err());
     }
 
     #[test]
