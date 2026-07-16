@@ -903,6 +903,23 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.
 
+### `std.bisect` — binary search & sorted-insert (Python `bisect`)
+Over an ascending-sorted `List[T: Comparable]` (compares with `<` → dispatches through `Comparable`).
+`bisect_left(xs, x) -> int` returns the leftmost insertion index (before equal elements);
+`bisect_right(xs, x) -> int` (a.k.a. `bisect(xs, x)`) the rightmost (after equal elements).
+`insort_left(xs, x)` / `insort_right(xs, x)` insert `x` in place keeping `xs` sorted (O(n)
+grow-then-shift, same cost as Python's `insort` — `List` has no native insert).
+**v1 limits (not bugs):** no `key: fn(T) -> K` variant and no bare `insort` alias (YAGNI — one-line
+adds on demand). `xs` MUST already be sorted ascending; results are undefined otherwise.
+
+### `std.memoize` — result caching (`functools.cache`)
+`memoize1(f: fn(K) -> V) -> fn(K) -> V` wraps `f` so each distinct argument is computed once and the
+result cached in a captured `Map[K, V]` (`K: Hashable`). The cache is a native reference type, so it
+persists across every call to the wrapped fn; `f` runs at most once per distinct arg.
+**v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[tuple, V]` on
+the argument tuple, but tuples aren't Hashable map keys yet — until then curry, or pack args into a
+struct with `hash` and memoize the single-arg wrapper.
+
 ### `std.flag` — Go-style CLI arg parsing
 Pure-Chezzi CLI parser over `os.args()` (already the program args **without** argv[0], so
 `fs.parse(os.args())` is the direct Go `flag.Parse(os.Args[1:])` analog). `import std.flag`.

@@ -1,0 +1,31 @@
+# std.bisect golden — the full boundary matrix: empty, all-equal, both ends, duplicate boundary,
+# and the two in-place inserts.
+
+import std.io
+import std.bisect
+
+fn main():
+    empty: List[int] = []
+    io.print(str(bisect.bisect_left(empty, 5)))    # 0
+    io.print(str(bisect.bisect_right(empty, 5)))   # 0
+
+    equal := [2, 2, 2, 2]
+    io.print(str(bisect.bisect_left(equal, 2)))    # 0
+    io.print(str(bisect.bisect_right(equal, 2)))   # 4
+
+    xs := [1, 3, 3, 5]
+    io.print(str(bisect.bisect_left(xs, 0)))       # 0  (before front)
+    io.print(str(bisect.bisect_right(xs, 9)))      # 4  (after back)
+    io.print(str(bisect.bisect_left(xs, 3)))       # 1  (before the dup run)
+    io.print(str(bisect.bisect_right(xs, 3)))      # 3  (after the dup run)
+    io.print(str(bisect.bisect(xs, 3)))            # 3  (alias == bisect_right)
+
+    a := [1, 3, 5]
+    bisect.insort_right(a, 4)
+    io.print(str(a))                               # [1, 3, 4, 5]
+
+    b := [1, 3, 3, 5]
+    bisect.insort_left(b, 3)
+    io.print(str(b))                               # [1, 3, 3, 3, 5]
+
+main()

@@ -1,0 +1,26 @@
+# std.memoize golden — proves single-eval: the memoized fn increments a shared counter, so the
+# counter's final value == the number of DISTINCT arguments (a cache hit does NOT re-run f).
+
+import std.io
+import std.memoize
+
+struct Counter:
+    count: int
+
+    fn bump(self):
+        self.count = self.count + 1
+
+fn main():
+    c := Counter(0)
+    fn slow_square(n: int) -> int:
+        c.bump()
+        return n * n
+    square := memoize.memoize1(slow_square)
+
+    io.print(str(square(3)))   # 9
+    io.print(str(square(3)))   # 9  (cache hit — no bump)
+    io.print(str(square(4)))   # 16
+    io.print(str(square(4)))   # 16 (cache hit — no bump)
+    io.print(str(c.count))     # 2  (one eval per distinct arg)
+
+main()

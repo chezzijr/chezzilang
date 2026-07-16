@@ -12,6 +12,7 @@
 
 /// Every `std/**/*.chz`, keyed by its path relative to `std/` (forward slashes, `.chz` included).
 pub const STD_FILES: &[(&str, &str)] = &[
+    ("bisect.chz", include_str!("../../std/bisect.chz")),
     ("cancel.chz", include_str!("../../std/cancel.chz")),
     ("cmp.chz", include_str!("../../std/cmp.chz")),
     ("collections.chz", include_str!("../../std/collections.chz")),
@@ -31,6 +32,7 @@ pub const STD_FILES: &[(&str, &str)] = &[
     ("json.chz", include_str!("../../std/json.chz")),
     ("log.chz", include_str!("../../std/log.chz")),
     ("math.chz", include_str!("../../std/math.chz")),
+    ("memoize.chz", include_str!("../../std/memoize.chz")),
     ("net.chz", include_str!("../../std/net.chz")),
     ("os.chz", include_str!("../../std/os.chz")),
     ("path.chz", include_str!("../../std/path.chz")),
