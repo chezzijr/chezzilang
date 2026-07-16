@@ -1,0 +1,28 @@
+# std.memoize — functools.cache-style result caching (M-B3.3: closures-as-data).
+#
+# Written entirely in Chezzi. `memoize1(f)` returns a wrapped function that caches `f`'s result per
+# argument in a captured `Map` — a native reference type, so the cache persists across every call to
+# the wrapped fn (a captured bare scalar would snapshot by value and lose the cache; see std/ref.chz).
+# `f` runs at most once per distinct argument.
+#
+# ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable`). A
+# general N-arg cache would key a `Map[tuple, V]` on the argument tuple, but tuples aren't Hashable
+# map keys today, so that upgrade waits on hashable tuples. Until then, curry / pack args into a
+# struct-with-`hash` and memoize the single-arg wrapper.
+
+# Cache lookup-or-compute, split out because a closure body is a single expression: the returned
+# wrapper delegates here so it can do the `Option` match + compute + store.
+fn _memo_get[K: Hashable, V](cache: Map[K, V], f: fn(K) -> V, k: K) -> V:
+    match cache.get(k):
+        Some(v):
+            return v
+        None:
+            v := f(k)
+            cache[k] = v
+            return v
+
+# Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same
+# signature as `f`.
+fn memoize1[K: Hashable, V](f: fn(K) -> V) -> fn(K) -> V:
+    cache: Map[K, V] = {}
+    return fn(k: K) -> V: _memo_get(cache, f, k)

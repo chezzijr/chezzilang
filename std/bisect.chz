@@ -1,0 +1,63 @@
+# std.bisect — binary search & sorted-insert on an ascending-sorted List (Python `bisect`).
+#
+# Written entirely in Chezzi. Every fn assumes `xs` is already sorted ascending and compares with
+# `<`, which dispatches through the `Comparable` protocol — so these work for int, float, str, and
+# any user struct that implements `compare(self, other) -> int`.
+#
+# `bisect_left` returns the leftmost insertion index (before any equal elements); `bisect_right`
+# (a.k.a. `bisect`) the rightmost (after any equal elements). `insort_*` insert `x` in-place keeping
+# the list sorted.
+#
+# ponytail: no key-fn variant and no bare `insort` alias in v1 — YAGNI. A `key: fn(T) -> K` overload
+# and an `insort` = `insort_right` alias are one-line additions if a caller needs them.
+
+# Leftmost index `i` in `[0, len]` such that inserting `x` at `i` keeps `xs` sorted and every element
+# before `i` is `< x` (equal elements end up to the RIGHT of `i`).
+fn bisect_left[T: Comparable](xs: List[T], x: T) -> int:
+    lo := 0
+    hi := xs.len()
+    while lo < hi:
+        mid := (lo + hi) / 2
+        if xs[mid] < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+# Rightmost index `i` in `[0, len]` such that inserting `x` at `i` keeps `xs` sorted and every element
+# before `i` is `<= x` (equal elements end up to the LEFT of `i`).
+fn bisect_right[T: Comparable](xs: List[T], x: T) -> int:
+    lo := 0
+    hi := xs.len()
+    while lo < hi:
+        mid := (lo + hi) / 2
+        if x < xs[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+# Alias for `bisect_right` (Python's `bisect.bisect`).
+fn bisect[T: Comparable](xs: List[T], x: T) -> int:
+    return bisect_right(xs, x)
+
+# Insert `x` into `xs` before any equal elements, keeping it sorted. O(n) grow-then-shift (List has no
+# native insert), same cost as Python's `insort`.
+fn insort_left[T: Comparable](xs: List[T], x: T):
+    i := bisect_left(xs, x)
+    xs.push(x)
+    j := xs.len() - 1
+    while j > i:
+        xs[j] = xs[j - 1]
+        j = j - 1
+    xs[i] = x
+
+# Insert `x` into `xs` after any equal elements, keeping it sorted.
+fn insort_right[T: Comparable](xs: List[T], x: T):
+    i := bisect_right(xs, x)
+    xs.push(x)
+    j := xs.len() - 1
+    while j > i:
+        xs[j] = xs[j - 1]
+        j = j - 1
+    xs[i] = x

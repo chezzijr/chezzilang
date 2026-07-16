@@ -499,8 +499,16 @@ normalize to UTC rather than round-tripping. (Python: `fromisoformat` done, `str
   persistence-shaped scripts. **Large.**
 - Config formats (TOML/YAML/INI): absent, JSON only. Low priority — JSON + env vars cover it. If ever:
   TOML, not YAML.
-- `bisect` / `binary_search` on a sorted `List` (sort/sort_by already exist). ~10 lines.
-- `functools.cache` / `memoize` — now *possible* (closures-as-data landed); ~15 lines.
+- ~~`bisect` / `binary_search` on a sorted `List` (sort/sort_by already exist). ~10 lines.~~
+  **SHIPPED.** Pure-Chezzi `std/bisect.chz`: `bisect_left`/`bisect_right`/`bisect` (alias) +
+  `insort_left`/`insort_right` over `List[T: Comparable]` (Python `bisect` semantics; left = before
+  equals, right = after). No key-fn variant / no bare `insort` alias in v1 (YAGNI). See
+  `docs/stdlib.md § std.bisect`.
+- ~~`functools.cache` / `memoize` — now *possible* (closures-as-data landed); ~15 lines.~~
+  **SHIPPED.** Pure-Chezzi `std/memoize.chz`: `memoize1(f: fn(K) -> V) -> fn(K) -> V` caches per
+  distinct arg in a captured `Map` (native ref type, so the cache persists across calls). Single-arg
+  only — N-arg would key `Map[tuple, V]` but tuples aren't Hashable map keys yet. See
+  `docs/stdlib.md § std.memoize`.
 - Runtime templating (`render(tpl, vars)`) — interpolation is compile-time only. Mostly obviated by
   format specs; the residual need is HTML generation, and **if an HTTP server ever ships, the lack of an
   auto-escaping template is an XSS hole**, not an ergonomics gap.

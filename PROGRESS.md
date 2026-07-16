@@ -4,6 +4,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/gaps.md` §10: `std.bisect` +
+> `std.memoize`, two pure-Chezzi modules.** Both are NEW pure-Chezzi files (zero native seam — the only
+> Rust touch = two `include_str!` lines in `src/resolver/std_embed.rs`, guarded by
+> `embedded_std_table_matches_disk`). `std/bisect.chz`: `bisect_left`/`bisect_right`/`bisect` (alias) +
+> `insort_left`/`insort_right` over `List[T: Comparable]` (Python `bisect` semantics — left lands
+> before equal elements, right after; `insort_*` is O(n) grow-then-shift since `List` has no native
+> insert). `std/memoize.chz`: `memoize1(f: fn(K) -> V) -> fn(K) -> V` caches per distinct arg in a
+> **captured `Map`** (native ref type ⇒ cache persists across wrapped calls; B3.3 closures-as-data) —
+> `f` runs once per distinct arg. Pure-Chezzi ⇒ serial-VM == M:N automatically. Test vehicle = golden
+> example + `assert_file_parity` (both engines) per module: `golden_bisect_via_run_file` (full boundary
+> matrix: empty / all-equal / both ends / dup left-vs-right / in-place insort) and
+> `golden_memoize_via_run_file` (single-eval proven by a captured call-counter → counter == 2 for two
+> distinct args). v1 ceilings (in `ponytail:` comments): bisect has no key-fn / no bare `insort` alias;
+> memoize is single-arg only (N-arg needs `Map[tuple, V]` but tuples aren't Hashable map keys yet).
+> Docs: `docs/stdlib.md § std.bisect` + `§ std.memoize`, `docs/gaps.md §10` (both SHIPPED). Full
+> `cargo test`/`clippy`/`conformance` green.
 > **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/gaps.md` §5: NUMBER/MATH surface in
 > `std.math`.** Ten native fns + two float constants added to the file-backed native module (mirroring
 > the existing `sqrt`/`abs`/`pi` pattern — zero new seam machinery): `gcd`/`lcm` (int; Python `math.gcd`

@@ -4878,6 +4878,32 @@ fn golden_math_more_via_run_file() {
     assert_file_parity("examples/math_more.chz");
 }
 
+/// `std.bisect` — binary search + sorted-insert over the full boundary matrix (empty, all-equal,
+/// both ends, duplicate left/right boundary, in-place insort). Runs end-to-end on the VM, byte-matches
+/// the `.expected` file and stays identical on the M:N engine (parity via `assert_file_parity`).
+#[test]
+fn golden_bisect_via_run_file() {
+    let path = fixture("examples/bisect.chz");
+    let expected = std::fs::read_to_string(fixture("examples/bisect.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/bisect.chz");
+}
+
+/// `std.memoize` — `memoize1` caches per distinct argument (single-eval proven by a captured
+/// call-counter: two distinct args → counter == 2, cache hits do NOT re-run `f`). Runs end-to-end on
+/// the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+#[test]
+fn golden_memoize_via_run_file() {
+    let path = fixture("examples/memoize.chz");
+    let expected = std::fs::read_to_string(fixture("examples/memoize.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/memoize.chz");
+}
+
 /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
 /// makes the channel permanently ready (`recv`/`try_recv` yield `true`, fanning out). Deterministic
 /// on every engine → golden + parity.
