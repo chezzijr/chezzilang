@@ -555,6 +555,12 @@ impl Compiler {
             ("Match", &["text", "start", "end", "groups"][..]),
             ("Response", &["status", "body", "headers"][..]),
             ("ProcResult", &["stdout", "stderr", "code"][..]),
+            // gaps §6 — `FileInfo` from `std.fs` (returned by `fs.stat`). Field order load-bearing
+            // (matches `native/fs.rs` stat builder + checker `seed_stdlib_structs`).
+            (
+                "FileInfo",
+                &["size", "mtime", "mode", "is_dir", "is_file", "is_symlink"][..],
+            ),
         ] {
             let tid = program.structs.len() as u32;
             program.structs.insert(
@@ -616,6 +622,7 @@ impl Compiler {
                     "std.regex" => Some("Match"),
                     "std.request" => Some("Response"),
                     "std.process" => Some("ProcResult"),
+                    "std.fs" => Some("FileInfo"),
                     _ => None,
                 } {
                     self.module_types[idx].insert(sname.to_string());

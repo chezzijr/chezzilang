@@ -6609,7 +6609,9 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         fs.functions.get("atomic_write").unwrap().ret,
         Ty::result(Ty::Nil)
     );
-    assert_eq!(fs.functions.len(), 15);
+    // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
+    // (FileInfo is a native struct, not a function — not counted here.)
+    assert_eq!(fs.functions.len(), 17);
 }
 
 /// Hover doc preserved after migration: math.sqrt (and an io/os fn) still carry the authored blurb via
@@ -6646,7 +6648,8 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     // (getpid/platform/hostname/home_dir/temp_dir/environ/setenv/chdir) = 12.
     assert_eq!(crate::native::native_members("std.os").len(), 12);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
-    assert_eq!(crate::native::native_members("std.fs").len(), 15);
+    // --- fs.stat/fs.walk (gaps §6): 15 original + stat + walk = 17 runtime members.
+    assert_eq!(crate::native::native_members("std.fs").len(), 17);
     let consts: Vec<&str> = crate::native::native_consts("std.math")
         .iter()
         .map(|(n, _)| *n)
@@ -6782,6 +6785,16 @@ fn bare_procresult_unknown_without_import() {
     entry_rejects(
         "fn main():\n    p: ProcResult = ProcResult(\"\", \"\", 0)\n    print(str(p.code))\n",
         "unknown type 'ProcResult'",
+    );
+}
+
+// A bare `FileInfo` without `import std.fs` gets the actionable import HINT (the types_by_name
+// reverse-index 4th touch point — omitting it degrades to a generic "unknown type" with no hint).
+#[test]
+fn bare_fileinfo_hints_std_fs() {
+    entry_rejects(
+        "fn f(x: FileInfo):\n    print(\"hi\")\n",
+        "import it from std.fs",
     );
 }
 

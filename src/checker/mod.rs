@@ -961,6 +961,7 @@ impl Checker {
             ("Match", "std.regex"),
             ("Response", "std.request"),
             ("ProcResult", "std.process"),
+            ("FileInfo", "std.fs"),
         ] {
             c.types_by_name
                 .entry(tn.to_string())

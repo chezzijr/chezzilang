@@ -441,7 +441,20 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 `glob(pattern) -> Result[List[str]]` (`*`/`?` in the final path component) ·
 `canonicalize(path) -> Result[str]` — resolve symlinks + `.`/`..` against the **real filesystem** to
 an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
-and so **requires the path to exist** (`Err` on a nonexistent path).
+and so **requires the path to exist** (`Err` on a nonexistent path) ·
+`stat(path) -> Result[FileInfo]` — read filesystem metadata into a
+`struct FileInfo { size: int, mtime: int, mode: int, is_dir: bool, is_file: bool, is_symlink: bool }`.
+`size` is bytes; `mtime` is Unix-epoch **seconds** (`0` if pre-epoch/unsupported); `mode` is the raw
+unix `st_mode` (permission + type bits — `0` on non-unix). `stat` **follows symlinks** for
+size/mtime/mode/is_dir/is_file (matching `stat`/Python `os.stat`); `is_symlink` is reported separately
+(so a symlink-to-file has `is_file == true` **and** `is_symlink == true`). `Err` on a missing/unreadable
+path (a broken symlink included). `FileInfo` is **owned by `std.fs`** — read its fields off a returned
+value with no import, but to name the type you must `import std.fs` (or `import FileInfo from std.fs`) ·
+`walk(path) -> Result[List[str]]` — recursively list **every** entry (files + dirs) strictly under
+`path` as full path strings, in a **deterministic** order: each directory's entries are sorted by name,
+a directory is listed before its children (pre-order). A **symlinked directory is listed but not
+descended** (cycle guard). `Err` on an unreadable root. (The sorted order is required for
+serial == M:N engine parity.)
 
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
@@ -464,8 +477,8 @@ is **not** `fsync`'d, so this is concurrent-observer atomicity, **not** crash/po
 (same as `write_file`).
 
 **Limit (v1):** recursive directory removal (`remove_dir_all` / `rm -rf`) is intentionally **not**
-provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. Walk + remove in Chezzi
-if you need it.
+provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. `fs.walk` (reverse the
+list) + `remove_file`/`remove_dir` in Chezzi if you need it.
 
 ### `std.time`
 `now() -> int` (Unix epoch seconds, UTC) · `monotonic() -> float` (seconds, immune to clock changes) ·
