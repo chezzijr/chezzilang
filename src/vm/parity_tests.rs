@@ -4866,6 +4866,26 @@ fn golden_std_demo_via_run_file() {
     assert_file_parity("examples/std_demo.chz");
 }
 
+// ----- std.io TTY detection (gaps §6) — separated block near golden_std_demo to shrink the
+// hand-resolved conflict with the concurrent List-methods task also editing this file. -----
+/// `io.isatty()`/`isatty_stdin()`/`isatty_stderr()` each return a plain `bool` without faulting, and
+/// serial==M:N (an env fd query is engine-agnostic). Under `cargo test` stdout is captured → the
+/// value is `false` here, so we assert bool-SHAPE + engine agreement, NOT a fixed value.
+#[test]
+fn golden_isatty_via_run_file() {
+    let out = parity_entry(
+        "import std.io\nio.print(str(io.isatty()))\nio.print(str(io.isatty_stdin()))\nio.print(str(io.isatty_stderr()))\n",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "expected 3 isatty lines, got {out:?}");
+    for line in lines {
+        assert!(
+            line == "true" || line == "false",
+            "isatty must return a bool, got {line:?}"
+        );
+    }
+}
+
 /// Additive std.math trig/exp/log intrinsics run end-to-end on the VM and byte-match both the
 /// `.expected` file and the interpreter (parity via `assert_file_parity`).
 #[test]

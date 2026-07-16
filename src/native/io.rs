@@ -69,6 +69,27 @@ fn flush(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Nil)
 }
 
+/// TTY detection (gaps §6) — query the REAL process fd via `std::io::IsTerminal`, so a CLI can
+/// colorize only when its output is a terminal (not piped/redirected). Environment queries, not VM
+/// sink queries, so engine-agnostic (serial == M:N); under `cargo test` stdout is captured → false.
+fn isatty(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "isatty", 0)?;
+    use std::io::IsTerminal;
+    Ok(NativeRet::Bool(std::io::stdout().is_terminal()))
+}
+
+fn isatty_stdin(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "isatty_stdin", 0)?;
+    use std::io::IsTerminal;
+    Ok(NativeRet::Bool(std::io::stdin().is_terminal()))
+}
+
+fn isatty_stderr(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "isatty_stderr", 0)?;
+    use std::io::IsTerminal;
+    Ok(NativeRet::Bool(std::io::stderr().is_terminal()))
+}
+
 /// `input(prompt)` — write the prompt with NO trailing newline, flush, then read one line. Returns
 /// exactly what `read_line` returns: `Some(line)` (newline stripped), `None` at EOF.
 fn input(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -166,6 +187,9 @@ pub const MEMBERS: &[(&str, NativeFn)] = &[
     ("read_all", read_all),
     ("read_char", read_char),
     ("flush", flush),
+    ("isatty", isatty),
+    ("isatty_stdin", isatty_stdin),
+    ("isatty_stderr", isatty_stderr),
     ("input", input),
     ("read_file", read_file),
     ("write_file", write_file),

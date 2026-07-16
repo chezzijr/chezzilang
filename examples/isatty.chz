@@ -1,0 +1,7 @@
+# TTY detection demo (gaps §6). Run in a terminal → all true; pipe (`| cat`) → stdout/stderr false.
+# No .expected fixture: the result is environment-dependent (how this process's fds are wired).
+import std.io
+
+io.print("stdout isatty: " + str(io.isatty()))
+io.print("stdin  isatty: " + str(io.isatty_stdin()))
+io.print("stderr isatty: " + str(io.isatty_stderr()))

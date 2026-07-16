@@ -34,7 +34,7 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 
 **STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — largest), §3 (lazy
 itertools), §4 (IO seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6
-(os/system — `isatty` the cheapest win), §7 (`sha1`/`sha512`/`hmac`, gzip, CSV), §8 (net depth), §9
+(os/system — `isatty` SHIPPED), §7 (`sha1`/`sha512`/`hmac`, gzip, CSV), §8 (net depth), §9
 (`strptime`), §10 (`std.db`, config formats, `bisect`, `memoize`), §11 (`std.process` `Child`).
 
 ## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
@@ -436,9 +436,9 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
   signal handling / `atexit` hook**, and `os.exit` does **not** run `defer`s. So a program that must
   clean up on Ctrl-C or on exit has no reliable path. (Python: `tempfile` + `atexit` + context managers;
   Go: `os.CreateTemp` + `defer` + `signal.Notify`.)
-- **No TTY detection** — `isatty` does not exist (zero hits in `src/`). So a CLI must either always
-  colorize (garbage when piped) or never. `io.isatty() -> bool` is **one fn** (`std::io::IsTerminal`) —
-  the cheapest real win in this file. Terminal size / echo-off (password prompts) are a second step.
+- ~~**No TTY detection**~~ — **SHIPPED** (2026-07-16): `io.isatty()` / `io.isatty_stdin()` /
+  `io.isatty_stderr()` `-> bool` (via `std::io::IsTerminal` on stdout/stdin/stderr) let a CLI colorize
+  only when not piped. Terminal size / echo-off (password prompts) remain a deliberate second step.
 - **`os.env` and `process.cmd` disagree**: `os.env` reads the injected `HostConfig`, while `process.cmd`
   shells out with the real inherited process env — so under a synthetic host config `os.env("X")` is
   `None` while `process.cmd("echo $X")` prints the real value. Nobody has written this down.

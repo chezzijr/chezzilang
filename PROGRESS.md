@@ -4,6 +4,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/io-isatty`) — `docs/gaps.md` §6: TTY detection.** Three
+> module-level bool natives on the file-backed `std.io` module: `io.isatty()` / `io.isatty_stdin()` /
+> `io.isatty_stderr()` `-> bool`, each one line via `std::io::IsTerminal` on stdout/stdin/stderr. Lets
+> a CLI colorize only when not piped (Python `sys.stdout.isatty()` / Go `isatty`). Engine-agnostic (an
+> env fd query, not a VM-sink query → serial==M:N trivially; captured under `cargo test` → false).
+> Seam reused as-is: `NativeRet::Bool` → `Value::Bool`, no new plumbing. Test `golden_isatty_via_run_file`
+> asserts bool-shape + engine agreement (not a fixed value). Manual eyeball: terminal → true, `| cat` →
+> stdout/stderr false, stdin true. Docs: `docs/stdlib.md §std.io`, `docs/gaps.md §6` (SHIPPED). Deferred
+> (deliberate second step): terminal-size / echo-off / raw-mode.
 > **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/gaps.md` §10: `std.bisect` +
 > `std.memoize`, two pure-Chezzi modules.** Both are NEW pure-Chezzi files (zero native seam — the only
 > Rust touch = two `include_str!` lines in `src/resolver/std_embed.rs`, guarded by
