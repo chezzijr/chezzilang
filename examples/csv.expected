@@ -1,0 +1,10 @@
+roundtrip: true
+comma_fields: 2
+comma_first: a,b
+escq: he said "hi"
+nl_rows: 1
+nl_first: 11
+empty_len: 0
+trail_rows: 1
+blank_mid: 3
+fmt_empty: ''

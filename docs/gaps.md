@@ -37,7 +37,7 @@ still open: `iter.min`/`max`, `unique`/`dedup`/`chunk`/`windows`/`group_by`/`par
 `take_while`/`drop_while`, Map/Set ergonomics — later waves), §3 (lazy itertools — SHIPPED), §4 (IO
 seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6 (os/system — `isatty`
 SHIPPED; `setenv`/`chdir`/`getpid`/`environ`/`platform`/metadata-reader still open), §7
-(`sha1`/`sha512`/`hmac`, gzip, CSV), §8 (net depth), §9
+(`sha1`/`sha512`/`hmac`, gzip; CSV SHIPPED), §8 (net depth), §9
 (`strptime`), §10 (`std.db`, config formats; `bisect` + `memoize` SHIPPED), §11 (`std.process` `Child`).
 
 ## Session log — 2026-07-14 → 2026-07-15 (Tier-0 + R1 + the cancel-teardown cascade)
@@ -457,7 +457,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - crypto: `sha256` / `sha256_bytes` (R1: hash binary data / a file) / `md5`. Missing `sha1` / `sha512`,
   **`hmac`**, secure-random-bytes / token,
   password hashing (bcrypt/argon2). All hand-rolled zero-dep today, so each is real work.
-- encoding: no gzip / zlib (new dependency), no CSV. Arbitrary-**bytes** base64 round-trip →
+- encoding: no gzip / zlib (new dependency). ~~no CSV~~ — **CSV SHIPPED** as a NEW pure-Chezzi module
+  `std.csv` (`parse(text) -> List[List[str]]` / `format(rows) -> str`, RFC 4180 quote state machine,
+  round-trip proven; `std/csv.chz`, NOT `std.encoding` which is file-backed native). Deferred v1
+  follow-ups: streaming/Reader, header→Map mapping, custom-delimiter/TSV `parse_sep`. Arbitrary-**bytes** base64 round-trip →
   **DONE (R1)** (`base64_encode_bytes`/`base64_decode_bytes`); hashing a *file* → **DONE (R1)**
   (`io.read_bytes` + `crypto.sha256_bytes`). Not added: hex / URL-safe bytes twins (~6 lines each, on demand).
 - **URL parsing read-half — SHIPPED**: `query_decode(q) -> Map[str,str]` (dup key last-wins, `+`/`%20`

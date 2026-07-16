@@ -714,6 +714,28 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
 
 `is_empty` aside, the FIRST list (`repeat`…`strip_suffix`) is also available as receiver methods on `str` (no import needed): `s.ends_with(x)` ≡ `text.ends_with(s, x)`. See the `str` method table in §2. The ergonomics fns above are `std.string`-only.
 
+### `std.csv` — RFC 4180 CSV read/write (pure Chezzi)
+`parse(text: str) -> List[List[str]]` · `format(rows: List[List[str]]) -> str`. A pure-Chezzi module
+(no native seam — it is string-scanning over the core `str` primitives).
+
+- `parse` — RFC 4180 quote state machine. Fields separated by `,`, records by CRLF **or** LF (both
+  accepted). A double-quote-wrapped field may contain commas, CR, LF and escaped quotes (`""` inside a
+  quoted field → one literal `"`). Leading/trailing spaces are significant (never trimmed). A trailing
+  record separator produces **no** spurious empty final record. Empty input → `[]`. A blank interior
+  line → a single-empty-field record `[""]` (this differs from Python's `csv`, which maps a blank line
+  to `[]` — chosen so `parse(format(rows)) == rows` holds).
+- `format` — the inverse. A field is quoted **iff** it contains a `,`, `"`, CR, or LF; embedded quotes
+  are doubled. Records are joined by CRLF (`\r\n`, per RFC 4180); since `parse` accepts CRLF or LF it
+  round-trips either way. `format([])` → `""`.
+- **Round-trip guarantee:** `parse(format(rows)) == rows` for rows covering every hard case (embedded
+  comma, embedded escaped quote, embedded newline, empty field, unicode). **Limit** (a property of the
+  CSV format, not a bug): a SOLE or TRAILING all-empty record does **not** round-trip
+  (`format([[""]])` == `""` and `parse("")` == `[]`) — CSV cannot encode a trailing blank line
+  distinctly from no trailing newline. An empty record round-trips only when sandwiched between
+  non-empty records.
+- **Deferred v1 follow-ups** (YAGNI): streaming/Reader-based parsing, header→`Map` row mapping, and a
+  custom-delimiter/TSV `parse_sep(text, sep)`.
+
 ### `std.path` — unix path-STRING manipulation
 Pure string ops on **unix `/` paths** — **NO filesystem I/O** (that is `std.fs`). Separator policy:
 `/` only; there is no Windows `\` handling. Edge-case semantics follow Python `os.path` (basename/

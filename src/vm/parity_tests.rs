@@ -4925,6 +4925,22 @@ fn golden_memoize_via_run_file() {
     assert_file_parity("examples/memoize.chz");
 }
 
+// ----- std.csv (gaps §7) — separate labeled block to shrink the hand-resolved conflict with the
+// concurrent std.os task also editing this file. -----
+/// `std.csv` — RFC 4180 parse/format round-trip over every hard case (embedded comma, `""` escaped
+/// quote, embedded newline in a quoted field, empty field, sandwiched empty record, unicode) plus
+/// direct parse asserts (empty input -> [], trailing separator -> no spurious record). Runs
+/// end-to-end on the VM, byte-matches the `.expected` file and stays identical on the M:N engine.
+#[test]
+fn golden_csv_via_run_file() {
+    let path = fixture("examples/csv.chz");
+    let expected = std::fs::read_to_string(fixture("examples/csv.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/csv.chz");
+}
+
 /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
 /// makes the channel permanently ready (`recv`/`try_recv` yield `true`, fanning out). Deterministic
 /// on every engine → golden + parity.

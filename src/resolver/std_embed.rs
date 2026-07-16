@@ -22,6 +22,7 @@ pub const STD_FILES: &[(&str, &str)] = &[
         include_str!("../../std/concurrency/collection.chz"),
     ),
     ("crypto.chz", include_str!("../../std/crypto.chz")),
+    ("csv.chz", include_str!("../../std/csv.chz")),
     ("datetime.chz", include_str!("../../std/datetime.chz")),
     ("encoding.chz", include_str!("../../std/encoding.chz")),
     ("ffi.chz", include_str!("../../std/ffi.chz")),

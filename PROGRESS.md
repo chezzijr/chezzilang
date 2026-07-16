@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
+> module `std/csv.chz` (zero native seam — RFC 4180 quote state machine over the core `str` primitives
+> + `std.string.replace`/`index_of`; only Rust touch = one `include_str!` line in
+> `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `parse(text) ->
+> List[List[str]]` (comma sep, CRLF **or** LF records, `""`→literal quote in quoted fields, spaces
+> significant, trailing sep → no spurious record, empty input → `[]`, blank interior line → `[""]`) +
+> `format(rows) -> str` (quote iff `,`/`"`/CR/LF, double embedded quotes, CRLF-joined). Round-trip
+> `parse(format(rows)) == rows` proven in-Chezzi over every hard case (embedded comma/quote/newline,
+> empty field, sandwiched empty record, unicode). Known format limit (ponytail-noted): sole/trailing
+> all-empty record can't round-trip. Tests: `golden_csv_via_run_file` (`examples/csv.chz`/`.expected` +
+> `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md § std.csv`, `docs/gaps.md §7` (SHIPPED).
+> Deferred v1: streaming/Reader, header→Map mapping, custom-delimiter/TSV `parse_sep`.
+>
 > **✅ STDLIB (2026-07-16, `auto-task/io-isatty`) — `docs/gaps.md` §6: TTY detection.** Three
 > module-level bool natives on the file-backed `std.io` module: `io.isatty()` / `io.isatty_stdin()` /
 > `io.isatty_stderr()` `-> bool`, each one line via `std::io::IsTerminal` on stdout/stdin/stderr. Lets

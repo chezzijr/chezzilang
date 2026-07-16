@@ -1,0 +1,106 @@
+# std.csv — RFC 4180 CSV read/write, pure Chezzi (no native seam).
+#
+# A dogfood module: parse/format are plain string-scanning over the core str primitives
+# (indexing s[i:i+1], len, concat, join) plus std.string.replace/index_of for the quote-doubling
+# in format. Identical across all engines (interp / VM / --parallel) — pure compute, no IO.
+#
+# ===== CONTRACT (load-bearing semantics) =====
+# * SEPARATOR: comma. Fields are separated by `,`, records by CRLF or LF (parse accepts both;
+#   format emits CRLF per RFC 4180). A field wrapped in double-quotes may contain commas, CR, LF
+#   and escaped quotes (`""` inside a quoted field = one literal `"`).
+# * SPACES are significant — never trimmed (leading/trailing spaces are ordinary chars).
+# * A trailing record separator does NOT produce a spurious empty final record.
+# * EMPTY input -> [] (empty list); format([]) -> "".
+# * BLANK interior line -> a single-empty-field record [""] (this is what round-trips through
+#   format's field model). NOTE: this differs from Python's csv, which maps a blank line to []
+#   (an empty record) — chosen so parse(format(rows)) == rows holds.
+# * ROUND-TRIP LIMIT (property of CSV, not a bug): a SOLE or TRAILING all-empty record cannot
+#   round-trip — format([[""]]) == "" and parse("") == [], because CSV cannot encode a trailing
+#   blank line distinctly from no trailing newline. An empty record round-trips only when
+#   sandwiched between non-empty records.
+#
+# ponytail: no streaming/Reader, no header->Map mapping, no custom-delimiter/TSV arg (v1 YAGNI).
+# A `sep` param would thread through both the parser branch and needs_quote and complicate the
+# (fiddly) quote machine for a v1 nobody asked for — add a `parse_sep(text, sep)` follow-up if TSV
+# is ever actually needed.
+
+import std.string as s
+
+# Parse RFC 4180 CSV text into records of string fields.
+fn parse(text: str) -> List[List[str]]:
+    rows: List[List[str]] = []
+    row: List[str] = []
+    field := ""
+    in_quotes := false
+    started := false   # governs ONLY the EOF flush: a trailing separator leaves started=false
+    n := text.len()
+    i := 0
+    while i < n:
+        c := text[i : i + 1]
+        if in_quotes:
+            if c == "\"":
+                if i + 1 < n and text[i + 1 : i + 2] == "\"":
+                    field = field + "\""   # "" -> one literal quote
+                    i += 2
+                else:
+                    in_quotes = false      # lone quote closes the quoted field
+                    i += 1
+            else:
+                field = field + c          # commas / CR / LF are literal inside quotes
+                i += 1
+        else:
+            if c == "\"":
+                in_quotes = true
+                started = true
+                i += 1
+            elif c == ",":
+                row.push(field)
+                field = ""
+                started = true
+                i += 1
+            elif c == "\r":
+                row.push(field)
+                field = ""
+                rows.push(row)
+                row = []
+                started = false
+                if i + 1 < n and text[i + 1 : i + 2] == "\n":
+                    i += 2                 # consume the LF of a CRLF pair
+                else:
+                    i += 1
+            elif c == "\n":
+                row.push(field)
+                field = ""
+                rows.push(row)
+                row = []
+                started = false
+                i += 1
+            else:
+                field = field + c
+                started = true
+                i += 1
+    if started:                            # flush an unterminated final record (no trailing sep)
+        row.push(field)
+        rows.push(row)
+    return rows
+
+# Does `f` need quoting? (contains a comma, a double-quote, a CR, or an LF)
+fn needs_quote(f: str) -> bool:
+    return s.index_of(f, ",") >= 0 or s.index_of(f, "\"") >= 0 or s.index_of(f, "\r") >= 0 or s.index_of(f, "\n") >= 0
+
+# Quote a single field iff needed, doubling embedded quotes.
+fn quote_field(f: str) -> str:
+    if needs_quote(f):
+        return "\"" + s.replace(f, "\"", "\"\"") + "\""
+    return f
+
+# Serialize records to RFC 4180 CSV text (records joined by CRLF; parse accepts CRLF or LF, so
+# either separator round-trips).
+fn format(rows: List[List[str]]) -> str:
+    lines: List[str] = []
+    for row in rows:
+        fields: List[str] = []
+        for field in row:
+            fields.push(quote_field(field))
+        lines.push(",".join(fields))
+    return "\r\n".join(lines)
