@@ -994,6 +994,19 @@ catchable by `recover:`; seed it with `fold(xs, init, f)` if the list can be emp
 for a float list use the method, which is generic) · `take(xs, n)` · `drop(xs, n)` ·
 `any(xs, pred) -> bool` · `all(xs, pred) -> bool` · `find(xs, pred) -> Option[T]` ·
 `flatten(xss) -> List[T]`.
+
+**Lazy adapters (itertools)** — return a lazy `Iterator[T]` (a generator, not a `List`), pulling from
+their source only as the consumer pulls, so an infinite source composed under `islice` terminates:
+`count(start=0, step=1) -> Iterator[int]` (infinite arithmetic counter) ·
+`repeat(x, n=-1) -> Iterator[T]` (`x` forever if `n<0`, else `n` times) ·
+`cycle(xs) -> Iterator[T]` (endlessly repeat a list's elements; **empty list = empty/immediately-done**,
+not an infinite spin) · `chain(a, b) -> Iterator[T]` (all of `a` then all of `b`; **two-arg only** in
+v1) · `islice(it, stop) -> Iterator[T]` (the first `stop` elements of any iterator; `stop<=0` = empty)
+· `imap(it, f) -> Iterator[U]` / `ifilter(it, pred) -> Iterator[T]` (the **lazy** siblings of the eager
+`map`/`filter` — named `imap`/`ifilter` since Chezzi has no overloading). The `it`-taking adapters
+(`islice`/`imap`/`ifilter`) accept **any** `Iterator[T]` — a list, set, str, user `next()` struct, or
+another generator — via the `[S: Iterator[T], T]` bound.
+
 Random helpers (call `std.rand`; seed via `rand.seed(n)` for reproducibility — these are pure-Chezzi
 because the native seam can't return a generic `List[T]`):
 `shuffle(xs) -> List[T]` (new randomly-permuted list, Fisher–Yates, non-mutating) ·

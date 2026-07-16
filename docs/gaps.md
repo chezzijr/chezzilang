@@ -32,8 +32,7 @@ One session, six gaps off this backlog's *ranked stdlib* list, run as three conc
 `datetime`, `flag`, `log`) take plain `.chz` fns + one `include_str!` line in `src/resolver/std_embed.rs`
 (guarded by `embedded_std_table_matches_disk`). Check which kind a module is before scoping a gap-fill.
 
-**STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — largest), §3 (lazy
-itertools), §4 (IO seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6
+**STILL OPEN on the ranked list after this session:** §2 (List/iter ergonomics — largest), §4 (IO seek), §5 (`divmod` needs a `NativeRet::Tuple`; decimal/bigint hard wall), §6
 (os/system — `isatty` the cheapest win), §7 (`sha1`/`sha512`/`hmac`, gzip, CSV), §8 (net depth), §9
 (`strptime`), §10 (`std.db`, config formats, `bisect`, `memoize`), §11 (`std.process` `Child`).
 
@@ -385,10 +384,14 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - Map: `get_or(k, default)` / `setdefault`, `items()`, `map_values`, `filter`. Set: `is_subset` /
   `is_superset` / `is_disjoint`.
 
-### 3. Lazy iterators (itertools) — builds on generator inference (shipped 2026-07-07)
-- No lazy adapters: `count` / `cycle` / `repeat` / `chain` / `islice` / lazy `map`/`filter`/`take` as
-  `Iterator[T]`. `std.iter` is all-eager `List`. Natural follow-up now that generators infer their
-  element type (`-> Iterator[T]` optional).
+### 3. Lazy iterators (itertools) — **SHIPPED (2026-07-16)**
+- ~~No lazy adapters: `count` / `cycle` / `repeat` / `chain` / `islice` / lazy `map`/`filter`/`take` as
+  `Iterator[T]`. `std.iter` is all-eager `List`.~~ **SHIPPED** as pure-Chezzi generators in `std.iter`:
+  `count(start=0, step=1)`, `repeat(x, n=-1)`, `cycle(xs)`, `chain(a, b)`, `islice(it, stop)`, and the
+  lazy `imap`/`ifilter` (named to avoid the eager `map`/`filter` — Chezzi has no overloading). Infinite
+  sources (`count`/`repeat`/`cycle`) terminate under `islice`. Follow-ups: `chain` is two-arg only
+  (varargs / list-of-iters later); `take(it, n)` alias dropped (collides with eager `take`; `islice`
+  covers it).
 
 ### 4. IO / files
 - **Interactive CLI — SHIPPED** (see *Interactive CLI* below): `chezzi run` streams stdout, `io.flush()`

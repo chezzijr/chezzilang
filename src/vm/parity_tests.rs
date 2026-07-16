@@ -5451,6 +5451,59 @@ fn golden_iter_more_via_run_file() {
     assert_file_parity("examples/iter_more.chz");
 }
 
+// --- lazy iterator adapters (gaps §3) — count/repeat/cycle/chain/islice/imap/ifilter ---
+// Each RUNS inline source through the graph path on BOTH engines (serial + M:N) via parity_entry
+// and asserts byte-identical stdout. The count+islice test is the laziness canary: an infinite
+// source pulled through a finite prefix MUST terminate — if it hangs, laziness broke.
+
+#[test]
+fn test_lazy_count_islice_terminates() {
+    // Infinite count() → islice prefix of 5. Must terminate.
+    let out = parity_entry(
+        "import std.iter\nfn main():\n  out:=[]\n  for x in iter.islice(iter.count(), 5): out.push(x)\n  print(out)\nmain()\n",
+    );
+    assert_eq!(out, "[0, 1, 2, 3, 4]\n");
+    // count(start, step) arithmetic + stop<=0 = empty.
+    let out2 = parity_entry(
+        "import std.iter\nfn main():\n  a:=[]\n  for x in iter.islice(iter.count(10, 3), 4): a.push(x)\n  b:=[]\n  for x in iter.islice(iter.count(), 0): b.push(x)\n  print(a)\n  print(b)\nmain()\n",
+    );
+    assert_eq!(out2, "[10, 13, 16, 19]\n[]\n");
+}
+
+#[test]
+fn test_lazy_repeat() {
+    let out = parity_entry(
+        "import std.iter\nfn main():\n  a:=[]\n  for x in iter.islice(iter.repeat(7), 3): a.push(x)\n  b:=[]\n  for x in iter.repeat(9, 2): b.push(x)\n  print(a)\n  print(b)\nmain()\n",
+    );
+    assert_eq!(out, "[7, 7, 7]\n[9, 9]\n");
+}
+
+#[test]
+fn test_lazy_cycle_and_empty() {
+    let out = parity_entry(
+        "import std.iter\nfn main():\n  a:=[]\n  for x in iter.islice(iter.cycle([1,2,3]), 7): a.push(x)\n  b:=[]\n  for x in iter.cycle([]): b.push(x)\n  print(a)\n  print(b)\nmain()\n",
+    );
+    // cycle of empty list terminates to [] (not an infinite spin).
+    assert_eq!(out, "[1, 2, 3, 1, 2, 3, 1]\n[]\n");
+}
+
+#[test]
+fn test_lazy_chain_order() {
+    let out = parity_entry(
+        "import std.iter\nfn main():\n  out:=[]\n  for x in iter.chain([1,2],[3,4]): out.push(x)\n  print(out)\nmain()\n",
+    );
+    assert_eq!(out, "[1, 2, 3, 4]\n");
+}
+
+#[test]
+fn test_lazy_imap_ifilter_compose() {
+    // Lazy map/filter over an infinite count(), sliced — must compose and terminate.
+    let out = parity_entry(
+        "import std.iter\nfn double(x:int)->int: return x*2\nfn is_even(x:int)->bool: return x%2==0\nfn main():\n  a:=[]\n  for x in iter.islice(iter.imap(iter.count(1), double), 4): a.push(x)\n  b:=[]\n  for x in iter.islice(iter.ifilter(iter.count(), is_even), 3): b.push(x)\n  print(a)\n  print(b)\nmain()\n",
+    );
+    assert_eq!(out, "[2, 4, 6, 8]\n[0, 2, 4]\n");
+}
+
 /// std.rand goldens — run as ONE test so they execute sequentially. The PRNG is a process-global
 /// (shared by VM + interp + every test in the run); two *separate* `#[test]`s seeding-then-drawing
 /// would interleave on that global under the test harness's parallel runner and diverge. Drawn

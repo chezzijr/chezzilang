@@ -134,6 +134,68 @@ fn flatten[T](xss: List[List[T]]) -> List[T]:
         out.extend(xs)
     return out
 
+# --- Lazy iterator adapters (generators) ---
+# These return a lazy `Iterator[T]` (a generator, `yield`), pulling from their source only as the
+# consumer pulls — so an infinite source (`count`, `repeat`, `cycle`) composed under `islice`
+# terminates. Python `itertools` lineage. The lazy `map`/`filter` are named `imap`/`ifilter`
+# because the eager `map`/`filter` above already own those names (Chezzi has no overloading).
+
+# Infinite arithmetic counter: start, start+step, start+2*step, … (Python `itertools.count`).
+fn count(start: int = 0, step: int = 1) -> Iterator[int]:
+    i := start
+    while true:
+        yield i
+        i = i + step
+
+# `x` forever (`n < 0`) or exactly `n` times (Python `itertools.repeat`).
+fn repeat[T](x: T, n: int = -1) -> Iterator[T]:
+    if n < 0:
+        while true:
+            yield x
+    else:
+        i := 0
+        while i < n:
+            yield x
+            i = i + 1
+
+# Endlessly repeat a list's elements (Python `itertools.cycle`). Empty list = empty/immediately-done
+# iterator (the `while` guard never enters), NOT an infinite spin.
+fn cycle[T](xs: List[T]) -> Iterator[T]:
+    while xs.len() > 0:
+        for x in xs:
+            yield x
+
+# Yield all of `a`, then all of `b` (Python `itertools.chain`).
+# ponytail: two-arg only in v1; varargs / list-of-iters is the follow-up.
+fn chain[T](a: List[T], b: List[T]) -> Iterator[T]:
+    for x in a:
+        yield x
+    for x in b:
+        yield x
+
+# The first `stop` elements of an iterator, lazily (a prefix; `stop <= 0` = empty). Pulls at most
+# `stop` elements from its source, so it terminates an infinite source (Python `itertools.islice`).
+fn islice[S: Iterator[T], T](it: S, stop: int) -> Iterator[T]:
+    i := 0
+    for x in it:
+        if i >= stop:
+            break
+        yield x
+        i = i + 1
+
+# Lazy `map`: apply `f` to each element of an iterator, yielding results (the lazy sibling of the
+# eager list `map`). Named `imap` because `map` is taken.
+fn imap[S: Iterator[T], T, U](it: S, f: fn(T) -> U) -> Iterator[U]:
+    for x in it:
+        yield f(x)
+
+# Lazy `filter`: keep the elements for which `pred` holds, yielding them (the lazy sibling of the
+# eager list `filter`). Named `ifilter` because `filter` is taken.
+fn ifilter[S: Iterator[T], T](it: S, pred: fn(T) -> bool) -> Iterator[T]:
+    for x in it:
+        if pred(x):
+            yield x
+
 # --- Random helpers (call native rand.int; seed with rand.seed(n) for deterministic output) ---
 
 # Return a NEW list with the elements of `xs` randomly permuted (Fisher–Yates). Non-mutating:
