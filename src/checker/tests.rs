@@ -5453,6 +5453,106 @@ fn outer_local_shadowed_by_later_loop_var_stays_mutable() {
     ok("i := 5\ni = 7\nfor i in 0..3:\n    print(i)\ni = 9\nprint(i)\n");
 }
 
+// ===== const bindings (L4: immutable binding modifier) =====
+
+#[test]
+fn const_global_reassign_rejected() {
+    rejects("PI: const float = 3.14\nPI = 3.0\n", "const");
+}
+
+#[test]
+fn const_global_compound_assign_rejected() {
+    rejects("N: const int = 10\nN += 1\n", "const");
+}
+
+#[test]
+fn const_local_reassign_rejected() {
+    rejects("fn f():\n    x: const int = 1\n    x = 2\n", "const");
+}
+
+#[test]
+fn const_runtime_init_ok() {
+    // `const` is a binding modifier, not a compile-time constant — a runtime RHS is fine.
+    ok("fn compute() -> int:\n    return 5\nX: const int = compute()\nprint(X)\n");
+}
+
+#[test]
+fn const_shallow_list_mutation_ok() {
+    // Shallow: the NAME is frozen, but the object it points at is still mutable.
+    ok("xs: const List[int] = [1, 2]\nxs.push(3)\nxs[0] = 9\nprint(xs)\n");
+}
+
+#[test]
+fn const_captured_in_closure_reassign_rejected() {
+    // A nested fn that reassigns a captured const must be rejected inside the closure body.
+    rejects(
+        "fn outer():\n    C: const int = 1\n    fn inner():\n        C = 2\n    inner()\n",
+        "const",
+    );
+}
+
+#[test]
+fn const_same_scope_walrus_redeclare_rejected() {
+    // `:=` must NOT be able to un-const a live const in the same scope (for a module global it is
+    // the SAME storage slot, so this would silently defeat the guarantee, not shadow it).
+    rejects("X: const int = 1\nX := 2\nX = 3\n", "const");
+}
+
+#[test]
+fn const_same_scope_typed_redeclare_rejected() {
+    rejects("X: const int = 1\nX: int = 2\n", "const");
+}
+
+#[test]
+fn const_shadow_in_inner_scope_ok() {
+    // A genuine inner-scope shadow (a fresh local named like an outer const) is still fine — the
+    // outer const is untouched; only same-scope re-declaration is the escape we reject.
+    ok("PI: const float = 3.14\nfn f():\n    PI := 9.0\n    PI = 10.0\n    print(PI)\n");
+}
+
+#[test]
+fn const_read_and_alias_ok() {
+    // Reading a const, and binding a fresh (mutable) name to its value, are both fine.
+    ok("K: const int = 7\ny := K + 1\ny = 100\nprint(K)\nprint(y)\n");
+}
+
+#[test]
+fn const_cannot_reach_ref_param_backdoor_closed() {
+    // The only way to mutate a value through a `ref` param is to pass a `ref`-declared local — a
+    // by-value local (which a const always is) is refused at desugar. Combined with the parser's
+    // `ref const` rejection, a const can NEVER be aliased into a ref param. Prove the wall stands.
+    let tokens =
+        lexer::tokenize("fn bump(x: ref int):\n    x = x + 1\nC: const int = 5\nbump(C)\n")
+            .expect("lex should succeed");
+    let mut module = parser::parse(tokens).expect("parse should succeed");
+    let err = crate::desugar::run_standalone(&mut module)
+        .expect_err("a const (by-value) must not be passable to a ref param");
+    assert!(
+        err.message.contains("ref` parameter"),
+        "expected the by-value-to-ref rejection, got: {err:?}"
+    );
+}
+
+#[test]
+fn const_from_imported_rebind_names_const() {
+    // A from-imported const, rebound, gets a const-specific message (not the snapshot-mutator one
+    // whose "call a mutator fn" advice is wrong for an immutable value). `math.pi` is a native const.
+    let errs = check_entry("import pi from std.math\npi = 3.0\n");
+    assert!(
+        errs.iter().any(|e| e.message.contains("const")),
+        "expected a const-specific message, got: {errs:?}"
+    );
+}
+
+#[test]
+fn const_qualified_module_write_names_const() {
+    let errs = check_entry("import std.math\nmath.pi = 3.0\n");
+    assert!(
+        errs.iter().any(|e| e.message.contains("const")),
+        "expected a const-specific message, got: {errs:?}"
+    );
+}
+
 // ===== break / continue =====
 
 #[test]

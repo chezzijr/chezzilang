@@ -4,6 +4,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE (2026-07-17, `feat/const-binding`) — `docs/gaps.md` L4: `const` immutable bindings.**
+> `const T` is a binding modifier in the same type-slot as `ref` (`PI: const float = 3.14`); the
+> checker rejects any later reassignment of the name (`=` + every compound). Immutable *binding*, not a
+> compile-time constant — runtime RHS is fine (JS `const`/Java `final`), and **shallow** (freezes the
+> name; a `const` container's contents stay mutable). Locals + module globals only; parse-rejected on
+> params, `:=`/destructuring, and `ref const`. Const-ness rides `ModuleSig.const_values`, so a
+> from-import / qualified rebind of a `const` global (or a native constant `math.pi`/`e`/`inf`/`nan`)
+> reports it as const, not as a mutable snapshot/field. Mirrors the `ref` `const_decls` sidecar
+> end-to-end; **compile-time-only, zero VM change, byte-identical on both engines**
+> (`golden_const_binding_via_run_file`). Visibility (`pub`/`_`) deliberately deferred until R3. Docs:
+> `syntax.md §const T`, `grammar.bnf`, `stdlib.md §std.math`, `examples/const_binding.chz`.
+
 > **✅ ENGINE + STDLIB (2026-07-17) — HYBRID native+Chezzi std module (a `std/*.chz` may mix bodyless
 > `native fn` decls with BODIED Chezzi `fn`s); first user: `math.divmod`.** Resolves the architectural
 > fork where a native module was harvested for SIGNATURES only then `continue`d past `check_module`

@@ -319,7 +319,9 @@ Number / integer functions (Python `math` semantics):
   input Errs (never faults). `base 0` auto-detects a `0x`/`0o`/`0b` prefix (else decimal); bases `2`/`8`/`16`
   also accept the matching prefix. A leading `+`/`-` sign is allowed (`parse_int_base("-2a", 16)` → `-42`).
 
-Constants: `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN; `math.nan != math.nan`).
+Constants (all `const` — reassigning `math.pi`, or `import pi from std.math; pi = x`, is a type
+error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN;
+`math.nan != math.nan`).
 
 ### `std.io`
 | Function | Signature | Notes |

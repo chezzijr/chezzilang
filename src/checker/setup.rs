@@ -9,6 +9,7 @@ impl Checker {
             errors: Vec::new(),
             scopes: Vec::new(),
             ref_decls: Vec::new(),
+            const_decls: Vec::new(),
             loop_vars: Vec::new(),
             capture_table: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
@@ -61,6 +62,7 @@ impl Checker {
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
             imported_values: HashMap::new(),
+            imported_consts: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
@@ -948,6 +950,7 @@ impl Checker {
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
         self.imported_values.clear();
+        self.imported_consts.clear();
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
         self.imported_time.clear();
@@ -1354,6 +1357,11 @@ impl Checker {
                         // The bind is a SNAPSHOT copy of the module global — rebinding it is rejected
                         // in `check_assign` (see `imported_values`).
                         self.imported_values.insert(bind.clone(), path.join("."));
+                        // Carry the source's const-ness so the rebind guard names it const, not just
+                        // "a snapshot copy" (whose "call a mutator fn" advice is wrong for a const).
+                        if sig.const_values.contains(member) {
+                            self.imported_consts.insert(bind.clone());
+                        }
                     } else if sig.types.contains(member) {
                         // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
                         // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
@@ -1611,10 +1619,17 @@ impl Checker {
                         sig.functions.insert(decl.name.clone(), fsig.clone());
                     }
                 }
-                StmtKind::Let { names, .. } => {
+                StmtKind::Let {
+                    names, is_const, ..
+                } => {
                     for name in names {
                         if let Some(ty) = self.lookup(name) {
                             sig.values.insert(name.clone(), ty);
+                            // Export const-ness so an importer's rebind names it const (a `const` let
+                            // is single-name, so this only ever marks the one binding).
+                            if *is_const {
+                                sig.const_values.insert(name.clone());
+                            }
                         }
                     }
                 }
@@ -1794,12 +1809,14 @@ impl Checker {
         self.scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.ref_decls.push(std::collections::HashSet::new());
+        self.const_decls.push(std::collections::HashSet::new());
         self.capture_table.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         self.scopes.pop();
         self.loop_vars.pop();
         self.ref_decls.pop();
+        self.const_decls.pop();
         self.capture_table.pop();
     }
     /// Record `name` (already declared in the current scope) as a `ref T` binding/param.
@@ -1817,11 +1834,33 @@ impl Checker {
         }
         false
     }
+    /// Record `name` (already declared in the current scope) as a `const T` binding.
+    pub(super) fn declare_const(&mut self, name: &str) {
+        if let Some(set) = self.const_decls.last_mut() {
+            set.insert(name.to_string());
+        }
+    }
+    /// Is `name` an in-scope `const T` binding (innermost binding wins, shadowing-aware)? A `const`
+    /// captured by a nested fn stays const inside the closure body — the enclosing scope is still on
+    /// the stack, so this resolves through it exactly like `is_ref_decl`.
+    pub(super) fn is_const_decl(&self, name: &str) -> bool {
+        for (vars, consts) in self.scopes.iter().zip(self.const_decls.iter()).rev() {
+            if vars.contains_key(name) {
+                return consts.contains(name);
+            }
+        }
+        false
+    }
     pub(super) fn declare(&mut self, name: &str, ty: Ty) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
         // Re-declaring a name (e.g. `:=` shadowing a loop var in the same scope) yields a fresh,
         // mutable binding — clear any loop-var mark so assignment to it isn't wrongly rejected.
         if let Some(set) = self.loop_vars.last_mut() {
+            set.remove(name);
+        }
+        // Same rule for a `const` binding: a re-declaration in the same scope is a fresh binding
+        // (mutable unless `declare_const` re-marks it), so clear any stale const mark first.
+        if let Some(set) = self.const_decls.last_mut() {
             set.remove(name);
         }
         // Same rule for a `from`-imported global: re-declaring it at MODULE scope (`COUNT := COUNT + 1`)

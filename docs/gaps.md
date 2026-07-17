@@ -634,11 +634,22 @@ Given that, the three "holes" are narrow and NOT worth building:
 - **Downcast out of the `Error` existential** (`errors.As`). Needs **R4**, which is won't-do — avoid by
   keeping the error a typed enum and `match`ing it before laundering to `Error`. **Won't-do.**
 
-### L4. No `const`, no visibility
-No `const`/`final` keyword (every module global and struct field is mutable); no `pub`/private (every
-name in a module is importable). (Go: `const` + capitalization export; Python: convention + `__all__`.)
-`const` is small (a checker flag on the binding); visibility is small-to-medium (resolver + `ModuleSig`
-filter). Matters much more once **R3** lands and people publish libraries with an intended API surface.
+### L4. ~~No `const`~~ — **`const` SHIPPED (2026-07-17)**; visibility still open
+- ~~No `const`/`final` keyword.~~ **SHIPPED.** `const T` is an immutable *binding* modifier in the
+  same type-slot as `ref` (`PI: const float = 3.14`) — the checker rejects any later reassignment
+  (`=` + every compound). Immutable binding, NOT a compile-time constant (runtime RHS is fine, JS
+  `const`/Java `final` semantics), and **shallow** (freezes the name; a `const` container's contents
+  stay mutable). Locals + module globals only; rejected on params/`:=`/destructuring and `ref const`.
+  Const-ness rides `ModuleSig.const_values` so a from-import/qualified rebind of a `const` global (or a
+  native constant `math.pi`/`e`/`inf`/`nan`) reports it as const. Mirrors the `ref` sidecar end-to-end
+  (`const_decls`); compile-time-only, zero VM/parity change. See `syntax.md §const T`,
+  `examples/const_binding.chz`.
+- **STILL OPEN — visibility.** No `pub`/private (every name in a module is importable). (Go:
+  capitalization export; Python: convention + `__all__`.) Small-to-medium (resolver + `ModuleSig`
+  filter). **Deferred**: it guards a boundary only **R3** (package manager) opens — with one author and
+  no external importers, enforced privacy protects nothing yet. Do it when R3 lands. (`_`-prefix is the
+  chosen spelling — Python-consistent, no new keyword, and std already uses it by convention.)
+- Struct-**field** immutability (a `const` field) is a separate, unshipped axis (fields are all mutable).
 
 ### L5. Operator-protocol holes
 The reserved set (`Add Sub Mul Div Mod Neg Arithmetic Comparable Stringable Hashable Index IndexSet

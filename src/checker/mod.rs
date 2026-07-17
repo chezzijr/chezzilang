@@ -609,6 +609,10 @@ struct VariantInfo {
 struct ModuleSig {
     functions: HashMap<String, FnSig>,
     values: HashMap<String, Ty>,
+    /// Subset of `values` declared `const` (a `const` top-level let, or a native constant). Carried
+    /// across the module boundary so an importer's rebind of the name (`import PI from m; PI = x`, or
+    /// qualified `m.PI = x`) reports a const-specific message instead of the generic snapshot/field one.
+    const_values: std::collections::HashSet<String>,
     types: std::collections::HashSet<String>,
     /// Native functions whose result type follows their argument type (int args → int, float args
     /// → float) instead of the fixed `FnSig` (gap #12: `std.math` `abs`/`min`/`max`). The `FnSig`
@@ -1286,6 +1290,9 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
     }
     for (cname, _) in crate::native::native_consts(name) {
         sig.values.insert((*cname).to_string(), Ty::Float);
+        // A native module constant (`math.pi`/`e`/`inf`/`nan`) is immutable — mark it const so a
+        // rebind (`m.pi = x` or `import pi from m; pi = x`) reports it as const, not a mutable field.
+        sig.const_values.insert((*cname).to_string());
     }
     if let Some((_, polys)) = MODULE_NUMERIC_POLY.iter().find(|(m, _)| *m == name) {
         for p in *polys {
@@ -1455,6 +1462,11 @@ struct Checker {
     /// `ref` binding renders `ref T` (via `ref_display`), but one about an explicit `Ref[T]` keeps
     /// `Ref[T]` (the user wrote `Ref`). Charge-5 transparency without lying in the other direction.
     ref_decls: Vec<std::collections::HashSet<String>>,
+    /// Per-scope set of names declared `const T` (mirrors `scopes` index-for-index). A const binding
+    /// is immutable: `check_assign` rejects any later reassignment of the name. Compile-time-only
+    /// (freezes the NAME; the object stays mutable — shallow). Cleared on re-declaration by `declare`
+    /// (a shadowing `:=` yields a fresh, possibly-mutable binding), same rule as `loop_vars`.
+    const_decls: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
@@ -1644,6 +1656,10 @@ struct Checker {
     /// the qualified form (`st.COUNT = 5`). Mutating THROUGH the binding (`LST.push(7)`) is untouched:
     /// a container is the same heap object. Per-module: cleared in `begin_module`.
     imported_values: HashMap<String, String>,
+    /// Subset of `imported_values` whose source binding was `const` (a native constant, or a `const`
+    /// top-level let). The rebind guard reports these as const rather than as a mutable snapshot copy.
+    /// Per-module: cleared in `begin_module` alongside `imported_values`.
+    imported_consts: std::collections::HashSet<String>,
     /// Fixed-width C-ABI integer TYPE names (`int8`..`uint64`) imported into the *current* module from
     /// `std.ffi` (`import int32 from std.ffi`). These are NOT callable values — they only gate
     /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type

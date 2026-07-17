@@ -57,9 +57,13 @@
 # (`r: ref int = 0`) — sugar that lowers to a `Ref[T]` box. Legal ONLY here and on a <param> type;
 # rejected in every other type position (return type, generic arg, collection element, struct field,
 # tuple element — none of which admit REF before <type>) and on a destructuring (<identList>) let.
+# An optional `CONST` in the same slot is the `const T` immutable-binding modifier
+# (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `REF` and `CONST`
+# are mutually exclusive; `CONST` is likewise rejected on a <param> type and on a destructuring let.
 <letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
             | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
             | "IDENT" "COLON" "REF" <type> "ASSIGN" <expr> "NEWLINE"
+            | "IDENT" "COLON" "CONST" <type> "ASSIGN" <expr> "NEWLINE"
             | <identList> "WALRUS" <expr> "NEWLINE"
             # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
             # trailing NEWLINE (mirrors the parser's `expect_stmt_end`).

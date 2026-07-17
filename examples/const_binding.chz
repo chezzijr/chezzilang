@@ -1,0 +1,39 @@
+# examples/const_binding.chz — `const T`: immutable binding modifier (L4).
+#
+# `const` freezes the NAME: the checker rejects any later reassignment (`=`, `+=`, …). It is a
+# BINDING modifier, not a compile-time constant — the RHS may be any runtime expression, evaluated
+# once. It is SHALLOW: a `const` container's own contents stay mutable (only the name is frozen).
+# Locals + module globals only (never a parameter); mutually exclusive with `ref`.
+
+# A module-global const, and a const initialized from a runtime call.
+PI: const float = 3.14159
+
+fn compute() -> int:
+    return 6 * 7
+
+ANSWER: const int = compute()      # runtime init is fine — const ≠ constexpr
+
+print(PI)                          # 3.14159
+print(ANSWER)                      # 42
+
+# Reading a const and binding a fresh, mutable name to its value.
+doubled := ANSWER * 2
+doubled = doubled + 1
+print(doubled)                     # 85
+
+# SHALLOW: the const name is frozen, but the List it points at is still mutable.
+xs: const List[int] = [1, 2]
+xs.push(3)
+xs[0] = 9
+print(xs)                          # [9, 2, 3]
+
+# A const local inside a function.
+fn area(r: int) -> int:
+    factor: const int = 3          # crude pi
+    return factor * r * r
+
+print(area(2))                     # 12
+
+# --- Rejected at type-check (uncomment any line to see the error) ---
+# PI = 3.0                         # cannot reassign const binding 'PI'
+# ANSWER += 1                      # cannot reassign const binding 'ANSWER'

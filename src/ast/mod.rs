@@ -44,6 +44,12 @@ pub enum StmtKind {
         /// rejection) and consumed by desugar (read/write/init lowering); both engines see only the
         /// already-lowered `Ref`/`.get()`/`.set()` forms, so they ignore this flag.
         is_ref: bool,
+        /// True for a `const T` binding (`PI: const int = 3`) — an immutable binding: the checker
+        /// rejects any later reassignment of the name. Only ever set on a single-name typed let
+        /// (the parser rejects `const` on params/`:=`/destructuring, and `ref const`/`const ref`).
+        /// Compile-time-only, like a rejected reassignment: never read by desugar/compiler or either
+        /// engine (`const` freezes the NAME; the object it points at stays mutable — shallow).
+        is_const: bool,
         /// Doc-comment: the contiguous run of `#` comment lines immediately above this `let`
         /// (blank line detaches). Purely informational (surfaced on LSP hover for top-level lets);
         /// runtime-inert — never read by desugar/compiler/checker codegen or either engine.

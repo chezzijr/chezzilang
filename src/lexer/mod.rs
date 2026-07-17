@@ -77,6 +77,10 @@ pub enum Token {
     /// A full keyword (corpus-safe: no `.chz` uses `ref` as a bare identifier). Legal only as a
     /// type prefix in the two binding positions; the parser rejects it everywhere else.
     Ref,
+    /// `const` — the immutable-binding modifier (`PI: const float = 3.14`). A full keyword
+    /// (corpus-safe: no `.chz` uses `const` as a bare identifier). Legal only as a type prefix in
+    /// a single-name typed let; the parser rejects it on params, `:=`, and destructuring.
+    Const,
     And,
     Or,
     Not,
@@ -225,6 +229,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("from", Token::From),
     ("as", Token::As),
     ("ref", Token::Ref),
+    ("const", Token::Const),
     ("and", Token::And),
     ("or", Token::Or),
     ("not", Token::Not),

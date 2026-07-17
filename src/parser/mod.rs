@@ -452,10 +452,20 @@ impl Parser {
             let name_span = self.cur_span();
             let name = self.expect_ident()?;
             self.expect(&Token::Colon)?;
-            // `r: ref T = …` — a by-reference binding. `ref` is consumed only here (a binding
-            // position); `parse_type` never eats it, so it is a parse error in any other type
-            // position (return type, generic arg, collection element, struct field, tuple element).
-            let is_ref = self.eat(&Token::Ref);
+            // `r: ref T = …` / `PI: const T = …` — binding modifiers in the type slot. `ref`/`const`
+            // are consumed only here; `parse_type` never eats them, so either is a parse error in any
+            // other type position. `ref` and `const` are mutually exclusive (a by-reference alias
+            // cannot also be immutable); accept them in either written order, then reject the combo.
+            let mut is_ref = self.eat(&Token::Ref);
+            let is_const = self.eat(&Token::Const);
+            if is_const {
+                is_ref = is_ref || self.eat(&Token::Ref); // catch `const ref`
+            }
+            if is_ref && is_const {
+                return Err(
+                    self.err("`ref` and `const` cannot be combined on one binding".to_string())
+                );
+            }
             let ty = self.parse_type()?;
             self.expect(&Token::Assign)?;
             let value = self.parse_expr()?;
@@ -465,6 +475,7 @@ impl Parser {
                 ty: Some(ty),
                 value,
                 is_ref,
+                is_const,
                 doc: stmt_doc,
             });
         }
@@ -509,6 +520,7 @@ impl Parser {
                     ty: None,
                     value,
                     is_ref: false,
+                    is_const: false,
                     doc: stmt_doc,
                 });
             }
@@ -596,6 +608,7 @@ impl Parser {
                     ty: None,
                     value,
                     is_ref: false,
+                    is_const: false,
                     doc: stmt_doc,
                 });
             }
@@ -1184,6 +1197,13 @@ impl Parser {
                 let mut is_ref = false;
                 let ty = if self.eat(&Token::Colon) {
                     is_ref = self.eat(&Token::Ref);
+                    // `const` is a binding modifier (locals + module globals), never valid on a
+                    // parameter — reject it explicitly rather than letting `parse_type` fail obscurely.
+                    if self.peek() == &Token::Const {
+                        return Err(self.err(
+                            "`const` is a binding modifier, not valid on parameters".to_string(),
+                        ));
+                    }
                     Some(self.parse_type()?)
                 } else {
                     None
@@ -6857,5 +6877,41 @@ mod tests {
     fn two_level_type_path_parses() {
         // `c.Shared[int]` is a valid qualified type annotation.
         parse_ok("fn f(x: c.Shared[int]): print(1)\n");
+    }
+
+    // ===== const binding modifier =====
+
+    #[test]
+    fn const_typed_let_parses() {
+        parse_ok("PI: const float = 3.14\n");
+    }
+
+    #[test]
+    fn const_and_ref_combined_rejected() {
+        assert!(
+            parse_err("r: ref const int = 0\n")
+                .message
+                .contains("cannot be combined")
+        );
+        assert!(
+            parse_err("r: const ref int = 0\n")
+                .message
+                .contains("cannot be combined")
+        );
+    }
+
+    #[test]
+    fn const_on_param_rejected() {
+        assert!(
+            parse_err("fn f(x: const int): print(1)\n")
+                .message
+                .contains("not valid on parameters")
+        );
+    }
+
+    #[test]
+    fn const_without_type_rejected() {
+        // `const` sits in the type slot, so a type must follow it (no inferred-type const in v1).
+        assert!(parse(lexer::tokenize("x: const = 5\n").unwrap()).is_err());
     }
 }

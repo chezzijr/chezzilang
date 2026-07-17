@@ -280,6 +280,43 @@ print(r + 100)     # 106 — usable anywhere its value is
   exception: it is a **read-only global** resolvable in every task (not a per-task capture), so reading
   it inside a task is fine and it is never gated.
 
+### `const T` — immutable bindings
+
+`const T` is a **binding modifier** (in the same type-slot as `ref`) that freezes the **name**: the
+checker rejects any later reassignment. It is an **immutable binding**, *not* a compile-time
+constant (Rust `const`/Go `const`) — the RHS is any runtime expression, evaluated once. Think JS
+`const` / Java `final`.
+
+```chezzi
+PI: const float = 3.14159
+ANSWER: const int = 6 * 7     # runtime RHS is fine — const ≠ constexpr
+PI = 3.0                      # ✗ type error: cannot reassign const binding 'PI'
+ANSWER += 1                   # ✗ every compound form is caught too
+```
+
+- **Shallow.** `const` freezes the binding, not the object it points at. A `const` container's own
+  contents stay mutable — only the name can't be rebound:
+
+  ```chezzi
+  xs: const List[int] = [1, 2]
+  xs.push(3)                    # ✓ mutating THROUGH the const is fine
+  xs[0] = 9                     # ✓ (index/field assignment is object mutation, not a rebind)
+  xs = [4]                      # ✗ rebinding the NAME is the error
+  ```
+- **Where it's allowed.** Locals + module globals **only**, and a **single-name typed** let. `const`
+  is a **parse error** on a parameter, on a `:=`/destructuring binding, and combined with `ref`
+  (`ref const` — an immutable by-reference alias is a contradiction). An explicit type is required
+  (`const` sits in the type slot).
+- **No laundering via re-declaration.** A live const cannot be re-declared in the **same scope** —
+  `PI := 9.0` or a second `PI: float = 9.0` after `PI: const float = 3.14` is a **type error**, so
+  the guarantee can't be dropped by swapping `=` for `:=`. A genuine **inner-scope** shadow (a fresh
+  local of the same name in a nested block/fn) is still fine — it leaves the outer const untouched.
+- **Across modules.** A `const` module global (and a native constant like `math.pi`/`e`/`inf`/`nan`)
+  carries its const-ness to importers: `import PI from m; PI = x` and the qualified `m.PI = x` both
+  report *"it is declared const in module 'm'"* rather than the generic snapshot/field message. (Note
+  that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
+  const marking sharpens the message, it doesn't add the restriction.)
+
 ### Closure capture — uniformly by reference
 
 Capture is **by reference, always**. A closure (and a `spawn:` / `parallel:` / `defer:` block)

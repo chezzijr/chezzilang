@@ -933,6 +933,8 @@ impl Walker<'_> {
                 ty,
                 value,
                 is_ref,
+                // `const` is not lowered here (compile-time-only; the checker enforces it) — ignore.
+                is_const: _,
                 doc: _,
             } => {
                 if *is_ref && self.lower_refs {

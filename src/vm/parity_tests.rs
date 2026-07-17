@@ -6303,6 +6303,20 @@ fn golden_ref_binding_via_run_file() {
     assert_file_parity("examples/ref_binding.chz");
 }
 
+/// `const T` golden: `examples/const_binding.chz` — the immutable binding modifier. A module-global
+/// const, a runtime-initialized const (const ≠ constexpr), reading + aliasing a const, SHALLOW
+/// mutation of a `const` List (name frozen, contents mutable), and a const local. `const` is
+/// compile-time-only (never lowered), so the VM engines are byte-identical by construction.
+#[test]
+fn golden_const_binding_via_run_file() {
+    let path = fixture("examples/const_binding.chz");
+    let expected = std::fs::read_to_string(fixture("examples/const_binding.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert_file_parity("examples/const_binding.chz");
+}
+
 /// `ref T` indirect-callee golden: `examples/ref_indirect.chz` — the type-directed arg coercion
 /// (alias / deref / by receiver type) reached through a LOCAL fn-value, a closure, and a method
 /// name shared across structs that disagree on ref-ness — including EXPRESSION receivers (an

@@ -1635,9 +1635,11 @@ impl Checker {
                 ty,
                 value,
                 is_ref,
+                is_const,
                 ..
             } => {
                 let is_ref = *is_ref;
+                let is_const = *is_const;
                 // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
                 // resolve the annotation first so its unannotated params bind to the slot's param
                 // types. Only the single-name, non-`ref`, `fn`-typed case (a `ref` pointee is never a
@@ -1774,9 +1776,29 @@ impl Checker {
                     };
                     self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
+                // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
+                // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
+                // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
+                // const mark). An INNER-scope binding of the same name is a genuine fresh shadow and is
+                // untouched (the outer scope's const set is not `.last()`). Skipped during return
+                // inference, whose truncate-and-rerun can re-walk a body within one open scope.
+                if !self.inferring_ret
+                    && self
+                        .const_decls
+                        .last()
+                        .is_some_and(|s| s.contains(name.as_str()))
+                {
+                    self.error(
+                        span,
+                        format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
+                    );
+                }
                 self.declare(name, declared);
                 if is_ref {
                     self.declare_ref(name);
+                }
+                if is_const {
+                    self.declare_const(name);
                 }
                 // B3.3 (Task 2a): a closure bound to a name records its non-sendable LOCAL captures
                 // keyed by the binding, so a later `spawn <name>()` (or `spawn f(<name>)`) rejects a
@@ -2535,6 +2557,18 @@ impl Checker {
                     );
                     return;
                 }
+                // A `const` binding is immutable: reject any reassignment of the NAME (covers `=` and
+                // every compound `+=`/`-=`/…, which all route through here). Mutating THROUGH it
+                // (`xs.push(v)`, `xs[i] = v`) is a different arm and stays allowed — const is shallow.
+                // Not fired for a from-imported const (that name is not in `const_decls`; its rebind is
+                // caught by the imported-global guard below, which names const when it is one).
+                if self.is_const_decl(name) {
+                    self.error(
+                        target.span,
+                        format!("cannot reassign const binding '{name}'"),
+                    );
+                    return;
+                }
                 // Uniform by-reference capture: a `spawn:` task gets its OWN per-task copy of a
                 // captured LOCAL (the airlock deep-copies its cell), so reassigning it is allowed —
                 // the write mutates the isolated copy and is NOT visible to the parent (design §4 F1,
@@ -2551,12 +2585,14 @@ impl Checker {
                 if self.resolves_at_module_scope(name)
                     && let Some(m) = self.imported_values.get(name).cloned()
                 {
-                    self.error(
-                        target.span,
+                    let msg = if self.imported_consts.contains(name) {
+                        format!("cannot reassign '{name}' — it is declared const in module '{m}'")
+                    } else {
                         format!(
                             "cannot assign to '{name}' imported from module '{m}' (a from-imported global is a snapshot copy — call a mutator fn in that module, or use a Shared/Ref)"
-                        ),
-                    );
+                        )
+                    };
+                    self.error(target.span, msg);
                     return;
                 }
                 if self.is_captured(name) && !self.is_local_capture(name) {
@@ -2727,6 +2763,22 @@ impl Checker {
                         }
                     }
                     Ty::Unknown => {}
+                    // A module member (`math.pi = x`) is never assignable. If it is a `const`, say so
+                    // (a wrong "call a mutator fn" cure would otherwise be implied for an immutable).
+                    Ty::Module(mname)
+                        if self
+                            .imported_modules
+                            .get(mname)
+                            .and_then(|id| self.module_sigs.get(id))
+                            .is_some_and(|sig| sig.const_values.contains(name)) =>
+                    {
+                        self.error(
+                            target.span,
+                            format!(
+                                "cannot reassign '{name}' — it is declared const in module '{mname}'"
+                            ),
+                        );
+                    }
                     other => self.error(
                         target.span,
                         format!("cannot assign to field '{name}' of {other}"),
