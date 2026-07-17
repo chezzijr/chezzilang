@@ -6216,6 +6216,48 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
     );
 }
 
+/// gaps.md B4: an uncaught fault thrown from an `Executor.submit(...)` closure must print the SAME
+/// backtrace frames on both engines. Previously `--serial` drained the submitted task INLINE on the
+/// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
+/// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
+/// worker's trace, printing only `at main`. Both engines now converge on `[main]` — matching a plain
+/// nursery-task panic (already `at main` on both engines, asserted by the neighbor guard below).
+#[test]
+fn executor_task_fault_trace_matches_on_both_engines() {
+    let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Executor.submit path.
+    let ex_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    ex.shutdown()\nmain()\n";
+    let ex_path = dir.join("ex.chz");
+    std::fs::write(&ex_path, ex_src).unwrap();
+    let (_o, _e, se, _) = run_file(&ex_path);
+    let (_o, _e, mn, _) = run_file_p(&ex_path);
+    let se = se.expect_err("serial should fault");
+    let mn = mn.expect_err("M:N should fault");
+    let se_names: Vec<&str> = se.trace.iter().map(|f| f.function.as_str()).collect();
+    let mn_names: Vec<&str> = mn.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(se_names, vec!["main"], "serial Executor trace == [main]");
+    assert_eq!(mn_names, vec!["main"], "M:N Executor trace == [main]");
+    // Soundness invariants (message + location) stay identical across engines.
+    assert_eq!(se.message, mn.message, "same fault message");
+    assert_eq!(se.span, mn.span, "same fault location");
+
+    // Neighbor guard: a plain nursery-task panic (non-Executor) was already `at main` on both
+    // engines — the fix must not regress it.
+    let nu_src = "fn boom():\n    panic(\"kaboom\")\nfn main():\n    parallel:\n        spawn: boom()\nmain()\n";
+    let nu_path = dir.join("nu.chz");
+    std::fs::write(&nu_path, nu_src).unwrap();
+    let (_o, _e, nse, _) = run_file(&nu_path);
+    let (_o, _e, nmn, _) = run_file_p(&nu_path);
+    let nse = nse.expect_err("serial nursery should fault");
+    let nmn = nmn.expect_err("M:N nursery should fault");
+    let nse_names: Vec<&str> = nse.trace.iter().map(|f| f.function.as_str()).collect();
+    let nmn_names: Vec<&str> = nmn.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(nse_names, vec!["main"], "serial nursery trace unchanged");
+    assert_eq!(nmn_names, vec!["main"], "M:N nursery trace unchanged");
+}
+
 /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on
 /// literals, a global times a literal, and a function call (free fns + struct fields). Byte-matches
 /// `.expected`, identical on interp + VM.

@@ -1914,6 +1914,16 @@ impl Vm {
                         self.push(task);
                         let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
                         self.pop();
+                        if r.is_err() {
+                            // gaps.md B4: the submitted task ran INLINE on this entry Vm, so its
+                            // callee frames were captured into `fault_trace` while intact. Drop that
+                            // trace before propagating so the outer `run_until` (running `main`) re-
+                            // captures at the shutdown call site — printing just `at main`. This
+                            // matches M:N (which discards the isolated worker's `fault_trace`) and a
+                            // plain nursery-task panic (already `at main` on both engines).
+                            self.fault_trace = None;
+                            self.fault_trace_depth = 0;
+                        }
                         r?;
                     }
                     self.pop(); // the executor root

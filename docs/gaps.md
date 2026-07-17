@@ -170,7 +170,18 @@ Verified still diverging post-fix (serial 4 / M:N 3, check OK): forms (A), (C) a
 honesty of the `serial == M:N` parity invariant is preserved — these are the boundary of a checker-only
 minimal diff, not a claim of full coverage.
 
-### B4. An `Executor`-task uncaught error prints more backtrace frames on `--serial` than M:N — cosmetic serial≠M:N — **OPEN (found 2026-07-17, low)**
+### B4. An `Executor`-task uncaught error prints more backtrace frames on `--serial` than M:N — cosmetic serial≠M:N — **FIXED (found 2026-07-17, fixed 2026-07-17)**
+**Fix:** serial dropped the inline task's callee frames to match M:N (and a plain nursery-task panic).
+Serial's `Executor.shutdown` drains each submitted task INLINE on the entry `Vm`, so the task's callee
+frames were captured into `fault_trace` while intact and survived to the top; M:N runs each task on an
+isolated worker `Vm` and discards that worker's `fault_trace`. `src/vm/netio.rs` (serial shutdown drain
+loop) now clears `self.fault_trace`/`self.fault_trace_depth` when an inline task returns `Err`, so the
+outer `run_until` (running `main`) re-captures at the shutdown call site — both engines print just
+`at main`. Covers both explicit `ex.shutdown()` and the implicit end-of-program `drain_live_executors`
+(both route through this one branch). Message/location/rc unchanged. Two-engine test:
+`executor_task_fault_trace_matches_on_both_engines` (src/vm/parity_tests.rs).
+
+<details><summary>Original report</summary>
 An uncaught runtime error thrown from an `Executor.submit(...)` closure prints a **full backtrace on
 `--serial`** (`at boom` / `at <closure>` / `at main`) but a **truncated one on M:N** (just `at main`) —
 **same error message, same source location, same exit code (1)**, only the intermediate call frames differ.
@@ -181,6 +192,7 @@ Cosmetic — the load-bearing parts (message/location/rc) match — so it is **n
 a real serial≠M:N observable-output divergence the parity suite doesn't cover. Fix: have the M:N Executor
 error-propagation path carry the submitted fiber's frames (or, symmetrically, have serial drop them) so the
 two agree. Low priority.
+</details>
 
 ### B5. M:N spuriously DEADLOCKS an uncontended cross-nursery send→recv (a nested-nursery `send` doesn't wake an outer parked receiver) — `--serial` works — **OPEN (found 2026-07-17)**
 On the **default M:N engine**, a `send` issued from inside a **nested** (child) `parallel:` does not wake a
