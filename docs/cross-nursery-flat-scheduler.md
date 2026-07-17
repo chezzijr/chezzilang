@@ -32,7 +32,8 @@
 >   commit**; the design below still applies. Workaround: case C (siblings in one nursery).
 > - **Case B — inline outer-body *blocking* recv (§4 last paragraph):** the fix is **wake-side only**.
 >   A blocking `recv`/`for v in ch:`/`wait:` issued directly in the inline `parallel:` body (not inside
->   a `spawn:`) still faults with a "deadlock — no task can ever send". Put blocking work in a `spawn:`.
+>   a `spawn:`) still faults with a "deadlock — no runnable task can send" (the diagnostic names the
+>   `spawn:` fix). Put blocking work in a `spawn:`.
 > - **Eager (per-connection) nurseries** run on a private `MnSched` (`activate_eager_nursery`, for
 >   liveness), so a cross-nursery wake into/out of an eager body is a separate limit.
 >
@@ -99,8 +100,8 @@ fn main():
 main()
 ```
 ```
-runtime error: recv on an empty channel: deadlock — nothing is queued and the sequential
-executor cannot block waiting for a producer ...   (at inner / at main)
+runtime error: recv on an empty channel: deadlock — no runnable task can send ...
+(at inner / at main)
 ```
 
 **C — both as sibling `spawn`s in ONE nursery → works** (the current workaround / recommended pattern):
@@ -173,8 +174,8 @@ Under this, case A runs: `I` sends a (marks `O` runnable) → parks on b; schedu
 level) → recvs a, sends b → done; `I` wakes, recvs b → done; inner join satisfied; outer proceeds.
 
 (Case B's inline-owner-blocks footgun is a *separate, smaller* question — optionally, let the owner
-yield to runnable children when it blocks mid-body instead of faulting with a "deadlock — no task can
-ever send". Decide whether to fix that here or leave it as "put blocking work in a `spawn`." Lower priority
+yield to runnable children when it blocks mid-body instead of faulting with a "deadlock — no runnable
+task can send". Decide whether to fix that here or leave it as "put blocking work in a `spawn`." Lower priority
 than the nesting fix.)
 
 ## 5. Per-engine deltas
