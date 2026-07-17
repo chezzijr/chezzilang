@@ -1422,7 +1422,7 @@ fn json_malformed_numbers_are_errors_parity() {
     let out = parity_entry(
         "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK \" + json.stringify(j)\n        Err(e): return \"ERR\"\nprint(tp(\"1e\"))\nprint(tp(\"1.\"))\nprint(tp(\"100000000000000000000\"))\n",
     );
-    assert_eq!(out, "ERR\nERR\nOK 100000000000000000000.0\n");
+    assert_eq!(out, "ERR\nERR\nOK 1e+20\n");
 }
 
 /// BUG 1: `json.stringify` must `\u00XX`-escape control chars U+0000..U+001F (Go/RFC-8259
@@ -1478,6 +1478,19 @@ fn json_stringify_non_finite_faults_parity() {
     );
 }
 
+/// Python-parity float `str()`/`print()`: scientific notation when the decimal exponent is `< -4`
+/// or `>= 16`, otherwise fixed. Byte-identical on both engines (serial == M:N).
+#[test]
+fn python_float_repr_str_parity() {
+    let out = parity_entry(
+        "print(str(1e16))\nprint(1.5e300)\nprint(0.00001)\nprint(str(0 - 2.5e-8))\nprint(1.0)\nprint(0.0001)\nprint(1e15)\nprint(1e100)\n",
+    );
+    assert_eq!(
+        out,
+        "1e+16\n1.5e+300\n1e-05\n-2.5e-08\n1.0\n0.0001\n1000000000000000.0\n1e+100\n"
+    );
+}
+
 /// Finding C regression guard: FINITE floats (including large magnitudes OUTSIDE the ±9e15
 /// int-collapse range like 1e300), whole-number floats, negatives, ints, strings and nested
 /// Arr/Obj are COMPLETELY unaffected — they stringify byte-identically and round-trip through
@@ -1488,9 +1501,9 @@ fn json_stringify_finite_roundtrip_unchanged_parity() {
         "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    Ok(v): print(\"roundtrip \" + json.stringify(v))\n    Err(e): print(\"ERR \" + e.message())\n",
     );
     // 1e300 is FINITE but far outside the ±9e15 int-collapse range: it must stringify normally
-    // (expanded via `str(f)`), NOT fault. `str(1e300)` renders as `1` + 300 zeros + `.0`.
-    let big = format!("1{}.0", "0".repeat(300));
-    let line = format!("[3,1.5,{big},-2.5,\"hi\",{{\"k\":42}}]");
+    // (via `str(f)`), NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity,
+    // exponent >= 16): `1e+300`.
+    let line = "[3,1.5,1e+300,-2.5,\"hi\",{\"k\":42}]".to_string();
     assert_eq!(out, format!("{line}\nroundtrip {line}\n"));
 }
 

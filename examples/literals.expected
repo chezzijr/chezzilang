@@ -1,6 +1,6 @@
 thousand: 1000.0
-avogadro: 602200000000000000000000.0
-tiny: 0.0000000015
+avogadro: 6.022e+23
+tiny: 1.5e-09
 big: 20000000000.0
 letter: A
 accent: é

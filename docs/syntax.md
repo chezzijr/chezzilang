@@ -2409,7 +2409,7 @@ print("{3.14159:.2f}")    # 2 decimals                 → "3.14"
 print("{0.1357:.1%}")     # percent: ×100, 1 decimal   → "13.6%"
 print("{255:x} {255:X}")  # hex (lower/upper)          → "ff FF"
 print("{255:b} {255:o}")  # binary / octal             → "11111111 377"
-print("{12345.678:.2e}")  # scientific                 → "1.23e4"
+print("{12345.678:.2e}")  # scientific (signed 2-digit exp) → "1.23e+04"
 print("{5:+d}")           # force a leading '+'         → "+5"
 print("{greeting:.5}")    # string precision truncates → "hello"
 ```
@@ -2422,11 +2422,12 @@ print("{greeting:.5}")    # string precision truncates → "hello"
   parse error, *not* a multi-gigabyte allocation.
 - **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
   also capped at 4096.
-- **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e` scientific ·
-  `%` percent (×100 then `%`). A float type char (`f`/`e`/`%`) promotes an int.
+- **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
+  (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·
+  `%` percent (×100 then `%`). A float type char (`f`/`e`/`E`/`%`) promotes an int.
 
-A **bare** `{expr}` (or `{expr:}` with an empty spec) renders exactly as before — e.g. a whole float
-prints `5.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
+A **bare** `{expr}` (or `{expr:}` with an empty spec) renders a whole float with a trailing `.0` —
+e.g. `5.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
 **type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, `{x:d}` on a float,
 `{x:.3d}` precision on an int, zero-pad on a non-number) is now **caught at compile time by `chezzi
 check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a
@@ -2441,15 +2442,15 @@ slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a 
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
 spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
 
-**Float formatting (plain) never uses scientific notation.** A bare float — `print(x)`, `str(x)`, or
-a `{x}` interpolation with no spec — always renders its **full decimal expansion**, never an `e`
-exponent. So `1.0e20` prints `100000000000000000000.0` (Python's `repr` gives `1e+20`), `1.5e-9`
-prints `0.0000000015` (Python `1.5e-09`), and very large / very small magnitudes print out in full
-rather than collapsing to an exponent. The rendered digits are **shortest-round-trip-correct** (the
-fewest digits that parse back to the same `f64`), just spelled out in full — so output stays exact
-and Python-feel readable, only more verbose at the extremes. This is an **intended divergence** from
-CPython, which switches to scientific notation past a magnitude threshold. When you *want* an
-exponent, ask for it explicitly with the `:e` format spec (`"{1.0e20:e}"` → `"1e20"`).
+**Plain float formatting matches CPython `repr()`/`str()` exactly.** A bare float — `print(x)`,
+`str(x)`, or a `{x}` interpolation with no spec — uses **scientific notation when the decimal
+exponent is `< -4` or `>= 16`**, and fixed-point otherwise. So `1e16` prints `1e+16`, `1e15` prints
+`1000000000000000.0`, `0.00001` prints `1e-05`, `1.5e300` prints `1.5e+300`, and `-2.5e-8` prints
+`-2.5e-08`; whole floats inside the fixed range keep their trailing `.0` (`1.0`, `1000.0`). The
+mantissa is **shortest-round-trip-correct** (the fewest digits that parse back to the same `f64`) and
+the exponent always carries an explicit sign, zero-padded to ≥2 digits — byte-identical to Python's
+`repr`. `json.stringify` routes through the same formatter, so a large float serializes as
+`1.5e+300` (valid JSON, round-trips through `json.parse`), not a 300-digit expansion.
 
 Core-type string methods (built in — no import needed):
 

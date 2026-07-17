@@ -3538,16 +3538,11 @@ fn as_f64(v: Value) -> f64 {
     }
 }
 
-/// Format a float the way Chezzi prints it (matches `interp::value::format_float`).
+/// Format a float the way Chezzi prints it — CPython `repr()`/`str()` parity: fixed with an
+/// always-present `.0` on integer-valued floats, scientific (`1e+16`, `1.5e+300`, `1e-05`) when the
+/// decimal exponent is `< -4` or `>= 16`. Single-sourced in `fmtspec` alongside the `{:e}` spec path.
 fn format_float(x: f64) -> String {
-    if x.is_finite() && x.fract() == 0.0 {
-        // Shortest round-trip decimal (`{}`) + an always-present `.0`: large integral floats
-        // (`1.5e23`) print the shortest form that round-trips, not the exact fixed-point
-        // expansion of the binary value. Rust's f64 Display never uses scientific notation.
-        format!("{x}.0")
-    } else {
-        format!("{x}")
-    }
+    crate::fmtspec::repr_float(x)
 }
 
 // ===== entry points =====

@@ -204,7 +204,7 @@ fn to_align(c: char) -> Align {
 }
 
 fn is_type(c: char) -> bool {
-    matches!(c, 'd' | 'f' | 'x' | 'X' | 'b' | 'o' | 'e' | '%')
+    matches!(c, 'd' | 'f' | 'x' | 'X' | 'b' | 'o' | 'e' | 'E' | '%')
 }
 
 /// Render `arg` per `spec` into `out`. Type/precision mismatches (e.g. `{s:d}`, `{s:.2f}`, zero-pad
@@ -292,7 +292,9 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
         // Precision on an integer is meaningful only via a float type char; every parse-allowed type
         // char (d/x/X/b/o and the f/e/% promoters) is otherwise valid for an int.
         ScalarKind::Int => {
-            if spec.precision.is_some() && !matches!(spec.ty, Some('f') | Some('e') | Some('%')) {
+            if spec.precision.is_some()
+                && !matches!(spec.ty, Some('f') | Some('e') | Some('E') | Some('%'))
+            {
                 return Err("format spec: precision not allowed on an integer".to_string());
             }
             Ok(())
@@ -346,6 +348,7 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
         // Float type chars promote the int to a float.
         Some('f') => return render_float(spec, n as f64),
         Some('e') => return render_float(spec, n as f64),
+        Some('E') => return render_float(spec, n as f64),
         Some('%') => return render_float(spec, n as f64),
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
@@ -362,13 +365,15 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     let body = match spec.ty {
         Some('f') | None => match spec.precision {
             Some(p) => format!("{mag:.*}", p),
-            // Bare `{f:>10}` etc. with no type/precision keeps full float repr.
-            None => format_float_like(mag),
+            // Bare `{f:>10}` etc. with no type/precision keeps the canonical Python repr.
+            None => repr_float(mag),
         },
-        Some('e') => match spec.precision {
-            Some(p) => format!("{mag:.*e}", p),
-            None => format!("{mag:e}"),
-        },
+        // `{:e}`/`{:E}`: Python default precision 6, exponent always signed + 2-digit padded.
+        Some('e') | Some('E') => {
+            let p = spec.precision.unwrap_or(6);
+            let marker = if spec.ty == Some('E') { 'E' } else { 'e' };
+            normalize_exp(&format!("{mag:.*e}", p), marker)
+        }
         Some('%') => {
             let scaled = mag * 100.0;
             let p = spec.precision.unwrap_or(6);
@@ -400,14 +405,43 @@ fn sign_prefix(neg: bool, force_plus: bool) -> String {
     }
 }
 
-/// Mirror the engines' canonical float rendering (`vm::format_float` / `interp::value::format_float`:
-/// a finite whole-valued float prints the shortest round-trip decimal with an always-present `.0`,
-/// e.g. `5.0`, `150000000000000000000000.0`) for a bare `{f:>10}` with no type char. `x` is the
-/// already-non-negative magnitude; the sign is handled by the caller.
-fn format_float_like(x: f64) -> String {
-    if x.is_finite() && x.fract() == 0.0 {
-        // Shortest round-trip decimal (`{}`) + an always-present `.0`. Rust's f64 Display never
-        // uses scientific notation, so the integral branch never emits an exponent.
+/// Normalize a Rust `{:e}`/`{:.Ne}` exponent string into Python form: `{mant}{marker}{sign}{dd}`
+/// where the exponent always carries an explicit sign and is zero-padded to at least 2 digits
+/// (`1.5e300` → `1.5e+300`, `-2.5e-8` → `-2.5e-08`, `1e0` → `1e+00`). A non-exponent input
+/// (`inf`/`NaN`, which Rust's float formatters emit with no `e`) passes through unchanged. Shared by
+/// the `{:e}`/`{:E}` spec arm and the default repr path so the exponent logic lives in one place.
+pub(crate) fn normalize_exp(rust_e: &str, marker: char) -> String {
+    match rust_e.split_once('e') {
+        None => rust_e.to_string(),
+        Some((mant, exp)) => {
+            // Rust only ever prefixes a '-' (never '+') on the exponent.
+            let (sign, digits) = match exp.strip_prefix('-') {
+                Some(d) => ('-', d),
+                None => ('+', exp),
+            };
+            format!("{mant}{marker}{sign}{digits:0>2}")
+        }
+    }
+}
+
+/// Canonical Python `repr()`/`str()` of a float — the single source of truth for the bare stringify
+/// path (`str(f)`, `print`, `{f}` interpolation with no type char, `json.stringify`). Matches
+/// CPython: scientific notation when the decimal exponent is `< -4` or `>= 16`, otherwise fixed with
+/// an always-present `.0` on integer-valued floats. Non-finite floats keep Rust's `inf`/`-inf`/`NaN`
+/// (the NaN sign is dropped, as before). `x` is signed here; callers that pre-split the sign pass the
+/// magnitude.
+pub(crate) fn repr_float(x: f64) -> String {
+    if !x.is_finite() {
+        return format!("{x}");
+    }
+    let e = format!("{x:e}");
+    let exp: i32 = e
+        .split_once('e')
+        .and_then(|(_, s)| s.parse().ok())
+        .unwrap_or(0);
+    if !(-4..16).contains(&exp) {
+        normalize_exp(&e, 'e')
+    } else if x.fract() == 0.0 {
         format!("{x}.0")
     } else {
         format!("{x}")
@@ -504,7 +538,7 @@ mod tests {
         assert_eq!(ok_apply(".1%", FmtArg::Float(0.1357)), "13.6%");
         assert_eq!(ok_apply("+d", FmtArg::Int(5)), "+5");
         assert_eq!(ok_apply("+d", FmtArg::Int(-5)), "-5");
-        assert_eq!(ok_apply("e", FmtArg::Float(2.5)), "2.5e0");
+        assert_eq!(ok_apply("e", FmtArg::Float(2.5)), "2.500000e+00");
         // string precision truncates
         assert_eq!(ok_apply(".3", FmtArg::Str("hello")), "hel");
         // bare float keeps `.0`
@@ -512,6 +546,31 @@ mod tests {
         assert_eq!(ok_apply(".2f", FmtArg::Float(5.0)), "5.00");
         // int promoted by float type char
         assert_eq!(ok_apply(".2f", FmtArg::Int(3)), "3.00");
+    }
+
+    #[test]
+    fn python_float_repr_and_e_spec() {
+        // Bare repr (str/print/interp-no-spec/json path) — CPython repr() differential table.
+        let repr_cases: &[(f64, &str)] = &[
+            (1e16, "1e+16"),
+            (1e15, "1000000000000000.0"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (1.5e300, "1.5e+300"),
+            (1.0, "1.0"),
+            (1e100, "1e+100"),
+            (-2.5e-8, "-2.5e-08"),
+            (0.0, "0.0"),
+            (123.5, "123.5"),
+        ];
+        for (x, want) in repr_cases {
+            assert_eq!(repr_float(*x), *want, "repr_float({x})");
+        }
+        // `{:e}`/`{:E}` spec — Python default precision 6, signed 2-digit exponent.
+        assert_eq!(ok_apply("e", FmtArg::Float(123456.789)), "1.234568e+05");
+        assert_eq!(ok_apply("e", FmtArg::Float(1.0)), "1.000000e+00");
+        assert_eq!(ok_apply(".2e", FmtArg::Float(0.000123)), "1.23e-04");
+        assert_eq!(ok_apply("E", FmtArg::Float(123456.789)), "1.234568E+05");
     }
 
     #[test]
