@@ -25,7 +25,7 @@ fn safe_div(a: int, b: int) -> Result[int]:
         return Err("divide by zero")
     return Ok(a / b)
 
-fn main():
+fn main() -> int!:
     print(greet("chezzi"))
 
     total := 0
@@ -41,5 +41,6 @@ fn main():
 
     r := safe_div(10, 2)?
     print("div: {r}")
+    return Ok(0)
 
 main()

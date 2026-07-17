@@ -3585,11 +3585,56 @@ fn try_in_result_function_ok() {
     ok(src);
 }
 
+// SOUNDNESS: `?` in a nil-returning fn silently swallows the propagated Err/None (check-OK-then-
+// data-loss). A named nil fn (including `main`) must REJECT — no `fn main` exception; a fn must
+// return Result/Option to use `?`. (2026-07-18 bug-hunt.)
 #[test]
-fn try_in_main_ok() {
-    // `?` in a nothing-returning function (e.g. main) is allowed — matches interpreter semantics.
+fn try_in_named_nil_fn_rejected() {
+    let src = "fn g() -> Result[int]:\n    return Ok(1)\n\
+               fn f():\n    x := g()?\n    print(x)\n";
+    rejects(
+        src,
+        "'?' used in a function that returns nil, not Result or Option",
+    );
+}
+
+#[test]
+fn try_in_named_nil_main_rejected() {
+    // No `fn main` exception — main is just a nil fn here.
     let src = "fn g() -> Result[int]:\n    return Ok(1)\n\
                fn main():\n    x := g()?\n    print(x)\n";
+    rejects(
+        src,
+        "'?' used in a function that returns nil, not Result or Option",
+    );
+}
+
+// A NESTED nil fn (nil `inner` inside a Result-returning `outer`) must also reject — the flag rides
+// the fn-body boundary, not just the top-level named fn.
+#[test]
+fn try_in_nested_nil_fn_rejected() {
+    let src = "fn helper() -> Result[int]:\n    return Ok(1)\n\
+               fn outer() -> Result[int]:\n    fn inner():\n        x := helper()?\n        print(x)\n    inner()\n    return Ok(0)\n";
+    rejects(
+        src,
+        "'?' used in a function that returns nil, not Result or Option",
+    );
+}
+
+// GUARD: `?` at MODULE TOP-LEVEL (outside any fn) stays valid — the runtime unwinds the Err at the
+// program boundary. Must NOT regress (the flag must be false at module scope).
+#[test]
+fn try_at_module_top_level_still_accepted() {
+    let src = "fn g() -> Result[int]:\n    return Ok(1)\n\
+               x := g()?\nprint(x)\n";
+    ok(src);
+}
+
+// GUARD: an Option-`?` at module top-level stays valid too.
+#[test]
+fn try_option_at_module_top_level_still_accepted() {
+    let src = "fn h() -> int?:\n    return Some(1)\n\
+               x := h()?\nprint(x)\n";
     ok(src);
 }
 

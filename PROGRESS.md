@@ -4,6 +4,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ SOUNDNESS (2026-07-18, `auto-task/try-nil-fn-reject`) — `docs/gaps.md` §B6: `?` in a nil fn
+> silently swallowed the error (check-OK-then-data-loss).** The checker accepted `?` whenever the
+> enclosing return was `Nil` — but `Nil` covers BOTH module top-level (legit — the runtime unwinds the
+> unhandled `Err`/`None` at the program boundary) AND a nil-returning fn body (the bug — the propagated
+> `Err`/`None` was dropped). Fix: new checker signal `in_fn_body: bool` (false at module top-level, true
+> inside any fn/closure body), saved/restored 1:1 beside every `current_ret` `mem::replace`
+> (`check_fn_body`/`infer_fn_ret`/closure-infer) + reset in `begin_module`; the two `Ty::Nil => {}`
+> acceptance arms in `infer_try` are now `Ty::Nil if !self.in_fn_body => {}`, falling through to the
+> existing reject (`'?' used in a function that returns nil, not Result or Option`). No `fn main`
+> exception — a fn must return `Result`/`Option` to use `?` (closures already enforced this). Runner
+> symmetry: `Vm::invoke_entrypoint` now routes a manifest `module:function` entry fn's return through
+> `top_level_error`, so a returned `Err`/`None` surfaces as `unhandled error: <msg>` (rc=1) — letting an
+> entrypoint legitimately be `-> T!` and use `?` (both engines, one edit). Migrated `examples/hello.chz`
+> + `examples/socket_timeout.chz` to `-> int!` + `return Ok(0)` (output-identical goldens hold).
+> Docs: `docs/syntax.md` §9 `?` rule, `docs/spec.md` entry model + the safe_div example, `docs/gaps.md`
+> §B6. Checker + runner change → parity preserved; `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-18, `auto-task/python-float-fmt`) — Python-compatible float formatting.**
 > Two float-format defects fixed together behind ONE shared exponent-normalizer (`fmtspec::normalize_exp`):
 > (1) the `{:e}`/`{:E}` spec was Rust-style (`1.23456789e5`) — now CPython-style: **default precision 6**,

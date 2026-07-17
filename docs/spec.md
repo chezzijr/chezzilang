@@ -276,15 +276,17 @@ fn safe_div(a: int, b: int) -> Result[int]:
         return Err("divide by zero")
     return Ok(a / b)
 
-fn main():
-    r := safe_div(10, 2)?              # ? propagates Err
+fn main() -> int!:                     # must return Result/Option to use `?` — no `fn main` exception
+    r := safe_div(10, 2)?              # ? propagates Err to main's Result
     nums := [1, 2, 3, 4]
         |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # pipe (needs: import std.iter);
                                                          #   a leading `|>` continues the line
         |> iter.map(fn(x: int) -> int: x * 10)
     print(nums)
+    return Ok(0)
 
 main()                                 # no auto-entry — `main` is a normal fn you call yourself
+                                       #   (its returned Err would auto-raise at top level, rc=1)
 ```
 
 **`pass` — the no-op keyword.** `pass` is a reserved keyword that does nothing. As a **statement** it
@@ -308,12 +310,18 @@ collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
 unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
-`unhandled error: …` and a non-zero code. A bare `chezzi run` (no file argument) runs the project
-manifest's `[project] entrypoint` — a **dotted module path**, optionally suffixed with
-**`:function`** (e.g. `"src.main:main"`). The module runs top-to-bottom like any other file; with a
-`:function` suffix the entry function is then **called** (a missing/non-function name is a clear
-error), so the source needs no trailing call. Without the suffix the module just runs top-to-bottom
-(no entry function is called). Running an explicit file (`chezzi run <file>`) is always top-level-only.
+`unhandled error: …` and a non-zero code. `?` is valid at module top-level (the runtime unwinds the
+propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-returning fn — but a
+**nil-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the
+error (there is no `fn main`/entrypoint exception — a fn must return `Result`/`Option`). A bare
+`chezzi run` (no file argument) runs the project manifest's `[project] entrypoint` — a **dotted module
+path**, optionally suffixed with **`:function`** (e.g. `"src.main:main"`). The module runs
+top-to-bottom like any other file; with a `:function` suffix the entry function is then **called** (a
+missing/non-function name is a clear error), so the source needs no trailing call. An entry function
+may legitimately be `-> T!` and use `?`; if it returns `Err`/`None`, `chezzi run` surfaces it as
+`unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. Without the suffix the module
+just runs top-to-bottom (no entry function is called). Running an explicit file (`chezzi run <file>`)
+is always top-level-only.
 
 ## Imports & module resolution
 
