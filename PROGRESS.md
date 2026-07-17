@@ -5437,6 +5437,20 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
+  recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth
+  (10000) exceeded (cyclic data structure?)` — there is no cyclic *data*, just the compiler letrec's
+  self-cell making the closure's capture graph self-referential (`Closure h -> Cell -> h`), tripping the
+  generic depth guard. The two closure-serialization arms (`to_wire_depth` / `to_snap_depth`,
+  `src/vm/sched.rs`) now scan the crossing closure's capture graph for its own handle (new
+  `graph_reaches_handle`, sibling of the Task-2b ref-capture scan) and raise a clear, **recoverable**,
+  byte-identical-on-both-engines error: `a recursive local fn cannot be sent across a task boundary — hoist
+  it to module scope (a module-global recursive fn is sendable)`. Fires at every airlock arm (`spawn:`
+  block, `spawn f()` callee, `spawn f(g)` arg, `Channel[fn].send`). **Diagnostic only — actual
+  recursive-local-fn sendability stays DEFERRED** (a risky VM change past the JIT freeze); the fix is to
+  hoist the fn to module scope (crosses as a plain `Func`, no capture, sendable). Genuine cyclic *data*
+  still reports the depth message (regression-locked). +2 tests (`airlock_recursive_local_fn_clear_diagnostic_both_engines`,
+  `airlock_module_global_recursive_fn_control_sends`). Docs: `docs/concurrency.md` §7, `docs/gaps.md`.
 - **QoL — int-const if/match-EXPRESSION branch widens to float (2026-07-17).** A bug-hunt papercut:
   `x := if c: 1 else: 2.5` was a compile error while the equivalent list literal `[1, 2.5]` coerced fine —
   an inconsistency in where the untyped-int-constant→float peephole applied. Extended the SAME

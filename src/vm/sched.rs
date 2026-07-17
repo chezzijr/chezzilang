@@ -2492,6 +2492,55 @@ impl Vm {
         }
     }
 
+    /// 2026-07-18 bug-hunt — does the value graph rooted at `v` reach the heap handle `target`? Used by
+    /// the two `Obj::Closure` airlock arms to detect a SELF-REFERENTIAL closure: the compiler's letrec
+    /// gives a recursive local `fn` a self-cell, so the crossing closure's capture graph is cyclic
+    /// (`Closure target -> captured[Cell] -> Cell.inner = target`). That cycle would otherwise trip the
+    /// generic `MAX_STRUCTURAL_DEPTH` guard and emit the misleading `maximum structural depth ...`
+    /// message; catching it here yields a clear "hoist to module scope" diagnostic instead. Bounded by
+    /// `MAX_STRUCTURAL_DEPTH` so an acyclic-but-deep graph, and a genuine DATA cycle NOT passing through
+    /// `target`, both degrade to `false` and keep falling through to the existing depth guard (which
+    /// still reports genuine cyclic data). Read-only (`&self`), allocates nothing.
+    fn graph_reaches_handle(&self, v: Value, target: GcRef, depth: usize) -> bool {
+        if depth > MAX_STRUCTURAL_DEPTH {
+            return false;
+        }
+        let Value::Obj(h) = v else {
+            return false;
+        };
+        if h == target {
+            return true;
+        }
+        match self.heap.get(h) {
+            Obj::Struct { fields, .. } => fields
+                .iter()
+                .any(|f| self.graph_reaches_handle(*f, target, depth + 1)),
+            Obj::List(items) | Obj::Tuple(items) => items
+                .iter()
+                .any(|x| self.graph_reaches_handle(*x, target, depth + 1)),
+            Obj::Iter { items, .. } => items
+                .iter()
+                .any(|x| self.graph_reaches_handle(*x, target, depth + 1)),
+            Obj::Map(m) => m.entries.iter().any(|(_, k, val)| {
+                self.graph_reaches_handle(*k, target, depth + 1)
+                    || self.graph_reaches_handle(*val, target, depth + 1)
+            }),
+            Obj::Set(s) => s
+                .entries
+                .iter()
+                .any(|(_, e)| self.graph_reaches_handle(*e, target, depth + 1)),
+            Obj::Enum { payload, .. } => payload
+                .iter()
+                .any(|x| self.graph_reaches_handle(*x, target, depth + 1)),
+            Obj::NewType { inner, .. } => self.graph_reaches_handle(*inner, target, depth + 1),
+            Obj::Cell(inner) => self.graph_reaches_handle(*inner, target, depth + 1),
+            Obj::Closure { captured, .. } => captured
+                .iter()
+                .any(|cv| self.graph_reaches_handle(*cv, target, depth + 1)),
+            _ => false,
+        }
+    }
+
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
     /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
     /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
@@ -2558,6 +2607,20 @@ impl Vm {
                     home,
                 } => {
                     let names = &self.program.protos[*proto].capture_names;
+                    // 2026-07-18 bug-hunt — a self-referential closure (a recursive local `fn`, whose
+                    // letrec self-cell makes its capture graph reach its own handle `h`) is not sendable:
+                    // full recursive-fn sendability stays deferred. Fault with a clear "hoist to module
+                    // scope" diagnostic here, BEFORE the generic depth guard would trip on the cycle and
+                    // BEFORE the per-capture ref check (the whole closure is unsendable either way).
+                    if captured
+                        .iter()
+                        .any(|cv| self.graph_reaches_handle(*cv, h, 0))
+                    {
+                        return Err(self.err(
+                            "a recursive local fn cannot be sent across a task boundary — hoist it to module scope (a module-global recursive fn is sendable)".to_string(),
+                            Span { line: 0, col: 0 },
+                        ));
+                    }
                     let mut wcap = Vec::with_capacity(captured.len());
                     for (i, cv) in captured.iter().enumerate() {
                         // Task 2b — a `ref`/`Ref` captured (top-level or nested) by a closure crossing
@@ -3335,6 +3398,19 @@ impl Vm {
             Obj::Closure { proto, captured, home } => {
                 // Lever #3: positional captures — carry names from the proto in slot order.
                 let names = &self.program.protos[proto].capture_names;
+                // 2026-07-18 bug-hunt — mirror of the `to_wire_depth` self-ref guard on the M:N snapshot
+                // path (byte-identical message + placeholder span): a recursive local `fn`'s letrec
+                // self-cell makes its capture graph reach its own handle `h`; report the clear diagnostic
+                // before the generic depth guard would trip on the cycle.
+                if captured
+                    .iter()
+                    .any(|cv| self.graph_reaches_handle(*cv, h, 0))
+                {
+                    return Err(self.err(
+                        "a recursive local fn cannot be sent across a task boundary — hoist it to module scope (a module-global recursive fn is sendable)".to_string(),
+                        Span { line: 0, col: 0 },
+                    ));
+                }
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {
                     // Task 2b — identical fault on the M:N snapshot path (parity with `to_wire_depth`):
