@@ -98,6 +98,108 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
+### B3. Mutating a captured MODULE-GLOBAL aggregate inside a task diverges serial (shared) vs M:N (lost) — serial≠M:N soundness — **OPEN (found 2026-07-17)**
+A task (`spawn`/`parallel:`) that **mutates a captured module-global mutable aggregate** in place
+(`List`/`Map`/`Set`/`struct` — `.push`, `m[k]=v`, `s.add`, `s.field=x`, nested) diverges between engines:
+on **`--serial`** the module global is shared by reference so the mutation **leaks** (visible to the parent
++ siblings); on **M:N** the per-task module-globals snapshot deep-copies it, so the mutation is **silently
+lost** (invisible to everyone — the `Shared.get()`-mutate-a-throwaway gotcha, but implicit). A **silent
+value divergence** that breaks the `serial == M:N` invariant the parity oracle rests on.
+
+Minimal repro (deterministic, 5/5) — `xs` is a **top-level** binding (a module global):
+```chezzi
+xs := [1, 2, 3]
+parallel:
+    spawn:
+        xs.push(99)
+print(xs.len())      # --serial: 4 (leaked)   |   M:N (default): 3 (mutation lost)
+```
+Also reproduces with `Map`/`Set`/struct-field, and independent of spawn form (block, `spawn f()` callee,
+closure-indirect `w := fn(): xs.push(..)`, and a closure reached through a captured struct field all leak).
+
+**The real trigger is the MODULE-GLOBAL-ness, not the spawn form** (corrected 2026-07-17 after a
+mis-scoping — an airlock subagent flagged the callee/closure forms leaking too; the common factor is that
+those repros bound `xs` at top level):
+- ❌ diverges: a **module-global** (top-level-bound) mutable aggregate mutated in a task.
+- ✅ isolates on BOTH engines: a **function-local** aggregate — direct block capture, `spawn f(xs)` arg-pass,
+  and closure-indirect capture ALL deep-copy correctly on both engines when `xs` is a `fn`-local (verified:
+  same repro inside `fn main():` gives serial=3 / M:N=3). Also fine: scalar reassignment (a cell/copy);
+  `Channel.send` of an aggregate; `Shared.get()` snapshot; `Executor.submit` (the
+  [#3](#3-executorsubmit-coop-vs-mn-capture-sharing-divergence--resolved-2026-07-11) fix holds).
+
+**Checker↔runtime gap:** the checker treats a captured module global as **frozen / read-only** — it
+REJECTS reassignment inside a task (`cannot reassign the captured module global 'x' … module globals are
+frozen`) — but it **allows in-place aggregate mutation**, which is also a write. So the "frozen" guarantee
+is half-enforced, and the two engines then disagree on whether that write is visible. Two clean fixes, pick
+one: **(a)** the checker rejects in-place mutation of a captured module-global aggregate in a task too
+(consistent with rejecting reassignment — smallest, checker-only, no VM risk), or **(b)** `--serial`
+deep-copies module globals per task like the M:N snapshot (makes them agree on "lost"). (a) is the
+lazier + safer pre-freeze choice and matches the documented read-only-module-global model.
+
+**Parity-suite blind spot:** ~3566 tests green, yet this diverges — **no parity test mutates a captured
+module-global aggregate in a task and observes it**. Land a failing-then-green
+`module_global_aggregate_mutation_in_task_parity` (`src/vm/parity_tests.rs`) with the fix. Tracked (not
+rushed) — a checker tightening (fix a) is low-risk, a VM change (fix b) is riskier pre-JIT-freeze.
+
+### B4. An `Executor`-task uncaught error prints more backtrace frames on `--serial` than M:N — cosmetic serial≠M:N — **OPEN (found 2026-07-17, low)**
+An uncaught runtime error thrown from an `Executor.submit(...)` closure prints a **full backtrace on
+`--serial`** (`at boom` / `at <closure>` / `at main`) but a **truncated one on M:N** (just `at main`) —
+**same error message, same source location, same exit code (1)**, only the intermediate call frames differ.
+Deterministic (5/5 each engine). M:N is internally consistent (a plain nursery-task panic drops to `at main`
+on both engines); the outlier is that `--serial`'s Executor path uniquely preserves the submitted closure's
+callee frames while M:N discards the submitted fiber's `fault_trace` when re-raising through `shutdown`.
+Cosmetic — the load-bearing parts (message/location/rc) match — so it is **not** a soundness bug, but it is
+a real serial≠M:N observable-output divergence the parity suite doesn't cover. Fix: have the M:N Executor
+error-propagation path carry the submitted fiber's frames (or, symmetrically, have serial drop them) so the
+two agree. Low priority.
+
+### B5. M:N spuriously DEADLOCKS an uncontended cross-nursery send→recv (a nested-nursery `send` doesn't wake an outer parked receiver) — `--serial` works — **OPEN (found 2026-07-17)**
+On the **default M:N engine**, a `send` issued from inside a **nested** (child) `parallel:` does not wake a
+single receiver parked on that channel in an **outer/ancestor** nursery — so M:N declares a **false
+`deadlock`** and faults, while `--serial` runs the program correctly. A real correctness bug in the
+**primary engine** on a legitimate structured-concurrency fan-out shape (a nested nursery produces into a
+channel an outer sibling consumes), not just a parity artifact.
+
+Minimal repro (deterministic — `--serial` 6/6 `rc=0`, M:N 8/8 `deadlock`):
+```chezzi
+import std.concurrency
+fn main():
+    ready := Channel[int]()
+    parallel:
+        spawn:
+            parallel:                 # nested nursery
+                spawn:
+                    ready.send(1)     # send from a nested-nursery grandchild
+        spawn:
+            v := ready.recv()         # receiver parks in the OUTER nursery (inside a spawn:)
+            print("receiver got {v}")
+main()
+# --serial: "receiver got 1"  rc=0   |   M:N: runtime error … deadlock …  rc=1
+```
+It is purely a **parked-receiver wake** gap: if the receiver is delayed so the `send` lands first, M:N
+reads the buffered value fine (the value is never lost) — the failure is only when the receiver parks on
+the empty channel *before* the nested-nursery send, and the cross-scope wake isn't routed.
+
+**Root cause (already documented, but as RESOLVED):** `docs/cross-nursery-flat-scheduler.md:150-155` —
+`MnSched.parked` is keyed per-nursery, so a `send`/`close` in another nursery *delivers the value but does
+not wake across scheds* (`src/vm/mod.rs:5810`). That doc's banner claims this routing class is **"RESOLVED
+under `--parallel`"** and that *"independent / normal multi-level nesting is fully supported … RUNS under
+`--parallel` and matches the cooperative engine."* This repro contradicts both. It is **NOT** one of the
+doc's enumerated allowed limits: it is **uncontended** (1 sender / 1 receiver — the allowed contended limit
+is *2+ receivers racing one channel*), the receiver's `recv` is inside a `spawn:` (**not** the Case-B inline
+outer-body recv), and there's no eager/per-connection nursery. So it's a **coverage gap in the flat-scheduler
+fix**, not a divergent-by-design case. (Note the doc's limit #2 says the *cooperative* engine faults on this
+class — the OPPOSITE of this shape, where `--serial` succeeds and M:N faults, because cooperative runs the
+innermost sender-nursery to completion first so the value is buffered before the outer recv.)
+
+**Also masks teardown diagnostics:** the same wake gap replaces a faulting nested-nursery sibling's real
+error with this spurious `deadlock` — so fixing the wake also cleans up nested-nursery fault reporting.
+
+Fix: route the parked-receiver wake across nursery scopes on M:N (the flat-scheduler design in §4 of that
+doc — one flat runnable/park set keyed by `ChannelCore` ptr, nursery = join record). Add the missing golden:
+`parallel_cross_nursery_nested_send_to_outer_recv.chz` (+ a serial==M:N parity assert). This is an M:N VM
+change — the riskiest of the 2026-07-17 finds pre-JIT-freeze; scope carefully.
+
 ### B1. `Socket.read` silently CORRUPTS data (`from_utf8_lossy`) — P0 — **FIXED (2026-07-14, R1)**
 `src/vm/netio.rs:315` and `:360` did `String::from_utf8_lossy(&buf)`, and `std/net.chz` types the
 method `read(self, n: int, ...) -> Result[str]`. So the socket seam **had to** lossily decode. Two
