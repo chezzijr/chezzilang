@@ -2457,6 +2457,32 @@ fn run_parallel_watchdog(src: &str) -> RunOutput {
     }
 }
 
+/// gaps.md B5 — cross-nursery child→parent wake parity: a `send` from a nested (eager) `parallel:`
+/// nursery must wake a receiver parked in the OUTER nursery. Uncontended 1-send / 1-recv, so the serial
+/// oracle == M:N. Pre-fix M:N false-faulted `deadlock` while serial printed "receiver got 1". Runs the
+/// M:N leg under a watchdog (10 rounds) so a lost-wakeup regression fails loud rather than hanging.
+#[test]
+fn parallel_cross_nursery_nested_send_to_outer_recv_parity() {
+    let src = include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.chz");
+    let expected =
+        include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.expected");
+    // Serial oracle.
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (so, _se, sr, _) = run_file(&entry);
+    assert!(sr.is_ok(), "serial oracle faulted: {sr:?}");
+    assert_eq!(so, expected, "serial oracle != expected");
+    // M:N leg under a watchdog, several rounds to shake a flaky lost wakeup.
+    for _ in 0..10 {
+        let (mo, _me, mr, _) = run_parallel_watchdog(src);
+        assert!(
+            mr.is_ok(),
+            "M:N faulted (spurious cross-nursery deadlock / lost wakeup): {mr:?}"
+        );
+        assert_eq!(mo, expected, "M:N stdout != serial oracle");
+    }
+}
+
 /// B3.5 — the cooperative `fibers_all_blocked_is_deadlock` golden, ported to `--parallel`: two
 /// tasks each block on a distinct empty channel with no producer. The cooperative scheduler
 /// already faults this; under threads B3.5's nursery-local detector must fault it too rather

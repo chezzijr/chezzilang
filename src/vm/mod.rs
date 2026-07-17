@@ -1458,6 +1458,18 @@ struct MnSched {
     /// fire (see [`MnSched::is_deadlocked`]). The block loop checks the channel queue before `terminate`,
     /// so a value that was genuinely sent always wins over a spuriously-fired terminate.
     blocked_native: AtomicUsize,
+    /// gaps.md B5 — the ANCESTOR sched to also wake on a `send`/`close`. `None` for every ordinary
+    /// sched (top-level + lazy nested nurseries all share ONE global `MnSched`). Set ONLY on an EAGER
+    /// nested nursery's PRIVATE sched (`activate_eager_nursery`), where it points at the sched the
+    /// activating worker fiber was running on (its parent nursery). A `send`/`close` inside an eager
+    /// body pushes the value into the SHARED `ChannelCore` but `wake_bucket` only scans the eager
+    /// sched's own `parked` set — so a receiver parked in the PARENT nursery on that channel is never
+    /// made runnable, and the parent quiesces to a spurious `deadlock`. `send_wake`/`close_wake` walk
+    /// this chain (strictly UPWARD — no cycle, no ABBA) to requeue the parent's parked receiver onto
+    /// its home sched. Value already in the shared queue → the woken receiver pops it (no double
+    /// consume); an over-wake (receiver finds the queue empty and re-parks) is the already-tolerated
+    /// pattern. Points UP only: parent→child ("into" an eager body) is a documented residual limit.
+    parent_wake: Option<Arc<MnSched>>,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -1770,6 +1782,8 @@ impl MnSched {
             steal_ctr: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
             blocked_native: AtomicUsize::new(0),
+            // gaps.md B5 — no parent by default; `activate_eager_nursery` sets it on an eager sched.
+            parent_wake: None,
         }
     }
 
@@ -2300,6 +2314,26 @@ impl MnSched {
         }
     }
 
+    /// gaps.md B5 — after waking this sched's own `parked` bucket for `key`, walk the `parent_wake`
+    /// chain and wake each ANCESTOR sched's bucket too. `None` for every ordinary sched, so this is a
+    /// no-op on the hot path; it fires only for an eager nested nursery's private sched, where a
+    /// receiver parked in the PARENT nursery on this channel would otherwise never be made runnable
+    /// (the value is already in the shared `ChannelCore`, but wake is per-sched). Each ancestor is
+    /// woken under its OWN core lock — the eager core guard is already dropped by the caller before
+    /// this runs, and `parent_wake` points strictly UPWARD, so no two sched cores are ever held at
+    /// once (no ABBA). `wake_bucket` bumps the ancestor's own `runnable`, requeuing the parent's
+    /// receiver onto its home queue; an over-wake (empty queue → re-park) is the tolerated pattern.
+    fn wake_parent_chain(&self, key: usize) {
+        let mut p = self.parent_wake.clone();
+        while let Some(anc) = p {
+            let mut pc = anc.lock();
+            anc.wake_bucket(&mut pc, key);
+            drop(pc);
+            anc.cv.notify_all();
+            p = anc.parent_wake.clone();
+        }
+    }
+
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
         let mut c = self.lock();
         core.q
@@ -2310,6 +2344,9 @@ impl MnSched {
         self.wake_bucket(&mut c, key);
         drop(c);
         self.cv.notify_all();
+        // gaps.md B5 — also wake a receiver parked on this channel in an ANCESTOR (parent) nursery's
+        // sched (eager nested nursery only; no-op otherwise). Value is already queued above.
+        self.wake_parent_chain(key);
         // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
         // on `core.cv` after a `recv` inside a native callback). Snapshot-parked fibers are requeued
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
@@ -2330,6 +2367,9 @@ impl MnSched {
         drop(c);
         self.cv.notify_all();
         core.cv.notify_all();
+        // gaps.md B5 — a close from inside an eager body must also wake a receiver ranging over this
+        // channel in an ANCESTOR nursery so it observes the close and ends (no-op for ordinary scheds).
+        self.wake_parent_chain(key);
     }
 
     /// Record a finished fiber's outcome in its FLAT slot, bump its SCOPE's done, drop it from

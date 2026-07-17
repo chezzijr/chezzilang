@@ -1253,8 +1253,12 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     `wait:` issued directly in the body (not inside a `spawn:`) still faults with a "deadlock — no
     runnable task can send" (the diagnostic points at the `spawn:` fix). Put blocking work in a `spawn:`.
   - **Eager (per-connection) nurseries** run on their OWN private `MnSched` (`activate_eager_nursery`,
-    for liveness — no inline worker between Enter/Join), so a cross-nursery wake INTO or OUT OF an eager
-    body is a separate limit, not the flat-scheduler routing class.
+    for liveness — no inline worker between Enter/Join). A cross-nursery wake **OUT OF** an eager body
+    (child→parent: a `send`/`close` inside the eager body waking a receiver parked in the parent) is now
+    routed via `MnSched::parent_wake` (gaps.md B5 — golden
+    `parallel_cross_nursery_nested_send_to_outer_recv.chz`). A wake **INTO** an eager body (parent→child:
+    receiver parked inside, sender in an ancestor) and sibling-eager→sibling-eager are still a separate
+    limit (timing-divergent — complete or deadlock-fault cleanly).
 
   **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
   D0's `ready`-set.)

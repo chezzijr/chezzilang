@@ -3,14 +3,19 @@
 > **Status: RESOLVED under `--parallel` (M:N).** The circular outer-sibling case (§1–§2 below) is fixed
 > by the flat scheduler described in §4. The landed fix covers: the circular wakeup, the inline
 > outer-body's own `send`/`close` waking an enlisted parked sibling, a `spawn:` issued *after* the
-> enlist, and an atomic enlist. Goldens: `examples/parallel_cross_nursery_{circular,fanout,inline_send,
-> inline_close,late_spawn}.chz`. Genuine deadlocks still fault (the deadlock predicate vetoes only while
+> enlist, an atomic enlist, and (gaps.md B5) a send/close OUT OF an eager nested nursery waking a
+> receiver parked in the parent (`MnSched::parent_wake`, child→parent — see the eager bullet below).
+> Goldens: `examples/parallel_cross_nursery_{circular,fanout,inline_send,inline_close,late_spawn,
+> nested_send_to_outer_recv}.chz`. Genuine deadlocks still fault (the deadlock predicate vetoes only while
 > every still-incomplete scope is *awaiting the builder's join* — a live external feeder —
 > `MnSched::all_incomplete_awaiting_builder`).
 >
 > **Independent / normal multi-level nesting is fully supported** (the old "2+ enlisting levels" gate is
 > GONE): a `parallel:` nested inside another `parallel:` — at any depth, with sibling `spawn`s and late
 > `spawn:`s into a non-outermost nursery — RUNS under `--parallel` and matches the cooperative engine.
+> (A nested nursery entered inside a `spawn:` takes the EAGER private-sched path; a `send`/`close` out of
+> it now wakes a parent-parked receiver via `MnSched::parent_wake` — gaps.md B5, see the eager bullet —
+> while a wake INTO an eager body remains a residual limit.)
 > Every still-pending OUTER nursery early-enlists as its own scope; a late `spawn:` into a middle nursery
 > runs on the held flat sched as a fresh trailing scope via `register_scope_seeded` (registers + seeds it
 > atomically under one core lock — append-only slots, un-latches a stale `terminate`), so the inline owner
@@ -35,7 +40,15 @@
 >   a `spawn:`) still faults with a "deadlock — no runnable task can send" (the diagnostic names the
 >   `spawn:` fix). Put blocking work in a `spawn:`.
 > - **Eager (per-connection) nurseries** run on a private `MnSched` (`activate_eager_nursery`, for
->   liveness), so a cross-nursery wake into/out of an eager body is a separate limit.
+>   liveness — OPTION A, kept). A `send`/`close` inside an eager body only scans that private sched's
+>   own park set, so a receiver parked in the PARENT nursery was never woken → a spurious `deadlock`
+>   (gaps.md **B5**). **FIXED for child→parent (OUT OF an eager body):** the eager sched carries a
+>   `MnSched::parent_wake` pointer at the activating parent sched, and `send_wake`/`close_wake` walk
+>   that chain (strictly upward — no cycle, no ABBA) to requeue the parent's parked receiver. Golden:
+>   `parallel_cross_nursery_nested_send_to_outer_recv.chz`. **Residual (still a limit):** parent→child
+>   (a receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP only) and
+>   sibling-eager→sibling-eager; those are timing-divergent and complete-or-deadlock-fault cleanly
+>   (pinned by `parallel_cross_nursery_parent_to_child_residual_never_panics`).
 >
 > Cross-refs: [`concurrency.md §11`](concurrency.md),
 > [`concurrency-tier-d.md`](concurrency-tier-d.md), `PROGRESS.md`.
@@ -147,12 +160,15 @@ Structures:
   (`mod.rs:743-748`). `join_nursery` (`mod.rs:5744`) drives the **innermost** nursery's children to
   completion. `wake_on_send` (`mod.rs:6817`) — **D0's fix** — already iterates *every* level and marks
   fibers ready across levels; the residual is purely that the innermost driver won't *run* an outer one.
-- **`--parallel` M:N engine.** `run_mn_nursery` (`mod.rs:5811`) + `MnSched` (`mod.rs:1041`). The run
-  *queue* is already global (D4 work-stealing: `global` overflow + `try_steal`, `mod.rs:1269/1479`), but
-  `MnSched.parked` (keyed by `ChannelCore` ptr) is **per-nursery**, so a `send`/`close` in another
-  nursery delivers the value but does not wake across scheds (`mod.rs:5810`). Deadlock predicate
-  (B3.5 / M:N): `running == 0 && runnable == 0 && parked > 0 && done < total` (`mod.rs:935`,
-  `take_runnable` `mod.rs:1243`) — currently per-nursery.
+- **`--parallel` M:N engine.** `run_mn_nursery` + `MnSched`. LAZY nested nurseries all share ONE global
+  `MnSched` (flat scheduler, §4), so their park/wake is already cross-scope. The residual (gaps.md B5)
+  was narrower: an EAGER (per-connection) nested nursery gets its OWN private `MnSched`
+  (`activate_eager_nursery`, for liveness), and `MnSched::send_wake`/`close_wake` only scan the sched
+  they run on — so a `send`/`close` inside the eager body delivered the value into the shared
+  `ChannelCore` but never woke a receiver parked on the PARENT sched. Fixed by `MnSched::parent_wake`
+  (the eager sched points at its parent; the wake walks that chain child→parent). Deadlock predicate
+  (`is_deadlocked`) is UNCHANGED: a genuine no-sender quiesce still faults on the eager sched's own
+  predicate.
 
 ## 4. Target design — nursery = join-counter, not a scheduler frame
 

@@ -974,7 +974,16 @@ impl Vm {
         );
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span { line: 1, col: 1 });
         // wid 0 = inline join worker; wid 1 = the dedicated raw drainer below.
-        let sched = Arc::new(MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err));
+        let mut inner = MnSched::new(0, 2, Arc::clone(&cancel), deadlock_err);
+        // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
+        // body only scans its OWN parked set, so a receiver parked in the PARENT nursery on a shared
+        // channel is never woken → the parent spuriously faults `deadlock`. Point `parent_wake` at the
+        // sched the activating worker fiber is running on (its parent nursery — held in `self.mn`, or
+        // `mn_enlist_sched` on the inline outermost builder) so `send_wake`/`close_wake` route the wake
+        // up to it. Strictly upward: no cycle, and it wakes a receiver on the parent's HOME sched (its
+        // outcome slot / JoinScope stay put).
+        inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
+        let sched = Arc::new(inner);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
         sched.lock().scopes[0].ancestors = self.scope_ancestors();

@@ -204,7 +204,28 @@ error-propagation path carry the submitted fiber's frames (or, symmetrically, ha
 two agree. Low priority.
 </details>
 
-### B5. M:N spuriously DEADLOCKS an uncontended cross-nursery send→recv (a nested-nursery `send` doesn't wake an outer parked receiver) — `--serial` works — **OPEN (found 2026-07-17)**
+### B5. M:N spuriously DEADLOCKS an uncontended cross-nursery send→recv (a nested-nursery `send` doesn't wake an outer parked receiver) — `--serial` works — **FIXED (found 2026-07-17, fixed 2026-07-17)**
+
+> **Fix (child→parent eager wake routing).** The residual was narrower than the OPEN note guessed: not
+> the shared global `MnSched` (lazy nested nurseries already share it), but an **EAGER** nested nursery's
+> **private** `MnSched` (`activate_eager_nursery` — entered when a `parallel:` runs inside a live worker
+> fiber on a ≥2-core box, for per-connection liveness). Its `send_wake`/`close_wake` only scanned its own
+> park set, so a `send` inside the eager body queued the value into the shared `ChannelCore` but never woke
+> a receiver parked on the PARENT sched → false `deadlock`. Added `MnSched::parent_wake: Option<Arc<MnSched>>`
+> (`None` for every ordinary sched; set on an eager sched to the activating parent sched via
+> `self.mn.or(mn_enlist_sched)`); `send_wake`/`close_wake` now walk that chain (strictly UPWARD — no cycle,
+> no ABBA, each ancestor woken under its own lock after the eager core guard is dropped) and requeue the
+> parent's parked receiver onto its home sched. Value already in the shared queue → the woken receiver pops
+> it (no double-consume); over-wake (empty queue → re-park) is the tolerated pattern. `is_deadlocked` is
+> UNCHANGED — a genuine no-sender quiesce still faults. Golden
+> `parallel_cross_nursery_nested_send_to_outer_recv.chz` (serial==M:N=="receiver got 1"; 30× on M:N under
+> CPU load, 0 flakes) + `parity_tests.rs` parity + three guards (genuine-deadlock-still-faults,
+> real-fault-reports-real-error, parent→child-residual-never-panics). **Residual (documented, pinned):**
+> parent→child (receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP
+> only) and sibling-eager→sibling-eager remain timing-divergent (complete-or-deadlock-fault cleanly); a
+> descendant walk / VM-global registry would be a larger pre-freeze change (out of scope). See
+> `docs/cross-nursery-flat-scheduler.md` (eager bullet + §3).
+
 On the **default M:N engine**, a `send` issued from inside a **nested** (child) `parallel:` does not wake a
 single receiver parked on that channel in an **outer/ancestor** nursery — so M:N declares a **false
 `deadlock`** and faults, while `--serial` runs the program correctly. A real correctness bug in the

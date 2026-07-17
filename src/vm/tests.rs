@@ -11276,6 +11276,124 @@ fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
     }
 }
 
+/// gaps.md B5 — a `send` from inside a NESTED (child, eager) `parallel:` nursery must wake a receiver
+/// parked on that channel in the OUTER nursery. Uncontended 1-send / 1-recv → deterministic, so serial
+/// (the oracle) == M:N == the golden. Before the child→parent wake-routing fix (`MnSched::parent_wake`)
+/// the DEFAULT M:N engine spuriously faulted `deadlock`: the value landed in the shared `ChannelCore`
+/// but the eager child sched's `send_wake` only scanned its OWN park set, so the outer parked receiver
+/// was never made runnable and the parent quiesced to a false deadlock — while serial printed "receiver
+/// got 1". 10 rounds under a 30s watchdog so a lost-wakeup regression fails loud instead of hanging.
+#[test]
+fn golden_parallel_cross_nursery_nested_send_to_outer_recv_matches_expected() {
+    let src = include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.chz");
+    let expected =
+        include_str!("../../examples/parallel_cross_nursery_nested_send_to_outer_recv.expected");
+    // Uncontended single-sender/single-receiver → the serial oracle must produce the SAME bytes.
+    assert_eq!(
+        run_capture(src).expect("coop run"),
+        expected,
+        "coop diverged from the golden"
+    );
+    for _ in 0..10 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = src.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_capture_parallel(&s));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(r) => assert_eq!(
+                r.expect("parallel run (no spurious cross-nursery deadlock)"),
+                expected
+            ),
+            Err(_) => panic!("hung — cross-nursery child→parent wake regressed (lost wakeup)"),
+        }
+    }
+}
+
+/// gaps.md B5 detector-accuracy guard — the child→parent wake routing must NOT weaken the deadlock
+/// detector. The B5 shape with NO send anywhere (the nested grandchild does other work, never sends)
+/// is a GENUINE deadlock: the outer receiver parks forever. It must STILL fault `deadlock` on M:N
+/// (`parent_wake` exists but is never triggered — no send). Proves the fix didn't turn the detector
+/// off to silence the false positive. 30s watchdog.
+#[test]
+fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
+    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    print(\"grandchild ran\")\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(r) => {
+            let err =
+                r.expect_err("a genuine no-sender cross-nursery recv must still fault deadlock");
+            assert!(
+                err.message.contains("deadlock"),
+                "expected deadlock, got: {}",
+                err.message
+            );
+        }
+        Err(_) => {
+            panic!("hung — genuine cross-nursery deadlock no longer fires (detector weakened)")
+        }
+    }
+}
+
+/// gaps.md B5 — a nested (eager) nursery whose grandchild raises a REAL fault (index-out-of-bounds)
+/// while an outer sibling parks on the channel must surface the REAL fault, NOT a spurious `deadlock`
+/// (`reduce_task_slots` ranks Fault > Deadlocked). Guards that the wake-routing patch keeps the real
+/// error winning. Serial oracle reports the same real fault. 30s watchdog.
+#[test]
+fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
+    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    xs := [1]\n                    ready.send(xs[9])\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(r) => {
+            let err = r.expect_err("the nested grandchild's real fault must surface");
+            assert!(
+                err.message.contains("out of bounds"),
+                "expected the real fault, got: {}",
+                err.message
+            );
+            assert!(
+                !err.message.contains("deadlock"),
+                "real fault masked by a spurious deadlock: {}",
+                err.message
+            );
+        }
+        Err(_) => panic!("hung — nested real-fault path regressed"),
+    }
+}
+
+/// gaps.md B5 residual boundary — the fix routes child→parent (a send OUT OF an eager body) ONLY;
+/// `parent_wake` points strictly UPWARD. The REVERSE direction (receiver parked INSIDE the eager body,
+/// sender in an ANCESTOR nursery) is NOT routed. This program is timing-divergent (if the ancestor send
+/// lands first the eager receiver reads the buffered value; if the eager receiver parks first it is not
+/// woken → deadlock), so — like the contended case — it must only ever COMPLETE or fault `deadlock`
+/// CLEANLY, never panic/hang. Pins that the fix is NOT over-claimed as full "any live sched" coverage.
+/// 30s watchdog.
+#[test]
+fn parallel_cross_nursery_parent_to_child_residual_never_panics() {
+    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    v := ready.recv()\n                    print(\"got {v}\")\n        spawn:\n            ready.send(1)\nmain()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => assert!(
+            e.message.contains("deadlock"),
+            "parent→child residual must succeed or deadlock-fault, got: {}",
+            e.message
+        ),
+        Err(_) => {
+            panic!("hung — parent→child residual must complete or deadlock-fault, never hang/panic")
+        }
+    }
+}
+
 /// Cross-nursery flat scheduler — a `spawn:` issued AFTER a nursery was early-enlisted (which drained
 /// its task vec) must NOT be silently dropped: the late task runs at the join. Before the fix the
 /// "already enlisted" join branch discarded the refilled vec. M:N-only, 30s watchdog. (charge #3.)

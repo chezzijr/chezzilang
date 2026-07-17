@@ -5217,8 +5217,16 @@ drain only its private queue and could never RUN `O` → `deadlock` fault) is **
   join points, the M:N flush order is `I` (inner join) then `O` (outer join) — i.e.
   `I got 1\nO got 1\ndone` — NOT the case-C single-nursery order (`O got 1\nI got 1`). Both complete; the
   ordering follows the parity-preserving per-nursery flush.
-- **Eager nurseries unchanged (OPTION A):** the per-connection eager nursery keeps its OWN sched +
-  dedicated drainer (single-scope fast path), untouched.
+- **Eager nurseries keep their private sched (OPTION A), + child→parent wake routing (gaps.md B5):** the
+  per-connection eager nursery keeps its OWN sched + dedicated drainer (single-scope fast path). But a
+  `send`/`close` inside an eager body only scanned that private sched's park set, so a receiver parked in
+  the PARENT nursery on a shared channel was never woken → a spurious `deadlock` (an uncontended nested
+  `send`→outer `recv`). Fixed by `MnSched::parent_wake` (the eager sched points at the activating parent
+  sched; `send_wake`/`close_wake` walk that chain child→parent, strictly upward, and requeue the parent's
+  parked receiver onto its home sched). `is_deadlocked` unchanged — genuine no-sender quiesce still faults.
+  Golden `parallel_cross_nursery_nested_send_to_outer_recv.chz` (serial==M:N). **Residual (documented):**
+  parent→child (receiver parked INSIDE an eager body, sender in an ancestor) + sibling-eager→sibling-eager
+  stay timing-divergent (complete or deadlock-fault cleanly).
 - **Cooperative (`run --serial`) + `--interp`:** still serialize nested nursery levels → the same program
   **still faults `deadlock`** there. The cooperative-engine flatten is a **separate, later commit**.
   Workaround on `run`: siblings in ONE nursery (doc case C). Golden is M:N-only (no coop/interp leg),
