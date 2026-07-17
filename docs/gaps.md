@@ -11,6 +11,23 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-18 (bug-hunt: recursive-local-fn airlock diagnostic)
+
+**RESOLVED (diagnostic only — full support stays DEFERRED past the JIT freeze):** a nested (local)
+recursive `fn` crossing the airlock (`spawn:` block, `spawn f()` callee, `spawn f(g)` arg,
+`Channel[fn].send`) used to fault with the misleading `maximum structural depth (10000) exceeded (cyclic
+data structure?)` — there is no cyclic *data*, just the letrec self-cell making the closure's capture
+graph self-referential (`Closure h -> Cell -> h`), which tripped the generic depth guard. The two
+closure-serialization arms (`to_wire_depth` / `to_snap_depth` in `src/vm/sched.rs`) now scan the crossing
+closure's capture graph for its own handle (new `graph_reaches_handle`, sibling of the Task-2b
+`graph_embeds_ref_depth`) and raise a clear, **recoverable**, byte-identical-on-both-engines error: `a
+recursive local fn cannot be sent across a task boundary — hoist it to module scope (a module-global
+recursive fn is sendable)`. The fix is in the message: a module-global recursive `fn` crosses as a plain
+`Func` (no capture) and IS sendable. **Actual recursive-local-fn sendability remains deferred** (a risky
+VM change post-JIT-freeze). Accepted ceiling: a genuine data cycle whose loop passes *through* a live
+closure would now report the recursive-fn message instead of the depth message — pathological/rare, not
+chased (`examples/cycle_guard.chz` / `airlock_cycle.chz` are pure data, unaffected).
+
 ## Session log — 2026-07-16 (stdlib gap-fill, waves 1–3: six gaps shipped)
 
 One session, six gaps off this backlog's *ranked stdlib* list, run as three concurrent-pair waves

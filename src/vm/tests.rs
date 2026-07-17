@@ -12761,6 +12761,52 @@ main()
     );
 }
 
+/// 2026-07-18 bug-hunt — a nested (local) recursive `fn` crossing the airlock has a self-referential
+/// capture graph (the letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). It used to
+/// trip the generic depth guard and emit the misleading `maximum structural depth ...` message. It now
+/// gets a CLEAR, recoverable diagnostic pointing at the fix (hoist to module scope). Byte-identical on
+/// both engines (serial `deep_clone`→`to_wire`, M:N spawn-block `to_wire`/`to_snap`).
+#[test]
+fn airlock_recursive_local_fn_clear_diagnostic_both_engines() {
+    let src = "\
+fn main():
+    fn fact(n: int) -> int:
+        if n <= 1: return 1
+        return n * fact(n - 1)
+    r := recover:
+        parallel:
+            spawn: fact(5)
+        \"done\"
+    match r:
+        Ok(v):  print(\"ok: {v}\")
+        Err(e): print(\"caught: {e.message()}\")
+main()
+";
+    assert_mc_parity(
+        src,
+        "caught: a recursive local fn cannot be sent across a task boundary — hoist it to module scope (a module-global recursive fn is sendable)\n",
+    );
+}
+
+/// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
+/// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
+/// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
+#[test]
+fn airlock_module_global_recursive_fn_control_sends() {
+    let src = "\
+fn fact(n: int) -> int:
+    if n <= 1: return 1
+    return n * fact(n - 1)
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(fact(5))
+    print(ch.recv())
+main()
+";
+    assert_mc_parity(src, "120\n");
+}
+
 /// Bug A regression — a cyclic MODULE-GLOBAL value snapshotted for an M:N worker (`to_snap`) is also
 /// depth-guarded. This path is M:N-ONLY: the serial engine never snapshots module globals, so this is
 /// a `run_capture_parallel`-only assertion (NOT `assert_mc_parity`). The empty `parallel:` nursery

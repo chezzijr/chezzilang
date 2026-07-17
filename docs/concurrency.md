@@ -741,6 +741,17 @@ aggregate) inside a task is a **compile error** (see below).
   closure across tasks — use Shared/Atomic/Channel` — **byte-identical on both engines**, never a
   silent deep-copy that drops the write. Together with the Task-2a gate, **no silent `ref` path
   remains**. A bare **native** handle is a different case and stays non-sendable (below).
+- **A recursive *local* `fn` cannot cross the airlock (clear diagnostic, deferred support).** A nested
+  `fn` that calls itself captures its own name for recursion — the compiler's letrec gives it a
+  self-cell, so the closure's capture graph is **self-referential** (it reaches its own heap handle).
+  Full recursive-local-fn sendability is a deferred VM change, so the same capture-graph scan detects the
+  self-reference and raises the **recoverable** error `a recursive local fn cannot be sent across a task
+  boundary — hoist it to module scope (a module-global recursive fn is sendable)` — **byte-identical on
+  both engines**, at every airlock arm (`spawn:` block, `spawn f()` callee, `spawn f(g)` arg,
+  `Channel[fn].send`). The fix is in the message: **hoist the `fn` to module scope** — a module-global
+  recursive `fn` crosses as a plain `Func` (recursion resolves via its home-global slot, no capture) and
+  IS sendable. Genuine cyclic *data* still reports the `maximum structural depth …` message; only a
+  self-referential closure gets this one.
 - **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
   producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
