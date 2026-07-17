@@ -11,6 +11,29 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-18 (bug-hunt: 5 findings — 4 fixed, 1 backlogged)
+
+Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib).
+The checker⊋compiler int→float surface came back **clean** (5 prior waves + `88837d8` hardened it).
+Five findings survived re-verification on the real binary, both engines:
+- **A/B6** — `?` in a nil-returning fn silently swallowed the Err/None — **FIXED** (see B6 below).
+- **C** — recursive-local-fn airlock misleading error — **FIXED** (diagnostic; see below).
+- **D+str** — float formatting was Rust-style, not Python — **FIXED**: `{:e}`/`{:E}` (default precision 6,
+  signed 2-digit exponent) + `str`/`print`/`json` scientific notation (CPython repr thresholds: sci when
+  exp `< -4` or `>= 16`). One shared exponent-normalize helper; matches CPython exactly, both engines.
+- **E — derived `std.cancel` token `done()` fired ~1ms BEFORE its deadline** (Go-context invariant break:
+  a task woken by `done()` read `cancelled()==false`/`reason()==None`) — **FIXED**. `Token.derive`
+  (`std/cancel.chz`) computed the child timer's remaining-ms with `int()` truncation toward zero; the
+  `+ 1` ms margin keeps `done()` at-or-after the absolute deadline. Parity-preserving (both engines were
+  wrong the same way → oracle-blind). Regression: `derived_cancel_token_done_implies_cancelled_runtime`.
+- **B — nested `Option`/enum `match` false "non-exhaustive"** — **BACKLOGGED** (won't-fix pre-freeze):
+  `match Some(Some(v)) / Some(None) / None` is exhaustive but the checker reports "missing Some". Root:
+  `check_exhaustive` (`src/checker/pattern.rs`) marks a variant covered only by an *irrefutable* arm; it
+  does not compute that `Some(Some(_))` + `Some(None)` recursively exhaust `Some`. It is an **over-reject**
+  (safe direction — never accepts a truly non-exhaustive match; workaround is a `_` arm). A proper fix is
+  a recursive-usefulness algorithm with real false-*accept* risk — deliberately not attempted right before
+  the JIT freeze.
+
 ## Session log — 2026-07-18 (bug-hunt: recursive-local-fn airlock diagnostic)
 
 **RESOLVED (diagnostic only — full support stays DEFERRED past the JIT freeze):** a nested (local)
