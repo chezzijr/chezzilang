@@ -274,6 +274,53 @@ fn push_fill(out: &mut String, fill: char, n: usize) {
     }
 }
 
+/// The scalar kind a value renders as for spec-validity purposes. `bool`/`bytes`/anything mapping to
+/// [`FmtArg::Other`] folds into `Str`, matching the runtime path (they render via `render_str`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarKind {
+    Int,
+    Float,
+    Str,
+}
+
+/// Single source of truth for "is this spec's type/precision/sign valid for this scalar kind?".
+/// Called FIRST by `render_int`/`render_float`/`render_str` (so the runtime wording never forks) AND
+/// by the checker to reject a provably-wrong `{expr:spec}` at COMPILE time for concrete scalars.
+/// The error strings are byte-identical to the runtime diagnostics.
+pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), String> {
+    match kind {
+        // Precision on an integer is meaningful only via a float type char; every parse-allowed type
+        // char (d/x/X/b/o and the f/e/% promoters) is otherwise valid for an int.
+        ScalarKind::Int => {
+            if spec.precision.is_some() && !matches!(spec.ty, Some('f') | Some('e') | Some('%')) {
+                return Err("format spec: precision not allowed on an integer".to_string());
+            }
+            Ok(())
+        }
+        // A float takes f/e/%/(none); the integer/radix type chars are rejected.
+        ScalarKind::Float => match spec.ty {
+            Some('d') => Err("format spec: type 'd' not valid for a float".to_string()),
+            Some(t @ ('x' | 'X' | 'b' | 'o')) => {
+                Err(format!("format spec: type '{t}' not valid for a float"))
+            }
+            _ => Ok(()),
+        },
+        // A string takes only fill/align/width/precision — no sign, no zero-pad, no type char.
+        ScalarKind::Str => {
+            if spec.sign {
+                return Err("format spec: sign '+' not allowed on a string".to_string());
+            }
+            if spec.zero_pad {
+                return Err("format spec: zero-pad '0' not allowed on a string".to_string());
+            }
+            if let Some(t) = spec.ty {
+                return Err(format!("format spec: type '{t}' not valid for a string"));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Produce `(sign_prefix, body, is_numeric)` for the value under the spec's type/precision rules.
 /// `sign_prefix` is `"-"`/`"+"`/`""` split off the front so zero-padding can insert zeros after it.
 fn render_base(spec: &FormatSpec, arg: FmtArg) -> Result<(String, String, bool), String> {
@@ -286,10 +333,8 @@ fn render_base(spec: &FormatSpec, arg: FmtArg) -> Result<(String, String, bool),
 }
 
 fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), String> {
-    // Precision on an integer is meaningful only via a float type char.
-    if spec.precision.is_some() && !matches!(spec.ty, Some('f') | Some('e') | Some('%')) {
-        return Err("format spec: precision not allowed on an integer".to_string());
-    }
+    // Validity (precision/type) is single-sourced in `spec_valid_for_scalar`.
+    spec_valid_for_scalar(spec, ScalarKind::Int)?;
     let neg = n < 0;
     let mag = (n as i128).unsigned_abs(); // safe for i64::MIN
     let body = match spec.ty {
@@ -302,12 +347,14 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
         Some('f') => return render_float(spec, n as f64),
         Some('e') => return render_float(spec, n as f64),
         Some('%') => return render_float(spec, n as f64),
-        Some(t) => return Err(format!("format spec: type '{t}' not valid for an integer")),
+        Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
     Ok((sign_prefix(neg, spec.sign), body, true))
 }
 
 fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), String> {
+    // Validity (type char) is single-sourced in `spec_valid_for_scalar`.
+    spec_valid_for_scalar(spec, ScalarKind::Float)?;
     // NaN: mask the sign so the spec path renders `NaN` (not `-NaN`), matching the bare
     // stringify path (`format_float`) which drops the NaN sign. `-inf`/`-0.0` keep their sign.
     let neg = !x.is_nan() && x.is_sign_negative() && (x != 0.0 || x.is_sign_negative());
@@ -327,22 +374,14 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
             let p = spec.precision.unwrap_or(6);
             format!("{scaled:.*}%", p)
         }
-        Some('d') => return Err("format spec: type 'd' not valid for a float".to_string()),
-        Some(t) => return Err(format!("format spec: type '{t}' not valid for a float")),
+        Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
     Ok((sign_prefix(neg, spec.sign), body, true))
 }
 
 fn render_str(spec: &FormatSpec, s: &str) -> Result<(String, String, bool), String> {
-    if spec.sign {
-        return Err("format spec: sign '+' not allowed on a string".to_string());
-    }
-    if spec.zero_pad {
-        return Err("format spec: zero-pad '0' not allowed on a string".to_string());
-    }
-    if let Some(t) = spec.ty {
-        return Err(format!("format spec: type '{t}' not valid for a string"));
-    }
+    // Validity (sign/zero-pad/type char) is single-sourced in `spec_valid_for_scalar`.
+    spec_valid_for_scalar(spec, ScalarKind::Str)?;
     // `.N` truncates a string to N chars (Python parity).
     let body = match spec.precision {
         Some(p) => s.chars().take(p).collect(),
@@ -504,6 +543,43 @@ mod tests {
         assert!(bad("05", FmtArg::Str("hi"))); // zero-pad on string
         assert!(bad("+", FmtArg::Str("hi"))); // sign on string
         assert!(bad(".2", FmtArg::Int(3))); // precision on plain int
+    }
+
+    #[test]
+    fn spec_valid_for_scalar_predicate() {
+        let p = |s: &str| parse(s).unwrap();
+        // invalid combos — messages must match the runtime wording verbatim
+        assert!(
+            spec_valid_for_scalar(&p(".2f"), ScalarKind::Str)
+                .unwrap_err()
+                .contains("type 'f' not valid for a string")
+        );
+        assert!(
+            spec_valid_for_scalar(&p("d"), ScalarKind::Float)
+                .unwrap_err()
+                .contains("type 'd' not valid for a float")
+        );
+        assert!(
+            spec_valid_for_scalar(&p(".3d"), ScalarKind::Int)
+                .unwrap_err()
+                .contains("precision not allowed on an integer")
+        );
+        assert!(
+            spec_valid_for_scalar(&p("x"), ScalarKind::Float)
+                .unwrap_err()
+                .contains("type 'x' not valid for a float")
+        );
+        assert!(
+            spec_valid_for_scalar(&p("+"), ScalarKind::Str)
+                .unwrap_err()
+                .contains("sign '+' not allowed on a string")
+        );
+        // valid combos
+        assert!(spec_valid_for_scalar(&p(".2f"), ScalarKind::Float).is_ok());
+        assert!(spec_valid_for_scalar(&p("d"), ScalarKind::Int).is_ok());
+        assert!(spec_valid_for_scalar(&p(".3"), ScalarKind::Str).is_ok());
+        assert!(spec_valid_for_scalar(&p("x"), ScalarKind::Int).is_ok());
+        assert!(spec_valid_for_scalar(&p(".2f"), ScalarKind::Int).is_ok()); // int promoted by float type
     }
 
     #[test]

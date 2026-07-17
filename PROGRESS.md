@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE (2026-07-17, `auto-task/check-fmtspec`) — Nit 2: static format-spec/value-type check.**
+> A `{expr:spec}` interpolation whose spec is provably wrong for a **concrete scalar** value
+> (`{s:.2f}` on a str, `{x:d}` on a float, `{x:.3d}` precision on an int) is now a **compile error**
+> (`chezzi check`), not runtime-only — consistent with the already-static width>4096 cap and Chezzi's
+> statically-typed model (deliberate divergence from Python's runtime `ValueError`). Single-sourced:
+> new `fmtspec::spec_valid_for_scalar(spec, ScalarKind)` predicate; `render_int/float/str` call it
+> first (runtime wording unchanged, guard arms now `unreachable!()`); the checker (`check_interpolation`)
+> calls the SAME predicate, but ONLY for `Ty::Int/Float/Str/Bool` — `Unknown`, a generic `Param(T)`,
+> protocols, structs, lists, bytes fall through and keep the runtime backstop (a generic `"{v:.2f}"`
+> body is NOT statically rejected; instantiating it with str still faults at runtime, both engines).
+> Docs: `docs/syntax.md` (format specs). Checker-only + pure runtime refactor → parity untouched.
+> `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-17, `feat/const-binding`) — `docs/gaps.md` L4: `const` immutable bindings.**
 > `const T` is a binding modifier in the same type-slot as `ref` (`PI: const float = 3.14`); the
 > checker rejects any later reassignment of the name (`=` + every compound). Immutable *binding*, not a
