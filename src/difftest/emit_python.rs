@@ -25,7 +25,7 @@ def _chz_str(v):
         if v != v: return "NaN"
         if v == float("inf"): return "inf"
         if v == float("-inf"): return "-inf"
-        return ("%.1f" % v) if v.is_integer() else repr(v)
+        return repr(v)
     if isinstance(v, str): return v
     if isinstance(v, tuple): return "(" + ", ".join(_chz_repr(x) for x in v) + ")"
     if isinstance(v, list): return "[" + ", ".join(_chz_repr(x) for x in v) + "]"

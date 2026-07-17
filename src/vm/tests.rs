@@ -9119,12 +9119,11 @@ fn golden_literals_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
 }
 
-/// Large-integral float golden: `examples/float_large_integral.chz`. A finite whole-valued float
-/// must print the SHORTEST decimal that round-trips (docs/syntax.md contract), not the exact
-/// fixed-point expansion of the binary value (`1.5e23` → `150000000000000000000000.0`, not the
-/// old artifact `150000000000000004194304.0`). Exercises BOTH the engine `format_float` path
-/// (bare interpolation) and `fmtspec::format_float_like` (bare format-spec, no type char), and
-/// asserts VM==interp==`.expected` (parity is the M19 bar).
+/// Large-integral float golden: `examples/float_large_integral.chz`. Floats print with CPython
+/// `repr()`/`str()` parity (docs/syntax.md contract): scientific notation once the decimal exponent
+/// is `>= 16` (`1.5e23` → `1.5e+23`), fixed with a `.0` below that. Exercises BOTH the engine
+/// `format_float` path (bare interpolation) and `fmtspec::repr_float` (bare format-spec, no type
+/// char) — now the same `repr_float` helper — and asserts VM==interp==`.expected` (parity is the M19 bar).
 #[test]
 fn golden_float_large_integral_matches_expected_and_interp() {
     let src = include_str!("../../examples/float_large_integral.chz");

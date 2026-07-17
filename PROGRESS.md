@@ -4,6 +4,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE (2026-07-18, `auto-task/python-float-fmt`) — Python-compatible float formatting.**
+> Two float-format defects fixed together behind ONE shared exponent-normalizer (`fmtspec::normalize_exp`):
+> (1) the `{:e}`/`{:E}` spec was Rust-style (`1.23456789e5`) — now CPython-style: **default precision 6**,
+> exponent **always signed + zero-padded to ≥2 digits** (`{123456.789:e}` → `1.234568e+05`, `{1.0:e}` →
+> `1.000000e+00`, `{0.000123:.2e}` → `1.23e-04`); `E` is a NEW type char (uppercase marker, same exponent).
+> (2) plain `str(float)`/`print`/`{f}`-no-spec/`json.stringify` never used scientific notation (Rust Display
+> never does) — now **matches CPython `repr()`/`str()` exactly** (`fmtspec::repr_float`): scientific when the
+> decimal exponent is `< -4` or `>= 16`, fixed otherwise, whole floats keep `.0`. `str(1e16)`→`1e+16`,
+> `str(1e15)`→`1000000000000000.0`, `str(0.00001)`→`1e-05`, `str(1.5e300)`→`1.5e+300`, `str(-2.5e-8)`→`-2.5e-08`.
+> `json.stringify` of a parsed `1.5e300` now emits `1.5e+300` (valid JSON, round-trips) not a 300-digit decimal.
+> Single-sourced: `vm::format_float` delegates to `fmtspec::repr_float`; both the spec arm and repr path share
+> `normalize_exp`. This is a **deliberate reversal** of the old "never scientific" divergence (commit 4f1ec35) —
+> Python parity is the goal. CPython differential shim (`emit_python.rs`) switched to `repr(v)` in lockstep.
+> Goldens updated: `examples/{float_large_integral,literals,format_specs}.expected`. Docs: `docs/syntax.md`,
+> `docs/spec.md`. Two-engine parity green (serial==M:N, one shared formatter). `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-17, `auto-task/check-fmtspec`) — Nit 2: static format-spec/value-type check.**
 > A `{expr:spec}` interpolation whose spec is provably wrong for a **concrete scalar** value
 > (`{s:.2f}` on a str, `{x:d}` on a float, `{x:.3d}` precision on an int) is now a **compile error**
