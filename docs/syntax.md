@@ -2419,12 +2419,17 @@ print("{greeting:.5}")    # string precision truncates → "hello"
   `%` percent (×100 then `%`). A float type char (`f`/`e`/`%`) promotes an int.
 
 A **bare** `{expr}` (or `{expr:}` with an empty spec) renders exactly as before — e.g. a whole float
-prints `5.0`. An **unknown type char** or trailing junk in the spec, and a **type/value mismatch**
-(e.g. `{name:d}` on a string, `{x:.2f}` on a string, zero-pad on a non-number), are both reported as
-**errors before any output** — surfaced with a runtime-error prefix and *not* caught by `chezzi check`
-(interpolation specs are validated when the program starts running, after the type-check phase). The
-spec is parsed once, shared by both engines (`src/fmtspec.rs`), so both engines produce
-byte-identical output. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
+prints `5.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
+**type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, `{x:d}` on a float,
+`{x:.3d}` precision on an int, zero-pad on a non-number) is now **caught at compile time by `chezzi
+check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a
+provably-wrong spec/type pairing is a static error, in the spirit of Chezzi's statically-typed model
+(this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`).
+The **runtime** validation stays as an identical backstop (same wording, single-sourced in
+`spec_valid_for_scalar`): it still fires for a value whose type the checker can't pin to a concrete
+scalar — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
+protocol existential — where the mismatch is only knowable at run time. The spec is parsed once,
+shared by both engines (`src/fmtspec.rs`), so both engines produce byte-identical output. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
 slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
 spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.

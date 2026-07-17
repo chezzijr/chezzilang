@@ -219,6 +219,38 @@ fn interpolation_valid_ok() {
     ok("print(\"lit braces {{ }}\")\n");
 }
 
+#[test]
+fn interpolation_spec_type_mismatch_rejected() {
+    // A format spec provably wrong for a CONCRETE scalar is a COMPILE error (was runtime-only).
+    // Messages must match the runtime backstop wording verbatim (single-sourced in fmtspec).
+    rejects(
+        "s: str = \"hi\"\nprint(\"{s:.2f}\")\n",
+        "type 'f' not valid for a string",
+    );
+    rejects(
+        "x: float = 1.5\nprint(\"{x:d}\")\n",
+        "type 'd' not valid for a float",
+    );
+    rejects(
+        "x: int = 3\nprint(\"{x:.3d}\")\n",
+        "precision not allowed on an integer",
+    );
+}
+
+#[test]
+fn interpolation_spec_valid_and_generic_ok() {
+    // No false positives: valid concrete-scalar specs, no-spec cases, structs, and — critically —
+    // a generic body where the value type is a `Param(T)` (T could be float at a call site) must
+    // NOT be statically rejected; the runtime keeps the backstop.
+    ok("x: float = 1.5\nprint(\"{x:.2f}\")\n");
+    ok("n: int = 3\nprint(\"{n:d}\")\n");
+    ok("s: str = \"hi\"\nprint(\"{s}\")\n");
+    ok("s: str = \"hello\"\nprint(\"{s:.3}\")\n"); // string precision truncates — allowed
+    ok("struct P:\n    a: int\np := P(1)\nprint(\"{p}\")\n");
+    // Generic body: v: T is Param → NOT statically rejected.
+    ok("fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\nfn main():\n    pass\n");
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]

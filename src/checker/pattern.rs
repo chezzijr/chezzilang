@@ -1071,15 +1071,24 @@ impl Checker {
                 let saved_ord = self.kw_frag_ord;
                 let mut ord = 0usize;
                 for chunk in chunks {
-                    if let crate::interpolation::Chunk::Expr(mut e, _spec) = chunk {
+                    if let crate::interpolation::Chunk::Expr(mut e, spec) = chunk {
                         self.kw_frag_ctx = span;
                         self.kw_frag_ord = ord;
                         // Anchor the fragment root at the string literal so a nil-fragment error
                         // points at the literal, not the `(1,1)` fragment-relative fallback.
                         e.span = span;
-                        // Discard the inferred type; we only want the side-effecting checks
-                        // (name resolution, arity/type/method validation, nil ban).
-                        let _ = self.infer_value(&e);
+                        let ty = self.infer_value(&e);
+                        // Static format-spec/value-type check: when the value is a CONCRETE scalar
+                        // and the spec is provably wrong for it, reject at COMPILE time (same wording
+                        // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires
+                        // for Int/Float/Str/Bool; Unknown, a generic `Param(T)`, protocols, structs,
+                        // lists, bytes, ... all fall through and keep the runtime backstop.
+                        if let Some(fs) = &spec
+                            && let Some(kind) = scalar_kind_of(&ty)
+                            && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
+                        {
+                            self.error(span, msg);
+                        }
                         ord += 1;
                     }
                 }
@@ -3422,4 +3431,19 @@ impl Checker {
     }
 
     // ===== calls =====
+}
+
+/// Map a type to the [`crate::fmtspec::ScalarKind`] it renders as for a static format-spec check —
+/// but ONLY for CONCRETE scalars. `bool` folds into `Str` (it renders via the runtime `FmtArg::Other`
+/// → `render_str` path). Everything else (Unknown, `Param(T)`, protocols, structs, lists, bytes, …)
+/// returns `None` so the static check is skipped and the runtime keeps its identical backstop — the
+/// soundness boundary that lets a generic body `"{v:.2f}"` (v: T could be float) pass check.
+fn scalar_kind_of(ty: &Ty) -> Option<crate::fmtspec::ScalarKind> {
+    use crate::fmtspec::ScalarKind;
+    match ty {
+        Ty::Int => Some(ScalarKind::Int),
+        Ty::Float => Some(ScalarKind::Float),
+        Ty::Str | Ty::Bool => Some(ScalarKind::Str),
+        _ => None,
+    }
 }

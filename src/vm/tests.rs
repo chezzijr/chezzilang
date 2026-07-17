@@ -13212,6 +13212,28 @@ fn interpolation_escape_newline_before_fragment_not_misattributed() {
 }
 
 #[test]
+fn interpolation_backstop_still_faults_for_generic_str() {
+    // Static format-spec/value-type checking fires only for CONCRETE scalars; a generic body
+    // `"{v:.2f}"` (v: T) passes check, so instantiating it with a str MUST still fault at RUNTIME
+    // with the identical message on BOTH engines — proving the runtime backstop is intact.
+    let src = "fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\nfn main():\n    print(show(\"hi\"))\nmain()\n";
+    let e1 = run_capture(src).unwrap_err().message;
+    let e2 = run_capture_parallel(src).unwrap_err().message;
+    assert!(
+        e1.contains("type 'f' not valid for a string"),
+        "serial: {e1}"
+    );
+    assert!(
+        e2.contains("type 'f' not valid for a string"),
+        "parallel: {e2}"
+    );
+    // A valid concrete-float `{x:.2f}` still renders identically on both engines.
+    let ok = "x: float = 3.14159\nprint(\"{x:.2f}\")\n";
+    assert_eq!(run_capture(ok).unwrap(), "3.14\n");
+    assert_eq!(run_capture_parallel(ok).unwrap(), "3.14\n");
+}
+
+#[test]
 fn non_interpolation_fault_span_unchanged() {
     // A direct top-level fault (no interpolation) still reports its real line — proves base_line=0
     // leaves normal lexing byte-identical.
