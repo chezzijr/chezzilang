@@ -413,12 +413,17 @@ struct Builder {
 }
 
 impl Builder {
-    fn visit(
-        &mut self,
+    /// The cycle + dedup + depth prologue every module load shares (normal [`visit`] AND file-backed
+    /// [`visit_native_file`] — a native `std/*.chz` can `import`, so it needs the same guards or a
+    /// native↔native cycle would push a dependent before its dependency and later index-panic in the
+    /// VM). Returns `Ok(true)` when the module is already fully loaded (caller returns early), `Ok(false)`
+    /// to proceed, or a cycle/too-deep `Err`. Must run BEFORE the module is pushed to `on_stack`.
+    fn enter_module_guard(
+        &self,
         id: &ModuleId,
         dotted: &[String],
         import_span: Span,
-    ) -> Result<(), ResolveError> {
+    ) -> Result<bool, ResolveError> {
         // Cycle: this module is already on the active DFS stack.
         if let Some(pos) = self.on_stack.iter().position(|(sid, _)| sid == id) {
             let mut chain: Vec<String> = self.on_stack[pos..]
@@ -434,7 +439,7 @@ impl Builder {
         }
         // Already loaded (e.g. via the other arm of a diamond).
         if self.visited.contains_key(id) {
-            return Ok(());
+            return Ok(true);
         }
         // Depth backstop: a pathological acyclic-but-very-deep chain would otherwise recurse until
         // the host stack overflows and the process aborts (SIGABRT). Placed AFTER the cycle and
@@ -455,6 +460,18 @@ impl Builder {
                 span: import_span,
                 module: Some(dotted_label(dotted)),
             });
+        }
+        Ok(false)
+    }
+
+    fn visit(
+        &mut self,
+        id: &ModuleId,
+        dotted: &[String],
+        import_span: Span,
+    ) -> Result<(), ResolveError> {
+        if self.enter_module_guard(id, dotted, import_span)? {
+            return Ok(());
         }
 
         // The dotted path of the module that contains the failing `import` statement (empty for an
@@ -617,10 +634,13 @@ impl Builder {
         path: &[String],
         import_span: Span,
     ) -> Result<(), ResolveError> {
-        if self.visited.contains_key(id) {
+        let dotted: Vec<String> = name.split('.').map(str::to_string).collect();
+        // Same cycle/dedup/depth guard `visit` uses — a native file may `import`, so a native↔native
+        // cycle must report a clean `import cycle: …` error, NOT recurse or push a dependent ahead of
+        // its dependency (which would later index-panic in the VM's `bind_import`).
+        if self.enter_module_guard(id, &dotted, import_span)? {
             return Ok(());
         }
-        let dotted: Vec<String> = name.split('.').map(str::to_string).collect();
         // Same source chain as any other `std.*` module ($CHEZZI_STD → embedded): these ARE std files
         // (`std/math.chz`, `std/regex.chz`, …), so reading them off the checkout would break `import
         // std.math` on an installed binary just as surely as the pure-Chezzi modules.
@@ -630,12 +650,11 @@ impl Builder {
             module: Some(dotted_label(&dotted)),
         })?;
         let ast = self.parse(&source, &dotted)?;
-        // Mark visited BEFORE resolving imports so a (pathological) native↔native import cycle dedups
-        // to an early return instead of recursing forever — normal-file cycles are still reported via
-        // `on_stack` in `visit`. `resolve_ast_imports` pushes each dependency to `order` first, so the
-        // `order.push` below keeps the deps-first invariant.
-        self.visited.insert(id.clone(), ());
+        // Resolve imports (pushing each dependency to `order` first) BEFORE marking visited + pushing
+        // this module — mirrors `visit`, keeping the deps-first `order` invariant and letting a cycle
+        // re-entry hit `enter_module_guard`'s `on_stack` check instead of the visited early-return.
         let imports = self.resolve_ast_imports(id, &dotted, &ast)?;
+        self.visited.insert(id.clone(), ());
         self.order.push(LoadedModule {
             id: id.clone(),
             dotted,

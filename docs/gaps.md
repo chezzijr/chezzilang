@@ -440,8 +440,10 @@ failing-then-green test + two-engine (serial + M:N) runtime verify.
 - **`divmod` SHIPPED** — Python `(q, r)`. Landed NOT by expanding the native seam (`NativeRet` still has
   no `Tuple`) but as a **bodied Chezzi fn** in `std/math.chz` (`fn divmod(a, b) -> (int, int): return
   (a / b, a % b)`) — the first user of the hybrid native+Chezzi module form (bodyless `native fn`s and a
-  bodied `fn` in one std file; see `syntax.md`). Int `/` is truncating and `%` carries the divisor's sign,
-  matching Python's `(a // b, a % b)`.
+  bodied `fn` in one std file; see `syntax.md`). Uses Chezzi's own C-style `/` (truncating) and `%`
+  (dividend's sign), so it is `(a / b, a % b)` — NOT Python's floor `divmod` (`divmod(-7,2)` is `(-3,-1)`
+  here, `(-4,1)` in Python); a Python-floor variant would drift from Chezzi's own operators, a worse
+  surprise than matching them.
 - No **decimal / bigint**. `int` is a checked i64 (overflow FAULTS, never promotes), so a big-number or
   exact-money program simply cannot be written — there is no workaround. (Python: `int` is arbitrary
   precision + `decimal`; Go: `math/big`.) Rare in scripting; deferred, but it is a hard wall, not a

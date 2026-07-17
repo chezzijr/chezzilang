@@ -153,6 +153,42 @@ fn native_file_can_import_another_module() {
 }
 
 #[test]
+fn native_to_native_import_cycle_is_a_clean_error_not_a_panic() {
+    // Now that native files can import, a native↔native cycle must report `import cycle: …` (like a
+    // normal-file cycle) — NOT panic in the VM by pushing a dependent before its dependency.
+    let stddir = copied_std();
+    std::fs::write(
+        stddir.0.join("math.chz"),
+        format!(
+            "{}\nimport std.io\n",
+            std::fs::read_to_string(stddir.0.join("math.chz")).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        stddir.0.join("io.chz"),
+        format!(
+            "{}\nimport std.math\n",
+            std::fs::read_to_string(stddir.0.join("io.chz")).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let t = TmpDir::new();
+    let prog = t.write("main.chz", "import std.math\nprint(math.gcd(4, 6))\n");
+    let (_, err, ok) = run(&prog, &[], Some(&stddir.0));
+    assert!(!ok, "a native import cycle must fail resolution");
+    assert!(
+        err.contains("import cycle"),
+        "expected a clean 'import cycle' diagnostic, got: {err}"
+    );
+    assert!(
+        !err.contains("panic") && !err.contains("index out of bounds"),
+        "must NOT panic, got: {err}"
+    );
+}
+
+#[test]
 fn ill_typed_module_level_bodied_fn_is_rejected() {
     let stddir = copied_std();
     // Append a bodied fn whose body violates its declared return type.

@@ -20,12 +20,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `gaps.md §5`'s divmod deferral. IN scope both soundness sites. **Native files can now `import` too**
 > (a native `.chz` is still a real file): `visit_native_file` resolves its imports via a new shared
 > `resolve_ast_imports` helper (extracted from `visit`), the native-arm body-check binds them, and the
-> compiler already carried `lm.imports` — a bodied fn there can `import std.string` and use it. Tests: in-process `entry_ok`
-> (member/from-import resolution) + `tests/hybrid_native_module.rs` (5: divmod run-parity, `Reader.lines`
-> run-parity, and TWO `$CHEZZI_STD`-corrupted-copy RED soundness tests in an isolated CHILD PROCESS —
-> env is process-global, must NOT be set in-library). `math_..._representative_sigs_exact` 31→32. Full
-> `--lib` 3608 green, `hybrid_native_module` 5 green, clippy clean. Docs: `syntax.md` (native-struct-mix
-> note extended + module-level hybrid), `stdlib.md §std.math`, `gaps.md §5`.
+> compiler already carried `lm.imports` — a bodied fn there can `import std.string` and use it. **Adversarial
+> review (post-commit) found + fixed two**: (1) a native↔native import cycle panicked in the VM
+> (`visit_native_file` lacked `visit`'s cycle/depth guard) — extracted a shared `enter_module_guard`
+> used by both, so a cycle now reports a clean `import cycle: …` error (regression test added); (2) the
+> `divmod` docs falsely claimed Python semantics — Chezzi `/`/`%` are deliberately **C-style** (truncating,
+> dividend's sign; `syntax.md:1347`), so `divmod(-7,2)` is `(-3,-1)` here vs Python's `(-4,1)`. Impl is
+> correct (matches Chezzi's own operators — a floor variant would drift from them); docs corrected
+> (`math.chz`/`stdlib.md`/`gaps.md`). Tests: in-process `entry_ok`
+> (member/from-import resolution) + `tests/hybrid_native_module.rs` (6: divmod run-parity, `Reader.lines`
+> run-parity, native-file import, native↔native cycle → clean error, and TWO `$CHEZZI_STD`-corrupted-copy
+> RED soundness tests in an isolated CHILD PROCESS — env is process-global, must NOT be set in-library).
+> `math_..._representative_sigs_exact` 31→32. Full `--lib` 3608 green, `hybrid_native_module` 6 green,
+> clippy clean. Docs: `syntax.md` (native-struct-mix note extended + module-level hybrid), `stdlib.md
+> §std.math`, `gaps.md §5`.
 
 > **✅ STDLIB (2026-07-16, `auto-task/crypto-secure-random`) — `docs/gaps.md` §7: CSPRNG in
 > `std.crypto`.** Two members added to the file-backed native `std.crypto` (bodyless `native fn` sigs

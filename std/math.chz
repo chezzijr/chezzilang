@@ -44,7 +44,9 @@ native fn gcd(a: int, b: int) -> int
 native fn lcm(a: int, b: int) -> int
 # `divmod` is a BODIED Chezzi fn living alongside the native decls in this same file (the hybrid
 # native+Chezzi module form — Rust-backed `native fn` sigs and a pure-Chezzi `fn` in one `.chz`).
-# Python `divmod`: returns the pair `(a // b, a % b)`; `b == 0` faults cleanly like `a / b`.
+# Returns the pair `(a / b, a % b)` using Chezzi's own C-style `/` and `%` — TRUNCATING toward zero,
+# remainder carries the DIVIDEND's sign (NOT Python's floor-`divmod`: `divmod(-7, 2)` is `(-3, -1)`
+# here, `(-4, 1)` in Python). `b == 0` faults cleanly like `a / b`.
 fn divmod(a: int, b: int) -> (int, int):
     return (a / b, a % b)
 native fn sign(x: float) -> float

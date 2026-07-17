@@ -302,9 +302,10 @@ Number / integer functions (Python `math` semantics):
 - `gcd(a, b) -> int`, `lcm(a, b) -> int` — greatest common divisor / least common multiple.
   `gcd(0, 0)` is `0`; negatives use absolute value (`gcd(-12, 8)` → `4`). `lcm` involving `0` is `0`.
   `lcm` is computed as `|a|/gcd * |b|`; a result that overflows i64 faults (integer, like `abs`).
-- `divmod(a, b) -> (int, int)` — the pair `(a / b, a % b)` (Python `divmod`). Int `/` truncates and `%`
-  carries the divisor's sign: `divmod(17, 5)` → `(3, 2)`, `divmod(-7, 2)` → `(-3, -1)`. `b == 0` faults
-  like `a / b`. (A bodied Chezzi fn living alongside the native decls — the hybrid module form.)
+- `divmod(a, b) -> (int, int)` — the pair `(a / b, a % b)` using Chezzi's own C-style `/` and `%`:
+  int `/` **truncates toward zero** and `%` carries the **dividend's** sign — NOT Python's floor
+  `divmod`. `divmod(17, 5)` → `(3, 2)`; `divmod(-7, 2)` → `(-3, -1)` (Python gives `(-4, 1)`). `b == 0`
+  faults like `a / b`. (A bodied Chezzi fn living alongside the native decls — the hybrid module form.)
 - `sign(x)` — numeric-polymorphic like `abs` (`int`→`int`, `float`→`float`); returns `-1`/`0`/`1`
   (numpy/Go convention). `sign(0.0)` is `0.0`, `sign(NaN)` is `NaN`.
 - `trunc(x: float) -> int` — truncate toward zero. Equivalent to the `int(x)` builtin; faults on a

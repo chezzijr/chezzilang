@@ -572,8 +572,8 @@ impl Vm {
         // `math.divmod`) get their globals bound by running the module toplevel — the compiler emits
         // `MakeFunc`/`DefineGlobalSlot` for them into their own reserved slots, distinct from the
         // name-keyed native members appended here. A pure-native module has no bodied decls, so its
-        // compiled toplevel is empty and `run_proto` is a no-op. (Native modules have no imports, so
-        // the import loop below is also a no-op for them.)
+        // compiled toplevel is empty and `run_proto` is a no-op. A hybrid native file may also `import`,
+        // so the import loop below binds those deps (empty/no-op for a pure-native module).
         if let Some(name) = m.native {
             for (mname, func) in crate::native::native_members(name) {
                 let nat = self.heap.alloc(Obj::Native {
