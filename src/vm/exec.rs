@@ -487,7 +487,13 @@ impl Vm {
                 span,
             ));
         }
-        self.invoke_value(callee, Vec::new(), span)?;
+        // Symmetric with the unhandled-top-level-Err rule: if the entry fn returns `Err(..)`/`None`,
+        // surface it as "unhandled error: <detail>" (rc=1) rather than silently discarding it. This
+        // lets a manifest entrypoint legitimately be `-> T!` and use `?`.
+        let ret = self.invoke_value(callee, Vec::new(), span)?;
+        if let Some(e) = self.top_level_error(ret, span) {
+            return Err(e);
+        }
         Ok(())
     }
 

@@ -2080,9 +2080,14 @@ match query():
 
 `Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
 `?` must match the enclosing function's return **kind**: a `Result`-`?` needs a `Result`-returning fn (and its
-propagated error type must fit the function's error type), an `Option`-`?` needs an `Option`-returning fn. A
-nothing-returning top level / `fn main()` accepts either (the unhandled `Err`/`None` exits the program). Mixing
-kinds — e.g. a `Result`-`?` inside an `Option`-returning fn — is a compile error.
+propagated error type must fit the function's error type), an `Option`-`?` needs an `Option`-returning fn. **A
+function must return `Result`/`Option` to use `?`** — there is **no `fn main`/entrypoint exception**; a
+nil-returning fn (named or nested) that uses `?` is a compile error (the propagated `Err`/`None` would be
+silently swallowed). Only **module top-level** code (outside any fn) accepts either kind — the runtime unwinds
+the unhandled `Err`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
+therefore legitimately be `-> T!` and use `?`; if that entry fn returns `Err`/`None`, `chezzi run` surfaces it
+as `unhandled error: <msg>` (rc=1), just like an unhandled top-level `Err`. Mixing kinds — e.g. a `Result`-`?`
+inside an `Option`-returning fn — is a compile error.
 
 **Optional chaining `?.` and null-coalescing `??`** (on `Option`) cut the `Some`/`None` boilerplate:
 

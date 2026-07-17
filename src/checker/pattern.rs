@@ -2903,9 +2903,12 @@ impl Checker {
         // The enclosing function must be able to early-return the Err/None. The operand's sum-type
         // KIND must match the enclosing return's KIND — a Result-`?` early-returns an `Err`, so the
         // function must itself return `Result`; an Option-`?` early-returns a `None`, so it must
-        // return `Option`. `Nil` (top-level / `fn main()` — the interpreter unwinds at the boundary)
-        // accepts either. Mixing kinds would make the function return the wrong sum-type and fault a
-        // downstream exhaustive `match`/`??` at runtime even though `check` passed.
+        // return `Option`. `Nil` accepts either ONLY at MODULE TOP-LEVEL (`!in_fn_body` — the runtime
+        // unwinds the unhandled Err/None at the program boundary); a nil-returning fn body (named OR
+        // nested, `in_fn_body == true`) REJECTS, since the propagated Err/None would be silently
+        // swallowed (a fn must return Result/Option to use `?` — no `fn main` exception). Mixing kinds
+        // would make the function return the wrong sum-type and fault a downstream exhaustive
+        // `match`/`??` at runtime even though `check` passed.
         match t {
             Ty::Result(ok, err) => {
                 match self.current_ret.clone() {
@@ -2919,8 +2922,10 @@ impl Checker {
                             );
                         }
                     }
-                    // Top-level / `fn main()` — the interpreter unwinds the Err at the boundary.
-                    Ty::Nil => {}
+                    // Module top-level ONLY (`!in_fn_body`) — the runtime unwinds the Err at the
+                    // program boundary. Inside a nil-returning fn body the flag is true, so this arm
+                    // fails its guard and falls through to `other =>`, rejecting the swallow.
+                    Ty::Nil if !self.in_fn_body => {}
                     Ty::Option(_) => {
                         self.error(
                             span,
@@ -2940,7 +2945,9 @@ impl Checker {
             }
             Ty::Option(inner) => {
                 match self.current_ret.clone() {
-                    Ty::Option(_) | Ty::Nil => {}
+                    Ty::Option(_) => {}
+                    // Module top-level ONLY — see the Result arm above; a nil fn body rejects.
+                    Ty::Nil if !self.in_fn_body => {}
                     Ty::Result(..) => {
                         self.error(
                             span,
@@ -3348,6 +3355,10 @@ impl Checker {
             .or_else(|| exp_ret.clone().filter(|r| !r.is_unknown()))
             .unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
+        // A closure body is a fn body: a `?` on a `Nil`-returning closure is rejected here (already the
+        // pre-existing behavior via `current_ret == Unknown` for an unannotated closure; this keeps the
+        // signal exact for an explicitly `-> nil` closure too). Saved/restored beside `current_ret`.
+        let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
@@ -3446,6 +3457,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.current_ret = saved_ret;
+        self.in_fn_body = saved_in_fn;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         let ret_ty = match ret {

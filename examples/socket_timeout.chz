@@ -30,12 +30,13 @@ fn read_server(listener: Listener) -> int!:
     listener.close()
     return Ok(0)
 
-fn read_client(addr: str):
+fn read_client(addr: str) -> int!:
     sock := net.connect(addr)?
     match sock.read(64, 100):
         Ok(s): print("read: unexpectedly got " + s)
         Err(e): print("read: " + e.message())
     sock.close()
+    return Ok(0)
 
 fn run() -> int!:
     # Demo 1 — a lone listener, no client.

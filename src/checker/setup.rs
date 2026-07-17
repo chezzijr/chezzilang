@@ -41,6 +41,7 @@ impl Checker {
             inferring_ret: false,
             collected_rets: Vec::new(),
             in_generator: false,
+            in_fn_body: false,
             collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
@@ -976,6 +977,7 @@ impl Checker {
         self.bare_types.clear();
         self.seed_stdlib_structs();
         self.current_ret = Ty::Nil;
+        self.in_fn_body = false;
         self.inferring_ret = false;
         self.collected_rets.clear();
         self.current_module_label = label;

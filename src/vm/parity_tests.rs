@@ -4557,6 +4557,61 @@ fn parity_full_suite_vm_vs_interp() {
     }
 }
 
+// A manifest `module:function` entrypoint whose fn returns `Err(..)` must surface it as an unhandled
+// runtime error (rc=1), symmetric with the unhandled-top-level-Err rule — not silently discard the
+// return value. Covers BOTH engines (they route through `run_file_inner`→`invoke_entrypoint`).
+// (2026-07-18 bug-hunt: `?` in a nil entry fn used to swallow the error; the fix lets the entry be
+// `-> T!` and use `?`, and this surfaces a returned Err.)
+#[test]
+fn manifest_entrypoint_err_surfaced_both_engines() {
+    let dir = TmpDir::new();
+    let entry = dir.write("main.chz", "fn main() -> int!:\n    return Err(\"boom\")\n");
+    for parallel in [false, true] {
+        let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
+            &entry,
+            crate::native::HostConfig::default(),
+            parallel,
+            Some("main"),
+            None,
+        );
+        let e = outcome.expect_err(&format!(
+            "entry fn returning Err must surface a runtime error (parallel={parallel})"
+        ));
+        assert!(
+            e.message.contains("unhandled error: boom"),
+            "expected 'unhandled error: boom', got {:?} (parallel={parallel})",
+            e.message
+        );
+    }
+}
+
+// GUARD: an entry fn returning `Ok(..)` runs clean (rc=0) — the surfacing gate is Err/None only.
+#[test]
+fn manifest_entrypoint_ok_runs_clean_both_engines() {
+    let dir = TmpDir::new();
+    let entry = dir.write(
+        "main.chz",
+        "fn main() -> int!:\n    print(\"ran\")\n    return Ok(0)\n",
+    );
+    for parallel in [false, true] {
+        let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
+            &entry,
+            crate::native::HostConfig::default(),
+            parallel,
+            Some("main"),
+            None,
+        );
+        assert!(
+            outcome.is_ok(),
+            "entry fn returning Ok must run clean (parallel={parallel}), got {outcome:?}"
+        );
+        assert!(
+            out.contains("ran"),
+            "expected 'ran' in output (parallel={parallel})"
+        );
+    }
+}
+
 #[test]
 fn parity_index_assign() {
     assert_parity("xs := [1, 2, 3]\nxs[1] = 9\nxs[0] += 4\nxs[2] -= 1\nprint(xs)\n");
@@ -10023,9 +10078,10 @@ fn create_into_missing_dir_clean_err_parity() {
 /// resolve `w.write(...)`/`w.close(...)` at check time — the CLI path).
 #[test]
 fn writer_program_type_checks_clean() {
+    // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import create, buffered, stdout, Writer from std.io\n\
                fn tag(w: Writer) -> Writer:\n    return w\n\
-               fn main():\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\nmain()\n";
+               fn main() -> int!:\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\n    return Ok(0)\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
@@ -10244,9 +10300,10 @@ fn import_reader_type_and_send_across_spawn_parity() {
 /// `r.read_line()`/`r.read_bytes(..)`/`r.close()` at check time.
 #[test]
 fn reader_program_type_checks_clean() {
+    // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import open, Reader from std.io\n\
                fn tag(r: Reader) -> Reader:\n    return r\n\
-               fn main():\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        Some(ln): print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\nmain()\n";
+               fn main() -> int!:\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        Some(ln): print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\n    return Ok(0)\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");

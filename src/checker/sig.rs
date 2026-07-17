@@ -359,6 +359,9 @@ impl Checker {
         // correctly resets an enclosing method's binding when a nested fn is inference-checked).
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
+        // In a fn body during return inference (mirrors `check_fn_body`): a `?` here targets this
+        // body, not module top-level. Saved/restored beside `current_ret`.
+        let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
@@ -410,6 +413,7 @@ impl Checker {
         self.in_generator = saved_ig;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
+        self.in_fn_body = saved_in_fn;
         self.current_self_ty = saved_self;
         self.exit_type_params(saved_tps);
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
@@ -3208,6 +3212,10 @@ impl Checker {
             }
         }
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // Inside a fn body now: a `?` on a `Nil`-returning body must be REJECTED (would swallow the
+        // Err/None), unlike module top-level where `Nil` accepts either. Saved/restored beside
+        // `current_ret`.
+        let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
         // which resets an enclosing method's binding). Restored below beside `current_ret`.
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
@@ -3364,6 +3372,7 @@ impl Checker {
         self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.in_fn_body = saved_in_fn;
         self.current_self_ty = saved_self;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;

@@ -28,6 +28,35 @@ VM change post-JIT-freeze). Accepted ceiling: a genuine data cycle whose loop pa
 closure would now report the recursive-fn message instead of the depth message — pathological/rare, not
 chased (`examples/cycle_guard.chz` / `airlock_cycle.chz` are pure data, unaffected).
 
+## Bug found by the 2026-07-18 bug-hunt — FIXED
+
+### B6. `?` in a nil-returning fn silently SWALLOWS the propagated `Err`/`None` — check-OK-then-data-loss — **FIXED (found 2026-07-18, fixed 2026-07-18)**
+
+`infer_try` (`src/checker/pattern.rs`) accepted `?` whenever `current_ret == Ty::Nil` — but `current_ret`
+is `Nil` for BOTH module top-level (legit — the runtime unwinds the unhandled `Err`/`None` at the program
+boundary) AND a nil-returning fn body (the bug — the propagated `Err`/`None` was dropped on the floor, so
+a `safe_div(..)?` in a `fn main():` type-checked yet lost its error). Closures already rejected this
+correctly (they get `current_ret == Unknown`, hitting the rejecting arm), so the rule was inconsistent
+across callable kinds.
+
+**Fix:** added one checker signal `in_fn_body: bool` (false at module top-level, true inside any
+fn/closure body), saved/restored 1:1 beside every `current_ret` `mem::replace` (`check_fn_body`,
+`infer_fn_ret`, closure-infer) and reset false in `begin_module`. The two `Ty::Nil => {}` acceptance
+arms in `infer_try` are now gated `Ty::Nil if !self.in_fn_body => {}`; inside a fn body they fall through
+to the existing reject arm (`'?' used in a function that returns nil, not Result or Option`). No `fn main`
+exception — a function must return `Result`/`Option` to use `?`.
+
+**Runner symmetry:** `Vm::invoke_entrypoint` (`src/vm/exec.rs`) discarded a manifest `module:function`
+entry fn's return value; it now routes the return through `top_level_error`, so an entry fn returning
+`Err`/`None` surfaces as `unhandled error: <msg>` (rc=1) — symmetric with the unhandled-top-level rule,
+and letting a project entrypoint legitimately be `-> T!` and use `?`. Both engines route through
+`invoke_entrypoint`, so the one edit covers serial + M:N.
+
+Migrated the two shipped examples that used `?` in a nil `main`/callee (output-identical, source-structure
+only): `examples/hello.chz` (`fn main() -> int!` + `return Ok(0)`), `examples/socket_timeout.chz`
+(`fn read_client(..) -> int!` + `return Ok(0)`). `recover.chz`/`edge_cases.chz` were false positives —
+their `?` sits inside a `recover:` block (`recover_depth > 0` short-circuits before the Nil gate).
+
 ## Session log — 2026-07-16 (stdlib gap-fill, waves 1–3: six gaps shipped)
 
 One session, six gaps off this backlog's *ranked stdlib* list, run as three concurrent-pair waves

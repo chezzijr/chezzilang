@@ -1551,6 +1551,12 @@ struct Checker {
     /// be COLLECTED, not diagnosed. Saved/restored across nested fn/closure boundaries; a closure
     /// resets it to `false` so a (hypothetical) closure `yield` cannot seed the enclosing generator.
     in_generator: bool,
+    /// True while checking (or inferring the return of) ANY fn/closure body; FALSE at module
+    /// top-level. Saved/restored 1:1 beside `current_ret` at every fn/closure boundary. It exists
+    /// solely to distinguish the two `current_ret == Nil` contexts for `?`: module top-level (legal —
+    /// the runtime unwinds an unhandled Err/None at the program boundary) vs a nil-returning fn body
+    /// (illegal — the propagated Err/None would be silently swallowed). See `infer_try`.
+    in_fn_body: bool,
     /// Element types gathered from every `yield` during a generator's return-type inference
     /// (`infer_fn_ret`, `inferring_ret` mode). The FIRST pins the generator's element `T`
     /// (strict-first-yield); pass-2 `check_yield` validates the rest against it. Drained per-fn.
