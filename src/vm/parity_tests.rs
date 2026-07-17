@@ -317,6 +317,19 @@ fn named_fn_import_stdlib_cancel_runtime() {
     assert_eq!(out, "false\n");
 }
 
+/// Stdlib (gaps.md cancel-derive fix): a derived token's `done()` must not fire before its
+/// `cancelled()`/`reason()` flip — the Go-context invariant "once done() unblocks, the token is
+/// cancelled". `derive()` truncated the child timer's remaining-ms toward zero, arming it up to ~1ms
+/// early; the `+ 1` ms margin keeps done() at-or-after the absolute deadline. Deterministic on both
+/// engines (the margin makes it load-independent): a task woken by `done()` reads `cancelled()==true`.
+#[test]
+fn derived_cancel_token_done_implies_cancelled_runtime() {
+    let out = parity_entry(
+        "import std.cancel\nc := cancel.timeout(10).derive()\n_ := c.done().recv()\nprint(\"{c.cancelled()} {c.reason()}\")\n",
+    );
+    assert_eq!(out, "true Some(timeout)\n");
+}
+
 /// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs on both engines.
 #[test]
 fn named_fn_import_stdlib_collections_runtime() {

@@ -88,7 +88,12 @@ struct Token:
         # a trip()-able latch (manual). A non-positive remaining ms means "already expired" (timer(0)).
         cdl := Channel[bool]()
         if d > 0.0:
-            rem_ms := int((d - time.monotonic()) * 1000.0)
+            # Round the remaining ms UP (the `+ 1` margin): int() truncates toward zero, which would
+            # arm done() up to ~1ms BEFORE the absolute deadline `d`, while cancelled()/reason() poll
+            # `d` directly — so a task woken by done() could still read cancelled()==false. That breaks
+            # the Go-context invariant "once done() unblocks, the token is cancelled". Over-arming by
+            # ≤1ms keeps done() at-or-after `d` (Go timers fire at-or-after too), never early.
+            rem_ms := int((d - time.monotonic()) * 1000.0) + 1
             if rem_ms < 0:
                 rem_ms = 0
             cdl = timer(rem_ms)
