@@ -456,6 +456,32 @@ pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> 
     has_int && has_float
 }
 
+/// `literal_numeric_mix` over ALL the LEAF value branches of a whole `if … elif … else` chain: an
+/// `elif` desugars to a nested `IfElse` in the `els` slot, so a float constant in ANY arm — head,
+/// middle, or tail — must license widening the int-constant arms, ORDER-INDEPENDENTLY (like a list
+/// literal / `match`). Flattens the chain to its leaves (each `then`, plus the final non-`IfElse`
+/// `els`) before applying the peephole. Computed ONCE at the chain head and threaded down the nested
+/// recursion (`compile_if_expr_chain` / the checker's `infer_if_else_chain` carry it as
+/// `inherited_mix`), so every level sees the SAME whole-chain mix rather than recomputing a narrower
+/// sub-chain mix. Used IDENTICALLY by both, so they cannot drift; each level then coerces only its own
+/// immediate leaf (`untyped_int_const`).
+pub(crate) fn if_chain_numeric_mix(then: &Expr, els: &Expr) -> bool {
+    let mut leaves: Vec<&Expr> = Vec::new();
+    fn collect<'a>(then: &'a Expr, els: &'a Expr, out: &mut Vec<&'a Expr>) {
+        out.push(then);
+        if let ExprKind::IfElse {
+            then: t2, els: e2, ..
+        } = &els.kind
+        {
+            collect(t2, e2, out);
+        } else {
+            out.push(els);
+        }
+    }
+    collect(then, els, &mut leaves);
+    literal_numeric_mix(leaves.into_iter())
+}
+
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
 /// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
 /// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
@@ -3800,14 +3826,22 @@ impl Compiler {
         arms: &[MatchExprArm],
         span: Span,
     ) -> Result<(), CompileError> {
+        // One-way int→float widening across arm VALUES: coerce an untyped int CONSTANT arm when a
+        // float CONSTANT sibling arm is present, under the same `literal_numeric_mix` predicate the
+        // checker's `branch_widen` licenses (identical `untyped_int_const` guard) — so the join always
+        // leaves the `float` the static type promises. Mirrors `compile_if_expr`.
+        let mix = literal_numeric_mix(arms.iter().map(|a| &a.body));
+        let widen = |s: &mut Self, fc: &mut FnComp, body: &Expr| -> Result<(), CompileError> {
+            s.compile_expr(fc, body)?; // leaves the arm's value on the stack
+            if mix && crate::ast::untyped_int_const(body) {
+                fc.emit(Op::CoerceFloat, body.span);
+            }
+            Ok(())
+        };
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
-            return self.compile_match_lit(fc, scrutinee, arms, span, |s, fc, body| {
-                s.compile_expr(fc, body) // leaves the arm's value on the stack
-            });
+            return self.compile_match_lit(fc, scrutinee, arms, span, widen);
         }
-        self.compile_match_general(fc, scrutinee, arms, span, |s, fc, body| {
-            s.compile_expr(fc, body) // leaves the arm's value on the stack
-        })
+        self.compile_match_general(fc, scrutinee, arms, span, widen)
     }
 
     /// Expression-position `if c: a else: b`: condition, then jump to whichever branch; both
@@ -3819,13 +3853,49 @@ impl Compiler {
         then: &Expr,
         els: &Expr,
     ) -> Result<(), CompileError> {
+        self.compile_if_expr_chain(fc, cond, then, els, None)
+    }
+
+    /// Chain-aware body of `compile_if_expr`. `inherited_mix` threads the WHOLE-chain
+    /// `if_chain_numeric_mix` down an `if … elif … else` chain (an `elif` is a nested `IfElse` in
+    /// `els`), so a float constant in an EARLIER arm licenses coercing the int constants in a later
+    /// all-int suffix. MUST mirror the checker's `infer_if_else_chain` predicate exactly (same
+    /// whole-chain mix + `untyped_int_const` guard), or static type and stored value drift. Each level
+    /// coerces only its own immediate leaf; the nested `els` sub-chain is compiled by a DIRECT
+    /// recursive call carrying the head's mix. `None` = chain head (compute the full-chain mix).
+    fn compile_if_expr_chain(
+        &mut self,
+        fc: &mut FnComp,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+        inherited_mix: Option<bool>,
+    ) -> Result<(), CompileError> {
+        let mix = inherited_mix.unwrap_or_else(|| if_chain_numeric_mix(then, els));
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
         self.compile_expr(fc, then)?;
+        if mix && crate::ast::untyped_int_const(then) {
+            fc.emit(Op::CoerceFloat, then.span);
+        }
         let end = fc.emit_jump(Op::Jump(0), cond.span);
         fc.patch_jump(skip);
-        self.compile_expr(fc, els)?;
+        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
+        // other `els` is the final leaf, coerced here if it is an int constant.
+        if let ExprKind::IfElse {
+            cond: c2,
+            then: t2,
+            els: e2,
+        } = &els.kind
+        {
+            self.compile_if_expr_chain(fc, c2, t2, e2, Some(mix))?;
+        } else {
+            self.compile_expr(fc, els)?;
+            if mix && crate::ast::untyped_int_const(els) {
+                fc.emit(Op::CoerceFloat, els.span);
+            }
+        }
         fc.patch_jump(end);
         Ok(())
     }

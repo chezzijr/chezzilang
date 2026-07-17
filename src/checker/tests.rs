@@ -2704,15 +2704,15 @@ fn if_expr_edefault_keeps_binding_leniency_and_neighbors() {
     // The E-default must NOT import return-position strictness: an un-inferable if-expr bound via `:=`
     // stays as lenient as the equivalent direct binding.
     entry_ok("fn main():\n    x := if true: None else: None\n    print(x)\n"); // like `x := None`
-    // T-merge across Ok/Err still works; annotated form still works; int/float still conflicts.
+    // T-merge across Ok/Err still works; annotated form still works.
     entry_ok("fn main():\n    x := if true: Some(3) else: None\n    print(x)\n");
     entry_ok(
         "fn main():\n    x: Result[str, str] = if true: Ok(\"a\") else: Err(\"b\")\n    print(x)\n",
     );
-    entry_rejects(
-        "fn main():\n    x := if true: 3 else: 4.0\n    print(x)\n",
-        "incompatible types",
-    );
+    // An untyped int-CONST branch beside a float-CONST branch now WIDENS to float (the
+    // `literal_numeric_mix` peephole — consistent with the list literal `[3, 4.0]`; the compiler
+    // emits `Op::CoerceFloat` on the int branch, so it is sound, not int-under-float).
+    entry_ok("fn main():\n    x := if true: 3 else: 4.0\n    print(x)\n");
 }
 
 #[test]
@@ -3133,6 +3133,44 @@ fn if_expression_unifies_branches() {
 #[test]
 fn if_expression_incompatible_branches_rejected() {
     rejects("x := if true: 1 else: \"z\"\n", "incompatible types");
+}
+
+#[test]
+fn if_expression_int_float_const_mix_widens() {
+    // QoL + consistency with list literals (`[1, 2.5]`): an untyped int-CONSTANT branch widens to
+    // float when a float-CONSTANT sibling branch is present — the same `literal_numeric_mix` peephole
+    // the list/map literals use. The compiler emits `Op::CoerceFloat` on the int branch under the
+    // identical predicate, so this is sound (no `Int` under a static `float`).
+    ok("x := if true: 1 else: 2.5\ny := x + 0.5\n");
+    ok("x := if false: 2.5 else: 1\ny := x + 0.5\n");
+    // elif chain: a float const anywhere licenses widening the int-const arms, ORDER-INDEPENDENTLY
+    // (the whole-chain mix is threaded through the recursion — `infer_if_else_chain`). Both a float in
+    // the tail/else AND a float in the head (before an all-int suffix) must widen, matching `[.., ..]`.
+    ok("x := if false: 1 elif false: 2 else: 3.5\ny := x + 0.5\n");
+    ok("x := if false: 2.5 elif false: 1 else: 2\ny := x + 0.5\n");
+    ok("x := if false: 1 elif false: 2.5 else: 3\ny := x + 0.5\n");
+    // A separate if-expr AFTER a mixed chain must NOT inherit the chain's mix (no leak): both-int
+    // stays int.
+    ok("x := if false: 1 elif false: 2 else: 3.5\nz := if true: 4 else: 5\nw := z + 1\n");
+    // both branches int (no float sibling) is UNCHANGED — stays `int`.
+    ok("x := if true: 1 else: 2\ny := x + 1\n");
+}
+
+#[test]
+fn match_expression_int_float_const_mix_widens() {
+    ok("x := match true:\n    true: 1\n    _: 2.5\ny := x + 0.5\n");
+}
+
+#[test]
+fn if_match_expression_typed_int_float_mix_still_rejected() {
+    // SOUNDNESS: a TYPED int (a variable, a call result) never widens — the compiler cannot see its
+    // type, so accepting it would leave an `Int` under a static `float` (the V1 hole). Must still
+    // reject, exactly like a typed-int element in a mixed list literal.
+    rejects("a := 5\nx := if true: a else: 2.5\n", "incompatible types");
+    rejects(
+        "a := 5\nx := match true:\n    true: a\n    false: 2.5\n",
+        "incompatible types",
+    );
 }
 
 #[test]

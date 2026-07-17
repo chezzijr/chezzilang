@@ -928,6 +928,9 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut result: Option<Ty> = None;
+        // int→float widen an untyped-int-const arm when a float-const sibling arm is present (mirrors
+        // the list/map `literal_numeric_mix` peephole the compiler coerces on — see `branch_widen`).
+        let mix = crate::compiler::literal_numeric_mix(arms.iter().map(|a| &a.body));
         for arm in arms {
             // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
             // conditionally too — refinement inside one arm must not leak across arms or past it.
@@ -947,6 +950,7 @@ impl Checker {
             let t = self.infer(&arm.body);
             self.pop_scope();
             self.restore_refinable(snap);
+            let t = Self::branch_widen(&arm.body, t, mix);
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
         self.expected_hint = None;
@@ -961,6 +965,23 @@ impl Checker {
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
     pub(super) fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
+        self.infer_if_else_chain(cond, then, els, None)
+    }
+
+    /// Chain-aware body of `infer_if_else`. `inherited_mix` carries the WHOLE-chain
+    /// `if_chain_numeric_mix` down from the head of an `if … elif … else` chain: an `elif` desugars to
+    /// a nested `IfElse` in `els`, and the nested `els` sub-chain is inferred by a DIRECT recursive
+    /// call here (not generic `infer`) so the head's mix reaches it — otherwise a float constant in an
+    /// EARLIER arm would not license widening the int constants in a later all-int suffix, making the
+    /// widening order-dependent (unlike a list literal / `match`). `None` = this is the chain head, so
+    /// compute the mix over the full chain; `Some(m)` = inherited from the head.
+    fn infer_if_else_chain(
+        &mut self,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+        inherited_mix: Option<bool>,
+    ) -> Ty {
         // Capture + clear the expected-type hint before the condition: the hint is for the branch
         // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
         // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
@@ -968,6 +989,10 @@ impl Checker {
         // would deadlock (acceptance would depend on branch order).
         let hint = self.expected_hint.take();
         let had_hint = hint.is_some();
+        // int→float widen an untyped-int-const branch when a float-const sibling is present ANYWHERE
+        // in the if/elif chain — the whole-chain mix, computed at the head and threaded down (mirrors
+        // the compiler's `compile_if_expr` — see `branch_widen`).
+        let mix = inherited_mix.unwrap_or_else(|| crate::compiler::if_chain_numeric_mix(then, els));
         self.expect_bool(cond, "if condition");
         // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
         // conditionally — refinement inside one must not leak into the other or past the `if`.
@@ -976,9 +1001,22 @@ impl Checker {
         let t_then = self.infer(then);
         self.restore_refinable(snap.clone());
         self.expected_hint = hint;
-        let t_els = self.infer(els);
+        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
+        // other `els` is the final leaf, inferred normally.
+        let t_els = if let ExprKind::IfElse {
+            cond: c2,
+            then: t2,
+            els: e2,
+        } = &els.kind
+        {
+            self.infer_if_else_chain(c2, t2, e2, Some(mix))
+        } else {
+            self.infer(els)
+        };
         self.expected_hint = None;
         self.restore_refinable(snap);
+        let t_then = Self::branch_widen(then, t_then, mix);
+        let t_els = Self::branch_widen(els, t_els, mix);
         let acc = self.unify_branch(None, t_then, then.span);
         let res = self.unify_branch(Some(acc), t_els, els.span);
         if had_hint {
@@ -1014,6 +1052,23 @@ impl Checker {
                 Ty::Result(v, Box::new(Ty::error_proto()))
             }
             other => other,
+        }
+    }
+
+    /// One-way int→float widening for an if/match-EXPRESSION tail branch — the scalar sibling of
+    /// [`elem_widen`], under the IDENTICAL soundness rule: a branch widens iff it is an untyped INT
+    /// constant AND the compiler is GUARANTEED to emit `Op::CoerceFloat` for it. The guarantee here is
+    /// the `literal_numeric_mix` peephole (`mix`) — a float-constant sibling branch is present — the
+    /// same predicate the compiler's `compile_if_expr`/`compile_match_expr` key their per-branch
+    /// coerce on, so checker and backend cannot drift (both over `crate::ast::const_num` /
+    /// `untyped_int_const`). A TYPED int branch (a variable, a call) never widens: the compiler cannot
+    /// see its type, so accepting it would leave an `Int` under a static `float` (the V1 hole). This
+    /// is what makes `x := if c: 1 else: 2.5` consistent with the accepted list literal `[1, 2.5]`.
+    fn branch_widen(body: &Expr, t: Ty, mix: bool) -> Ty {
+        if mix && t == Ty::Int && crate::ast::untyped_int_const(body) {
+            Ty::Float
+        } else {
+            t
         }
     }
 

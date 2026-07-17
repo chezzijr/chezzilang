@@ -10259,3 +10259,31 @@ fn module_global_aggregate_mutation_in_task_parity() {
     let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
     assert_parity_out(src, "3\n");
 }
+
+/// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a
+/// float-constant sibling branch is present (the `literal_numeric_mix` peephole, shared with list/map
+/// literals). This test proves the compiler actually emits `Op::CoerceFloat` on the int branch — the
+/// int-taken branch must render as a FLOAT ("1.0"), never leave an `Int` under a static `float` — and
+/// that both engines agree.
+#[test]
+fn if_match_expr_int_float_widen_parity() {
+    let src = concat!(
+        "fn main():\n",
+        "    x := if true: 1 else: 2.5\n", // int branch taken -> must be 1.0
+        "    print(x)\n",
+        "    print(x + 0.5)\n",
+        "    y := if false: 1 else: 2.5\n", // float branch taken -> 2.5
+        "    print(y)\n",
+        "    z := match true:\n        true: 1\n        _: 2.5\n", // int arm -> 1.0
+        "    print(z)\n",
+        "    print(str(if true: 1 else: 2.5))\n", // str of the widened value -> "1.0"
+        "    e := if false: 1 elif true: 2 else: 3.5\n", // elif chain, int arm taken -> 2.0
+        "    print(e)\n",
+        "    h := if true: 2.5 elif false: 1 else: 3\n", // float in HEAD, float arm taken -> 2.5
+        "    print(h)\n",
+        "    g := if false: 2.5 elif true: 1 else: 3\n", // float in HEAD, int arm taken -> 1.0
+        "    print(g)\n",
+        "main()\n",
+    );
+    assert_parity_out(src, "1.0\n1.5\n2.5\n1.0\n1.0\n2.0\n2.5\n1.0\n");
+}

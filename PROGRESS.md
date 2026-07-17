@@ -5437,6 +5437,16 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **QoL — int-const if/match-EXPRESSION branch widens to float (2026-07-17).** A bug-hunt papercut:
+  `x := if c: 1 else: 2.5` was a compile error while the equivalent list literal `[1, 2.5]` coerced fine —
+  an inconsistency in where the untyped-int-constant→float peephole applied. Extended the SAME
+  `literal_numeric_mix` mechanism (float-const sibling → widen the int-const siblings) to if/match-expression
+  tail branches, on BOTH sides under one predicate: checker `branch_widen` (in `infer_if_else`/`infer_match`)
+  widens the branch type, compiler `compile_if_expr`/`compile_match_expr` emit `Op::CoerceFloat` on the
+  int-const branch — identical `untyped_int_const` guard, zero drift. Sound (proven no int-under-float,
+  both engines: `if_match_expr_int_float_widen_parity`). A TYPED int branch still rejects (the V1 hole
+  boundary), and multi-`return` inference is UNTOUCHED (still conflicts — a separate join, not a widening
+  sink). Consistent with `[1, 2.5]`; docs in `syntax.md` (if-expression) + `spec.md` (widening contexts).
 - **P0 fix — a cancelled task's `defer` silently did not run on M:N (2026-07-14).** Pre-existing
   scheduler race. A cancel trip and its `cancel_drain` (which requeues the scope's PARKED fibers so they
   unwind) sit two core-lock acquisitions apart; an idle worker's `take_runnable` landing in that gap saw

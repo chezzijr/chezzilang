@@ -2023,7 +2023,14 @@ sign := if n > 0: "pos" else: "neg"
 grade := if s >= 90: "A" elif s >= 80: "B" else: "F"
 ```
 
-All arms (and both `if` branches) must agree on a type. When every branch is an `Ok(…)` (no `Err`
+All arms (and both `if` branches) must agree on a type — with ONE numeric adaptation: an untyped **int
+constant** branch beside a float **constant** sibling branch widens to `float` (`x := if c: 1 else: 2.5`
+→ `float`; `match n: 0: 1; _: 2.5` → `float`), the exact `literal_numeric_mix` peephole the list literal
+`[1, 2.5]` uses (the compiler emits `Op::CoerceFloat` on the int branch, so it is a real float, never an
+`int` under a `float`). A **typed** int branch (a variable, a call) does NOT adapt — `a := 5; if c: a
+else: 2.5` is a type error (write `float(a)`), same as a typed int element in a mixed list. This is a
+property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
+on `int`/`float` — annotate `-> float`). When every branch is an `Ok(…)` (no `Err`
 branch pins the error type), an **unannotated** `if`/`match`-expression's `Result` error slot defaults
 to the built-in `Error` protocol — `x := if c: Ok(1) else: Ok(2)` is `Result[int, Error]`, matching the
 `T!`/`Result[T]` shorthand and return-type inference (it does not leak an un-pinned error type onto a

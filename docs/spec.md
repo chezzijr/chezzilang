@@ -467,8 +467,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (coerced at the callee prologue, from the DECLARED param type — so a call through a function VALUE
   never widens: `f := id[float]`; `f(1)` is an error, write `f(1.0)`), a `float` parameter DEFAULT
   value (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field, native/`extern` `double`
-  params, and a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
-  infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), or an annotated
+  params, a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
+  infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), a **mixed-numeric-constant
+  if/match EXPRESSION** (an untyped int-constant tail branch beside a float-constant sibling branch widens
+  to `float` — `x := if c: 1 else: 2.5`, `match n: 0: 1; _: 2.5` — the same peephole, consistent with the
+  `[1, 2.5]` literal; a TYPED int branch does NOT adapt, and this is a property of the EXPRESSION, distinct
+  from un-annotated multi-`return` merge below which still conflicts), or an annotated
   `xs: List[float] = [1, f]` / `[1, 2]` (the annotation is the type context — spelled as a `List[…]`/
   `Map[…]`; a whole-collection alias `type LF = List[float]` is not a type context, an aliased ELEMENT
   `List[F]` is). A scalar `float` sink spelled through a type ALIAS (`type F = float`) is a float sink
