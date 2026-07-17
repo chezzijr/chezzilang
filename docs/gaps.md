@@ -175,11 +175,21 @@ minimal diff, not a claim of full coverage.
 Serial's `Executor.shutdown` drains each submitted task INLINE on the entry `Vm`, so the task's callee
 frames were captured into `fault_trace` while intact and survived to the top; M:N runs each task on an
 isolated worker `Vm` and discards that worker's `fault_trace`. `src/vm/netio.rs` (serial shutdown drain
-loop) now clears `self.fault_trace`/`self.fault_trace_depth` when an inline task returns `Err`, so the
-outer `run_until` (running `main`) re-captures at the shutdown call site — both engines print just
-`at main`. Covers both explicit `ex.shutdown()` and the implicit end-of-program `drain_live_executors`
-(both route through this one branch). Message/location/rc unchanged. Two-engine test:
-`executor_task_fault_trace_matches_on_both_engines` (src/vm/parity_tests.rs).
+loop) now snapshots any pre-existing `fault_trace`/`fault_trace_depth`, gives the inline task a clean
+capture slate, and **restores that snapshot** after the task runs — dropping ONLY the inline task's own
+callee frames, never a superseding outer fault. On the common path the snapshot is empty, so the
+propagated fault re-captures at the shutdown call site in the enclosing `run_until` — both engines print
+just `at main`. Three cases converge (verified both engines):
+- **explicit `ex.shutdown()`** → both `at main`;
+- **`defer ex.shutdown()` while `main` is unwinding** (the outer fault is already captured) → both
+  `at main` — the snapshot/restore is what preserves the outer `[main]` here instead of nuking it to
+  `[]` (the initial `= None` clear got this wrong: serial `[]` vs M:N `[main]`; caught in review);
+- **implicit end-of-program `drain_live_executors`** (no `ex.shutdown()`) → the executor is reaped
+  *after* `main` returned, so there is no enclosing `run_until` to re-capture at: **both engines print
+  an EMPTY trace** (parity holds — both `[]`, not `at main`).
+Message/location/rc unchanged on all three. Two-engine test:
+`executor_task_fault_trace_matches_on_both_engines` (src/vm/parity_tests.rs) covers all three + the
+non-Executor nursery neighbor.
 
 <details><summary>Original report</summary>
 An uncaught runtime error thrown from an `Executor.submit(...)` closure prints a **full backtrace on

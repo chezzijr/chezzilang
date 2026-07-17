@@ -1912,18 +1912,21 @@ impl Vm {
                         let Some(task) = task else { break };
                         let task = self.from_wire(task);
                         self.push(task);
+                        // gaps.md B4: the submitted task runs INLINE on this entry Vm, so its callee
+                        // frames get captured into `fault_trace` while intact. We must drop ONLY the
+                        // inline task's own frames — never a superseding OUTER fault already captured
+                        // (e.g. `defer ex.shutdown()` while `main` is unwinding). So snapshot any
+                        // pre-existing trace, give the task a clean capture slate, then restore the
+                        // outer trace regardless of outcome. On the common `ex.shutdown()` path the
+                        // outer trace is None, so the propagated fault re-captures at the shutdown
+                        // call site (`at main`) in the enclosing `run_until` — matching M:N (which
+                        // discards the isolated worker's `fault_trace`) and a plain nursery-task panic.
+                        let outer_trace = self.fault_trace.take();
+                        let outer_depth = std::mem::replace(&mut self.fault_trace_depth, 0);
                         let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
                         self.pop();
-                        if r.is_err() {
-                            // gaps.md B4: the submitted task ran INLINE on this entry Vm, so its
-                            // callee frames were captured into `fault_trace` while intact. Drop that
-                            // trace before propagating so the outer `run_until` (running `main`) re-
-                            // captures at the shutdown call site — printing just `at main`. This
-                            // matches M:N (which discards the isolated worker's `fault_trace`) and a
-                            // plain nursery-task panic (already `at main` on both engines).
-                            self.fault_trace = None;
-                            self.fault_trace_depth = 0;
-                        }
+                        self.fault_trace = outer_trace;
+                        self.fault_trace_depth = outer_depth;
                         r?;
                     }
                     self.pop(); // the executor root

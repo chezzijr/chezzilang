@@ -23,12 +23,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`at boom`/`at <closure>`/`at main`) but only `at main` on M:N (same message/location/rc). Serial's
 > `shutdown` drains each submitted task INLINE on the entry `Vm`, so the task's callee frames were
 > captured into `fault_trace` while intact; M:N runs each task on an isolated worker `Vm` and drops that
-> trace. Fix (VM-only, `src/vm/netio.rs` serial shutdown drain loop): clear `fault_trace`/
-> `fault_trace_depth` when an inline task returns `Err`, so the outer `run_until` re-captures at the
-> shutdown call site — both engines now print just `at main`, matching a plain nursery-task panic.
-> Covers explicit `ex.shutdown()` + implicit end-of-program `drain_live_executors` (one branch).
-> Message/location/rc unchanged. Test: `executor_task_fault_trace_matches_on_both_engines` (+ nursery
-> neighbor guard) in `src/vm/parity_tests.rs`. Full `cargo test`/`clippy`/`conformance` green.
+> trace. Fix (VM-only, `src/vm/netio.rs` serial shutdown drain loop): snapshot any pre-existing
+> `fault_trace`/`fault_trace_depth`, give the inline task a clean slate, then RESTORE the snapshot —
+> dropping only the inline task's own frames, never a superseding outer fault. Three cases converge:
+> explicit `ex.shutdown()` → both `at main`; `defer ex.shutdown()` while `main` unwinds → both `at main`
+> (snapshot/restore preserves the outer `[main]`; an initial `= None` clear got this wrong, serial `[]`
+> vs M:N `[main]` — caught in review); implicit end-of-program `drain_live_executors` → both EMPTY (no
+> enclosing `run_until` to re-capture, parity holds at `[]`). Message/location/rc unchanged.
+> Test: `executor_task_fault_trace_matches_on_both_engines` (all 3 cases + nursery neighbor guard) in
+> `src/vm/parity_tests.rs`. Full `cargo test`/`clippy`/`conformance` green.
 >
 > **✅ SOUNDNESS (2026-07-17, `auto-task/b3-frozen-aggregate-mutation`) — `docs/gaps.md` §B3: freeze
 > IN-PLACE mutation of a captured module-global aggregate in a task (was: serial≠M:N divergence).** The

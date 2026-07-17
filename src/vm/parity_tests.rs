@@ -6256,6 +6256,52 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let nmn_names: Vec<&str> = nmn.trace.iter().map(|f| f.function.as_str()).collect();
     assert_eq!(nse_names, vec!["main"], "serial nursery trace unchanged");
     assert_eq!(nmn_names, vec!["main"], "M:N nursery trace unchanged");
+
+    // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
+    // reaped by `drain_live_executors` AFTER `main` returned, so there is no enclosing `run_until`
+    // to re-capture at: both engines print the fault with an EMPTY trace. Parity holds (both []).
+    let im_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
+    let im_path = dir.join("implicit.chz");
+    std::fs::write(&im_path, im_src).unwrap();
+    let (_o, _e, ise, _) = run_file(&im_path);
+    let (_o, _e, imn, _) = run_file_p(&im_path);
+    let ise = ise.expect_err("serial implicit drain should fault");
+    let imn = imn.expect_err("M:N implicit drain should fault");
+    let ise_names: Vec<&str> = ise.trace.iter().map(|f| f.function.as_str()).collect();
+    let imn_names: Vec<&str> = imn.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(
+        ise_names,
+        Vec::<&str>::new(),
+        "serial implicit-drain trace empty"
+    );
+    assert_eq!(
+        imn_names,
+        Vec::<&str>::new(),
+        "M:N implicit-drain trace empty"
+    );
+
+    // B4 review edge 2 (the medium charge): `defer ex.shutdown()` while `main` is unwinding from
+    // an outer panic. The drain must drop ONLY the inline task's frames, NOT the superseding outer
+    // fault already captured — else serial nukes it to [] while M:N keeps [main] (re-introducing the
+    // serial != M:N divergence this fix exists to kill). The submitted task's fault supersedes; both
+    // engines report `kaboom` at `[main]`.
+    let df_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
+    let df_path = dir.join("defer_unwind.chz");
+    std::fs::write(&df_path, df_src).unwrap();
+    let (_o, _e, dse, _) = run_file(&df_path);
+    let (_o, _e, dmn, _) = run_file_p(&df_path);
+    let dse = dse.expect_err("serial defer-unwind should fault");
+    let dmn = dmn.expect_err("M:N defer-unwind should fault");
+    let dse_names: Vec<&str> = dse.trace.iter().map(|f| f.function.as_str()).collect();
+    let dmn_names: Vec<&str> = dmn.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(
+        dse_names,
+        vec!["main"],
+        "serial defer-unwind trace == [main]"
+    );
+    assert_eq!(dmn_names, vec!["main"], "M:N defer-unwind trace == [main]");
+    assert_eq!(dse.message, dmn.message, "defer-unwind same fault message");
+    assert_eq!(dse.span, dmn.span, "defer-unwind same fault location");
 }
 
 /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on
