@@ -1743,7 +1743,10 @@ impl Checker {
     /// scan flags index/field-assign ONLY (a method-name match here would be type-blind and false-reject
     /// `Shared.update`/`Atomic.add`/user methods); callee-form *method*-mutation (`obj.push()` reached
     /// through a spawned free fn) remains a documented gap (gaps.md §B3 residual C). Direct in-spawn-body
-    /// method-mutation IS caught, type-aware, in `infer_method_call`.
+    /// method-mutation whose receiver ROOT is the module global (`xs.push()`, `cfg.items.push()`) IS caught,
+    /// type-aware, in `infer_method_call`; a receiver reached through a task-local ALIAS
+    /// (`local := xs; local.push()`) is NOT — the root resolves to the local — and stays a documented
+    /// residual (gaps.md §B3 residual D).
     pub(super) fn check_spawn_global_mutation(&mut self, stmts: &[Stmt]) {
         // Module globals = top-level `let` binding names.
         let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();

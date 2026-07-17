@@ -9292,6 +9292,31 @@ fn shared_update_on_captured_module_global_in_spawn_ok() {
 }
 
 #[test]
+fn mutate_captured_module_global_bytearray_extend_in_spawn_rejected() {
+    // `bytearray` is a mutable aggregate too: `.extend` mutates in place (returns nil) like `List.extend`,
+    // and a bytearray is copied across the airlock (per-task snapshot on M:N, shared by ref on --serial) —
+    // so it must be frozen alongside `.push`/`.pop`. Regression guard for the extend-omitted-from-the-
+    // mutator-set gap.
+    rejects(
+        "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            ba.extend([1, 2, 3])\nmain()\n",
+        "cannot mutate the captured module global 'ba'",
+    );
+}
+
+#[test]
+fn mutate_captured_module_global_via_task_local_alias_in_spawn_residual_gap() {
+    // KNOWN RESIDUAL v1 GAP (gaps.md §B3 (D)): aliasing a captured module-global aggregate into a
+    // task-local (`local := xs`) then mutating the alias defeats the receiver-root gate — `root_ident`
+    // resolves to the task-local `local`, not the global `xs`. Catching it needs flow-sensitive alias
+    // tracking (a much larger change with false-positive risk), the same indirect-dispatch class as A/B/C.
+    // This test PINS the gap: it currently type-checks OK (the program silently diverges serial 4 / M:N 3
+    // at runtime). If a future fix rejects it, update this test + gaps.md §B3.
+    ok(
+        "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\nmain()\n",
+    );
+}
+
+#[test]
 fn task_local_binding_in_spawn_block_assignable() {
     // A binding declared *inside* the task body is task-local, not a capture — assignable.
     ok(

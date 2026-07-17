@@ -31,7 +31,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > both engines). Covers the direct repro, `Executor.submit` closures, closures declared inside a `spawn:`
 > block, and `spawn f()` callee index/field-assign. **Residual v1 gaps** (same pre-existing indirect-dispatch
 > class, documented in `gaps.md §B3`): top-level-bound closure `spawn w()`, closure via captured struct
-> field, and callee-form *method*-mutation. Tests: 5 checker rejection + 4 boundary-accept unit tests +
+> field, callee-form *method*-mutation, and a task-local alias `local := xs; local.push()`. Tests: 6 checker
+> rejection + 5 boundary/pin-accept unit tests +
 > `module_global_aggregate_mutation_in_task_parity` (serial==M:N==3, the accepted fn-local path). Docs:
 > `gaps.md §B3` (→ FIXED core forms), `concurrency.md §7`. Full `cargo test`/`clippy`/`conformance` green.
 >

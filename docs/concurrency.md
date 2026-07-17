@@ -781,8 +781,9 @@ aggregate) inside a task is a **compile error** (see below).
   `Channel` or a `Shared`. (Reads of both are always fine.) The in-place-mutation gate covers the direct
   `spawn:` block, `Executor.submit` closures, and closures declared inside a `spawn:` block; a handful of
   fully indirect forms (a top-level-bound closure spawned by name, a closure reached through a captured
-  struct field, and callee-form *method*-mutation reached transitively through a `spawn f()` free fn) remain
-  a documented v1 gap — see `docs/gaps.md §B3`.
+  struct field, callee-form *method*-mutation reached transitively through a `spawn f()` free fn, and a
+  method-mutation through a task-local alias of the global — `local := xs; local.push(..)`) remain a
+  documented v1 gap — see `docs/gaps.md §B3`.
 - **Cyclic sendables degrade gracefully, not copied.** The airlock copies a sendable by a structural
   deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global snapshot),
   so a value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b; b.next = a`)

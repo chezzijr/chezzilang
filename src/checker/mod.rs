@@ -1930,7 +1930,7 @@ fn is_inplace_aggregate_mutator(obj_ty: &Ty, method: &str) -> bool {
         ),
         Ty::Map(_, _) => matches!(method, "remove" | "update"),
         Ty::Set(_) => matches!(method, "add" | "remove"),
-        Ty::ByteArray => matches!(method, "push" | "pop"),
+        Ty::ByteArray => matches!(method, "push" | "pop" | "extend"),
         _ => false,
     }
 }

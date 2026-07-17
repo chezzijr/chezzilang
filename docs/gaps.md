@@ -160,8 +160,13 @@ that violates minimal-diff):**
 - **(C)** **callee-form method-mutation** — a free fn reached from `spawn` that does `g.push()` / `g.add()` /
   `g.update()` (the transitive scan is type-blind, so it flags only the collision-free index/field-assign
   forms there, never method names). `spawn: s.bump()` on a user struct is the same class.
+- **(D)** a **task-local ALIAS** of the module global — `local := xs` inside the task, then `local.push(..)`.
+  The method-mutation gate keys on the receiver ROOT (`root_ident`), which resolves to the task-local `local`,
+  not the module global `xs`; catching it needs flow-sensitive alias tracking (a much larger change with
+  false-positive risk on rebind/control-flow) — same indirect class. Pinned by
+  `mutate_captured_module_global_via_task_local_alias_in_spawn_residual_gap`.
 
-Verified still diverging post-fix (serial 4 / M:N 3, check OK): forms (A) and (C). Documented here so the
+Verified still diverging post-fix (serial 4 / M:N 3, check OK): forms (A), (C) and (D). Documented here so the
 honesty of the `serial == M:N` parity invariant is preserved — these are the boundary of a checker-only
 minimal diff, not a claim of full coverage.
 
