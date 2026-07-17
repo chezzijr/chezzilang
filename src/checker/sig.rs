@@ -2541,6 +2541,24 @@ impl Checker {
     }
 
     pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
+        // B3: an INDEX-assign (`m[k]=v`, `xs[i]=v`) or FIELD-assign (`s.field=x`) whose receiver ROOT
+        // is a captured MODULE GLOBAL is frozen under --parallel, exactly like the whole-name reassign
+        // gate in the `Ident` arm below (serial shares by ref → leak; M:N snapshots → silent lost
+        // write). A fn-LOCAL aggregate root is `is_local_capture` (deep-copied per task, agrees on both
+        // engines) and stays allowed. Method-form mutators are gated in `infer_method_call`.
+        if matches!(
+            &target.kind,
+            ExprKind::Index { .. } | ExprKind::Field { .. }
+        ) && let Some(root) = root_ident(target)
+            && self.is_captured(root)
+            && !self.is_local_capture(root)
+        {
+            self.error(
+                target.span,
+                format!("cannot mutate the captured module global '{root}' inside a spawned task (module globals are frozen under --parallel — use a Shared or Channel)"),
+            );
+            return;
+        }
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {

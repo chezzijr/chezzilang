@@ -10134,3 +10134,14 @@ fn reader_annotation_requires_import() {
         ),
     }
 }
+
+/// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so both
+/// engines AGREE (serial == M:N == 3): the parent's list is untouched by the isolated task copy. This
+/// locks that the accepted path (the boundary the B3 checker fix keeps allowing) still runs identically
+/// on both engines post-fix. The MODULE-GLOBAL form — which used to diverge (serial 4 / M:N 3) — is now
+/// a compile error (see the checker unit tests), so it cannot be parity-tested here.
+#[test]
+fn module_global_aggregate_mutation_in_task_parity() {
+    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
+    assert_parity_out(src, "3\n");
+}

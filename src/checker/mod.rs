@@ -1897,6 +1897,44 @@ fn is_locally_shadowed(name: &str, scopes: &[std::collections::HashSet<String>])
     scopes.iter().any(|s| s.contains(name))
 }
 
+/// Walk an lvalue / method-receiver's `Field`/`Index` chain down to its base identifier — the
+/// receiver ROOT. `Some("xs")` for `xs`, `xs[i]`, `xs.f`, `cfg.items[0].x`; `None` when the base is
+/// not a plain ident (a literal, a call result, a parenthesised expr, …). Shared by the B3
+/// frozen-captured-module-global mutation gates (method-mutation, index-assign, field-assign) so a
+/// nested mutation (`cfg.items.push(x)`, `xss[0][1] = v`) still resolves to its module-global root.
+pub(super) fn root_ident(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n),
+        ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => root_ident(obj),
+        _ => None,
+    }
+}
+
+/// Is `method` an **in-place mutator** of one of the four built-in aggregate types (List/Map/Set/
+/// bytearray)? Gated on the concrete receiver type so a colliding name on a different type
+/// (`Shared.update`, `Atomic.add`, a user-struct method) can NEVER match — the B3 method-mutation
+/// gate is deliberately collision-free. Mirrors the `*mutates*` rows in `docs/stdlib.md` containers.
+fn is_inplace_aggregate_mutator(obj_ty: &Ty, method: &str) -> bool {
+    match obj_ty {
+        Ty::List(_) => matches!(
+            method,
+            "push"
+                | "pop"
+                | "reverse"
+                | "extend"
+                | "sort"
+                | "sort_by"
+                | "sort_by_key"
+                | "insert"
+                | "remove_at"
+        ),
+        Ty::Map(_, _) => matches!(method, "remove" | "update"),
+        Ty::Set(_) => matches!(method, "add" | "remove"),
+        Ty::ByteArray => matches!(method, "push" | "pop"),
+        _ => false,
+    }
+}
+
 /// Render a resolved type-arg list for a user-facing redirect hint (`int, str`), used by the
 /// removed-gliding-form error to suggest the type-side form `Enum[int, str].Variant(...)`.
 fn render_targs(targs: &[Ty]) -> String {
@@ -2258,6 +2296,19 @@ fn find_global_mutations(
                     }
                 } else {
                     find_mutations_in_expr(target, globals, scopes, out);
+                    // B3: an index/field-assign (`m[k]=v`, `s.field=x`) whose ROOT is an unshadowed
+                    // module global is a global mutation too — reachable through a spawned free-fn
+                    // callee this transitive scan models. Index/field ONLY: a method-name match would
+                    // be type-blind here and false-reject Shared.update / Atomic.add / user methods.
+                    if matches!(
+                        &target.kind,
+                        ExprKind::Index { .. } | ExprKind::Field { .. }
+                    ) && let Some(root) = root_ident(target)
+                        && !is_locally_shadowed(root, scopes)
+                        && globals.contains(root)
+                    {
+                        out.push((target.span, root.to_string()));
+                    }
                 }
             }
             StmtKind::Return(Some(e))

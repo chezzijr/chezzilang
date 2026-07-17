@@ -17,6 +17,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Docs: `docs/syntax.md` (format specs). Checker-only + pure runtime refactor → parity untouched.
 > `cargo test`/`clippy`/`conformance` green.
 >
+> **✅ SOUNDNESS (2026-07-17, `auto-task/b3-frozen-aggregate-mutation`) — `docs/gaps.md` §B3: freeze
+> IN-PLACE mutation of a captured module-global aggregate in a task (was: serial≠M:N divergence).** The
+> frozen-module-global rule (checker already REJECTED *reassigning* a captured module global inside a
+> `spawn`/`parallel:` task) now ALSO rejects **in-place mutation** — `.push`/`.add`/`m[k]=v`/`s.field=x`
+> (nested) whose receiver root is that global. Closes the half-enforcement that let the write leak on
+> `--serial` (shared by ref) but silently vanish on M:N (per-task snapshot). Checker-only, **parity-neutral**
+> (no VM / dispatch / deep-copy change): three gates reuse the existing `is_captured && !is_local_capture`
+> module-global-only boundary — method-mutation in `infer_method_call` (typed on receiver ∈
+> {List,Map,Set,bytearray} + a mutator name, so `Shared.update`/`Atomic.add`/user methods can't false-fire),
+> index/field-assign at the top of `check_assign`, and index/field-assign in the transitive-callee scan
+> `check_spawn_global_mutation`. A **fn-LOCAL** aggregate stays accepted (deep-copies per task, agrees on
+> both engines). Covers the direct repro, `Executor.submit` closures, closures declared inside a `spawn:`
+> block, and `spawn f()` callee index/field-assign. **Residual v1 gaps** (same pre-existing indirect-dispatch
+> class, documented in `gaps.md §B3`): top-level-bound closure `spawn w()`, closure via captured struct
+> field, and callee-form *method*-mutation. Tests: 5 checker rejection + 4 boundary-accept unit tests +
+> `module_global_aggregate_mutation_in_task_parity` (serial==M:N==3, the accepted fn-local path). Docs:
+> `gaps.md §B3` (→ FIXED core forms), `concurrency.md §7`. Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ LANGUAGE (2026-07-17, `feat/const-binding`) — `docs/gaps.md` L4: `const` immutable bindings.**
 > `const T` is a binding modifier in the same type-slot as `ref` (`PI: const float = 3.14`); the
 > checker rejects any later reassignment of the name (`=` + every compound). Immutable *binding*, not a

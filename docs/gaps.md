@@ -98,7 +98,7 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
-### B3. Mutating a captured MODULE-GLOBAL aggregate inside a task diverges serial (shared) vs M:N (lost) — serial≠M:N soundness — **OPEN (found 2026-07-17)**
+### B3. Mutating a captured MODULE-GLOBAL aggregate inside a task diverges serial (shared) vs M:N (lost) — serial≠M:N soundness — **FIXED (core forms) — residual v1 limits documented (2026-07-17)**
 A task (`spawn`/`parallel:`) that **mutates a captured module-global mutable aggregate** in place
 (`List`/`Map`/`Set`/`struct` — `.push`, `m[k]=v`, `s.add`, `s.field=x`, nested) diverges between engines:
 on **`--serial`** the module global is shared by reference so the mutation **leaks** (visible to the parent
@@ -127,19 +127,43 @@ those repros bound `xs` at top level):
   `Channel.send` of an aggregate; `Shared.get()` snapshot; `Executor.submit` (the
   [#3](#3-executorsubmit-coop-vs-mn-capture-sharing-divergence--resolved-2026-07-11) fix holds).
 
-**Checker↔runtime gap:** the checker treats a captured module global as **frozen / read-only** — it
-REJECTS reassignment inside a task (`cannot reassign the captured module global 'x' … module globals are
-frozen`) — but it **allows in-place aggregate mutation**, which is also a write. So the "frozen" guarantee
-is half-enforced, and the two engines then disagree on whether that write is visible. Two clean fixes, pick
-one: **(a)** the checker rejects in-place mutation of a captured module-global aggregate in a task too
-(consistent with rejecting reassignment — smallest, checker-only, no VM risk), or **(b)** `--serial`
-deep-copies module globals per task like the M:N snapshot (makes them agree on "lost"). (a) is the
-lazier + safer pre-freeze choice and matches the documented read-only-module-global model.
+**Fix (landed) — checker fix (a), the frozen-module-global rule extended to in-place mutation.** The
+checker already treated a captured module global as **frozen / read-only** and REJECTED reassignment inside
+a task (`cannot reassign the captured module global 'x' … module globals are frozen`). It now ALSO rejects
+**in-place mutation** of a captured module-global aggregate whose receiver root is that global — closing the
+half-enforcement (`cannot mutate the captured module global 'x' … module globals are frozen under --parallel
+— use a Shared or Channel`). Checker-only, parity-neutral (no VM / dispatch / deep-copy change). Chose (a)
+over (b) `--serial` deep-copying globals: smallest diff, no pre-JIT-freeze VM risk, matches the documented
+read-only-module-global model. Three gates reuse the existing `is_captured(root) && !is_local_capture(root)`
+boundary (selects scope-0 module globals only; a `fn`-local aggregate is `is_local_capture` and stays
+accepted — it deep-copies correctly on both engines):
+- **method-mutation** (`xs.push`, `m.update`, `s.add`, …) in `infer_method_call` — gated on the concrete
+  receiver type ∈ {List, Map, Set, bytearray} + an in-place-mutator name, so `Shared.update` / `Atomic.add`
+  / a user-struct method with a colliding name can NEVER false-fire (collision-free by construction);
+- **index-assign** (`m[k]=v`, `xs[i]=v`, nested) + **field-assign** (`s.field=x`, nested) at the top of
+  `check_assign`, keyed on the receiver root via a shared `root_ident` chain-walk.
 
-**Parity-suite blind spot:** ~3566 tests green, yet this diverges — **no parity test mutates a captured
-module-global aggregate in a task and observes it**. Land a failing-then-green
-`module_global_aggregate_mutation_in_task_parity` (`src/vm/parity_tests.rs`) with the fix. Tracked (not
-rushed) — a checker tightening (fix a) is low-risk, a VM change (fix b) is riskier pre-JIT-freeze.
+Covers: (i) the direct `parallel: spawn: xs.push(99)` repro, (ii) `Executor.submit` closures, (iii) closures
+DECLARED INSIDE a `spawn:` block, (iv) `spawn f()` callee with INDEX/FIELD-assign (via the transitive-callee
+scan `check_spawn_global_mutation`, extended index/field-only — no method-name matching there, which would be
+type-blind and false-reject `Shared.update`/`Atomic.add`/user methods). Regression net:
+`module_global_aggregate_mutation_in_task_parity` (`src/vm/parity_tests.rs`) locks the fn-local accepted path
+still agrees (serial == M:N == 3); the module-global forms are now compile errors (checker unit tests).
+
+**Residual v1 limits still leaking silently (same pre-existing indirect-dispatch gap class as commit
+`b478834` — not new; impossible for scalars, newly reachable only for aggregate mutation; closing them
+needs call-graph-through-closures / method-receiver modeling, a much larger change with false-positive risk
+that violates minimal-diff):**
+- **(A)** a **top-level-bound closure** `w := fn(): xs.push(..)` then `spawn w()` — the static call graph
+  cannot follow a spawn root that is a closure value.
+- **(B)** a closure reached **through a captured struct field** `spawn: w.f()`.
+- **(C)** **callee-form method-mutation** — a free fn reached from `spawn` that does `g.push()` / `g.add()` /
+  `g.update()` (the transitive scan is type-blind, so it flags only the collision-free index/field-assign
+  forms there, never method names). `spawn: s.bump()` on a user struct is the same class.
+
+Verified still diverging post-fix (serial 4 / M:N 3, check OK): forms (A) and (C). Documented here so the
+honesty of the `serial == M:N` parity invariant is preserved — these are the boundary of a checker-only
+minimal diff, not a claim of full coverage.
 
 ### B4. An `Executor`-task uncaught error prints more backtrace frames on `--serial` than M:N — cosmetic serial≠M:N — **OPEN (found 2026-07-17, low)**
 An uncaught runtime error thrown from an `Executor.submit(...)` closure prints a **full backtrace on

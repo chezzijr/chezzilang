@@ -1736,11 +1736,14 @@ impl Checker {
 
     /// G1 (B3.3b): under `--parallel` a module global is **read-only after init** — cross-task
     /// mutable state must go through `Shared[T]` (the `value → Ref[T] → Shared[T]` mutation ladder's
-    /// top rung). A reassignment of a module global reachable — directly or **transitively through
-    /// free-function calls** — from a `spawn` task is an error. Flow-scoped to `spawn` reachability:
-    /// the same global mutated only from sequential code stays legal (the default cooperative engine
-    /// is single-heap and unaffected). Method-mediated chains (`obj.m()` / `spawn obj.m()`) are a
-    /// documented gap that lands with method-task support (B3.3 thread flip).
+    /// top rung). A reassignment — OR an index/field in-place mutation (`m[k]=v`, `s.field=x`, B3) — of a
+    /// module global reachable, directly or **transitively through free-function calls**, from a `spawn`
+    /// task is an error. Flow-scoped to `spawn` reachability: the same global mutated only from sequential
+    /// code stays legal (the default cooperative engine is single-heap and unaffected). This transitive
+    /// scan flags index/field-assign ONLY (a method-name match here would be type-blind and false-reject
+    /// `Shared.update`/`Atomic.add`/user methods); callee-form *method*-mutation (`obj.push()` reached
+    /// through a spawned free fn) remains a documented gap (gaps.md §B3 residual C). Direct in-spawn-body
+    /// method-mutation IS caught, type-aware, in `infer_method_call`.
     pub(super) fn check_spawn_global_mutation(&mut self, stmts: &[Stmt]) {
         // Module globals = top-level `let` binding names.
         let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();

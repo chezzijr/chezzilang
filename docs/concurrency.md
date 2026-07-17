@@ -712,7 +712,8 @@ once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `cl
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
 stays on the isolated copy, invisible to the parent); a captured **module global** is **frozen** and
-reassigning it inside a task is a **compile error** (see below).
+both **reassigning** it AND **mutating it in place** (`.push`/`m[k]=v`/`s.field=x` on a module-global
+aggregate) inside a task is a **compile error** (see below).
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
@@ -751,8 +752,8 @@ reassigning it inside a task is a **compile error** (see below).
   the `ref` is captured directly by a `spawn:` block, or by a closure/nested-fn used as a `spawn f()`
   **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global** `ref`, by contrast, is
   a **read-only global** resolvable in every task (like a free fn), **not** a per-task capture — reading
-  it inside a task is fine and it is never gated (only *reassigning* a module global inside a task is the
-  error, below). The checker
+  it inside a task is fine and it is never gated (only *reassigning* or *in-place mutating* a module global
+  inside a task is the error, below). The checker
   cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing a task
   airlock **as data** (passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic`)
   is reported at **runtime** as a **graceful, catchable** error (`a generator cannot be sent across
@@ -771,12 +772,17 @@ reassigning it inside a task is a **compile error** (see below).
   and `shutdown` is still caught) — so serial and M:N agree by construction, and a poisoned snapshot
   leaf (which replays as `nil`) guarantees an M:N worker can never obtain a real cross-heap generator
   from a module global.
-- **Captured locals are isolated copies; module globals are frozen.** Reassigning a captured **local**
-  inside a task is fine — it mutates that task's own copy, invisible to the parent (so it can't share
-  state by accident). Reassigning a captured **module global** inside a task is a **compile error** (it
-  would diverge — shared on the serial engine, a worker snapshot on M:N), with the fix in the message
-  (`use a Shared or Channel`). Either way, to produce output visible to the parent, use a `Channel` or a
-  `Shared`. (Reads of both are always fine.)
+- **Captured locals are isolated copies; module globals are frozen.** Reassigning (or in-place mutating)
+  a captured **local** inside a task is fine — it mutates that task's own copy, invisible to the parent (so
+  it can't share state by accident). Both **reassigning** a captured **module global** AND **mutating it in
+  place** (`.push`/`.add`/`m[k]=v`/`s.field=x` on a module-global aggregate — B3) inside a task are a
+  **compile error** (they would diverge — shared on the serial engine, a worker snapshot on M:N), with the
+  fix in the message (`use a Shared or Channel`). Either way, to produce output visible to the parent, use a
+  `Channel` or a `Shared`. (Reads of both are always fine.) The in-place-mutation gate covers the direct
+  `spawn:` block, `Executor.submit` closures, and closures declared inside a `spawn:` block; a handful of
+  fully indirect forms (a top-level-bound closure spawned by name, a closure reached through a captured
+  struct field, and callee-form *method*-mutation reached transitively through a `spawn f()` free fn) remain
+  a documented v1 gap — see `docs/gaps.md §B3`.
 - **Cyclic sendables degrade gracefully, not copied.** The airlock copies a sendable by a structural
   deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global snapshot),
   so a value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b; b.next = a`)

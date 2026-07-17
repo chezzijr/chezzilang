@@ -9208,6 +9208,89 @@ fn reassign_captured_module_global_in_spawn_block_rejected() {
     );
 }
 
+// ----- B3: in-place mutation of a captured MODULE GLOBAL aggregate is frozen too -----
+
+#[test]
+fn mutate_captured_module_global_list_method_in_spawn_rejected() {
+    // A `.push`/`.pop`/… on a captured module-global List inside a spawn: leaks on serial (shared by
+    // ref) but is silently lost on M:N (per-task snapshot) — the same freeze the reassign gate applies.
+    rejects(
+        "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            xs.push(99)\nmain()\n",
+        "cannot mutate the captured module global 'xs'",
+    );
+}
+
+#[test]
+fn mutate_captured_module_global_map_index_assign_in_spawn_rejected() {
+    // `m[k] = v` on a captured module-global Map inside a spawn: — index-assign form.
+    rejects(
+        "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            m[1] = 9\nmain()\n",
+        "cannot mutate the captured module global 'm'",
+    );
+}
+
+#[test]
+fn mutate_captured_module_global_struct_field_assign_in_spawn_rejected() {
+    // `s.field = x` on a captured module-global struct inside a spawn: — field-assign form.
+    rejects(
+        "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            s.n = 9\nmain()\n",
+        "cannot mutate the captured module global 's'",
+    );
+}
+
+#[test]
+fn mutate_captured_module_global_set_method_in_spawn_rejected() {
+    rejects(
+        "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            st.add(9)\nmain()\n",
+        "cannot mutate the captured module global 'st'",
+    );
+}
+
+#[test]
+fn mutate_module_global_index_assign_via_spawned_callee_rejected() {
+    // Transitive-callee form (Path A): a free fn reached from `spawn` does the index-assign.
+    rejects(
+        "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\nmain()\n",
+        "cannot mutate module global 'm'",
+    );
+}
+
+#[test]
+fn mutate_fn_local_aggregate_in_spawn_block_ok() {
+    // A fn-LOCAL aggregate captured into a spawn: is deep-copied per task (agrees serial==M:N), so its
+    // in-place mutation stays ACCEPTED — only MODULE-GLOBAL roots are frozen.
+    ok(
+        "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n",
+    );
+    ok(
+        "fn main():\n    m := {1: 2}\n    parallel:\n        spawn:\n            m[1] = 9\nmain()\n",
+    );
+}
+
+#[test]
+fn read_method_on_captured_module_global_in_spawn_ok() {
+    // A non-mutating method (`.len()`, `.get()`, `.map()`) on a captured module global is a READ — it
+    // must stay accepted (guards against over-listing the mutator set).
+    ok(
+        "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            print(xs.len())\nmain()\n",
+    );
+}
+
+#[test]
+fn mutate_module_global_aggregate_sequentially_ok() {
+    // Outside any spawned task the module global is not frozen — a top-level `.push` stays fine.
+    ok("xs := [1, 2, 3]\nxs.push(4)\nprint(xs.len())\n");
+}
+
+#[test]
+fn shared_update_on_captured_module_global_in_spawn_ok() {
+    // The collision guard: `Shared.update` shares the mutator name `update` with `Map`, but the gate is
+    // typed on the receiver so a captured module-global Shared stays accepted (that IS the cross-task box).
+    entry_ok(
+        "import std.concurrency\ng := Shared(0)\nfn main():\n    parallel:\n        spawn:\n            g.update(fn(x): x + 1)\nmain()\n",
+    );
+}
+
 #[test]
 fn task_local_binding_in_spawn_block_assignable() {
     // A binding declared *inside* the task body is task-local, not a capture — assignable.
