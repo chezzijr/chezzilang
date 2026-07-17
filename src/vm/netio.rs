@@ -1409,9 +1409,11 @@ impl Vm {
         // No scheduler (top level / single fiber) or a native callback on the cooperative engine: no
         // sibling could ever fill the channel — a real deadlock.
         Err(self.err(
-            "recv on an empty channel: deadlock — nothing is queued and no task \
-             can ever send (a consumer that waits mid-flight on a live producer \
-             needs C5)"
+            "recv on an empty channel: deadlock — no runnable task can send. If a \
+             producer is spawned in the same `parallel:` nursery, note the nursery \
+             body runs before its spawned tasks start, so a blocking recv / \
+             `for v in ch:` in the body can't reach it — put the consumer in a \
+             `spawn:` too."
                 .to_string(),
             span,
         ))
@@ -1583,8 +1585,10 @@ impl Vm {
         // No scheduler (top level / single fiber) or inside a native callback: no sibling could ever
         // fill the channels — a real deadlock (mirrors `chan_recv_step`'s sequential `recv` fault).
         Err(self.err(
-            "wait on channels that are all empty: deadlock — nothing is queued and no task \
-             can ever send"
+            "wait on channels that are all empty: deadlock — no runnable task can send. If a \
+             producer is spawned in the same `parallel:` nursery, note the nursery body runs \
+             before its spawned tasks start, so a blocking `wait:` in the body can't reach it \
+             — put the `wait:` in a `spawn:` too."
                 .to_string(),
             span,
         ))
