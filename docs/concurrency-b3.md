@@ -283,8 +283,13 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      (`Vm::check_task_generator_reach`) — run on **both** engines during body execution — faults with
      the graceful `a generator cannot be sent across tasks` error IFF a spawned task can reach a
      generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
-     **any** op that can transfer control into an unscanned proto — a call, an operator overload, a
-     protocol/`str` hook, a nested spawn/defer, a `GetCaptured` home-global read — treated as OPAQUE).
+     a **resolvable** transfer whose target proto the scan FOLLOWS — a direct `Call(0)`/`SpawnCall(0)`
+     of a known module-global fn, a `Type.method()` static, an `argc==0` method (by-name over all user
+     impls), a static `spawn:` block — recursing memoized + cycle-guarded into the callee's own home).
+     A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an argc>0 call or its callable arg, an
+     operator overload, an index/field/hash hook, a builtin re-entry, a `spawn recv.m()`, a
+     `GetCaptured` home-global read). Nursery-management ops (`EnterNursery`/`JoinNursery`/
+     `ReclaimNursery`) are inert (the tasks they run were registered by the followed `Spawn*` ops).
      The gate runs at **four** choke points to keep serial == M:N: (a) `register_task` (the single
      common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)
      the **lazy nursery join** (`join_nursery`, before the serial-cooperative vs M:N split), against the
@@ -317,9 +322,12 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      a print is treated as a reach whenever some `str` hook could reach a generator global
      (`any_str_hook_reaches_generator`), while a print with no generator-reaching hook in the program
      stays inert (keeps the primary `print("literal")` safe case un-gated). Conservative by design:
-     over-gates (e.g. a spawned task doing unrelated work via a call — or any print, when a
-     generator-reaching `str` hook exists — while a generator global is live is gated), never
-     under-gates. A future precision refinement is a callee-provenance-paired transitive scan.
+     over-gates the residual OPAQUE transfers (an argc>0 call / operator overload / builtin re-entry —
+     or any print, when a generator-reaching `str` hook exists — while a generator global is live is
+     gated), never under-gates. In the CONSERVATIVE outer-nursery mode every `Spawn*` op also stays
+     OPAQUE (its reach depends on globals that may be reassigned in the frozen-vs-live window). A future
+     precision refinement is scanning operator-overload impls by operator name (the same by-name
+     over-approximation the `argc==0` method scan already uses).
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; resolved via the `wait_timeout` re-check loop.
 3. **Pool starvation** (G3) — parent-participates + documented "don't out-block the pool" rule for v1.
 4. **Output contract** (G4) — settled (decision F) but pervasive; threaded through B3.2/B3.3.
