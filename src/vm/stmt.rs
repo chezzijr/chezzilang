@@ -121,8 +121,8 @@ impl Vm {
         let v = self.pop();
         // Extract (variant_id, payload-arity, first-payload) up front so the heap borrow is released
         // before we mutate the stack / unwind a frame.
-        let info = match v {
-            Value::Obj(h) => match self.heap.get(h) {
+        let info = match v.view() {
+            ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::Enum {
                     variant_id,
                     payload,
@@ -262,7 +262,7 @@ impl Vm {
             tid: def.tid,
             fields,
         });
-        self.push(Value::Obj(h));
+        self.push(Value::obj(h));
         Ok(())
     }
 
@@ -322,7 +322,7 @@ impl Vm {
             variant_id,
             payload,
         });
-        self.push(Value::Obj(h));
+        self.push(Value::obj(h));
         Ok(())
     }
 
@@ -333,7 +333,7 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let obj = self.pop();
-        let Value::Obj(h) = obj else {
+        let Some(h) = obj.as_obj() else {
             return Err(self.err(
                 format!("cannot read field '{name}' of {}", self.type_name(obj)),
                 span,
@@ -434,16 +434,18 @@ impl Vm {
         let obj = self.pop();
         // Each component is `Nil` (omitted) → `None`, or an `Int` → `Some`. Anything else faults.
         let comp = |vm: &Vm, v: Value| -> Result<Option<i64>, RuntimeError> {
-            match v {
-                Value::Nil => Ok(None),
-                Value::Int(n) => Ok(Some(n)),
-                other => Err(vm.err(format!("expected int, found {}", vm.type_name(other)), span)),
+            if v.is_nil() {
+                Ok(None)
+            } else if let Some(n) = vm.int_val(v) {
+                Ok(Some(n))
+            } else {
+                Err(vm.err(format!("expected int, found {}", vm.type_name(v)), span))
             }
         };
         let s = comp(self, start)?;
         let e = comp(self, end)?;
         let st = comp(self, step)?;
-        let Value::Obj(h) = obj else {
+        let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
         };
         // Snapshot the result kind without holding the heap borrow across the alloc / method call.
@@ -489,19 +491,19 @@ impl Vm {
                 self.push(obj);
                 let nh = self.heap.alloc(Obj::List(slice));
                 self.pop();
-                self.push(Value::Obj(nh));
+                self.push(Value::obj(nh));
             }
             Sliced::Str(sub) => {
                 let nh = self.heap.alloc(Obj::Str(sub.into()));
-                self.push(Value::Obj(nh));
+                self.push(Value::obj(nh));
             }
             Sliced::Bytes(sub) => {
                 let nh = self.heap.alloc(Obj::Bytes(sub.into_boxed_slice()));
-                self.push(Value::Obj(nh));
+                self.push(Value::obj(nh));
             }
             Sliced::ByteArray(sub) => {
                 let nh = self.heap.alloc(Obj::ByteArray(sub));
-                self.push(Value::Obj(nh));
+                self.push(Value::obj(nh));
             }
             Sliced::Struct => {
                 // The `slice` protocol takes three `Option[int]` components — pass real `Option`
@@ -510,7 +512,7 @@ impl Vm {
                 self.push(obj);
                 let opt = |vm: &mut Vm, c: Option<i64>| match c {
                     None => vm.alloc_enum("Option", "None", Vec::new()),
-                    Some(n) => vm.alloc_enum("Option", "Some", vec![Value::Int(n)]),
+                    Some(n) => vm.alloc_enum("Option", "Some", vec![Value::int(n)]),
                 };
                 let s_v = opt(self, s);
                 let e_v = opt(self, e);
@@ -560,7 +562,7 @@ impl Vm {
         // str/bool): pop it as a Value and validate per object kind.
         let key = self.pop();
         let obj = self.pop();
-        let Value::Obj(h) = obj else {
+        let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
         // M19 Tier-2 — Int-key fast path. A `List` or `Map` indexed by an `Int` needs no rooting:
@@ -568,7 +570,7 @@ impl Vm {
         // `hash_key_rooted` push/pop the general Map arm does is pure waste. The `candidates` +
         // `values_equal` probe is unchanged, so an Int key still matches a `values_equal` `Float`
         // key. `Str`/`Struct` (and any non-Int key) fall through to the general match below.
-        if let Value::Int(n) = key {
+        if let Some(n) = key.as_int_inline() {
             match self.heap.get(h) {
                 Obj::List(items) => {
                     return match crate::slice::norm_index(n, items.len()).map(|i| items[i]) {
@@ -586,7 +588,7 @@ impl Vm {
                 Obj::Bytes(b) => {
                     return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
                         Some(v) => {
-                            self.push(Value::Int(v));
+                            self.push(Value::int(v));
                             Ok(())
                         }
                         None => {
@@ -598,7 +600,7 @@ impl Vm {
                 Obj::ByteArray(b) => {
                     return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
                         Some(v) => {
-                            self.push(Value::Int(v));
+                            self.push(Value::int(v));
                             Ok(())
                         }
                         None => {
@@ -631,9 +633,9 @@ impl Vm {
         }
         // Require an int index for list/str (the message matches the old `AsInt` exactly, for parity).
         let int_idx = |vm: &Vm| -> Result<i64, RuntimeError> {
-            match key {
-                Value::Int(n) => Ok(n),
-                other => Err(vm.err(format!("expected int, found {}", vm.type_name(other)), span)),
+            match vm.int_val(key) {
+                Some(n) => Ok(n),
+                None => Err(vm.err(format!("expected int, found {}", vm.type_name(key)), span)),
             }
         };
         match self.heap.get(h) {
@@ -670,7 +672,7 @@ impl Vm {
                 let idx = int_idx(self)?;
                 match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
                     Some(v) => {
-                        self.push(Value::Int(v));
+                        self.push(Value::int(v));
                         Ok(())
                     }
                     None => {
@@ -682,7 +684,7 @@ impl Vm {
                 let idx = int_idx(self)?;
                 match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
                     Some(v) => {
-                        self.push(Value::Int(v));
+                        self.push(Value::int(v));
                         Ok(())
                     }
                     None => {
@@ -727,7 +729,7 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let val = self.pop();
         let obj = self.pop();
-        let Value::Obj(h) = obj else {
+        let Some(h) = obj.as_obj() else {
             return Err(self.err(
                 format!("cannot assign field '{name}' of {}", self.type_name(obj)),
                 span,
@@ -792,16 +794,14 @@ impl Vm {
         // The index is NOT pre-validated as int (AsInt removed for map keys): pop as a Value.
         let key = self.pop();
         let obj = self.pop();
-        let Value::Obj(h) = obj else {
+        let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
         // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
         // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same
         // `candidates`/`values_equal`/`push` as the general Map arm → byte-identical behavior. A
         // `Struct` with an Int key still falls through to its `set_index` protocol dispatch below.
-        if let Value::Int(_) = key
-            && matches!(self.heap.get(h), Obj::Map(_))
-        {
+        if self.is_integral(key) && matches!(self.heap.get(h), Obj::Map(_)) {
             let hk = self.scalar_hash(key);
             let Obj::Map(m) = self.heap.get(h) else {
                 unreachable!()
@@ -859,13 +859,10 @@ impl Vm {
             self.dispatch_index_method(h, "set_index", vec![obj, key, val], span)?;
             return Ok(());
         }
-        let idx = match key {
-            Value::Int(n) => n,
-            other => {
-                return Err(self.err(
-                    format!("expected int, found {}", self.type_name(other)),
-                    span,
-                ));
+        let idx = match self.int_val(key) {
+            Some(n) => n,
+            None => {
+                return Err(self.err(format!("expected int, found {}", self.type_name(key)), span));
             }
         };
         // `bytearray[i] = x` — the NEW mutable capability `bytes` lacks. The value must be an `int`
@@ -874,19 +871,18 @@ impl Vm {
         // same `bytearray` observe it (like `list`). Validate the value up front (`&self` borrow)
         // before the `&mut self` `get_mut` below.
         if matches!(self.heap.get(h), Obj::ByteArray(_)) {
-            let byte = match val {
-                Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                Value::Int(n) => {
+            let byte = match self.int_val(val) {
+                Some(n) if (0..=255).contains(&n) => n as u8,
+                Some(n) => {
                     return Err(self.err(
                         format!("byte value {n} out of range (must be 0..=255)"),
                         span,
                     ));
                 }
-                other => {
-                    return Err(self.err(
-                        format!("expected int, found {}", self.type_name(other)),
-                        span,
-                    ));
+                None => {
+                    return Err(
+                        self.err(format!("expected int, found {}", self.type_name(val)), span)
+                    );
                 }
             };
             let Obj::ByteArray(b) = self.heap.get_mut(h) else {
@@ -931,9 +927,9 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let v = self.stack[self.base() + scrut];
-        let h = match v {
-            Value::Obj(h) => h,
-            _ => unreachable!("scrutinee ensured to be an enum"),
+        let h = match v.as_obj() {
+            Some(h) => h,
+            None => unreachable!("scrutinee ensured to be an enum"),
         };
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
@@ -998,7 +994,7 @@ impl Vm {
         if let Some(halt) = self.stream_halt(span) {
             return Err(halt); // stdout died (closed reader / unwritable) — halt like `os.exit`
         }
-        self.push(Value::Nil);
+        self.push(Value::nil());
         Ok(())
     }
 
@@ -1024,7 +1020,7 @@ impl Vm {
         if let Some(halt) = self.stream_halt(span) {
             return Err(halt);
         }
-        self.push(Value::Nil);
+        self.push(Value::nil());
         Ok(())
     }
 
@@ -1043,12 +1039,11 @@ impl Vm {
         // guarantees a single `str` arg; fall back to the value's type name for a non-str (matches
         // the interp's defensive guard, keeping messages byte-identical across engines).
         if name == "panic" {
-            let message = match args.first() {
-                Some(Value::Obj(h)) => match self.heap.get(*h) {
-                    Obj::Str(s) => s.to_string(),
-                    _ => self.type_name(args[0]).to_string(),
+            let message = match args.first().copied() {
+                Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
+                    Some(Obj::Str(s)) => s.to_string(),
+                    _ => self.type_name(v).to_string(),
                 },
-                Some(other) => self.type_name(*other).to_string(),
                 None => String::new(),
             };
             return Err(self.err(message, span));
@@ -1123,24 +1118,24 @@ impl Vm {
         arg: Option<&Value>,
         span: Span,
     ) -> Result<Option<SockTimeout>, RuntimeError> {
-        match arg {
-            None => Ok(None),
-            Some(Value::Int(ms)) => {
-                let poll_once = *ms <= 0;
-                let ms = (*ms).max(0) as u64;
-                let dur = std::time::Duration::from_millis(ms);
-                let deadline = std::time::Instant::now()
-                    .checked_add(dur)
-                    .unwrap_or_else(|| {
-                        std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
-                    });
-                Ok(Some(SockTimeout {
-                    poll_once,
-                    deadline,
-                }))
-            }
-            Some(_) => Err(self.err("timeout_ms expects an int (milliseconds)".into(), span)),
-        }
+        let Some(v) = arg else {
+            return Ok(None);
+        };
+        let Some(ms) = self.int_val(*v) else {
+            return Err(self.err("timeout_ms expects an int (milliseconds)".into(), span));
+        };
+        let poll_once = ms <= 0;
+        let ms = ms.max(0) as u64;
+        let dur = std::time::Duration::from_millis(ms);
+        let deadline = std::time::Instant::now()
+            .checked_add(dur)
+            .unwrap_or_else(|| {
+                std::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365)
+            });
+        Ok(Some(SockTimeout {
+            poll_once,
+            deadline,
+        }))
     }
 
     /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
@@ -1162,7 +1157,7 @@ impl Vm {
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
         // and with the docs ("reusing one exhausted cursor yields nothing on a second pass"). Lifted
         // OUT of the immutable-borrow `match self.heap.get(h)` below so `get_mut` can advance `pos`.
-        if let Value::Obj(h) = v
+        if let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Iter { .. })
         {
             let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
@@ -1174,18 +1169,18 @@ impl Vm {
             return Ok(drained);
         }
         // Built-in collections: copy directly, no re-entry.
-        if let Value::Obj(h) = v {
+        if let Some(h) = v.as_obj() {
             match self.heap.get(h) {
                 Obj::List(items) => return Ok(items.clone()),
                 Obj::Set(s) => return Ok(s.entries.iter().map(|(_, e)| *e).collect()),
                 Obj::Map(m) => return Ok(m.entries.iter().map(|(_, k, _)| *k).collect()),
                 Obj::Bytes(b) => {
                     let bytes = b.clone();
-                    return Ok(bytes.iter().map(|&x| Value::Int(x as i64)).collect());
+                    return Ok(bytes.iter().map(|&x| Value::int(x as i64)).collect());
                 }
                 Obj::ByteArray(b) => {
                     let bytes = b.clone();
-                    return Ok(bytes.iter().map(|&x| Value::Int(x as i64)).collect());
+                    return Ok(bytes.iter().map(|&x| Value::int(x as i64)).collect());
                 }
                 Obj::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
@@ -1197,7 +1192,7 @@ impl Vm {
         }
         // Re-entrant paths (generator / user struct iterator): run user `.next()` until `None`, rooting
         // the source + a heap accumulator list on the operand stack across each call.
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
         };
         // Resolve the iteration step: a generator resumes; a user struct dispatches its `next` proto.
@@ -1234,7 +1229,7 @@ impl Vm {
         // Root the source + the growing accumulator list across the re-entrant calls.
         let acc = self.heap.alloc(Obj::List(Vec::new()));
         self.push(v);
-        self.push(Value::Obj(acc));
+        self.push(Value::obj(acc));
         let result = (|| {
             loop {
                 let res = match step {
@@ -1243,7 +1238,7 @@ impl Vm {
                         vm.run_proto(proto, home, None, vec![v], true, false, span)
                     })?,
                 };
-                let Value::Obj(rh) = res else {
+                let Some(rh) = res.as_obj() else {
                     return Err(self.err(
                         format!(
                             "iterator next() must return Option, found {}",
@@ -1329,7 +1324,7 @@ impl Vm {
         // snapshots there keeps them alive across the phase-1 re-entrant hashes. Then hash (phase 1)
         // and build GC-free (phase 2), reading the snapshots from the list.
         let lh = self.heap.alloc(Obj::List(src.clone()));
-        self.push(Value::Obj(lh));
+        self.push(Value::obj(lh));
         let n = src.len();
         let built = (|| {
             for i in 0..n {
@@ -1373,14 +1368,14 @@ impl Vm {
             Ok(set)
         })();
         self.pop(); // unroot the source list
-        Ok(Value::Obj(self.heap.alloc(Obj::Set(built?))))
+        Ok(Value::obj(self.heap.alloc(Obj::Set(built?))))
     }
 
     /// Cast-unwrap a generic aggregate newtype to its inner value for `List(s)`/`Set(s)`/`Map(s)`: a
     /// `Obj::NewType` (e.g. a `Stack[T] = List[T]`) peels to the wrapped collection. A non-newtype
     /// value passes through. Type args are erased at runtime; the checker verified the underlying.
     pub(super) fn unwrap_newtype_value(&self, v: Value) -> Value {
-        if let Value::Obj(h) = v
+        if let Some(h) = v.as_obj()
             && let Obj::NewType { inner, .. } = self.heap.get(h)
         {
             return *inner;
@@ -1408,7 +1403,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
+        Ok(Value::obj(self.heap.alloc(Obj::List(items))))
     }
 
     /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
@@ -1421,7 +1416,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let one = match args {
             // `Map()` → a fresh empty map (the `Map[K, V]()` turbofish form; mirrors `Set()`).
-            [] => return Ok(Value::Obj(self.heap.alloc(Obj::Map(MapData::default())))),
+            [] => return Ok(Value::obj(self.heap.alloc(Obj::Map(MapData::default())))),
             [one] => one,
             _ => {
                 return Err(self.err(
@@ -1433,15 +1428,15 @@ impl Vm {
         let it = self.unwrap_newtype_value(*one);
         // Cast-unwrapping a generic newtype over `Map[K, V]` (`Tally[T] = Map[T, int]`) yields the
         // inner map DIRECTLY — a copy, not a re-iteration as 2-tuples (iterating a map gives keys).
-        if let Value::Obj(h) = it
+        if let Some(h) = it.as_obj()
             && let Obj::Map(inner) = self.heap.get(h)
         {
             let copy = inner.clone();
-            return Ok(Value::Obj(self.heap.alloc(Obj::Map(copy))));
+            return Ok(Value::obj(self.heap.alloc(Obj::Map(copy))));
         }
         let drained = self.drain_iterable(it, span)?;
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
-        let src_obj = Value::Obj(self.heap.alloc(Obj::List(drained.clone())));
+        let src_obj = Value::obj(self.heap.alloc(Obj::List(drained.clone())));
         self.push(src_obj);
         // Snapshot keys are rooted by pushing them onto the operand stack (the drained tuples may
         // ALIAS caller-held tuples, so they cannot be mutated in place). Everything above this base
@@ -1450,28 +1445,18 @@ impl Vm {
         let built = (|| {
             let mut map = MapData::default();
             for elem in &drained {
-                let (k, v) =
-                    match elem {
-                        Value::Obj(eh) => match self.heap.get(*eh) {
-                            Obj::Tuple(parts) if parts.len() == 2 => (parts[0], parts[1]),
-                            _ => return Err(self.err(
-                                format!(
-                                    "Map() expects an iterable of (key, value) 2-tuples, got {}",
-                                    self.type_name(*elem)
-                                ),
-                                span,
-                            )),
-                        },
-                        other => {
-                            return Err(self.err(
-                                format!(
-                                    "Map() expects an iterable of (key, value) 2-tuples, got {}",
-                                    self.type_name(*other)
-                                ),
-                                span,
-                            ));
-                        }
-                    };
+                let (k, v) = match elem.as_obj().map(|eh| self.heap.get(eh)) {
+                    Some(Obj::Tuple(parts)) if parts.len() == 2 => (parts[0], parts[1]),
+                    _ => {
+                        return Err(self.err(
+                            format!(
+                                "Map() expects an iterable of (key, value) 2-tuples, got {}",
+                                self.type_name(*elem)
+                            ),
+                            span,
+                        ));
+                    }
+                };
                 // Snapshot a struct/enum/newtype KEY on insert (Go value-key model); root it on the
                 // operand stack for the rest of the build (the later `hash_key_rooted` re-enters the
                 // VM → GC). Values stay by-reference (rooted via src_obj). The snapshot is `==` the
@@ -1494,7 +1479,7 @@ impl Vm {
         })();
         self.stack.truncate(stack_base); // unroot the snapshot keys (Ok or Err)
         self.pop(); // unroot the source list
-        Ok(Value::Obj(self.heap.alloc(Obj::Map(built?))))
+        Ok(Value::obj(self.heap.alloc(Obj::Map(built?))))
     }
 
     /// Collect raw bytes from a byte-sequence-shaped argument for the `bytes`/`bytearray`
@@ -1506,46 +1491,37 @@ impl Vm {
         v: Value,
         span: Span,
     ) -> Result<Vec<u8>, RuntimeError> {
-        match v {
-            Value::Obj(h) => {
-                match self.heap.get(h) {
-                    Obj::Bytes(b) => Ok(b.to_vec()),
-                    Obj::ByteArray(b) => Ok(b.clone()),
-                    Obj::List(items) => {
-                        let mut out = Vec::with_capacity(items.len());
-                        for e in items {
-                            match e {
-                                Value::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
-                                Value::Int(n) => return Err(self.err(
-                                    format!(
-                                        "{what}() list element {n} out of range (must be 0..=255)"
-                                    ),
-                                    span,
-                                )),
-                                other => return Err(self.err(
-                                    format!(
-                                        "{what}() expects a list of int, got an element of type {}",
-                                        self.type_name(*other)
-                                    ),
-                                    span,
-                                )),
-                            }
+        match v.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::Bytes(b)) => Ok(b.to_vec()),
+            Some(Obj::ByteArray(b)) => Ok(b.clone()),
+            Some(Obj::List(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for e in items {
+                    match self.int_val(*e) {
+                        Some(n) if (0..=255).contains(&n) => out.push(n as u8),
+                        Some(n) => {
+                            return Err(self.err(
+                                format!("{what}() list element {n} out of range (must be 0..=255)"),
+                                span,
+                            ));
                         }
-                        Ok(out)
+                        None => {
+                            return Err(self.err(
+                                format!(
+                                    "{what}() expects a list of int, got an element of type {}",
+                                    self.type_name(*e)
+                                ),
+                                span,
+                            ));
+                        }
                     }
-                    _ => Err(self.err(
-                        format!(
-                            "{what}() expects a bytes, a bytearray, or a List[int], got {}",
-                            self.type_name(v)
-                        ),
-                        span,
-                    )),
                 }
+                Ok(out)
             }
-            other => Err(self.err(
+            _ => Err(self.err(
                 format!(
                     "{what}() expects a bytes, a bytearray, or a List[int], got {}",
-                    self.type_name(other)
+                    self.type_name(v)
                 ),
                 span,
             )),
@@ -1562,8 +1538,9 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let bytes: Vec<u8> = match args {
             [] => Vec::new(),
-            [Value::Int(n)] => {
-                if *n < 0 {
+            [one] if self.int_val(*one).is_some() => {
+                let n = self.int_val(*one).unwrap();
+                if n < 0 {
                     return Err(
                         self.err(format!("bytearray() size {n} must be non-negative"), span)
                     );
@@ -1572,7 +1549,7 @@ impl Vm {
                 // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
                 // recoverable fault, matching range()/format-width's "never a giant abort" rule —
                 // without a hard cap, so legitimately large buffers still work.
-                let n = *n as usize;
+                let n = n as usize;
                 let mut buf: Vec<u8> = Vec::new();
                 if buf.try_reserve_exact(n).is_err() {
                     return Err(self.err(
@@ -1591,7 +1568,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::Obj(self.heap.alloc(Obj::ByteArray(bytes))))
+        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes))))
     }
 
     /// `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a `bytearray`; `bytes([ints])` → from a
@@ -1610,7 +1587,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::Obj(
+        Ok(Value::obj(
             self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
         ))
     }
@@ -1620,10 +1597,11 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let (start, end, step) = match args {
-            [Value::Int(n)] => (0, *n, 1),
-            [Value::Int(a), Value::Int(b)] => (*a, *b, 1),
-            [Value::Int(a), Value::Int(b), Value::Int(s)] => (*a, *b, *s),
+        let ints: Option<Vec<i64>> = args.iter().map(|v| self.int_val(*v)).collect();
+        let (start, end, step) = match ints.as_deref() {
+            Some([n]) => (0, *n, 1),
+            Some([a, b]) => (*a, *b, 1),
+            Some([a, b, s]) => (*a, *b, *s),
             _ => {
                 return Err(self.err(
                     "range() expects range(end), range(start, end), or range(start, end, step) of ints"
@@ -1632,12 +1610,10 @@ impl Vm {
                 ));
             }
         };
-        let items: Vec<Value> = crate::slice::range_values(start, end, step)
-            .map_err(|message| self.err(message, span))?
-            .into_iter()
-            .map(Value::Int)
-            .collect();
-        Ok(Value::Obj(self.heap.alloc(Obj::List(items))))
+        let raw = crate::slice::range_values(start, end, step)
+            .map_err(|message| self.err(message, span))?;
+        let items: Vec<Value> = raw.into_iter().map(|n| self.make_int(n)).collect();
+        Ok(Value::obj(self.heap.alloc(Obj::List(items))))
     }
 
     pub(super) fn builtin_int(
@@ -1646,35 +1622,42 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("int", args, 1, span)?;
-        match args[0] {
-            Value::Int(n) => Ok(Value::Int(n)),
-            Value::Float(f) => {
-                if !f.is_finite() || f < i64::MIN as f64 || f >= 9_223_372_036_854_775_808.0 {
-                    return Err(self.err(format!("int(): {f} is out of integer range"), span));
-                }
-                Ok(Value::Int(f as i64))
+        let v = args[0];
+        if self.is_integral(v) {
+            // `int(int)` is identity — inline or boxed big-int, returned unchanged.
+            return Ok(v);
+        }
+        if v.is_float() {
+            let f = self.float_of(v);
+            if !f.is_finite() || f < i64::MIN as f64 || f >= 9_223_372_036_854_775_808.0 {
+                return Err(self.err(format!("int(): {f} is out of integer range"), span));
             }
-            Value::Bool(b) => Ok(Value::Int(i64::from(b))),
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-                    self.err(format!("int(): cannot parse '{s}' as an integer"), span)
-                }),
+            return Ok(self.make_int(f as i64));
+        }
+        if let Some(b) = v.as_bool() {
+            return Ok(Value::int(i64::from(b)));
+        }
+        if let Some(h) = v.as_obj() {
+            match self.heap.get(h) {
+                Obj::Str(s) => {
+                    let s = s.to_string();
+                    return match s.trim().parse::<i64>() {
+                        Ok(n) => Ok(self.make_int(n)),
+                        Err(_) => {
+                            Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
+                        }
+                    };
+                }
                 // `int(newtype)` unwraps the inner value (the cast-unwrap path). The checker has
                 // already verified the underlying is `int`, so recursing yields the inner `Int`.
                 Obj::NewType { inner, .. } => {
                     let inner = *inner;
-                    self.builtin_int(&[inner], span)
+                    return self.builtin_int(&[inner], span);
                 }
-                _ => Err(self.err(
-                    format!("int() cannot convert {}", self.type_name(args[0])),
-                    span,
-                )),
-            },
-            other => Err(self.err(
-                format!("int() cannot convert {}", self.type_name(other)),
-                span,
-            )),
+                _ => {}
+            }
         }
+        Err(self.err(format!("int() cannot convert {}", self.type_name(v)), span))
     }
 
     pub(super) fn builtin_float(
@@ -1683,31 +1666,40 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("float", args, 1, span)?;
-        match args[0] {
-            Value::Float(f) => Ok(Value::Float(f)),
-            Value::Int(n) => Ok(Value::Float(n as f64)),
-            Value::Bool(b) => Ok(Value::Float(f64::from(b))),
-            Value::Obj(h) => {
-                match self.heap.get(h) {
-                    Obj::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
-                        self.err(format!("float(): cannot parse '{s}' as a float"), span)
-                    }),
-                    // `float(newtype)` unwraps the inner (checker verified the underlying is float).
-                    Obj::NewType { inner, .. } => {
-                        let inner = *inner;
-                        self.builtin_float(&[inner], span)
-                    }
-                    _ => Err(self.err(
-                        format!("float() cannot convert {}", self.type_name(args[0])),
-                        span,
-                    )),
-                }
-            }
-            other => Err(self.err(
-                format!("float() cannot convert {}", self.type_name(other)),
-                span,
-            )),
+        let v = args[0];
+        if v.is_float() {
+            return Ok(v);
         }
+        if self.is_integral(v) {
+            let f = self.int_of(v) as f64;
+            return Ok(self.box_float(f));
+        }
+        if let Some(b) = v.as_bool() {
+            return Ok(self.box_float(f64::from(b)));
+        }
+        if let Some(h) = v.as_obj() {
+            match self.heap.get(h) {
+                Obj::Str(s) => {
+                    let s = s.to_string();
+                    return match s.trim().parse::<f64>() {
+                        Ok(f) => Ok(self.box_float(f)),
+                        Err(_) => {
+                            Err(self.err(format!("float(): cannot parse '{s}' as a float"), span))
+                        }
+                    };
+                }
+                // `float(newtype)` unwraps the inner (checker verified the underlying is float).
+                Obj::NewType { inner, .. } => {
+                    let inner = *inner;
+                    return self.builtin_float(&[inner], span);
+                }
+                _ => {}
+            }
+        }
+        Err(self.err(
+            format!("float() cannot convert {}", self.type_name(v)),
+            span,
+        ))
     }
 
     /// `bool(x)` — total truthiness cast over the scalars. Never faults on int/float/bool/str
@@ -1721,27 +1713,28 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("bool", args, 1, span)?;
-        match args[0] {
-            Value::Int(n) => Ok(Value::Bool(n != 0)),
-            Value::Float(f) => Ok(Value::Bool(f != 0.0)),
-            Value::Bool(b) => Ok(Value::Bool(b)),
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => Ok(Value::Bool(!s.is_empty())),
+        let v = args[0];
+        if let Some(n) = self.int_val(v) {
+            return Ok(Value::bool(n != 0));
+        }
+        if v.is_float() {
+            return Ok(Value::bool(self.float_of(v) != 0.0));
+        }
+        if let Some(b) = v.as_bool() {
+            return Ok(Value::bool(b));
+        }
+        if let Some(h) = v.as_obj() {
+            match self.heap.get(h) {
+                Obj::Str(s) => return Ok(Value::bool(!s.is_empty())),
                 // `bool(newtype)` unwraps the inner scalar (mirrors int/float's cast-unwrap).
                 Obj::NewType { inner, .. } => {
                     let inner = *inner;
-                    self.builtin_bool(&[inner], span)
+                    return self.builtin_bool(&[inner], span);
                 }
-                _ => Err(self.err(
-                    format!("bool() cannot convert {}", self.type_name(args[0])),
-                    span,
-                )),
-            },
-            other => Err(self.err(
-                format!("bool() cannot convert {}", self.type_name(other)),
-                span,
-            )),
+                _ => {}
+            }
         }
+        Err(self.err(format!("bool() cannot convert {}", self.type_name(v)), span))
     }
 
     pub(super) fn builtin_str(
@@ -1753,9 +1746,9 @@ impl Vm {
         // `str` is dual: a `newtype N = str` with NO `str(self)` override UNWRAPS to its inner str
         // (the cast-unwrap). A `str(self)` override OR any other underlying goes through `stringify`
         // (the display cast — which itself honors the override). Mirrors the interp.
-        if let Value::Obj(h) = args[0]
+        if let Some(h) = args[0].as_obj()
             && let Obj::NewType { type_key, inner } = self.heap.get(h)
-            && let Value::Obj(ih) = *inner
+            && let Some(ih) = inner.as_obj()
             && matches!(self.heap.get(ih), Obj::Str(_))
             && !self
                 .program
@@ -1763,10 +1756,10 @@ impl Vm {
                 .get(type_key.as_ref())
                 .is_some_and(|m| m.contains_key("str"))
         {
-            return Ok(Value::Obj(ih));
+            return Ok(Value::obj(ih));
         }
         let s = self.stringify(args[0], span, 0)?;
-        Ok(Value::Obj(self.heap.alloc(Obj::Str(s.into()))))
+        Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
     /// `ord(s)` — codepoint of the first char of `s`. Mirrors `interp::builtins::ord` (errors too).
@@ -1776,22 +1769,19 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("ord", args, 1, span)?;
-        match args[0] {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => match s.chars().next() {
-                    Some(c) => Ok(Value::Int(c as i64)),
-                    None => Err(self.err("ord() of an empty string".to_string(), span)),
-                },
-                _ => Err(self.err(
-                    format!("ord() expects a str, got {}", self.type_name(args[0])),
-                    span,
-                )),
-            },
-            other => Err(self.err(
-                format!("ord() expects a str, got {}", self.type_name(other)),
-                span,
-            )),
+        let v = args[0];
+        if let Some(h) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(h)
+        {
+            return match s.chars().next() {
+                Some(c) => Ok(Value::int(c as i64)),
+                None => Err(self.err("ord() of an empty string".to_string(), span)),
+            };
         }
+        Err(self.err(
+            format!("ord() expects a str, got {}", self.type_name(v)),
+            span,
+        ))
     }
 
     /// `chr(n)` — the 1-char str for codepoint `n`. Mirrors `interp::builtins::chr` (errors too).
@@ -1801,16 +1791,17 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("chr", args, 1, span)?;
-        match args[0] {
-            Value::Int(n) => u32::try_from(n)
+        let v = args[0];
+        match self.int_val(v) {
+            Some(n) => u32::try_from(n)
                 .ok()
                 .and_then(char::from_u32)
                 .map(|c| self.alloc_char(c))
                 .ok_or_else(|| {
                     self.err(format!("chr(): {n} is not a valid Unicode codepoint"), span)
                 }),
-            other => Err(self.err(
-                format!("chr() expects an int, got {}", self.type_name(other)),
+            None => Err(self.err(
+                format!("chr() expects an int, got {}", self.type_name(v)),
                 span,
             )),
         }
@@ -1835,7 +1826,7 @@ impl Vm {
     pub(super) fn global_slot(&self, module: GcRef, slot: u32) -> Value {
         match self.heap.get(module) {
             Obj::Module { slots, .. } => slots[slot as usize],
-            _ => Value::Nil,
+            _ => Value::nil(),
         }
     }
 
@@ -1873,12 +1864,13 @@ impl Vm {
     // ----- display / type names -----
 
     pub(super) fn type_name(&self, v: Value) -> &'static str {
-        match v {
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Bool(_) => "bool",
-            Value::Nil => "nil",
-            Value::Obj(h) => match self.heap.get(h) {
+        // A boxed float is Float-tagged → `view` yields `Obj(h)` → the `Obj::FloatBox => "float"` arm
+        // below names it (a boxed `BigInt` likewise → "int").
+        match v.view() {
+            ValueView::Int(_) => "int",
+            ValueView::Bool(_) => "bool",
+            ValueView::Nil => "nil",
+            ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
                 Obj::Bytes(_) => "bytes",
                 Obj::ByteArray(_) => "bytearray",
@@ -1933,12 +1925,12 @@ impl Vm {
                 Span { line: 1, col: 1 },
             ));
         }
-        match v {
-            Value::Int(n) => Ok(n.to_string()),
-            Value::Float(x) => Ok(format_float(x)),
-            Value::Bool(b) => Ok(b.to_string()),
-            Value::Nil => Ok("nil".to_string()),
-            Value::Obj(h) => match self.heap.get(h) {
+        match v.view() {
+            ValueView::Int(n) => Ok(n.to_string()),
+            ValueView::Bool(b) => Ok(b.to_string()),
+            ValueView::Nil => Ok("nil".to_string()),
+            // A boxed float/big-int is heap-tagged → the `Obj::FloatBox`/`Obj::BigInt` arms below.
+            ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::Str(s) => Ok(s.to_string()),
                 // Boxed scalars render identically to the inline `Int`/`Float`.
                 Obj::BigInt(n) => Ok(n.to_string()),
@@ -2126,7 +2118,7 @@ impl Vm {
             WireValue::Str(s) => s.to_string(),
             WireValue::Bytes(b) => crate::slice::bytes_repr(b),
             WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
-            WireValue::Handle(h) => self.display(Value::Obj(*h)),
+            WireValue::Handle(h) => self.display(Value::obj(*h)),
             WireValue::List(items) => {
                 let inner = items
                     .iter()
@@ -2316,33 +2308,33 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
-        match v {
-            Value::Int(n) => crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
-                .map_err(|m| self.err(m, span))?,
-            Value::Float(x) => {
-                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
-                    .map_err(|m| self.err(m, span))?
-            }
-            Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)) => {
-                let s = match self.heap.get(h) {
-                    Obj::Str(s) => s.clone(),
-                    _ => unreachable!(),
-                };
-                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
-                    .map_err(|m| self.err(m, span))?;
-            }
-            other => {
-                // Bool/Nil/containers/structs: render with the normal stringify, then treat as a
-                // string for fill/align/width (type chars/precision error via `apply`).
-                let mut rendered = String::new();
-                self.stringify_into(&mut rendered, other, span, 0)?;
-                crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
-                    .map_err(|m| self.err(m, span))?;
-            }
+        if let Some(n) = self.int_val(v) {
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        } else if v.is_float() {
+            let x = self.float_of(v);
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        } else if let Some(h) = v.as_obj()
+            && matches!(self.heap.get(h), Obj::Str(_))
+        {
+            let s = match self.heap.get(h) {
+                Obj::Str(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        } else {
+            // Bool/Nil/containers/structs: render with the normal stringify, then treat as a
+            // string for fill/align/width (type chars/precision error via `apply`).
+            let mut rendered = String::new();
+            self.stringify_into(&mut rendered, v, span, 0)?;
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
+                .map_err(|m| self.err(m, span))?;
         }
         self.pop();
         let h = self.heap.alloc(Obj::Str(out.into()));
-        self.push(Value::Obj(h));
+        self.push(Value::obj(h));
         Ok(())
     }
 
@@ -2363,21 +2355,21 @@ impl Vm {
                 span,
             ));
         }
-        match v {
-            Value::Int(n) => {
-                let _ = write!(out, "{n}");
-            }
-            Value::Float(x) => out.push_str(&format_float(x)),
-            Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-            Value::Nil => out.push_str("nil"),
+        if let Some(n) = self.int_val(v) {
+            let _ = write!(out, "{n}");
+        } else if v.is_float() {
+            out.push_str(&format_float(self.float_of(v)));
+        } else if let Some(b) = v.as_bool() {
+            out.push_str(if b { "true" } else { "false" });
+        } else if v.is_nil() {
+            out.push_str("nil");
+        } else if let Some(h) = v.as_obj() {
             // ROOT the object on the operand stack: a `str` method runs nested frames that GC at
             // instruction boundaries, and the container keeps its transitive contents reachable.
-            Value::Obj(h) => {
-                self.push(v);
-                let r = self.stringify_obj_into(out, h, span, depth);
-                self.pop();
-                return r;
-            }
+            self.push(v);
+            let r = self.stringify_obj_into(out, h, span, depth);
+            self.pop();
+            return r;
         }
         Ok(())
     }
@@ -2389,7 +2381,7 @@ impl Vm {
     /// (Bug B). Checking the runtime VALUE (not the declared syntax) transparently covers an
     /// annotated `-> str`, an inferred (un-annotated) str, and a str type-alias return alike.
     pub(super) fn is_str_value(&self, v: Value) -> bool {
-        matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)))
+        matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)))
     }
 
     pub(super) fn stringify_obj_into(
@@ -2465,7 +2457,7 @@ impl Vm {
                 {
                     let home = self.module_objs[def.module_idx];
                     let res = self.guarded(|vm| {
-                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {
                         return self.stringify_into(out, res, span, depth);
@@ -2519,7 +2511,7 @@ impl Vm {
                 {
                     let home = self.module_objs[self.enum_home_module(&key)];
                     let res = self.guarded(|vm| {
-                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {
                         return self.stringify_into(out, res, span, depth);
@@ -2553,7 +2545,7 @@ impl Vm {
                 {
                     let home = self.module_objs[self.newtype_home_module(&type_key)];
                     let res = self.guarded(|vm| {
-                        vm.run_proto(proto, home, None, vec![Value::Obj(h)], true, false, span)
+                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {
                         return self.stringify_into(out, res, span, depth);
@@ -2597,7 +2589,7 @@ impl Vm {
             | Obj::Writer(_)
             | Obj::Reader(_)
             | Obj::Ptr(_) => {
-                out.push_str(&self.display_guarded(Value::Obj(h), depth)?);
+                out.push_str(&self.display_guarded(Value::obj(h), depth)?);
             }
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),

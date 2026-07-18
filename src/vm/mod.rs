@@ -24,7 +24,7 @@ use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use value::{GcRef, Value};
+use value::{GcRef, Value, ValueView};
 use wire::WireValue;
 
 use crate::ast::Span;
@@ -307,17 +307,12 @@ impl GeneratorCore {
             out.push(c);
         }
         if let GenState::Pending(args) = &self.state {
-            out.extend(args.iter().filter_map(|v| {
-                if let Value::Obj(h) = v {
-                    Some(*h)
-                } else {
-                    None
-                }
-            }));
+            // `child_gcref` roots boxed floats (Float tag) too, not just true `Obj`s.
+            out.extend(args.iter().filter_map(|v| v.child_gcref()));
         }
         for v in &self.ctx.stack {
-            if let Value::Obj(h) = v {
-                out.push(*h);
+            if let Some(h) = v.child_gcref() {
+                out.push(h);
             }
         }
         for f in &self.ctx.frames {
@@ -369,13 +364,11 @@ impl Deferred {
             Deferred::Call { callee, args, .. } => (callee, args),
             Deferred::Method { recv, args, .. } => (recv, args),
         };
-        std::iter::once(head).chain(args.iter()).filter_map(|v| {
-            if let Value::Obj(h) = v {
-                Some(*h)
-            } else {
-                None
-            }
-        })
+        // `child_gcref` roots BOTH true `Obj`s and boxed floats (Float tag) — a deferred/spawn arg may
+        // be a boxed float and must stay alive until the call runs.
+        std::iter::once(head)
+            .chain(args.iter())
+            .filter_map(|v| v.child_gcref())
     }
 }
 
@@ -411,13 +404,11 @@ impl PendingCall {
             PendingCall::Call { callee, args, .. } => (callee, args),
             PendingCall::Method { recv, args, .. } => (recv, args),
         };
-        std::iter::once(head).chain(args.iter()).filter_map(|v| {
-            if let Value::Obj(h) = v {
-                Some(*h)
-            } else {
-                None
-            }
-        })
+        // `child_gcref` roots BOTH true `Obj`s and boxed floats (Float tag) — a deferred/spawn arg may
+        // be a boxed float and must stay alive until the call runs.
+        std::iter::once(head)
+            .chain(args.iter())
+            .filter_map(|v| v.child_gcref())
     }
 
     /// The spawning span of this task (D2b — carried onto the fiber for fault attribution).
@@ -1107,7 +1098,7 @@ fn module_slot_pairs(
         index.len(),
         "module slots/index out of lockstep — slot order would corrupt on worker fault"
     );
-    let mut pairs: Vec<(String, Value)> = vec![(String::new(), Value::Nil); slots.len()];
+    let mut pairs: Vec<(String, Value)> = vec![(String::new(), Value::nil()); slots.len()];
     for (name, &i) in index {
         pairs[i as usize] = (name.to_string(), slots[i as usize]);
     }
@@ -1194,7 +1185,7 @@ enum SnapValue {
     /// Option B — a live (frame-holding) generator resident in a module global. It CANNOT cross to an
     /// M:N worker (its parked frames reference the parent heap), so the snapshot encodes it as a poison
     /// leaf instead of faulting eagerly (the old behavior faulted even for an UNTOUCHED generator
-    /// global, diverging from the serial engine, which never snapshots). Replayed as `Value::Nil`: the
+    /// global, diverging from the serial engine, which never snapshots). Replayed as `Value::nil()`: the
     /// conservative `check_task_generator_reach` gate at `register_task` guarantees no spawned task ever
     /// reaches this slot on EITHER engine, so a correct program never observes the Nil — but if one ever
     /// did, a harmless Nil is produced, never a fabricated cross-heap generator (never UB).
@@ -3203,73 +3194,79 @@ impl crate::native::Host for VmHost<'_> {
         self.args.len()
     }
     fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Int(n)) => Ok(*n),
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "int",
-                self.vm.type_name(*other),
-            )),
+        match self.args.get(i).copied() {
+            Some(v) => match self.vm.int_val(v) {
+                Some(n) => Ok(n),
+                None => Err(crate::native::HostError::arg_type(
+                    i,
+                    "int",
+                    self.vm.type_name(v),
+                )),
+            },
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_is_int(&self, i: usize) -> bool {
-        matches!(self.args.get(i), Some(Value::Int(_)))
+        self.args.get(i).is_some_and(|v| self.vm.is_integral(*v))
     }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Float(f)) => Ok(*f),
-            Some(Value::Int(n)) => Ok(*n as f64),
-            Some(other) => Err(crate::native::HostError::arg_type(
+        match self.args.get(i).copied() {
+            Some(v) if v.is_float() => Ok(self.vm.float_of(v)),
+            Some(v) if self.vm.is_integral(v) => Ok(self.vm.int_of(v) as f64),
+            Some(v) => Err(crate::native::HostError::arg_type(
                 i,
                 "float",
-                self.vm.type_name(*other),
+                self.vm.type_name(v),
             )),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Bool(b)) => Ok(*b),
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "bool",
-                self.vm.type_name(*other),
-            )),
+        match self.args.get(i).copied() {
+            Some(v) => match v.as_bool() {
+                Some(b) => Ok(b),
+                None => Err(crate::native::HostError::arg_type(
+                    i,
+                    "bool",
+                    self.vm.type_name(v),
+                )),
+            },
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                Obj::Ptr(a) => Ok(*a),
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "ptr", got))
+        match self.args.get(i).copied() {
+            Some(v) => {
+                if let Some(h) = v.as_obj()
+                    && let Obj::Ptr(a) = self.vm.heap.get(h)
+                {
+                    Ok(*a)
+                } else {
+                    Err(crate::native::HostError::arg_type(
+                        i,
+                        "ptr",
+                        self.vm.type_name(v),
+                    ))
                 }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "ptr",
-                self.vm.type_name(*other),
-            )),
+            }
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
     fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                Obj::Str(s) => Ok(s.to_string()),
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "str", got))
+        match self.args.get(i).copied() {
+            Some(v) => {
+                if let Some(h) = v.as_obj()
+                    && let Obj::Str(s) = self.vm.heap.get(h)
+                {
+                    Ok(s.to_string())
+                } else {
+                    Err(crate::native::HostError::arg_type(
+                        i,
+                        "str",
+                        self.vm.type_name(v),
+                    ))
                 }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "str",
-                self.vm.type_name(*other),
-            )),
+            }
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -3277,19 +3274,20 @@ impl crate::native::Host for VmHost<'_> {
     /// seam param `bytes`, and neither a `bytearray` (not assignable to a `bytes` sink — 7b29552) nor a
     /// `list[int]` (a `bytes()`-ctor convenience, not a seam contract) can reach here from typed code.
     fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                Obj::Bytes(b) => Ok(b.to_vec()),
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "bytes", got))
+        match self.args.get(i).copied() {
+            Some(v) => {
+                if let Some(h) = v.as_obj()
+                    && let Obj::Bytes(b) = self.vm.heap.get(h)
+                {
+                    Ok(b.to_vec())
+                } else {
+                    Err(crate::native::HostError::arg_type(
+                        i,
+                        "bytes",
+                        self.vm.type_name(v),
+                    ))
                 }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "bytes",
-                self.vm.type_name(*other),
-            )),
+            }
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
@@ -3298,52 +3296,44 @@ impl crate::native::Host for VmHost<'_> {
         i: usize,
     ) -> Result<Vec<crate::native::NativeRet>, crate::native::HostError> {
         use crate::native::NativeRet as N;
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                // Positional, declaration-order fields (the same order the StructDef declares them).
-                // Map each scalar field value to a NativeRet so the cffi layer casts it to its C
-                // field width. The checker guarantees flat scalar fields.
-                Obj::Struct { fields, .. } => {
-                    let mut out = Vec::with_capacity(fields.len());
-                    for v in fields {
-                        let n = match v {
-                            Value::Int(n) => N::Int(*n),
-                            Value::Float(f) => N::Float(*f),
-                            Value::Bool(b) => N::Bool(*b),
-                            Value::Obj(fh) => match self.vm.heap.get(*fh) {
-                                Obj::Ptr(a) => N::Ptr(*a),
-                                _ => {
-                                    return Err(crate::native::HostError::arg_type(
-                                        i,
-                                        "struct scalar field",
-                                        "other",
-                                    ));
-                                }
-                            },
-                            _ => {
-                                return Err(crate::native::HostError::arg_type(
-                                    i,
-                                    "struct scalar field",
-                                    "other",
-                                ));
-                            }
-                        };
-                        out.push(n);
-                    }
-                    Ok(out)
-                }
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "struct", got))
-                }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "struct",
-                self.vm.type_name(*other),
-            )),
-            None => Err(crate::native::HostError::missing_arg(i)),
+        let Some(v) = self.args.get(i).copied() else {
+            return Err(crate::native::HostError::missing_arg(i));
+        };
+        let struct_fields = match v.as_obj().map(|h| self.vm.heap.get(h)) {
+            Some(Obj::Struct { fields, .. }) => fields.clone(),
+            _ => {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "struct",
+                    self.vm.type_name(v),
+                ));
+            }
+        };
+        // Positional, declaration-order fields (the same order the StructDef declares them). Map each
+        // scalar field value to a NativeRet so the cffi layer casts it to its C field width. The
+        // checker guarantees flat scalar fields.
+        let mut out = Vec::with_capacity(struct_fields.len());
+        for fv in &struct_fields {
+            let n = if let Some(k) = self.vm.int_val(*fv) {
+                N::Int(k)
+            } else if fv.is_float() {
+                N::Float(self.vm.float_of(*fv))
+            } else if let Some(b) = fv.as_bool() {
+                N::Bool(b)
+            } else if let Some(fh) = fv.as_obj()
+                && let Obj::Ptr(a) = self.vm.heap.get(fh)
+            {
+                N::Ptr(*a)
+            } else {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "struct scalar field",
+                    "other",
+                ));
+            };
+            out.push(n);
         }
+        Ok(out)
     }
     fn invoke_callback(
         &mut self,
@@ -3374,83 +3364,67 @@ impl crate::native::Host for VmHost<'_> {
         Ok(self.vm.value_to_native_ret(result))
     }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                Obj::Map(m) => {
-                    // Iterate `entries` (insertion order) so header order is deterministic and
-                    // matches the interp + off-heap hosts. Every key/value must be a str.
-                    let mut pairs = Vec::with_capacity(m.entries.len());
-                    for (_, k, v) in &m.entries {
-                        let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
-                            return Err(crate::native::HostError::arg_type(
-                                i,
-                                "Map[str, str]",
-                                "other",
-                            ));
-                        };
-                        let (Obj::Str(ks), Obj::Str(vs)) =
-                            (self.vm.heap.get(*kh), self.vm.heap.get(*vh))
-                        else {
-                            return Err(crate::native::HostError::arg_type(
-                                i,
-                                "Map[str, str]",
-                                "other",
-                            ));
-                        };
-                        pairs.push((ks.to_string(), vs.to_string()));
-                    }
-                    Ok(pairs)
-                }
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "Map[str, str]", got))
-                }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "Map[str, str]",
-                self.vm.type_name(*other),
-            )),
-            None => Err(crate::native::HostError::missing_arg(i)),
+        let Some(v) = self.args.get(i).copied() else {
+            return Err(crate::native::HostError::missing_arg(i));
+        };
+        let entries = match v.as_obj().map(|h| self.vm.heap.get(h)) {
+            Some(Obj::Map(m)) => m.entries.clone(),
+            _ => {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "Map[str, str]",
+                    self.vm.type_name(v),
+                ));
+            }
+        };
+        // Iterate `entries` (insertion order) so header order is deterministic and matches the interp
+        // + off-heap hosts. Every key/value must be a str.
+        let mut pairs = Vec::with_capacity(entries.len());
+        for (_, k, val) in &entries {
+            let (Some(kh), Some(vh)) = (k.as_obj(), val.as_obj()) else {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "Map[str, str]",
+                    "other",
+                ));
+            };
+            let (Obj::Str(ks), Obj::Str(vs)) = (self.vm.heap.get(kh), self.vm.heap.get(vh)) else {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "Map[str, str]",
+                    "other",
+                ));
+            };
+            pairs.push((ks.to_string(), vs.to_string()));
         }
+        Ok(pairs)
     }
     fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
-        match self.args.get(i) {
-            Some(Value::Obj(h)) => match self.vm.heap.get(*h) {
-                Obj::List(items) => {
-                    // Iterate in list order (it IS the argv). Every element must be a str.
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in items {
-                        let Value::Obj(eh) = v else {
-                            return Err(crate::native::HostError::arg_type(
-                                i,
-                                "List[str]",
-                                "other",
-                            ));
-                        };
-                        let Obj::Str(s) = self.vm.heap.get(*eh) else {
-                            return Err(crate::native::HostError::arg_type(
-                                i,
-                                "List[str]",
-                                "other",
-                            ));
-                        };
-                        out.push(s.to_string());
-                    }
-                    Ok(out)
-                }
-                _ => {
-                    let got = self.vm.type_name(self.args[i]);
-                    Err(crate::native::HostError::arg_type(i, "List[str]", got))
-                }
-            },
-            Some(other) => Err(crate::native::HostError::arg_type(
-                i,
-                "List[str]",
-                self.vm.type_name(*other),
-            )),
-            None => Err(crate::native::HostError::missing_arg(i)),
+        let Some(av) = self.args.get(i).copied() else {
+            return Err(crate::native::HostError::missing_arg(i));
+        };
+        let items = match av.as_obj().map(|h| self.vm.heap.get(h)) {
+            Some(Obj::List(items)) => items.clone(),
+            _ => {
+                return Err(crate::native::HostError::arg_type(
+                    i,
+                    "List[str]",
+                    self.vm.type_name(av),
+                ));
+            }
+        };
+        // Iterate in list order (it IS the argv). Every element must be a str.
+        let mut out = Vec::with_capacity(items.len());
+        for v in &items {
+            let Some(eh) = v.as_obj() else {
+                return Err(crate::native::HostError::arg_type(i, "List[str]", "other"));
+            };
+            let Obj::Str(s) = self.vm.heap.get(eh) else {
+                return Err(crate::native::HostError::arg_type(i, "List[str]", "other"));
+            };
+            out.push(s.to_string());
         }
+        Ok(out)
     }
     fn write_stdout(&mut self, s: &str) {
         self.vm.emit_out(s);
@@ -3526,17 +3500,8 @@ impl crate::native::Host for VmHost<'_> {
     }
 }
 
-fn is_numeric(v: Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_))
-}
-
-fn as_f64(v: Value) -> f64 {
-    match v {
-        Value::Int(n) => n as f64,
-        Value::Float(f) => f,
-        _ => unreachable!("as_f64 on non-numeric"),
-    }
-}
+// `is_numeric` / `as_f64` are now heap-aware methods on `Vm` (arith.rs) — a boxed `BigInt`/`FloatBox`
+// is invisible to a free fn that can't reach the heap.
 
 /// Format a float the way Chezzi prints it — CPython `repr()`/`str()` parity: fixed with an
 /// always-present `.0` on integer-valued floats, scientific (`1e+16`, `1.5e+300`, `1e-05`) when the

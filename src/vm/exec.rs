@@ -289,7 +289,7 @@ impl Vm {
             state: GenState::Pending(args),
             ctx: GenCtx::default(),
         };
-        Value::Obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+        Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
 
     /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
@@ -383,7 +383,7 @@ impl Vm {
     /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
     /// error that exits the program. Mirrors `interp::top_level_error` — message must be identical.
     pub(super) fn top_level_error(&self, v: Value, span: Span) -> Option<RuntimeError> {
-        let Value::Obj(h) = v else { return None };
+        let h = v.as_obj()?;
         let Obj::Enum {
             variant_id,
             payload,
@@ -471,8 +471,8 @@ impl Vm {
         })?;
         // Guard with a clear message before `invoke_value`'s generic "not callable" fault.
         let callable = matches!(
-            callee,
-            Value::Obj(h) if matches!(
+            callee.as_obj(),
+            Some(h) if matches!(
                 self.heap.get(h),
                 Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_)
             )
@@ -567,7 +567,7 @@ impl Vm {
             .collect();
         let mod_obj = self.heap.alloc(Obj::Module {
             name: m.label.clone().into_boxed_str(),
-            slots: vec![Value::Nil; m.global_slots.len()],
+            slots: vec![Value::nil(); m.global_slots.len()],
             index,
         });
         debug_assert_eq!(self.module_objs.len(), idx);
@@ -586,10 +586,11 @@ impl Vm {
                     name: (*mname).into(),
                     func: *func,
                 });
-                self.module_define(mod_obj, mname, Value::Obj(nat));
+                self.module_define(mod_obj, mname, Value::obj(nat));
             }
             for (cname, cval) in crate::native::native_consts(name) {
-                self.module_define(mod_obj, cname, Value::Float(*cval));
+                let fv = self.box_float(*cval);
+                self.module_define(mod_obj, cname, fv);
             }
         }
 
@@ -629,7 +630,7 @@ impl Vm {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                self.module_define(into, &name, Value::Obj(target_obj));
+                self.module_define(into, &name, Value::obj(target_obj));
             }
             Import::From { names, .. } => {
                 for (member, alias) in names {
@@ -731,9 +732,9 @@ impl Vm {
         // propagate the signal up without popping a result — the caller gates on `paused()` before
         // using the (sentinel) return value.
         if self.paused() {
-            return Ok(Value::Nil);
+            return Ok(Value::nil());
         }
-        Ok(self.stack.pop().unwrap_or(Value::Nil))
+        Ok(self.stack.pop().unwrap_or(Value::nil()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -811,7 +812,7 @@ impl Vm {
         let n_slots = self.program.protos[proto].n_slots;
         // Reserve the remaining (non-parameter) local slots.
         while self.stack.len() < base + n_slots {
-            self.stack.push(Value::Nil);
+            self.stack.push(Value::nil());
         }
         self.frames.push(CallFrame {
             proto,
@@ -935,7 +936,7 @@ impl Vm {
                 // `jump_checked`) — keep in lock-step with `step`'s arm.
                 Op::Jump(t) => self.jump_checked(*t, span),
                 Op::JumpIfFalse(t) => {
-                    if let Value::Bool(false) = self.pop() {
+                    if self.pop().as_bool() == Some(false) {
                         self.frames[fi].ip = *t;
                     }
                     Ok(())
@@ -1107,8 +1108,8 @@ impl Vm {
     /// live-context rooting in [`Vm::collect`].
     pub(super) fn root_ctx(ctx: &FiberCtx, work: &mut Vec<GcRef>) {
         for v in &ctx.stack {
-            if let Value::Obj(h) = v {
-                work.push(*h);
+            if let Some(h) = v.child_gcref() {
+                work.push(h);
             }
         }
         for f in &ctx.frames {
@@ -1130,8 +1131,8 @@ impl Vm {
     pub(super) fn collect(&mut self) {
         let mut work: Vec<GcRef> = Vec::new();
         for v in &self.stack {
-            if let Value::Obj(h) = v {
-                work.push(*h);
+            if let Some(h) = v.child_gcref() {
+                work.push(h);
             }
         }
         for f in &self.frames {
@@ -1157,8 +1158,8 @@ impl Vm {
         // while it runs, so `children` adds nothing extra). Both are empty outside a `generator_next`.
         for host in &self.gen_host_ctx {
             for v in &host.stack {
-                if let Value::Obj(h) = v {
-                    work.push(*h);
+                if let Some(h) = v.child_gcref() {
+                    work.push(h);
                 }
             }
             for f in &host.frames {
@@ -1324,8 +1325,15 @@ impl Vm {
 
     pub(super) fn step(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         match op {
-            Op::ConstInt(n) => self.push(Value::Int(*n)),
-            Op::ConstFloat(x) => self.push(Value::Float(*x)),
+            Op::ConstInt(n) => {
+                // A source literal may exceed ±2^62 (still within i64) → box it.
+                let v = self.make_int(*n);
+                self.push(v);
+            }
+            Op::ConstFloat(x) => {
+                let v = self.box_float(*x);
+                self.push(v);
+            }
             Op::ConstStr(s) => {
                 // M19 Phase 3 — intern by data pointer (stable for the program's lifetime, since the
                 // literal lives in the immutable `Arc<Program>`). First push of this op allocs the
@@ -1340,17 +1348,17 @@ impl Vm {
                         h
                     }
                 };
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::ConstBytes(b) => {
                 // Not interned in v1 (unlike `ConstStr`): allocate a fresh `bytes` heap object per
                 // push, like a list literal. Bytes literals are not a hot path.
                 let h = self.heap.alloc(Obj::Bytes(b.clone()));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
-            Op::True => self.push(Value::Bool(true)),
-            Op::False => self.push(Value::Bool(false)),
-            Op::Nil => self.push(Value::Nil),
+            Op::True => self.push(Value::bool(true)),
+            Op::False => self.push(Value::bool(false)),
+            Op::Nil => self.push(Value::nil()),
             Op::Pop => {
                 self.pop();
             }
@@ -1407,7 +1415,7 @@ impl Vm {
             Op::GetCaptured(slot) => {
                 // Lever #3: hot path is a pure `captured[slot]` index — no string hash. The slot is
                 // always in range (one capture per snapshot entry, populated at MakeClosure), and a
-                // nested missing parent capture is stored as `Value::Nil` (byte-identical to the old
+                // nested missing parent capture is stored as `Value::nil()` (byte-identical to the old
                 // `get(name) -> Some(Nil)`).
                 let frame = self.frames.last().unwrap();
                 let (clo, home) = (frame.closure, frame.home);
@@ -1440,39 +1448,36 @@ impl Vm {
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, span)?,
             Op::Neg => {
                 let v = self.pop();
-                let r = match v {
-                    Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| {
+                let r = if let Some(n) = self.int_val(v) {
+                    let neg = n.checked_neg().ok_or_else(|| {
                         self.err("integer overflow in negation".to_string(), span)
-                    })?,
-                    Value::Float(f) => Value::Float(-f),
+                    })?;
+                    self.make_int(neg)
+                } else if v.is_float() {
+                    let f = self.float_of(v);
+                    self.box_float(-f)
+                } else if let Some(h) = v.as_obj()
+                    && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
+                {
                     // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
                     // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
-                    Value::Obj(h)
-                        if matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }) =>
-                    {
-                        let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
-                        self.guarded(|vm| {
-                            vm.run_proto(proto, home, None, vec![v], true, false, span)
-                        })?
-                    }
-                    other => {
-                        return Err(self.err(
-                            format!("cannot apply Neg to {}", self.type_name(other)),
-                            span,
-                        ));
-                    }
+                    let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
+                    self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?
+                } else {
+                    return Err(
+                        self.err(format!("cannot apply Neg to {}", self.type_name(v)), span)
+                    );
                 };
                 self.push(r);
             }
             Op::Not => {
                 let v = self.pop();
-                match v {
-                    Value::Bool(b) => self.push(Value::Bool(!b)),
-                    other => {
-                        return Err(self.err(
-                            format!("cannot apply Not to {}", self.type_name(other)),
-                            span,
-                        ));
+                match v.as_bool() {
+                    Some(b) => self.push(Value::bool(!b)),
+                    None => {
+                        return Err(
+                            self.err(format!("cannot apply Not to {}", self.type_name(v)), span)
+                        );
                     }
                 }
             }
@@ -1481,13 +1486,13 @@ impl Vm {
                 let r = self.pop();
                 let l = self.pop();
                 let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::Bool(eq));
+                self.push(Value::bool(eq));
             }
             Op::NotEq => {
                 let r = self.pop();
                 let l = self.pop();
                 let eq = self.values_equal_guarded(l, r, 0, span)?;
-                self.push(Value::Bool(!eq));
+                self.push(Value::bool(!eq));
             }
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
             // `return` (not `?`): keeps `step`'s frame from materializing an extra `RuntimeError`
@@ -1497,7 +1502,7 @@ impl Vm {
             Op::Contains => return self.op_contains(span),
             Op::AsBool => {
                 let v = *self.stack.last().unwrap();
-                if !matches!(v, Value::Bool(_)) {
+                if v.as_bool().is_none() {
                     return Err(
                         self.err(format!("expected bool, found {}", self.type_name(v)), span)
                     );
@@ -1505,7 +1510,7 @@ impl Vm {
             }
             Op::AsInt => {
                 let v = *self.stack.last().unwrap();
-                if !matches!(v, Value::Int(_)) {
+                if !self.is_integral(v) {
                     return Err(
                         self.err(format!("expected int, found {}", self.type_name(v)), span)
                     );
@@ -1514,16 +1519,17 @@ impl Vm {
             Op::CoerceFloat => {
                 // One-way int→float widening (idempotent on Float). Reuses `builtin_float`'s
                 // `n as f64`; any non-numeric top is a runtime error (the checker guarantees numeric).
-                let top = self.stack.last_mut().unwrap();
-                match *top {
-                    Value::Int(n) => *top = Value::Float(n as f64),
-                    Value::Float(_) => {}
-                    other => {
-                        return Err(self.err(
-                            format!("expected number, found {}", self.type_name(other)),
-                            span,
-                        ));
-                    }
+                let v = *self.stack.last().unwrap();
+                if let Some(n) = self.int_val(v) {
+                    let f = self.box_float(n as f64);
+                    *self.stack.last_mut().unwrap() = f;
+                } else if v.is_float() {
+                    // already a float — idempotent no-op
+                } else {
+                    return Err(self.err(
+                        format!("expected number, found {}", self.type_name(v)),
+                        span,
+                    ));
                 }
             }
             // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
@@ -1555,17 +1561,17 @@ impl Vm {
             // Cancellation checkpoint — lock-step with the inlined arm in `run_until`.
             Op::Jump(t) => self.jump_checked(*t, span)?,
             Op::JumpIfFalse(t) => {
-                if let Value::Bool(false) = self.pop() {
+                if self.pop().as_bool() == Some(false) {
                     self.jump(*t);
                 }
             }
             Op::JumpIfFalseKeep(t) => {
-                if let Value::Bool(false) = *self.stack.last().unwrap() {
+                if self.stack.last().unwrap().as_bool() == Some(false) {
                     self.jump(*t);
                 }
             }
             Op::JumpIfTrueKeep(t) => {
-                if let Value::Bool(true) = *self.stack.last().unwrap() {
+                if self.stack.last().unwrap().as_bool() == Some(true) {
                     self.jump(*t);
                 }
             }
@@ -1579,7 +1585,7 @@ impl Vm {
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::LoadBuiltin(name) => {
                 let h = self.heap.alloc(Obj::Builtin(name.as_str().into()));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
@@ -1615,13 +1621,13 @@ impl Vm {
                 let at = self.stack.len() - *n;
                 let items: Vec<Value> = self.stack.split_off(at);
                 let h = self.heap.alloc(Obj::List(items));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewTuple(n) => {
                 let at = self.stack.len() - *n;
                 let items: Vec<Value> = self.stack.split_off(at);
                 let h = self.heap.alloc(Obj::Tuple(items));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewMap(n) => {
                 // Build an insertion-ordered hash map with last-key-wins upsert. Phase 1 hashes
@@ -1657,7 +1663,7 @@ impl Vm {
                 }
                 self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Map(map));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewSet(n) => {
                 // Insertion-ordered hash set, dedup keeping first occurrence. Same two-phase rooting
@@ -1686,7 +1692,7 @@ impl Vm {
                 }
                 self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Set(set));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
             Op::NewType(type_key) => {
@@ -1695,7 +1701,7 @@ impl Vm {
                     type_key: type_key.as_str().into(),
                     inner,
                 });
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             // ----- cells (uniform by-reference capture, Task A — unwired) -----
             Op::NewCell => {
@@ -1703,11 +1709,11 @@ impl Vm {
                 // same profile as `Op::NewType`).
                 let v = self.pop();
                 let h = self.heap.alloc(Obj::Cell(v));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::CellLoad => {
                 let ch = self.pop();
-                let Value::Obj(h) = ch else {
+                let Some(h) = ch.as_obj() else {
                     unreachable!("CellLoad on a non-handle value");
                 };
                 let Obj::Cell(v) = self.heap.get(h) else {
@@ -1720,7 +1726,7 @@ impl Vm {
                 // HARD contract: pop the HANDLE first, then the value (operands are `[val, handle]`).
                 let ch = self.pop();
                 let v = self.pop();
-                let Value::Obj(h) = ch else {
+                let Some(h) = ch.as_obj() else {
                     unreachable!("CellStore on a non-handle value");
                 };
                 if let Obj::Cell(slot) = self.heap.get_mut(h) {
@@ -1740,7 +1746,7 @@ impl Vm {
                     proto: *proto,
                     home,
                 });
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).
@@ -1762,7 +1768,7 @@ impl Vm {
                                 }
                                 _ => None,
                             })
-                            .unwrap_or(Value::Nil),
+                            .unwrap_or(Value::nil()),
                     };
                     captured.push(v);
                 }
@@ -1771,7 +1777,7 @@ impl Vm {
                     captured,
                     home,
                 });
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::GetField { name, ic } => self.get_field(name, *ic, span)?,
             Op::GetIndex => self.get_index(span)?,
@@ -1794,7 +1800,7 @@ impl Vm {
                 let s = self.stringify(v, span, 0)?;
                 self.pop();
                 let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — see commit 1450077).
@@ -1809,28 +1815,28 @@ impl Vm {
                 }
                 self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::ListClone => {
                 // Normalise a `for` iterand to an index-iterable list: a list is cloned (so a body
                 // that mutates it doesn't disturb iteration); a map yields its keys (gap #14).
                 let v = self.pop();
-                match v {
-                    Value::Obj(h) => match self.heap.get(h) {
+                match v.view() {
+                    ValueView::Obj(h) => match self.heap.get(h) {
                         Obj::List(items) => {
                             let cloned = items.clone();
                             let nh = self.heap.alloc(Obj::List(cloned));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         Obj::Map(m) => {
                             let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
                             let nh = self.heap.alloc(Obj::List(keys));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         Obj::Set(s) => {
                             let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
                             let nh = self.heap.alloc(Obj::List(elems));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         // A string iterates as 1-char strings (Python-style; gap: char type).
                         Obj::Str(s) => {
@@ -1840,76 +1846,75 @@ impl Vm {
                             let items: Vec<Value> =
                                 chars.into_iter().map(|c| self.alloc_char(c)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         // `bytes`/`bytearray` iterate as `int`s (0–255). Snapshots to a list of ints —
                         // mutating the `bytearray` during iteration does not change the loop sequence.
                         Obj::Bytes(b) => {
                             let items: Vec<Value> =
-                                b.iter().map(|&x| Value::Int(x as i64)).collect();
+                                b.iter().map(|&x| Value::int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         Obj::ByteArray(b) => {
                             let items: Vec<Value> =
-                                b.iter().map(|&x| Value::Int(x as i64)).collect();
+                                b.iter().map(|&x| Value::int(x as i64)).collect();
                             let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         // A cursor (`for x in pure_iterable_struct` lowered via `IterableToCursor`)
                         // snapshots its REMAINING items to the index-iterable list.
                         Obj::Iter { items, pos } => {
                             let cloned = items[(*pos).min(items.len())..].to_vec();
                             let nh = self.heap.alloc(Obj::List(cloned));
-                            self.push(Value::Obj(nh));
+                            self.push(Value::obj(nh));
                         }
                         _ => {
                             return Err(self
                                 .err(format!("cannot iterate over {}", self.type_name(v)), span));
                         }
                     },
-                    other => {
-                        return Err(self.err(
-                            format!("cannot iterate over {}", self.type_name(other)),
-                            span,
-                        ));
+                    _ => {
+                        return Err(
+                            self.err(format!("cannot iterate over {}", self.type_name(v)), span)
+                        );
                     }
                 }
             }
             Op::ArrLen => {
                 let v = self.pop();
-                let len = match v {
-                    Value::Obj(h) => match self.heap.get(h) {
+                let len = match v.view() {
+                    ValueView::Obj(h) => match self.heap.get(h) {
                         Obj::List(items) => items.len() as i64,
                         _ => unreachable!("ArrLen on non-list"),
                     },
                     _ => unreachable!("ArrLen on non-list"),
                 };
-                self.push(Value::Int(len));
+                self.push(Value::int(len));
             }
             Op::IsStruct => {
                 let v = self.pop();
                 let is_struct =
-                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
-                self.push(Value::Bool(is_struct));
+                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
+                self.push(Value::bool(is_struct));
             }
             Op::IsGenerator => {
                 let v = self.pop();
                 let is_gen =
-                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Generator(_)));
-                self.push(Value::Bool(is_gen));
+                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Generator(_)));
+                self.push(Value::bool(is_gen));
             }
             Op::IsCursor => {
                 let v = self.pop();
                 let is_cursor =
-                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Iter { .. }));
-                self.push(Value::Bool(is_cursor));
+                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Iter { .. }));
+                self.push(Value::bool(is_cursor));
             }
             Op::IterableToCursor => {
                 // One-time `for`-entry conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
                 // becomes its cursor (so the seq path drains it); everything else passes through.
                 let v = self.pop();
-                let convert = if let Value::Obj(h) = v
+                let convert = if let Some(h) = v.as_obj()
                     && let Obj::Struct { name, .. } = self.heap.get(h)
                 {
                     let name = name.clone();
@@ -1949,14 +1954,15 @@ impl Vm {
             }
             Op::IsMap => {
                 let v = self.pop();
-                let is_map = matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Map(_)));
-                self.push(Value::Bool(is_map));
+                let is_map =
+                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Map(_)));
+                self.push(Value::bool(is_map));
             }
             Op::IsChannel => {
                 let v = self.pop();
                 let is_chan =
-                    matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Channel(_)));
-                self.push(Value::Bool(is_chan));
+                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Channel(_)));
+                self.push(Value::bool(is_chan));
             }
             Op::ChanRecvOrClosed => {
                 // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
@@ -1964,7 +1970,7 @@ impl Vm {
                 // exit). Runs at the loop top, never inside a native callback (`native_reentry == 0`),
                 // so it takes the snapshot-park / cooperative-park / fault paths — never the demote path.
                 let v = self.pop();
-                let Value::Obj(h) = v else {
+                let Some(h) = v.as_obj() else {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
                 };
                 match self.chan_recv_step(h, span)? {
@@ -1984,7 +1990,7 @@ impl Vm {
             }
             Op::EnsureEnum(slot) => {
                 let v = self.stack[self.base() + *slot];
-                if !matches!(v, Value::Obj(h) if matches!(self.heap.get(h), Obj::Enum { .. })) {
+                if !matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Enum { .. })) {
                     return Err(self.err(format!("cannot match on {}", self.type_name(v)), span));
                 }
             }
@@ -2008,8 +2014,8 @@ impl Vm {
             )?,
             Op::MatchNoArm(slot) => {
                 let v = self.stack[self.base() + *slot];
-                let variant = match v {
-                    Value::Obj(h) => match self.heap.get(h) {
+                let variant = match v.view() {
+                    ValueView::Obj(h) => match self.heap.get(h) {
                         Obj::Enum { variant_id, .. } => self.enum_names(*variant_id).1.to_string(),
                         _ => String::new(),
                     },
@@ -2056,7 +2062,7 @@ impl Vm {
                 let h = self
                     .heap
                     .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewShared => {
                 let init = self.pop();
@@ -2067,7 +2073,7 @@ impl Vm {
                     v: Mutex::new(init),
                     ..Default::default()
                 })));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             Op::NewRwShared => {
                 let init = self.pop();
@@ -2078,7 +2084,7 @@ impl Vm {
                     v: RwLock::new(init),
                     ..Default::default()
                 })));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
             // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's
             // `Instant`/`Duration` math) do NOT inflate `step`'s stack frame — `step` is on the per-op
@@ -2100,7 +2106,7 @@ impl Vm {
                 // Register for the program-exit auto-drain; the handle is also a GC root, so the
                 // executor's queued work survives even after every in-program handle is gone.
                 self.executors.push(h);
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
             }
         }
         Ok(())
@@ -2123,10 +2129,10 @@ mod cell_ops_tests {
     fn newcell_cellload_roundtrips() {
         let mut vm = new_vm();
         let span = Span::default();
-        vm.push(Value::Int(7));
+        vm.push(Value::int(7));
         vm.step(&Op::NewCell, span).unwrap();
         vm.step(&Op::CellLoad, span).unwrap();
-        assert_eq!(vm.pop(), Value::Int(7));
+        assert_eq!(vm.pop(), Value::int(7));
     }
 
     /// HARD contract: operands are pushed value-THEN-handle (stack `[val, handle]`), so `CellStore`
@@ -2135,16 +2141,16 @@ mod cell_ops_tests {
     fn cellstore_pops_handle_first() {
         let mut vm = new_vm();
         let span = Span::default();
-        vm.push(Value::Int(7));
+        vm.push(Value::int(7));
         vm.step(&Op::NewCell, span).unwrap();
         let h = vm.pop();
         // Push value THEN handle: [Int(9), handle].
-        vm.push(Value::Int(9));
+        vm.push(Value::int(9));
         vm.push(h);
         vm.step(&Op::CellStore, span).unwrap();
         // Reload through the same handle → observes the stored value.
         vm.push(h);
         vm.step(&Op::CellLoad, span).unwrap();
-        assert_eq!(vm.pop(), Value::Int(9));
+        assert_eq!(vm.pop(), Value::int(9));
     }
 }

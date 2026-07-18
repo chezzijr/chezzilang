@@ -4875,6 +4875,21 @@ conformance` green.
     programs (reachable only from a unit test), each behaving identically to the inline `Int`/`Float` for
     display/hash/eq/order/wire; `size_of::<Obj>()` stays 88. Phase 1 (the `struct Value(u64)` swap) is gated
     on the measured `peak_live_bytes` drop vs this baseline.
+  - **UPDATE 2026-07-18 — Phase 1 Task 4 (the representation swap) landed on branch `feat/value-8b`,
+    pending the measure gate (Task 6).** `Value` is now an 8-byte `struct Value(u64)`
+    (`assert_eq!(size_of::<Value>(), 8)`): bit0=1 → inline `Int` `(n<<1)|1` (±2^62); low3 `000` → `Obj`
+    (incl. boxed `BigInt`), `010` → `Float` (its own tag → `is_float` is heap-free, points at
+    `Obj::FloatBox`), `100` → the `Nil`/`False`/`True` immediates. Wide ints and every float now box via
+    `Vm::make_int`/`Vm::box_float` and read back via `Vm::int_of`/`Vm::float_of`; classification goes
+    through `Value::view()` → `ValueView` (a boxed float/big-int surfaces as `Obj(gcref)`, resolved
+    heap-side). **Behavior-preserving**: overflow still faults at the i64 ceiling (boxing only lifts the
+    *inline* ceiling to ±2^62, not the i64 one), int `==`/order stay exact-i64, `1 == 1.0` still true,
+    two independently-boxed equal floats compare `==` and hash equal. GC traces boxed floats via
+    `Value::child_gcref` (both the Obj and Float tags) at every root/children site; the airlock re-boxes
+    on the destination heap in `from_wire` identically on both engines. Two-engine parity + difftest +
+    conformance green. Observable limit lifted (design §3): `[x] * n`'s `count * size_of::<Value>() ≤
+    isize::MAX` bound doubled (Value 16B→8B), so a marginally larger repeat now succeeds. Perf/memory
+    delta measured + recorded in `docs/benchmarks.md` at the merge gate (Task 6), not here.
 - **String concat/split builder/rope** moves no current bench — `join` already buffers into one `String`;
   `+`/`split` aren't exercised by the `str` bench.
 - **Arith specialization + frame pooling: effectively closed** — superinstructions inline the monomorphic

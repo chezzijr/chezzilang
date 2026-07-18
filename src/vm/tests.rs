@@ -17,7 +17,7 @@ fn build_str_map(vm: &mut Vm, pairs: &[(&str, &str)]) -> Value {
         let hk = vm.hash_value(kv, span).unwrap();
         map.push(hk, kv, vv);
     }
-    Value::Obj(vm.heap.alloc(Obj::Map(map)))
+    Value::obj(vm.heap.alloc(Obj::Map(map)))
 }
 
 /// `OffloadHost::arg_str_map` serves the pre-extracted `NativeArg::Map` pairs back (so an
@@ -62,8 +62,8 @@ fn extract_native_args_snapshots_str_map() {
     let mut bad = MapData::default();
     let kv = vm.alloc_str("k".to_string());
     let hk = vm.hash_value(kv, span).unwrap();
-    bad.push(hk, kv, Value::Int(7));
-    let bad_map = Value::Obj(vm.heap.alloc(Obj::Map(bad)));
+    bad.push(hk, kv, Value::int(7));
+    let bad_map = Value::obj(vm.heap.alloc(Obj::Map(bad)));
     assert_eq!(vm.extract_native_args(&[bad_map]), None);
 }
 
@@ -73,7 +73,7 @@ fn vm_host_arg_str_map_reads_live_map() {
     use crate::native::Host;
     let mut vm = Vm::new(Arc::new(empty_program()));
     let m = build_str_map(&mut vm, &[("one", "1"), ("two", "2")]);
-    let not_map = Value::Int(3);
+    let not_map = Value::int(3);
     let mut host = VmHost {
         vm: &mut vm,
         args: vec![m, not_map],
@@ -114,7 +114,7 @@ fn extract_native_args_snapshots_str_list() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let a = vm.alloc_str("echo".to_string());
     let b = vm.alloc_str("hi".to_string());
-    let list = Value::Obj(vm.heap.alloc(Obj::List(vec![a, b])));
+    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b])));
     let got = vm.extract_native_args(&[list]).expect("str list extracts");
     assert_eq!(
         got,
@@ -125,7 +125,7 @@ fn extract_native_args_snapshots_str_list() {
     );
     // A list with a non-str element is not snapshottable → None (safe inline fallback).
     let s = vm.alloc_str("x".to_string());
-    let bad = Value::Obj(vm.heap.alloc(Obj::List(vec![s, Value::Int(7)])));
+    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(7)])));
     assert_eq!(vm.extract_native_args(&[bad]), None);
 }
 
@@ -136,12 +136,12 @@ fn vm_host_arg_str_list_reads_live_list() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let a = vm.alloc_str("one".to_string());
     let b = vm.alloc_str("two".to_string());
-    let list = Value::Obj(vm.heap.alloc(Obj::List(vec![a, b])));
+    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b])));
     let s = vm.alloc_str("z".to_string());
-    let bad = Value::Obj(vm.heap.alloc(Obj::List(vec![s, Value::Int(3)])));
+    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(3)])));
     let mut host = VmHost {
         vm: &mut vm,
-        args: vec![list, bad, Value::Int(9)],
+        args: vec![list, bad, Value::int(9)],
     };
     assert_eq!(
         host.arg_str_list(0).unwrap(),
@@ -588,8 +588,8 @@ fn vm_alloc_str_inlines_short_spills_long() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let short = vm.alloc_str("item-499999".to_string()); // 11 bytes ≤ INLINE_CAP
     let long = vm.alloc_str("x".repeat(crate::vm::chzstr::INLINE_CAP + 1)); // > INLINE_CAP
-    let inline = matches!(vm.heap.get(match short { Value::Obj(h) => h, _ => unreachable!() }), Obj::Str(s) if s.is_inline());
-    let heap = matches!(vm.heap.get(match long { Value::Obj(h) => h, _ => unreachable!() }), Obj::Str(s) if !s.is_inline());
+    let inline = matches!(vm.heap.get(short.as_obj().unwrap()), Obj::Str(s) if s.is_inline());
+    let heap = matches!(vm.heap.get(long.as_obj().unwrap()), Obj::Str(s) if !s.is_inline());
     assert!(inline, "short string should be stored inline");
     assert!(heap, "long string should spill to the heap");
 }
@@ -1305,16 +1305,23 @@ fn widen_suite_float_field_coerced() {
     let mut vm = Vm::new(Arc::new(program));
     vm.init_for_tests().unwrap();
     let inst = vm.build_suite_instance(thunk).unwrap();
-    let Value::Obj(h) = inst else {
+    let Some(h) = inst.as_obj() else {
         panic!("suite instance is not an object");
     };
-    let Obj::Struct { fields, .. } = vm.heap.get(h) else {
-        panic!("suite instance is not a struct");
+    let f0 = {
+        let Obj::Struct { fields, .. } = vm.heap.get(h) else {
+            panic!("suite instance is not a struct");
+        };
+        fields[0]
     };
+    assert!(
+        f0.is_float(),
+        "float suite field must store a boxed float, not Int(3)"
+    );
     assert_eq!(
-        fields[0],
-        Value::Float(3.0),
-        "float suite field must store f64(3.0), not Int(3)"
+        vm.float_of(f0),
+        3.0,
+        "float suite field must store f64(3.0)"
     );
 }
 
@@ -1929,17 +1936,18 @@ pub(crate) fn empty_program() -> Program {
 fn bigint_floatbox_behave_like_inline() {
     use std::cmp::Ordering;
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let bi = Value::Obj(vm.heap.alloc(Obj::BigInt(5)));
-    let bi2 = Value::Obj(vm.heap.alloc(Obj::BigInt(5)));
-    let fb = Value::Obj(vm.heap.alloc(Obj::FloatBox(1.5)));
-    let fb2 = Value::Obj(vm.heap.alloc(Obj::FloatBox(1.5)));
+    let bi = Value::obj(vm.heap.alloc(Obj::BigInt(5)));
+    let bi2 = Value::obj(vm.heap.alloc(Obj::BigInt(5)));
+    let fb = Value::obj(vm.heap.alloc(Obj::FloatBox(1.5)));
+    let fb2 = Value::obj(vm.heap.alloc(Obj::FloatBox(1.5)));
     // Display matches the inline scalar.
     assert_eq!(vm.display(bi), "5");
-    assert_eq!(vm.display(bi), vm.display(Value::Int(5)));
-    assert_eq!(vm.display(fb), vm.display(Value::Float(1.5)));
+    assert_eq!(vm.display(bi), vm.display(Value::int(5)));
+    let ref15 = vm.box_float(1.5);
+    assert_eq!(vm.display(fb), vm.display(ref15));
     // Hash matches the inline scalar (validates the canonical f64-bits scheme, not `*n as u64`).
-    assert_eq!(vm.scalar_hash(bi), vm.scalar_hash(Value::Int(5)));
-    assert_eq!(vm.scalar_hash(fb), vm.scalar_hash(Value::Float(1.5)));
+    assert_eq!(vm.scalar_hash(bi), vm.scalar_hash(Value::int(5)));
+    assert_eq!(vm.scalar_hash(fb), vm.scalar_hash(ref15));
     // Equality holds across two independent boxes of the same value.
     assert!(vm.values_equal(bi, bi2));
     assert!(vm.values_equal(fb, fb2));
@@ -1960,11 +1968,11 @@ fn vm_calls_native_fn_value() {
         name: "add".into(),
         func: add,
     });
-    vm.push(Value::Obj(h));
-    vm.push(Value::Int(40));
-    vm.push(Value::Int(2));
+    vm.push(Value::obj(h));
+    vm.push(Value::int(40));
+    vm.push(Value::int(2));
     vm.do_call(2, Span { line: 1, col: 1 }).unwrap();
-    assert_eq!(vm.pop(), Value::Int(42));
+    assert_eq!(vm.pop(), Value::int(42));
 }
 
 #[test]
@@ -2002,8 +2010,8 @@ fn cursor_crosses_airlock_by_deep_copy() {
     // gated non-sendable like a generator, which panicked `deep_clone`'s `.expect` and diverged VM
     // from interp; a cursor is plain data — a snapshot Vec + index — so it crosses by value.)
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let cursor = Value::Obj(vm.heap.alloc(Obj::Iter {
-        items: vec![Value::Int(7), Value::Int(8)],
+    let cursor = Value::obj(vm.heap.alloc(Obj::Iter {
+        items: vec![Value::int(7), Value::int(8)],
         pos: 1,
     }));
     let wire = vm
@@ -2019,13 +2027,13 @@ fn cursor_crosses_airlock_by_deep_copy() {
     }
     // Rebuild on the heap: an independent cursor with the same items + pos.
     let rebuilt = vm.from_wire(wire);
-    let Value::Obj(h) = rebuilt else {
+    let Some(h) = rebuilt.as_obj() else {
         panic!("from_wire(cursor) must be a heap obj")
     };
     match vm.heap.get(h) {
         Obj::Iter { items, pos } => {
             assert_eq!(*pos, 1);
-            assert_eq!(items, &vec![Value::Int(7), Value::Int(8)]);
+            assert_eq!(items, &vec![Value::int(7), Value::int(8)]);
         }
         _ => panic!("expected a rebuilt Obj::Iter"),
     }
@@ -2044,7 +2052,7 @@ fn vm_native_str_return_lowers_to_heap_with_no_children() {
     });
     // A native fn handle has no GC children (guards the mark-phase claim).
     assert!(vm.heap.children(nat).is_empty());
-    vm.push(Value::Obj(nat));
+    vm.push(Value::obj(nat));
     vm.do_call(0, Span { line: 1, col: 1 }).unwrap();
     let result = vm.pop();
     assert_eq!(vm.display(result), "hi");
@@ -2061,36 +2069,36 @@ fn wire_roundtrip_preserves_value_equality() {
     let s = vm.heap.alloc(Obj::Str("s".into()));
     let tup = vm
         .heap
-        .alloc(Obj::Tuple(vec![Value::Bool(true), Value::Nil]));
+        .alloc(Obj::Tuple(vec![Value::bool(true), Value::nil()]));
     let st = vm.heap.alloc(Obj::Struct {
         name: "P".into(),
         tid: TID_NONE,
-        fields: vec![Value::Int(1), Value::Obj(s)],
+        fields: vec![Value::int(1), Value::obj(s)],
     });
     let en = vm.heap.alloc(Obj::Enum {
         // `empty_program` has no variant table, so use the unregistered sentinel (the enum analogue
         // of the struct's `TID_NONE` above) — it round-trips ("?"→VID_NONE→"?") value-equal.
         variant_id: crate::vm::op::VID_NONE,
-        payload: vec![Value::Int(9)],
+        payload: vec![Value::int(9)],
     });
     let mut m = MapData::default();
-    m.push(10, Value::Int(1), Value::Int(100));
-    m.push(20, Value::Obj(s), Value::Int(200));
+    m.push(10, Value::int(1), Value::int(100));
+    m.push(20, Value::obj(s), Value::int(200));
     let map = vm.heap.alloc(Obj::Map(m));
     let mut set = SetData::default();
-    set.push(5, Value::Int(1));
-    set.push(6, Value::Int(2));
+    set.push(5, Value::int(1));
+    set.push(6, Value::int(2));
     let setobj = vm.heap.alloc(Obj::Set(set));
     let list = vm.heap.alloc(Obj::List(vec![
-        Value::Int(1),
-        Value::Obj(s),
-        Value::Obj(tup),
-        Value::Obj(st),
-        Value::Obj(en),
-        Value::Obj(map),
-        Value::Obj(setobj),
+        Value::int(1),
+        Value::obj(s),
+        Value::obj(tup),
+        Value::obj(st),
+        Value::obj(en),
+        Value::obj(map),
+        Value::obj(setobj),
     ]));
-    let v = Value::Obj(list);
+    let v = Value::obj(list);
 
     let w = vm
         .to_wire(v)
@@ -2114,14 +2122,14 @@ fn wire_roundtrip_preserves_value_equality() {
 fn wire_preserves_map_hashes_and_order() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let mut m = MapData::default();
-    m.push(42, Value::Int(1), Value::Int(10)); // collides with the third entry on hash 42
-    m.push(7, Value::Int(2), Value::Int(20));
-    m.push(42, Value::Int(3), Value::Int(30));
-    let map = Value::Obj(vm.heap.alloc(Obj::Map(m)));
+    m.push(42, Value::int(1), Value::int(10)); // collides with the third entry on hash 42
+    m.push(7, Value::int(2), Value::int(20));
+    m.push(42, Value::int(3), Value::int(30));
+    let map = Value::obj(vm.heap.alloc(Obj::Map(m)));
 
     let w = vm.to_wire(map).expect("map should serialize");
     let wired = vm.from_wire(w);
-    let Value::Obj(h) = wired else {
+    let Some(h) = wired.as_obj() else {
         panic!("expected heap obj")
     };
     let Obj::Map(rebuilt) = vm.heap.get(h) else {
@@ -2149,7 +2157,7 @@ fn wire_passes_by_reference_objects_as_same_handle() {
         slots: Vec::new(),
         index: Default::default(),
     });
-    let v = Value::Obj(m);
+    let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
     assert_eq!(
         vm.from_wire(w),
@@ -2167,7 +2175,7 @@ fn wire_passes_by_reference_objects_as_same_handle() {
 fn wire_crosses_str_by_value() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let s = vm.heap.alloc(Obj::Str("imm".into()));
-    let v = Value::Obj(s);
+    let v = Value::obj(s);
     let w = vm.to_wire(v).expect("str should serialize");
     let wired = vm.from_wire(w);
     assert_ne!(
@@ -2189,15 +2197,15 @@ fn wire_str_map_key_survives_roundtrip() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let key = vm.heap.alloc(Obj::Str("k".into()));
     let mut m = MapData::default();
-    let h = vm.scalar_hash(Value::Obj(key));
-    m.push(h, Value::Obj(key), Value::Int(42));
-    let map = Value::Obj(vm.heap.alloc(Obj::Map(m)));
+    let h = vm.scalar_hash(Value::obj(key));
+    m.push(h, Value::obj(key), Value::int(42));
+    let map = Value::obj(vm.heap.alloc(Obj::Map(m)));
 
     let w = vm
         .to_wire(map)
         .expect("map with a str key should serialize");
     let wired = vm.from_wire(w);
-    let Value::Obj(mh) = wired else {
+    let Some(mh) = wired.as_obj() else {
         panic!("expected map handle")
     };
     let Obj::Map(rebuilt) = vm.heap.get(mh) else {
@@ -2207,14 +2215,14 @@ fn wire_str_map_key_survives_roundtrip() {
     assert_eq!(rebuilt.entries.len(), 1);
     let (rh, rk, rv) = &rebuilt.entries[0];
     assert_eq!(*rh, h, "cached hash preserved");
-    assert_eq!(*rv, Value::Int(42));
+    assert_eq!(*rv, Value::int(42));
     assert_eq!(
         rebuilt.candidates(h),
         &[0],
         "index bucket points at the rebuilt key"
     );
     assert!(
-        vm.values_equal(*rk, Value::Obj(key)),
+        vm.values_equal(*rk, Value::obj(key)),
         "rebuilt str key is value-equal"
     );
 }
@@ -2236,18 +2244,12 @@ fn wire_shares_core_across_a_fresh_handle() {
         .heap
         .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
     for h in [ch, sh, rw, ex] {
-        let v = Value::Obj(h);
+        let v = Value::obj(h);
         let w = vm.to_wire(v).expect("core handle should serialize");
         let wired = vm.from_wire(w);
         assert_ne!(wired, v, "a crossed core gets a fresh handle (new GcRef)");
         // Same underlying core: an `Arc::ptr_eq` between the two handles' cores.
-        let same = match (
-            vm.heap.get(h),
-            vm.heap.get(match wired {
-                Value::Obj(g) => g,
-                _ => unreachable!(),
-            }),
-        ) {
+        let same = match (vm.heap.get(h), vm.heap.get(wired.as_obj().unwrap())) {
             (Obj::Channel(a), Obj::Channel(b)) => Arc::ptr_eq(a, b),
             (Obj::Shared(a), Obj::Shared(b)) => Arc::ptr_eq(a, b),
             (Obj::RwShared(a), Obj::RwShared(b)) => Arc::ptr_eq(a, b),
@@ -2268,16 +2270,16 @@ fn channel_core_shared_across_handles() {
         .heap
         .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
     // Cross the airlock → a second handle onto the same core.
-    let w = vm.to_wire(Value::Obj(h1)).unwrap();
-    let Value::Obj(h2) = vm.from_wire(w) else {
+    let w = vm.to_wire(Value::obj(h1)).unwrap();
+    let Some(h2) = vm.from_wire(w).as_obj() else {
         panic!("expected handle")
     };
     let sp = Span { line: 1, col: 1 };
-    vm.channel_method(h1, "send", &[Value::Int(7)], sp).unwrap();
+    vm.channel_method(h1, "send", &[Value::int(7)], sp).unwrap();
     // recv through the OTHER handle sees the message.
     assert_eq!(
         vm.channel_method(h2, "recv", &[], sp).unwrap(),
-        Value::Int(7)
+        Value::int(7)
     );
 }
 
@@ -2308,10 +2310,10 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     // Queue first, then hand the receiving `Vm` to another thread: the value is already in the
     // shared core, so the cross-thread `recv` pops it deterministically (no interleaving race).
     sender
-        .channel_method(sh, "send", &[Value::Int(42)], sp)
+        .channel_method(sh, "send", &[Value::int(42)], sp)
         .unwrap();
     let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
-    assert_eq!(handle.join().unwrap(), Value::Int(42));
+    assert_eq!(handle.join().unwrap(), Value::int(42));
 }
 
 /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function
@@ -2533,7 +2535,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
 /// body via `start_task` (a `Ready` fiber is treated as a resume and runs no body).
 fn mk_pending_fiber(task_index: usize) -> Fiber {
     let task = PendingCall::Call {
-        callee: Value::Nil,
+        callee: Value::nil(),
         args: Vec::new(),
         span: Span { line: 1, col: 1 },
     };
@@ -5889,13 +5891,13 @@ fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.parallel = true;
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
-    vm.push(Value::Obj(hv)); // keep the host object stack-rooted
+    vm.push(Value::obj(hv)); // keep the host object stack-rooted
 
     let mut fiber_heap = Heap::new();
     let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
-        stack: vec![Value::Obj(hf)], // the fiber's own stack roots its object
+        stack: vec![Value::obj(hf)], // the fiber's own stack roots its object
         ..FiberCtx::default()
     };
 
@@ -5907,7 +5909,7 @@ fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
     // Park back out: the untouched host heap + its object are restored.
     vm.swap_ctx(&mut ctx);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-    assert_eq!(vm.pop(), Value::Obj(hv));
+    assert_eq!(vm.pop(), Value::obj(hv));
 }
 
 /// D2a share-nothing lock: a `collect` while an M:N fiber is swapped in must leave the parked
@@ -5928,7 +5930,7 @@ fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
     let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
-        stack: vec![Value::Obj(hf)],
+        stack: vec![Value::obj(hf)],
         ..FiberCtx::default()
     };
 
@@ -5949,15 +5951,15 @@ fn executor_core_shut_is_shared_across_handles() {
     let h1 = vm
         .heap
         .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
-    let w = vm.to_wire(Value::Obj(h1)).unwrap();
-    let Value::Obj(h2) = vm.from_wire(w) else {
+    let w = vm.to_wire(Value::obj(h1)).unwrap();
+    let Some(h2) = vm.from_wire(w).as_obj() else {
         panic!("expected handle")
     };
     let sp = Span { line: 1, col: 1 };
     vm.executor_method(h1, "shutdown", &[], sp).unwrap();
     let dummy = vm.heap.alloc(Obj::Str("task".into()));
     let err = vm
-        .executor_method(h2, "submit", &[Value::Obj(dummy)], sp)
+        .executor_method(h2, "submit", &[Value::obj(dummy)], sp)
         .unwrap_err();
     assert_eq!(
         err.message,
@@ -5971,12 +5973,12 @@ fn executor_core_shut_is_shared_across_handles() {
 fn display_shared_renders_contents() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let s = vm.heap.alloc(Obj::Str("hi".into()));
-    let boxed = vm.to_wire(Value::Obj(s)).unwrap();
+    let boxed = vm.to_wire(Value::obj(s)).unwrap();
     let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore {
         v: Mutex::new(boxed),
         ..Default::default()
     })));
-    assert_eq!(vm.display(Value::Obj(sh)), "Shared(hi)");
+    assert_eq!(vm.display(Value::obj(sh)), "Shared(hi)");
 }
 
 // ----- B3.2: isolated worker-VM construction (no threads) -----
@@ -6014,7 +6016,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
     (
         vm,
         PendingCall::Call {
-            callee: Value::Obj(clo),
+            callee: Value::obj(clo),
             args: Vec::new(),
             span: sp,
         },
@@ -6041,7 +6043,7 @@ fn worker_runs_in_distinct_heap() {
         "worker must not allocate into the parent heap"
     );
     let got = vm.from_wire(res.value);
-    let want = Value::Obj(vm.heap.alloc(Obj::List(vec![Value::Int(1), Value::Int(2)])));
+    let want = Value::obj(vm.heap.alloc(Obj::List(vec![Value::int(1), Value::int(2)])));
     assert!(
         vm.values_equal(got, want),
         "result must round-trip back to [1, 2]"
@@ -6115,7 +6117,7 @@ fn worker_returns_value_and_out() {
     );
     assert_eq!(
         vm.from_wire(res.value),
-        Value::Int(7),
+        Value::int(7),
         "return value crosses back"
     );
     assert_eq!(
@@ -6160,7 +6162,7 @@ fn worker_crosses_str_by_value() {
         .run_task_isolated(task)
         .expect("a str result now crosses by value");
     let got = vm.from_wire(res.value);
-    let want = Value::Obj(vm.heap.alloc(Obj::Str("oops".into())));
+    let want = Value::obj(vm.heap.alloc(Obj::Str("oops".into())));
     assert!(
         vm.values_equal(got, want),
         "str result round-trips to \"oops\""
@@ -6214,7 +6216,7 @@ fn worker_reads_module_global() {
     let res = vm
         .run_task_isolated(task)
         .expect("task reads a module global in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(42));
+    assert_eq!(vm.from_wire(res.value), Value::int(42));
 }
 
 #[test]
@@ -6231,7 +6233,7 @@ fn worker_reads_last_of_many_globals() {
     let res = vm
         .run_task_isolated(task)
         .expect("task reads the last module global in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(99));
+    assert_eq!(vm.from_wire(res.value), Value::int(99));
 }
 
 #[test]
@@ -6295,7 +6297,7 @@ fn worker_calls_sibling_free_fn() {
     let res = vm
         .run_task_isolated(task)
         .expect("task calls a sibling fn in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(8));
+    assert_eq!(vm.from_wire(res.value), Value::int(8));
 }
 
 /// A spawned task calls a function from an IMPORTED module — proves cross-module `module_objs`
@@ -6328,7 +6330,7 @@ fn worker_calls_imported_fn() {
         .run_task_isolated(task)
         .expect("task calls an imported fn in its worker");
     let got = vm.from_wire(res.value);
-    let want = Value::Obj(vm.heap.alloc(Obj::Str("abab".into())));
+    let want = Value::obj(vm.heap.alloc(Obj::Str("abab".into())));
     assert!(vm.values_equal(got, want), "imported repeat returns abab");
 }
 
@@ -6341,7 +6343,7 @@ fn worker_runs_method_task() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let recv = vm.heap.alloc(Obj::Str("hello".into()));
     let task = PendingCall::Method {
-        recv: Value::Obj(recv),
+        recv: Value::obj(recv),
         name: "len".into(),
         args: Vec::new(),
         span: sp(),
@@ -6349,7 +6351,7 @@ fn worker_runs_method_task() {
     let res = vm
         .run_task_isolated(task)
         .expect("method task now runs in a worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(5));
+    assert_eq!(vm.from_wire(res.value), Value::int(5));
 }
 
 /// A struct method resolved through reconstructed `module_objs` — and its body **reads a module
@@ -6369,7 +6371,7 @@ fn worker_method_on_struct() {
     let res = vm
         .run_task_isolated(task)
         .expect("struct method task dispatches in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(70));
+    assert_eq!(vm.from_wire(res.value), Value::int(70));
 }
 
 /// Cross-heap safety: a module global that is a **container of callables** (`[fn …]`) must have its
@@ -6389,7 +6391,7 @@ fn worker_calls_through_global_fn_container() {
     let res = vm
         .run_task_isolated(task)
         .expect("task calls a fn from a global container in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::Int(21));
+    assert_eq!(vm.from_wire(res.value), Value::int(21));
 }
 
 /// The module-graph reconstruction must be GC-safe: with `gc_stress` on (collect before every
@@ -6409,7 +6411,7 @@ fn worker_reconstruction_survives_gc_stress() {
     let res = vm
         .run_task_isolated(task)
         .expect("reconstruction survives GC stress");
-    assert_eq!(vm.from_wire(res.value), Value::Int(6));
+    assert_eq!(vm.from_wire(res.value), Value::int(6));
 }
 
 // ----- arithmetic -----
@@ -8874,7 +8876,7 @@ fn golden_struct_layout_chz_matches_expected_and_interp() {
 /// `Vec<Value>`, hidden-class / `__slots__` layout) with NO per-instance field-name strings.
 /// Compiles a program with `struct Point(x, y)`, drives the real `new_struct` construction path
 /// (push args, call `new_struct`), then pattern-matches the heap object and verifies the field
-/// Vec is `[Value::Int(1), Value::Int(2)]` in declaration order — names live only in the
+/// Vec is `[Value::int(1), Value::int(2)]` in declaration order — names live only in the
 /// StructDef. This is the type-level guard the layout change is built around (the destructure of
 /// `fields` as `&Vec<Value>` would not compile against the old `Vec<(Box<str>,Value)>`).
 #[test]
@@ -8887,11 +8889,11 @@ fn struct_positional_layout_no_per_instance_names() {
     let program = crate::compiler::compile_module_standalone(&module).expect("compile");
     let mut vm = Vm::new(Arc::new(program));
     let span = Span { line: 1, col: 1 };
-    vm.push(Value::Int(1));
-    vm.push(Value::Int(2));
+    vm.push(Value::int(1));
+    vm.push(Value::int(2));
     // ROOT REDESIGN — structs are keyed by the qualified IDENTITY KEY (`<main>::Point` standalone).
     vm.new_struct("<main>::Point", 2, span).expect("new_struct");
-    let Value::Obj(h) = vm.pop() else {
+    let Some(h) = vm.pop().as_obj() else {
         panic!("expected struct obj")
     };
     match vm.heap.get(h) {
@@ -8900,7 +8902,7 @@ fn struct_positional_layout_no_per_instance_names() {
             let fields: &Vec<Value> = fields; // positional: NOT Vec<(Box<str>, Value)>
             assert_eq!(
                 *fields,
-                vec![Value::Int(1), Value::Int(2)],
+                vec![Value::int(1), Value::int(2)],
                 "fields must be positional in declaration order, no per-instance names"
             );
         }
@@ -8933,7 +8935,7 @@ fn enum_variant_id_stamped_at_construction() {
     let mut vm = Vm::new(Arc::new(program));
     let span = Span { line: 1, col: 1 };
     vm.new_enum("Green", green_id, 0, span).expect("new_enum");
-    let Value::Obj(h) = vm.pop() else {
+    let Some(h) = vm.pop().as_obj() else {
         panic!("expected enum obj")
     };
     match vm.heap.get(h) {
@@ -8974,8 +8976,8 @@ fn native_result_option_have_fixed_variant_ids() {
     assert_eq!(vid("Option", "None"), VID_NONE_VARIANT);
     // A native-built enum (alloc_enum ⇒ Option::Some) must carry the right id.
     let mut vm = Vm::new(Arc::new(program));
-    let v = vm.alloc_enum("Option", "Some", vec![Value::Int(7)]);
-    let Value::Obj(h) = v else { panic!() };
+    let v = vm.alloc_enum("Option", "Some", vec![Value::int(7)]);
+    let Some(h) = v.as_obj() else { panic!() };
     let Obj::Enum { variant_id, .. } = vm.heap.get(h) else {
         panic!("expected enum")
     };
@@ -13814,7 +13816,7 @@ fn host_arg_bytes_rejects_non_bytes() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let mut host = VmHost {
         vm: &mut vm,
-        args: vec![Value::Int(7)],
+        args: vec![Value::int(7)],
     };
     let err = host.arg_bytes(0).expect_err("int is not bytes");
     assert_eq!(err.message, "argument 0 must be bytes, got int");
@@ -13827,14 +13829,14 @@ fn host_arg_bytes_rejects_non_bytes() {
 fn extract_native_args_carries_bytes() {
     use crate::native::NativeArg as A;
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let b = Value::Obj(vm.heap.alloc(Obj::Bytes(vec![0u8, 255].into_boxed_slice())));
+    let b = Value::obj(vm.heap.alloc(Obj::Bytes(vec![0u8, 255].into_boxed_slice())));
     assert_eq!(
-        vm.extract_native_args(&[b, Value::Int(3)]),
+        vm.extract_native_args(&[b, Value::int(3)]),
         Some(vec![A::Bytes(vec![0, 255]), A::Int(3)])
     );
     // A `bytearray` is NOT a seam arg (the checker rejects it at a `bytes` param): extraction bails
     // to `None` → the call would run inline, never off-heap with a stale copy of a mutable buffer.
-    let ba = Value::Obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
+    let ba = Value::obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
     assert_eq!(vm.extract_native_args(&[ba]), None);
 }
 

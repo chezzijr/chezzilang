@@ -10387,3 +10387,85 @@ fn if_match_expr_int_float_widen_parity() {
     );
     assert_parity_out(src, "1.0\n1.5\n2.5\n1.0\n1.0\n2.0\n2.5\n1.0\n");
 }
+
+// ----- 8-byte `Value` (int-favoring pointer-tag): boxing must be invisible to programs -----
+
+#[test]
+fn parity_big_int_crosses_inline_box_boundary() {
+    // 2^62 and above box as `Obj::BigInt`; 2^62-1 and below stay inline. Crossing the boundary must
+    // be invisible: arithmetic, equality, and Display all agree, and both engines match byte-for-byte.
+    let src = "\
+fn main():
+    x := 4611686018427387904
+    print(x)
+    print(x - 1)
+    print(x == x)
+    print(x + 1)
+    y := 1 << 62
+    print(y)
+    print(x == y)
+    print(x + 100)
+main()";
+    assert_parity_out(
+        src,
+        "4611686018427387904\n4611686018427387903\ntrue\n4611686018427387905\n4611686018427387904\ntrue\n4611686018427388004\n",
+    );
+}
+
+#[test]
+fn parity_i64_overflow_still_faults_past_boxing() {
+    // Boxing lifts the INLINE ceiling to ±2^62, NOT the i64 ceiling: an operation whose true result
+    // exceeds i64 still faults (overflow semantics unchanged), it does not silently box a wider value.
+    let src = "\
+fn run() -> int!:
+    x := 4611686018427387904
+    r := recover:
+        _ := x * 2
+    match r:
+        Ok(v): return Ok(v)
+        Err(e): print(e.message())
+    return Ok(0)
+fn main():
+    _ := run()
+main()";
+    assert_eq!(parity_entry(src), "integer overflow in Mul\n");
+}
+
+#[test]
+fn parity_boxed_float_canonical_eq() {
+    // Two independently-boxed equal floats compare `==` and hash equal (a Set dedups them to one);
+    // cross-type `1 == 1.0` still holds. Boxing is per-alloc, so equality MUST compare the f64.
+    let src = "\
+fn main():
+    a := 1.5
+    b := 3.0 / 2.0
+    print(a == b)
+    print(a)
+    print(1 == 1.0)
+    s := {1.5, 3.0 / 2.0}
+    print(s.len())
+main()";
+    assert_parity_out(src, "true\n1.5\ntrue\n1\n");
+}
+
+#[test]
+fn parity_airlock_bigint_and_float_roundtrip() {
+    // A boxed big-int and a boxed float cross the airlock (spawn + Channel) and round-trip on BOTH
+    // engines: `from_wire` re-boxes via `make_int`/`box_float` on the destination heap identically.
+    let src = "\
+fn main():
+    ci := Channel[int]()
+    cf := Channel[float]()
+    parallel:
+        spawn:
+            ci.send(4611686018427387905)
+            cf.send(1.5)
+    x := ci.recv()
+    f := cf.recv()
+    print(x)
+    print(x == 4611686018427387905)
+    print(f)
+    print(f == 1.5)
+main()";
+    assert_parity_out(src, "4611686018427387905\ntrue\n1.5\ntrue\n");
+}

@@ -12,7 +12,7 @@ impl Vm {
         // frame's parameter slots in place. Native / not-callable callees fall through to the `Vec`
         // path (`invoke_native` needs an owned `Vec`, HOFs build args off-stack).
         let callee = self.stack[at - 1];
-        if let Value::Obj(h) = callee {
+        if let Some(h) = callee.as_obj() {
             let kind = match self.heap.get(h) {
                 Obj::Func { proto, home } => Some((*proto, *home, None)),
                 Obj::Closure { proto, home, .. } => Some((*proto, *home, Some(h))),
@@ -83,8 +83,8 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let argc = args.len();
-        match callee {
-            Value::Obj(h) => {
+        match callee.view() {
+            ValueView::Obj(h) => {
                 // Borrow the heap object only long enough to read its `Copy` fields. The old code
                 // `self.heap.get(h).clone()` deep-cloned the whole `Obj` on *every* call — for a
                 // closure that meant cloning its captured-environment `HashMap` each time — just to
@@ -185,18 +185,17 @@ impl Vm {
                             self.emit_out(&line);
                             match self.stream_halt(span) {
                                 Some(halt) => Err(halt), // stdout died — halt like `os.exit`
-                                None => Ok(Value::Nil),
+                                None => Ok(Value::nil()),
                             }
                         }
                         "ord" => self.builtin_ord(&args, span),
                         "chr" => self.builtin_chr(&args, span),
                         "panic" => {
-                            let message = match args.first() {
-                                Some(Value::Obj(h)) => match self.heap.get(*h) {
-                                    Obj::Str(s) => s.to_string(),
-                                    _ => self.type_name(args[0]).to_string(),
+                            let message = match args.first().copied() {
+                                Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
+                                    Some(Obj::Str(s)) => s.to_string(),
+                                    _ => self.type_name(v).to_string(),
                                 },
-                                Some(other) => self.type_name(*other).to_string(),
                                 None => String::new(),
                             };
                             Err(self.err(message, span))
@@ -220,7 +219,10 @@ impl Vm {
                     )),
                 }
             }
-            other => Err(self.err(format!("'{}' is not callable", self.type_name(other)), span)),
+            _ => Err(self.err(
+                format!("'{}' is not callable", self.type_name(callee)),
+                span,
+            )),
         }
     }
 
@@ -305,7 +307,7 @@ impl Vm {
             };
             if let Some(req) = offload {
                 self.offload = Some(req);
-                return Ok(Value::Nil); // sentinel; never pushed (the `paused()` gate at the call site)
+                return Ok(Value::nil()); // sentinel; never pushed (the `paused()` gate at the call site)
             }
         }
         // D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (the offload gate
@@ -315,10 +317,10 @@ impl Vm {
         if self.mn.is_some()
             && self.native_reentry > 0
             && name == "sleep_ms"
-            && let Some(Value::Int(ms)) = args.first()
-            && *ms > 0
+            && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
+            && ms > 0
         {
-            return self.demote_block_sleep(*ms as u64, span);
+            return self.demote_block_sleep(ms as u64, span);
         }
         let mut host = VmHost { vm: self, args };
         let ret = func(&mut host).map_err(|e| RuntimeError {
@@ -344,11 +346,18 @@ impl Vm {
     ) -> Option<Vec<crate::native::NativeArg>> {
         use crate::native::NativeArg as A;
         args.iter()
-            .map(|v| match v {
-                Value::Int(n) => Some(A::Int(*n)),
-                Value::Float(f) => Some(A::Float(*f)),
-                Value::Bool(b) => Some(A::Bool(*b)),
-                Value::Obj(h) => match self.heap.get(*h) {
+            .map(|&v| {
+                if let Some(n) = self.int_val(v) {
+                    return Some(A::Int(n));
+                }
+                if v.is_float() {
+                    return Some(A::Float(self.float_of(v)));
+                }
+                if let Some(b) = v.as_bool() {
+                    return Some(A::Bool(b));
+                }
+                let h = v.as_obj()?;
+                match self.heap.get(h) {
                     Obj::Str(s) => Some(A::Str(s.to_string())),
                     // R1 — a binary arg (today `io.write_bytes`): copied out so it survives the
                     // off-heap handoff. `bytes` only — the checker types every seam param `bytes`
@@ -360,12 +369,12 @@ impl Vm {
                     // typed code, so this is unreachable from a well-typed program).
                     Obj::Map(m) => {
                         let mut pairs = Vec::with_capacity(m.entries.len());
-                        for (_, k, v) in &m.entries {
-                            let (Value::Obj(kh), Value::Obj(vh)) = (k, v) else {
+                        for (_, k, mv) in &m.entries {
+                            let (Some(kh), Some(vh)) = (k.as_obj(), mv.as_obj()) else {
                                 return None;
                             };
                             let (Obj::Str(ks), Obj::Str(vs)) =
-                                (self.heap.get(*kh), self.heap.get(*vh))
+                                (self.heap.get(kh), self.heap.get(vh))
                             else {
                                 return None;
                             };
@@ -378,11 +387,9 @@ impl Vm {
                     // `None` → run inline (the checker guarantees str for typed code).
                     Obj::List(items) => {
                         let mut out = Vec::with_capacity(items.len());
-                        for v in items {
-                            let Value::Obj(eh) = v else {
-                                return None;
-                            };
-                            let Obj::Str(s) = self.heap.get(*eh) else {
+                        for e in items {
+                            let eh = e.as_obj()?;
+                            let Obj::Str(s) = self.heap.get(eh) else {
                                 return None;
                             };
                             out.push(s.to_string());
@@ -390,8 +397,7 @@ impl Vm {
                         Some(A::List(out))
                     }
                     _ => None,
-                },
-                _ => None,
+                }
             })
             .collect()
     }
@@ -410,34 +416,42 @@ impl Vm {
     /// `Bytes` arm here would be unreachable dead code.
     pub(super) fn value_to_native_ret(&self, v: Value) -> crate::native::NativeRet {
         use crate::native::NativeRet as N;
-        match v {
-            Value::Int(n) => N::Int(n),
-            Value::Float(f) => N::Float(f),
-            Value::Bool(b) => N::Bool(b),
-            Value::Nil => N::Nil,
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Ptr(a) => N::Ptr(*a),
-                _ => N::Int(0),
-            },
+        if let Some(n) = self.int_val(v) {
+            return N::Int(n);
         }
+        if v.is_float() {
+            return N::Float(self.float_of(v));
+        }
+        if let Some(b) = v.as_bool() {
+            return N::Bool(b);
+        }
+        if v.is_nil() {
+            return N::Nil;
+        }
+        if let Some(h) = v.as_obj()
+            && let Obj::Ptr(a) = self.heap.get(h)
+        {
+            return N::Ptr(*a);
+        }
+        N::Int(0)
     }
 
     pub(super) fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
         use crate::native::NativeRet as N;
         match ret {
-            N::Int(n) => Value::Int(n),
-            N::Float(f) => Value::Float(f),
-            N::Bool(b) => Value::Bool(b),
-            N::Nil => Value::Nil,
-            N::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
+            N::Int(n) => self.make_int(n),
+            N::Float(f) => self.box_float(f),
+            N::Bool(b) => Value::bool(b),
+            N::Nil => Value::nil(),
+            N::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
             N::Str(s) => self.alloc_str(s),
-            N::Bytes(b) => Value::Obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice()))),
+            N::Bytes(b) => Value::obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice()))),
             N::List(items) => {
                 let mut vs = Vec::with_capacity(items.len());
                 for x in items {
                     vs.push(self.lower_native(x));
                 }
-                Value::Obj(self.heap.alloc(Obj::List(vs)))
+                Value::obj(self.heap.alloc(Obj::List(vs)))
             }
             N::Struct { name, fields } => {
                 // Positional layout: lower the named native fields, then place them into a flat Vec
@@ -461,13 +475,13 @@ impl Vm {
                                 .iter()
                                 .find(|(k, _)| k.as_ref() == fname.as_str())
                                 .map(|(_, v)| *v)
-                                .unwrap_or(Value::Nil)
+                                .unwrap_or(Value::nil())
                         })
                         .collect(),
                     // Ad-hoc / unregistered (TID_NONE): keep native emit order positionally.
                     None => lowered.into_iter().map(|(_, v)| v).collect(),
                 };
-                Value::Obj(self.heap.alloc(Obj::Struct {
+                Value::obj(self.heap.alloc(Obj::Struct {
                     name: name.into_boxed_str(),
                     tid,
                     fields: fs,
@@ -483,7 +497,7 @@ impl Vm {
                     let hk = self.scalar_hash(lk);
                     map.push(hk, lk, lv);
                 }
-                Value::Obj(self.heap.alloc(Obj::Map(map)))
+                Value::obj(self.heap.alloc(Obj::Map(map)))
             }
             N::Ok(inner) => {
                 let p = self.lower_native(*inner);
@@ -522,7 +536,7 @@ impl Vm {
             // reserved names above. The fallback is defensive only.
             _ => VID_NONE,
         };
-        Value::Obj(self.heap.alloc(Obj::Enum {
+        Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
             payload,
         }))
@@ -569,18 +583,16 @@ impl Vm {
 
     /// The enum type, variant name, and (copied) payload of an enum value; `None` if not an enum.
     pub(super) fn enum_parts(&self, v: Value) -> Option<(String, String, Vec<Value>)> {
-        match v {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Enum {
-                    variant_id,
-                    payload,
-                } => {
-                    // M19 lever #2 — cold path: resolve the type + variant names from the id.
-                    let (ty, variant) = self.enum_names(*variant_id);
-                    Some((ty.to_string(), variant.to_string(), payload.clone()))
-                }
-                _ => None,
-            },
+        let h = v.as_obj()?;
+        match self.heap.get(h) {
+            Obj::Enum {
+                variant_id,
+                payload,
+            } => {
+                // M19 lever #2 — cold path: resolve the type + variant names from the id.
+                let (ty, variant) = self.enum_names(*variant_id);
+                Some((ty.to_string(), variant.to_string(), payload.clone()))
+            }
             _ => None,
         }
     }
@@ -619,16 +631,16 @@ impl Vm {
                         "decode: integer {f} at {path} is out of range for int"
                     ));
                 }
-                Ok(Value::Int(f as i64))
+                Ok(self.make_int(f as i64))
             }
             D::Float => {
                 let f = self
                     .json_num(&variant, &payload)
                     .ok_or_else(|| mismatch("float"))?;
-                Ok(Value::Float(f))
+                Ok(self.box_float(f))
             }
-            D::Bool => match (variant.as_str(), payload.first()) {
-                ("Bool", Some(Value::Bool(b))) => Ok(Value::Bool(*b)),
+            D::Bool => match (variant.as_str(), payload.first().and_then(|v| v.as_bool())) {
+                ("Bool", Some(b)) => Ok(Value::bool(b)),
                 _ => Err(mismatch("bool")),
             },
             D::Str => {
@@ -659,7 +671,7 @@ impl Vm {
                 for (i, it) in items.into_iter().enumerate() {
                     out.push(self.coerce_json(it, inner, &format!("{path}[{i}]"))?);
                 }
-                Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
             }
             D::Map(inner) => {
                 if variant != "Obj" {
@@ -675,7 +687,7 @@ impl Vm {
                     let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"))?;
                     out.push(hk, k, coerced); // str keys unchanged → reuse the cached hash
                 }
-                Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
             }
             D::Struct {
                 key,
@@ -716,7 +728,7 @@ impl Vm {
                     tid,
                     fields: field_vals,
                 });
-                Ok(Value::Obj(h))
+                Ok(Value::obj(h))
             }
         }
     }
@@ -724,11 +736,13 @@ impl Vm {
     /// The `f64` of a JSON `Num`, else `None`.
     pub(super) fn json_num(&self, variant: &str, payload: &[Value]) -> Option<f64> {
         if variant == "Num" {
-            match payload.first() {
-                Some(Value::Float(f)) => Some(*f),
-                Some(Value::Int(n)) => Some(*n as f64),
-                _ => None,
-            }
+            payload.first().and_then(|&v| {
+                if v.is_float() {
+                    Some(self.float_of(v))
+                } else {
+                    self.int_val(v).map(|n| n as f64)
+                }
+            })
         } else {
             None
         }
@@ -736,21 +750,16 @@ impl Vm {
 
     /// The owned text of a str value, else `None`.
     pub(super) fn val_str(&self, v: Value) -> Option<String> {
-        match v {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Str(s) => Some(s.to_string()),
-                _ => None,
-            },
+        let h = v.as_obj()?;
+        match self.heap.get(h) {
+            Obj::Str(s) => Some(s.to_string()),
             _ => None,
         }
     }
 
     /// The heap handle of an `Obj` value (caller guarantees it is one).
     pub(super) fn as_obj(&self, v: Value) -> GcRef {
-        match v {
-            Value::Obj(h) => h,
-            _ => unreachable!("as_obj on non-object"),
-        }
+        v.as_obj().expect("as_obj on non-object")
     }
 
     pub(super) fn check_arity(
@@ -856,10 +865,10 @@ impl Vm {
         // ordering. Structs with their own `compare` fall through to the normal dispatch below.
         // Mirrors `interp::eval_method_call`.
         if method == "compare" && args.len() == 1 {
-            let is_prim = matches!(recv, Value::Int(_) | Value::Float(_))
-                || matches!(recv, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)));
+            let is_prim = self.is_numeric(recv)
+                || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
             if is_prim && let Some(ord) = self.compare(recv, args[0]) {
-                self.push(Value::Int(ord as i64));
+                self.push(Value::int(ord as i64));
                 return Ok(());
             }
         }
@@ -871,18 +880,18 @@ impl Vm {
         // scalar receiver `stringify` runs no user code, so the owned `String` exists before the alloc.
         // Mirrors the `compare` scalar branch above. Structs with their own `str` fall through below.
         if method == "str" && args.is_empty() {
-            let is_scalar = matches!(
-                recv,
-                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil
-            ) || matches!(recv, Value::Obj(h) if matches!(self.heap.get(h), Obj::Str(_)));
+            let is_scalar = self.is_numeric(recv)
+                || recv.as_bool().is_some()
+                || recv.is_nil()
+                || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
             if is_scalar {
                 let s = self.stringify(recv, span, 0)?;
                 let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
                 return Ok(());
             }
         }
-        let Value::Obj(h) = recv else {
+        let Some(h) = recv.as_obj() else {
             return Err(self.err(
                 format!("type {} has no method '{method}'", self.type_name(recv)),
                 span,
@@ -1140,7 +1149,7 @@ impl Vm {
             let items = self.drain_iterable(recv, span)?;
             self.pop(); // unroot receiver
             let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
-            self.push(Value::Obj(cursor));
+            self.push(Value::obj(cursor));
             return Ok(());
         }
         // Core-type methods (M6): built-in methods on `str` / `list`. Handled before the clone-match
@@ -1510,7 +1519,7 @@ impl Vm {
         // ROOT the source list on the operand stack: a method receiver is popped before dispatch, so
         // an inline temporary (`make().map(..)`) is otherwise unrooted and the callback's GC could
         // collect it before we snapshot.
-        self.push(Value::Obj(src_h));
+        self.push(Value::obj(src_h));
         // Take a SNAPSHOT now (matching the interpreter): iterate the receiver's elements as of call
         // time so a callback that shrinks/grows the receiver mid-iteration neither perturbs the
         // sequence nor indexes past the live (now-shorter) Vec. The snapshot is heap-allocated and
@@ -1522,7 +1531,7 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        self.push(Value::obj(snap_h)); // ROOT the snapshot
         let n = match self.heap.get(snap_h) {
             Obj::List(v) => v.len(),
             _ => unreachable!(),
@@ -1541,7 +1550,7 @@ impl Vm {
                 let is_filter = method == "filter";
                 // ROOT the result list too.
                 let res_h = self.heap.alloc(Obj::List(Vec::new()));
-                self.push(Value::Obj(res_h));
+                self.push(Value::obj(res_h));
                 for i in 0..n {
                     // Read from the rooted SNAPSHOT, not the live receiver: a callback that shrinks
                     // the receiver must not affect this index (stays valid, no OOB).
@@ -1552,21 +1561,21 @@ impl Vm {
                     // May GC; source, snapshot, and result lists are rooted, so elements survive.
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     if is_filter {
-                        match out {
-                            Value::Bool(true) => {
+                        match out.as_bool() {
+                            Some(true) => {
                                 if let Obj::List(items) = self.heap.get_mut(res_h) {
                                     items.push(elem);
                                 }
                             }
-                            Value::Bool(false) => {}
-                            other => {
+                            Some(false) => {}
+                            None => {
                                 self.pop(); // unroot result
                                 self.pop(); // unroot snapshot
                                 self.pop(); // unroot source
                                 return Err(self.err(
                                     format!(
                                         "filter predicate must return bool, got {}",
-                                        self.type_name(other)
+                                        self.type_name(out)
                                     ),
                                     span,
                                 ));
@@ -1579,7 +1588,7 @@ impl Vm {
                 self.pop(); // unroot result
                 self.pop(); // unroot snapshot
                 self.pop(); // unroot source
-                Ok(Value::Obj(res_h))
+                Ok(Value::obj(res_h))
             }
             "fold" => {
                 if args.len() != 2 {
@@ -1627,7 +1636,7 @@ impl Vm {
                 let f = args.swap_remove(0);
                 let is_drop = method == "drop_while";
                 let res_h = self.heap.alloc(Obj::List(Vec::new()));
-                self.push(Value::Obj(res_h)); // ROOT the result list
+                self.push(Value::obj(res_h)); // ROOT the result list
                 let mut cut = n; // first index where pred is false (n = all-true)
                 for i in 0..n {
                     let elem = match self.heap.get(snap_h) {
@@ -1635,24 +1644,24 @@ impl Vm {
                         _ => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                    match out {
-                        Value::Bool(true) => {
+                    match out.as_bool() {
+                        Some(true) => {
                             if !is_drop && let Obj::List(items) = self.heap.get_mut(res_h) {
                                 items.push(elem);
                             }
                         }
-                        Value::Bool(false) => {
+                        Some(false) => {
                             cut = i;
                             break;
                         }
-                        other => {
+                        None => {
                             self.pop(); // unroot result
                             self.pop(); // unroot snapshot
                             self.pop(); // unroot source
                             return Err(self.err(
                                 format!(
                                     "{method} predicate must return bool, got {}",
-                                    self.type_name(other)
+                                    self.type_name(out)
                                 ),
                                 span,
                             ));
@@ -1674,7 +1683,7 @@ impl Vm {
                 self.pop(); // unroot result
                 self.pop(); // unroot snapshot
                 self.pop(); // unroot source
-                Ok(Value::Obj(res_h))
+                Ok(Value::obj(res_h))
             }
             // count: number of snapshot elements satisfying `pred`. position: index of the FIRST
             // match as Option[int] (short-circuits), else None.
@@ -1697,22 +1706,22 @@ impl Vm {
                         _ => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                    match out {
-                        Value::Bool(true) => {
+                    match out.as_bool() {
+                        Some(true) => {
                             if is_pos {
                                 found = Some(i);
                                 break;
                             }
                             count += 1;
                         }
-                        Value::Bool(false) => {}
-                        other => {
+                        Some(false) => {}
+                        None => {
                             self.pop(); // unroot snapshot
                             self.pop(); // unroot source
                             return Err(self.err(
                                 format!(
                                     "{method} predicate must return bool, got {}",
-                                    self.type_name(other)
+                                    self.type_name(out)
                                 ),
                                 span,
                             ));
@@ -1723,11 +1732,11 @@ impl Vm {
                 self.pop(); // unroot source
                 if is_pos {
                     Ok(match found {
-                        Some(i) => self.alloc_enum("Option", "Some", vec![Value::Int(i as i64)]),
+                        Some(i) => self.alloc_enum("Option", "Some", vec![Value::int(i as i64)]),
                         None => self.alloc_enum("Option", "None", vec![]),
                     })
                 } else {
-                    Ok(Value::Int(count))
+                    Ok(Value::int(count))
                 }
             }
             _ => unreachable!("list_hof called with non-HOF method {method}"),
@@ -1756,7 +1765,7 @@ impl Vm {
         // Root the source list itself: a method receiver is popped before dispatch, so an inline
         // temporary (`make().sort_by(...)`) is otherwise unrooted and the comparator's GC could
         // collect it before the write-back.
-        self.push(Value::Obj(src_h));
+        self.push(Value::obj(src_h));
         // Sort a SNAPSHOT taken now (matching the interpreter): a comparator that mutates the source
         // list mid-sort must not perturb the ordering, and its mutations are discarded by the final
         // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
@@ -1768,7 +1777,7 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        self.push(Value::obj(snap_h)); // ROOT the snapshot
         let n = match self.heap.get(snap_h) {
             Obj::List(v) => v.len(),
             _ => unreachable!(),
@@ -1791,7 +1800,7 @@ impl Vm {
         }
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 
     /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
@@ -1844,12 +1853,13 @@ impl Vm {
         b: Value,
         span: Span,
     ) -> Result<i64, RuntimeError> {
-        match self.guarded(|vm| vm.invoke_value(cmp, vec![a, b], span))? {
-            Value::Int(n) => Ok(n),
-            other => Err(self.err(
+        let res = self.guarded(|vm| vm.invoke_value(cmp, vec![a, b], span))?;
+        match self.int_val(res) {
+            Some(n) => Ok(n),
+            None => Err(self.err(
                 format!(
                     "sort_by comparator must return int, got {}",
-                    self.type_name(other)
+                    self.type_name(res)
                 ),
                 span,
             )),
@@ -1874,7 +1884,7 @@ impl Vm {
             ));
         }
         let f = args.swap_remove(0);
-        self.push(Value::Obj(src_h)); // ROOT the source list
+        self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
             let elems = match self.heap.get(src_h) {
                 Obj::List(v) => v.clone(),
@@ -1882,7 +1892,7 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        self.push(Value::obj(snap_h)); // ROOT the snapshot
         let n = match self.heap.get(snap_h) {
             Obj::List(v) => v.len(),
             _ => unreachable!(),
@@ -1890,7 +1900,7 @@ impl Vm {
         // Compute keys once per element into a rooted list. Each `invoke_value` may GC; already-pushed
         // keys survive because `keys_h` is rooted (a `Vec::push` into it does not itself GC).
         let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
-        self.push(Value::Obj(keys_h)); // ROOT the keys
+        self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
             let e = match self.heap.get(snap_h) {
                 Obj::List(v) => v[i],
@@ -1930,7 +1940,7 @@ impl Vm {
         self.pop(); // unroot keys
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 
     /// `xs.min()` / `xs.max()` — the extremal element by natural order. A Comparable-struct element's
@@ -1956,7 +1966,7 @@ impl Vm {
         // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
         // indexing the live source post-user-code would panic out of bounds. GC-rooted so its elements
         // survive `order_key`'s struct-compare allocations.
-        self.push(Value::Obj(src_h)); // ROOT the source list
+        self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
             let elems = match self.heap.get(src_h) {
                 Obj::List(v) => v.clone(),
@@ -1964,7 +1974,7 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        self.push(Value::obj(snap_h)); // ROOT the snapshot
         let mut best = 0usize;
         let mut err = None;
         for i in 1..n {
@@ -2025,7 +2035,7 @@ impl Vm {
         if n == 0 {
             return Err(self.err(format!("{name}() of empty list"), span));
         }
-        self.push(Value::Obj(src_h)); // ROOT the source list
+        self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
             let elems = match self.heap.get(src_h) {
                 Obj::List(v) => v.clone(),
@@ -2033,9 +2043,9 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot
+        self.push(Value::obj(snap_h)); // ROOT the snapshot
         let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
-        self.push(Value::Obj(keys_h)); // ROOT the keys
+        self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
             let e = match self.heap.get(snap_h) {
                 Obj::List(v) => v[i],
@@ -2138,7 +2148,7 @@ impl Vm {
         b: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
-        if let (Value::Obj(ha), Value::Obj(hb)) = (a, b)
+        if let (Some(ha), Some(hb)) = (a.as_obj(), b.as_obj())
             && matches!(self.heap.get(ha), Obj::Struct { .. })
             && matches!(self.heap.get(hb), Obj::Struct { .. })
         {
@@ -2149,15 +2159,17 @@ impl Vm {
         // float pair, including `-0.0`/`+0.0` (which `partial_cmp` ranks Equal but `total_cmp` orders
         // `-0.0 < +0.0`) and NaN (deterministic, to one end). Int keys deliberately stay on the int
         // path below (`Int.cmp`): routing them through `as_f64` would lose precision past 2^53.
-        if let (Value::Float(x), Value::Float(y)) = (a, b) {
-            return Ok(x.total_cmp(&y));
+        if a.is_float() && b.is_float() {
+            return Ok(self.float_of(a).total_cmp(&self.float_of(b)));
         }
         match self.compare(a, b) {
             Some(ord) => Ok(ord),
             // Numeric `None` means a NaN float — handled above for the Float/Float case; this arm
             // only catches a mixed int/float key pair (not reachable for a single key type K), kept
             // deterministic via `total_cmp` for safety.
-            None if is_numeric(a) && is_numeric(b) => Ok(as_f64(a).total_cmp(&as_f64(b))),
+            None if self.is_numeric(a) && self.is_numeric(b) => {
+                Ok(self.as_f64(a).total_cmp(&self.as_f64(b)))
+            }
             // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
             None => Err(self.err(
                 format!(
@@ -2181,21 +2193,12 @@ impl Vm {
         arg: Value,
         span: Span,
     ) -> Result<Vec<Value>, RuntimeError> {
-        match arg {
-            Value::Obj(ah) => match self.heap.get(ah) {
-                Obj::List(items) => Ok(items.clone()),
-                _ => Err(self.err(
-                    format!(
-                        "{method}() expects a list argument, got {}",
-                        self.type_name(arg)
-                    ),
-                    span,
-                )),
-            },
-            other => Err(self.err(
+        match arg.as_obj().map(|ah| self.heap.get(ah)) {
+            Some(Obj::List(items)) => Ok(items.clone()),
+            _ => Err(self.err(
                 format!(
                     "{method}() expects a list argument, got {}",
-                    self.type_name(other)
+                    self.type_name(arg)
                 ),
                 span,
             )),
@@ -2235,12 +2238,12 @@ impl Vm {
 
     /// An `int` method-argument, with a uniform type error matching the interp.
     pub(super) fn int_arg(&self, method: &str, v: &Value, span: Span) -> Result<i64, RuntimeError> {
-        match v {
-            Value::Int(n) => Ok(*n),
-            other => Err(self.err(
+        match self.int_val(*v) {
+            Some(n) => Ok(n),
+            None => Err(self.err(
                 format!(
                     "{method}() expects an int argument, got {}",
-                    self.type_name(*other)
+                    self.type_name(*v)
                 ),
                 span,
             )),
@@ -2256,21 +2259,12 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         // A str argument's owned text, with a uniform type error matching the interp.
         let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
-            match args[i] {
-                Value::Obj(ah) => match vm.heap.get(ah) {
-                    Obj::Str(a) => Ok(a.to_string()),
-                    _ => Err(vm.err(
-                        format!(
-                            "{method}() expects a str argument, got {}",
-                            vm.type_name(args[i])
-                        ),
-                        span,
-                    )),
-                },
-                other => Err(vm.err(
+            match args[i].as_obj().map(|ah| vm.heap.get(ah)) {
+                Some(Obj::Str(a)) => Ok(a.to_string()),
+                _ => Err(vm.err(
                     format!(
                         "{method}() expects a str argument, got {}",
-                        vm.type_name(other)
+                        vm.type_name(args[i])
                     ),
                     span,
                 )),
@@ -2282,7 +2276,7 @@ impl Vm {
                 match method {
                     "len" => {
                         self.arity_err("len", args, 0, span)?;
-                        Ok(Value::Int(s.chars().count() as i64))
+                        Ok(Value::int(s.chars().count() as i64))
                     }
                     "upper" => {
                         self.arity_err("upper", args, 0, span)?;
@@ -2308,31 +2302,31 @@ impl Vm {
                             .split(sep.as_str())
                             .map(|p| self.alloc_str(p.to_string()))
                             .collect();
-                        Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
                     }
                     "chars" => {
                         self.arity_err("chars", args, 0, span)?;
                         let cs: Vec<Value> = s.chars().map(|c| self.alloc_char(c)).collect();
-                        Ok(Value::Obj(self.heap.alloc(Obj::List(cs))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(cs))))
                     }
                     "starts_with" => {
                         self.arity_err("starts_with", args, 1, span)?;
-                        Ok(Value::Bool(s.starts_with(str_arg(self, 0)?.as_str())))
+                        Ok(Value::bool(s.starts_with(str_arg(self, 0)?.as_str())))
                     }
                     "contains" => {
                         self.arity_err("contains", args, 1, span)?;
-                        Ok(Value::Bool(s.contains(str_arg(self, 0)?.as_str())))
+                        Ok(Value::bool(s.contains(str_arg(self, 0)?.as_str())))
                     }
                     // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out
                     // into a new immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
                     "encode" => {
                         self.arity_err("encode", args, 0, span)?;
                         let bytes = s.as_bytes().to_vec().into_boxed_slice();
-                        Ok(Value::Obj(self.heap.alloc(Obj::Bytes(bytes))))
+                        Ok(Value::obj(self.heap.alloc(Obj::Bytes(bytes))))
                     }
                     "join" => {
                         self.arity_err("join", args, 1, span)?;
-                        let Value::Obj(lh) = args[0] else {
+                        let Some(lh) = args[0].as_obj() else {
                             return Err(self.err(
                                 format!(
                                     "join() expects a list of str, got {}",
@@ -2352,7 +2346,7 @@ impl Vm {
                         };
                         let mut out = String::new();
                         for (i, item) in items.clone().iter().enumerate() {
-                            let Value::Obj(ih) = item else {
+                            let Some(ih) = item.as_obj() else {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
@@ -2361,7 +2355,7 @@ impl Vm {
                                     span,
                                 ));
                             };
-                            let Obj::Str(part) = self.heap.get(*ih) else {
+                            let Obj::Str(part) = self.heap.get(ih) else {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
@@ -2382,7 +2376,7 @@ impl Vm {
                     // (see std/string.chz) and to the interp arms.
                     "ends_with" => {
                         self.arity_err("ends_with", args, 1, span)?;
-                        Ok(Value::Bool(s.ends_with(str_arg(self, 0)?.as_str())))
+                        Ok(Value::bool(s.ends_with(str_arg(self, 0)?.as_str())))
                     }
                     "replace" => {
                         self.arity_err("replace", args, 2, span)?;
@@ -2494,11 +2488,11 @@ impl Vm {
                         let sub = str_arg(self, 0)?;
                         // std.string: empty -> 0; otherwise the CODEPOINT index (not byte offset).
                         if sub.is_empty() {
-                            Ok(Value::Int(0))
+                            Ok(Value::int(0))
                         } else {
                             match s.find(sub.as_str()) {
-                                Some(byte) => Ok(Value::Int(s[..byte].chars().count() as i64)),
-                                None => Ok(Value::Int(-1)),
+                                Some(byte) => Ok(Value::int(s[..byte].chars().count() as i64)),
+                                None => Ok(Value::int(-1)),
                             }
                         }
                     }
@@ -2507,9 +2501,9 @@ impl Vm {
                         let sub = str_arg(self, 0)?;
                         // std.string: empty -> 0; otherwise non-overlapping count.
                         if sub.is_empty() {
-                            Ok(Value::Int(0))
+                            Ok(Value::int(0))
                         } else {
-                            Ok(Value::Int(s.matches(sub.as_str()).count() as i64))
+                            Ok(Value::int(s.matches(sub.as_str()).count() as i64))
                         }
                     }
                     "strip_prefix" => {
@@ -2530,7 +2524,7 @@ impl Vm {
                             .split('\n')
                             .map(|p| self.alloc_str(p.to_string()))
                             .collect();
-                        Ok(Value::Obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
                     }
                     // `strip` is a trim alias.
                     "strip" => {
@@ -2541,14 +2535,20 @@ impl Vm {
                     "to_int" => {
                         self.arity_err("to_int", args, 0, span)?;
                         match s.trim().parse::<i64>() {
-                            Ok(n) => Ok(self.alloc_enum("Option", "Some", vec![Value::Int(n)])),
+                            Ok(n) => {
+                                let nv = self.make_int(n);
+                                Ok(self.alloc_enum("Option", "Some", vec![nv]))
+                            }
                             Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
                     "to_float" => {
                         self.arity_err("to_float", args, 0, span)?;
                         match s.trim().parse::<f64>() {
-                            Ok(f) => Ok(self.alloc_enum("Option", "Some", vec![Value::Float(f)])),
+                            Ok(f) => {
+                                let fv = self.box_float(f);
+                                Ok(self.alloc_enum("Option", "Some", vec![fv]))
+                            }
                             Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
@@ -2557,7 +2557,10 @@ impl Vm {
                     "parse_int" => {
                         self.arity_err("parse_int", args, 0, span)?;
                         match s.trim().parse::<i64>() {
-                            Ok(n) => Ok(self.alloc_enum("Result", "Ok", vec![Value::Int(n)])),
+                            Ok(n) => {
+                                let nv = self.make_int(n);
+                                Ok(self.alloc_enum("Result", "Ok", vec![nv]))
+                            }
                             Err(_) => {
                                 let msg =
                                     self.alloc_str(format!("cannot parse '{s}' as an integer"));
@@ -2568,7 +2571,10 @@ impl Vm {
                     "parse_float" => {
                         self.arity_err("parse_float", args, 0, span)?;
                         match s.trim().parse::<f64>() {
-                            Ok(f) => Ok(self.alloc_enum("Result", "Ok", vec![Value::Float(f)])),
+                            Ok(f) => {
+                                let fv = self.box_float(f);
+                                Ok(self.alloc_enum("Result", "Ok", vec![fv]))
+                            }
                             Err(_) => {
                                 let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
                                 Ok(self.alloc_enum("Result", "Err", vec![msg]))
@@ -2578,272 +2584,276 @@ impl Vm {
                     _ => Err(self.err(format!("type str has no method '{method}'"), span)),
                 }
             }
-            Obj::List(items) => match method {
-                "len" => {
-                    self.arity_err("len", args, 0, span)?;
-                    Ok(Value::Int(items.len() as i64))
-                }
-                "push" => {
-                    self.arity_err("push", args, 1, span)?;
-                    let v = args[0];
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    items.push(v);
-                    Ok(Value::Nil)
-                }
-                "pop" => {
-                    self.arity_err("pop", args, 0, span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    let popped = items.pop();
-                    // M19 lever #2 — route through `alloc_enum` so the dense `variant_id` is stamped
-                    // (replacing the two ad-hoc per-instance `Box<str>` builds).
-                    Ok(match popped {
-                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                        None => self.alloc_enum("Option", "None", vec![]),
-                    })
-                }
-                "reverse" => {
-                    self.arity_err("reverse", args, 0, span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    items.reverse();
-                    Ok(Value::Nil)
-                }
-                "sort" => {
-                    self.arity_err("sort", args, 0, span)?;
-                    // In place, ascending. Checker guarantees a homogeneous orderable element type.
-                    // A list of Comparable structs orders via each struct's `compare` (engine
-                    // re-entry, so a merge sort that holds `&mut self`); primitives use the faster
-                    // `value_order`. Str elements live on the heap, so `value_order` needs
-                    // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
-                    // primitive path), then write back.
-                    let is_struct = matches!(items.first(), Some(Value::Obj(hh)) if matches!(self.heap.get(*hh), Obj::Struct { .. }));
-                    if is_struct {
-                        // Struct compare re-enters the VM (may GC) → rooted, index-based sort.
-                        return self.list_sort_structs(h, span);
+            Obj::List(items) => {
+                match method {
+                    "len" => {
+                        self.arity_err("len", args, 0, span)?;
+                        Ok(Value::int(items.len() as i64))
                     }
-                    let mut elems = items.clone();
-                    elems.sort_by(|a, b| self.value_order(*a, *b));
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    *items = elems;
-                    Ok(Value::Nil)
-                }
-                "contains" => {
-                    self.arity_err("contains", args, 1, span)?;
-                    let target = args[0];
-                    let elems = items.clone();
-                    Ok(Value::Bool(
-                        elems.iter().any(|v| self.values_equal(*v, target)),
-                    ))
-                }
-                "index_of" => {
-                    self.arity_err("index_of", args, 1, span)?;
-                    let target = args[0];
-                    let elems = items.clone();
-                    let idx = elems.iter().position(|v| self.values_equal(*v, target));
-                    Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
-                }
-                "concat" => {
-                    self.arity_err("concat", args, 1, span)?;
-                    let mut out = items.clone();
-                    out.extend(self.expect_list_obj("concat", args[0], span)?);
-                    // `out` is fully built and moved into the new Obj before any GC can run.
-                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
-                }
-                "extend" => {
-                    self.arity_err("extend", args, 1, span)?;
-                    // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
-                    let appended = self.expect_list_obj("extend", args[0], span)?;
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    items.extend(appended);
-                    Ok(Value::Nil)
-                }
-                "sum" => {
-                    self.arity_err("sum", args, 0, span)?;
-                    let any_float = items.iter().any(|v| matches!(v, Value::Float(_)));
-                    if any_float {
-                        let mut acc = 0.0_f64;
-                        for v in items.iter() {
-                            match v {
-                                Value::Int(n) => acc += *n as f64,
-                                Value::Float(f) => acc += *f,
-                                other => {
-                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(*other)), span));
+                    "push" => {
+                        self.arity_err("push", args, 1, span)?;
+                        let v = args[0];
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        items.push(v);
+                        Ok(Value::nil())
+                    }
+                    "pop" => {
+                        self.arity_err("pop", args, 0, span)?;
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        let popped = items.pop();
+                        // M19 lever #2 — route through `alloc_enum` so the dense `variant_id` is stamped
+                        // (replacing the two ad-hoc per-instance `Box<str>` builds).
+                        Ok(match popped {
+                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                            None => self.alloc_enum("Option", "None", vec![]),
+                        })
+                    }
+                    "reverse" => {
+                        self.arity_err("reverse", args, 0, span)?;
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        items.reverse();
+                        Ok(Value::nil())
+                    }
+                    "sort" => {
+                        self.arity_err("sort", args, 0, span)?;
+                        // In place, ascending. Checker guarantees a homogeneous orderable element type.
+                        // A list of Comparable structs orders via each struct's `compare` (engine
+                        // re-entry, so a merge sort that holds `&mut self`); primitives use the faster
+                        // `value_order`. Str elements live on the heap, so `value_order` needs
+                        // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
+                        // primitive path), then write back.
+                        let is_struct = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. }));
+                        if is_struct {
+                            // Struct compare re-enters the VM (may GC) → rooted, index-based sort.
+                            return self.list_sort_structs(h, span);
+                        }
+                        let mut elems = items.clone();
+                        elems.sort_by(|a, b| self.value_order(*a, *b));
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        *items = elems;
+                        Ok(Value::nil())
+                    }
+                    "contains" => {
+                        self.arity_err("contains", args, 1, span)?;
+                        let target = args[0];
+                        let elems = items.clone();
+                        Ok(Value::bool(
+                            elems.iter().any(|v| self.values_equal(*v, target)),
+                        ))
+                    }
+                    "index_of" => {
+                        self.arity_err("index_of", args, 1, span)?;
+                        let target = args[0];
+                        let elems = items.clone();
+                        let idx = elems.iter().position(|v| self.values_equal(*v, target));
+                        Ok(Value::int(idx.map(|i| i as i64).unwrap_or(-1)))
+                    }
+                    "concat" => {
+                        self.arity_err("concat", args, 1, span)?;
+                        let mut out = items.clone();
+                        out.extend(self.expect_list_obj("concat", args[0], span)?);
+                        // `out` is fully built and moved into the new Obj before any GC can run.
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                    }
+                    "extend" => {
+                        self.arity_err("extend", args, 1, span)?;
+                        // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
+                        let appended = self.expect_list_obj("extend", args[0], span)?;
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        items.extend(appended);
+                        Ok(Value::nil())
+                    }
+                    "sum" => {
+                        self.arity_err("sum", args, 0, span)?;
+                        // Clone out so `make_int`/`box_float` (which mutate the heap) don't collide with
+                        // the `items` heap borrow.
+                        let elems = items.clone();
+                        let any_float = elems.iter().any(|v| v.is_float());
+                        if any_float {
+                            let mut acc = 0.0_f64;
+                            for &v in &elems {
+                                if v.is_float() {
+                                    acc += self.float_of(v);
+                                } else if let Some(n) = self.int_val(v) {
+                                    acc += n as f64;
+                                } else {
+                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(v)), span));
                                 }
                             }
-                        }
-                        Ok(Value::Float(acc))
-                    } else {
-                        let mut acc = 0_i64;
-                        for v in items.iter() {
-                            match v {
-                                Value::Int(n) => {
-                                    acc = acc.checked_add(*n).ok_or_else(|| {
+                            Ok(self.box_float(acc))
+                        } else {
+                            let mut acc = 0_i64;
+                            for &v in &elems {
+                                if let Some(n) = self.int_val(v) {
+                                    acc = acc.checked_add(n).ok_or_else(|| {
                                         self.err("integer overflow in Add".to_string(), span)
                                     })?;
+                                } else {
+                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(v)), span));
                                 }
-                                other => {
-                                    return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(*other)), span));
+                            }
+                            Ok(self.make_int(acc))
+                        }
+                    }
+                    "first" | "last" => {
+                        self.arity_err(method, args, 0, span)?;
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        let picked = if method == "first" {
+                            items.first().copied()
+                        } else {
+                            items.last().copied()
+                        };
+                        Ok(match picked {
+                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                            None => self.alloc_enum("Option", "None", vec![]),
+                        })
+                    }
+                    "reversed" => {
+                        // A NEW list (clone then reverse) — never mutate the receiver (that is `reverse`).
+                        self.arity_err("reversed", args, 0, span)?;
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        let mut out = items.clone();
+                        out.reverse();
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                    }
+                    "insert" => {
+                        // Python-clamp: i>len appends, negatives are len-relative and clamp to 0. Never faults.
+                        self.arity_err("insert", args, 2, span)?;
+                        let Some(i) = self.int_val(args[0]) else {
+                            unreachable!()
+                        };
+                        let x = args[1];
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        let len = items.len() as i64;
+                        let idx = if i < 0 { (i + len).max(0) } else { i.min(len) } as usize;
+                        items.insert(idx, x);
+                        Ok(Value::nil())
+                    }
+                    "remove_at" => {
+                        // Returns the removed element; Python-relative negatives; true OOB faults.
+                        self.arity_err("remove_at", args, 1, span)?;
+                        let Some(i) = self.int_val(args[0]) else {
+                            unreachable!()
+                        };
+                        let Obj::List(items) = self.heap.get_mut(h) else {
+                            unreachable!()
+                        };
+                        let len = items.len();
+                        match crate::slice::norm_index(i, len) {
+                            Some(idx) => Ok(items.remove(idx)),
+                            None => {
+                                Err(self.err(format!("index {i} out of bounds (len {len})"), span))
+                            }
+                        }
+                    }
+                    // min/max may re-enter the VM (a Comparable-struct `compare` → GC), which invalidates
+                    // the `items` borrow — route to a rooted, index-based helper (mirrors `sort`'s struct path).
+                    "min" | "max" => {
+                        self.arity_err(method, args, 0, span)?;
+                        self.list_reduce_extreme(h, method == "max", span)
+                    }
+                    // unique/dedup: NEW list, never mutate the receiver. Equality via `values_equal`
+                    // (pure `&self`, no re-entry/GC — same primitive `contains` uses, works on floats),
+                    // so no rooting is needed here.
+                    "unique" | "dedup" => {
+                        self.arity_err(method, args, 0, span)?;
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        let items = items.clone();
+                        let mut out: Vec<Value> = Vec::new();
+                        if method == "dedup" {
+                            // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element iff it
+                            // differs from the previously-kept one.
+                            for v in items {
+                                if out.last().is_none_or(|&p| !self.values_equal(p, v)) {
+                                    out.push(v);
+                                }
+                            }
+                        } else {
+                            // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
+                            // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
+                            for v in items {
+                                if !out.iter().any(|&k| self.values_equal(k, v)) {
+                                    out.push(v);
                                 }
                             }
                         }
-                        Ok(Value::Int(acc))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
                     }
-                }
-                "first" | "last" => {
-                    self.arity_err(method, args, 0, span)?;
-                    let Obj::List(items) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let picked = if method == "first" {
-                        items.first().copied()
-                    } else {
-                        items.last().copied()
-                    };
-                    Ok(match picked {
-                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                        None => self.alloc_enum("Option", "None", vec![]),
-                    })
-                }
-                "reversed" => {
-                    // A NEW list (clone then reverse) — never mutate the receiver (that is `reverse`).
-                    self.arity_err("reversed", args, 0, span)?;
-                    let Obj::List(items) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let mut out = items.clone();
-                    out.reverse();
-                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
-                }
-                "insert" => {
-                    // Python-clamp: i>len appends, negatives are len-relative and clamp to 0. Never faults.
-                    self.arity_err("insert", args, 2, span)?;
-                    let Value::Int(i) = args[0] else {
-                        unreachable!()
-                    };
-                    let x = args[1];
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    let len = items.len() as i64;
-                    let idx = if i < 0 { (i + len).max(0) } else { i.min(len) } as usize;
-                    items.insert(idx, x);
-                    Ok(Value::Nil)
-                }
-                "remove_at" => {
-                    // Returns the removed element; Python-relative negatives; true OOB faults.
-                    self.arity_err("remove_at", args, 1, span)?;
-                    let Value::Int(i) = args[0] else {
-                        unreachable!()
-                    };
-                    let Obj::List(items) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    let len = items.len();
-                    match crate::slice::norm_index(i, len) {
-                        Some(idx) => Ok(items.remove(idx)),
-                        None => Err(self.err(format!("index {i} out of bounds (len {len})"), span)),
-                    }
-                }
-                // min/max may re-enter the VM (a Comparable-struct `compare` → GC), which invalidates
-                // the `items` borrow — route to a rooted, index-based helper (mirrors `sort`'s struct path).
-                "min" | "max" => {
-                    self.arity_err(method, args, 0, span)?;
-                    self.list_reduce_extreme(h, method == "max", span)
-                }
-                // unique/dedup: NEW list, never mutate the receiver. Equality via `values_equal`
-                // (pure `&self`, no re-entry/GC — same primitive `contains` uses, works on floats),
-                // so no rooting is needed here.
-                "unique" | "dedup" => {
-                    self.arity_err(method, args, 0, span)?;
-                    let Obj::List(items) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let items = items.clone();
-                    let mut out: Vec<Value> = Vec::new();
-                    if method == "dedup" {
-                        // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element iff it
-                        // differs from the previously-kept one.
-                        for v in items {
-                            if out.last().is_none_or(|&p| !self.values_equal(p, v)) {
-                                out.push(v);
+                    // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
+                    // list is ROOTED on the operand stack and every inner handle is pushed into it
+                    // IMMEDIATELY after allocation (no intervening alloc), keeping prior inners reachable.
+                    "chunk" | "windows" => {
+                        self.arity_err(method, args, 1, span)?;
+                        let Some(n) = self.int_val(args[0]) else {
+                            unreachable!()
+                        };
+                        if n <= 0 {
+                            let what = if method == "chunk" { "chunk" } else { "window" };
+                            return Err(
+                                self.err(format!("{what} size must be positive, got {n}"), span)
+                            );
+                        }
+                        let n = n as usize;
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        let items = items.clone();
+                        let len = items.len();
+                        let outer = self.heap.alloc(Obj::List(Vec::new()));
+                        self.push(Value::obj(outer)); // ROOT the outer list across inner allocs
+                        if method == "chunk" {
+                            let mut start = 0;
+                            while start < len {
+                                let end = (start + n).min(len);
+                                let inner = self.heap.alloc(Obj::List(items[start..end].to_vec()));
+                                if let Obj::List(o) = self.heap.get_mut(outer) {
+                                    o.push(Value::obj(inner));
+                                }
+                                start = end;
+                            }
+                        } else if n <= len {
+                            // windows: `n > len` → no windows → empty outer list (loop skipped).
+                            for start in 0..=len - n {
+                                let inner =
+                                    self.heap.alloc(Obj::List(items[start..start + n].to_vec()));
+                                if let Obj::List(o) = self.heap.get_mut(outer) {
+                                    o.push(Value::obj(inner));
+                                }
                             }
                         }
-                    } else {
-                        // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
-                        // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
-                        for v in items {
-                            if !out.iter().any(|&k| self.values_equal(k, v)) {
-                                out.push(v);
-                            }
-                        }
+                        self.pop(); // unroot outer
+                        Ok(Value::obj(outer))
                     }
-                    Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                    _ => Err(self.err(format!("type list has no method '{method}'"), span)),
                 }
-                // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
-                // list is ROOTED on the operand stack and every inner handle is pushed into it
-                // IMMEDIATELY after allocation (no intervening alloc), keeping prior inners reachable.
-                "chunk" | "windows" => {
-                    self.arity_err(method, args, 1, span)?;
-                    let Value::Int(n) = args[0] else {
-                        unreachable!()
-                    };
-                    if n <= 0 {
-                        let what = if method == "chunk" { "chunk" } else { "window" };
-                        return Err(
-                            self.err(format!("{what} size must be positive, got {n}"), span)
-                        );
-                    }
-                    let n = n as usize;
-                    let Obj::List(items) = self.heap.get(h) else {
-                        unreachable!()
-                    };
-                    let items = items.clone();
-                    let len = items.len();
-                    let outer = self.heap.alloc(Obj::List(Vec::new()));
-                    self.push(Value::Obj(outer)); // ROOT the outer list across inner allocs
-                    if method == "chunk" {
-                        let mut start = 0;
-                        while start < len {
-                            let end = (start + n).min(len);
-                            let inner = self.heap.alloc(Obj::List(items[start..end].to_vec()));
-                            if let Obj::List(o) = self.heap.get_mut(outer) {
-                                o.push(Value::Obj(inner));
-                            }
-                            start = end;
-                        }
-                    } else if n <= len {
-                        // windows: `n > len` → no windows → empty outer list (loop skipped).
-                        for start in 0..=len - n {
-                            let inner =
-                                self.heap.alloc(Obj::List(items[start..start + n].to_vec()));
-                            if let Obj::List(o) = self.heap.get_mut(outer) {
-                                o.push(Value::Obj(inner));
-                            }
-                        }
-                    }
-                    self.pop(); // unroot outer
-                    Ok(Value::Obj(outer))
-                }
-                _ => Err(self.err(format!("type list has no method '{method}'"), span)),
-            },
+            }
             Obj::Map(m) => match method {
                 "len" => {
                     self.arity_err("len", args, 0, span)?;
-                    Ok(Value::Int(m.entries.len() as i64))
+                    Ok(Value::int(m.entries.len() as i64))
                 }
                 "has" => {
                     self.arity_err("has", args, 1, span)?;
                     let key = args[0];
-                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -2851,12 +2861,12 @@ impl Vm {
                         .candidates(hk)
                         .iter()
                         .any(|&p| self.values_equal(m.entries[p].1, key));
-                    Ok(Value::Bool(found))
+                    Ok(Value::bool(found))
                 }
                 "get" => {
                     self.arity_err("get", args, 1, span)?;
                     let key = args[0];
-                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -2874,17 +2884,17 @@ impl Vm {
                 "keys" => {
                     self.arity_err("keys", args, 0, span)?;
                     let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
-                    Ok(Value::Obj(self.heap.alloc(Obj::List(keys))))
+                    Ok(Value::obj(self.heap.alloc(Obj::List(keys))))
                 }
                 "values" => {
                     self.arity_err("values", args, 0, span)?;
                     let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
-                    Ok(Value::Obj(self.heap.alloc(Obj::List(vals))))
+                    Ok(Value::obj(self.heap.alloc(Obj::List(vals))))
                 }
                 "remove" => {
                     self.arity_err("remove", args, 1, span)?;
                     let key = args[0];
-                    let hk = self.hash_key_rooted(key, &[Value::Obj(h), key], span)?;
+                    let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -2908,24 +2918,13 @@ impl Vm {
                     self.arity_err(method, args, 1, span)?;
                     // Snapshot the incoming entries (with their cached hashes — engine-wide
                     // consistent, so reuse is sound) first; handles `m.merge(m)`/`m.update(m)`.
-                    let incoming = match args[0] {
-                        Value::Obj(oh) => match self.heap.get(oh) {
-                            Obj::Map(o) => o.entries.clone(),
-                            _ => {
-                                return Err(self.err(
-                                    format!(
-                                        "{method}() expects a map argument, got {}",
-                                        self.type_name(args[0])
-                                    ),
-                                    span,
-                                ));
-                            }
-                        },
-                        other => {
+                    let incoming = match args[0].as_obj().map(|oh| self.heap.get(oh)) {
+                        Some(Obj::Map(o)) => o.entries.clone(),
+                        _ => {
                             return Err(self.err(
                                 format!(
                                     "{method}() expects a map argument, got {}",
-                                    self.type_name(other)
+                                    self.type_name(args[0])
                                 ),
                                 span,
                             ));
@@ -2962,12 +2961,12 @@ impl Vm {
                             }
                         }
                         // `out` is fully built and moved into the new Obj before any GC can run.
-                        Ok(Value::Obj(self.heap.alloc(Obj::Map(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
                     } else {
                         for (hk, key, val) in incoming {
                             self.map_upsert_in_heap(h, hk, key, val);
                         }
-                        Ok(Value::Nil)
+                        Ok(Value::nil())
                     }
                 }
                 _ => Err(self.err(format!("type map has no method '{method}'"), span)),
@@ -2975,16 +2974,16 @@ impl Vm {
             Obj::Set(s) => match method {
                 "len" => {
                     self.arity_err("len", args, 0, span)?;
-                    Ok(Value::Int(s.entries.len() as i64))
+                    Ok(Value::int(s.entries.len() as i64))
                 }
                 "has" => {
                     self.arity_err("has", args, 1, span)?;
                     let x = args[0];
-                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    Ok(Value::Bool(
+                    Ok(Value::bool(
                         s.candidates(hx)
                             .iter()
                             .any(|&p| self.values_equal(s.entries[p].1, x)),
@@ -2993,7 +2992,7 @@ impl Vm {
                 "add" => {
                     self.arity_err("add", args, 1, span)?;
                     let x = args[0];
-                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -3011,12 +3010,12 @@ impl Vm {
                         };
                         s.push(hx, x);
                     }
-                    Ok(Value::Nil)
+                    Ok(Value::nil())
                 }
                 "remove" => {
                     self.arity_err("remove", args, 1, span)?;
                     let x = args[0];
-                    let hx = self.hash_key_rooted(x, &[Value::Obj(h), x], span)?;
+                    let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -3031,9 +3030,9 @@ impl Vm {
                                 unreachable!()
                             };
                             s.remove_at(i);
-                            Ok(Value::Bool(true))
+                            Ok(Value::bool(true))
                         }
-                        None => Ok(Value::Bool(false)),
+                        None => Ok(Value::bool(false)),
                     }
                 }
                 "union" | "intersection" | "difference" => {
@@ -3076,7 +3075,7 @@ impl Vm {
                             }
                         }
                     }
-                    Ok(Value::Obj(self.heap.alloc(Obj::Set(out))))
+                    Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                 }
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),
             },
@@ -3102,21 +3101,21 @@ impl Vm {
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                Ok(Value::Int(b.len() as i64))
+                Ok(Value::int(b.len() as i64))
             }
             "push" => {
                 self.arity_err("push", args, 1, span)?;
-                let byte = match args[0] {
-                    Value::Int(n) if (0..=255).contains(&n) => n as u8,
-                    Value::Int(n) => {
+                let byte = match self.int_val(args[0]) {
+                    Some(n) if (0..=255).contains(&n) => n as u8,
+                    Some(n) => {
                         return Err(self.err(
                             format!("byte value {n} out of range (must be 0..=255)"),
                             span,
                         ));
                     }
-                    other => {
+                    None => {
                         return Err(self.err(
-                            format!("push() expects an int, got {}", self.type_name(other)),
+                            format!("push() expects an int, got {}", self.type_name(args[0])),
                             span,
                         ));
                     }
@@ -3125,7 +3124,7 @@ impl Vm {
                     unreachable!()
                 };
                 b.push(byte);
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "pop" => {
                 self.arity_err("pop", args, 0, span)?;
@@ -3134,7 +3133,7 @@ impl Vm {
                 };
                 let popped = b.pop();
                 Ok(match popped {
-                    Some(x) => self.alloc_enum("Option", "Some", vec![Value::Int(x as i64)]),
+                    Some(x) => self.alloc_enum("Option", "Some", vec![Value::int(x as i64)]),
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
@@ -3147,7 +3146,7 @@ impl Vm {
                     unreachable!()
                 };
                 b.extend_from_slice(&appended);
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
             // fault (catchable by `recover:`), never a panic — mirrors the bytes path + the interp.
@@ -3186,7 +3185,7 @@ impl Vm {
                 let Obj::Bytes(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                Ok(Value::Int(b.len() as i64))
+                Ok(Value::int(b.len() as i64))
             }
             _ => Err(self.err(format!("type bytes has no method '{method}'"), span)),
         }
@@ -3210,17 +3209,8 @@ impl Vm {
         method: &str,
         span: Span,
     ) -> Result<SetData, RuntimeError> {
-        match v {
-            Value::Obj(h) => match self.heap.get(h) {
-                Obj::Set(s) => Ok(s.clone()),
-                _ => Err(self.err(
-                    format!(
-                        "{method}() expects a set argument, got {}",
-                        self.type_name(v)
-                    ),
-                    span,
-                )),
-            },
+        match v.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::Set(s)) => Ok(s.clone()),
             _ => Err(self.err(
                 format!(
                     "{method}() expects a set argument, got {}",
@@ -3233,7 +3223,7 @@ impl Vm {
 
     /// Allocate a heap string and return its handle as a `Value`.
     pub(super) fn alloc_str(&mut self, s: String) -> Value {
-        Value::Obj(self.heap.alloc(Obj::Str(s.into())))
+        Value::obj(self.heap.alloc(Obj::Str(s.into())))
     }
 
     /// M19 Phase 3 — the 1-char `str` value for `c`, in a single allocation. `c.to_string()` +
@@ -3241,7 +3231,7 @@ impl Vm {
     /// into a stack buffer and boxing the `&str` is one. Used by string indexing/iteration/`chr`.
     pub(super) fn alloc_char(&mut self, c: char) -> Value {
         let mut buf = [0u8; 4];
-        Value::Obj(
+        Value::obj(
             self.heap
                 .alloc(Obj::Str((&*c.encode_utf8(&mut buf)).into())),
         )

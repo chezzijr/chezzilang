@@ -408,3 +408,35 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(src), "12\n0\n4\n2\n");
 }
+
+/// A boxed float (its own Float tag — 8B-`Value` milestone) held ONLY inside a list must be traced
+/// by `children()`/`gc_roots` (via `Value::child_gcref`, which must match the Float tag as well as
+/// the Obj tag) or it is swept while live — a silent use-after-free surfacing only under GC pressure.
+/// Build a list of floats, stress-collect between allocations, then read them back.
+#[test]
+fn boxed_float_in_list_survives_collect() {
+    let src = "\
+fn main():
+    xs := [1.5, 2.5, 3.5]
+    junk := [str(1), str(2), str(3), str(4)]
+    more := [str(5), str(6)]
+    print(xs[0] + xs[1] + xs[2])
+main()";
+    assert_eq!(run_capture_stress(src), "7.5\n");
+}
+
+/// A boxed big-int (`Obj::BigInt`, > 2^62) held only inside a list survives GC stress too.
+#[test]
+fn boxed_bigint_in_list_survives_collect() {
+    let src = "\
+fn main():
+    xs := [4611686018427387905, 4611686018427387906]
+    junk := [str(1), str(2), str(3)]
+    print(xs[0])
+    print(xs[1])
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "4611686018427387905\n4611686018427387906\n"
+    );
+}

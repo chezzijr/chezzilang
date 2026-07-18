@@ -4,6 +4,85 @@
 use super::*;
 
 impl Vm {
+    // ===== 8-byte `Value` boxing helpers =====
+    //
+    // An i64 outside ±2^62 is heap-boxed as `Obj::BigInt` (an Obj-tagged `Value`); a float is
+    // heap-boxed as `Obj::FloatBox` (a Float-tagged `Value`). These are the ONLY producers of
+    // wide-int / float `Value`s and the canonical readers. The inline-int fast path stays first in
+    // every reader so the int-heavy hot loops never touch the heap.
+
+    /// Make an int `Value`: inline if in ±2^62, else box as `Obj::BigInt`. The single guard that
+    /// keeps the canonical-representation invariant (an i64 is inline XOR boxed, never both).
+    #[inline]
+    pub(super) fn make_int(&mut self, n: i64) -> Value {
+        if (Value::INT_MIN_INLINE..=Value::INT_MAX_INLINE).contains(&n) {
+            Value::int(n)
+        } else {
+            Value::obj(self.heap.alloc(Obj::BigInt(n)))
+        }
+    }
+
+    /// The i64 iff `v` is an int (inline `Int` OR boxed `BigInt`), else `None`.
+    #[inline]
+    pub(super) fn int_val(&self, v: Value) -> Option<i64> {
+        if let Some(n) = v.as_int_inline() {
+            Some(n)
+        } else if v.is_obj() {
+            if let Obj::BigInt(n) = self.heap.get(v.as_gcref()) {
+                Some(*n)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Is `v` any integer (inline or boxed big-int)?
+    #[inline]
+    pub(super) fn is_integral(&self, v: Value) -> bool {
+        v.is_int() || (v.is_obj() && matches!(self.heap.get(v.as_gcref()), Obj::BigInt(_)))
+    }
+
+    /// Unwrap an int (inline or boxed). Panics on a non-int.
+    #[inline]
+    pub(super) fn int_of(&self, v: Value) -> i64 {
+        self.int_val(v).expect("int_of on non-int")
+    }
+
+    /// Box a float as `Obj::FloatBox`, returning a Float-tagged `Value`.
+    #[inline]
+    pub(super) fn box_float(&mut self, f: f64) -> Value {
+        Value::float_ref(self.heap.alloc(Obj::FloatBox(f)))
+    }
+
+    /// Unwrap a boxed float's f64. Panics on a non-float.
+    #[inline]
+    pub(super) fn float_of(&self, v: Value) -> f64 {
+        debug_assert!(v.is_float(), "float_of on non-float");
+        if let Obj::FloatBox(f) = self.heap.get(v.as_gcref()) {
+            *f
+        } else {
+            unreachable!("float_of on non-FloatBox")
+        }
+    }
+
+    /// Is `v` a number (int inline/boxed, or a boxed float)?
+    #[inline]
+    pub(super) fn is_numeric(&self, v: Value) -> bool {
+        v.is_int() || v.is_float() || self.is_integral(v)
+    }
+
+    /// Coerce a numeric `Value` to f64 (int → f64, float → its f64). Panics on a non-numeric.
+    #[inline]
+    pub(super) fn as_f64(&self, v: Value) -> f64 {
+        if v.is_float() {
+            self.float_of(v)
+        } else {
+            self.int_of(v) as f64
+        }
+    }
+
     /// M19 Tier-2 — adaptive quickening for the un-fused generic arith/ordered-compare binops
     /// (`Add..GtEq`). `site` indexes [`Vm::quicken`]. Cold: observe the two stack operands' types once,
     /// then run the generic path. Int-specialized: take the `fast_int_bin` path (the exact int
@@ -20,7 +99,7 @@ impl Vm {
         let cffi = crate::native::cffi::Cffi::new(&def.lib, &def.name, def.params, def.ret)
             .map_err(|e| self.err(e.message, span))?;
         let h = self.heap.alloc(Obj::Cffi(std::sync::Arc::new(cffi)));
-        self.push(Value::Obj(h));
+        self.push(Value::obj(h));
         Ok(())
     }
 
@@ -34,7 +113,10 @@ impl Vm {
         match self.quicken[site] {
             Q_INT => {
                 let n = self.stack.len();
-                if let (Value::Int(x), Value::Int(y)) = (self.stack[n - 2], self.stack[n - 1]) {
+                if let (Some(x), Some(y)) = (
+                    self.stack[n - 2].as_int_inline(),
+                    self.stack[n - 1].as_int_inline(),
+                ) {
                     let v = self.fast_int_bin(x, y, kind, span)?;
                     self.stack.truncate(n - 2);
                     self.stack.push(v);
@@ -50,10 +132,8 @@ impl Vm {
             _ => {
                 // Q_COLD — record whether this site is int/int, then run the generic path this once.
                 let n = self.stack.len();
-                let both_int = matches!(
-                    (self.stack[n - 2], self.stack[n - 1]),
-                    (Value::Int(_), Value::Int(_))
-                );
+                let both_int = self.stack[n - 2].as_int_inline().is_some()
+                    && self.stack[n - 1].as_int_inline().is_some();
                 self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
                 self.run_bin_kind(kind, span)
             }
@@ -74,26 +154,27 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         if self.quicken[site] == Q_INT {
             let n = self.stack.len();
-            if let (Value::Int(x), Value::Int(y)) = (self.stack[n - 2], self.stack[n - 1]) {
+            if let (Some(x), Some(y)) = (
+                self.stack[n - 2].as_int_inline(),
+                self.stack[n - 1].as_int_inline(),
+            ) {
                 self.stack.truncate(n - 2);
                 let eq = x == y;
-                self.push(Value::Bool(eq ^ negate));
+                self.push(Value::bool(eq ^ negate));
                 return Ok(());
             }
             self.quicken[site] = Q_GENERIC; // non-int at a specialized site → deopt
         } else if self.quicken[site] == Q_COLD {
             let n = self.stack.len();
-            let both_int = matches!(
-                (self.stack[n - 2], self.stack[n - 1]),
-                (Value::Int(_), Value::Int(_))
-            );
+            let both_int = self.stack[n - 2].as_int_inline().is_some()
+                && self.stack[n - 1].as_int_inline().is_some();
             self.quicken[site] = if both_int { Q_INT } else { Q_GENERIC };
             // fall through to the generic path this first time
         }
         let r = self.pop();
         let l = self.pop();
         let eq = self.values_equal_guarded(l, r, 0, span)?;
-        self.push(Value::Bool(eq ^ negate));
+        self.push(Value::bool(eq ^ negate));
         Ok(())
     }
 
@@ -109,7 +190,7 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + a];
         let r = self.stack[self.base() + b];
-        if let (Value::Int(x), Value::Int(y)) = (l, r) {
+        if let (Some(x), Some(y)) = (l.as_int_inline(), r.as_int_inline()) {
             let v = self.fast_int_bin(x, y, kind, span)?;
             self.push(v);
         } else {
@@ -130,12 +211,12 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + slot];
-        if let Value::Int(x) = l {
+        if let Some(x) = l.as_int_inline() {
             let v = self.fast_int_bin(x, val, kind, span)?;
             self.push(v);
         } else {
             self.push(l);
-            self.push(Value::Int(val));
+            self.push(Value::int(val));
             self.run_bin_kind(kind, span)?;
         }
         Ok(())
@@ -151,22 +232,23 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let at = self.base() + slot;
-        match self.stack[at] {
-            Value::Int(x) => {
-                let v = x
-                    .checked_add(delta)
-                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
-                self.stack[at] = Value::Int(v);
-            }
-            Value::Float(f) => self.stack[at] = Value::Float(f + delta as f64),
-            other => {
-                self.push(other);
-                self.push(Value::Int(delta));
-                self.arith(&Op::Add, span)?;
-                let v = self.pop();
-                let at = self.base() + slot;
-                self.stack[at] = v;
-            }
+        let cur = self.stack[at];
+        if let Some(x) = cur.as_int_inline() {
+            let v = x
+                .checked_add(delta)
+                .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
+            self.stack[at] = self.make_int(v);
+        } else if cur.is_float() {
+            let f = self.float_of(cur);
+            self.stack[at] = self.box_float(f + delta as f64);
+        } else {
+            // A boxed big-int local, or a non-numeric — route through the exact `arith` path.
+            self.push(cur);
+            self.push(Value::int(delta));
+            self.arith(&Op::Add, span)?;
+            let v = self.pop();
+            let at = self.base() + slot;
+            self.stack[at] = v;
         }
         Ok(())
     }
@@ -175,48 +257,56 @@ impl Vm {
     /// `arith` (overflow / div-by-zero errors) and `compare_op` (ordering) for `Int` operands
     /// exactly. Anything non-`Int` never reaches here — the caller falls back to the slow path.
     pub(super) fn fast_int_bin(
-        &self,
+        &mut self,
         x: i64,
         y: i64,
         kind: crate::vm::op::BinKind,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         use crate::vm::op::BinKind;
+        // Arithmetic is computed in true i64 (overflow still faults past i64), then `make_int` boxes
+        // any result outside ±2^62 — the inline↔box fork, invisible to the program.
         let v = match kind {
-            BinKind::Add => Value::Int(
-                x.checked_add(y)
-                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?,
-            ),
-            BinKind::Sub => Value::Int(
-                x.checked_sub(y)
-                    .ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?,
-            ),
-            BinKind::Mul => Value::Int(
-                x.checked_mul(y)
-                    .ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?,
-            ),
+            BinKind::Add => {
+                let n = x
+                    .checked_add(y)
+                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
+                self.make_int(n)
+            }
+            BinKind::Sub => {
+                let n = x
+                    .checked_sub(y)
+                    .ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?;
+                self.make_int(n)
+            }
+            BinKind::Mul => {
+                let n = x
+                    .checked_mul(y)
+                    .ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?;
+                self.make_int(n)
+            }
             BinKind::Div => {
                 if y == 0 {
                     return Err(self.err("division by zero".to_string(), span));
                 }
-                Value::Int(
-                    x.checked_div(y)
-                        .ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?,
-                )
+                let n = x
+                    .checked_div(y)
+                    .ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?;
+                self.make_int(n)
             }
             BinKind::Mod => {
                 if y == 0 {
                     return Err(self.err("modulo by zero".to_string(), span));
                 }
-                Value::Int(
-                    x.checked_rem(y)
-                        .ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?,
-                )
+                let n = x
+                    .checked_rem(y)
+                    .ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?;
+                self.make_int(n)
             }
-            BinKind::Lt => Value::Bool(x < y),
-            BinKind::LtEq => Value::Bool(x <= y),
-            BinKind::Gt => Value::Bool(x > y),
-            BinKind::GtEq => Value::Bool(x >= y),
+            BinKind::Lt => Value::bool(x < y),
+            BinKind::LtEq => Value::bool(x <= y),
+            BinKind::Gt => Value::bool(x > y),
+            BinKind::GtEq => Value::bool(x >= y),
         };
         Ok(v)
     }
@@ -254,116 +344,137 @@ impl Vm {
             Op::Mod => "Mod",
             _ => unreachable!(),
         };
-        let result = match (l, r) {
-            (Value::Int(a), Value::Int(b)) => {
-                let v = match op {
-                    Op::Add => a.checked_add(b),
-                    Op::Sub => a.checked_sub(b),
-                    Op::Mul => a.checked_mul(b),
-                    Op::Div | Op::Mod if b == 0 => {
-                        return Err(self.err(
-                            format!(
-                                "{} by zero",
-                                if matches!(op, Op::Div) {
-                                    "division"
-                                } else {
-                                    "modulo"
-                                }
-                            ),
-                            span,
-                        ));
-                    }
-                    Op::Div => a.checked_div(b),
-                    Op::Mod => a.checked_rem(b),
-                    _ => unreachable!(),
-                };
-                Value::Int(v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?)
-            }
-            (a, b) if is_numeric(a) && is_numeric(b) => {
-                let (x, y) = (as_f64(a), as_f64(b));
-                // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
-                // never a fault. (The INT arm above still faults on /0 and overflow.)
-                Value::Float(match op {
-                    Op::Add => x + y,
-                    Op::Sub => x - y,
-                    Op::Mul => x * y,
-                    Op::Div => x / y,
-                    Op::Mod => x % y,
-                    _ => unreachable!(),
-                })
-            }
-            // Same-newtype arithmetic: `Meters + Meters` etc. UNWRAPS both wrappers, runs the
-            // underlying's NATIVE primitive op (identical overflow/div-by-zero/float semantics — it
-            // recurses through `self.binary` on the inners), then REWRAPS in the same newtype. This is
-            // NOT a user `add` method — it is the underlying's own op (distinct from struct
-            // overloading). The checker has rejected `Meters + float` / `Meters + Seconds`, so a
-            // mismatched pair never reaches here from typechecked code. Must precede struct_arith.
-            (Value::Obj(ha), Value::Obj(hb))
-                if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
-                    && self.same_newtype_keys(ha, hb) =>
-            {
-                self.newtype_arith(op, ha, hb, name, span)?
-            }
-            // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
-            // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
-            // conformance. Must precede the string-concat `Add` arm below (which would otherwise
-            // reject struct+struct).
-            (Value::Obj(ha), Value::Obj(hb))
-                if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
-                    && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
-                    && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
-            {
-                self.struct_arith(op, l, r, span)?
-            }
-            (Value::Obj(ha), Value::Obj(hb)) if matches!(op, Op::Add) => {
-                match (self.heap.get(ha), self.heap.get(hb)) {
-                    (Obj::Str(a), Obj::Str(b)) => {
-                        let s = format!("{a}{b}");
-                        let h = self.heap.alloc(Obj::Str(s.into()));
-                        Value::Obj(h)
-                    }
-                    // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
-                    (Obj::List(a), Obj::List(b)) => {
-                        let mut out = a.clone();
-                        out.extend(b.iter().copied());
-                        Value::Obj(self.heap.alloc(Obj::List(out)))
-                    }
-                    _ => {
-                        return Err(self.err(
-                            format!(
-                                "cannot apply {name} to {} and {}",
-                                self.type_name(l),
-                                self.type_name(r)
-                            ),
-                            span,
-                        ));
+        let result = if self.is_integral(l) && self.is_integral(r) {
+            let (a, b) = (self.int_of(l), self.int_of(r));
+            let v = match op {
+                Op::Add => a.checked_add(b),
+                Op::Sub => a.checked_sub(b),
+                Op::Mul => a.checked_mul(b),
+                Op::Div | Op::Mod if b == 0 => {
+                    return Err(self.err(
+                        format!(
+                            "{} by zero",
+                            if matches!(op, Op::Div) {
+                                "division"
+                            } else {
+                                "modulo"
+                            }
+                        ),
+                        span,
+                    ));
+                }
+                Op::Div => a.checked_div(b),
+                Op::Mod => a.checked_rem(b),
+                _ => unreachable!(),
+            };
+            let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
+            self.make_int(n)
+        } else if self.is_numeric(l) && self.is_numeric(r) {
+            let (x, y) = (self.as_f64(l), self.as_f64(r));
+            // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
+            // never a fault. (The INT arm above still faults on /0 and overflow.)
+            let f = match op {
+                Op::Add => x + y,
+                Op::Sub => x - y,
+                Op::Mul => x * y,
+                Op::Div => x / y,
+                Op::Mod => x % y,
+                _ => unreachable!(),
+            };
+            self.box_float(f)
+        } else {
+            match (l.view(), r.view()) {
+                // Same-newtype arithmetic: `Meters + Meters` etc. UNWRAPS both wrappers, runs the
+                // underlying's NATIVE primitive op (identical overflow/div-by-zero/float semantics — it
+                // recurses through `self.binary` on the inners), then REWRAPS in the same newtype. This
+                // is NOT a user `add` method — it is the underlying's own op (distinct from struct
+                // overloading). The checker has rejected `Meters + float` / `Meters + Seconds`, so a
+                // mismatched pair never reaches here from typechecked code. Must precede struct_arith.
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
+                        && self.same_newtype_keys(ha, hb) =>
+                {
+                    self.newtype_arith(op, ha, hb, name, span)?
+                }
+                // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
+                // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
+                // conformance. Must precede the string-concat `Add` arm below (which would otherwise
+                // reject struct+struct).
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
+                        && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
+                        && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
+                {
+                    self.struct_arith(op, l, r, span)?
+                }
+                (ValueView::Obj(ha), ValueView::Obj(hb)) if matches!(op, Op::Add) => {
+                    match (self.heap.get(ha), self.heap.get(hb)) {
+                        (Obj::Str(a), Obj::Str(b)) => {
+                            let s = format!("{a}{b}");
+                            let h = self.heap.alloc(Obj::Str(s.into()));
+                            Value::obj(h)
+                        }
+                        // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
+                        (Obj::List(a), Obj::List(b)) => {
+                            let mut out = a.clone();
+                            out.extend(b.iter().copied());
+                            Value::obj(self.heap.alloc(Obj::List(out)))
+                        }
+                        _ => {
+                            return Err(self.err(
+                                format!(
+                                    "cannot apply {name} to {} and {}",
+                                    self.type_name(l),
+                                    self.type_name(r)
+                                ),
+                                span,
+                            ));
+                        }
                     }
                 }
-            }
-            // Set difference (gap #3): `a - b` — identical to `.difference` (vm:7918).
-            (Value::Obj(ha), Value::Obj(hb))
-                if matches!(op, Op::Sub)
-                    && matches!(self.heap.get(ha), Obj::Set(_))
-                    && matches!(self.heap.get(hb), Obj::Set(_)) =>
-            {
-                self.set_op(SetOp::Difference, ha, hb)
-            }
-            // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative, Python-style). `n <= 0` →
-            // empty; guard capacity against the Vec overflow abort, like `str.repeat` (vm:7514).
-            (Value::Obj(ha), Value::Int(n)) | (Value::Int(n), Value::Obj(ha))
-                if matches!(op, Op::Mul) && matches!(self.heap.get(ha), Obj::List(_)) =>
-            {
-                self.list_repeat(ha, n, span)?
-            }
-            _ => {
-                return Err(self.err(
-                    format!(
-                        "cannot apply {name} to {} and {}",
-                        self.type_name(l),
-                        self.type_name(r)
-                    ),
-                    span,
-                ));
+                // Set difference (gap #3): `a - b` — identical to `.difference` (vm:7918).
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(op, Op::Sub)
+                        && matches!(self.heap.get(ha), Obj::Set(_))
+                        && matches!(self.heap.get(hb), Obj::Set(_)) =>
+                {
+                    self.set_op(SetOp::Difference, ha, hb)
+                }
+                // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative, Python-style). `n <= 0` →
+                // empty; guard capacity against the Vec overflow abort, like `str.repeat` (vm:7514).
+                (ValueView::Obj(ha), ValueView::Int(n))
+                | (ValueView::Int(n), ValueView::Obj(ha))
+                    if matches!(op, Op::Mul) && matches!(self.heap.get(ha), Obj::List(_)) =>
+                {
+                    self.list_repeat(ha, n, span)?
+                }
+                // List repeat with a boxed (>2^62) count: the count boxes as `Obj::BigInt`, so it
+                // arrives as `Obj` not `Int`. Route it to `list_repeat` (its capacity guard faults
+                // with "list repeat capacity overflow") instead of the generic "cannot apply Mul".
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(op, Op::Mul)
+                        && ((matches!(self.heap.get(ha), Obj::List(_))
+                            && matches!(self.heap.get(hb), Obj::BigInt(_)))
+                            || (matches!(self.heap.get(hb), Obj::List(_))
+                                && matches!(self.heap.get(ha), Obj::BigInt(_)))) =>
+                {
+                    let (lh, cnt) = if matches!(self.heap.get(ha), Obj::List(_)) {
+                        (ha, self.int_of(Value::obj(hb)))
+                    } else {
+                        (hb, self.int_of(Value::obj(ha)))
+                    };
+                    self.list_repeat(lh, cnt, span)?
+                }
+                _ => {
+                    return Err(self.err(
+                        format!(
+                            "cannot apply {name} to {} and {}",
+                            self.type_name(l),
+                            self.type_name(r)
+                        ),
+                        span,
+                    ));
+                }
             }
         };
         self.push(result);
@@ -384,7 +495,7 @@ impl Vm {
             unreachable!("list_repeat receiver is a list")
         };
         if n <= 0 {
-            return Ok(Value::Obj(self.heap.alloc(Obj::List(Vec::new()))));
+            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
         }
         let n = n as usize;
         // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
@@ -410,7 +521,7 @@ impl Vm {
                 for _ in 0..n {
                     out.extend(src.iter().copied());
                 }
-                Ok(Value::Obj(self.heap.alloc(Obj::List(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
             }
             None => Err(self.err("list repeat capacity overflow".to_string(), span)),
         }
@@ -477,7 +588,7 @@ impl Vm {
                 }
             }
         }
-        Value::Obj(self.heap.alloc(Obj::Set(out)))
+        Value::obj(self.heap.alloc(Obj::Set(out)))
     }
 
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
@@ -531,7 +642,7 @@ impl Vm {
             _ => unreachable!(),
         };
         let inner = self.arith_scalar(op, a, b, name, span)?;
-        Ok(Value::Obj(self.heap.alloc(Obj::NewType {
+        Ok(Value::obj(self.heap.alloc(Obj::NewType {
             type_key: key,
             inner,
         })))
@@ -541,56 +652,55 @@ impl Vm {
     /// SAME overflow / division-by-zero / float semantics as the inline `binary` arms. Shared by the
     /// newtype same-type operator path so it byte-matches a raw int/float op.
     pub(super) fn arith_scalar(
-        &self,
+        &mut self,
         op: &Op,
         a: Value,
         b: Value,
         name: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match (a, b) {
-            (Value::Int(a), Value::Int(b)) => {
-                let v = match op {
-                    Op::Add => a.checked_add(b),
-                    Op::Sub => a.checked_sub(b),
-                    Op::Mul => a.checked_mul(b),
-                    Op::Div | Op::Mod if b == 0 => {
-                        let kind = if matches!(op, Op::Div) {
-                            "division"
-                        } else {
-                            "modulo"
-                        };
-                        return Err(self.err(format!("{kind} by zero"), span));
-                    }
-                    Op::Div => a.checked_div(b),
-                    Op::Mod => a.checked_rem(b),
-                    _ => unreachable!(),
-                };
-                Ok(Value::Int(v.ok_or_else(|| {
-                    self.err(format!("integer overflow in {name}"), span)
-                })?))
-            }
-            (a, b) if is_numeric(a) && is_numeric(b) => {
-                let (x, y) = (as_f64(a), as_f64(b));
-                // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
-                // never a fault. (The INT arm above still faults on /0 and overflow.)
-                Ok(Value::Float(match op {
-                    Op::Add => x + y,
-                    Op::Sub => x - y,
-                    Op::Mul => x * y,
-                    Op::Div => x / y,
-                    Op::Mod => x % y,
-                    _ => unreachable!(),
-                }))
-            }
-            _ => Err(self.err(
+        if self.is_integral(a) && self.is_integral(b) {
+            let (a, b) = (self.int_of(a), self.int_of(b));
+            let v = match op {
+                Op::Add => a.checked_add(b),
+                Op::Sub => a.checked_sub(b),
+                Op::Mul => a.checked_mul(b),
+                Op::Div | Op::Mod if b == 0 => {
+                    let kind = if matches!(op, Op::Div) {
+                        "division"
+                    } else {
+                        "modulo"
+                    };
+                    return Err(self.err(format!("{kind} by zero"), span));
+                }
+                Op::Div => a.checked_div(b),
+                Op::Mod => a.checked_rem(b),
+                _ => unreachable!(),
+            };
+            let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
+            Ok(self.make_int(n))
+        } else if self.is_numeric(a) && self.is_numeric(b) {
+            let (x, y) = (self.as_f64(a), self.as_f64(b));
+            // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
+            // never a fault. (The INT arm above still faults on /0 and overflow.)
+            let f = match op {
+                Op::Add => x + y,
+                Op::Sub => x - y,
+                Op::Mul => x * y,
+                Op::Div => x / y,
+                Op::Mod => x % y,
+                _ => unreachable!(),
+            };
+            Ok(self.box_float(f))
+        } else {
+            Err(self.err(
                 format!(
                     "cannot apply {name} to {} and {}",
                     self.type_name(a),
                     self.type_name(b)
                 ),
                 span,
-            )),
+            ))
         }
     }
 
@@ -603,7 +713,8 @@ impl Vm {
         method: &str,
         span: Span,
     ) -> Result<(usize, GcRef), RuntimeError> {
-        let Value::Obj(h) = recv else { unreachable!() };
+        debug_assert!(recv.is_obj(), "resolve_overload_method on non-obj");
+        let h = recv.as_gcref();
         match self.heap.get(h) {
             Obj::Struct { name, .. } => {
                 let name = name.clone();
@@ -675,60 +786,62 @@ impl Vm {
             Op::Shr => "Shr",
             _ => unreachable!(),
         };
-        let result = match (l, r) {
-            (Value::Int(a), Value::Int(b)) => {
-                let v = match op {
-                    Op::BitAnd => a & b,
-                    Op::BitOr => a | b,
-                    Op::BitXor => a ^ b,
-                    Op::Shl | Op::Shr => {
-                        if !(0..64).contains(&b) {
-                            return Err(
-                                self.err(format!("shift amount {b} out of range (0..64)"), span)
-                            );
-                        }
-                        if matches!(op, Op::Shl) {
-                            // Left shift can overflow (drop high bits) like `+ - * / %`; treat
-                            // it as a recoverable fault, not a silent wrap. Round-trip test:
-                            // `(a << b) >> b == a` holds iff no significant bit was shifted out
-                            // (correct for negative operands too — `-1 << 63` round-trips).
-                            let v = a << (b as u32);
-                            if (v >> (b as u32)) != a {
-                                return Err(self.err(format!("integer overflow in {name}"), span));
-                            }
-                            v
-                        } else {
-                            a >> (b as u32)
-                        }
+        let result = if self.is_integral(l) && self.is_integral(r) {
+            let (a, b) = (self.int_of(l), self.int_of(r));
+            let v = match op {
+                Op::BitAnd => a & b,
+                Op::BitOr => a | b,
+                Op::BitXor => a ^ b,
+                Op::Shl | Op::Shr => {
+                    if !(0..64).contains(&b) {
+                        return Err(
+                            self.err(format!("shift amount {b} out of range (0..64)"), span)
+                        );
                     }
-                    _ => unreachable!(),
-                };
-                Value::Int(v)
-            }
-            // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
-            // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
-            // `.union`/`.intersection` methods; `^` has no method form. Mirrors interp.
-            (Value::Obj(ha), Value::Obj(hb))
-                if matches!(op, Op::BitOr | Op::BitAnd | Op::BitXor)
-                    && matches!(self.heap.get(ha), Obj::Set(_))
-                    && matches!(self.heap.get(hb), Obj::Set(_)) =>
-            {
-                let set_op = match op {
-                    Op::BitOr => SetOp::Union,
-                    Op::BitAnd => SetOp::Intersection,
-                    _ => SetOp::SymmetricDifference,
-                };
-                self.set_op(set_op, ha, hb)
-            }
-            _ => {
-                return Err(self.err(
-                    format!(
-                        "cannot apply {name} to {} and {}",
-                        self.type_name(l),
-                        self.type_name(r)
-                    ),
-                    span,
-                ));
+                    if matches!(op, Op::Shl) {
+                        // Left shift can overflow (drop high bits) like `+ - * / %`; treat
+                        // it as a recoverable fault, not a silent wrap. Round-trip test:
+                        // `(a << b) >> b == a` holds iff no significant bit was shifted out
+                        // (correct for negative operands too — `-1 << 63` round-trips).
+                        let v = a << (b as u32);
+                        if (v >> (b as u32)) != a {
+                            return Err(self.err(format!("integer overflow in {name}"), span));
+                        }
+                        v
+                    } else {
+                        a >> (b as u32)
+                    }
+                }
+                _ => unreachable!(),
+            };
+            self.make_int(v)
+        } else {
+            match (l.view(), r.view()) {
+                // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
+                // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
+                // `.union`/`.intersection` methods; `^` has no method form. Mirrors interp.
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(op, Op::BitOr | Op::BitAnd | Op::BitXor)
+                        && matches!(self.heap.get(ha), Obj::Set(_))
+                        && matches!(self.heap.get(hb), Obj::Set(_)) =>
+                {
+                    let set_op = match op {
+                        Op::BitOr => SetOp::Union,
+                        Op::BitAnd => SetOp::Intersection,
+                        _ => SetOp::SymmetricDifference,
+                    };
+                    self.set_op(set_op, ha, hb)
+                }
+                _ => {
+                    return Err(self.err(
+                        format!(
+                            "cannot apply {name} to {} and {}",
+                            self.type_name(l),
+                            self.type_name(r)
+                        ),
+                        span,
+                    ));
+                }
             }
         };
         self.push(result);
@@ -749,11 +862,11 @@ impl Vm {
         // dispatches `x in obj` to that method. The `matches!` peek ENDS the immutable `self.heap`
         // borrow before `resolve_overload_method`/`run_proto` need `&mut self` (mirrors
         // `struct_compare`). Containers (list/set/map/str) skip this and take the fast path below.
-        if let Value::Obj(h) = container
+        if let Some(h) = container.as_obj()
             && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
         {
             let (proto, home) = self.resolve_overload_method(container, "contains", span)?;
-            return match self.guarded(|vm| {
+            let res = self.guarded(|vm| {
                 vm.run_proto(
                     proto,
                     home,
@@ -763,25 +876,26 @@ impl Vm {
                     false,
                     span,
                 )
-            })? {
-                Value::Bool(b) => {
-                    self.push(Value::Bool(b));
+            })?;
+            return match res.as_bool() {
+                Some(b) => {
+                    self.push(Value::bool(b));
                     Ok(())
                 }
-                other => Err(self.err(
-                    format!("contains() must return bool, got {}", self.type_name(other)),
+                None => Err(self.err(
+                    format!("contains() must return bool, got {}", self.type_name(res)),
                     span,
                 )),
             };
         }
-        let found = match container {
-            Value::Obj(h) => match self.heap.get(h) {
+        let found = match container.view() {
+            ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::List(items) => {
                     let elems = items.clone();
                     elems.iter().any(|v| self.values_equal(*v, needle))
                 }
                 Obj::Set(_) => {
-                    let hx = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
+                    let hx = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -790,7 +904,7 @@ impl Vm {
                         .any(|&p| self.values_equal(s.entries[p].1, needle))
                 }
                 Obj::Map(_) => {
-                    let hk = self.hash_key_rooted(needle, &[Value::Obj(h), needle], span)?;
+                    let hk = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
@@ -799,7 +913,7 @@ impl Vm {
                         .any(|&p| self.values_equal(m.entries[p].1, needle))
                 }
                 Obj::Str(_) => {
-                    let Value::Obj(nh) = needle else {
+                    let Some(nh) = needle.as_obj() else {
                         return Err(self.err(
                             format!(
                                 "substring `in` requires a str on the left, found {}",
@@ -839,7 +953,7 @@ impl Vm {
                 ));
             }
         };
-        self.push(Value::Bool(found));
+        self.push(Value::bool(found));
         Ok(())
     }
 
@@ -849,7 +963,7 @@ impl Vm {
         // Same-newtype ordering: `Meters < Meters` UNWRAPS both and compares the underlyings with
         // their NATIVE ordering (the checker rejected `Meters < float` / `< Seconds`). Not a user
         // `compare` method — the underlying's native compare. Must precede the struct/enum overload.
-        if let (Value::Obj(hl), Value::Obj(hr)) = (l, r)
+        if let (Some(hl), Some(hr)) = (l.as_obj(), r.as_obj())
             && self.same_newtype_keys(hl, hr)
         {
             let a = match self.heap.get(hl) {
@@ -861,20 +975,20 @@ impl Vm {
                 _ => unreachable!(),
             };
             let bres = self.ordered_bool(op, a, b, span)?;
-            self.push(Value::Bool(bres));
+            self.push(Value::bool(bres));
             return Ok(());
         }
         // Operator overloading: ordering on two structs dispatches to `compare(self, other) -> int`
         // (the `Comparable` protocol). The checker has verified conformance. Equality stays
         // structural; only ordering is overloaded. Mirrors `interp::struct_ordering`.
-        if let (Value::Obj(hl), Value::Obj(hr)) = (l, r)
+        if let (Some(hl), Some(hr)) = (l.as_obj(), r.as_obj())
             && matches!(self.heap.get(hl), Obj::Struct { .. } | Obj::Enum { .. })
             && matches!(self.heap.get(hr), Obj::Struct { .. } | Obj::Enum { .. })
         {
             return self.struct_ordering(op, l, r, span);
         }
         let b = self.ordered_bool(op, l, r, span)?;
-        self.push(Value::Bool(b));
+        self.push(Value::bool(b));
         Ok(())
     }
 
@@ -901,7 +1015,7 @@ impl Vm {
                 _ => unreachable!(),
             }),
             // Both numeric ⇒ NaN is involved ⇒ false for all four ops.
-            None if is_numeric(a) && is_numeric(b) => Ok(false),
+            None if self.is_numeric(a) && self.is_numeric(b) => Ok(false),
             // Genuinely-incomparable types: unreachable from well-typed source (the checker rejects
             // e.g. `str < int`); kept for internal-invariant safety.
             None => {
@@ -941,7 +1055,7 @@ impl Vm {
             Op::GtEq => ord.is_ge(),
             _ => unreachable!(),
         };
-        self.push(Value::Bool(b));
+        self.push(Value::bool(b));
         Ok(())
     }
 
@@ -955,10 +1069,12 @@ impl Vm {
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(l, "compare", span)?;
-        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))? {
-            Value::Int(n) => Ok(n.cmp(&0)),
-            other => Err(self.err(
-                format!("compare() must return int, got {}", self.type_name(other)),
+        let res =
+            self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
+        match self.int_val(res) {
+            Some(n) => Ok(n.cmp(&0)),
+            None => Err(self.err(
+                format!("compare() must return int, got {}", self.type_name(res)),
                 span,
             )),
         }
@@ -970,9 +1086,11 @@ impl Vm {
     /// dispatches its user `hash(self) -> int` (re-entrant — may allocate / trigger GC). Floats are
     /// rejected as keys by the checker (NaN footgun), so only integral-valued floats reach here.
     pub(super) fn hash_value(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
-        match v {
-            // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar.
-            Value::Obj(h) => match self.heap.get(h) {
+        // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar. A boxed
+        // float is Float-tagged (not `as_obj`) so it falls to the scalar arm below; a boxed `BigInt`
+        // is Obj-tagged and must be treated as the integral scalar it is.
+        if let Some(h) = v.as_obj() {
+            match self.heap.get(h) {
                 Obj::Struct { .. } => self.struct_hash(v, span),
                 // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
                 // resolver, mirroring the struct path (re-entrant — may allocate / trigger GC).
@@ -980,7 +1098,7 @@ impl Vm {
                 // A newtype key dispatches its user `hash(self) -> int` (opt-in — the checker rejects
                 // a newtype with no `hash` as a key, even over an intrinsically-hashable underlying).
                 Obj::NewType { .. } => self.newtype_hash(v, span),
-                Obj::Str(_) | Obj::Bytes(_) => Ok(self.scalar_hash(v)),
+                Obj::Str(_) | Obj::Bytes(_) | Obj::BigInt(_) => Ok(self.scalar_hash(v)),
                 _ => Err(self.err(
                     format!(
                         "{} is not hashable (cannot be a map/set key)",
@@ -988,8 +1106,9 @@ impl Vm {
                     ),
                     span,
                 )),
-            },
-            _ => Ok(self.scalar_hash(v)),
+            }
+        } else {
+            Ok(self.scalar_hash(v))
         }
     }
 
@@ -998,14 +1117,19 @@ impl Vm {
     /// correctness-safe degenerate hash — `values_equal` still confirms each probe).
     pub(super) fn scalar_hash(&self, v: Value) -> u64 {
         use std::hash::{Hash, Hasher};
-        match v {
+        // A boxed float is Float-tagged; unwrap it heap-side. Normalise zero so `+0.0`/`-0.0` (both
+        // `values_equal`) hash identically.
+        if v.is_float() {
+            let f = self.float_of(v);
+            return (if f == 0.0 { 0.0 } else { f }).to_bits();
+        }
+        match v.view() {
             // Normalise zero so `Int(0)`, `+0.0`, and `-0.0` (all `values_equal`) hash identically —
             // `(-0.0).to_bits() != (0.0).to_bits()` would otherwise break the hash invariant.
-            Value::Int(n) => (if n == 0 { 0.0 } else { n as f64 }).to_bits(),
-            Value::Float(f) => (if f == 0.0 { 0.0 } else { f }).to_bits(),
-            Value::Bool(b) => b as u64,
-            Value::Nil => 0,
-            Value::Obj(h) => match self.heap.get(h) {
+            ValueView::Int(n) => (if n == 0 { 0.0 } else { n as f64 }).to_bits(),
+            ValueView::Bool(b) => b as u64,
+            ValueView::Nil => 0,
+            ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::Str(s) => {
                     let mut hr = std::collections::hash_map::DefaultHasher::new();
                     s.as_bytes().hash(&mut hr);
@@ -1031,7 +1155,7 @@ impl Vm {
     /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
     /// [`struct_compare`] (re-entrant via `run_proto`).
     pub(super) fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
-        let Value::Obj(h) = v else { unreachable!() };
+        let Some(h) = v.as_obj() else { unreachable!() };
         let Obj::Struct { name, .. } = self.heap.get(h).clone() else {
             unreachable!()
         };
@@ -1058,10 +1182,11 @@ impl Vm {
             )
         })?;
         let home = self.module_objs[def.module_idx];
-        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
-            Value::Int(n) => Ok(n as u64),
-            other => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(other)),
+        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        match self.int_val(res) {
+            Some(n) => Ok(n as u64),
+            None => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(res)),
                 span,
             )),
         }
@@ -1071,10 +1196,11 @@ impl Vm {
     /// [`resolve_overload_method`], mirroring [`struct_hash`] (re-entrant via `run_proto`).
     pub(super) fn enum_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
-            Value::Int(n) => Ok(n as u64),
-            other => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(other)),
+        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        match self.int_val(res) {
+            Some(n) => Ok(n as u64),
+            None => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(res)),
                 span,
             )),
         }
@@ -1084,10 +1210,11 @@ impl Vm {
     /// re-entrant via `run_proto`). The checker guarantees a key-used newtype defines `hash`.
     pub(super) fn newtype_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        match self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))? {
-            Value::Int(n) => Ok(n as u64),
-            other => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(other)),
+        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        match self.int_val(res) {
+            Some(n) => Ok(n as u64),
+            None => Err(self.err(
+                format!("hash() must return int, got {}", self.type_name(res)),
                 span,
             )),
         }
@@ -1130,8 +1257,8 @@ impl Vm {
     /// compared arms and keeps identity/by-reference sub-values by handle, so the snapshot stays
     /// `values_equal` to the original (its cached hash is therefore still valid).
     pub(super) fn snapshot_key(&mut self, key: Value) -> Value {
-        match key {
-            Value::Obj(h)
+        match key.view() {
+            ValueView::Obj(h)
                 if matches!(
                     self.heap.get(h),
                     Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
@@ -1183,7 +1310,7 @@ impl Vm {
         done: &mut super::fxhash::FxHashMap<GcRef, ()>,
         depth: usize,
     ) -> bool {
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return false;
         };
         if depth > MAX_STRUCTURAL_DEPTH {
@@ -1238,14 +1365,14 @@ impl Vm {
         visited: &mut super::fxhash::FxHashMap<GcRef, GcRef>,
         depth: usize,
     ) -> Value {
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return v; // scalars
         };
         if depth > MAX_STRUCTURAL_DEPTH {
             return v; // absurdly deep (non-cyclic) key: stop copying, alias the tail (no overflow)
         }
         if let Some(&c) = visited.get(&h) {
-            return Value::Obj(c); // already copied (shared sub-value or cycle back-edge)
+            return Value::obj(c); // already copied (shared sub-value or cycle back-edge)
         }
         match self.heap.get(h) {
             Obj::List(items) => {
@@ -1259,7 +1386,7 @@ impl Vm {
                 if let Obj::List(dst) = self.heap.get_mut(nh) {
                     *dst = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::Tuple(items) => {
                 let items = items.clone();
@@ -1272,7 +1399,7 @@ impl Vm {
                 if let Obj::Tuple(dst) = self.heap.get_mut(nh) {
                     *dst = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::Struct { name, tid, fields } => {
                 let (name, tid, fields) = (name.clone(), *tid, fields.clone());
@@ -1289,7 +1416,7 @@ impl Vm {
                 if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
                     *fields = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::Enum {
                 variant_id,
@@ -1308,7 +1435,7 @@ impl Vm {
                 if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
                     *payload = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::NewType { type_key, inner } => {
                 let (type_key, inner) = (type_key.clone(), *inner);
@@ -1318,7 +1445,7 @@ impl Vm {
                 if let Obj::NewType { inner, .. } = self.heap.get_mut(nh) {
                     *inner = ci;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::Map(m) => {
                 let entries = m.entries.clone();
@@ -1337,7 +1464,7 @@ impl Vm {
                 if let Obj::Map(dst) = self.heap.get_mut(nh) {
                     dst.entries = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             Obj::Set(s) => {
                 let entries = s.entries.clone();
@@ -1350,11 +1477,11 @@ impl Vm {
                 if let Obj::Set(dst) = self.heap.get_mut(nh) {
                     dst.entries = copied;
                 }
-                Value::Obj(nh)
+                Value::obj(nh)
             }
             // A `bytearray` is mutable + structurally compared but a GC LEAF (raw bytes, no children):
             // copy the buffer, no recursion, no visited entry (it can't participate in a cycle).
-            Obj::ByteArray(b) => Value::Obj(self.heap.alloc(Obj::ByteArray(b.clone()))),
+            Obj::ByteArray(b) => Value::obj(self.heap.alloc(Obj::ByteArray(b.clone()))),
             // Everything else (immutable `Str`/`Bytes`/`Ptr`/`Builtin` + all identity-compared
             // by-reference objects) is kept BY REFERENCE — a copy would break `values_equal` for the
             // identity arms and needlessly duplicate the immutable ones.
@@ -1376,7 +1503,7 @@ impl Vm {
         // Root the source list itself: a method receiver is popped before dispatch, so an inline
         // temporary (`make().sort()`) is otherwise unrooted and the comparator's GC could collect it
         // before the write-back.
-        self.push(Value::Obj(src_h));
+        self.push(Value::obj(src_h));
         let snap_h = {
             let elems = match self.heap.get(src_h) {
                 Obj::List(v) => v.clone(),
@@ -1384,7 +1511,7 @@ impl Vm {
             };
             self.heap.alloc(Obj::List(elems))
         };
-        self.push(Value::Obj(snap_h)); // ROOT the snapshot across the comparator calls
+        self.push(Value::obj(snap_h)); // ROOT the snapshot across the comparator calls
         let n = match self.heap.get(snap_h) {
             Obj::List(v) => v.len(),
             _ => unreachable!(),
@@ -1407,7 +1534,7 @@ impl Vm {
         }
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 
     /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
@@ -1453,19 +1580,26 @@ impl Vm {
     }
 
     pub(super) fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {
-        match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Some(a.cmp(&b)),
-            (a, b) if is_numeric(a) && is_numeric(b) => as_f64(a).partial_cmp(&as_f64(b)),
-            (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
-                (Obj::Str(a), Obj::Str(b)) => Some(a.cmp(b)),
-                // `bytes`/`bytearray` order lexicographically by byte (Python parity), including
-                // cross-type (Python `b"a" < bytearray(b"b")` compares by content).
-                (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
-                (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.cmp(b)),
-                (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.as_ref().cmp(b.as_slice())),
-                (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.as_slice().cmp(b.as_ref())),
-                _ => None,
-            },
+        // Both integral (inline or boxed) → exact i64 order; else both numeric → f64 (NaN → None).
+        if self.is_integral(l) && self.is_integral(r) {
+            return Some(self.int_of(l).cmp(&self.int_of(r)));
+        }
+        if self.is_numeric(l) && self.is_numeric(r) {
+            return self.as_f64(l).partial_cmp(&self.as_f64(r));
+        }
+        match (l.view(), r.view()) {
+            (ValueView::Obj(ha), ValueView::Obj(hb)) => {
+                match (self.heap.get(ha), self.heap.get(hb)) {
+                    (Obj::Str(a), Obj::Str(b)) => Some(a.cmp(b)),
+                    // `bytes`/`bytearray` order lexicographically by byte (Python parity), including
+                    // cross-type (Python `b"a" < bytearray(b"b")` compares by content).
+                    (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.cmp(b)),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.as_ref().cmp(b.as_slice())),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.as_slice().cmp(b.as_ref())),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -1494,16 +1628,21 @@ impl Vm {
                 span,
             ));
         }
-        match (l, r) {
-            // Exact i64 equality for two ints (Python parity). MUST precede the numeric arm below,
-            // which compares via `as_f64` — lossy for `|i64| > 2^53` (distinct ints round to one
-            // f64). The f64 arm is kept only for cross-type Int/Float (`1 == 1.0`). Mirrors the
-            // exact `(Int,Int)` arms already in `compare` and `value_order`.
-            (Value::Int(a), Value::Int(b)) => Ok(a == b),
-            (a, b) if is_numeric(a) && is_numeric(b) => Ok(as_f64(a) == as_f64(b)),
-            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
-            (Value::Nil, Value::Nil) => Ok(true),
-            (Value::Obj(ha), Value::Obj(hb)) => {
+        // Exact i64 equality when BOTH operands are integral (inline `Int` OR boxed `BigInt`) —
+        // Python parity. MUST precede the numeric arm below, which compares via `as_f64` — lossy for
+        // `|i64| > 2^53` (distinct ints round to one f64). The canonical-rep invariant (inline XOR
+        // boxed) makes this correct across kinds: an inline int and a boxed big-int are never equal.
+        if self.is_integral(l) && self.is_integral(r) {
+            return Ok(self.int_of(l) == self.int_of(r));
+        }
+        // Cross-type numeric (`1 == 1.0`) and float==float compare via f64.
+        if self.is_numeric(l) && self.is_numeric(r) {
+            return Ok(self.as_f64(l) == self.as_f64(r));
+        }
+        match (l.view(), r.view()) {
+            (ValueView::Bool(a), ValueView::Bool(b)) => Ok(a == b),
+            (ValueView::Nil, ValueView::Nil) => Ok(true),
+            (ValueView::Obj(ha), ValueView::Obj(hb)) => {
                 if ha == hb {
                     return Ok(true);
                 }
@@ -1681,14 +1820,17 @@ impl Vm {
     /// int/float/str lists; str elements are read through the heap. Anything else compares Equal.
     pub(super) fn value_order(&self, a: Value, b: Value) -> std::cmp::Ordering {
         use std::cmp::Ordering::Equal;
-        match (a, b) {
-            (Value::Int(x), Value::Int(y)) => x.cmp(&y),
-            (Value::Float(x), Value::Float(y)) => x.total_cmp(&y),
-            (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
+        // Homogeneous lists only (checker-enforced): both int (inline/boxed) → exact i64; both float
+        // → total_cmp; both str → lexical. A mixed/other pair compares Equal.
+        if self.is_integral(a) && self.is_integral(b) {
+            return self.int_of(a).cmp(&self.int_of(b));
+        }
+        if a.is_float() && b.is_float() {
+            return self.float_of(a).total_cmp(&self.float_of(b));
+        }
+        match (a.as_obj(), b.as_obj()) {
+            (Some(ha), Some(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
                 (Obj::Str(x), Obj::Str(y)) => x.cmp(y),
-                // Boxed scalars order identically to the inline `Int`/`Float` arms above.
-                (Obj::BigInt(x), Obj::BigInt(y)) => x.cmp(y),
-                (Obj::FloatBox(x), Obj::FloatBox(y)) => x.total_cmp(y),
                 _ => Equal,
             },
             _ => Equal,

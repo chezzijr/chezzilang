@@ -52,11 +52,11 @@ impl Vm {
     /// still cross by reference (their `Arc` core is deep-copied as the same `Arc`), so `Shared`-based
     /// cross-task sharing is unaffected.
     fn cross_spawn_callee(&mut self, callee: Value, span: Span) -> Result<Value, RuntimeError> {
-        let deep = match callee {
-            Value::Obj(h) => {
+        let deep = match callee.as_obj() {
+            Some(h) => {
                 matches!(self.heap.get(h), Obj::Closure { captured, .. } if !captured.is_empty())
             }
-            _ => false,
+            None => false,
         };
         if deep {
             let w = self.wire_callable(callee, span)?;
@@ -89,7 +89,7 @@ impl Vm {
                         }
                         _ => None,
                     })
-                    .unwrap_or(Value::Nil),
+                    .unwrap_or(Value::nil()),
             };
             // Deep-copy across the airlock: the task can't share mutable state with the parent.
             // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
@@ -102,7 +102,7 @@ impl Vm {
         });
         self.register_task(
             PendingCall::Call {
-                callee: Value::Obj(h),
+                callee: Value::obj(h),
                 args: Vec::new(),
                 span,
             },
@@ -155,8 +155,8 @@ impl Vm {
         }
         // (c) Resolve the task's callee to a scannable proto + its home module.
         let (proto, home) = match task {
-            PendingCall::Call { callee, .. } => match callee {
-                Value::Obj(h) => match self.heap.get(*h) {
+            PendingCall::Call { callee, .. } => match callee.as_obj() {
+                Some(h) => match self.heap.get(h) {
                     Obj::Func { proto, home } => (*proto, *home),
                     Obj::Closure { proto, home, .. } => (*proto, *home),
                     // A builtin / native callee runs pure Rust — it reads no module global.
@@ -165,7 +165,7 @@ impl Vm {
                     _ => return Err(self.generator_airlock_err(span)),
                 },
                 // A non-object callee is never a valid spawn target → gate defensively.
-                _ => return Err(self.generator_airlock_err(span)),
+                None => return Err(self.generator_airlock_err(span)),
             },
             // `spawn recv.method(args)` — the method proto can't be paired statically (dynamic
             // dispatch on the receiver's runtime type) → OPAQUE, conservatively gate.
@@ -217,14 +217,14 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let (proto, home) = match task {
-            PendingCall::Call { callee, .. } => match callee {
-                Value::Obj(h) => match self.heap.get(*h) {
+            PendingCall::Call { callee, .. } => match callee.as_obj() {
+                Some(h) => match self.heap.get(h) {
                     Obj::Func { proto, home } => (*proto, *home),
                     Obj::Closure { proto, home, .. } => (*proto, *home),
                     Obj::Builtin(_) | Obj::Native { .. } => return Ok(()),
                     _ => return Err(self.generator_airlock_err(span)),
                 },
-                _ => return Err(self.generator_airlock_err(span)),
+                None => return Err(self.generator_airlock_err(span)),
             },
             PendingCall::Method { .. } => return Err(self.generator_airlock_err(span)),
         };
@@ -419,7 +419,7 @@ impl Vm {
         if depth > MAX_STRUCTURAL_DEPTH {
             return false;
         }
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return false;
         };
         match self.heap.get(h) {
@@ -1486,7 +1486,7 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 
     /// D5 owe #3 Path C (#3 socket half) — a socket `read`/`write`/`accept` that `WouldBlock`s INSIDE a
@@ -2456,7 +2456,7 @@ impl Vm {
         if depth > MAX_STRUCTURAL_DEPTH {
             return false;
         }
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return false;
         };
         match self.heap.get(h) {
@@ -2505,7 +2505,7 @@ impl Vm {
         if depth > MAX_STRUCTURAL_DEPTH {
             return false;
         }
-        let Value::Obj(h) = v else {
+        let Some(h) = v.as_obj() else {
             return false;
         };
         if h == target {
@@ -2574,12 +2574,13 @@ impl Vm {
                 Span { line: 0, col: 0 },
             ));
         }
-        Ok(match v {
-            Value::Int(n) => WireValue::Int(n),
-            Value::Float(f) => WireValue::Float(f),
-            Value::Bool(b) => WireValue::Bool(b),
-            Value::Nil => WireValue::Nil,
-            Value::Obj(h) => match self.heap.get(h) {
+        Ok(match v.view() {
+            ValueView::Int(n) => WireValue::Int(n),
+            ValueView::Bool(b) => WireValue::Bool(b),
+            ValueView::Nil => WireValue::Nil,
+            // A boxed float is Float-tagged → `view` yields `Obj(h)` → the `Obj::FloatBox` arm below
+            // maps it to `WireValue::Float` (a boxed `BigInt` likewise → `WireValue::Int`).
+            ValueView::Obj(h) => match self.heap.get(h) {
                 // B3.3a: `str` crosses by value (owned bytes) so it can survive an OS-thread heap
                 // boundary; immutable + value-compared, so a fresh handle on reconstruction is
                 // observationally identical to sharing this one.
@@ -2801,51 +2802,54 @@ impl Vm {
     #[allow(clippy::wrong_self_convention)]
     pub(super) fn from_wire(&mut self, w: WireValue) -> Value {
         match w {
-            WireValue::Int(n) => Value::Int(n),
-            WireValue::Float(f) => Value::Float(f),
-            WireValue::Bool(b) => Value::Bool(b),
-            WireValue::Nil => Value::Nil,
+            // Re-create on the DESTINATION heap: `make_int` re-inlines or re-boxes (wide) and
+            // `box_float` re-boxes — identically on both engines, so the airlock round-trip is
+            // representation-stable across serial/M:N.
+            WireValue::Int(n) => self.make_int(n),
+            WireValue::Float(f) => self.box_float(f),
+            WireValue::Bool(b) => Value::bool(b),
+            WireValue::Nil => Value::nil(),
             // B3.3a: rebuild a fresh heap `str` from the owned bytes (by value, not the old handle).
-            WireValue::Str(s) => Value::Obj(self.heap.alloc(Obj::Str(s.into()))),
+            WireValue::Str(s) => Value::obj(self.heap.alloc(Obj::Str(s.into()))),
             // Rebuild a fresh heap `bytes` from the owned raw bytes (by value, like `str`).
-            WireValue::Bytes(b) => Value::Obj(self.heap.alloc(Obj::Bytes(b))),
+            WireValue::Bytes(b) => Value::obj(self.heap.alloc(Obj::Bytes(b))),
             // Rebuild a FRESH, independent heap `bytearray` from the owned raw bytes (deep copy across
             // the airlock, like `list`) — the other side never shares this VM's buffer.
-            WireValue::ByteArray(b) => Value::Obj(self.heap.alloc(Obj::ByteArray(b.into_vec()))),
-            WireValue::Handle(h) => Value::Obj(h),
+            WireValue::ByteArray(b) => Value::obj(self.heap.alloc(Obj::ByteArray(b.into_vec()))),
+            WireValue::Handle(h) => Value::obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
             // drives the program-exit auto-drain and shares this core, so the alias needs no entry.
-            WireValue::Channel(core) => Value::Obj(self.heap.alloc(Obj::Channel(core))),
-            WireValue::Shared(core) => Value::Obj(self.heap.alloc(Obj::Shared(core))),
-            WireValue::RwShared(core) => Value::Obj(self.heap.alloc(Obj::RwShared(core))),
-            WireValue::Atomic(core) => Value::Obj(self.heap.alloc(Obj::Atomic(core))),
-            WireValue::Executor(core) => Value::Obj(self.heap.alloc(Obj::Executor(core))),
+            WireValue::Channel(core) => Value::obj(self.heap.alloc(Obj::Channel(core))),
+            WireValue::Shared(core) => Value::obj(self.heap.alloc(Obj::Shared(core))),
+            WireValue::RwShared(core) => Value::obj(self.heap.alloc(Obj::RwShared(core))),
+            WireValue::Atomic(core) => Value::obj(self.heap.alloc(Obj::Atomic(core))),
+            WireValue::Executor(core) => Value::obj(self.heap.alloc(Obj::Executor(core))),
             // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
             // in `to_wire`) — two fibers reach one fd.
-            WireValue::Socket(core) => Value::Obj(self.heap.alloc(Obj::Socket(core))),
-            WireValue::Listener(core) => Value::Obj(self.heap.alloc(Obj::Listener(core))),
+            WireValue::Socket(core) => Value::obj(self.heap.alloc(Obj::Socket(core))),
+            WireValue::Listener(core) => Value::obj(self.heap.alloc(Obj::Listener(core))),
             // R2: rebuild a fresh heap handle onto the SAME shared writer core (`Arc` cloned in
             // `to_wire`) — two fibers reach one output.
-            WireValue::Writer(core) => Value::Obj(self.heap.alloc(Obj::Writer(core))),
+            WireValue::Writer(core) => Value::obj(self.heap.alloc(Obj::Writer(core))),
             // R2b: rebuild a fresh heap handle onto the SAME shared reader core (`Arc` cloned in
             // `to_wire`) — two fibers reach one fd.
-            WireValue::Reader(core) => Value::Obj(self.heap.alloc(Obj::Reader(core))),
+            WireValue::Reader(core) => Value::obj(self.heap.alloc(Obj::Reader(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
-            WireValue::Ptr(a) => Value::Obj(self.heap.alloc(Obj::Ptr(a))),
+            WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
             // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
-            WireValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name))),
+            WireValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name))),
             WireValue::List(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::List(cloned)))
+                Value::obj(self.heap.alloc(Obj::List(cloned)))
             }
             WireValue::Tuple(items) => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::Tuple(cloned)))
+                Value::obj(self.heap.alloc(Obj::Tuple(cloned)))
             }
             WireValue::Iter { items, pos } => {
                 let cloned: Vec<Value> = items.into_iter().map(|x| self.from_wire(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::Iter { items: cloned, pos }))
+                Value::obj(self.heap.alloc(Obj::Iter { items: cloned, pos }))
             }
             WireValue::Map(entries) => {
                 let mut out = MapData::default();
@@ -2853,7 +2857,7 @@ impl Vm {
                     let (ck, cv) = (self.from_wire(k), self.from_wire(val));
                     out.push(hash, ck, cv);
                 }
-                Value::Obj(self.heap.alloc(Obj::Map(out)))
+                Value::obj(self.heap.alloc(Obj::Map(out)))
             }
             WireValue::Set(entries) => {
                 let mut out = SetData::default();
@@ -2861,7 +2865,7 @@ impl Vm {
                     let ce = self.from_wire(e);
                     out.push(hash, ce);
                 }
-                Value::Obj(self.heap.alloc(Obj::Set(out)))
+                Value::obj(self.heap.alloc(Obj::Set(out)))
             }
             WireValue::Struct { name, fields } => {
                 // Positional layout: the wire fields arrive in declaration order (to_wire emits
@@ -2871,7 +2875,7 @@ impl Vm {
                     .map(|(_, val)| self.from_wire(val))
                     .collect();
                 let tid = self.struct_tid(&name);
-                Value::Obj(self.heap.alloc(Obj::Struct {
+                Value::obj(self.heap.alloc(Obj::Struct {
                     name,
                     tid,
                     fields: cloned,
@@ -2884,20 +2888,20 @@ impl Vm {
                 let cloned: Vec<Value> = payload.into_iter().map(|x| self.from_wire(x)).collect();
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
-                Value::Obj(self.heap.alloc(Obj::Enum {
+                Value::obj(self.heap.alloc(Obj::Enum {
                     variant_id,
                     payload: cloned,
                 }))
             }
             WireValue::NewType { type_key, inner } => {
                 let inner = self.from_wire(*inner);
-                Value::Obj(self.heap.alloc(Obj::NewType { type_key, inner }))
+                Value::obj(self.heap.alloc(Obj::NewType { type_key, inner }))
             }
             // Rebuild a FRESH, independent `Obj::Cell` on this side (deep copy, never a shared box) —
             // the receiving task owns its own cell (design §4 F1).
             WireValue::Cell(inner) => {
                 let inner = self.from_wire(*inner);
-                Value::Obj(self.heap.alloc(Obj::Cell(inner)))
+                Value::obj(self.heap.alloc(Obj::Cell(inner)))
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
             // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
@@ -2915,7 +2919,7 @@ impl Vm {
                     .map(|(_k, w)| self.from_wire(w))
                     .collect();
                 let home = self.worker_home(home);
-                Value::Obj(self.heap.alloc(Obj::Closure {
+                Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
                     home,
@@ -2925,7 +2929,7 @@ impl Vm {
             // is shared via `Arc<Program>`; `worker_home` resolves the home index like the Closure arm).
             WireValue::Func { proto, home } => {
                 let home = self.worker_home(home);
-                Value::Obj(self.heap.alloc(Obj::Func { proto, home }))
+                Value::obj(self.heap.alloc(Obj::Func { proto, home }))
             }
         }
     }
@@ -3014,8 +3018,8 @@ impl Vm {
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
                 let wargs = self.wire_args(args, span)?;
-                match callee {
-                    Value::Obj(h) => match self.heap.get(h).clone() {
+                match callee.as_obj() {
+                    Some(h) => match self.heap.get(h).clone() {
                         Obj::Closure {
                             proto,
                             captured,
@@ -3062,7 +3066,7 @@ impl Vm {
                             ));
                         }
                     },
-                    _ => {
+                    None => {
                         return Err(self.err(
                             format!(
                                 "spawn: '{}' is not an isolable task",
@@ -3117,7 +3121,7 @@ impl Vm {
                     .into_iter()
                     .map(|(_k, w)| worker.from_wire(w))
                     .collect();
-                let callee = Value::Obj(worker.heap.alloc(Obj::Closure {
+                let callee = Value::obj(worker.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
                     home,
@@ -3132,12 +3136,12 @@ impl Vm {
                 span,
             } => {
                 let home = worker.worker_home(home);
-                let callee = Value::Obj(worker.heap.alloc(Obj::Func { proto, home }));
+                let callee = Value::obj(worker.heap.alloc(Obj::Func { proto, home }));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Builtin { name, args, span } => {
-                let callee = Value::Obj(worker.heap.alloc(Obj::Builtin(name)));
+                let callee = Value::obj(worker.heap.alloc(Obj::Builtin(name)));
                 let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
@@ -3246,7 +3250,7 @@ impl Vm {
     /// or produce a less specific fault otherwise). A captured `Channel`/`Shared` crosses as its shared
     /// `Arc` (via `to_wire`), unchanged.
     pub(super) fn wire_callable(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
-        if let Value::Obj(h) = v
+        if let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Func { .. } | Obj::Closure { .. })
         {
             // `to_wire_at` re-stamps a generator capture's placeholder span with `span`.
@@ -3377,13 +3381,13 @@ impl Vm {
                 Span { line: 0, col: 0 },
             ));
         }
-        let h = match v {
-            Value::Obj(h) => h,
-            // A scalar (Int/Float/Bool/Nil) is always sendable — never `Obj::Generator`, so this
-            // `.expect` is unreachable for a generator.
-            scalar => {
+        let h = match v.as_obj() {
+            Some(h) => h,
+            // A scalar (inline Int/Bool/Nil) or a boxed float (Float tag) is always sendable — never
+            // `Obj::Generator`, so this `.expect` is unreachable for a generator.
+            None => {
                 return Ok(SnapValue::Wire(
-                    self.to_wire_depth(scalar, depth)
+                    self.to_wire_depth(v, depth)
                         .expect("scalar is always sendable"),
                 ));
             }
@@ -3544,7 +3548,7 @@ impl Vm {
             // parked frames reference the parent heap), but the eager module-global snapshot must NOT
             // fault here: an UNTOUCHED generator global is legal (the serial engine, which never
             // snapshots, runs it fine, so faulting only on M:N diverged). Encode it as a poison leaf;
-            // it replays as `Value::Nil`. The conservative `check_task_generator_reach` gate at
+            // it replays as `Value::nil()`. The conservative `check_task_generator_reach` gate at
             // `register_task` guarantees no spawned task ever REACHES this slot on either engine (both
             // fault at the spawn site if it could), so a correct program never observes the Nil — and
             // even under a gate miss the worst case is a harmless Nil, never a fabricated cross-heap
@@ -3632,7 +3636,7 @@ impl Vm {
             SnapValue::Wire(w) => self.from_wire(w.clone()),
             SnapValue::Func { proto, home } => {
                 let whome = self.worker_home(*home);
-                Value::Obj(self.heap.alloc(Obj::Func {
+                Value::obj(self.heap.alloc(Obj::Func {
                     proto: *proto,
                     home: whome,
                 }))
@@ -3648,13 +3652,13 @@ impl Vm {
                     .iter()
                     .map(|(_k, cv)| self.replay_snap(cv))
                     .collect();
-                Value::Obj(self.heap.alloc(Obj::Closure {
+                Value::obj(self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured: cap,
                     home: whome,
                 }))
             }
-            SnapValue::ModuleAlias(idx) => Value::Obj(self.module_objs[*idx]),
+            SnapValue::ModuleAlias(idx) => Value::obj(self.module_objs[*idx]),
             SnapValue::ModuleInline { name, globals } => {
                 let wm = self.heap.alloc(Obj::Module {
                     name: name.clone(),
@@ -3665,37 +3669,37 @@ impl Vm {
                     let val = self.replay_snap(gv);
                     self.module_define(wm, k, val);
                 }
-                Value::Obj(wm)
+                Value::obj(wm)
             }
-            SnapValue::Native { name, func } => Value::Obj(self.heap.alloc(Obj::Native {
+            SnapValue::Native { name, func } => Value::obj(self.heap.alloc(Obj::Native {
                 name: name.clone(),
                 func: *func,
             })),
             // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
-            SnapValue::Builtin(name) => Value::Obj(self.heap.alloc(Obj::Builtin(name.clone()))),
+            SnapValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name.clone()))),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
-            SnapValue::Cffi(c) => Value::Obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
+            SnapValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::List(v)))
+                Value::obj(self.heap.alloc(Obj::List(v)))
             }
             SnapValue::Iter { items, pos } => {
                 let v = items.iter().map(|x| self.replay_snap(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::Iter {
+                Value::obj(self.heap.alloc(Obj::Iter {
                     items: v,
                     pos: *pos,
                 }))
             }
             SnapValue::Tuple(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x)).collect();
-                Value::Obj(self.heap.alloc(Obj::Tuple(v)))
+                Value::obj(self.heap.alloc(Obj::Tuple(v)))
             }
             SnapValue::Struct { name, fields } => {
                 // Positional layout: the snap fields are in declaration order (to_snap emits them
                 // so), so rebuild positionally — the carried names are discarded.
                 let f = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
                 let tid = self.struct_tid(name);
-                Value::Obj(self.heap.alloc(Obj::Struct {
+                Value::obj(self.heap.alloc(Obj::Struct {
                     name: name.clone(),
                     tid,
                     fields: f,
@@ -3708,14 +3712,14 @@ impl Vm {
                 let p = payload.iter().map(|x| self.replay_snap(x)).collect();
                 // M19 lever #2 — the dense `variant_id` was carried directly (mirrors `from_wire`);
                 // replay it as-is against the shared program — no lossy name re-resolution.
-                Value::Obj(self.heap.alloc(Obj::Enum {
+                Value::obj(self.heap.alloc(Obj::Enum {
                     variant_id: *variant_id,
                     payload: p,
                 }))
             }
             SnapValue::NewType { type_key, inner } => {
                 let inner = self.replay_snap(inner);
-                Value::Obj(self.heap.alloc(Obj::NewType {
+                Value::obj(self.heap.alloc(Obj::NewType {
                     type_key: type_key.clone(),
                     inner,
                 }))
@@ -3723,7 +3727,7 @@ impl Vm {
             // Rebuild a FRESH independent cell on the worker (deep copy, never shared) — design §4 F1.
             SnapValue::Cell(inner) => {
                 let inner = self.replay_snap(inner);
-                Value::Obj(self.heap.alloc(Obj::Cell(inner)))
+                Value::obj(self.heap.alloc(Obj::Cell(inner)))
             }
             SnapValue::Map(entries) => {
                 let mut out = MapData::default();
@@ -3731,7 +3735,7 @@ impl Vm {
                     let (ck, cv) = (self.replay_snap(k), self.replay_snap(val));
                     out.push(*hash, ck, cv);
                 }
-                Value::Obj(self.heap.alloc(Obj::Map(out)))
+                Value::obj(self.heap.alloc(Obj::Map(out)))
             }
             SnapValue::Set(entries) => {
                 let mut out = SetData::default();
@@ -3739,7 +3743,7 @@ impl Vm {
                     let ce = self.replay_snap(e);
                     out.push(*hash, ce);
                 }
-                Value::Obj(self.heap.alloc(Obj::Set(out)))
+                Value::obj(self.heap.alloc(Obj::Set(out)))
             }
             // Option B — a poisoned generator global replays as Nil. `fault_module` replays ALL of a
             // module's globals the first time ANY of them is read, so a poisoned slot is legitimately
@@ -3747,7 +3751,7 @@ impl Vm {
             // is normal, not an error. The reachability gate guarantees the task never READS (uses) the
             // poisoned slot itself; the Nil it replays to is a harmless, memory-safe placeholder, never
             // a fabricated cross-heap generator.
-            SnapValue::Poison => Value::Nil,
+            SnapValue::Poison => Value::nil(),
         }
     }
 }

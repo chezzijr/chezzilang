@@ -117,17 +117,21 @@ impl Vm {
         match method {
             "write" | "write_bytes" => {
                 self.arity_err(method, args, 1, span)?;
-                let data = match (method, args.first()) {
-                    ("write_bytes", Some(v)) => self.collect_bytes_arg("write_bytes", *v, span)?,
-                    (_, Some(Value::Obj(sh))) => match self.heap.get(*sh) {
-                        Obj::Str(s) => s.as_bytes().to_vec(),
-                        _ => return Err(self.err("write expects a str".into(), span)),
-                    },
-                    _ => return Err(self.err("write expects a str".into(), span)),
+                let data = if method == "write_bytes"
+                    && let Some(v) = args.first()
+                {
+                    self.collect_bytes_arg("write_bytes", *v, span)?
+                } else if let Some(v) = args.first()
+                    && let Some(sh) = v.as_obj()
+                    && let Obj::Str(s) = self.heap.get(sh)
+                {
+                    s.as_bytes().to_vec()
+                } else {
+                    return Err(self.err("write expects a str".into(), span));
                 };
                 let core = self.writer_core(h);
                 match self.write_to_core(&core, &data) {
-                    Ok(n) => Ok(self.sock_ok(Value::Int(n as i64))),
+                    Ok(n) => Ok(self.sock_ok(Value::int(n as i64))),
                     Err(WriteErr::Closed) => Ok(self.sock_err("write on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
@@ -136,7 +140,7 @@ impl Vm {
                 self.arity_err("flush", args, 0, span)?;
                 let core = self.writer_core(h);
                 match self.flush_core(&core) {
-                    Ok(()) => Ok(self.sock_ok(Value::Nil)),
+                    Ok(()) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Closed) => Ok(self.sock_err("flush on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
@@ -149,7 +153,7 @@ impl Vm {
                 let flushed = self.flush_core(&core);
                 *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 match flushed {
-                    Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::Nil)),
+                    Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
             }
@@ -179,12 +183,13 @@ impl Vm {
     /// R2 — `io.create(path)` = truncate + create; `io.append(path)` = append, create-if-absent (never
     /// truncates). Returns `Ok(Writer)` or a clean `Err` (perms, missing dir).
     fn io_open(&mut self, verb: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let path = match args.first() {
-            Some(Value::Obj(h)) => match self.heap.get(*h) {
-                Obj::Str(s) => s.to_string(),
-                _ => return Err(self.err(format!("io.{verb} expects a path string"), span)),
-            },
-            _ => return Err(self.err(format!("io.{verb} expects a path string"), span)),
+        let path = if let Some(v) = args.first()
+            && let Some(sh) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(sh)
+        {
+            s.to_string()
+        } else {
+            return Err(self.err(format!("io.{verb} expects a path string"), span));
         };
         let opened = match verb {
             "create" => std::fs::File::create(&path),
@@ -200,7 +205,7 @@ impl Vm {
                     inner: Mutex::new(Some(Backing::File(std::io::BufWriter::new(f)))),
                     key: core::next_poll_key(),
                 });
-                let v = Value::Obj(self.heap.alloc(Obj::Writer(core)));
+                let v = Value::obj(self.heap.alloc(Obj::Writer(core)));
                 Ok(self.sock_ok(v))
             }
             Err(e) => Ok(self.sock_err(format!("{path}: {e}"))),
@@ -214,21 +219,23 @@ impl Vm {
             inner: Mutex::new(Some(backing)),
             key: core::next_poll_key(),
         });
-        Value::Obj(self.heap.alloc(Obj::Writer(core)))
+        Value::obj(self.heap.alloc(Obj::Writer(core)))
     }
 
     /// R2 — `io.buffered(w, size = 8192)`: wrap a `Writer` in a `Backing::Buffered` that accumulates in
     /// the VM and drains to `w` on flush / buffer-full / close (the Go `bufio.NewWriter` escape hatch).
     fn io_buffered(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let inner = match args.first() {
-            Some(Value::Obj(h)) if matches!(self.heap.get(*h), Obj::Writer(_)) => {
-                self.writer_core(*h)
-            }
-            _ => return Err(self.err("buffered expects a Writer".into(), span)),
+        let inner = if let Some(v) = args.first()
+            && let Some(wh) = v.as_obj()
+            && matches!(self.heap.get(wh), Obj::Writer(_))
+        {
+            self.writer_core(wh)
+        } else {
+            return Err(self.err("buffered expects a Writer".into(), span));
         };
         let cap = match args.get(1) {
             None => 8192,
-            Some(Value::Int(n)) => (*n).max(1) as usize,
+            Some(v) if self.is_integral(*v) => self.int_of(*v).max(1) as usize,
             Some(_) => return Err(self.err("buffered size expects an int".into(), span)),
         };
         let core = Arc::new(WriterCore {
@@ -239,7 +246,7 @@ impl Vm {
             })),
             key: core::next_poll_key(),
         });
-        Ok(Value::Obj(self.heap.alloc(Obj::Writer(core))))
+        Ok(Value::obj(self.heap.alloc(Obj::Writer(core))))
     }
 
     // ===== R2b — `Reader` / read-only file handle (the input twin of `Writer`) =====
@@ -320,7 +327,7 @@ impl Vm {
             "read_bytes" => {
                 self.arity_err("read_bytes", args, 1, span)?;
                 let n = match args.first() {
-                    Some(Value::Int(n)) => (*n).max(0) as u64,
+                    Some(v) if self.is_integral(*v) => self.int_of(*v).max(0) as u64,
                     _ => return Err(self.err("read_bytes expects an int byte count".into(), span)),
                 };
                 let core = self.reader_core(h);
@@ -340,7 +347,7 @@ impl Vm {
                 };
                 match outcome {
                     Ok(buf) => {
-                        let bv = Value::Obj(self.heap.alloc(Obj::Bytes(buf.into_boxed_slice())));
+                        let bv = Value::obj(self.heap.alloc(Obj::Bytes(buf.into_boxed_slice())));
                         Ok(self.sock_ok(bv))
                     }
                     Err(None) => Ok(self.sock_err("read_bytes on a closed reader")),
@@ -352,7 +359,7 @@ impl Vm {
                 let core = self.reader_core(h);
                 // Take + drop the reader (closing the fd). Idempotent: an already-closed reader is Ok.
                 *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                Ok(self.sock_ok(Value::Nil))
+                Ok(self.sock_ok(Value::nil()))
             }
             _ => Err(self.err(format!("type Reader has no method '{method}'"), span)),
         }
@@ -361,12 +368,13 @@ impl Vm {
     /// R2b — `io.open(path)` = open a file read-only. Returns `Ok(Reader)` or a clean `Err` (missing
     /// file, perms). The read twin of `io.create`/`io.append`.
     fn io_open_reader(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
-        let path = match args.first() {
-            Some(Value::Obj(h)) => match self.heap.get(*h) {
-                Obj::Str(s) => s.to_string(),
-                _ => return Err(self.err("io.open expects a path string".into(), span)),
-            },
-            _ => return Err(self.err("io.open expects a path string".into(), span)),
+        let path = if let Some(v) = args.first()
+            && let Some(sh) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(sh)
+        {
+            s.to_string()
+        } else {
+            return Err(self.err("io.open expects a path string".into(), span));
         };
         match std::fs::File::open(&path) {
             Ok(f) => {
@@ -374,7 +382,7 @@ impl Vm {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
                 });
-                let v = Value::Obj(self.heap.alloc(Obj::Reader(core)));
+                let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
                 Ok(self.sock_ok(v))
             }
             Err(e) => Ok(self.sock_err(format!("{path}: {e}"))),

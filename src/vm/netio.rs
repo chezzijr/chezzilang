@@ -53,7 +53,7 @@ impl Vm {
         let init = self.pop();
         // A non-sendable init (a frame-holding generator) faults gracefully with the `NewAtomic` span.
         let init = self.to_wire_at(init, span)?;
-        Ok(Value::Obj(self.heap.alloc(Obj::Atomic(Arc::new(
+        Ok(Value::obj(self.heap.alloc(Obj::Atomic(Arc::new(
             AtomicCore {
                 v: Mutex::new(init),
             },
@@ -66,14 +66,14 @@ impl Vm {
     /// stays out of `step`'s (recursion-path) stack frame.
     #[inline(never)]
     pub(super) fn new_timer(&mut self, span: Span) -> Result<Value, RuntimeError> {
-        let ms = match self.pop() {
-            Value::Int(ms) => ms.max(0) as u64,
-            other => {
-                return Err(self.err(
-                    format!("timer(ms) expects int, got {}", self.type_name(other)),
-                    span,
-                ));
-            }
+        let v = self.pop();
+        let ms = if let Some(ms) = self.int_val(v) {
+            ms.max(0) as u64
+        } else {
+            return Err(self.err(
+                format!("timer(ms) expects int, got {}", self.type_name(v)),
+                span,
+            ));
         };
         // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant` overflow
         // (mirrors the `sleep_ms` offload path).
@@ -86,7 +86,7 @@ impl Vm {
             timer: Some(deadline),
             ..Default::default()
         });
-        Ok(Value::Obj(self.heap.alloc(Obj::Channel(core))))
+        Ok(Value::obj(self.heap.alloc(Obj::Channel(core))))
     }
 
     pub(super) fn executor_core(&self, h: GcRef) -> Arc<ExecutorCore> {
@@ -260,14 +260,13 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let addr = match args.first() {
-            Some(Value::Obj(h)) => match self.heap.get(*h) {
-                Obj::Str(s) => s.to_string(),
-                _ => {
-                    return Err(self.err(format!("std.net.{name} expects an address string"), span));
-                }
-            },
-            _ => return Err(self.err(format!("std.net.{name} expects an address string"), span)),
+        let addr = if let Some(v) = args.first()
+            && let Some(sh) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(sh)
+        {
+            s.to_string()
+        } else {
+            return Err(self.err(format!("std.net.{name} expects an address string"), span));
         };
         match name {
             "connect" => match crate::native::net::connect_nonblocking(&addr) {
@@ -281,7 +280,7 @@ impl Vm {
                 Ok((stream, true)) => {
                     if self.mn.is_some() && self.native_reentry == 0 {
                         self.park_on_connect(stream);
-                        Ok(Value::Nil) // parked sentinel; `poll_park` gates the result-push at `do_call`
+                        Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
                     } else if self.mn.is_some() {
                         // `native_reentry > 0` — a `connect` reached inside a native callback (operator
                         // overload, list HOF, `Shared.update`, ...). The caller's loop state lives on the
@@ -306,7 +305,7 @@ impl Vm {
                         key: core::next_poll_key(),
                         in_flight: core::new_in_flight(),
                     });
-                    let v = Value::Obj(self.heap.alloc(Obj::Listener(core)));
+                    let v = Value::obj(self.heap.alloc(Obj::Listener(core)));
                     Ok(self.sock_ok(v))
                 }
                 Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
@@ -331,7 +330,7 @@ impl Vm {
             in_flight,
             carry: Mutex::new(Vec::new()),
         });
-        let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
+        let v = Value::obj(self.heap.alloc(Obj::Socket(core)));
         self.sock_ok(v)
     }
 
@@ -424,7 +423,9 @@ impl Vm {
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
         let n = match args.first() {
-            Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
+            Some(v) if self.is_integral(*v) => {
+                (self.int_of(*v).max(0) as usize).min(MAX_SOCKET_READ)
+            }
             _ => return Err(self.err("read_bytes expects an int byte count".into(), span)),
         };
         let core = self.socket_core(h);
@@ -437,7 +438,7 @@ impl Vm {
             {
                 return Ok(self.sock_err("read_bytes on a closed socket"));
             }
-            let bv = Value::Obj(self.heap.alloc(Obj::Bytes(Box::default())));
+            let bv = Value::obj(self.heap.alloc(Obj::Bytes(Box::default())));
             return Ok(self.sock_ok(bv));
         }
         let deadline = timeout
@@ -464,7 +465,7 @@ impl Vm {
         // Allocate only AFTER the locks drop.
         match attempt {
             Ok(bytes) => {
-                let bv = Value::Obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
+                let bv = Value::obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
                 Ok(self.sock_ok(bv))
             }
             Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -479,7 +480,7 @@ impl Vm {
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::Nil); // parked (sentinel)
+                    return Ok(Value::nil()); // parked (sentinel)
                 }
                 if self.mn.is_some() && self.native_reentry > 0 {
                     let core = Arc::clone(&core);
@@ -512,7 +513,7 @@ impl Vm {
                             };
                             match r {
                                 Ok(bytes) => {
-                                    let bv = Value::Obj(
+                                    let bv = Value::obj(
                                         vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
                                     );
                                     SockPoll::Ready(Ok(vm.sock_ok(bv)))
@@ -578,7 +579,9 @@ impl Vm {
         // gigabytes before a byte arrives (review). The caller already loops for large payloads —
         // `read` returns the actual count.
         let n = match args.first() {
-            Some(Value::Int(n)) => ((*n).max(0) as usize).min(MAX_SOCKET_READ),
+            Some(v) if self.is_integral(*v) => {
+                (self.int_of(*v).max(0) as usize).min(MAX_SOCKET_READ)
+            }
             _ => return Err(self.err("read expects an int byte count".into(), span)),
         };
         let core = self.socket_core(h);
@@ -681,7 +684,7 @@ impl Vm {
                         deadline,
                     };
                     if self.park_on_fd(h, args, target, span)? {
-                        return Ok(Value::Nil); // parked (sentinel; `poll_park` gates the push)
+                        return Ok(Value::nil()); // parked (sentinel; `poll_park` gates the push)
                     }
                     // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
                     // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
@@ -787,13 +790,17 @@ impl Vm {
             return Ok(self.sock_err("timeout"));
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
-        let data = match (method, args.first()) {
-            ("write_bytes", Some(v)) => self.collect_bytes_arg("write_bytes", *v, span)?,
-            (_, Some(Value::Obj(sh))) => match self.heap.get(*sh) {
-                Obj::Str(s) => s.as_bytes().to_vec(),
-                _ => return Err(self.err("write expects a str".into(), span)),
-            },
-            _ => return Err(self.err("write expects a str".into(), span)),
+        let data = if method == "write_bytes"
+            && let Some(v) = args.first()
+        {
+            self.collect_bytes_arg("write_bytes", *v, span)?
+        } else if let Some(v) = args.first()
+            && let Some(sh) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(sh)
+        {
+            s.as_bytes().to_vec()
+        } else {
+            return Err(self.err("write expects a str".into(), span));
         };
         // N2 — the per-call deadline, latched on the fiber so it survives a park's ip-rewind re-run
         // (identical discipline to `socket_read`).
@@ -812,7 +819,7 @@ impl Vm {
             }
         };
         match attempt {
-            Ok(got) => Ok(self.sock_ok(Value::Int(got as i64))),
+            Ok(got) => Ok(self.sock_ok(Value::int(got as i64))),
             Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if timeout.is_some_and(|t| t.poll_once) {
                     return Ok(self.sock_err("timeout"));
@@ -825,7 +832,7 @@ impl Vm {
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::Nil);
+                    return Ok(Value::nil());
                 }
                 // In-callback on M:N → demote + backoff-poll the non-blocking write (#3 socket half).
                 if self.mn.is_some() && self.native_reentry > 0 {
@@ -847,7 +854,7 @@ impl Vm {
                                 std::io::Write::write(stream, &data)
                             };
                             match r {
-                                Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::Int(got as i64)))),
+                                Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(got as i64)))),
                                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                     SockPoll::WouldBlock
                                 }
@@ -907,7 +914,7 @@ impl Vm {
                 // a no-op in the common case (the owning fiber is running, not parked).
                 poller::deregister(core.key);
                 *core.stream.lock().unwrap() = None;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Socket has no method '{method}'"), span)),
         }
@@ -963,7 +970,7 @@ impl Vm {
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::Nil);
+                    return Ok(Value::nil());
                 }
                 // In-callback on M:N → demote + backoff-poll the non-blocking accept (#3 socket half).
                 if self.mn.is_some() && self.native_reentry > 0 {
@@ -1045,7 +1052,7 @@ impl Vm {
                 let core = self.listener_core(h);
                 poller::deregister(core.key);
                 *core.listener.lock().unwrap() = None;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Listener has no method '{method}'"), span)),
         }
@@ -1061,7 +1068,7 @@ impl Vm {
             in_flight: core::new_in_flight(),
             carry: Mutex::new(Vec::new()),
         });
-        let v = Value::Obj(self.heap.alloc(Obj::Socket(core)));
+        let v = Value::obj(self.heap.alloc(Obj::Socket(core)));
         self.sock_ok(v)
     }
 
@@ -1111,7 +1118,7 @@ impl Vm {
                     span,
                 ));
             }
-            self.push(Value::Obj(h)); // receiver (deeper on the stack)
+            self.push(Value::obj(h)); // receiver (deeper on the stack)
             for &a in args {
                 self.push(a); // its args, in order, back on top
             }
@@ -1147,7 +1154,7 @@ impl Vm {
                     return Err(self.err("send on a closed channel".to_string(), span));
                 }
                 self.channel_send_wire(h, w);
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             // `try_send` is the safe partner of `send`: channels are unbounded, so its only failure is
             // a closed channel — returns `false` then (never faults), `true` once the value is queued.
@@ -1155,10 +1162,10 @@ impl Vm {
                 self.arity_err("try_send", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
                 if self.channel_core(h).q.lock().unwrap().closed {
-                    return Ok(Value::Bool(false));
+                    return Ok(Value::bool(false));
                 }
                 self.channel_send_wire(h, w);
-                Ok(Value::Bool(true))
+                Ok(Value::bool(true))
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
@@ -1187,7 +1194,7 @@ impl Vm {
                     RecvStep::Got(w) => Ok(self.from_wire(w)),
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
-                    RecvStep::Parked => Ok(Value::Nil),
+                    RecvStep::Parked => Ok(Value::nil()),
                     // Closed-and-drained: a distinct fault (not the deadlock fault) — no producer left.
                     RecvStep::ClosedEmpty => {
                         Err(self.err("receive on a closed channel".to_string(), span))
@@ -1241,7 +1248,7 @@ impl Vm {
                     // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
                     self.wake_on_send(h);
                 }
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             // `trip()` flips the manual level-trigger latch (the primitive behind `std.cancel`'s
             // `done()`): the channel is then permanently ready (`recv`/`try_recv`/`wait` yield `true`).
@@ -1259,12 +1266,12 @@ impl Vm {
                     core.cv.notify_all();
                     self.wake_on_send(h);
                 }
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
                 let n = self.channel_core(h).q.lock().unwrap().queue.len();
-                Ok(Value::Int(n as i64))
+                Ok(Value::int(n as i64))
             }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }
@@ -1424,7 +1431,7 @@ impl Vm {
     /// set the `suspend` sentinel. The scheduler / worker loop files the fiber into the channel's
     /// wait set; a sibling `send`/`close` wakes it.
     pub(super) fn park_recv(&mut self, h: GcRef) {
-        self.push(Value::Obj(h));
+        self.push(Value::obj(h));
         self.frames.last_mut().unwrap().ip -= 1;
         self.suspend = Some(h);
     }
@@ -1448,7 +1455,7 @@ impl Vm {
         let mut soonest: Option<(usize, std::time::Instant)> = None;
         let mut all_closed = true;
         for i in 0..n {
-            let Value::Obj(h) = self.stack[base + i] else {
+            let Some(h) = self.stack[base + i].as_obj() else {
                 unreachable!("wait arm operand is not a channel handle");
             };
             let core = self.channel_core(h);
@@ -1463,14 +1470,14 @@ impl Vm {
             }
             // A tripped latch (`trip()`) is ready like a fired timer — take the arm with `true`.
             if core.done_latch.load(Ordering::Relaxed) {
-                self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
+                self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
                 return Ok(());
             }
             if let Some(deadline) = core.timer {
                 // A timer channel is never closed and always eventually ready: fired now → take it;
                 // otherwise a live waiter whose deadline we may sleep to below.
                 if std::time::Instant::now() >= deadline {
-                    self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
+                    self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
                     return Ok(());
                 }
                 all_closed = false;
@@ -1495,9 +1502,10 @@ impl Vm {
         // Block on all live arms. The N arm handles are on the stack (they root the channels + re-supply
         // the poll on resume). A live timer arm (`soonest`) is just another arm bucket on the M:N paths.
         let keys: Vec<GcRef> = (0..n)
-            .map(|i| match self.stack[base + i] {
-                Value::Obj(h) => h,
-                _ => unreachable!("wait arm operand is not a channel handle"),
+            .map(|i| {
+                self.stack[base + i]
+                    .as_obj()
+                    .expect("wait arm operand is not a channel handle")
             })
             .collect();
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
@@ -1571,7 +1579,7 @@ impl Vm {
             if now < deadline {
                 std::thread::sleep(deadline - now);
             }
-            self.take_wait_arm(base, Value::Bool(true), meta.arm_targets[i]);
+            self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
             return Ok(());
         }
         if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
@@ -1624,7 +1632,7 @@ impl Vm {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
                 *self.shared_core(h).v.lock().unwrap() = w;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "update" => {
                 self.arity_err("update", args, 1, span)?;
@@ -1646,13 +1654,13 @@ impl Vm {
                 };
                 let w = core.v.lock().unwrap().clone();
                 let cur = self.from_wire(w);
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire_at(next, span)?;
                 *core.v.lock().unwrap() = stored;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
         }
@@ -1688,7 +1696,7 @@ impl Vm {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
                 *self.rwshared_core(h).v.write().unwrap() = w;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "read" => {
                 self.arity_err("read", args, 1, span)?;
@@ -1699,7 +1707,7 @@ impl Vm {
                 // No write-back — `read` returns `f`'s result.
                 let w = core.v.read().unwrap().clone();
                 let cur = self.from_wire(w);
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
                 let result = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 result
@@ -1725,13 +1733,13 @@ impl Vm {
                 };
                 let w = core.v.write().unwrap().clone();
                 let cur = self.from_wire(w);
-                self.push(Value::Obj(h));
+                self.push(Value::obj(h));
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire_at(next, span)?;
                 *core.v.write().unwrap() = stored;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
         }
@@ -1760,7 +1768,7 @@ impl Vm {
                 self.arity_err("store", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
                 *self.atomic_core(h).v.lock().unwrap() = w;
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
@@ -1784,7 +1792,7 @@ impl Vm {
                 if swapped {
                     *g = self.to_wire_at(args[1], span)?;
                 }
-                Ok(Value::Bool(swapped))
+                Ok(Value::bool(swapped))
             }
             "add" | "sub" => {
                 self.arity_err(method, args, 1, span)?;
@@ -1875,7 +1883,7 @@ impl Vm {
                     let w = self.wire_callable(args[0], span)?;
                     g.queue.push_back(w);
                 }
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "shutdown" => {
                 self.arity_err("shutdown", args, 0, span)?;
@@ -1905,7 +1913,7 @@ impl Vm {
                     // across its re-entrant call. A submitted task runs INLINE on the entry `Vm`, so
                     // it reads the one shared `host.stdin` — which is exactly the contract (the M:N
                     // drain's workers get the same source via `spawn_worker`).
-                    self.push(Value::Obj(h));
+                    self.push(Value::obj(h));
                     loop {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().queue.pop_front();
@@ -1931,7 +1939,7 @@ impl Vm {
                     }
                     self.pop(); // the executor root
                 }
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             "shutdown_now" => {
                 self.arity_err("shutdown_now", args, 0, span)?;
@@ -1939,7 +1947,7 @@ impl Vm {
                 let mut g = core.inner.lock().unwrap();
                 g.shut = true;
                 g.queue.clear();
-                Ok(Value::Nil)
+                Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
         }

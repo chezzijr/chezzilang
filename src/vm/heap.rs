@@ -422,9 +422,11 @@ impl Heap {
     /// The heap handles directly referenced by an object (for the mark worklist).
     pub fn children(&self, h: GcRef) -> Vec<GcRef> {
         let mut out = Vec::new();
+        // `child_gcref` returns the handle for BOTH a true `Obj` (tag 000, incl. boxed `BigInt`) AND a
+        // boxed float (Float tag 010) — a boxed float inside a container must be traced or it is swept.
         let mut push = |v: &Value| {
-            if let Value::Obj(c) = v {
-                out.push(*c);
+            if let Some(c) = v.child_gcref() {
+                out.push(c);
             }
         };
         match self.get(h) {
@@ -576,7 +578,7 @@ mod iter_obj_tests {
         // A heap element the cursor must keep alive.
         let elem = heap.alloc(Obj::Str("kept".into()));
         let cursor = heap.alloc(Obj::Iter {
-            items: vec![Value::Obj(elem), Value::Int(7)],
+            items: vec![Value::obj(elem), Value::int(7)],
             pos: 0,
         });
         let kids = heap.children(cursor);
@@ -598,7 +600,7 @@ mod iter_obj_tests {
     fn live_bytes_counts_list_backing() {
         let mut h = Heap::new();
         let empty = h.live_bytes();
-        let r = h.alloc(Obj::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        let r = h.alloc(Obj::List(vec![Value::int(1), Value::int(2), Value::int(3)]));
         let grown = h.live_bytes();
         // one slot (size_of::<Obj>) + the Vec's 3*size_of::<Value>() backing must register
         assert!(grown > empty + std::mem::size_of::<Obj>());
