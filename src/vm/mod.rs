@@ -4017,6 +4017,18 @@ fn run_file_inner(
             None => Ok(()),
         })
         .and_then(|()| vm.drain_live_executors(Span { line: 1, col: 1 }));
+    // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,
+    // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
+    // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so
+    // stdout parity is untouched.
+    if std::env::var("CHEZZI_HEAP_STATS").is_ok() {
+        let peak = vm.heap.peak_live_bytes().max(vm.heap.live_bytes());
+        eprintln!(
+            "[heap-stats] peak_live_bytes={} size_of_value={}",
+            peak,
+            std::mem::size_of::<Value>()
+        );
+    }
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the
     // requested code as a clean halt.
     if let Some(code) = vm.pending_exit {

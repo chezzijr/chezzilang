@@ -330,6 +330,9 @@ pub struct Heap {
     since_gc: usize,
     /// Collect once `since_gc` reaches this; grows with the live set after each collection.
     next_gc: usize,
+    /// Peak of `live_bytes()` sampled at each `sweep()` — the memory probe's high-water mark
+    /// (reported behind `CHEZZI_HEAP_STATS=1`). The Phase-1 8B-`Value` gate compares this.
+    peak_live_bytes: usize,
 }
 
 impl Default for Heap {
@@ -340,6 +343,7 @@ impl Default for Heap {
             live: 0,
             since_gc: 0,
             next_gc: MIN_GC_THRESHOLD,
+            peak_live_bytes: 0,
         }
     }
 }
@@ -501,6 +505,43 @@ impl Heap {
         }
         self.since_gc = 0;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
+        let lb = self.live_bytes();
+        if lb > self.peak_live_bytes {
+            self.peak_live_bytes = lb;
+        }
+    }
+
+    /// Approximate live heap footprint in bytes: each live slot's `Obj` plus the owned backing
+    /// storage (Vec/Box capacities) of the container variants. For the Phase-1 8B-`Value` memory
+    /// gate — not precise allocator accounting (Map/Set count entries backing only, not the index),
+    /// but stable enough to compare before/after on a fixed workload.
+    pub fn live_bytes(&self) -> usize {
+        let mut total = 0usize;
+        for slot in &self.slots {
+            let Some(obj) = &slot.obj else { continue };
+            total += std::mem::size_of::<Obj>();
+            total += match obj {
+                Obj::Str(s) => s.as_str().len(),
+                Obj::Bytes(b) => b.len(),
+                Obj::ByteArray(b) => b.capacity(),
+                Obj::Iter { items, .. } => items.capacity() * std::mem::size_of::<Value>(),
+                Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
+                Obj::Struct { fields, .. } => fields.capacity() * std::mem::size_of::<Value>(),
+                Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
+                Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
+                Obj::Module { slots, .. } => slots.capacity() * std::mem::size_of::<Value>(),
+                // Map/Set: entries + the index cost; approximate by entries backing only.
+                Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
+                Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
+                _ => 0,
+            };
+        }
+        total
+    }
+
+    /// The high-water mark of [`live_bytes`](Heap::live_bytes) sampled at each `sweep()`.
+    pub fn peak_live_bytes(&self) -> usize {
+        self.peak_live_bytes
     }
 }
 
@@ -537,5 +578,17 @@ mod iter_obj_tests {
         }
         heap.sweep();
         assert!(matches!(heap.get(elem), Obj::Str(s) if &**s == "kept"));
+    }
+
+    /// `live_bytes()` must register a container's owned Vec backing, not just the `Obj` slot itself.
+    #[test]
+    fn live_bytes_counts_list_backing() {
+        let mut h = Heap::new();
+        let empty = h.live_bytes();
+        let r = h.alloc(Obj::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        let grown = h.live_bytes();
+        // one slot (size_of::<Obj>) + the Vec's 3*size_of::<Value>() backing must register
+        assert!(grown > empty + std::mem::size_of::<Obj>());
+        let _ = r;
     }
 }
