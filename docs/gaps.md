@@ -11,6 +11,24 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-18 (8-byte `Value` shipped — one perf item BACKLOGGED)
+
+The 8-byte `Value` milestone landed (int-favoring pointer-tag; commits `6c67eb9`/`fa3c014`, merge context
+in `PROGRESS.md`, numbers in `docs/benchmarks.md`). It also surfaced + fixed a pre-existing soundness bug
+(int `==` was lossy `as_f64` above 2^53 → now exact i64, `ccbd3c4`). One planned sub-task was deferred:
+
+- **Float-constant interning — DEFERRED (backlog).** With 8-byte `Value`, every non-inline `f64` boxes
+  into an `Obj::FloatBox` heap slot, so a float literal in a hot loop allocates one box per iteration.
+  The mitigation (plan Task 5): intern compile-time float constants into one `FloatBox` at load, mirroring
+  the existing runtime `str_intern` cache (`src/vm/exec.rs:87`, ctx-swapped per fiber at `exec.rs:185`) —
+  add `Vm::intern_float(f64) -> Value` keyed on `f.to_bits()` and route the float-literal load opcode
+  through it. **Why deferred:** the bench set (`benches/run.chz`) is int-heavy and showed **no float
+  regression** — `str` flat, all others improved — so the churn cost is currently unproven (defer on
+  VERIFIED cost, not speculation). **Revisit trigger:** a float-heavy workload (tight numeric loop over
+  `f64` literals/results) where `Heap::live_bytes()` / GC frequency shows the per-iteration FloatBox churn
+  actually costs. A heavier follow-on (Ruby-style flonum: inline common-magnitude `f64`, box only the rest)
+  is the bigger lever if interning alone isn't enough — see design §2.
+
 ## Session log — 2026-07-18 (bug-hunt: 5 findings — 4 fixed, 1 backlogged)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib).
