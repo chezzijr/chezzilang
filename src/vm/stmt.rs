@@ -512,7 +512,11 @@ impl Vm {
                 self.push(obj);
                 let opt = |vm: &mut Vm, c: Option<i64>| match c {
                     None => vm.alloc_enum("Option", "None", Vec::new()),
-                    Some(n) => vm.alloc_enum("Option", "Some", vec![Value::int(n)]),
+                    Some(n) => {
+                        // `n` comes from `int_val` (may be a boxed BigInt) → box if wide.
+                        let nv = vm.make_int(n);
+                        vm.alloc_enum("Option", "Some", vec![nv])
+                    }
                 };
                 let s_v = opt(self, s);
                 let e_v = opt(self, e);

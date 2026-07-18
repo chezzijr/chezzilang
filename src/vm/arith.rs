@@ -216,7 +216,8 @@ impl Vm {
             self.push(v);
         } else {
             self.push(l);
-            self.push(Value::int(val));
+            let cv = self.make_int(val); // `val` is an unbounded fused literal → box if wide.
+            self.push(cv);
             self.run_bin_kind(kind, span)?;
         }
         Ok(())
@@ -244,7 +245,8 @@ impl Vm {
         } else {
             // A boxed big-int local, or a non-numeric — route through the exact `arith` path.
             self.push(cur);
-            self.push(Value::int(delta));
+            let dv = self.make_int(delta); // `delta` is an unbounded fused literal → box if wide.
+            self.push(dv);
             self.arith(&Op::Add, span)?;
             let v = self.pop();
             let at = self.base() + slot;

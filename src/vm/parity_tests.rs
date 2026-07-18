@@ -10469,3 +10469,56 @@ fn main():
 main()";
     assert_parity_out(src, "4611686018427387905\ntrue\n1.5\ntrue\n");
 }
+
+#[test]
+fn parity_bin_local_const_wide_literal_on_boxed_local() {
+    // `BinLocalConst{slot,val}` fuses `[GetLocal, ConstInt(val), binop]` with an UNBOUNDED `val`.
+    // When the local is a boxed BigInt the fast inline path misses and the else-branch must
+    // reconstruct the folded constant via `make_int` (boxes wide vals), NOT the inline-only
+    // `Value::int` (debug-panics / release-corrupts for |val| > 2^62-1).
+    let src = "\
+fn f() -> int:
+    x := 5000000000000000000
+    return x - 4999999999999999999
+fn main():
+    print(f())
+main()";
+    assert_parity_out(src, "1\n");
+}
+
+#[test]
+fn parity_inc_local_wide_delta_on_boxed_local() {
+    // `IncLocal{slot,delta}` (the `+=` superinstruction) carries an UNBOUNDED fused `delta`. On a
+    // boxed BigInt local the else-branch must push the delta via `make_int`, not the inline-only
+    // `Value::int` (which debug-panics / release-corrupts for |delta| > 2^62-1).
+    let src = "\
+fn f() -> int:
+    x := -5000000000000000000
+    x += 4999999999999999999
+    return x
+fn main():
+    print(f())
+main()";
+    assert_parity_out(src, "-1\n");
+}
+
+#[test]
+fn parity_struct_slice_wide_bound() {
+    // The `slice`-protocol path unwraps each bound via `int_val` (accepts a boxed BigInt) then
+    // re-wraps it as an `Option[int]` for the user body. A wide bound must round-trip via `make_int`,
+    // not the inline-only `Value::int` (debug-panic / release-corrupt at |n| > 2^62-1).
+    let src = "\
+struct Cut:
+    xs: List[int]
+    fn index(self, key: int) -> int:
+        return self.xs[key]
+    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> int:
+        match start:
+            Some(s): return s
+            None: return 0
+fn main():
+    c := Cut([1])
+    print(c[9000000000000000000:])
+main()";
+    assert_parity_out(src, "9000000000000000000\n");
+}
