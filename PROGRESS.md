@@ -4875,8 +4875,7 @@ conformance` green.
     programs (reachable only from a unit test), each behaving identically to the inline `Int`/`Float` for
     display/hash/eq/order/wire; `size_of::<Obj>()` stays 88. Phase 1 (the `struct Value(u64)` swap) is gated
     on the measured `peak_live_bytes` drop vs this baseline.
-  - **UPDATE 2026-07-18 — Phase 1 Task 4 (the representation swap) landed on branch `feat/value-8b`,
-    pending the measure gate (Task 6).** `Value` is now an 8-byte `struct Value(u64)`
+  - **DONE 2026-07-18 — 8-byte `Value` MERGED to main (`fa3c014`); measure gate passed.** `Value` is now an 8-byte `struct Value(u64)`
     (`assert_eq!(size_of::<Value>(), 8)`): bit0=1 → inline `Int` `(n<<1)|1` (±2^62); low3 `000` → `Obj`
     (incl. boxed `BigInt`), `010` → `Float` (its own tag → `is_float` is heap-free, points at
     `Obj::FloatBox`), `100` → the `Nil`/`False`/`True` immediates. Wide ints and every float now box via
@@ -4888,8 +4887,12 @@ conformance` green.
     `Value::child_gcref` (both the Obj and Float tags) at every root/children site; the airlock re-boxes
     on the destination heap in `from_wire` identically on both engines. Two-engine parity + difftest +
     conformance green. Observable limit lifted (design §3): `[x] * n`'s `count * size_of::<Value>() ≤
-    isize::MAX` bound doubled (Value 16B→8B), so a marginally larger repeat now succeeds. Perf/memory
-    delta measured + recorded in `docs/benchmarks.md` at the merge gate (Task 6), not here.
+    isize::MAX` bound doubled (Value 16B→8B), so a marginally larger repeat now succeeds. **Measure gate
+    (same machine/session, 16B→8B): the dispatch-floor benches got FASTER — `loop` 1.13×→1.03× CPython
+    (near parity), `fib` 3.29×→2.95× (first sub-3×), `map`→1.77×, `poly_method`→3.94×; only `primes`
+    +2.7% (in-noise). Cache-density win beat the tag decode tax.** Full numbers in `docs/benchmarks.md`.
+    Prereq soundness fix (`ccbd3c4`): int `==` was lossy `as_f64` above 2^53 → now exact i64. Float-const
+    interning (plan Task 5) DEFERRED — no measured float regression on the int-heavy bench set.
 - **String concat/split builder/rope** moves no current bench — `join` already buffers into one `String`;
   `+`/`split` aren't exercised by the `str` bench.
 - **Arith specialization + frame pooling: effectively closed** — superinstructions inline the monomorphic

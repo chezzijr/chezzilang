@@ -889,3 +889,26 @@ checkpoint calls; it adds an `is_empty`-style read of the enclosing-scope flags,
 never on the dispatch path): `loop` **1.13×** · `fib` **3.29×** · `str` 2.15× · `primes` 2.28× · `list`
 2.51× · `struct` 2.70× · `poly_method` 4.53× · `map` **1.88×** · `empty` **4.63× faster**. Unmoved from
 the numbers above (single run, treat sub-0.1× deltas as noise).
+
+## 8-byte `Value` (int-favoring pointer-tag) — M19 memory-layout lever (2026-07-18)
+
+`Value` shrank 16 B → 8 B: `struct Value(u64)` with a low-bit tag (`bit0=1` → inline `Int` `(n<<1)|1`,
+±2^62; low3 `000`=`Obj`, `010`=`Float`→`Obj::FloatBox`, `100`=`Nil`/`False`/`True`). Wide ints and every
+`f64` box on the heap (`Obj::BigInt`/`Obj::FloatBox`). Behavior-preserving; int `==`/order exact-i64;
+two-engine parity + difftest green. Design/plan: `~/.claude/plans/2026-07-18-8b-value-pointer-tag-*.md`.
+
+**Direct before/after, same machine + session** (hyperfine mean, Chezzi ms; main@`ccbd3c4` 16 B → merged 8 B):
+`fib` 270.1→**248.0** (−8.2%) · `loop` 1057→**958** (−9.4%) · `map` 164.6→**152.9** (−7.1%) ·
+`list` 412.3→394.5 (−4.3%) · `struct` 447.7→433.3 (−3.2%) · `poly_method` 1340→1285 (−4.1%) ·
+`str` 178.2→179.7 (+0.8%) · `primes` 637.7→654.6 (+2.7%, within its ±77 ms band). The dispatch-floor
+benches we feared (`loop`, `fib`) got **faster** — the cache-density win beat the tag decode/encode tax.
+
+**CPython ratios after (lower = better):** `loop` **1.03×** (was 1.13× — near parity) · `fib` **2.95×**
+(was 3.29× — first sub-3×) · `map` **1.77×** (was 1.88×) · `primes` 2.26× · `str` 2.19× · `list` 2.49× ·
+`struct` 2.60× · `poly_method` **3.94×** (was 4.53×) · `empty` 4.5× faster.
+
+**Memory:** `Heap::live_bytes()` on `benches/run.chz` moved 24277 → 23997 (−1.2%) — small because the heap
+metric is dominated by the unchanged 88 B `Obj` slot; the real footprint win is the operand/`CallFrame`
+stacks (`Vec<Value>` halved), which don't show in `live_bytes` but surface as the speedups above. Float
+boxing adds a heap slot per non-inline float — no measured regression on this (int-heavy) bench set, so
+float-constant interning (plan Task 5) is **deferred** until a float-heavy workload shows the cost.

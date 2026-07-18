@@ -369,6 +369,15 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
     two GC-leaf `Obj` variants (`BigInt`/`FloatBox`, unused by real programs yet — reachable only from a
     unit test; `size_of::<Obj>()` stays 88). Phase 1 (the `struct Value(u64)` swap) is gated on the
     measured memory drop vs this baseline.
+  - **DONE 2026-07-18 — the 8B-`Value` swap LANDED (int-favoring pointer-tag).** `Value` is now
+    `struct Value(u64)`. The measure gate passed comfortably: on `benches/run.chz` the dispatch-floor
+    benches got **faster**, not slower — `loop` 1.13×→**1.03×** CPython (near parity), `fib` 3.29×→**2.95×**
+    (first sub-3×), `map`→1.77×, `poly_method`→3.94×; only `primes` +2.7% (in-noise). The cache-density win
+    beat the tag decode tax. Behavior-preserving (int `==`/order exact-i64; `1==1.0` preserved; overflow
+    still faults at the i64 ceiling). This also surfaced + fixed a pre-existing soundness bug: int `==`
+    was lossy `as_f64` above 2^53 (fixed `ccbd3c4`, now exact i64). Full numbers in `docs/benchmarks.md`.
+    Float-constant interning (plan Task 5) deferred — no measured float regression on the int-heavy set.
+    **So this lever is no longer "blocked" — NaN-box was the wrong scheme; pointer-tag was the right one.**
 - **Register VM** instead of stack — fewer ops, less stack traffic. Effectively a VM rewrite; only
   if dispatch count is still the wall after superinstructions.
 - **Generational / incremental GC** — current is stop-the-world full-heap (`next_gc = 2×live`).
@@ -445,7 +454,7 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
    split (`&mut ExecState` + `&Heap`) lets the borrow coexist. Structural refactor, not a one-session lever.
 7. **`for`-loop snapshot (`ListClone`) + per-char alloc** — mandated by the for-loop's observable
    snapshot semantics (identical on both engines); `alloc_char` (Phase 3) already halved the string case. Behavior-blocked.
-8. **Operand-stack 16 B/Value traffic** → NaN-box (blocked, full i64) / register VM (#8, low-ROI) — above.
+8. **Operand-stack 16 B/Value traffic** → **DONE 2026-07-18: 8B pointer-tag Value shipped** (NaN-box was the wrong scheme; see the dedicated note above) / register VM (#8, low-ROI).
 
 **Land order:** **#1 ✅ → #3 ✅ → #2 ✅ — sequence complete** as **JIT groundwork** (the positional
 layouts the JIT codegen wants), each measured against `struct`/`hof`/`enum` (read suite-neutral — they're
@@ -466,7 +475,7 @@ touching the value model or the GC.
 > N-way polymorphic method-call IC + sticky-deopt + clone-free megamorphic slow path, `poly_method`
 > −33% (6.0× → 4.28× CPython)** — this unifies the field/method caches under one adaptive form.
 > **Genuinely remaining:** the **denser int-keyed `map`** representation **also landed (2026-06-13,
-> `map` 2.68× → 1.94× CPython, −26% on merged HEAD)**, so what's left is the Tier-3 milestones (#6 JIT / #7 NaN-box (blocked) / #8 register
+> `map` 2.68× → 1.94× CPython, −26% on merged HEAD)**, so what's left is the Tier-3 milestones (#6 JIT / #7 8B-Value **DONE** (pointer-tag) / #8 register
 > VM). Per-lever tags below; landed details + measured deltas in `PROGRESS.md` "Current focus" and
 > `docs/benchmarks.md`.
 
@@ -509,14 +518,14 @@ gap but a JIT is the only path to *match/beat* it on tight compute.
 6. **Cranelift method-JIT** — the only path to *match/beat* CPython 3.14 on compute. Counter-triggered,
    JIT the hot protos (Python's tier-2 model). End-game; only once the language is fully frozen. #4 is the
    lower-risk stepping stone toward it.
-7. **NaN-boxing — stays BLOCKED** (full i64; see the dedicated note above).
+7. **8B `Value` — DONE 2026-07-18** via int-favoring pointer-tag (NOT NaN-box, which stays blocked by full i64). `loop`→1.03× CPython, `fib`→2.95×; see the dedicated note + `docs/benchmarks.md`.
 8. **Register VM / generational+incremental GC — low ROI** (dispatch is already near the match floor; GC
    moves no bench). Deprioritized; revisit only if a real workload proves otherwise.
 
 **Sequencing (updated 2026-06-13):** Tier 1 is **done** (#1, #2 landed; #3 deferred), and Tier 2 is
 **done** — #4 (v1 binops **and** the `CallMethod` N-way extension) + #5 (index spec **and** the denser
 int-keyed `map`) all landed. With both the `CallMethod` adaptive quickening and the denser `map`
-shipped, the high-ceiling play left is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 NaN-box stays
+shipped, the high-ceiling play left is **#6 (Cranelift method-JIT)** as the JIT end-game (#7 8B-Value shipped 2026-07-18 via pointer-tag; NaN-box stays
 blocked; #8 register VM / gen-GC stays low-ROI). All steps: behavior-preserving, two-engine-parity-clean,
 measure-first, each targeting a named bench.
 
