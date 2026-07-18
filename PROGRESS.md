@@ -4,6 +4,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ DRIFT-FIX (2026-07-18, `auto-task/gen-reach-recurse`) — generator-reach airlock gate OVER-FIRED
+> (check-OK-then-run-fault).** `Vm::proto_reaches_generator` (`src/vm/sched.rs`) opaqued out at the
+> FIRST call/method/operator/nursery op (`_ => return true`), so a spawned task that merely called a
+> generator-free user fn wrongly faulted `a generator cannot be sent across tasks` on BOTH engines —
+> violating the doc contract (`concurrency.md`: "an untouched generator global does NOT fault").
+> Fix: the scan now RESOLVES + FOLLOWS the transfers it can prove — a direct `Call(0)`/`SpawnCall(0)`
+> of a known module-global fn (resolve the live slot to its `Func`/`Closure`), a `Type.method()`
+> static, an `argc==0` method (by-name over all user impls, mirroring the `str`-hook scan), a static
+> `spawn:` block — recursing memoized + cycle-guarded into the callee's OWN home; nursery-management
+> ops are inert. UNRESOLVABLE/dynamic transfers stay OPAQUE (argc>0 calls + callable args, operator
+> overloads, index/field/hash hooks, builtin re-entry, `spawn recv.m()`, `GetCaptured`), and every
+> `Spawn*` op stays OPAQUE in the conservative outer-nursery TOCTOU mode — never under-gates. Tests:
+> 4 new (`generator_reach_*` — clean-fn, builtin-method-on-local, by-name-method-reads-g-faults,
+> nested-spawn-clean), all existing generator-reach positives stay faulting (now via resolved
+> transitive reach). Docs: `concurrency-b3.md`, tests.rs comments. Full `cargo test`/`clippy`/
+> `conformance` green.
+>
 > **✅ SOUNDNESS (2026-07-18, `auto-task/try-nil-fn-reject`) — `docs/gaps.md` §B6: `?` in a nil fn
 > silently swallowed the error (check-OK-then-data-loss).** The checker accepted `?` whenever the
 > enclosing return was `Nil` — but `Nil` covers BOTH module top-level (legit — the runtime unwinds the

@@ -3,6 +3,18 @@
 
 use super::*;
 
+/// Resolution of a direct `Call(0)`/`SpawnCall(0)` callee for the generator-reach scan
+/// ([`Vm::resolve_global_direct_callee`]): a scannable user body, a provably-inert builtin/native, or
+/// an unresolvable (dynamic) target that stays conservatively OPAQUE.
+enum DirectCallee {
+    /// A resolved user `Func`/`Closure` — recurse into `(proto, home)`.
+    Scan(ProtoId, GcRef),
+    /// A builtin/native global — reads no module global, keep scanning.
+    Inert,
+    /// Not statically resolvable (no preceding `GetGlobalSlot`, a non-callable slot) — gate.
+    Opaque,
+}
+
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
@@ -257,12 +269,14 @@ impl Vm {
     }
 
     /// Option B (d) — boolean core of the reach scan. Reads/writes of a `home`-module global slot that
-    /// embeds a generator are a direct reach; any op that can transfer control into an unscanned proto
-    /// is OPAQUE (we cannot prove it never reaches the generator) → reach. Only a small allowlist of
-    /// provably-inert leaf/control ops keeps scanning — every other op (calls, operator overloads,
-    /// index/field/hash hooks, nested spawn/defer, closure-capture of a home global via the
-    /// `GetCaptured` cold path, …) is a reach. Straight-line, no dataflow — over-approximates by design
-    /// (acceptable), never under-approximates.
+    /// embeds a generator are a direct reach; a control transfer whose target this scan can RESOLVE (a
+    /// direct call of a known module-global fn, a `Type.method()` static, an `argc==0` method, a nested
+    /// `spawn`/`spawn:`) is FOLLOWED — recursing (memoized + cycle-guarded) into the callee proto with
+    /// the callee's OWN home — so a task that only routes through provably-generator-free bodies stops
+    /// gating (the doc contract in `docs/concurrency.md`: "an untouched generator global does NOT
+    /// fault"). A genuinely-UNRESOLVABLE / dynamic transfer (an argc>0 call, an operator overload, an
+    /// index/field/hash hook, a builtin re-entry, a closure value, the `GetCaptured` cold path, …) stays
+    /// OPAQUE → reach. Over-approximates by design (acceptable), never under-approximates.
     ///
     /// `print_hazard`: `CallPrint`/`CallPrintSep` STRINGIFY their operands, and a struct/enum/newtype
     /// `str(self)` hook runs arbitrary user code (`stmt.rs` stringify → `run_proto`) that can read a
@@ -271,10 +285,11 @@ impl Vm {
     /// so a print cannot either and keeps scanning (keeps the SAFE `print("literal")` case un-gated).
     ///
     /// `conservative` (the nested-nursery TOCTOU path): treat ANY home-global read/write as a reach,
-    /// regardless of the slot's CURRENT value. An early-enlisted outer task runs against a FROZEN module
-    /// snapshot on M:N but against LIVE globals on serial, and the slot may be reassigned to a generator
-    /// in that window — so its present value cannot be trusted. The verdict is then purely STATIC (proto
-    /// code + `has_generators`), identical at every join on both engines.
+    /// regardless of the slot's CURRENT value, AND keep every nested `Spawn*` op OPAQUE (its reach
+    /// depends on globals that may be reassigned in the frozen-vs-live window). An early-enlisted outer
+    /// task runs against a FROZEN module snapshot on M:N but against LIVE globals on serial, so its
+    /// present slot values cannot be trusted. The verdict is then purely STATIC (proto code +
+    /// `has_generators`), identical at every join on both engines.
     fn proto_reaches_generator(
         &self,
         proto: ProtoId,
@@ -282,7 +297,30 @@ impl Vm {
         print_hazard: bool,
         conservative: bool,
     ) -> bool {
-        for op in &self.program.protos[proto].code {
+        // The `visited` set is both the cycle-guard (a proto may be mutually recursive) and a memo: a
+        // proto scanned clean-so-far on this stack is not re-scanned. Sound because a genuine reach
+        // returns `true` and short-circuits UP the stack before any clean/false result is trusted.
+        let mut visited: std::collections::HashSet<ProtoId> = std::collections::HashSet::new();
+        self.proto_reaches_generator_rec(proto, home, print_hazard, conservative, &mut visited)
+    }
+
+    /// Recursive core of [`Vm::proto_reaches_generator`] — see that wrapper's doc for the contract.
+    fn proto_reaches_generator_rec(
+        &self,
+        proto: ProtoId,
+        home: GcRef,
+        print_hazard: bool,
+        conservative: bool,
+        visited: &mut std::collections::HashSet<ProtoId>,
+    ) -> bool {
+        // Cycle-guard + memo (see wrapper): a proto already on this scan is either known-clean-so-far
+        // or short-circuited to `true` before we return here — re-scanning it is redundant and would
+        // not terminate on a recursive fn.
+        if !visited.insert(proto) {
+            return false;
+        }
+        let code = &self.program.protos[proto].code;
+        for (i, op) in code.iter().enumerate() {
             match op {
                 // A home-global read/write is a reach: in `conservative` mode UNCONDITIONALLY (the frozen
                 // snapshot may diverge from the live slot); otherwise only when the slot embeds a generator.
@@ -297,8 +335,96 @@ impl Vm {
                         return true;
                     }
                 }
+                // A direct call of a KNOWN module-global fn (`GetGlobalSlot(s); Call(0)`): resolve the
+                // slot to a `Func`/`Closure` and recurse into it with the callee's OWN home. A
+                // builtin/native global reads no module global (inert); an unresolvable callee
+                // (local/captured/computed value) stays OPAQUE.
+                Op::Call(0) => match self.resolve_global_direct_callee(home, code, i) {
+                    DirectCallee::Scan(p, h) => {
+                        if self.proto_reaches_generator_rec(
+                            p,
+                            h,
+                            print_hazard,
+                            conservative,
+                            visited,
+                        ) {
+                            return true;
+                        }
+                    }
+                    DirectCallee::Inert => {}
+                    DirectCallee::Opaque => return true,
+                },
+                // A nested `spawn f()` — same resolution as a direct call, EXCEPT in `conservative`
+                // (nested-nursery TOCTOU) mode, where a `Spawn*` op must stay OPAQUE.
+                Op::SpawnCall(0) => {
+                    if conservative {
+                        return true;
+                    }
+                    match self.resolve_global_direct_callee(home, code, i) {
+                        DirectCallee::Scan(p, h) => {
+                            if self.proto_reaches_generator_rec(
+                                p,
+                                h,
+                                print_hazard,
+                                conservative,
+                                visited,
+                            ) {
+                                return true;
+                            }
+                        }
+                        DirectCallee::Inert => {}
+                        DirectCallee::Opaque => return true,
+                    }
+                }
+                // A nested `spawn:` block — its synthetic proto is static, so recurse it (its own
+                // `GetCaptured` cold path stays OPAQUE below, gating a captured generator; runtime-value
+                // captures are independently re-gated by `register_task`). OPAQUE under `conservative`.
+                Op::SpawnBlock(p, _) => {
+                    if conservative {
+                        return true;
+                    }
+                    if self.proto_reaches_generator_rec(
+                        *p,
+                        home,
+                        print_hazard,
+                        conservative,
+                        visited,
+                    ) {
+                        return true;
+                    }
+                }
+                // A STATIC (`Type.method()`) call: resolve the concrete method proto (struct or enum)
+                // and recurse with its declaring module's home. Unresolvable → OPAQUE.
+                Op::CallStatic {
+                    type_key, method, ..
+                } => match self.resolve_static_method(type_key, method) {
+                    Some((p, h)) => {
+                        if self.proto_reaches_generator_rec(
+                            p,
+                            h,
+                            print_hazard,
+                            conservative,
+                            visited,
+                        ) {
+                            return true;
+                        }
+                    }
+                    None => return true,
+                },
+                // A method call with NO extra args: the receiver type is not in the bytecode, so scan
+                // EVERY user impl named `name` (a by-name over-approximation, mirroring the `str`-hook
+                // scan). A pure-builtin method (no user impl, e.g. `len`/`upper`) reaches nothing. An
+                // argc>0 method (a higher-order builtin re-entry like `.map(f)`) falls to the OPAQUE
+                // catch-all below — a callable arg could escape scanning.
+                Op::CallMethod { name, argc: 0, .. } => {
+                    if self.any_user_method_impl_reaches(name, print_hazard, conservative, visited)
+                    {
+                        return true;
+                    }
+                }
                 // Provably-inert leaf / control ops: they touch no module global and transfer control
-                // to no unscanned proto, so they cannot reach the generator — keep scanning.
+                // to no unscanned proto (nursery ops only manage the nursery stack; the tasks they run
+                // were registered by the `Spawn*` ops handled above), so they cannot reach the generator.
                 Op::ConstInt(_)
                 | Op::ConstFloat(_)
                 | Op::ConstStr(_)
@@ -322,12 +448,136 @@ impl Vm {
                 | Op::AsInt
                 | Op::CoerceFloat
                 | Op::Dup
-                | Op::Dup2 => {}
-                // Everything else can transfer control into an unscanned proto (a call, an operator
-                // overload, an index/field/`str`/hash hook, a nested spawn/defer, a home-global read via
-                // the `GetCaptured` cold path, …). We cannot PROVE it never reaches the generator, so
-                // conservatively treat it as a reach.
+                | Op::Dup2
+                | Op::EnterNursery
+                | Op::JoinNursery
+                | Op::ReclaimNursery => {}
+                // Everything else can transfer control into an UNSCANNABLE target (an argc>0 call or
+                // its callable arg, an operator overload, an index/field/`str`/hash hook, a builtin
+                // re-entry, a `spawn recv.m()`, a home-global read via the `GetCaptured` cold path, …).
+                // We cannot PROVE it never reaches the generator, so conservatively treat it as a reach.
                 _ => return true,
+            }
+        }
+        false
+    }
+
+    /// Resolve a direct `Call(0)` / `SpawnCall(0)` whose callee is the immediately-preceding
+    /// `GetGlobalSlot(s)` in `code` (index `call_idx`) to a scannable target, reading `home`'s live
+    /// module slot. `Func`/`Closure` → `Scan` (recurse); builtin/native → `Inert` (keep scanning);
+    /// anything else (no preceding `GetGlobalSlot`, a non-callable slot) → `Opaque` (gate).
+    fn resolve_global_direct_callee(
+        &self,
+        home: GcRef,
+        code: &[Op],
+        call_idx: usize,
+    ) -> DirectCallee {
+        let slot = match code.get(call_idx.wrapping_sub(1)) {
+            Some(Op::GetGlobalSlot(s)) if call_idx > 0 => *s as usize,
+            _ => return DirectCallee::Opaque,
+        };
+        let Obj::Module { slots, .. } = self.heap.get(home) else {
+            return DirectCallee::Opaque;
+        };
+        match slots.get(slot).and_then(|v| v.as_obj()) {
+            Some(h) => match self.heap.get(h) {
+                Obj::Func { proto, home } => DirectCallee::Scan(*proto, *home),
+                Obj::Closure { proto, home, .. } => DirectCallee::Scan(*proto, *home),
+                Obj::Builtin(_) | Obj::Native { .. } => DirectCallee::Inert,
+                _ => DirectCallee::Opaque,
+            },
+            None => DirectCallee::Opaque,
+        }
+    }
+
+    /// Resolve a `Type.method()` static call to `(proto, home)` — struct first, then enum. `None` if
+    /// the type/method is not a user-defined bodied method (a native/unresolvable static → OPAQUE).
+    fn resolve_static_method(&self, type_key: &str, method: &str) -> Option<(ProtoId, GcRef)> {
+        if let Some(def) = self.program.structs.get(type_key)
+            && let Some(&p) = def.methods.get(method)
+            && def.module_idx < self.module_objs.len()
+        {
+            return Some((p, self.module_objs[def.module_idx]));
+        }
+        if let Some(methods) = self.program.enum_methods.get(type_key)
+            && let Some(&p) = methods.get(method)
+            && let Some(&idx) = self.program.enum_home.get(type_key)
+            && idx < self.module_objs.len()
+        {
+            return Some((p, self.module_objs[idx]));
+        }
+        None
+    }
+
+    /// By-name method over-approximation for an `argc==0` `CallMethod` whose receiver type is erased in
+    /// the bytecode: scan EVERY user impl named `name` (struct / enum / newtype / native-bodied),
+    /// recursing each with its declaring module's home; reach iff ANY reaches. Mirrors
+    /// [`Vm::any_str_hook_reaches_generator`]'s scan-all-impls pattern. Shares `visited` with the
+    /// caller (cycle-guard + memo). A name with no user impl (a pure builtin) reaches nothing.
+    fn any_user_method_impl_reaches(
+        &self,
+        name: &str,
+        print_hazard: bool,
+        conservative: bool,
+        visited: &mut std::collections::HashSet<ProtoId>,
+    ) -> bool {
+        for def in self.program.structs.values() {
+            if let Some(&p) = def.methods.get(name)
+                && def.module_idx < self.module_objs.len()
+                && self.proto_reaches_generator_rec(
+                    p,
+                    self.module_objs[def.module_idx],
+                    print_hazard,
+                    conservative,
+                    visited,
+                )
+            {
+                return true;
+            }
+        }
+        for (key, methods) in &self.program.enum_methods {
+            if let Some(&p) = methods.get(name)
+                && let Some(&idx) = self.program.enum_home.get(key)
+                && idx < self.module_objs.len()
+                && self.proto_reaches_generator_rec(
+                    p,
+                    self.module_objs[idx],
+                    print_hazard,
+                    conservative,
+                    visited,
+                )
+            {
+                return true;
+            }
+        }
+        for (key, methods) in &self.program.newtype_methods {
+            if let Some(&p) = methods.get(name)
+                && let Some(&idx) = self.program.newtype_home.get(key)
+                && idx < self.module_objs.len()
+                && self.proto_reaches_generator_rec(
+                    p,
+                    self.module_objs[idx],
+                    print_hazard,
+                    conservative,
+                    visited,
+                )
+            {
+                return true;
+            }
+        }
+        for (key, methods) in &self.program.native_methods {
+            if let Some(&p) = methods.get(name)
+                && let Some(&idx) = self.program.native_home.get(key)
+                && idx < self.module_objs.len()
+                && self.proto_reaches_generator_rec(
+                    p,
+                    self.module_objs[idx],
+                    print_hazard,
+                    conservative,
+                    visited,
+                )
+            {
+                return true;
             }
         }
         false

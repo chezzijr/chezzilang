@@ -7447,8 +7447,10 @@ fn golden_generators_inferred_chz() {
 // cursor_crosses_* tests).
 //
 // Option B (module-global generators): a live generator held as a MODULE GLOBAL is gated IFF a
-// spawned task can actually REACH it — a direct home-global read, or ANY call/operator/hook that
-// can transitively reach it (the conservative `check_task_generator_reach` gate at `register_task`).
+// spawned task can actually REACH it — a direct home-global read, or a RESOLVABLE call/method/static
+// that transitively reaches it (the reach scan follows resolvable callee protos; an unresolvable
+// dynamic transfer stays conservatively OPAQUE) — the `check_task_generator_reach` gate at
+// `register_task`.
 // The gate runs during body execution on BOTH engines, so serial and M:N agree by construction: an
 // UNTOUCHED generator global runs clean on both; a REACHED one faults on both. (Memory safety is
 // independently guaranteed by the `SnapValue::Poison` snapshot — an M:N worker never obtains a real
@@ -7548,8 +7550,9 @@ fn generator_module_global_hazard_reads_it_faults_both() {
 }
 
 /// Option B TRANSITIVE hazard: the spawned task does NOT read `g` directly — it calls a helper
-/// that does. The task body has no `GetGlobalSlot(g)`, but it has an `Op::Call` (an unresolvable
-/// dispatch) so the conservative gate treats it as OPAQUE and faults on BOTH engines.
+/// that does. The task body has no `GetGlobalSlot(g)`; the reach scan RESOLVES the direct
+/// `Op::Call` into the helper's proto (`GetGlobalSlot(g)` embedding a generator) and faults on BOTH
+/// engines via that resolved transitive reach.
 #[test]
 fn generator_module_global_transitive_helper_reads_it_faults_both() {
     let src = concat!(
@@ -7580,6 +7583,137 @@ fn generator_module_global_transitive_helper_reads_it_faults_both() {
             err.message
         );
     }
+}
+
+/// Option B TRANSITIVE over-gate fix: a spawned `spawn:` BLOCK whose body only calls a user fn that
+/// touches NO generator global must run CLEAN on both engines. The synthetic block proto is
+/// `GetGlobalSlot(noop); Call(0)`; the reach scan now RESOLVES the direct call into `noop`'s proto
+/// (which reads no generator global) instead of opaquing out at the first call. (Was: both engines
+/// faulted `a generator cannot be sent across tasks` on the un-followed `Op::Call`.)
+#[test]
+fn generator_reach_task_calls_clean_fn_runs_clean_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn noop():\n",
+        "    x := 1\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            noop()\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    let expect = "done\n";
+    assert_eq!(
+        run_capture(src).expect("serial: clean-fn task must not gate"),
+        expect
+    );
+    assert_eq!(
+        run_capture_parallel(src).expect("M:N: clean-fn task must not gate"),
+        expect
+    );
+}
+
+/// Option B TRANSITIVE over-gate fix: a spawned task calling an `argc==0` method on a LOCAL value,
+/// where NO user type implements that method name (pure builtin like `.upper()`), must run CLEAN.
+/// The by-name `CallMethod` scan finds no user impl → provably inert → no gate.
+#[test]
+fn generator_reach_task_method_on_local_runs_clean_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn task():\n",
+        "    s := \"hi\"\n",
+        "    n := s.upper()\n",
+        "    print(n)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn task()\n",
+        "main()\n"
+    );
+    let expect = "HI\n";
+    assert_eq!(
+        run_capture(src).expect("serial: builtin-method task must not gate"),
+        expect
+    );
+    assert_eq!(
+        run_capture_parallel(src).expect("M:N: builtin-method task must not gate"),
+        expect
+    );
+}
+
+/// Option B under-gate guard for the by-name `CallMethod` scan: a spawned task calling an `argc==0`
+/// USER method (`reads_g`) whose impl READS the generator global must STILL fault on both engines.
+/// The receiver `S` is constructed in the PARENT (`spawn work(S(1))`) and crosses as a data arg, so
+/// the task body is `GetLocal(s); CallMethod{reads_g,0}` — the ONLY reach path is the by-name scan,
+/// which must resolve `S.reads_g` and find the `GetGlobalSlot(g)` embedding a generator.
+#[test]
+fn generator_reach_task_method_reads_g_faults_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "struct S:\n",
+        "    x: int\n",
+        "    fn reads_g(self):\n",
+        "        for v in g:\n",
+        "            print(v)\n",
+        "fn work(s: S):\n",
+        "    s.reads_g()\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn work(S(1))\n",
+        "main()\n"
+    );
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{engine}: expected a fault (by-name method reach), got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// Option B TRANSITIVE over-gate fix: a NESTED spawn — the outer task's body has `EnterNursery` +
+/// `SpawnCall(inner)` + `JoinNursery`, and `inner` touches no generator global. The scan treats the
+/// nursery-management ops as inert and recurses the resolvable nested `spawn inner()` into `inner`'s
+/// (clean) proto, so both engines run CLEAN. (Was: `EnterNursery` hit the opaque catch-all.)
+#[test]
+fn generator_reach_nested_spawn_runs_clean_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n",
+        "    yield 1\n",
+        "g := gen()\n",
+        "fn inner():\n",
+        "    x := 1\n",
+        "fn outer():\n",
+        "    parallel:\n",
+        "        spawn inner()\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn outer()\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    let expect = "done\n";
+    assert_eq!(
+        run_capture(src).expect("serial: nested clean spawn must not gate"),
+        expect
+    );
+    assert_eq!(
+        run_capture_parallel(src).expect("M:N: nested clean spawn must not gate"),
+        expect
+    );
 }
 
 /// Option B over-gate regression guards: (a) a NON-generator module global read by a spawned task
@@ -7955,8 +8089,9 @@ fn generator_module_global_executor_untouched_runs_clean_both() {
 }
 
 /// Option B — TRANSITIVE reach through an `Executor` job: the job body has no `GetGlobalSlot(g)`, it
-/// calls a helper that reads `g`. The job's `Op::Call` is OPAQUE to the straight-line scan, so the
-/// conservative gate faults on BOTH engines (over-approximation — matches the nursery transitive case).
+/// calls a helper that reads `g`. The reach scan RESOLVES the job's `Op::Call` into the helper's
+/// proto (which reads `g`) and faults on BOTH engines via that resolved transitive reach (matches the
+/// nursery transitive case).
 #[test]
 fn generator_module_global_executor_transitive_helper_faults_both() {
     let src = concat!(
