@@ -10522,3 +10522,32 @@ fn main():
 main()";
     assert_parity_out(src, "9000000000000000000\n");
 }
+
+// ===== F3 — checker over-rejection fixes, end-to-end RUN parity =====
+
+/// F3 — generic fns over the native reserved handles (`Shared`/`Atomic`) bind `T` from the argument
+/// and run type-erased identically on both engines.
+#[test]
+fn generic_fn_over_native_handles_run_parity() {
+    let src = "import std.concurrency\n\
+               fn peek[T](s: Shared[T]) -> T:\n\
+               \x20   return s.get()\n\
+               fn look[T](a: Atomic[T]) -> T:\n\
+               \x20   return a.load()\n\
+               print(peek(Shared(9)))\n\
+               print(look(Atomic(3)))\n";
+    assert_parity_out(src, "9\n3\n");
+}
+
+/// F3 (subst) — a generic wrapper struct holding a `Channel[T]` constructs, and its channel is
+/// sent-to and recv'd-from after `Channel[T]→Channel[int]` substitution.
+#[test]
+fn generic_wrapper_struct_channel_run_parity() {
+    let src = "import std.concurrency\n\
+               struct Box[T]:\n\
+               \x20   ch: Channel[T]\n\
+               b := Box(Channel[int]())\n\
+               b.ch.send(7)\n\
+               print(b.ch.recv())\n";
+    assert_parity_out(src, "7\n");
+}

@@ -2407,7 +2407,7 @@ impl Checker {
                             span,
                         );
                     }
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
                     self.enforce_bounds(
                         &sig.where_bounds,
                         &HashMap::from([("T".to_string(), elem.clone())]),
@@ -2479,7 +2479,7 @@ impl Checker {
                     self.native_handle_method("Set", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -3070,7 +3070,21 @@ impl Checker {
         span: Span,
         widen: bool,
     ) {
-        self.check_args_range_decl(name, params, None, min_params, args, span, widen);
+        self.check_args_range_decl(name, params, None, min_params, args, span, widen, false);
+    }
+
+    /// [`Checker::check_args_range`] for a List/Set COLLECTION mutator receiver — the only path that
+    /// may show the element-pin annotation hint on a `push`/`add`/`insert` mismatch (handle methods
+    /// like `Atomic.add` route through `check_args_range` and never see it).
+    pub(super) fn check_args_range_coll(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        min_params: usize,
+        args: &[Expr],
+        span: Span,
+    ) {
+        self.check_args_range_decl(name, params, None, min_params, args, span, false, true);
     }
 
     /// [`Checker::check_args_w`] for a SUBSTITUTED parameter list (a method of a generic type, whose
@@ -3088,10 +3102,19 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) {
-        self.check_args_range_decl(name, params, Some(declared), params.len(), args, span, true);
+        self.check_args_range_decl(
+            name,
+            params,
+            Some(declared),
+            params.len(),
+            args,
+            span,
+            true,
+            false,
+        );
     }
 
-    #[allow(clippy::too_many_arguments)] // params + their pre-substitution twins + arity + span + flag
+    #[allow(clippy::too_many_arguments)] // params + their pre-substitution twins + arity + span + flags
     fn check_args_range_decl(
         &mut self,
         name: &str,
@@ -3101,6 +3124,7 @@ impl Checker {
         args: &[Expr],
         span: Span,
         widen: bool,
+        is_collection: bool,
     ) {
         if !(min_params..=params.len()).contains(&args.len()) {
             let want = if min_params == params.len() {
@@ -3149,7 +3173,10 @@ impl Checker {
                 // `list[<first element>]`; a later element of a different (e.g. protocol-sibling) type
                 // is a real mismatch — point the user at the explicit annotation that makes a
                 // mixed/protocol collection legal.
-                let hint = if i == 0 && matches!(name, "push" | "add" | "insert") {
+                // The element-pin narrative is only valid for a List/Set collection receiver. The
+                // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
+                // show the collection hint — gate on the receiver actually being a collection.
+                let hint = if is_collection && i == 0 && matches!(name, "push" | "add" | "insert") {
                     // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a
                     // return-only `T` from `empty[T]()` called with nothing to bind it from. A
                     // `Ty::Param` that IS in scope (`self.type_params`) is a legitimately-bound

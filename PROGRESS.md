@@ -4,6 +4,35 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CHECKER (2026-07-18, `auto-task/checker-overreject-fixes`) — two disjoint over-rejection /
+> diagnostic fixes (all checker-side, parity-neutral, runtime unchanged).**
+> **F2 (dropped — was unsound)** — a proposed whitelist of the built-in `Error` existential as sendable
+> (to admit `Channel[int!]`/`Channel[Error]`) was **rejected on review**: the `Error` existential erases
+> field-level sendability, so a struct that satisfies `Error` yet carries a non-sendable field (a
+> `Ref[T]`, a live generator) would launder past the gate that the concrete `Channel[MyErr]` correctly
+> rejects — a check-OK-then-run-fault (`Err(GErr(gen()))` over `Channel[int!]` type-checked then faulted
+> `a generator cannot be sent across tasks`). The conservative rejection is **correct and consistent**
+> (an element type must be *provably* sendable; an existential is not — `Channel[Result[int,str]]` works
+> because `str` is). Idiomatic error-over-channel = a concrete sendable error type (a typed enum).
+> Pinned by `channel_of_protocol_existential_is_non_sendable`. **F3** — the free `unify` (`src/checker/mod.rs`)
+> had no arms for the four native reserved generic handles, so `unify(Shared[T], Shared[int])` bound
+> nothing and a generic fn/struct over `Shared`/`Channel`/`Atomic`/`RwShared` rejected the call (even
+> with turbofish); the identical shape over `List[T]` worked. Fix: add the four handle arms to `unify`
+> AND the matching subst arms to `subst` (the wrapper-struct field `ch: Channel[T]` now substitutes to
+> `Channel[int]`). Audit: sibling walkers (`ty_collect_params`, `contains_unknown_in_slot`,
+> `merge_unknown`, `sig.rs::fill_ret`) already list all four; `ty_fully_concrete` (mod.rs:2898) shares
+> the `_ => true` shape omission but its bound-forwarding domain (where/satisfaction) is unreachable by
+> handle types today (no `where`-bounded handle path) — left as-is (touching it risks bound-comparison
+> behavior). **F4** (cosmetic) — `Atomic.add(1.5)` was correctly rejected but showed the List/Set
+> collection element-pin hint (`add` collides between `Set.add` and `Atomic.add`). Fix: thread an
+> `is_collection` bool through `check_args_range_decl` (new `check_args_range_coll` wrapper routes only
+> the List/Set method arms); handle methods now never show the hint. Mismatch text/span/rc unchanged;
+> `Set.add`'s hint still fires. Tests: `channel_of_protocol_existential_is_non_sendable`,
+> `generic_fn_over_native_handles_infers_param`, `generic_wrapper_struct_holding_channel_substitutes`,
+> `atomic_add_mismatch_no_collection_hint` (checker) +
+> `generic_fn_over_native_handles_run_parity`, `generic_wrapper_struct_channel_run_parity` (RUN parity,
+> serial==M:N). `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ SOUNDNESS (2026-07-18, `auto-task/try-nil-fn-reject`) — `docs/gaps.md` §B6: `?` in a nil fn
 > silently swallowed the error (check-OK-then-data-loss).** The checker accepted `?` whenever the
 > enclosing return was `Nil` — but `Nil` covers BOTH module top-level (legit — the runtime unwinds the
