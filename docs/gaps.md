@@ -937,6 +937,54 @@ dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
 - **Not a gap:** spread/unpack (`f(*args)`) was deliberately dropped in `spec.md` and varargs +
   `.concat`/`.merge` cover it.
 
+### L7. Sendability-bounded protocol existentials — the sound way to admit `Channel[Error]` (POST-FREEZE milestone)
+
+**Motivation (F2, 2026-07-18 bug-hunt).** `Channel[int!]` / `Channel[Error]` are rejected today because a
+protocol existential is non-sendable (`sendable_rec`, `src/checker/proto.rs`). A one-line whitelist of the
+built-in `Error` existential was tried and **reverted as unsound**: the existential *erases field-level
+sendability*, so a struct that satisfies `Error` yet holds a non-sendable field (a builtin `Ref[T]`, a
+**live generator**) launders past the gate that the concrete `Channel[MyErr]` correctly rejects —
+check-OK-then-run-fault (verified: `Err(GErr(gen()))` over `Channel[int!]` type-checked then faulted `a
+generator cannot be sent across tasks`, both engines). The current **conservative rejection is correct**;
+the workaround (a concrete sendable error type) already works: `Channel[int!str]`, `Channel[int!MyEnum]`,
+`Channel[Result[int, MyErr]]` all type-check and send `Err(...)` across a spawn today, both engines. So this
+is a **generalization, not a live gap** — deferred, not urgent.
+
+**Why Rust, not Go, is the reference.** Go has NO static sendability check — you may send *anything* over a
+channel (an `interface{}`, a pointer, a mutex), because Go channels **share by reference** (`chan *T` hands
+both goroutines the same pointee) and defer safety to the race detector + discipline. Chezzi is the
+opposite: the airlock **deep-copies** on send (tasks are isolated — value semantics, no shared mutable
+memory except through `Shared`/`Channel` handles; this is why the B3 module-global mutation was *lost* on
+M:N). That is **Rust's `Send`, not Go's channel model**. In Rust a bare `dyn Error` is not `Send`; you write
+`Box<dyn Error + Send>` and the compiler then forces every concrete error stored into it to be `Send`. That
+`+ Send` bound is exactly the design below.
+
+**The feature: a sendability-bounded protocol existential.** Let a protocol (or a use-site) be marked
+sendable-bounded, meaning the existential is itself sendable AND every value widened into it is required to
+be sendable. Then `Channel[Error]` is sound: a `Ref`/generator-carrying witness is **rejected at the
+widening**, not laundered — `sendable_rec` can safely return `true` for the bounded existential.
+
+**The work (checker-side, well-scoped but real).** Chezzi protocols are **structural** (Go-style), so
+widening to an existential is frequently *implicit* (a struct used where `Error` is expected — e.g. the
+`Err(GErr(...))` argument in the F2 repro). Every implicit widening site becomes a sendability check point:
+- add a sendable-bound marker to protocol types (a bounded existential `Ty`, or a per-use `+ send` flag);
+- at every place a concrete type is coerced to a sendable-bounded existential (call args, `Err(...)`/`Ok(...)`
+  payloads, struct fields, returns, channel `send`), require `sendable(concrete)` and error otherwise —
+  mirroring the `+ Send` propagation;
+- flip `sendable_rec`'s `Ty::Protocol` arm to `true` for a sendable-bounded existential (only);
+- decide the surface: is `Error` sendable-bounded by default (simplest — errors are almost always plain
+  data), or opt-in per protocol / per use? Default-bounded `Error` gives `Channel[int!]` for free but would
+  reject a today-legal `Err(struct-with-Ref)` used purely in-task — measure that blast radius first.
+
+**Risk / why POST-FREEZE.** This is checker surface with **real false-positive risk** (every widening site
+must be found; a missed one is a soundness hole, an over-eager one rejects legal in-task code). Do NOT
+attempt before the JIT freeze. The concrete-error-type workaround covers the practical need until then.
+Related: [B2](#b2--between-disjoint-types-type-checks-a-proposed-tightening-not-a-clear-bug) (another
+typed-language tightening), and the note that **dropping `ref`/`Ref` is the WRONG lever for F2** — it is
+breaking (22+ example uses, 83 in `src`), its by-reference-*param* role (`fn bump(x: ref int)`, Go `*int` /
+Rust `&mut`) has no replacement and is not vestigial, and it would not close the generator-field laundering
+anyway; this milestone fixes F2 *while keeping* `ref`.
+
 ## Tooling / ecosystem (category added 2026-07-14 — this file previously had none)
 
 The CLI ships exactly 8 commands (`init run test check tokens ast docs help`). **R3 (no package
