@@ -61,10 +61,10 @@ impl Vm {
     }
 
     /// M19 Tier-2 — adaptive quickening for `Eq`/`NotEq` (never fused, so always reached here). The
-    /// int fast path REPLICATES the generic numeric comparison `as_f64(x) == as_f64(y)` (lossy for
-    /// `|i64| > 2^53`) — NOT exact `x == y` — so it stays byte-identical to `values_equal_guarded`
-    /// (`Value::Int` is numeric) and to the interpreter; preserving that loss is what keeps two-engine
-    /// parity. `negate` flips the result for `NotEq`. Mirrors the kept `Op::Eq`/`Op::NotEq` `step` arms.
+    /// int fast path uses EXACT `x == y` (i64), matching `values_equal_guarded`'s exact `(Int,Int)`
+    /// arm — both engines run this same code, so two-engine parity holds. (It formerly replicated the
+    /// lossy `as_f64(x) == as_f64(y)`, which wrongly equated distinct ints above 2^53.) `negate` flips
+    /// the result for `NotEq`. Mirrors the kept `Op::Eq`/`Op::NotEq` `step` arms.
     #[inline(never)]
     pub(super) fn q_eq(
         &mut self,
@@ -76,7 +76,7 @@ impl Vm {
             let n = self.stack.len();
             if let (Value::Int(x), Value::Int(y)) = (self.stack[n - 2], self.stack[n - 1]) {
                 self.stack.truncate(n - 2);
-                let eq = (x as f64) == (y as f64);
+                let eq = x == y;
                 self.push(Value::Bool(eq ^ negate));
                 return Ok(());
             }
@@ -1495,6 +1495,11 @@ impl Vm {
             ));
         }
         match (l, r) {
+            // Exact i64 equality for two ints (Python parity). MUST precede the numeric arm below,
+            // which compares via `as_f64` — lossy for `|i64| > 2^53` (distinct ints round to one
+            // f64). The f64 arm is kept only for cross-type Int/Float (`1 == 1.0`). Mirrors the
+            // exact `(Int,Int)` arms already in `compare` and `value_order`.
+            (Value::Int(a), Value::Int(b)) => Ok(a == b),
             (a, b) if is_numeric(a) && is_numeric(b) => Ok(as_f64(a) == as_f64(b)),
             (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
             (Value::Nil, Value::Nil) => Ok(true),

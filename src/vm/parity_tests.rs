@@ -2007,6 +2007,23 @@ fn parity_int_div_by_zero_still_faults() {
 }
 
 #[test]
+fn parity_large_int_equality_is_exact() {
+    // Two distinct i64 values above 2^53 must NOT compare equal (Python parity). Previously both
+    // engines compared ints via `as_f64`, so 2^62+1 and 2^62+2 (both round to 2^62 in f64) wrongly
+    // compared EQUAL. Cross-type `1 == 1.0` must STILL be true (int/float interop preserved).
+    let src = "fn main():\n    a := 4611686018427387905\n    b := 4611686018427387906\n    print(a == b)\n    print(a != b)\n    print(a == a)\n    print(1 == 1.0)\n    print(2 == 3)\nmain()";
+    assert_parity_out(src, "false\ntrue\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn parity_large_int_map_keys_distinct() {
+    // Two distinct large ints are distinct map keys (they were collapsed to one when eq was f64).
+    // `1` and `1.0` still collapse to a single key (cross-type numeric key equality preserved).
+    let src = "fn main():\n    m := {4611686018427387905: 1, 4611686018427387906: 2}\n    print(m.len())\n    n := {1: 10, 1.0: 20}\n    print(n.len())\nmain()";
+    assert_parity_out(src, "2\n1\n");
+}
+
+#[test]
 fn recover_tail_stmt_match_value_run_parity() {
     // A `recover:` whose TAIL is a statement-form `match` with value-producing arms yields
     // `Ok(<arm value>)` — the value is NOT dropped (the old bug wrapped `Ok(nil)`). v=100.

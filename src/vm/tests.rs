@@ -1349,16 +1349,16 @@ fn quicken_table_presized_and_based() {
 }
 
 #[test]
-fn quicken_eq_preserves_lossy_f64_semantics() {
-    // GOTCHA: the generic `Eq` compares numerics via `as_f64(a)==as_f64(b)` (mod.rs:3380), which
-    // is LOSSY for i64 beyond 2^53. The quickened int fast path MUST replicate the loss (NOT use
-    // exact `x==y`), or it diverges from the interpreter and breaks parity. 2^53 vs 2^53+1 both
-    // round to the same f64, so `==` is TRUE and `!=` is FALSE under the (preserved) semantics.
-    // Run it in a hot loop so the site warms past Cold into the specialized Int state.
+fn quicken_eq_uses_exact_i64_semantics() {
+    // The quickened int `Eq`/`NotEq` fast path compares EXACT i64 (`x == y`), matching
+    // `values_equal_guarded`'s exact `(Int,Int)` arm — Python parity. 2^53 vs 2^53+1 are DISTINCT
+    // ints (they'd collide only under the old lossy `as_f64` compare), so `==` is FALSE and `!=` is
+    // TRUE. Run it in a hot loop so the site warms past Cold into the specialized Int state — this
+    // guards that the specialized path stays exact, not just the generic one.
     let src = "i := 0\nhits := 0\nwhile i < 3:\n    if 9007199254740992 == 9007199254740993:\n        hits = hits + 1\n    i = i + 1\nprint(hits)\n";
-    assert_eq!(run_parity(src), "3\n");
+    assert_eq!(run_parity(src), "0\n");
     let src2 = "i := 0\nmiss := 0\nwhile i < 3:\n    if 9007199254740992 != 9007199254740993:\n        miss = miss + 1\n    i = i + 1\nprint(miss)\n";
-    assert_eq!(run_parity(src2), "0\n");
+    assert_eq!(run_parity(src2), "3\n");
 }
 
 #[test]
