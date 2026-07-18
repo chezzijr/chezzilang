@@ -18649,3 +18649,74 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
         "membership",
     );
 }
+
+// ===== F2/F3/F4 — checker over-rejection / diagnostic fixes =====
+
+/// F2 — `Channel[int!]` / `Channel[Error]` are sendable: the built-in `Error` protocol existential
+/// is the one the runtime already wires across the airlock (task-fault propagation), so a worker can
+/// A `Channel` over a USER protocol existential is non-sendable (an Error-satisfying witness can carry
+/// non-sendable fields; the built-in `Error` existential is likewise NOT provably sendable, so
+/// `Channel[int!]`/`Channel[Error]` stay rejected — use a concrete sendable error type, e.g. a typed enum).
+#[test]
+fn channel_of_protocol_existential_is_non_sendable() {
+    entry_rejects(
+        "protocol Drawable:\n    fn draw(self) -> str\nc := Channel[Drawable]()\nprint(\"x\")\n",
+        "must be sendable",
+    );
+    entry_rejects(
+        "import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n",
+        "must be sendable",
+    );
+    entry_rejects(
+        "import std.concurrency\nc := Channel[Error]()\nprint(\"x\")\n",
+        "must be sendable",
+    );
+}
+
+/// F3 — a generic fn over a native reserved handle (`Shared`/`Channel`/`Atomic`/`RwShared`) binds its
+/// type param `T` from the argument, exactly like the identical shape over `List[T]`.
+#[test]
+fn generic_fn_over_native_handles_infers_param() {
+    entry_ok(
+        "import std.concurrency\nfn peek[T](s: Shared[T]) -> T:\n    return s.get()\nx := peek(Shared(9))\nprint(x)\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn first[T](c: Channel[T]) -> T:\n    return c.recv()\nch := Channel[int]()\nch.send(1)\nprint(first(ch))\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn look[T](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn peekrw[T](s: RwShared[T]) -> T:\n    return s.get()\nprint(peekrw(RwShared(4)))\n",
+    );
+}
+
+/// F3 (subst side) — a generic wrapper struct holding a `Channel[T]` substitutes `Channel[T]→Channel[int]`
+/// so its channel field/method type resolves after construction.
+#[test]
+fn generic_wrapper_struct_holding_channel_substitutes() {
+    entry_ok(
+        "import std.concurrency\nstruct Box[T]:\n    ch: Channel[T]\nfn main():\n    b := Box(Channel[int]())\n    b.ch.send(7)\n    x: int = b.ch.recv()\n    print(x)\nmain()\n",
+    );
+}
+
+/// F4 — `Atomic.add` type mismatch must NOT show the List/Set collection element-pin hint (wrong
+/// domain); the mismatch error itself is unchanged. `Set.add`'s hint still fires.
+#[test]
+fn atomic_add_mismatch_no_collection_hint() {
+    let errs = check_entry("import std.concurrency\na := Atomic(0)\na.add(1.5)\n");
+    let msg = errs
+        .iter()
+        .map(|e| e.message.as_str())
+        .find(|m| m.contains("expected int, found float"))
+        .expect("Atomic.add float mismatch should be reported");
+    assert!(
+        !msg.contains("List[<protocol>]"),
+        "Atomic.add hint should NOT mention the List collection pin: {msg:?}"
+    );
+    // Set.add's collection hint STILL fires (a Set first-use-pinned to int, mismatched later add).
+    rejects(
+        "fn main():\n    s := Set()\n    s.add(1)\n    s.add(\"x\")\nmain()\n",
+        "List[<protocol>]",
+    );
+}

@@ -3025,6 +3025,13 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
             // Preserve surface labels across generic substitution (they name params, not types).
             labels: labels.clone(),
         },
+        // Native reserved generic handles must substitute their element param too (mirror `subst`'s
+        // List/Map/… arms) so a generic wrapper struct field `ch: Channel[T]` becomes `Channel[int]`
+        // after construction — without these the field stayed `Channel[T]` and every use rejected.
+        Ty::Channel(t) => Ty::channel(subst(t, map)),
+        Ty::Shared(t) => Ty::shared(subst(t, map)),
+        Ty::Atomic(t) => Ty::atomic(subst(t, map)),
+        Ty::RwShared(t) => Ty::rwshared(subst(t, map)),
         Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         Ty::Enum(n, args) => Ty::Enum(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         Ty::NewType(n, args) => {
@@ -3111,6 +3118,14 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::List(d), Ty::List(a)) | (Ty::Set(d), Ty::Set(a)) | (Ty::Option(d), Ty::Option(a)) => {
             unify(d, a, map)
         }
+        // Native reserved generic handles bind their element param exactly like `List[T]` above —
+        // without these arms `unify(Shared[T], Shared[int])` fell to the `_` no-op and bound nothing,
+        // so a generic fn over `Shared`/`Channel`/`Atomic`/`RwShared` (or a wrapper struct holding
+        // one) rejected the call. (Sibling `ty_collect_params` already lists all four.)
+        (Ty::Channel(d), Ty::Channel(a))
+        | (Ty::Shared(d), Ty::Shared(a))
+        | (Ty::Atomic(d), Ty::Atomic(a))
+        | (Ty::RwShared(d), Ty::RwShared(a)) => unify(d, a, map),
         (Ty::Result(dt, de), Ty::Result(at, ae)) => {
             unify(dt, at, map);
             unify(de, ae, map);
