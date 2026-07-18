@@ -1276,9 +1276,10 @@ impl Checker {
                     ("Channel", [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if !self.sendable(&elem) {
+                            let hint = self.sendable_error_hint(&elem);
                             self.error(
                                 span,
-                                format!("Channel element type must be sendable, found {elem}"),
+                                format!("Channel element type must be sendable (able to cross a task boundary), found {elem}{hint}"),
                             );
                         }
                         Ty::channel(elem)

@@ -18671,6 +18671,25 @@ fn channel_of_protocol_existential_is_non_sendable() {
         "import std.concurrency\nc := Channel[Error]()\nprint(\"x\")\n",
         "must be sendable",
     );
+    // The `Error`-carrying element gets the concrete-error-type hint pointing at `Channel[int!str]`.
+    entry_rejects(
+        "import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n",
+        "name a concrete error type",
+    );
+    // A non-Error non-sendable element (builtin `Ref`) does NOT get the Error hint (just the base
+    // message + the plain gloss).
+    let errs = check_entry("import std.ref\nc := Channel[Ref[int]]()\nprint(\"x\")\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cross a task boundary")),
+        "expected the plain gloss, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("concrete error type")),
+        "a non-Error element must NOT get the Error hint, got: {errs:?}"
+    );
 }
 
 /// F3 — a generic fn over a native reserved handle (`Shared`/`Channel`/`Atomic`/`RwShared`) binds its

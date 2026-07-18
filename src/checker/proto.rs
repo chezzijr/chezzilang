@@ -1475,6 +1475,21 @@ impl Checker {
         }
     }
 
+    /// A targeted hint for the most common non-sendable channel element: the built-in `Error`
+    /// existential — what a bare `T!` / `Result[T, Error]` erases to (rendered `Result[int]`). It
+    /// isn't sendable because a value satisfying `Error` may carry a non-sendable field; point the
+    /// user at a concrete error type. Empty string when the type doesn't mention `Error`.
+    pub(super) fn sendable_error_hint(&self, ty: &Ty) -> String {
+        if ty_mentions_error_existential(ty) {
+            " — the built-in `Error` type can't cross a task boundary (a value satisfying `Error` \
+             may hold data that can't be sent between tasks); name a concrete error type, e.g. \
+             `Channel[int!str]` or `Channel[int!MyErr]`"
+                .to_string()
+        } else {
+            String::new()
+        }
+    }
+
     /// Resolve the element type of a value-first concurrency box (`Shared`/`RwShared`/`Atomic`) from
     /// an OPTIONAL turbofish, mirroring the container-ctor turbofish pattern (the `List` arm above).
     /// With no turbofish the value's `inferred` type wins; with one type arg that arg pins the element
@@ -2120,5 +2135,29 @@ impl Checker {
                 map.entry(tp.name.clone()).or_insert(Ty::Unknown);
             }
         }
+    }
+}
+
+/// Does `ty` mention the built-in `Error` protocol existential anywhere (the E side of a bare `T!`,
+/// or nested inside a container/struct)? Drives the concrete-error-type hint on a non-sendable
+/// channel element. Matches `Error` by name — it is a reserved protocol (`prebuilt_protocols`), so a
+/// user protocol can never shadow it.
+fn ty_mentions_error_existential(ty: &Ty) -> bool {
+    match ty {
+        Ty::Protocol(n, _) => n == "Error",
+        Ty::List(t)
+        | Ty::Set(t)
+        | Ty::Option(t)
+        | Ty::Channel(t)
+        | Ty::Shared(t)
+        | Ty::Atomic(t)
+        | Ty::RwShared(t) => ty_mentions_error_existential(t),
+        Ty::Map(a, b) | Ty::Result(a, b) => {
+            ty_mentions_error_existential(a) || ty_mentions_error_existential(b)
+        }
+        Ty::Tuple(xs) | Ty::Struct(_, xs) | Ty::Enum(_, xs) | Ty::NewType(_, xs) => {
+            xs.iter().any(ty_mentions_error_existential)
+        }
+        _ => false,
     }
 }
