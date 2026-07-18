@@ -2584,6 +2584,10 @@ impl Vm {
                 // boundary; immutable + value-compared, so a fresh handle on reconstruction is
                 // observationally identical to sharing this one.
                 Obj::Str(s) => WireValue::Str(s.as_str().into()),
+                // Boxed scalars cross by value, exactly like the inline `Int`/`Float` arms above —
+                // `from_wire` re-inlines (or re-boxes, once Phase 1 is live) on the far heap.
+                Obj::BigInt(n) => WireValue::Int(*n),
+                Obj::FloatBox(f) => WireValue::Float(*f),
                 // `bytes` crosses by value (owned raw bytes), exactly like `str` — immutable +
                 // value-compared, so a fresh handle on reconstruction is observationally identical.
                 Obj::Bytes(b) => WireValue::Bytes(b.clone()),
@@ -3394,6 +3398,10 @@ impl Vm {
             return Ok(SnapValue::Wire(w));
         }
         Ok(match self.heap.get(h).clone() {
+            // Boxed scalars: in practice `to_wire_depth` above already handled these (no handle), so
+            // this arm is a defensive mirror keeping the match exhaustive — same value as inline.
+            Obj::BigInt(n) => SnapValue::Wire(WireValue::Int(n)),
+            Obj::FloatBox(f) => SnapValue::Wire(WireValue::Float(f)),
             Obj::Func { proto, home } => SnapValue::Func { proto, home: self.home_index(home) },
             Obj::Closure { proto, captured, home } => {
                 // Lever #3: positional captures — carry names from the proto in slot order.

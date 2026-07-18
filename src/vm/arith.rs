@@ -1018,6 +1018,11 @@ impl Vm {
                     b.as_ref().hash(&mut hr);
                     hr.finish()
                 }
+                // A boxed scalar hashes identically to the inline `Int`/`Float` of the same value
+                // (same zero-normalised f64-bits scheme as the `Value::Int`/`Value::Float` arms
+                // above) — mandatory for the "behaves like inline" invariant.
+                Obj::BigInt(n) => (if *n == 0 { 0.0 } else { *n as f64 }).to_bits(),
+                Obj::FloatBox(f) => (if *f == 0.0 { 0.0 } else { *f }).to_bits(),
                 _ => 0,
             },
         }
@@ -1657,6 +1662,9 @@ impl Vm {
                     // `ha == hb` identity short-circuit above never fires; compare by name to match the
                     // interp (derived `PartialEq` on `Value::Builtin`'s `Rc<str>`) — VM==interp parity.
                     (Obj::Builtin(a), Obj::Builtin(b)) => Ok(a == b),
+                    // Boxed scalars compare by value, identically to the inline `Int`/`Float` arms.
+                    (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),
+                    (Obj::FloatBox(a), Obj::FloatBox(b)) => Ok(a == b),
                     _ => Ok(false),
                 }
             }
@@ -1673,6 +1681,9 @@ impl Vm {
             (Value::Float(x), Value::Float(y)) => x.total_cmp(&y),
             (Value::Obj(ha), Value::Obj(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
                 (Obj::Str(x), Obj::Str(y)) => x.cmp(y),
+                // Boxed scalars order identically to the inline `Int`/`Float` arms above.
+                (Obj::BigInt(x), Obj::BigInt(y)) => x.cmp(y),
+                (Obj::FloatBox(x), Obj::FloatBox(y)) => x.total_cmp(y),
                 _ => Equal,
             },
             _ => Equal,

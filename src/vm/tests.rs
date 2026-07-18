@@ -1922,6 +1922,32 @@ pub(crate) fn empty_program() -> Program {
     }
 }
 
+/// A boxed `BigInt`/`FloatBox` must be observationally identical to the inline `Int`/`Float` of the
+/// same value — display, hash (the f64-bits scheme, NOT `*n as u64`), equality, and ordering. These
+/// variants are unreachable from real programs this phase, so this direct test is their only exercise.
+#[test]
+fn bigint_floatbox_behave_like_inline() {
+    use std::cmp::Ordering;
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let bi = Value::Obj(vm.heap.alloc(Obj::BigInt(5)));
+    let bi2 = Value::Obj(vm.heap.alloc(Obj::BigInt(5)));
+    let fb = Value::Obj(vm.heap.alloc(Obj::FloatBox(1.5)));
+    let fb2 = Value::Obj(vm.heap.alloc(Obj::FloatBox(1.5)));
+    // Display matches the inline scalar.
+    assert_eq!(vm.display(bi), "5");
+    assert_eq!(vm.display(bi), vm.display(Value::Int(5)));
+    assert_eq!(vm.display(fb), vm.display(Value::Float(1.5)));
+    // Hash matches the inline scalar (validates the canonical f64-bits scheme, not `*n as u64`).
+    assert_eq!(vm.scalar_hash(bi), vm.scalar_hash(Value::Int(5)));
+    assert_eq!(vm.scalar_hash(fb), vm.scalar_hash(Value::Float(1.5)));
+    // Equality holds across two independent boxes of the same value.
+    assert!(vm.values_equal(bi, bi2));
+    assert!(vm.values_equal(fb, fb2));
+    // Ordering: equal boxes compare Equal.
+    assert_eq!(vm.value_order(bi, bi2), Ordering::Equal);
+    assert_eq!(vm.value_order(fb, fb2), Ordering::Equal);
+}
+
 #[test]
 fn vm_calls_native_fn_value() {
     use crate::native::{Host, HostError, NativeRet};

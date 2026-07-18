@@ -361,6 +361,14 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   this call** — it stayed at a 16-byte tagged union *because* it added 64-bit ints. Blast radius is
   **VM-only**, but it's still a milestone-sized design spike (box-big-ints scheme + measure), not a clean
   behavior-preserving session. Park until the int model is up for revisiting.
+  - **UPDATE 2026-07-18 — 8B-`Value` is now its own milestone (int-favoring pointer-tag, not NaN-box).**
+    Design/plan in `~/.claude/plans/2026-07-18-8b-value-pointer-tag-*.md`: tag `Int` inline (`(n<<1)|1`,
+    ±2^62), box the rare wide int (`Obj::BigInt`) and every `f64` (`Obj::FloatBox`). **Phase 0 scaffolding
+    landed** (parity-trivial, additive): `Heap::live_bytes()` + peak high-water probe behind
+    `CHEZZI_HEAP_STATS=1` (baseline: `benches/run.chz` peak_live_bytes=24277 at size_of_value=16), and the
+    two GC-leaf `Obj` variants (`BigInt`/`FloatBox`, unused by real programs yet — reachable only from a
+    unit test; `size_of::<Obj>()` stays 88). Phase 1 (the `struct Value(u64)` swap) is gated on the
+    measured memory drop vs this baseline.
 - **Register VM** instead of stack — fewer ops, less stack traffic. Effectively a VM rewrite; only
   if dispatch count is still the wall after superinstructions.
 - **Generational / incremental GC** — current is stop-the-world full-heap (`next_gc = 2×live`).

@@ -4866,6 +4866,15 @@ conformance` green.
   int, semantics-sensitive overflow) — not behavior-preserving, uncertain win on the very int benches it
   targets (Lua 5.4 stayed 16-byte for this exact reason). Blast radius is VM-only (the frozen interp has
   its own `Rc`-based `Value`), but it's a milestone spike. Parked.
+  - **UPDATE 2026-07-18 — reopened as the 8B-`Value` int-favoring pointer-tag milestone (NOT NaN-box).**
+    Plan `~/.claude/plans/2026-07-18-8b-value-pointer-tag-*.md`: inline-tag `Int` (`(n<<1)|1`, ±2^62), box
+    the rare wide int + every `f64`. **Phase 0 (heap-side scaffolding) landed** — additive, parity-trivial:
+    (1) `Heap::live_bytes()` + a peak high-water probe reported behind env `CHEZZI_HEAP_STATS=1` as
+    `[heap-stats] peak_live_bytes=<n> size_of_value=<n>` (baseline `benches/run.chz` = peak_live_bytes 24277
+    at size_of_value 16); (2) two GC-leaf `Obj` variants `BigInt(i64)`/`FloatBox(f64)`, unused by real
+    programs (reachable only from a unit test), each behaving identically to the inline `Int`/`Float` for
+    display/hash/eq/order/wire; `size_of::<Obj>()` stays 88. Phase 1 (the `struct Value(u64)` swap) is gated
+    on the measured `peak_live_bytes` drop vs this baseline.
 - **String concat/split builder/rope** moves no current bench — `join` already buffers into one `String`;
   `+`/`split` aren't exercised by the `str` bench.
 - **Arith specialization + frame pooling: effectively closed** — superinstructions inline the monomorphic

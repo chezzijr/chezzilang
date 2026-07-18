@@ -1882,6 +1882,9 @@ impl Vm {
                 Obj::Str(_) => "str",
                 Obj::Bytes(_) => "bytes",
                 Obj::ByteArray(_) => "bytearray",
+                // Boxed scalars report the same type name as the inline `Int`/`Float`.
+                Obj::BigInt(_) => "int",
+                Obj::FloatBox(_) => "float",
                 Obj::List(_) => "List",
                 Obj::Tuple(_) => "tuple",
                 Obj::Map(_) => "Map",
@@ -1937,6 +1940,9 @@ impl Vm {
             Value::Nil => Ok("nil".to_string()),
             Value::Obj(h) => match self.heap.get(h) {
                 Obj::Str(s) => Ok(s.to_string()),
+                // Boxed scalars render identically to the inline `Int`/`Float`.
+                Obj::BigInt(n) => Ok(n.to_string()),
+                Obj::FloatBox(f) => Ok(format_float(*f)),
                 // Python `bytes` repr `b'...'` — shared with the interp via `slice::bytes_repr`.
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
@@ -2397,6 +2403,9 @@ impl Vm {
         // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
         match self.heap.get(h).clone() {
             Obj::Str(s) => out.push_str(&s),
+            // Boxed scalars stringify identically to the inline `Int`/`Float`.
+            Obj::BigInt(n) => out.push_str(&n.to_string()),
+            Obj::FloatBox(f) => out.push_str(&format_float(f)),
             // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper, engine-parity).
             Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
             // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper, engine-parity).

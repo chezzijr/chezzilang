@@ -159,6 +159,16 @@ pub enum Obj {
     /// no `GcRef`s — so `children()` traces nothing (the difference vs `Bytes` is the mutability of the
     /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 88B `Obj` cap.
     ByteArray(Vec<u8>),
+    /// A heap-boxed `i64` outside the ±2^62 inline-`Value` range (8B-`Value` milestone). A GC LEAF:
+    /// holds one raw `i64`, no `GcRef`s, so `children()` traces nothing (like `Bytes`). Immutable, so
+    /// aliasing two `Value`s to one box is invisible. UNUSED until the 8B-`Value` swap (Phase 1); the
+    /// behavior arms exist so a `BigInt(n)` behaves identically to the inline `Int(n)`.
+    BigInt(i64),
+    /// A heap-boxed `f64` (8B-`Value` milestone: floats do not fit inline). A GC LEAF: one raw `f64`,
+    /// no `GcRef`s. Immutable, so aliasing two `Value`s to one box is invisible. UNUSED until the
+    /// 8B-`Value` swap (Phase 1); the behavior arms exist so a `FloatBox(f)` behaves identically to
+    /// the inline `Float(f)`.
+    FloatBox(f64),
     /// `Iter` — a composable cursor (the `Iterable[T]` `.iter()` result), the heap payload behind the
     /// existential `Iterator[T]` type. A frozen SNAPSHOT (`items`) of a collection's contents at the
     /// instant `.iter()` was called, plus a read `pos`. `.next()` returns `Some(items[pos])` and
@@ -423,6 +433,9 @@ impl Heap {
             Obj::Bytes(_) => {}
             // Also a GC leaf — the mutable `bytearray` still holds only raw `u8`s, never a `GcRef`.
             Obj::ByteArray(_) => {}
+            // GC leaves: a boxed scalar holds one raw `i64`/`f64`, no `GcRef`s (like `Bytes`).
+            Obj::BigInt(_) => {}
+            Obj::FloatBox(_) => {}
             // NON-LEAF: the cursor's snapshot may hold heap `GcRef`s, which must stay alive while the
             // cursor is reachable (a not-yet-consumed element is still owned by the cursor).
             Obj::Iter { items, .. } => items.iter().for_each(&mut push),
@@ -590,5 +603,17 @@ mod iter_obj_tests {
         // one slot (size_of::<Obj>) + the Vec's 3*size_of::<Value>() backing must register
         assert!(grown > empty + std::mem::size_of::<Obj>());
         let _ = r;
+    }
+
+    /// `BigInt`/`FloatBox` are GC LEAVES (`children()` traces nothing, like `Bytes`) and must not
+    /// grow `Obj` past the 88B cap.
+    #[test]
+    fn bigint_and_floatbox_are_leaves() {
+        let mut h = Heap::new();
+        let a = h.alloc(Obj::BigInt(i64::MAX));
+        let b = h.alloc(Obj::FloatBox(3.5));
+        assert!(h.children(a).is_empty());
+        assert!(h.children(b).is_empty());
+        assert_eq!(std::mem::size_of::<Obj>(), 88); // cap unchanged
     }
 }
