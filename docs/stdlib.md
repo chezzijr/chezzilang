@@ -197,7 +197,7 @@ Iterate received values with `for v in ch:` (ends when closed and drained).
 `get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**
 (the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
 throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
-`RwShared`/`Atomic`; *unlike* `Ref[T]` (`std.ref`), whose `get()` aliases the live value but can't cross a spawn.
+`RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
@@ -1162,16 +1162,6 @@ ignored, and recursive/generic struct targets are rejected (use the `Json` enum 
 A JSON *literal in Chezzi source* clashes with string interpolation, so use a raw string
 (`r"""{"k": 1}"""`, verbatim — preferred) or double the braces (`"{{ }}"`); a bare `{…}` in a normal
 string is interpolation.
-
-### `std.ref` — mutable box
-```chezzi
-struct Ref[T]:
-    value: T
-```
-Construct `Ref(v)`; methods `get() -> T` · `set(v: T) -> nil` · `update(f: fn(T) -> T) -> nil`.
-`Ref` is a **reserved global** backing the `ref` keyword, so it is usable bare with **no import**
-(the always-linked `std/ref.chz` supplies the layout). `import std.ref` is a harmless no-op kept
-for compatibility.
 
 ### `std.cancel` — cooperative cancellation & timeouts
 `struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·

@@ -41,7 +41,6 @@ pub const STD_FILES: &[(&str, &str)] = &[
     ("prelude.chz", include_str!("../../std/prelude.chz")),
     ("process.chz", include_str!("../../std/process.chz")),
     ("rand.chz", include_str!("../../std/rand.chz")),
-    ("ref.chz", include_str!("../../std/ref.chz")),
     ("regex.chz", include_str!("../../std/regex.chz")),
     ("request.chz", include_str!("../../std/request.chz")),
     ("string.chz", include_str!("../../std/string.chz")),

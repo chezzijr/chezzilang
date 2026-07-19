@@ -38,15 +38,9 @@ pub enum StmtKind {
         name_spans: Vec<Span>,
         ty: Option<Type>,
         value: Expr,
-        /// True for a `ref T` binding (`r: ref int = 0`) — a transparent by-reference local that
-        /// lowers to a `Ref[T]` box in the desugar pass. Only ever set on a single-name typed let
-        /// (the parser rejects `ref` on a destructuring/`:=` let). Read by the checker (coercion +
-        /// rejection) and consumed by desugar (read/write/init lowering); both engines see only the
-        /// already-lowered `Ref`/`.get()`/`.set()` forms, so they ignore this flag.
-        is_ref: bool,
         /// True for a `const T` binding (`PI: const int = 3`) — an immutable binding: the checker
         /// rejects any later reassignment of the name. Only ever set on a single-name typed let
-        /// (the parser rejects `const` on params/`:=`/destructuring, and `ref const`/`const ref`).
+        /// (the parser rejects `const` on params/`:=`/destructuring).
         /// Compile-time-only, like a rejected reassignment: never read by desugar/compiler or either
         /// engine (`const` freezes the NAME; the object it points at stays mutable — shallow).
         is_const: bool,
@@ -495,15 +489,11 @@ pub struct Param {
     pub name_span: Span,
     pub ty: Option<Type>,
     pub default: Option<Expr>,
-    /// True for a `ref T` parameter (`fn f(x: ref int)`) — a transparent by-reference param that
-    /// lowers to a `Ref[T]` box. The caller must pass a `ref`-bound argument (alias) — see the
-    /// coercion table in the checker. Both engines see only lowered forms and ignore this flag.
-    pub is_ref: bool,
     /// True for a variadic parameter (`fn f(...args: T)`) — collects surplus trailing positional
     /// arguments into a fresh `List[T]`. At most one per signature; must carry an element type
     /// annotation; may not carry a default. Everything after it is keyword-only. The desugar pass
     /// collapses the surplus positionals into a `List` literal, so the function still compiles to a
-    /// single `List[T]` param slot and both engines ignore this flag (like `is_ref`).
+    /// single `List[T]` param slot and both engines ignore this flag.
     pub is_variadic: bool,
 }
 

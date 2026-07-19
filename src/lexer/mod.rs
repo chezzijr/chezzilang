@@ -73,10 +73,6 @@ pub enum Token {
     Native,
     From,
     As,
-    /// `ref` — the by-reference binding modifier (`r: ref int = 0`, `fn f(x: ref int)`).
-    /// A full keyword (corpus-safe: no `.chz` uses `ref` as a bare identifier). Legal only as a
-    /// type prefix in the two binding positions; the parser rejects it everywhere else.
-    Ref,
     /// `const` — the immutable-binding modifier (`PI: const float = 3.14`). A full keyword
     /// (corpus-safe: no `.chz` uses `const` as a bare identifier). Legal only as a type prefix in
     /// a single-name typed let; the parser rejects it on params, `:=`, and destructuring.
@@ -228,7 +224,6 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("native", Token::Native),
     ("from", Token::From),
     ("as", Token::As),
-    ("ref", Token::Ref),
     ("const", Token::Const),
     ("and", Token::And),
     ("or", Token::Or),
@@ -2631,7 +2626,7 @@ mod tests {
             "fn", "return", "if", "else", "elif", "for", "while", "in", "break", "continue",
             "pass", "struct", "enum", "protocol", "type", "newtype", "match", "recover", "defer",
             "assert", "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from",
-            "as", "ref", "and", "or", "not", "true", "false",
+            "as", "and", "or", "not", "true", "false",
         ] {
             assert!(
                 KEYWORDS.iter().any(|(k, _)| *k == w),

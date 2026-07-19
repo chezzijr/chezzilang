@@ -104,15 +104,6 @@ impl Checker {
             .params
             .iter()
             .map(|p| match &p.ty {
-                // A `ref T` param is a `Ref[T]` box (its reads/writes were lowered to `.get()`/`.set()`
-                // by desugar). `check_ref_ty` rejects a non-boxable pointee (e.g. a bare generic).
-                Some(t) if p.is_ref => {
-                    self.check_ref_ty(t, span);
-                    self.resolve_type(
-                        &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
-                        span,
-                    )
-                }
                 // A variadic param `...xs: T` collapses to the slot type `List[T]` — the desugar pass
                 // sweeps the surplus positionals into a `List[T]` literal, so the checker sees an
                 // ordinary `List[T]` argument for this slot.
@@ -376,9 +367,6 @@ impl Checker {
                 params.get(i).cloned().unwrap_or(Ty::Unknown)
             };
             self.declare(&param.name, ty);
-            if param.is_ref {
-                self.declare_ref(&param.name);
-            }
         }
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression, so its
         // type IS the inferred return (mirroring a closure body) — there is no `return` to collect.
@@ -728,23 +716,6 @@ impl Checker {
             | Ty::Reader
             | Ty::Ptr
             | Ty::Module(_) => t.clone(),
-        }
-    }
-
-    /// Validate the pointee type of a `ref T` binding/param. `ref` lowers to a `Ref[T]` box, so the
-    /// pointee must be a concrete (monomorphic) type: a bare in-scope generic parameter is rejected
-    /// (use a first-class `Ref[T]` field/param for a generic box). Other unboxable shapes do not arise
-    /// — the parser already bars `ref` from collection-element / return / field positions.
-    pub(super) fn check_ref_ty(&mut self, t: &Type, span: Span) {
-        if let Type::Named { name: n, .. } = t
-            && self.type_params.contains_key(n)
-        {
-            self.error(
-                span,
-                format!(
-                    "`ref {n}` is not allowed: a `ref` binding cannot point at the generic type parameter '{n}' — use a first-class `Ref[{n}]` instead"
-                ),
-            );
         }
     }
 
@@ -1639,21 +1610,17 @@ impl Checker {
                 name_spans,
                 ty,
                 value,
-                is_ref,
                 is_const,
                 ..
             } => {
-                let is_ref = *is_ref;
                 let is_const = *is_const;
                 // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
                 // resolve the annotation first so its unannotated params bind to the slot's param
-                // types. Only the single-name, non-`ref`, `fn`-typed case (a `ref` pointee is never a
-                // closure; destructuring never binds one). Otherwise ordinary bottom-up inference.
+                // types. Only the single-name, `fn`-typed case (destructuring never binds one).
+                // Otherwise ordinary bottom-up inference.
                 let val_ty = match ty {
                     Some(t)
-                        if !is_ref
-                            && names.len() == 1
-                            && matches!(value.kind, ExprKind::Closure { .. }) =>
+                        if names.len() == 1 && matches!(value.kind, ExprKind::Closure { .. }) =>
                     {
                         let expected = self.resolve_type(t, span);
                         if matches!(expected, Ty::Func { .. }) {
@@ -1666,11 +1633,9 @@ impl Checker {
                     // thread the annotation as a hint into the value's inference so a generic
                     // ctor / generic fn-call pre-seeds its type params from it — `a: Heap[int] =
                     // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
-                    // params. A `ref` binding is excluded (its init was desugared to a `Ref(...)`
-                    // wrapper whose param is the pointee, not this annotation). `infer_call` clears
-                    // the hint, but pair the set with an immediate clear so a non-call value never
-                    // leaks it into the next statement.
-                    Some(t) if !is_ref && names.len() == 1 => {
+                    // params. `infer_call` clears the hint, but pair the set with an immediate clear
+                    // so a non-call value never leaks it into the next statement.
+                    Some(t) if names.len() == 1 => {
                         let expected = self.resolve_type(t, span);
                         // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
                         // annotation licenses the literal's untyped-int-constant elements to widen —
@@ -1705,34 +1670,16 @@ impl Checker {
                 let name = &names[0];
                 let declared = match ty {
                     Some(t) => {
-                        // A `ref T` binding is, at runtime, a `Ref[T]` box (the desugar pass lowered
-                        // the init to `Ref(v)`/alias and every read to `.get()`); so the binding's
-                        // checker type is `Ref[T]`, not `T`. The pointee element type `T` is rejected
-                        // if it is not boxable (e.g. a bare unconstrained generic) by `check_ref_ty`.
-                        let expected = if is_ref {
-                            self.check_ref_ty(t, span);
-                            self.resolve_type(
-                                &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
-                                span,
-                            )
-                        } else {
-                            self.resolve_type(t, span)
-                        };
+                        let expected = self.resolve_type(t, span);
                         if !self.assignable_w(
                             &expected,
                             &val_ty,
                             crate::ast::untyped_int_const(value),
                         ) {
-                            // Transparency: a `ref T` binding's mismatch renders `ref T`, not `Ref[T]`.
-                            let exp = if is_ref {
-                                ref_display(&expected)
-                            } else {
-                                expected.to_string()
-                            };
                             self.error(
                                 value.span,
                                 format!(
-                                    "cannot assign {val_ty} to variable of type {exp}{}",
+                                    "cannot assign {val_ty} to variable of type {expected}{}",
                                     widen_note(&expected, &val_ty, value)
                                 ),
                             );
@@ -1799,9 +1746,6 @@ impl Checker {
                     );
                 }
                 self.declare(name, declared);
-                if is_ref {
-                    self.declare_ref(name);
-                }
                 if is_const {
                     self.declare_const(name);
                 }
@@ -3790,7 +3734,7 @@ impl Checker {
             Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
             // A USER struct scrutinee (L2) matches positional field patterns (`Point(x, y)`). Gated
             // to user-declared structs via `struct_fields_of`: a native/reserved handle
-            // (Socket/Ref/Iterator — a `Ty::Struct` with a `struct_shape` but `StructOrigin::Builtin`)
+            // (Socket/Iterator — a `Ty::Struct` with a `struct_shape` but `StructOrigin::Builtin`)
             // is NOT bare-destructurable by the compiler, so it stays on the `other =>` reject below —
             // never a pattern the checker accepts but the compiler can't lower (the checker-superset
             // trap). Fields are already instantiated (generic `Box[int]` → field `int`, not `T`).
@@ -3946,7 +3890,7 @@ impl Checker {
     /// The INSTANTIATED positional field types of a USER struct (`Ty::Struct`) — the shape a struct
     /// pattern `Point(x, y)` binds against (L2). Returns `None` for anything that is not a
     /// user-declared struct: non-struct types, and — crucially — native/reserved struct handles
-    /// (`StructOrigin::Builtin`: Socket/Ref/Iterator/Match/…), whose fields the compiler cannot bare-
+    /// (`StructOrigin::Builtin`: Socket/Iterator/Match/…), whose fields the compiler cannot bare-
     /// destructure. Gating here (not just in the compiler) keeps the checker from accepting a struct
     /// pattern the compiler can't lower. Generic params are substituted (`Box[int]` → field `int`).
     pub(super) fn struct_fields_of(&self, ty: &Ty) -> Option<Vec<Ty>> {

@@ -53,16 +53,11 @@
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
 # Only `:=` introduces destructuring binds (`a, b = …` is multi-target *re*assignment — see below).
-# An optional `REF` before the typed-let's <type> is the `ref T` by-reference binding modifier
-# (`r: ref int = 0`) — sugar that lowers to a `Ref[T]` box. Legal ONLY here and on a <param> type;
-# rejected in every other type position (return type, generic arg, collection element, struct field,
-# tuple element — none of which admit REF before <type>) and on a destructuring (<identList>) let.
-# An optional `CONST` in the same slot is the `const T` immutable-binding modifier
-# (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `REF` and `CONST`
-# are mutually exclusive; `CONST` is likewise rejected on a <param> type and on a destructuring let.
+# An optional `CONST` before the typed-let's <type> is the `const T` immutable-binding modifier
+# (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `CONST` is rejected
+# on a <param> type and on a destructuring (<identList>) let.
 <letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
             | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
-            | "IDENT" "COLON" "REF" <type> "ASSIGN" <expr> "NEWLINE"
             | "IDENT" "COLON" "CONST" <type> "ASSIGN" <expr> "NEWLINE"
             | <identList> "WALRUS" <expr> "NEWLINE"
             # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
@@ -177,13 +172,11 @@
 # not model.
 # An optional trailing comma before the closing `)` is permitted (`fn g(a, b,)`).
 <params> ::= <param> | <param> "COMMA" | <param> "COMMA" <params>
-# A `ref T` param (`fn f(x: ref int)`) — the by-reference binding modifier, lowered to a `Ref[T]`
-# box. The optional `REF` sits between the `COLON` and the <type>, the same as a typed-let.
 # A leading `...` marks a VARIADIC param (`fn f(...xs: T)`) — it collects surplus trailing positional
 # args into a `List[T]`; everything after it is keyword-only. Parser-level rules the permissive grammar
 # does not model: at most one variadic, it must carry an element type, it may not carry a default, and
 # it is legal only where defaults are (free fns / methods / native decls — not closures / extern).
-<param>  ::= "IDENT" | "IDENT" "COLON" <type> | "IDENT" "COLON" "REF" <type>
+<param>  ::= "IDENT" | "IDENT" "COLON" <type>
            | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
            | "DOTDOTDOT" "IDENT" "COLON" <type>
 

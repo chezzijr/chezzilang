@@ -197,7 +197,7 @@ struct Compiler {
     /// The key is ALWAYS `<module-key>::<Name>` (no winner/loser, no bare keys) so every user
     /// struct/enum/variant/alias is unique by construction. Built once by
     /// [`Compiler::assign_type_keys`] before any module compiles. A name NOT in this map is a
-    /// reserved/native type (`Result`/`Option`/`Match`/`Response`/`Ref`/`Iterator`/FFI widths),
+    /// reserved/native type (`Result`/`Option`/`Match`/`Response`/`Iterator`/FFI widths),
     /// which keeps its bare name (those never module-key).
     type_keys: HashMap<(usize, String), String>,
     /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
@@ -657,7 +657,7 @@ impl Compiler {
                 continue;
             }
             // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified
-            // key entry → `type_key` falls back to bare), so `Ref`/`Iterator`/FFI widths resolve bare.
+            // key entry → `type_key` falls back to bare), so `Iterator`/FFI widths resolve bare.
             let is_std = lm.is_std();
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
@@ -948,7 +948,7 @@ impl Compiler {
                     if let Some(tidx) = self.program.module_index(&imp.target) {
                         self.imported_modules.insert(bind, tidx);
                         // A whole-module import of a STDLIB module exposes its types BARE too (mirrors
-                        // the checker's std exception — e.g. the `Ref` from `import std.ref`). User
+                        // the checker's std exception). User
                         // whole-module imports do NOT (their types are only reachable qualified).
                         if path.first().map(String::as_str) == Some("std")
                             && let Some(types) = self.module_types.get(tidx)
@@ -978,16 +978,6 @@ impl Compiler {
                     }
                 }
             }
-        }
-        // `Ref` is a reserved global backing the `ref` keyword: std.ref is ALWAYS linked into the
-        // graph, and its `struct Ref[T]` is keyed BARE ("Ref"), so expose the bare name import-free in
-        // EVERY module (mirrors the checker's always-present `Ref` seed). Guarded on the struct actually
-        // being registered so it's a no-op if std.ref somehow isn't present. `or_insert` never clobbers
-        // a local — `Ref` is reserved, so there can be no user `struct Ref` to disambiguate.
-        if self.program.structs.contains_key("Ref") {
-            self.bare_types
-                .entry("Ref".to_string())
-                .or_insert_with(|| "Ref".to_string());
         }
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {

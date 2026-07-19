@@ -4721,28 +4721,26 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
     assert_eq!(vo, io, "serial vs M:N divergence");
 }
 
-/// Entry-last backstop — when the ENTRY file IS an always-injected prelude stub
-/// (`chezzi run std/prelude.chz` / `chezzi run std/ref.chz`), the resolver dedups the entry's own
-/// visit and the entry-last reorder must restore `modules.last() == entry` so the positional-entry
-/// consumers designate the right module. Both stubs are side-effect-free (no top-level output, no
-/// test fns), so all three engines (cooperative VM, M:N `--parallel`, interp) must run clean with
-/// empty stdout — byte-identical. Proves "runs clean, no panic" across all three engines.
+/// Entry-last backstop — when the ENTRY file IS the always-injected prelude stub
+/// (`chezzi run std/prelude.chz`), the resolver dedups the entry's own visit and the entry-last
+/// reorder must restore `modules.last() == entry` so the positional-entry consumers designate the
+/// right module. The stub is side-effect-free (no top-level output, no test fns), so all three
+/// engines (cooperative VM, M:N `--parallel`, interp) must run clean with empty stdout —
+/// byte-identical. Proves "runs clean, no panic" across all three engines.
 #[test]
 fn entry_is_always_linked_stub_runs_clean_three_engine() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for stub in ["prelude.chz", "ref.chz"] {
-        let entry = manifest.join("std").join(stub);
-        let cfg = crate::native::HostConfig::default;
-        let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-        let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
-        let (io, _ie, ir, _ic) = run_file_p(&entry);
-        assert!(vr.is_ok(), "cooperative VM faulted on {stub}: {vr:?}");
-        assert!(pr.is_ok(), "--parallel faulted on {stub}: {pr:?}");
-        assert!(ir.is_ok(), "interp faulted on {stub}: {ir:?}");
-        assert_eq!(vo, "", "cooperative VM stdout not empty on {stub}");
-        assert_eq!(vo, po, "VM vs --parallel divergence on {stub}");
-        assert_eq!(vo, io, "VM vs interp divergence on {stub}");
-    }
+    let entry = manifest.join("std").join("prelude.chz");
+    let cfg = crate::native::HostConfig::default;
+    let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
+    let (po, _pe, pr, _pc) = run_file_parallel(&entry, cfg());
+    let (io, _ie, ir, _ic) = run_file_p(&entry);
+    assert!(vr.is_ok(), "cooperative VM faulted on prelude.chz: {vr:?}");
+    assert!(pr.is_ok(), "--parallel faulted on prelude.chz: {pr:?}");
+    assert!(ir.is_ok(), "interp faulted on prelude.chz: {ir:?}");
+    assert_eq!(vo, "", "cooperative VM stdout not empty on prelude.chz");
+    assert_eq!(vo, po, "VM vs --parallel divergence on prelude.chz");
+    assert_eq!(vo, io, "VM vs interp divergence on prelude.chz");
 }
 
 /// Task 4 — `import std.concurrency` then construct + use ALL FOUR runtime concurrency ctors must

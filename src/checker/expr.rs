@@ -3161,14 +3161,7 @@ impl Checker {
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)
             {
-                // Transparency: render `ref T` (not the lowered `Ref[T]`) ONLY when the argument is
-                // a `ref` binding — an explicit first-class `Ref[T]` arg keeps its `Ref[T]` spelling.
-                let is_ref_arg = matches!(&arg.kind, ExprKind::Ident(n) if self.is_ref_decl(n));
-                let (expected, actual) = if is_ref_arg {
-                    (ref_display(pt), ref_display(&at))
-                } else {
-                    (pt.to_string(), at.to_string())
-                };
+                let (expected, actual) = (pt.to_string(), at.to_string());
                 // Annotation hint for a collection mutator whose element slot was PINNED by an
                 // earlier push/add/insert (refine-on-first-use). An un-annotated `xs := []` reads as
                 // `list[<first element>]`; a later element of a different (e.g. protocol-sibling) type

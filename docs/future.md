@@ -57,7 +57,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
 > chaining, tuple-destructuring `for`, match guards, `std.os.exit`, and runtime stack traces have all
 > landed. Mutable closure capture **landed as uniform by-reference capture** (2026-07-09, reversing the
-> earlier snapshot-by-value decision; `std.ref` `Ref[T]` stays as the explicit box). Nothing in this list is still open — see
+> earlier snapshot-by-value decision). Nothing in this list is still open — see
 > [`PROGRESS.md`](../PROGRESS.md).
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
@@ -95,8 +95,8 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    reference** (a closure shares & can edit the closest binding of a captured name), superseding the
    earlier snapshot-by-value decision. A counter / accumulator is now a raw captured local, mutated
    through a `defer:` block or a method call (closures are expression-only — `fn(): n = n + 1` is a
-   parse error, so the write goes in a statement position); `Ref[T]` stays for the explicit box and `ref` for
-   by-reference params. Cross-task mutation still requires `Shared[T]` et al. (a plain capture into a
+   parse error, so the write goes in a statement position). Cross-task mutation still requires
+   `Shared[T]` et al. (a plain capture into a
    `spawn` is an isolated per-task copy — the one deliberate divergence from Go). See
    [`PROGRESS.md`](../PROGRESS.md) "Uniform by-reference capture".
 9. **Match guards + range patterns** — `n if n>0:`, `1..10:`. Roadmap. Guards subsume the rest.
@@ -107,30 +107,14 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 11. ~~**Runtime stack traces**~~ — **DONE.** Error + call chain + line numbers, both engines
     (`37f374a`).
 
-12. **`ref T` — transparent reference bindings (DX sugar over `Ref[T]`) — ✅ LANDED.**
-    Motivation was ergonomics: `Ref[T]` does everything but is a **viral wrapper** (`x: Ref[int]`, not
-    `int`; `.get()`/`.set()` ceremony). `ref T` is the **binding MODIFIER** that lets a local/param be
-    spelled and used as a plain `T` while carrying reference semantics:
-    ```chezzi
-    fn foo(x: ref int):
-        x += 1        # auto-deref write — lowers to x.set(x.get() + 1)
-    n: ref int = 0
-    foo(n)            # alias the box (the design chose AUTO-DEREF: no `ref n` / `^` operator)
-    print(n)          # 1
-    ```
-    **Shipped as Version A: pure desugar to a heap `Ref` cell + auto-deref.** Reads lower to `.get()`,
-    writes to `.set()`, init to a fresh `Ref(v)` (or an alias when the RHS is already a `ref` binding).
-    **No new VM op, no engine change, parity by construction** (the same desugar path optional-chaining /
-    `??` took — all lowering lives in `src/desugar/mod.rs`, run inside `resolver::build_graph`, which
-    both engines + the checker consume). Because the cell is heap/GC'd it is escape-safe: an inner fn /
-    closure that captures a `ref` and outlives the frame shares the box (no dangle). **Design choices as
-    built:** (a) **AUTO-DEREF, no call-site `ref` marker and no `^` deref operator** — the read/write
-    site is inferred from the param/binding ref-ness (the earlier "explicit `ref` at the call site" /
-    `r^` notes are superseded); (b) **`ref` restricted to locals + params only** — the parser bars it
-    from return types, generic args, collection elements, struct fields, tuple elements, and
-    destructuring bindings (those keep first-class `Ref[T]`); (c) coercion table + the non-sendable airlock
-    boundary (a `ref`/`Ref` box can't cross a task — use `Shared[T]`). See `docs/syntax.md` (`ref T`),
-    `gaps.md`, and examples `ref_binding.chz` / `ref_airlock.chz`.
+12. **`ref T` / `Ref[T]` — transparent reference bindings — ⛔ REMOVED (2026-07-19).**
+    `ref T` (a binding modifier lowering to a `Ref[T]` box) and the reserved `Ref[T]` box were
+    **removed entirely** on minimalism/coherence grounds: they added only **scalar** aliasing, a
+    pointer-graft on Chezzi's Python object model (structs/`List`/`Map`/`Set` already share by
+    reference on assignment; scalars copy). Nothing real depended on it — zero stdlib `.chz` imported
+    `std.ref`. For an in-task mutable value to close over or pass by reference, use a plain one-field
+    `struct` (a struct is a shared reference); for cross-task mutation use `Shared[T]`. The `ref`
+    keyword, the `Ref[T]` reserved global, and `std.ref` no longer exist.
 
 13. **Static / associated protocol requirements (typeclass-style `T.default()`) — ⏸️ SHELVED
     (attempted twice 2026-06-24, both rejected; not worth the cost at the current model).**

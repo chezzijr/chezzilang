@@ -1,6 +1,6 @@
 # std.prelude — the universe builtins' SIGNATURES, declared in Chezzi (phase 3a).
 #
-# ALWAYS-LINKED into every program's module graph (like std.ref), but with UNIVERSE semantics: these
+# ALWAYS-LINKED into every program's module graph, but with UNIVERSE semantics: these
 # names are always in scope, NOT an importable module namespace. Each `native fn`/`native ctor` is a
 # body-less signature whose implementation is bound natively (name-keyed `do_builtin` in the VM /
 # `builtins::call` in the interp) — the front-end reads ONLY the signature; the backends compile no

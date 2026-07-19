@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
+use ty::compatible;
 pub use ty::{FnLabels, KeywordKey, KeywordTable};
-use ty::{compatible, ref_display};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
 /// module's import/alias scope (the single source of truth for every alias spelling). Each param /
@@ -117,11 +117,6 @@ fn is_reserved_type(name: &str) -> bool {
     name == "Result"
         || name == "Option"
         || name == "Iterator"
-        // `Ref` backs the reserved `ref` keyword (`a: ref int` lowers to a bare `Ref[T]`), so it's a
-        // reserved global alongside Result/Option/Iterator — always present (std.ref is always linked),
-        // import-free, and a user `struct Ref` is rejected here. std.ref's OWN `struct Ref[T]` decl is
-        // exempted at the decl guard via `current_module_is_stdlib`.
-        || name == "Ref"
         // Builtin scalar primitives — a user `struct int` / `enum str` would shadow the scalar arm in
         // `resolve_type`.
         || name == "int"
@@ -555,9 +550,9 @@ impl FnSig {
     }
 }
 
-/// Where a struct was declared: a stdlib module (`std.*`) vs a user/entry module. Lets a sendability
-/// rule key on the *builtin* `Ref[T]` (std.ref) without snaring a user struct that's merely named
-/// `Ref` (the principled replacement for the old bare-name check).
+/// Where a struct was declared: a stdlib module (`std.*`) vs a user/entry module. Lets a reserved-name
+/// / import-collision rule key on a *builtin*-origin std struct (`Match`/`Response`/`ProcResult`/…)
+/// without snaring a user struct that merely happens to share the name.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StructOrigin {
     Builtin,
@@ -1127,16 +1122,6 @@ impl Checker {
             c.keyword_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
-            // Cache std.ref's real `Ref[T]` StructInfo (layout + get/set/update) the first time it's
-            // checked, so `seed_stdlib_structs` can re-seed it bare (import-free) in every subsequent
-            // module — `Ref` backs the reserved `ref` keyword. Only std.ref declares `Ref`, and the
-            // resolver injects it as order[0] (no deps), so this is populated before entry/all others.
-            if c.ref_seed.is_none()
-                && lm.is_std()
-                && let Some(info) = sig.struct_defs.get("Ref")
-            {
-                c.ref_seed = Some(info.clone());
-            }
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set` native-struct
             // METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table only) into
             // `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/`s.add(...)`
@@ -1145,7 +1130,7 @@ impl Checker {
             // is a normal AST module whose `check_module` no-ops native structs) by resolving the decls
             // over `lm.ast` while still in the prelude's stdlib module context (type params + `Hashable`
             // in scope). The prelude is order[0] (always-linked, no deps), so this is populated before
-            // entry/all others — exactly like `ref_seed` above. The `List`/`Map`/`Set` names still resolve
+            // entry/all others. The `List`/`Map`/`Set` names still resolve
             // to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via `resolve_type`'s reserved arms; the
             // ctors/literals stay compiler-wired.
             if c.container_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
@@ -1433,13 +1418,12 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
 ];
 
 /// B3.3 (Task 2a) — one non-sendable LOCAL capture of a closure/nested-fn value: the captured
-/// binding's name, its checker type, and whether it is a `ref` binding (for the `ref T` display).
-/// Recorded at the value's decl site and replayed as a compile error at a spawn callee/arg site.
+/// binding's name and its checker type. Recorded at the value's decl site and replayed as a compile
+/// error at a spawn callee/arg site.
 #[derive(Clone)]
 struct Capture {
     name: String,
     ty: Ty,
-    is_ref: bool,
 }
 
 struct Checker {
@@ -1456,12 +1440,6 @@ struct Checker {
     /// falls through to the same `unknown name` error, keeping the VM (pre-slotted `nil`) and the
     /// interp (source-order env) from diverging. Rebuilt at the start of each `check_module`.
     module_global_lets: std::collections::HashSet<String>,
-    /// Per-scope set of names declared as `ref T` bindings/params (mirrors `scopes` index-for-index).
-    /// A `ref T` and an explicit first-class `Ref[T]` are the same `Ty::Struct("Ref", _)` after
-    /// lowering, so this is the ONLY way to tell them apart for transparency: a diagnostic about a
-    /// `ref` binding renders `ref T` (via `ref_display`), but one about an explicit `Ref[T]` keeps
-    /// `Ref[T]` (the user wrote `Ref`). Charge-5 transparency without lying in the other direction.
-    ref_decls: Vec<std::collections::HashSet<String>>,
     /// Per-scope set of names declared `const T` (mirrors `scopes` index-for-index). A const binding
     /// is immutable: `check_assign` rejects any later reassignment of the name. Compile-time-only
     /// (freezes the NAME; the object stays mutable — shallow). Cleared on re-declaration by `declare`
@@ -1763,13 +1741,6 @@ struct Checker {
     capture_table: Vec<HashMap<String, Vec<Capture>>>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
-    /// The real `StructInfo` for `std.ref`'s `Ref[T]` (layout + get/set/update methods), harvested
-    /// from the checked `std.ref` module the FIRST time it's seen in the graph (it's order[0], so
-    /// cached before any other module checks). Re-seeded bare (import-free) in every module by
-    /// [`seed_stdlib_structs`], because `Ref` backs the reserved `ref` keyword — `std.ref` is always
-    /// linked into the graph, so this is single-sourced from the `.chz` rather than hand-built. `None`
-    /// until harvested (and on the lone single-module `check` path, which has no graph).
-    ref_seed: Option<StructInfo>,
     /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /
     /// `Listener` handles, captured from the file-backed `std/net.chz` harvest the first time std.net is
     /// checked in the graph. `Socket`/`Listener` resolve to the RESERVED `Ty::Socket`/`Ty::Listener`
@@ -1817,7 +1788,7 @@ struct Checker {
     /// Phase 5a-containers — the harvested `StructInfo` (method table) for each of the three RESERVED
     /// UNIVERSE container types (`List`/`Map`/`Set`), keyed by bare name, captured from the always-linked
     /// `std/prelude.chz`'s `native struct` decls the first time the prelude module is checked in the graph
-    /// (order[0], before entry/all others — like `ref_seed`). Like `concurrency_seeds`, these resolve to
+    /// (order[0], before entry/all others). Like `concurrency_seeds`, these resolve to
     /// the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` (NOT nominal structs) — only the METHOD table is
     /// re-seeded (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `xs.push(...)` /
     /// `m.get(...)` / `s.add(...)` resolve via the normal method path, with each generic method sig's

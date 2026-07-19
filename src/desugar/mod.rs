@@ -30,9 +30,6 @@ use std::collections::{HashMap, HashSet};
 struct PSpec {
     name: String,
     default: Option<Expr>,
-    /// True for a `ref T` parameter — the call-arg lowering passes the box (alias) instead of
-    /// auto-dereferencing to a `.get()` copy. See [`Walker::walk_expr`]'s `Call` arm.
-    is_ref: bool,
     /// True for a variadic parameter (`...xs: T`). `normalize_call` sweeps all surplus trailing
     /// positional args into a synthesized `List` literal at this slot; everything after it is
     /// keyword-only. At most one per spec. Struct fields are never variadic.
@@ -163,12 +160,10 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             let mut walker = Walker {
                 ctx,
                 scopes: Vec::new(),
-                ref_names: Vec::new(),
-                local_fn: Vec::new(),
                 local_struct: Vec::new(),
                 next_tmp: 0,
                 skip_normalize: false,
-                lower_refs: pass == 0,
+                first_pass: pass == 0,
             };
             // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
             let ast: &mut Module = &mut graph.modules[mi].ast;
@@ -208,12 +203,10 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         let mut walker = Walker {
             ctx,
             scopes: Vec::new(),
-            ref_names: Vec::new(),
-            local_fn: Vec::new(),
             local_struct: Vec::new(),
             next_tmp: 0,
             skip_normalize: false,
-            lower_refs: pass == 0,
+            first_pass: pass == 0,
         };
         walker.walk_block(&mut module.stmts)?;
     }
@@ -243,17 +236,13 @@ pub fn lower_carriers(expr: &mut Expr) {
         methods_by_struct: &methods_by_struct,
         fn_fields: &fn_fields,
     };
-    // Interpolation fragments never contain `ref` bindings (they are sub-expressions), so ref-
-    // lowering is inert here; leave it off to keep the fragment path minimal.
     let mut walker = Walker {
         ctx,
         scopes: Vec::new(),
-        ref_names: Vec::new(),
-        local_fn: Vec::new(),
         local_struct: Vec::new(),
         next_tmp: 0,
         skip_normalize: true,
-        lower_refs: false,
+        first_pass: false,
     };
     // Infallible: `skip_normalize` suppresses the only error path (`normalize_call`).
     let _ = walker.walk_expr(expr);
@@ -303,7 +292,6 @@ fn collect_methods_into(stmts: &[Stmt], map: &mut HashMap<String, Vec<Vec<PSpec>
                 .map(|p| PSpec {
                     name: p.name.clone(),
                     default: p.default.clone(),
-                    is_ref: p.is_ref,
                     is_variadic: p.is_variadic,
                 })
                 .collect();
@@ -337,7 +325,6 @@ fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), V
                         .map(|p| PSpec {
                             name: p.name.clone(),
                             default: p.default.clone(),
-                            is_ref: p.is_ref,
                             is_variadic: p.is_variadic,
                         })
                         .collect();
@@ -391,7 +378,6 @@ fn collect_methods_by_struct_into_standalone(
                 .map(|p| PSpec {
                     name: p.name.clone(),
                     default: p.default.clone(),
-                    is_ref: p.is_ref,
                     is_variadic: p.is_variadic,
                 })
                 .collect();
@@ -616,7 +602,6 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                         .map(|p| PSpec {
                             name: p.name.clone(),
                             default: p.default.clone(),
-                            is_ref: p.is_ref,
                             is_variadic: p.is_variadic,
                         })
                         .collect(),
@@ -630,7 +615,6 @@ fn collect_module_reg(stmts: &[Stmt]) -> ModReg {
                         .map(|f| PSpec {
                             name: f.name.clone(),
                             default: f.default.clone(),
-                            is_ref: false,
                             is_variadic: false,
                         })
                         .collect(),
@@ -695,20 +679,10 @@ impl Ctx<'_> {
 struct Walker<'a> {
     ctx: Ctx<'a>,
     scopes: Vec<HashSet<String>>,
-    /// Names bound as `ref T` in each lexical scope (parallel to `scopes`). A bare rvalue use of such
-    /// a name auto-derefs to `<name>.get()`; an assignment target lowers to `<name>.set(v)`; a call
-    /// arg destined for a `ref` param stays the bare box ident (alias). Plain (non-ref) locals are
-    /// never in this set, so they keep today's by-value semantics.
-    ref_names: Vec<HashSet<String>>,
-    /// Per-scope map of a LOCAL fn-value name to its parameters' `is_ref` flags (parallel to
-    /// `scopes`). Populated when a local is bound to a bare named-fn (`g := bump`) or a closure
-    /// literal (`g := fn(x: ref int): ...`). Lets `callee_param_is_ref` resolve a call through an
-    /// indirect callee — the type-directed coercion decision the syntactic name lookup cannot make.
-    local_fn: Vec<HashMap<String, Vec<bool>>>,
     /// Per-scope map of a LOCAL name to the struct type it was constructed/annotated as (parallel to
     /// `scopes`). Populated by `x := StructName(...)` and `x: StructName = ...`. Lets a method call
-    /// `recv.m(args)` resolve `m`'s `ref` flags against the receiver's *actual* struct (so a sibling
-    /// struct's same-named method with different ref-ness does not derail the decision — charge 2).
+    /// `recv.m(args)` resolve `m`'s param defaults/variadic against the receiver's *actual* struct (so
+    /// a sibling struct's same-named method does not derail the decision).
     local_struct: Vec<HashMap<String, String>>,
     /// Counter for fresh temp names minted when lowering `?.`/`??` to `match` (`__opt0`, `__opt1`, …).
     /// `__`-prefixed names can't be written by user code, so they never collide with a real binding.
@@ -717,11 +691,10 @@ struct Walker<'a> {
     /// fragments, which are re-parsed after the module-wide pass and need only carrier lowering
     /// (their call-normalization was already skipped before this pass existed; kept identical).
     skip_normalize: bool,
-    /// `ref T` read/write/init lowering runs on the FIRST pass only. The module pass walks the tree
-    /// twice (to lower spliced defaults); ref-lowering is NOT idempotent (re-walking a synthesized
-    /// `r.get()` would re-deref its box ident to `r.get().get()`, and re-wrap a `Ref(v)` init), so it
-    /// must fire exactly once. On pass 2 the Walker treats `ref` bindings as ordinary names.
-    lower_refs: bool,
+    /// Variadic-collapse runs on the FIRST pass only. The module pass walks the tree twice (to lower
+    /// spliced defaults); the collapse is NOT idempotent (re-running it on pass 2 would wrap the
+    /// synthesized `List` in another `List`), so it must fire exactly once.
+    first_pass: bool,
 }
 
 impl Walker<'_> {
@@ -737,50 +710,12 @@ impl Walker<'_> {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
-        self.ref_names.push(HashSet::new());
-        self.local_fn.push(HashMap::new());
         self.local_struct.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.ref_names.pop();
-        self.local_fn.pop();
         self.local_struct.pop();
-    }
-
-    /// Record `name` as a `ref T` binding in the current (innermost) scope.
-    fn bind_ref(&mut self, name: &str) {
-        if let Some(top) = self.ref_names.last_mut() {
-            top.insert(name.to_string());
-        }
-    }
-
-    /// True if `name` resolves to a `ref T` binding — **shadowing-aware**: the INNERMOST scope that
-    /// declares `name` decides. A plain (`:=`) inner binding that shadows an outer `ref` of the same
-    /// name is therefore NOT a ref (its reads/writes are ordinary). `scopes` and `ref_names` are kept
-    /// in lockstep (every `bind_ref` is preceded by a `bind`), so the first `scopes` frame holding the
-    /// name is the binding site; we consult that same frame's `ref_names`.
-    fn is_ref(&self, name: &str) -> bool {
-        for (vars, refs) in self.scopes.iter().zip(self.ref_names.iter()).rev() {
-            if vars.contains(name) {
-                return refs.contains(name);
-            }
-        }
-        false
-    }
-
-    /// True if `e` is a bare identifier naming an in-scope `ref` binding.
-    fn is_ref_ident(&self, e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::Ident(n) if self.is_ref(n))
-    }
-
-    /// Record a LOCAL fn-value binding `name` carrying the given per-param `is_ref` flags, in the
-    /// innermost scope (lockstep with `bind`). Looked up by `callee_param_is_ref` for an indirect call.
-    fn bind_local_fn(&mut self, name: &str, flags: Vec<bool>) {
-        if let Some(top) = self.local_fn.last_mut() {
-            top.insert(name.to_string(), flags);
-        }
     }
 
     /// Record that LOCAL `name` holds a value of struct type `sname`, in the innermost scope.
@@ -819,16 +754,6 @@ impl Walker<'_> {
         }
     }
 
-    /// The `is_ref` flags of a local fn-value `name` (innermost binding wins, shadowing-aware).
-    fn local_fn_flags(&self, name: &str) -> Option<&Vec<bool>> {
-        for (vars, fns) in self.scopes.iter().zip(self.local_fn.iter()).rev() {
-            if vars.contains(name) {
-                return fns.get(name);
-            }
-        }
-        None
-    }
-
     /// The struct type a local receiver `name` was constructed/annotated as (innermost wins).
     fn local_struct_ty(&self, name: &str) -> Option<&String> {
         for (vars, sts) in self.scopes.iter().zip(self.local_struct.iter()).rev() {
@@ -837,23 +762,6 @@ impl Walker<'_> {
             }
         }
         None
-    }
-
-    /// If `value` is a bare named-fn / closure literal whose callee param `is_ref` flags are knowable
-    /// pre-type, return them — so a `g := <callee>` binding can be resolved at an indirect call site.
-    /// `None` for any RHS we cannot type locally (a method value, a returned fn, etc.).
-    fn fn_value_flags(&self, value: &Expr) -> Option<Vec<bool>> {
-        match &value.kind {
-            // `g := fn(x: ref int): ...` — the closure's own param ref-flags.
-            ExprKind::Closure { params, .. } => Some(params.iter().map(|p| p.is_ref).collect()),
-            // `g := bump` (a bare free-fn / ctor name, or a fn-value local being re-aliased).
-            ExprKind::Ident(n) if !self.is_local(n) => self
-                .ctx
-                .resolve_bare(n)
-                .map(|s| s.iter().map(|p| p.is_ref).collect()),
-            ExprKind::Ident(n) => self.local_fn_flags(n).cloned(),
-            _ => None,
-        }
     }
 
     /// If `value` is a bare struct-constructor call (`StructName(...)`), the struct's name — so a
@@ -932,89 +840,32 @@ impl Walker<'_> {
                 name_spans: _,
                 ty,
                 value,
-                is_ref,
                 // `const` is not lowered here (compile-time-only; the checker enforces it) — ignore.
                 is_const: _,
                 doc: _,
             } => {
-                if *is_ref && self.lower_refs {
-                    // `r: ref T = RHS`. The parser guarantees a single name here. CREATE-vs-ALIAS is
-                    // driven by the RHS: a bare in-scope `ref` ident aliases the same box (share),
-                    // anything else creates a FRESH `Ref(RHS)`. This syntactic test is provably
-                    // equivalent to the type-driven rule because NO expression can have type `ref T`
-                    // except a ref-binding ident (ref is barred from return types/collections/fields).
-                    if self.is_ref_ident(value) {
-                        // ALIAS: leave the box ident untouched (do NOT auto-deref it to `.get()`).
-                    } else {
-                        // CREATE: lower the RHS's inner expressions, then wrap in a fresh `Ref(...)`.
-                        self.walk_expr(value)?;
-                        let inner = std::mem::replace(value, ident_expr("", value.span));
-                        *value = ref_ctor(inner);
-                    }
-                    for n in names.iter() {
-                        self.bind(n);
-                        self.bind_ref(n);
+                // Record the RHS's struct type (a `x: StructName = ...` annotation or a
+                // `x := StructName(...)` ctor call) so a later method call on `x` resolves its
+                // param defaults/variadic against the receiver's actual struct.
+                let struct_ty = if names.len() == 1 {
+                    match ty {
+                        Some(Type::Named { name: n, .. }) => Some(n.clone()),
+                        _ => self.struct_value_ty(value),
                     }
                 } else {
-                    // Snapshot the RHS shape for indirect-callee resolution BEFORE walking (walking a
-                    // bare `ref` ident would rewrite it to `.get()`). Only meaningful on the ref-
-                    // lowering pass — that is the only pass that consults these maps for arg coercion.
-                    let fn_flags = if self.lower_refs && names.len() == 1 {
-                        self.fn_value_flags(value)
-                    } else {
-                        None
-                    };
-                    let struct_ty = if self.lower_refs && names.len() == 1 {
-                        // A `x: StructName = ...` annotation, or a `x := StructName(...)` ctor call.
-                        match ty {
-                            Some(Type::Named { name: n, .. }) => Some(n.clone()),
-                            _ => self.struct_value_ty(value),
-                        }
-                    } else {
-                        None
-                    };
-                    self.walk_expr(value)?;
-                    for n in names.iter() {
-                        self.bind(n);
-                    }
-                    if let Some(flags) = fn_flags {
-                        self.bind_local_fn(&names[0], flags);
-                    }
-                    if let Some(sname) = struct_ty {
-                        self.bind_local_struct(&names[0], &sname);
-                    }
+                    None
+                };
+                self.walk_expr(value)?;
+                for n in names.iter() {
+                    self.bind(n);
+                }
+                if let Some(sname) = struct_ty {
+                    self.bind_local_struct(&names[0], &sname);
                 }
             }
-            StmtKind::Assign { target, value, op } => {
-                // A `ref` assignment target mutates the pointee (never rebinds): `r = v` -> `r.set(v)`,
-                // `r += 1` -> `r.set(r.get() <op> 1)`. Lowered to a statement-expression set call.
-                if self.is_ref_ident(target) {
-                    let op = *op;
-                    self.walk_expr(value)?;
-                    let box_ident = target.clone(); // the bare `ref` box ident (un-derefed)
-                    let new_val = match op.to_binop() {
-                        // Plain `=`: the set argument is the walked RHS as-is.
-                        None => std::mem::replace(value, ident_expr("", value.span)),
-                        // Compound `r OP= rhs`: `r.set(r.get() OP rhs)`.
-                        Some(binop) => {
-                            let rhs = std::mem::replace(value, ident_expr("", value.span));
-                            let get = method_call(box_ident.clone(), "get", vec![]);
-                            Expr {
-                                kind: ExprKind::Binary {
-                                    op: binop,
-                                    lhs: Box::new(get),
-                                    rhs: Box::new(rhs),
-                                },
-                                span: target.span,
-                            }
-                        }
-                    };
-                    let set = method_call(box_ident, "set", vec![new_val]);
-                    stmt.kind = StmtKind::Expr(set);
-                } else {
-                    self.walk_expr(target)?;
-                    self.walk_expr(value)?;
-                }
+            StmtKind::Assign { target, value, op: _ } => {
+                self.walk_expr(target)?;
+                self.walk_expr(value)?;
             }
             StmtKind::Fn(decl) => {
                 // Param defaults are evaluated in the caller's scope (no params bound), so normalize
@@ -1029,9 +880,6 @@ impl Walker<'_> {
                 self.push_scope();
                 for p in &decl.params {
                     self.bind_param(p);
-                    if p.is_ref && self.lower_refs {
-                        self.bind_ref(&p.name);
-                    }
                 }
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
@@ -1055,9 +903,6 @@ impl Walker<'_> {
                     self.push_scope();
                     for p in &m.params {
                         self.bind_param(p);
-                        if p.is_ref && self.lower_refs {
-                            self.bind_ref(&p.name);
-                        }
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -1152,9 +997,6 @@ impl Walker<'_> {
                     self.push_scope();
                     for p in &m.params {
                         self.bind_param(p);
-                        if p.is_ref && self.lower_refs {
-                            self.bind_ref(&p.name);
-                        }
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -1173,9 +1015,6 @@ impl Walker<'_> {
                     self.push_scope();
                     for p in &m.params {
                         self.bind_param(p);
-                        if p.is_ref && self.lower_refs {
-                            self.bind_ref(&p.name);
-                        }
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -1246,12 +1085,6 @@ impl Walker<'_> {
                 self.push_scope();
                 for p in params.iter() {
                     self.bind(&p.name);
-                    // A closure `ref` param is a `Ref[T]` box just like a named-fn `ref` param, so
-                    // its body reads/writes lower to `.get()`/`.set()` (charge 3). The checker's
-                    // `infer_closure` validates the pointee type; here we only drive the lowering.
-                    if p.is_ref && self.lower_refs {
-                        self.bind_ref(&p.name);
-                    }
                 }
                 self.walk_expr(body)?;
                 self.pop_scope();
@@ -1310,41 +1143,7 @@ impl Walker<'_> {
                 ..
             } => {
                 self.walk_expr(callee)?;
-                // A positional arg that is a bare `ref` ident is lowered per the callee's param kind:
-                // into a `ref` param it stays the bare box ident (alias — caller's binding is mutated
-                // through it); into a plain `T` param it auto-derefs to `<ident>.get()` (a copy). All
-                // other args (and `ref` idents whose param is unknown / non-ref) walk normally, which
-                // already derefs a bare `ref` ident to `.get()` via the `Ident` leaf below.
-                // Ref call-arg lowering runs on the first pass only (alongside all other ref-lowering;
-                // see `lower_refs`). On pass 2 the args are already in final form, so walk plainly.
-                let param_ref = if self.lower_refs {
-                    self.callee_param_is_ref(callee)
-                } else {
-                    None
-                };
-                for (i, a) in args.iter_mut().enumerate() {
-                    let param_is_ref = param_ref
-                        .as_ref()
-                        .is_some_and(|f| f.get(i).copied().unwrap_or(false));
-                    if param_is_ref {
-                        if self.is_ref_ident(a) {
-                            // Row 1: `ref T` arg into a `ref T` param — pass the box (alias). Leave
-                            // the bare ident untouched (do NOT auto-deref to `.get()`).
-                            continue;
-                        }
-                        // Rows 3 & 4: you cannot take a reference to a by-value local or a temporary.
-                        // (Emitted here, not in the checker, because the param's ref-ness and the
-                        // arg's syntactic shape are both already known at this point — co-located with
-                        // the alias/deref decision that shares the identical `param_ref` info.)
-                        let msg = if matches!(a.kind, ExprKind::Ident(_)) {
-                            "cannot pass a by-value local to a by-reference `ref` parameter; declare the local `ref` to pass it by reference".to_string()
-                        } else {
-                            "cannot pass a literal or temporary to a by-reference `ref` parameter; literals are temporary — bind a `ref` local first".to_string()
-                        };
-                        return Err(err(a.span, msg));
-                    }
-                    // Row 2 (ref T -> T) and all non-ref params: walk normally, which auto-derefs a
-                    // bare `ref` ident to `.get()` (a copy) via the `Ident` leaf.
+                for a in args.iter_mut() {
                     self.walk_expr(a)?;
                 }
                 for (_, v) in named.iter_mut() {
@@ -1358,17 +1157,7 @@ impl Walker<'_> {
                 self.lower_carrier(expr);
                 return self.walk_expr(expr);
             }
-            // A bare rvalue use of a `ref` binding auto-derefs to `<name>.get()`. (Write targets,
-            // alias-inits, and ref-param call args are handled by their callers *before* reaching
-            // here, so this only fires for genuine value reads.) The synthesized `get`/`set` calls
-            // built elsewhere hold the un-derefed box ident and are never routed back through here.
-            ExprKind::Ident(n) => {
-                if self.is_ref(n) {
-                    let box_ident = std::mem::replace(expr, ident_expr("", expr.span));
-                    *expr = method_call(box_ident, "get", vec![]);
-                    return Ok(());
-                }
-            }
+            ExprKind::Ident(_) => {}
             // Leaves.
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -1482,64 +1271,6 @@ impl Walker<'_> {
             }
             other => other, // unreachable: caller guards on the two carrier kinds
         };
-    }
-
-    /// The per-parameter `is_ref` flags of a call's callee, in declaration order, if it resolves to a
-    /// registered free function / struct constructor / unambiguous struct method. Mirrors
-    /// `normalize_call`'s resolution so the call-arg alias/deref decision uses the SAME rule as the
-    /// checker's coercion check. `None` for closures, builtins, fn-fields, or unknown callees (no
-    /// `ref` param info available — the args then walk normally / auto-deref).
-    fn callee_param_is_ref(&self, callee: &Expr) -> Option<Vec<bool>> {
-        match &callee.kind {
-            // A bare callee: a registered free fn / ctor (non-local), OR a LOCAL fn-value bound to a
-            // named fn / closure (charges 1 & 3). The local case is resolved through `local_fn`, the
-            // type-directed link the syntactic name lookup alone cannot see.
-            ExprKind::Ident(name) if !self.is_local(name) => self
-                .ctx
-                .resolve_bare(name)
-                .map(|s| s.iter().map(|p| p.is_ref).collect()),
-            ExprKind::Ident(name) => self.local_fn_flags(name).cloned(),
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                // `module.f(...)` — a qualified free fn.
-                ExprKind::Ident(alias)
-                    if !self.is_local(alias) && self.ctx.aliases.contains_key(alias) =>
-                {
-                    self.ctx
-                        .resolve_qualified(alias, name)
-                        .map(|s| s.iter().map(|p| p.is_ref).collect())
-                }
-                _ if !self.ctx.fn_fields.contains(name) => {
-                    // A method call `recv.m(...)`. If the receiver's struct type is knowable pre-type
-                    // (a named local, an inline ctor call, or a struct-returning fn call — see
-                    // `receiver_struct_ty`), resolve `m` against THAT struct (charge 2 — sibling
-                    // structs may disagree on a param's ref-ness). This receiver-aware lookup binds
-                    // the exact user method even when its name collides with a builtin.
-                    if let Some(sname) = self.receiver_struct_ty(obj)
-                        && let Some(spec) = self.ctx.methods_by_struct.get(&(sname, name.clone()))
-                    {
-                        return Some(spec.iter().map(|p| p.is_ref).collect());
-                    }
-                    // A builtin-named call with an unknowable/builtin receiver: no `ref` info (the
-                    // receiver may be a list/str/map/set). Don't consult the name-keyed user-method
-                    // table — it could mis-bind a genuine builtin call's args.
-                    if is_builtin_method(name) {
-                        return None;
-                    }
-                    // Otherwise fall back to the name-keyed table, using it only when every defining
-                    // struct agrees (an unambiguous pre-type shape).
-                    match self.ctx.methods.get(name.as_str()) {
-                        Some(cands)
-                            if !cands.is_empty() && cands.iter().all(|c| *c == cands[0]) =>
-                        {
-                            Some(cands[0].iter().map(|p| p.is_ref).collect())
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            },
-            _ => None,
-        }
     }
 
     /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
@@ -1700,11 +1431,11 @@ impl Walker<'_> {
         // call is an ordinary fully-positional call, so the checker AND both engines need zero
         // variadic-specific logic (parity by construction). This must run BEFORE the fixed-arity gates
         // below (a `f(1,2,3)` into a single `List` slot is "too many" by those rules).
-        // Collapse on the FIRST pass only (like `ref` lowering): after pass 1 the call is already in
-        // final collapsed form (`args = [pre..., List, kwonly...]`, `named` empty), so re-running it on
-        // pass 2 would wrap the synthesized `List` in another `List`. On pass 2 the collapsed call falls
-        // through to the fixed-arity gate below, which is a no-op for it.
-        if self.lower_refs
+        // Collapse on the FIRST pass only: after pass 1 the call is already in final collapsed form
+        // (`args = [pre..., List, kwonly...]`, `named` empty), so re-running it on pass 2 would wrap
+        // the synthesized `List` in another `List`. On pass 2 the collapsed call falls through to the
+        // fixed-arity gate below, which is a no-op for it.
+        if self.first_pass
             && let Some(v) = params.iter().position(|p| p.is_variadic)
         {
             let ExprKind::Call { args, named, .. } = &mut expr.kind else {
@@ -1878,45 +1609,6 @@ fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
 fn ident_expr(name: &str, span: Span) -> Expr {
     Expr {
         kind: ExprKind::Ident(name.to_string()),
-        span,
-    }
-}
-
-/// `<recv>.<method>(<args>)` — a no-default method call carrying the receiver's span. Used by the
-/// `ref T` lowering to build `r.get()` (read) and `r.set(v)` (write). `named`/`type_args` are empty.
-fn method_call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
-    let span = recv.span;
-    let callee = Expr {
-        kind: ExprKind::Field {
-            obj: Box::new(recv),
-            name: method.to_string(),
-            name_span: span,
-        },
-        span,
-    };
-    Expr {
-        kind: ExprKind::Call {
-            callee: Box::new(callee),
-            args,
-            named: vec![],
-            type_args: vec![],
-        },
-        span,
-    }
-}
-
-/// `Ref(<value>)` — a fresh-box constructor call for a `ref T` create-init. `Ref` is a reserved
-/// global (backs the `ref` keyword): `std/ref.chz` is always linked into the graph, so this resolves
-/// import-free, like `Result`/`Option`. No `import std.ref` needed.
-fn ref_ctor(value: Expr) -> Expr {
-    let span = value.span;
-    Expr {
-        kind: ExprKind::Call {
-            callee: Box::new(ident_expr("Ref", span)),
-            args: vec![value],
-            named: vec![],
-            type_args: vec![],
-        },
         span,
     }
 }
@@ -2559,260 +2251,6 @@ mod tests {
             matches!(args[0].kind, ExprKind::Match { .. }),
             "carrier lowered to match, got {:?}",
             args[0].kind
-        );
-    }
-
-    // ===== `ref T` binding lowering =====
-
-    /// True if `e` is `Ref(<arg>)` — a call of the bare `Ref` constructor with one positional arg.
-    fn is_ref_create(e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::Call { callee, args, .. }
-            if matches!(&callee.kind, ExprKind::Ident(n) if n == "Ref") && args.len() == 1)
-    }
-
-    /// True if `e` is `<recv>.get()` — a no-arg method call named `get`.
-    fn is_get_call(e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::Call { callee, args, .. }
-            if args.is_empty()
-            && matches!(&callee.kind, ExprKind::Field { name, .. } if name == "get"))
-    }
-
-    /// True if `e` is `<recv>.set(<arg>)`.
-    fn is_set_call(e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::Call { callee, args, .. }
-            if args.len() == 1
-            && matches!(&callee.kind, ExprKind::Field { name, .. } if name == "set"))
-    }
-
-    #[test]
-    fn lowers_ref_read_write() {
-        let s = desugar_ok("r: ref int = 0\nprint(r)\nr = 5\nr += 1\n");
-        // 1) `r: ref int = 0`  ->  `r := Ref(0)` (create a fresh box)
-        let StmtKind::Let { value, .. } = &s[0].kind else {
-            panic!("let")
-        };
-        assert!(
-            is_ref_create(value),
-            "init should be Ref(0), got {:?}",
-            value.kind
-        );
-        // 2) `print(r)`  ->  `print(r.get())`  (rvalue read auto-derefs)
-        let StmtKind::Expr(e) = &s[1].kind else {
-            panic!("expr")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("print call")
-        };
-        assert!(
-            is_get_call(&args[0]),
-            "rvalue read should be r.get(), got {:?}",
-            args[0].kind
-        );
-        // 3) `r = 5`  ->  `r.set(5)`  (assignment lowers to a statement-expr set call)
-        let StmtKind::Expr(e) = &s[2].kind else {
-            panic!("set stmt, got {:?}", s[2].kind)
-        };
-        assert!(
-            is_set_call(e),
-            "assign should lower to r.set(5), got {:?}",
-            e.kind
-        );
-        // 4) `r += 1`  ->  `r.set(r.get() + 1)`
-        let StmtKind::Expr(e) = &s[3].kind else {
-            panic!("compound set stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("set call")
-        };
-        let ExprKind::Binary { lhs, .. } = &args[0].kind else {
-            panic!("set arg should be a binary")
-        };
-        assert!(
-            is_get_call(lhs),
-            "compound lhs should be r.get(), got {:?}",
-            lhs.kind
-        );
-    }
-
-    #[test]
-    fn aliases_ref_ident() {
-        // `r2: ref int = r` (RHS is already a ref binding) -> ALIAS: keep `r2 := r`, NOT `Ref(r)`.
-        let s = desugar_ok("r: ref int = 0\nr2: ref int = r\n");
-        let StmtKind::Let { value, .. } = &s[1].kind else {
-            panic!("let")
-        };
-        assert!(
-            !is_ref_create(value),
-            "alias must NOT wrap in Ref(), got {:?}",
-            value.kind
-        );
-        assert!(
-            matches!(&value.kind, ExprKind::Ident(n) if n == "r"),
-            "alias keeps the box ident"
-        );
-    }
-
-    #[test]
-    fn lowers_ref_arg_by_param_kind() {
-        // byref(r) passes the box (alias); byval(r) auto-derefs to r.get() (a copy).
-        let src = "fn byref(x: ref int):\n    x = 1\nfn byval(x: int):\n    print(x)\nr: ref int = 0\nbyref(r)\nbyval(r)\n";
-        let s = desugar_ok(src);
-        // byref(r) — last-but-one stmt
-        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
-            panic!("byref call stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "ref param arg should stay the bare box ident, got {:?}",
-            args[0].kind
-        );
-        // byval(r) — last stmt
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
-            panic!("byval call stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            is_get_call(&args[0]),
-            "non-ref param arg should auto-deref to r.get(), got {:?}",
-            args[0].kind
-        );
-    }
-
-    #[test]
-    fn lowers_ref_arg_through_local_fn_value() {
-        // Charge 1: `g := bump; g(r)` resolves through the LOCAL fn-value to bump's `ref` param, so
-        // the box aliases (the arg stays the bare ident, not `.get()`).
-        let src = "fn bump(x: ref int):\n    x = 1\nr: ref int = 0\ng := bump\ng(r)\n";
-        let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
-            panic!("g(r) call stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "indirect ref param arg should alias (bare ident), got {:?}",
-            args[0].kind
-        );
-    }
-
-    #[test]
-    fn lowers_ref_arg_through_receiver_typed_method() {
-        // Charge 2: two structs share `apply` with DIFFERENT ref-ness; `a.apply(r)` resolves to A's
-        // (ref) signature via the receiver type, so the box aliases — and `b.apply(r)` resolves to
-        // B's (by-value) signature, so the arg auto-derefs.
-        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nr: ref int = 0\na := A(0)\nb := B(0)\na.apply(r)\nb.apply(r)\n";
-        let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
-            panic!("a.apply stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "A.apply (ref) arg should alias (bare ident), got {:?}",
-            args[0].kind
-        );
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
-            panic!("b.apply stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            is_get_call(&args[0]),
-            "B.apply (by-value) arg should auto-deref to r.get(), got {:?}",
-            args[0].kind
-        );
-    }
-
-    #[test]
-    fn lowers_ref_arg_through_ctor_receiver_typed_method() {
-        // Charge 2 (expression receiver): two structs share `apply` with DIFFERENT ref-ness; an
-        // INLINE ctor-call receiver `A(0).apply(r)` must resolve to A's (ref) signature via the
-        // receiver's struct type (just like a named local), so the box aliases — and `B(0).apply(r)`
-        // resolves to B's (by-value) signature, so the arg auto-derefs.
-        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nr: ref int = 0\nA(0).apply(r)\nB(0).apply(r)\n";
-        let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 2].kind else {
-            panic!("A(0).apply stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "A(0).apply (ref) arg should alias (bare ident), got {:?}",
-            args[0].kind
-        );
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
-            panic!("B(0).apply stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            is_get_call(&args[0]),
-            "B(0).apply (by-value) arg should auto-deref to r.get(), got {:?}",
-            args[0].kind
-        );
-    }
-
-    #[test]
-    fn lowers_ref_arg_through_fn_call_receiver_typed_method() {
-        // Charge 2 (struct-returning free-fn receiver): `mk()` returns `A`, so `mk().apply(r)` must
-        // resolve to A's (ref) signature via the return type and alias the box.
-        let src = "struct A:\n    t: int\n    fn apply(self, x: ref int):\n        x = 1\nstruct B:\n    t: int\n    fn apply(self, x: int):\n        print(x)\nfn mk() -> A:\n    return A(0)\nr: ref int = 0\nmk().apply(r)\n";
-        let s = desugar_ok(src);
-        let StmtKind::Expr(e) = &s[s.len() - 1].kind else {
-            panic!("mk().apply stmt")
-        };
-        let ExprKind::Call { args, .. } = &e.kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(&args[0].kind, ExprKind::Ident(n) if n == "r"),
-            "mk().apply (ref) arg should alias (bare ident), got {:?}",
-            args[0].kind
-        );
-    }
-
-    #[test]
-    fn closure_ref_param_lowers_body_read() {
-        // Charge 3: a closure `ref` param drives body read/write lowering like a named-fn ref param.
-        // The body `x + 1` lowers to `x.get() + 1`.
-        let s = desugar_ok("g := fn(x: ref int) -> int: x + 1\n");
-        let StmtKind::Let { value, .. } = &s[0].kind else {
-            panic!("let")
-        };
-        let ExprKind::Closure { body, .. } = &value.kind else {
-            panic!("closure")
-        };
-        let ExprKind::Binary { lhs, .. } = &body.kind else {
-            panic!("binary body")
-        };
-        assert!(
-            is_get_call(lhs),
-            "closure ref read should lower to x.get(), got {:?}",
-            lhs.kind
-        );
-    }
-
-    #[test]
-    fn closure_byval_arg_into_ref_param_errors() {
-        // Charge 3: a by-value local into a closure `ref` param is the same row-3 error as a named fn.
-        let e = desugar_err("g := fn(x: ref int) -> int: x + 1\nn := 5\ng(n)\n");
-        assert!(
-            e.message.contains("by-reference") && e.message.contains("declare"),
-            "expected the by-value->ref error, got: {:?}",
-            e.message
         );
     }
 

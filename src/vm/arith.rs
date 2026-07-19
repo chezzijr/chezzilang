@@ -1251,7 +1251,7 @@ impl Vm {
     /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
     ///
     /// Deliberately NOT `deep_clone` (the concurrency airlock's `to_wire`/`from_wire`): that
-    /// serializer (a) FAULTS on a generator / captured `ref` / cyclic key — nonsensical for a plain
+    /// serializer (a) FAULTS on a generator / cyclic key — nonsensical for a plain
     /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilds
     /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
     /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of

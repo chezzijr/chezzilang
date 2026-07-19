@@ -242,9 +242,8 @@ reusing an exhausted one yields nothing.
 > the **task boundary**: a plain captured local sent across `spawn`/`parallel:` is snapshot-copied into
 > an independent per-task cell (F1 — the sole deliberate divergence from Go, byte-identical serial vs
 > M:N), so cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
-> boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`); `ref`/`Ref[T]`
-> stay for by-reference params and the explicit first-class box. This reverses the earlier
-> snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`
+> boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`). This reverses
+> the earlier snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`
 > "Closure capture".
 
 ### Syntax sketch
@@ -420,7 +419,7 @@ case: two modules' `Point` are simply `a::Point` and `b::Point`. The **display n
 `json.decode` errors, `repr` — renders the bare name, so output is byte-identical regardless of module
 and two colliding `Point`s **both** print `Point(...)` (Python-like; the module is never shown in
 normal output). JSON *encode* likewise emits the bare field/type naming (no `module::` leaks into the
-wire). Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Ref`, `Iterator`, the std library type
+wire). Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Iterator`, the std library type
 surface on `import std.*`, and the FFI width names like `int32`) are **not** module-keyed — they keep
 their bare name globally. An imported `type` alias is **transparent**: its body is resolved in the
 *defining* module's scope, so a cross-module `import Len from sizes` where `type Len = int32` carries

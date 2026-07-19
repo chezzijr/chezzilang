@@ -1779,9 +1779,8 @@ impl Checker {
                 self.error(
                     span,
                     format!(
-                        "cannot use non-sendable captured binding '{name}' of type {disp} inside a \
-                         spawned task (captures cross the airlock — communicate via a Channel or Shared)",
-                        disp = if self.is_ref_decl(name) { ref_display(&ty) } else { ty.to_string() }
+                        "cannot use non-sendable captured binding '{name}' of type {ty} inside a \
+                         spawned task (captures cross the airlock — communicate via a Channel or Shared)"
                     ),
                 );
             }
@@ -3376,19 +3375,9 @@ impl Checker {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                // A closure `ref T` param is a `Ref[T]` box, exactly like a named-fn `ref` param
-                // (charge 3): the body's reads/writes were lowered to `.get()`/`.set()` by desugar,
-                // and a `ref` arg aliases at the call site. `check_ref_ty` rejects a non-boxable
-                // pointee. Without a `ref`, the param keeps its by-value type, or — for an
-                // unannotated param — the expected (slot) param type (source #1), else `Unknown`.
+                // An annotated param keeps its type; an unannotated param takes the expected (slot)
+                // param type (source #1), else is inferred from the body, else `Unknown`.
                 let ty = match &p.ty {
-                    Some(t) if p.is_ref => {
-                        self.check_ref_ty(t, body.span);
-                        self.resolve_type(
-                            &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
-                            body.span,
-                        )
-                    }
                     Some(t) => self.resolve_type(t, body.span),
                     None => {
                         // An unannotated param: prefer the expected (slot) param type (source #1);
@@ -3445,9 +3434,6 @@ impl Checker {
                     self.hover_record_at(p.name_span, &ty, HoverKind::Param, None);
                 }
                 self.declare(&p.name, ty.clone());
-                if p.is_ref {
-                    self.declare_ref(&p.name);
-                }
                 ty
             })
             .collect();

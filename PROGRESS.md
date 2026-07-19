@@ -4,6 +4,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ LANGUAGE (2026-07-19, `auto-task/remove-ref`) — the `ref` keyword, the `Ref[T]` reserved box, and
+> `std.ref` were REMOVED entirely (pure subtraction, minimalism/coherence — NOT a sendability change).**
+> `ref T` (a binding modifier lowering to a `Ref[T]` box) and the explicit `Ref[T]` box only ever added
+> **scalar** aliasing — a pointer-graft on Chezzi's Python object model, where structs/`List`/`Map`/`Set`
+> already share by reference on assignment and scalars copy. Nothing real depended on it: **zero** stdlib
+> `.chz` imported `std.ref`; the sole non-demonstrator example used `ref` only to show it now behaves like
+> a plain local. Ripped across the whole pipeline: `Token::Ref` (lexer) + the `REF` grammar production
+> (`docs/grammar.bnf`, conformance stays green); `Param.is_ref`/`StmtKind::Let.is_ref` (ast) + the parser
+> eats; the entire `lower_refs`/`ref_names`/`callee_param_is_ref` desugar subsystem (variadic-collapse
+> kept via a renamed `first_pass` flag); the checker `ref_decls`/`ref_seed`/`is_ref_decl`/`ref_display`/
+> `check_ref_ty` plumbing + the `Ref` reserved-type arm + the dead `name=="Ref"` arm in `sendable_rec`;
+> the resolver **always-link of `std.ref`** (+ its ordering tests) and `std/ref.chz` + the embedded-std
+> entry; the compiler bare-`Ref` exposure block; and the VM airlock `captured_graph_embeds_ref` scanner
+> (both `to_wire`/`to_snap` call sites, in lockstep). `Ref` is now an ORDINARY identifier — a user
+> `struct Ref` is legal. For an in-task mutable value to close over / pass by reference use a plain
+> one-field `struct` (a struct is a shared reference); for cross-task mutation use `Shared[T]`. The
+> Channel/spawn sendability GATE is unchanged — its tests were re-expressed with a **protocol existential**
+> probe (a genuinely non-sendable type) instead of `Ref[int]`. Boundary test
+> `ref_surface_removed_fails_to_compile` pins that `ref`/`Ref[T]`/`import std.ref` now fail to compile
+> with a clean error. Docs synced (syntax/spec/stdlib/concurrency/future/grammar); gaps.md L7 amended so
+> the "wrong lever for F2" note isn't self-contradictory (the removal is orthogonal to L7/sendability).
+
 > **✅ CHECKER (2026-07-18, `auto-task/checker-overreject-fixes`) — two disjoint over-rejection /
 > diagnostic fixes (all checker-side, parity-neutral, runtime unchanged).**
 > **F2 (dropped — was unsound)** — a proposed whitelist of the built-in `Error` existential as sendable

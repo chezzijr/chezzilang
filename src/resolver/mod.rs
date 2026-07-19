@@ -340,32 +340,20 @@ fn build_graph_impl(
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
     };
-    // ALWAYS-LINK std.ref: `Ref[T]` is a reserved global backing the `ref` keyword (`a: ref int`
-    // lowers to a bare `Ref[T]` box), so its `.chz` layout+methods must be present in EVERY program's
-    // graph — import-free — for the checker to seed it and both engines to construct it. Injected
-    // BEFORE the entry DFS: std.ref imports nothing, so it lands at order[0] and the entry normally
-    // ends up LAST (the compiler/resolver `modules.last() == entry` invariant holds). Deduped by
-    // `visited`, so a program that already imports std.ref (or IS std.ref) doesn't double-read; the
-    // entry_override id-match reuses the in-memory buffer. If std.ref can't be found this fails for ALL
-    // programs, which is correct (a misconfigured std root should surface loudly, not silently).
     // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
     // `float`/`str`/`bytes`/`bytearray`, phase 3a) are declared here as `native fn`/`native ctor` decls
-    // and read by the checker as their signature source. Injected FIRST (before ref + the entry DFS) so
+    // and read by the checker as their signature source. Injected FIRST (before the entry DFS) so
     // it's checked before any module that might use those builtins in value position; import-free, so
     // it lands at the front and the entry normally ends LAST. Deduped by `visited` (a program that IS
     // std.prelude doesn't double-read). If it can't be found this fails for ALL programs — correct (a
     // misconfigured std root should surface loudly).
-    // BACKSTOP: when the ENTRY file IS one of these always-injected stubs, its own visit is deduped
+    // BACKSTOP: when the ENTRY file IS the always-injected prelude stub, its own visit is deduped
     // here and it does NOT land last — the entry-last reorder just below `ModuleGraph` construction
     // restores `modules.last() == entry` for that case.
     let prelude_path = ["std".to_string(), "prelude".to_string()];
     let prelude_file = module_file(&prelude_path, &b.project_root, &b.std_root);
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
     b.visit(&prelude_id, &prelude_path, Span { line: 1, col: 1 })?;
-    let ref_path = ["std".to_string(), "ref".to_string()];
-    let ref_file = module_file(&ref_path, &b.project_root, &b.std_root);
-    let ref_id = ModuleId(canonical_or_abs(&ref_file));
-    b.visit(&ref_id, &ref_path, Span { line: 1, col: 1 })?;
     b.visit(&entry_id, &[], Span { line: 1, col: 1 })?;
     let mut graph = ModuleGraph {
         entry: entry_id,
@@ -373,17 +361,15 @@ fn build_graph_impl(
     };
     // ENTRY-LAST BACKSTOP: every positional-entry consumer (compiler `entry_idx = modules.len()-1`,
     // both engines' `entry_home() = modules.last()`) derives the entry as the FINAL module, so the
-    // `modules.last() == graph.entry` invariant must hold. It normally does — the always-linked stubs
-    // are import-free, so they precede the entry DFS and the entry lands last. But when the ENTRY file
-    // IS one of those stubs (`chezzi run std/prelude.chz`), its own `b.visit(...)` is deduped by
-    // `visited` and never appended, so the entry ends up mid-list (e.g. graph ends [prelude, ref] with
-    // entry == prelude). Restore the invariant by moving the entry module to the tail (stable for all
-    // others → deps still precede dependents). Guarded on `pos != len-1`, so the normal case (entry is
-    // a user file, already last) is a strict no-op — zero behavior change. If `graph.entry` is somehow
-    // absent, leave the order untouched (no panic). NOTE: this reorders the stub-entry run order to
-    // [ref, prelude]; byte-identical across all three engines ONLY because the always-linked stubs
-    // emit no top-level output / declare no test fns — re-evaluate if a side-effecting always-linked
-    // stub is ever added.
+    // `modules.last() == graph.entry` invariant must hold. It normally does — the always-linked prelude
+    // stub is import-free, so it precedes the entry DFS and the entry lands last. But when the ENTRY
+    // file IS that stub (`chezzi run std/prelude.chz`), its own `b.visit(...)` is deduped by `visited`
+    // and never appended, so the entry ends up mid-list. Restore the invariant by moving the entry
+    // module to the tail (stable for all others → deps still precede dependents). Guarded on
+    // `pos != len-1`, so the normal case (entry is a user file, already last) is a strict no-op — zero
+    // behavior change. If `graph.entry` is somehow absent, leave the order untouched (no panic).
+    // Byte-identical across all engines ONLY because the always-linked stub emits no top-level output /
+    // declares no test fns — re-evaluate if a side-effecting always-linked stub is ever added.
     if let Some(pos) = graph.modules.iter().position(|m| m.id == graph.entry)
         && pos != graph.modules.len() - 1
     {
@@ -812,7 +798,6 @@ mod tests {
 
         for segs in [
             &["std", "prelude"][..],
-            &["std", "ref"][..],
             &["std", "math"][..], // file-backed native module
             &["std", "concurrency", "collection"][..], // nested dir
         ] {
@@ -907,8 +892,8 @@ mod tests {
         );
     }
 
-    // 0c. std.prelude (phase 3a) is ALWAYS-LINKED into every graph — like std.ref — and the entry
-    // still lands LAST (both always-linked modules are import-free, so they precede the entry DFS).
+    // 0c. std.prelude (phase 3a) is ALWAYS-LINKED into every graph, and the entry still lands LAST
+    // (the always-linked module is import-free, so it precedes the entry DFS).
     #[test]
     fn prelude_always_linked_and_entry_last() {
         let t = TmpDir::new();
@@ -918,8 +903,7 @@ mod tests {
             graph.modules.iter().any(|m| m.dotted == ["std", "prelude"]),
             "std.prelude must be always-linked into the graph"
         );
-        // Both always-linked helpers are present, and the entry is still the final module.
-        assert!(graph.modules.iter().any(|m| m.dotted == ["std", "ref"]));
+        // The entry is still the final module.
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
         // Dedup: a second build doesn't double-count the prelude.
         let prelude_count = graph
@@ -930,60 +914,19 @@ mod tests {
         assert_eq!(prelude_count, 1, "std.prelude must appear exactly once");
     }
 
-    // 0d. When the ENTRY file IS an always-injected stub, the always-injected `b.visit(...)` runs
-    // first and the entry's own visit is deduped by `visited` → without the resolver entry-last
-    // backstop the graph would end [prelude, ref] with `modules.last() != graph.entry`. The backstop
-    // moves the entry module to the tail so the positional-entry contract holds even here.
+    // 0d. When the ENTRY file IS the always-injected prelude stub, the always-injected `b.visit(...)`
+    // runs first and the entry's own visit is deduped by `visited` → without the resolver entry-last
+    // backstop the graph could end with `modules.last() != graph.entry`. The backstop moves the entry
+    // module to the tail so the positional-entry contract holds even here.
     #[test]
     fn entry_is_prelude_stub_still_designated_last() {
-        // entry == std/prelude.chz: prelude is visited FIRST, so pre-fix modules.last() == ref.
+        // entry == std/prelude.chz: prelude is visited FIRST (and deduped when the entry re-visits it).
         let entry = std_root().join("prelude.chz");
         let graph = build_graph(&entry).expect("build (prelude entry)");
         assert_eq!(
             graph.modules.last().unwrap().id,
             graph.entry,
             "entry (std.prelude) must be the final module even when injected first"
-        );
-        assert_eq!(
-            graph
-                .modules
-                .iter()
-                .filter(|m| m.dotted == ["std", "prelude"])
-                .count(),
-            1,
-            "std.prelude must appear exactly once"
-        );
-        assert_eq!(
-            graph
-                .modules
-                .iter()
-                .filter(|m| m.dotted == ["std", "ref"])
-                .count(),
-            1,
-            "std.ref must appear exactly once"
-        );
-    }
-
-    // 0e. Forward-guard: entry == std/ref.chz. ref is visited SECOND, so it is already-last today
-    // (the reorder is a no-op here) — kept so a future phase that injects more stubs before ref is
-    // covered too.
-    #[test]
-    fn entry_is_ref_stub_still_designated_last() {
-        let entry = std_root().join("ref.chz");
-        let graph = build_graph(&entry).expect("build (ref entry)");
-        assert_eq!(
-            graph.modules.last().unwrap().id,
-            graph.entry,
-            "entry (std.ref) must be the final module"
-        );
-        assert_eq!(
-            graph
-                .modules
-                .iter()
-                .filter(|m| m.dotted == ["std", "ref"])
-                .count(),
-            1,
-            "std.ref must appear exactly once"
         );
         assert_eq!(
             graph

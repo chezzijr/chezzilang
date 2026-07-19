@@ -135,9 +135,9 @@ propagate back). Candidates: **(A) module globals immutable after init** vs **(B
 (a worker's writes silently never propagate).
 
 **Decision: Option A.** A module global is just a top-scope value; mutating it across a task is the same
-move the checker already bans for `Ref[T]` at the `spawn` boundary. Chezzi's mutation ladder is already
-`value` (copy) → `Ref[T]` (in-task box) → `Shared[T]` (cross-task box); Option A applies the existing top
-rung to globals. Option B was rejected — a write that *looks* global going silently local-only is a footgun
+move the checker already bans for a non-sendable value at the `spawn` boundary. Chezzi's mutation ladder is
+`value` (copy) → an in-task mutable `struct`/collection → `Shared[T]` (cross-task box); Option A applies the
+existing top rung to globals. Option B was rejected — a write that *looks* global going silently local-only is a footgun
 with no precedent, and there's nowhere for it to propagate under shared-nothing.
 
 Concretely (B3.3): under `--parallel` a module global is **read-only after the module's init prologue** — a

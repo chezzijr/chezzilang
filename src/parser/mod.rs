@@ -452,20 +452,10 @@ impl Parser {
             let name_span = self.cur_span();
             let name = self.expect_ident()?;
             self.expect(&Token::Colon)?;
-            // `r: ref T = …` / `PI: const T = …` — binding modifiers in the type slot. `ref`/`const`
-            // are consumed only here; `parse_type` never eats them, so either is a parse error in any
-            // other type position. `ref` and `const` are mutually exclusive (a by-reference alias
-            // cannot also be immutable); accept them in either written order, then reject the combo.
-            let mut is_ref = self.eat(&Token::Ref);
+            // `PI: const T = …` — the immutable-binding modifier in the type slot. `const` is
+            // consumed only here; `parse_type` never eats it, so it is a parse error in any other
+            // type position.
             let is_const = self.eat(&Token::Const);
-            if is_const {
-                is_ref = is_ref || self.eat(&Token::Ref); // catch `const ref`
-            }
-            if is_ref && is_const {
-                return Err(
-                    self.err("`ref` and `const` cannot be combined on one binding".to_string())
-                );
-            }
             let ty = self.parse_type()?;
             self.expect(&Token::Assign)?;
             let value = self.parse_expr()?;
@@ -474,7 +464,6 @@ impl Parser {
                 name_spans: vec![name_span],
                 ty: Some(ty),
                 value,
-                is_ref,
                 is_const,
                 doc: stmt_doc,
             });
@@ -519,7 +508,6 @@ impl Parser {
                     name_spans,
                     ty: None,
                     value,
-                    is_ref: false,
                     is_const: false,
                     doc: stmt_doc,
                 });
@@ -607,7 +595,6 @@ impl Parser {
                     name_spans: vec![expr.span],
                     ty: None,
                     value,
-                    is_ref: false,
                     is_const: false,
                     doc: stmt_doc,
                 });
@@ -1191,12 +1178,7 @@ impl Parser {
                     seen_variadic = true;
                 }
                 let name = self.expect_ident()?;
-                // A `ref` modifier is legal only directly after the `:` of a param annotation
-                // (`x: ref int`). `parse_type` never consumes `ref`, so it is a parse error in any
-                // nested type position (`x: List[ref int]`, `x: (ref int, int)`).
-                let mut is_ref = false;
                 let ty = if self.eat(&Token::Colon) {
-                    is_ref = self.eat(&Token::Ref);
                     // `const` is a binding modifier (locals + module globals), never valid on a
                     // parameter — reject it explicitly rather than letting `parse_type` fail obscurely.
                     if self.peek() == &Token::Const {
@@ -1244,7 +1226,6 @@ impl Parser {
                     name_span,
                     ty,
                     default,
-                    is_ref,
                     is_variadic,
                 });
                 if !self.eat(&Token::Comma) {
@@ -2044,13 +2025,8 @@ impl Parser {
         Ok((path, last_span))
     }
 
-    /// A module-path segment: an identifier, or the `ref` keyword spelled as a path component (the
-    /// `std.ref` module / `ref.chz` filename). `ref` is a binding-modifier keyword, but a module
-    /// path is not a type position, so accepting it here keeps `import std.ref` working.
+    /// A module-path segment: an identifier.
     fn expect_path_segment(&mut self) -> PResult<String> {
-        if self.eat(&Token::Ref) {
-            return Ok("ref".to_string());
-        }
         self.expect_ident()
     }
 
@@ -6778,83 +6754,6 @@ mod tests {
         }
     }
 
-    // ===== `ref T` binding modifier (ref T) =====
-
-    #[test]
-    fn parses_ref_local_and_param() {
-        match only("r: ref int = 0\n") {
-            StmtKind::Let {
-                is_ref, ty, names, ..
-            } => {
-                assert!(is_ref, "typed-let `ref` modifier should set is_ref");
-                assert_eq!(names, vec!["r".to_string()]);
-                assert_eq!(ty, Some(Type::named("int")));
-            }
-            other => panic!("{other:?}"),
-        }
-        match only("fn f(x: ref int):\n    return\n") {
-            StmtKind::Fn(decl) => {
-                let p = &decl.params[0];
-                assert!(p.is_ref, "param `ref` modifier should set is_ref");
-                assert_eq!(p.ty, Some(Type::named("int")));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn plain_local_and_param_are_not_ref() {
-        match only("x: int = 0\n") {
-            StmtKind::Let { is_ref, .. } => assert!(!is_ref),
-            other => panic!("{other:?}"),
-        }
-        match only("fn f(x: int):\n    return\n") {
-            StmtKind::Fn(decl) => assert!(!decl.params[0].is_ref),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_ref_in_type_positions() {
-        // `ref` is consumed only in the two binding positions; `parse_type` never eats it, so it is a
-        // parse error in any other type position (the lexer keyword can't start a <type>).
-        for src in [
-            "fn f() -> ref int:\n    return 0\n", // return type
-            "xs: List[ref int] = []\n",           // generic arg / collection element
-            "struct S:\n    count: ref int\n",    // struct field
-            "p: (ref int, int) = (0, 1)\n",       // tuple element
-        ] {
-            assert!(
-                parse_err(src).message.contains("found 'ref'"),
-                "expected a `ref` placement error for: {src:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_ref_destructuring() {
-        // `ref` is a single-name binding modifier; a destructuring let cannot carry it.
-        let _ = parse_err("a, b: ref int := (0, 1)\n");
-    }
-
-    #[test]
-    fn parses_closure_ref_param() {
-        // A `ref` modifier is legal on a closure param (`fn(x: ref int)`), parsed like any param.
-        match only("g := fn(x: ref int) -> int: x + 1\n") {
-            StmtKind::Let { value, .. } => {
-                let ExprKind::Closure { params, .. } = &value.kind else {
-                    panic!("closure")
-                };
-                assert!(
-                    params[0].is_ref,
-                    "closure param `ref` modifier should set is_ref"
-                );
-                assert_eq!(params[0].ty, Some(Type::named("int")));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
     // A three-level type path `std.concurrency.Shared[int]` is NOT supported (paths are two-level).
     // The parser emits the targeted two-level hint instead of the cryptic "expected '=', found '.'".
     #[test]
@@ -6884,20 +6783,6 @@ mod tests {
     #[test]
     fn const_typed_let_parses() {
         parse_ok("PI: const float = 3.14\n");
-    }
-
-    #[test]
-    fn const_and_ref_combined_rejected() {
-        assert!(
-            parse_err("r: ref const int = 0\n")
-                .message
-                .contains("cannot be combined")
-        );
-        assert!(
-            parse_err("r: const ref int = 0\n")
-                .message
-                .contains("cannot be combined")
-        );
     }
 
     #[test]

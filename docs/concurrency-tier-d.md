@@ -250,7 +250,7 @@ avoids it structurally with no shared locks). chezzi's rule mirrors BEAM's: **do
 that needs the same `Shared` box** — `update` is a fast RMW, never park inside it. `update` is kept
 deliberately: it is the only atomic read-modify-write, so removing it for bare `get`/`set` would
 reintroduce a silent lost-update race (a worse, non-local footgun than this narrow same-box deadlock).
-Future: this may be surfaced via a `share` binding modifier (mirroring `ref T` for `Ref[T]`) and/or a
+Future: this may be surfaced via a `share` binding modifier and/or a
 lint/runtime fault to turn the silent hang loud.
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — ✅ LANDED (D6a–D6c)

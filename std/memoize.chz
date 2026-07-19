@@ -2,7 +2,7 @@
 #
 # Written entirely in Chezzi. `memoize1(f)` returns a wrapped function that caches `f`'s result per
 # argument in a captured `Map` — a native reference type, so the cache persists across every call to
-# the wrapped fn (a captured bare scalar would snapshot by value and lose the cache; see std/ref.chz).
+# the wrapped fn (a captured bare scalar would snapshot by value and lose the cache).
 # `f` runs at most once per distinct argument.
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable`). A

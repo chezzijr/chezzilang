@@ -1,8 +1,6 @@
-# Closure capture across scopes: capture is now UNIFORMLY BY REFERENCE — a closure shares the
-# closest binding of a captured name and sees later writes to it. A local, a global, and a `ref`
-# local all behave the same way here (the `ref` annotation is now only needed for by-reference
-# *params*, not for capture). See docs/syntax.md for the full rule.
-import std.ref
+# Closure capture across scopes: capture is UNIFORMLY BY REFERENCE — a closure shares the closest
+# binding of a captured name and sees later writes to it. A function local and a module global both
+# behave the same way here. See docs/syntax.md for the full rule.
 
 g := 10                          # module global
 
@@ -12,17 +10,18 @@ fn local_shared() -> int:
     x = 20
     return f()                   # 20 — the closure sees the later write
 
-fn ref_shared() -> int:
-    x: ref int = 10              # a `ref` local: also a shared box
-    f := fn() -> int: x
-    x = 20
-    return f()                   # 20 — the closure sees the write through the box
+fn nested_mutate() -> int:
+    x := 10
+    fn bump():
+        x = 20                   # a nested fn writes the captured local through the shared binding
+    bump()
+    return x                     # 20 — the write is visible to the caller
 
 fn read_global() -> int:
     f := fn() -> int: g          # `g` is global: referenced live
     return f()
 
 print(local_shared())            # 20
-print(ref_shared())              # 20
+print(nested_mutate())           # 20
 g = 20                           # mutate the global after the closure was created
 print(read_global())             # 20 — live read of the current global value

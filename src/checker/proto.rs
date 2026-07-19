@@ -67,16 +67,6 @@ impl Checker {
                     .params
                     .iter()
                     .map(|p| match &p.ty {
-                        // A `ref T` protocol-method param is a `Ref[T]` box, exactly like a `ref`
-                        // param on a concrete fn/method (charge 4) — so a conforming struct's `ref`
-                        // method matches it, and a `ref` arg through the existential aliases.
-                        Some(t) if p.is_ref => {
-                            self.check_ref_ty(t, span);
-                            self.resolve_type(
-                                &Type::Generic("Ref".to_string(), vec![t.clone()], Span::default()),
-                                span,
-                            )
-                        }
                         Some(t) => self.resolve_type(t, span),
                         None if p.name == "self" => Ty::Unknown,
                         None => {
@@ -1408,15 +1398,6 @@ impl Checker {
             // user `Func`. All four builtins (`print`/`ord`/`chr`/`panic`) are covered uniformly.
             Ty::BuiltinFn { .. } => true,
             Ty::Struct(name, args) => {
-                // The *builtin* `Ref[T]` (std.ref) is the in-task box: copying it across a spawn
-                // would silently give each task its own box (a footgun), so it's non-sendable —
-                // reach for the cross-task box `Shared[T]` instead (spec §7). Keyed on origin (not
-                // the bare name), so a user struct that merely happens to be named `Ref` is sendable.
-                if name == "Ref"
-                    && self.structs.get(name).map(|i| i.origin) == Some(StructOrigin::Builtin)
-                {
-                    return false;
-                }
                 if !args.iter().all(|a| self.sendable_rec(a, stack)) {
                     return false;
                 }

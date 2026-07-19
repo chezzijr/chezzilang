@@ -5632,23 +5632,6 @@ fn const_read_and_alias_ok() {
 }
 
 #[test]
-fn const_cannot_reach_ref_param_backdoor_closed() {
-    // The only way to mutate a value through a `ref` param is to pass a `ref`-declared local — a
-    // by-value local (which a const always is) is refused at desugar. Combined with the parser's
-    // `ref const` rejection, a const can NEVER be aliased into a ref param. Prove the wall stands.
-    let tokens =
-        lexer::tokenize("fn bump(x: ref int):\n    x = x + 1\nC: const int = 5\nbump(C)\n")
-            .expect("lex should succeed");
-    let mut module = parser::parse(tokens).expect("parse should succeed");
-    let err = crate::desugar::run_standalone(&mut module)
-        .expect_err("a const (by-value) must not be passable to a ref param");
-    assert!(
-        err.message.contains("ref` parameter"),
-        "expected the by-value-to-ref rejection, got: {err:?}"
-    );
-}
-
-#[test]
 fn const_from_imported_rebind_names_const() {
     // A from-imported const, rebound, gets a const-specific message (not the snapshot-mutator one
     // whose "call a mutator fn" advice is wrong for an immutable value). `math.pi` is a native const.
@@ -7099,12 +7082,8 @@ fn user_struct_match_without_import_ok() {
 // seed and carry the user layout while the runtime returns/constructs the native shape → field trap.
 #[test]
 fn import_plus_same_name_struct_decl_rejected() {
-    // from-import form, all four struct-modeled natives
+    // from-import form, the struct-modeled natives
     for (src, name) in [
-        (
-            "import Ref from std.ref\nstruct Ref:\n    v: int\nfn main():\n    print(1)\nmain()\n",
-            "Ref",
-        ),
         (
             "import Match from std.regex\nstruct Match:\n    v: int\nfn main():\n    print(1)\nmain()\n",
             "Match",
@@ -7137,7 +7116,7 @@ fn import_plus_same_name_struct_decl_rejected() {
 #[test]
 fn import_does_not_over_reject_distinct_struct_name() {
     entry_ok(
-        "import Ref from std.ref\nstruct RefBox:\n    v: int\nfn main():\n    b := RefBox(5)\n    print(str(b.v))\nmain()\n",
+        "import Match from std.regex\nstruct MatchBox:\n    v: int\nfn main():\n    b := MatchBox(5)\n    print(str(b.v))\nmain()\n",
     );
 }
 
@@ -9018,11 +8997,12 @@ fn channel_needs_element_type() {
 
 #[test]
 fn channel_non_sendable_element_rejected() {
-    // A still-non-sendable element type (a `Ref[int]` in-task box) is rejected as a `Channel`
-    // element. (B3.3 Task 2a: a `fn`-typed element is now SENDABLE — closures cross by value — so the
-    // gate keys on a genuinely non-sendable box; the closure case is `channel_of_closures_typechecks`.)
+    // A non-sendable element type (a protocol existential, which may wrap a closure) is rejected as a
+    // `Channel` element. (B3.3 Task 2a: a `fn`-typed element is now SENDABLE — closures cross by value
+    // — so the gate keys on a genuinely non-sendable type; the closure case is
+    // `channel_of_closures_typechecks`.)
     entry_rejects(
-        "import std.ref\nfn main():\n    ch := Channel[Ref[int]]()\n    print(ch.len())\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nfn main():\n    ch := Channel[NS]()\n    print(ch.len())\nmain()\n",
         "Channel element type must be sendable",
     );
 }
@@ -9153,42 +9133,56 @@ fn spawn_capture_free_closure_arg_ok() {
 
 #[test]
 fn spawn_arg_closure_capturing_ref_rejected() {
-    // B3.3 (Task 2a): a closure ARG whose captures include a local `ref` is rejected — via the
+    // B3.3 (Task 2a): a closure ARG whose captures include a non-sendable local is rejected — via the
     // capture gate, not the bare-type sendability check (a `fn` value is now sendable). The captured
-    // `ref` crosses the airlock as a silent deep copy, so it must be a compile error.
+    // value crosses the airlock as a silent deep copy, so it must be a compile error.
     entry_rejects(
-        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn run(g)\nmain()\n",
-        "non-sendable captured binding 'r'",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn run(g)\nmain()\n",
+        "non-sendable captured binding 'p'",
     );
 }
 
 #[test]
 fn spawn_keyword_arg_closure_capturing_ref_rejected() {
-    // The capture gate must fire whether the ref-capturing closure crosses positionally OR by LABEL
+    // The capture gate must fire whether the capturing closure crosses positionally OR by LABEL
     // through a function VALUE. Regression guard: the gate must iterate keyword args too, so
-    // `spawn h(f=g)` cannot smuggle a ref-capturing closure past the airlock while `spawn h(g)` is
-    // rejected — the checker-accepts / runtime-diverges hole (kept from the old non-sendable-value gate).
+    // `spawn h(f=g)` cannot smuggle a non-sendable-capturing closure past the airlock while
+    // `spawn h(g)` is rejected — the checker-accepts / runtime-diverges hole.
+    let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\n";
     entry_rejects(
-        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn h(f=g)\nmain()\n",
-        "non-sendable captured binding 'r'",
+        &format!(
+            "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(f=g)\nmain()\n"
+        ),
+        "non-sendable captured binding 'p'",
     );
     // The positional form of the SAME call is (and stays) rejected — parity of the two spellings.
     entry_rejects(
-        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    h := run\n    r: ref int = 0\n    g := fn() -> int: r\n    parallel:\n        spawn h(g)\nmain()\n",
-        "non-sendable captured binding 'r'",
+        &format!(
+            "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(g)\nmain()\n"
+        ),
+        "non-sendable captured binding 'p'",
     );
 }
 
 #[test]
 fn spawn_non_sendable_ref_keyword_arg_rejected() {
-    // A `Ref[T]` (std.ref mutable box) is non-sendable; passing it by label to a spawned function
-    // value must be rejected, exactly like the positional form (else the task silently mutates a
-    // deep-cloned copy and the parent box is unchanged — the footgun the gate exists to prevent).
-    // Uses the graph path (`entry_rejects`) so the spawn gate is exercised through `check_graph`
-    // too, not only the single-module `check_src` path (checker-test-helper-key-divergence).
+    // A non-sendable value (a protocol existential) passed by label to a spawned function value must
+    // be rejected, exactly like the positional form (else the task silently mutates a deep-cloned copy
+    // — the footgun the gate exists to prevent). Uses the graph path (`entry_rejects`) so the spawn
+    // gate is exercised through `check_graph` too (checker-test-helper-key-divergence).
+    let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(r: NS):\n    print(r.tag())\n";
     entry_rejects(
-        "import std.ref\nfn run(r: Ref[int]):\n    r.set(1)\nfn main():\n    h := run\n    b := Ref(0)\n    parallel:\n        spawn h(r=b)\nmain()\n",
-        "non-sendable value of type Ref[int]",
+        &format!(
+            "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(r=b)\nmain()\n"
+        ),
+        "non-sendable value of type NS",
+    );
+    // Positional form of the same call — rejected identically.
+    entry_rejects(
+        &format!(
+            "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(b)\nmain()\n"
+        ),
+        "non-sendable value of type NS",
     );
 }
 
@@ -9244,21 +9238,19 @@ fn spawn_bad_arg_reports_one_error() {
 #[test]
 fn channel_non_sendable_struct_field_rejected() {
     // A non-sendable value smuggled inside a struct field must be caught (deep field sendability). The
-    // field is a `Ref[int]` box — still non-sendable after B3.3 (a `fn` field would now be sendable,
-    // as closures cross by value; that path is deferred to the runtime backstop, Task 2b).
+    // field is a protocol existential (a genuinely non-sendable type — it may wrap a closure).
     entry_rejects(
-        "import std.ref\nstruct Holder:\n    f: Ref[int]\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Holder:\n    f: NS\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
         "Channel element type must be sendable",
     );
 }
 
 #[test]
 fn spawn_non_sendable_struct_field_arg_rejected() {
-    // A struct carrying a still-non-sendable field (a `Ref[int]` box) is a non-sendable spawn arg
-    // (deep field sendability). (B3.3 Task 2a: a `fn` field is now sendable — closures cross by value
-    // — so the coverage uses a box that stays non-sendable; the closure case is deferred to Task 2b.)
+    // A struct carrying a non-sendable field (a protocol existential) is a non-sendable spawn arg
+    // (deep field sendability).
     entry_rejects(
-        "import std.ref\nstruct Holder:\n    f: Ref[int]\nfn run_it(h: Holder):\n    h.f.set(1)\nfn main():\n    h := Holder(Ref(0))\n    parallel:\n        spawn run_it(h)\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nstruct Holder:\n    f: NS\nfn run_it(h: Holder):\n    print(h.f.tag())\nfn main():\n    h := Holder(Boxy(0))\n    parallel:\n        spawn run_it(h)\nmain()\n",
         "non-sendable value of type Holder",
     );
 }
@@ -9564,277 +9556,6 @@ fn rwshared_annotation_with_map_ok() {
     );
 }
 
-// ===== `ref T` transparent reference bindings (coercion table) =====
-
-/// The desugar pass (run inside `build_graph`) enforces the `ref` call-arg coercion table. Resolve
-/// `src` as an entry program and return the resolve-error message (empty string = resolved clean).
-fn resolve_err_msg(src: &str) -> String {
-    let t = TmpDir::new();
-    let entry = t.write("main.chz", src);
-    match crate::resolver::build_graph(&entry) {
-        Ok(_) => String::new(),
-        Err(e) => e.message,
-    }
-}
-
-#[test]
-fn ref_to_byval_param_is_error() {
-    // Row 3: a by-value `int` local passed to a `ref int` param — can't take a reference to a
-    // by-value local. The error must direct the user to declare the local `ref`.
-    let msg = resolve_err_msg(
-        "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    n := 0\n    byref(n)\nmain()\n",
-    );
-    assert!(
-        msg.contains("by-reference") && msg.contains("declare"),
-        "expected the by-value->ref error, got: {msg:?}"
-    );
-}
-
-#[test]
-fn literal_to_ref_param_is_error() {
-    // Row 4: a literal/temporary passed to a `ref int` param — literals are temporary, you can't
-    // take a reference to one.
-    let msg = resolve_err_msg(
-        "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    byref(3)\nmain()\n",
-    );
-    assert!(
-        msg.contains("literal") && msg.contains("temporary"),
-        "expected the literal->ref error, got: {msg:?}"
-    );
-}
-
-#[test]
-fn ref_to_ref_and_ref_to_t_ok() {
-    // Rows 1 & 2: a `ref int` arg into a `ref int` param (alias) and into a plain `int` param
-    // (auto-deref copy) both type-check clean end-to-end.
-    entry_ok(
-        "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn byval(x: int):\n    print(x)\nfn main():\n    r: ref int = 0\n    byref(r)\n    byval(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_create_read_write_and_alias_ok() {
-    // The headline forms: create + read/write sugar and alias-shares-box all type-check.
-    entry_ok(
-        "import std.ref\nfn main():\n    r: ref int = 0\n    r = 5\n    r += 1\n    print(r)\n    r2: ref int = r\n    r2 = 9\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_over_generic_param_rejected() {
-    // A `ref T` over a generic type parameter is rejected (use a first-class `Ref[T]`).
-    let errs = check_entry(
-        "import std.ref\nfn id[T](x: ref T):\n    x = x\nfn main():\n    print(1)\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("generic type parameter")),
-        "expected the ref-over-generic error, got: {errs:?}"
-    );
-}
-
-#[test]
-fn ref_shadowed_by_plain_local_is_not_ref() {
-    // A plain `:=` local that shadows an outer `ref` of the same name is an ordinary by-value local:
-    // its reads/writes must NOT be lowered to `.get()`/`.set()` (shadowing-aware ref tracking). A
-    // regression guard — naive "ref name is ref everywhere" lowering produced `int has no method get`.
-    entry_ok(
-        "import std.ref\nn: ref int = 5\nfn f():\n    n := 100\n    n = 200\n    print(n)\nf()\nprint(n)\n",
-    );
-}
-
-#[test]
-fn ref_struct_field_access_through_box_ok() {
-    // A `ref P` auto-derefs for field read AND field write: `rp.x` -> `rp.get().x`, and
-    // `rp.x = 9` -> `rp.get().x = 9` (the box's struct field is mutated in place).
-    entry_ok(
-        "import std.ref\nstruct P:\n    x: int\nfn main():\n    rp: ref P = P(1)\n    print(rp.x)\n    rp.x = 9\n    print(rp.x)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_binding_captured_in_spawn_rejected() {
-    // Spec §7: a `ref T` is a `Ref[T]` box, which is non-sendable — capturing it inside a spawned
-    // task is rejected (same-task aliasing only; use `Shared[T]` for cross-task mutation). This is
-    // the SAME boundary as an explicit `Ref[T]`, since `ref T` lowers to it.
-    entry_rejects(
-        "import std.ref\nfn main():\n    r: ref int = 0\n    parallel:\n        spawn:\n            r = r + 1\n    print(r)\nmain()\n",
-        "non-sendable",
-    );
-}
-
-#[test]
-fn ref_value_copy_crosses_airlock_ok() {
-    // The deref-first escape: copy the ref's VALUE into a plain local, then send the copy. No box
-    // crosses, so this type-checks (and the child's mutation cannot reach the parent's binding).
-    entry_ok(
-        "import std.concurrency\nimport std.ref\nfn main():\n    total: ref int = 100\n    snapshot := total\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(snapshot * 2)\n    print(total)\n    print(out.get())\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_is_not_sendable() {
-    // `Ref[T]` is the *in-task* box (std.ref); passing it across a spawn would silently copy it,
-    // so the checker rejects it — the cross-task box is `Shared[T]`. (Spec §7.)
-    entry_rejects(
-        "import std.ref\nfn bump(r: Ref[int]):\n    r.set(r.get() + 1)\nfn main():\n    r := Ref(0)\n    parallel:\n        spawn bump(r)\nmain()\n",
-        "non-sendable value of type Ref[int]",
-    );
-}
-
-#[test]
-fn ref_through_local_fn_value_aliases_ok() {
-    // Charge 1: a `ref T` arg into a `ref T` param reached through a LOCAL fn-value (`g := bump`)
-    // must alias (pass the box), not auto-deref. The callee's ref-ness is resolved through the
-    // local binding, so the type-check is clean (no false `expected Ref[int], found int`).
-    entry_ok(
-        "import std.ref\nfn bump(x: ref int):\n    x = 99\nfn main():\n    r: ref int = 7\n    g := bump\n    g(r)\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_through_shared_method_name_aliases_ok() {
-    // Charge 2: two structs share a method name `apply` with DIFFERENT param ref-ness (A: ref,
-    // B: by-value). `a.apply(r)` must resolve to A's signature via the receiver type and alias the
-    // box — no false `expected Ref[int], found int` from a syntactic cross-struct disagreement.
-    entry_ok(
-        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    a := A(0)\n    r: ref int = 1\n    a.apply(r)\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_through_shared_method_name_ctor_receiver_ok() {
-    // Charge 2 (expression receiver): the receiver is an INLINE ctor call `A(0).apply(r)` rather
-    // than a named local. The receiver's struct type must still pick A's (ref) signature, so the box
-    // aliases — no false `expected Ref[int], found int`. Mirrors the named-local form exactly.
-    entry_ok(
-        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    r: ref int = 1\n    A(0).apply(r)\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_through_shared_method_name_fn_receiver_ok() {
-    // Charge 2 (expression receiver): the receiver is a struct-returning free-fn call `mk().apply(r)`
-    // where `fn mk() -> A`. The declared return type picks A's (ref) signature, so the box aliases.
-    entry_ok(
-        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn mk() -> A:\n    return A(0)\nfn main():\n    r: ref int = 1\n    mk().apply(r)\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_shared_method_byval_sibling_ctor_receiver_ok() {
-    // Charge 2 sibling (expression receiver): the by-value `B(0).apply(r)` must still accept a `ref`
-    // arg by auto-deref (row 2) — the fix must NOT over-alias. Positive guard against over-relaxing.
-    entry_ok(
-        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    r: ref int = 1\n    B(0).apply(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_shared_method_byval_sibling_ok() {
-    // Charge 2 sibling: the by-value `B.apply` must still accept a `ref` arg by auto-deref (row 2).
-    entry_ok(
-        "import std.ref\nstruct A:\n    dummy: int\n    fn apply(self, x: ref int):\n        x = 42\nstruct B:\n    dummy: int\n    fn apply(self, x: int):\n        print(x)\nfn main():\n    b := B(0)\n    r: ref int = 1\n    b.apply(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn closure_ref_param_aliases_ok() {
-    // Charge 3: a closure `ref` param is typed as `Ref[T]` (its body reads auto-deref via `.get()`),
-    // and a `ref` arg is accepted by passing the box (alias), exactly like a named-fn `ref` param.
-    // Closures are expression-bodied, so the body reads the ref; the full mutate-alias path is in
-    // the `ref_binding` golden. Both forms type-check clean here.
-    entry_ok(
-        "import std.ref\nfn main():\n    g := fn(x: ref int) -> int: x + 1\n    r: ref int = 5\n    print(g(r))\nmain()\n",
-    );
-}
-
-#[test]
-fn closure_byval_into_ref_param_is_error() {
-    // Charge 3: a closure `ref` param must REJECT a by-value `T` argument, exactly like the named-fn
-    // `ref_to_byval_param_is_error` row 3. Today the closure `ref` is silently inert (no error).
-    let msg = resolve_err_msg(
-        "import std.ref\nfn main():\n    g := fn(x: ref int) -> int: x + 1\n    n := 5\n    print(g(n))\nmain()\n",
-    );
-    assert!(
-        msg.contains("by-reference") && msg.contains("declare"),
-        "expected the by-value->ref error for a closure ref param, got: {msg:?}"
-    );
-}
-
-#[test]
-fn protocol_ref_param_is_honored() {
-    // Charge 4: a `ref` param in a protocol signature must be honored as `Ref[T]` (consistent with
-    // named-fn/method ref params), so a struct method with a `ref` param satisfies it and a `ref`
-    // arg through the existential aliases.
-    entry_ok(
-        "import std.ref\nprotocol Bumper:\n    fn bump(self, x: ref int)\nstruct Counter:\n    dummy: int\n    fn bump(self, x: ref int):\n        x = 7\nfn use(b: Bumper, r: ref int):\n    b.bump(r)\nfn main():\n    c := Counter(0)\n    r: ref int = 1\n    use(c, r)\n    print(r)\nmain()\n",
-    );
-}
-
-#[test]
-fn ref_arg_mismatch_message_is_transparent() {
-    // Charge 5: a diagnostic about a `ref` binding must say `ref T`, not the lowered `Ref[T]`.
-    // A `ref str` arg into a `ref int` param mismatches; the rendered types must use the `ref T`
-    // spelling the user wrote, never leaking `Ref[...]`.
-    let errs = check_entry(
-        "import std.ref\nfn byref(x: ref int):\n    x = 1\nfn main():\n    r: ref str = \"hi\"\n    byref(r)\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("ref int") || e.message.contains("ref str")),
-        "expected a transparent `ref T` rendering, got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("Ref[")),
-        "diagnostics for ref bindings must not leak Ref[T], got: {errs:?}"
-    );
-}
-
-#[test]
-fn ref_capture_message_is_transparent() {
-    // Charge 5: the non-sendable capture message for a `ref` binding must say `ref int`, not
-    // `Ref[int]` (the user never wrote `Ref`).
-    let errs = check_entry(
-        "import std.ref\nfn main():\n    total: ref int = 100\n    parallel:\n        spawn:\n            total = total + 1\n    print(total)\nmain()\n",
-    );
-    assert!(
-        errs.iter().any(|e| e.message.contains("ref int")),
-        "expected `ref int` in the capture message, got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("Ref[int]")),
-        "capture message for a ref binding must not leak Ref[int], got: {errs:?}"
-    );
-}
-
-#[test]
-fn explicit_ref_box_keeps_ref_bracket_in_messages() {
-    // Charge-5 must NOT lie in reverse: a GENUINE first-class `Ref[T]` (the user wrote `Ref`, not a
-    // `ref` binding) keeps its `Ref[T]` spelling in arg-mismatch + capture diagnostics. Transparency
-    // is for `ref` bindings only — an explicit box is not transparent.
-    let errs = check_entry(
-        "import std.ref\nfn f(x: Ref[int]):\n    print(x.get())\nfn main():\n    f(\"hi\")\nmain()\n",
-    );
-    assert!(
-        errs.iter().any(|e| e.message.contains("Ref[int]")),
-        "explicit Ref[int] param must render Ref[int], got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("ref int")),
-        "explicit Ref[int] must NOT be rewritten to `ref int`, got: {errs:?}"
-    );
-    // And the non-sendable capture of an explicit box also keeps `Ref[int]`.
-    let errs = check_entry(
-        "import std.ref\nfn main():\n    box: Ref[int] = Ref(0)\n    parallel:\n        spawn:\n            box.set(box.get() + 1)\n    print(box.get())\nmain()\n",
-    );
-    assert!(
-        errs.iter().any(|e| e.message.contains("Ref[int]"))
-            && !errs.iter().any(|e| e.message.contains("ref int")),
-        "explicit Ref[int] capture must keep Ref[int], got: {errs:?}"
-    );
-}
-
 // ----- Atomic[T]: the generic atomic box -----
 
 #[test]
@@ -10014,14 +9735,13 @@ fn import_module_as_reserved_int_rejected() {
 #[test]
 fn import_alias_to_reserved_type_from_rejected() {
     // Finding B: `import who as Result from lib` silently rebound a reserved TYPE name (Result/
-    // Option/Iterator/Ref/Socket/Listener/ptr/owned_str) — the alias guard only covered reserved
+    // Option/Iterator/Socket/Listener/ptr/owned_str) — the alias guard only covered reserved
     // CALLABLE names, so the type-name case slipped through while `import who as int` was rejected.
     // Now symmetric with the decl-site guard (`is_reserved_type`): reject as `reserved (builtin)`.
     for ty in [
         "Result",
         "Option",
         "Iterator",
-        "Ref",
         "Socket",
         "Listener",
         "ptr",
@@ -10522,7 +10242,6 @@ fn protocol_named_reserved_type_rejected_at_decl() {
         "range",
         "Result",
         "Option",
-        "Ref",
         "Socket",
         "Shared",
         "Executor",
@@ -10703,11 +10422,11 @@ fn read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok() 
 
 #[test]
 fn submit_non_sendable_capture_rejected() {
-    // A submitted closure reading a non-sendable captured binding (a Ref) crosses the airlock to a
-    // pool thread under `--parallel` — rejected exactly like a `spawn` capture.
+    // A submitted closure reading a non-sendable captured binding (a protocol existential) crosses
+    // the airlock to a pool thread under `--parallel` — rejected exactly like a `spawn` capture.
     entry_rejects(
-        "import std.concurrency\nimport std.ref\nfn main():\n    r := Ref(0)\n    ex := Executor()\n    ex.submit(fn(): r.set(1))\n    ex.shutdown()\nmain()\n",
-        "non-sendable captured binding 'r'",
+        "import std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    ex := Executor()\n    ex.submit(fn(): print(p.tag()))\n    ex.shutdown()\nmain()\n",
+        "non-sendable captured binding 'p'",
     );
 }
 
@@ -10761,59 +10480,31 @@ fn top_level_closure_submitted_ok() {
 // ----- B3.3 (Task 2a): capture-sendability gate at the spawn CALLEE + ARG sites -----
 // A closure/nested-fn value crosses the airlock BY VALUE (`sendable(Func)` is permissive), so the
 // bare `fn` type type-checks; the per-closure capture check moves to the airlock SITES. A captured
-// NON-SENDABLE LOCAL (a `ref` etc.) at a spawn callee/arg is a clean compile error, matching the
-// `spawn:` block form. A MODULE-GLOBAL `ref` is a read-only global, NOT a capture — never gated.
+// NON-SENDABLE LOCAL (a protocol existential etc.) at a spawn callee/arg is a clean compile error,
+// matching the `spawn:` block form. A MODULE-GLOBAL non-sendable is a read-only global, NOT a
+// capture — never gated. (The probe is a protocol existential — a genuinely non-sendable value.)
 
 #[test]
-fn ref_captured_by_spawn_callee_closure_rejected() {
-    // A function-local `ref` captured by a closure VALUE that is the spawn CALLEE crosses the airlock
-    // as a silent deep copy (the write vanishes) — now a compile error, exactly like the block form.
+fn nonsendable_captured_by_spawn_callee_closure_rejected() {
+    // A function-local non-sendable value captured by a closure VALUE that is the spawn CALLEE
+    // crosses the airlock as a silent deep copy — a compile error, exactly like the block form.
     let errs = check_entry(
-        "import std.ref\nfn main():\n    r: ref int = 0\n    bump := fn() -> int: r\n    parallel:\n        spawn bump()\n    print(r)\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    grab := fn() -> int: p.tag()\n    parallel:\n        spawn grab()\nmain()\n",
     );
-    assert_eq!(errs.len(), 1, "expected exactly 1 error, got: {errs:?}");
     assert!(
-        errs[0]
-            .message
-            .contains("non-sendable captured binding 'r'")
-            && errs[0].message.contains("ref int"),
+        errs.iter()
+            .any(|e| e.message.contains("non-sendable captured binding 'p'")),
         "got: {errs:?}"
     );
 }
 
 #[test]
-fn ref_captured_by_nested_fn_spawn_callee_rejected() {
-    // Same gate for a NESTED `fn` value (statement body, so it can WRITE the ref) as the callee.
-    let errs = check_entry(
-        "import std.ref\nfn main():\n    r: ref int = 0\n    fn bump():\n        r = 5\n    parallel:\n        spawn bump()\n    print(r)\nmain()\n",
-    );
-    assert_eq!(errs.len(), 1, "expected exactly 1 error, got: {errs:?}");
-    assert!(
-        errs[0]
-            .message
-            .contains("non-sendable captured binding 'r'")
-            && errs[0].message.contains("ref int"),
-        "got: {errs:?}"
-    );
-}
-
-#[test]
-fn ref_captured_by_inline_closure_spawn_arg_rejected() {
-    // An INLINE closure passed as a spawn ARG whose captures include a local `ref` is gated on the
-    // spot (the arg-Closure path), not only the recorded-binding (Ident) path.
-    entry_rejects(
-        "import std.ref\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    r: ref int = 0\n    parallel:\n        spawn run(fn() -> int: r)\nmain()\n",
-        "non-sendable captured binding 'r'",
-    );
-}
-
-#[test]
-fn module_global_ref_spawn_callee_ok() {
-    // CRITICAL NON-REGRESSION: a `ref` declared at MODULE scope is a read-only global resolvable in
-    // every task (like a free fn), NOT a per-task local capture — the scope-0 exclusion must keep it
-    // out of the gate. Checks clean (and runs 42 on both engines — see the parity test).
+fn module_global_nonsendable_spawn_callee_ok() {
+    // CRITICAL NON-REGRESSION: a non-sendable value declared at MODULE scope is a read-only global
+    // resolvable in every task (like a free fn), NOT a per-task local capture — the scope-0 exclusion
+    // must keep it out of the gate even when a task READS it.
     entry_ok(
-        "import std.ref\ncounter: ref int = 0\nfn work(ch: Channel[int]):\n    ch.send(42)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\ng: NS = Boxy(42)\nfn work(ch: Channel[int]):\n    ch.send(g.tag())\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
     );
 }
 
@@ -10951,32 +10642,13 @@ fn spawn_global_mutation_inside_recover_rejected() {
     );
 }
 
-// ----- C5 refinement #2: `Ref` non-sendability keys on origin, not the bare name -----
-
+// `Ref` is now an ORDINARY identifier (the `ref` keyword and `Ref[T]` box were removed): a user
+// `struct Ref` is legal, no longer reserved.
 #[test]
-fn user_struct_named_ref_now_reserved() {
-    // `Ref` is now a reserved global backing the `ref` keyword (std.ref is always linked), so a
-    // user `struct Ref` is rejected at declaration with the same `reserved (builtin)` error as
-    // `struct Result`/`struct Option` — no longer a legal user struct.
-    entry_rejects("struct Ref:\n    val: int\nprint(1)\n", "reserved");
-}
-
-/// `ref T` (keyword) AND the explicit `Ref[T]` box both type-check with NO `import std.ref`, because
-/// `Ref` is a reserved global whose std.ref layout+methods are always linked into the graph.
-#[test]
-fn ref_keyword_and_type_work_without_import() {
-    entry_ok("a: ref int = 0\nprint(a)\n");
-    entry_ok("x: Ref[int] = Ref(0)\nx.set(5)\nprint(x.get())\n");
-    entry_ok("x: Ref[str] = Ref(\"hi\")\nx.update(fn(v: str) -> str: v.upper())\nprint(x.get())\n");
-}
-
-/// `import std.ref` stays a HARMLESS NO-OP now that `Ref` is pre-seeded bare: importing it (whole-
-/// module or `from`-form) must NOT produce a dup-def / shadow error — the bind_import inserts are
-/// idempotent over the always-present seed.
-#[test]
-fn import_std_ref_is_harmless_noop() {
-    entry_ok("import std.ref\na: ref int = 0\nx: Ref[int] = Ref(1)\nprint(a + x.get())\n");
-    entry_ok("import Ref from std.ref\nx: Ref[int] = Ref(1)\nprint(x.get())\n");
+fn user_struct_named_ref_is_legal() {
+    entry_ok(
+        "struct Ref:\n    val: int\nfn main():\n    r := Ref(5)\n    print(str(r.val))\nmain()\n",
+    );
 }
 
 // ----- D6c: optional `timeout_ms` on net socket read/accept/write -----
@@ -18676,9 +18348,11 @@ fn channel_of_protocol_existential_is_non_sendable() {
         "import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n",
         "name a concrete error type",
     );
-    // A non-Error non-sendable element (builtin `Ref`) does NOT get the Error hint (just the base
-    // message + the plain gloss).
-    let errs = check_entry("import std.ref\nc := Channel[Ref[int]]()\nprint(\"x\")\n");
+    // A non-Error non-sendable element (a protocol existential) does NOT get the Error hint (just the
+    // base message + the plain gloss).
+    let errs = check_entry(
+        "import std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nc := Channel[NS]()\nprint(\"x\")\n",
+    );
     assert!(
         errs.iter()
             .any(|e| e.message.contains("cross a task boundary")),
@@ -18738,4 +18412,30 @@ fn atomic_add_mismatch_no_collection_hint() {
         "fn main():\n    s := Set()\n    s.add(1)\n    s.add(\"x\")\nmain()\n",
         "List[<protocol>]",
     );
+}
+
+// ===== `ref` keyword / `Ref[T]` box / `import std.ref` REMOVED (minimalism cleanup) =====
+// Boundary pin: after removal, none of the three surfaces exist. Each program must FAIL to compile
+// with a clean error (a resolve/parse/type error, never a panic), not silently work.
+#[test]
+fn ref_surface_removed_fails_to_compile() {
+    fn compile_fails(src: &str) -> String {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        match crate::resolver::build_graph(&entry) {
+            Err(e) => format!("{e:?}"),
+            Ok(graph) => match check_graph(&graph) {
+                Ok(()) => String::new(),
+                Err(errs) => format!("{errs:?}"),
+            },
+        }
+    }
+    for src in [
+        "import std.ref\nfn main():\n    print(1)\nmain()\n",
+        "fn main():\n    x: ref int = 0\n    print(x)\nmain()\n",
+        "fn main():\n    x: Ref[int] = 0\n    print(x)\nmain()\n",
+    ] {
+        let msg = compile_fails(src);
+        assert!(!msg.is_empty(), "expected a compile error for: {src:?}");
+    }
 }

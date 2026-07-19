@@ -269,9 +269,9 @@ fn parity_entry(src: &str) -> String {
     assert_parity_file(&[("main.chz", src)], "main.chz")
 }
 
-/// Like [`parity_entry`], but for a program that must FAULT on BOTH engines: runs the graph path
-/// (needed to link `std.ref` for `ref`/`Ref`) on the serial + M:N engines, asserts both error with
-/// an identical message, and returns that message so the caller can assert its content.
+/// Like [`parity_entry`], but for a program that must FAULT on BOTH engines: runs the graph path on
+/// the serial + M:N engines, asserts both error with an identical message, and returns that message
+/// so the caller can assert its content.
 #[cfg(test)]
 fn parity_entry_fault(src: &str) -> String {
     let t = TmpDir::new();
@@ -974,27 +974,8 @@ fn executor_autodrain_skipped_on_os_exit() {
 // ----- Executor.submit crosses a submitted closure BY VALUE on BOTH engines (serial == M:N) -----
 // The cooperative engine used to queue the submitted closure's own heap Handle (captures shared by
 // reference, bypassing the airlock), while M:N wired it by value. That broke serial==M:N. Now both
-// route through `wire_callable`/`to_wire`, so the ref/generator airlock enforcement runs and captures
+// route through `wire_callable`/`to_wire`, so the generator airlock enforcement runs and captures
 // isolate identically on both engines.
-
-#[test]
-fn executor_submit_ref_capturing_closure_faults_both_engines() {
-    // Repro #1: a submitted closure indirectly captures a local `ref` (via a nested fn). WAS:
-    // serial ran silently (`done`), M:N faulted. NOW: BOTH fault via the closure-capture ref scan.
-    let src = "\
-import std.ref
-fn main():
-    r: ref int = 0
-    fn getr() -> int:
-        return r
-    ex := Executor()
-    ex.submit(fn(): getr())
-    ex.shutdown()
-    print(\"done\")
-main()";
-    let e = parity_entry_fault(src);
-    assert!(e.contains("ref/Ref"), "fault msg: {e}");
-}
 
 #[test]
 fn executor_submit_generator_capturing_closure_faults_both_engines() {
@@ -6467,54 +6448,6 @@ fn golden_sort_by_key_via_run_file() {
     assert_file_parity("examples/sort_by_key.chz");
 }
 
-/// `Ref[T]` golden: `examples/ref.chz` — a pure-Chezzi one-field mutable box (`std.ref`):
-/// `get`/`set`/`update`, closure-capture accumulation through the shared struct, generic over a
-/// non-int type. Byte-matches `.expected`, identical on interp + VM. No engine change.
-#[test]
-fn golden_ref_via_run_file() {
-    let path = fixture("examples/ref.chz");
-    let expected = std::fs::read_to_string(fixture("examples/ref.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-    assert_file_parity("examples/ref.chz");
-}
-
-/// `Ref` reserved-global golden: `examples/ref_no_import.chz` exercises the `ref` keyword, the
-/// explicit `Ref[int]`/`Ref(0)` box, and a closure that mutates a captured `ref` local through the
-/// shared box — all with NO `import std.ref` (std.ref is always linked). Asserts all THREE engines
-/// byte-identical: cooperative VM == interp (`assert_file_parity`) PLUS the M:N OS-thread engine
-/// (`run_file_parallel`).
-#[test]
-fn golden_ref_no_import_via_run_file() {
-    let path = fixture("examples/ref_no_import.chz");
-    let expected = std::fs::read_to_string(fixture("examples/ref_no_import.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-    assert_file_parity("examples/ref_no_import.chz");
-    // M:N OS-thread engine (default `run`) must match byte-for-byte too.
-    let (par_out, _par_err, par_res, _) =
-        run_file_parallel(&path, crate::native::HostConfig::default());
-    assert!(par_res.is_ok(), "{par_res:?}");
-    assert_eq!(par_out, expected, "M:N engine divergence for ref_no_import");
-}
-
-/// `ref T` golden: `examples/ref_binding.chz` — the transparent by-reference binding modifier
-/// (sugar over `std.ref` `Ref[T]`): create + read/write auto-deref, alias-shares-box, a plain
-/// `:=` copy that does NOT share, pass-by-ref mutating the caller's binding, a `ref -> T` param
-/// auto-deref copy, and inner-fn capture-by-ref persisting through the shared box. All lowering
-/// lives in desugar, so the VM and interp are byte-identical by construction.
-#[test]
-fn golden_ref_binding_via_run_file() {
-    let path = fixture("examples/ref_binding.chz");
-    let expected = std::fs::read_to_string(fixture("examples/ref_binding.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-    assert_file_parity("examples/ref_binding.chz");
-}
-
 /// `const T` golden: `examples/const_binding.chz` — the immutable binding modifier. A module-global
 /// const, a runtime-initialized const (const ≠ constexpr), reading + aliasing a const, SHALLOW
 /// mutation of a `const` List (name frozen, contents mutable), and a const local. `const` is
@@ -6527,35 +6460,6 @@ fn golden_const_binding_via_run_file() {
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
     assert_file_parity("examples/const_binding.chz");
-}
-
-/// `ref T` indirect-callee golden: `examples/ref_indirect.chz` — the type-directed arg coercion
-/// (alias / deref / by receiver type) reached through a LOCAL fn-value, a closure, and a method
-/// name shared across structs that disagree on ref-ness — including EXPRESSION receivers (an
-/// inline ctor call and a struct-returning fn call), which resolve by receiver type identically
-/// to a named local. All lower to the same `Ref[T]` box, so the VM and interp are byte-identical
-/// by construction.
-#[test]
-fn golden_ref_indirect_via_run_file() {
-    let path = fixture("examples/ref_indirect.chz");
-    let expected = std::fs::read_to_string(fixture("examples/ref_indirect.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-    assert_file_parity("examples/ref_indirect.chz");
-}
-
-/// `ref T` airlock golden: `examples/ref_airlock.chz` — the concurrency boundary (spec §7). A
-/// `ref T` box is non-sendable, so its VALUE must be copied across the airlock; the child mutates
-/// only its copy and the parent's binding is untouched. Byte-identical on interp + VM.
-#[test]
-fn golden_ref_airlock_via_run_file() {
-    let path = fixture("examples/ref_airlock.chz");
-    let expected = std::fs::read_to_string(fixture("examples/ref_airlock.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-    assert_file_parity("examples/ref_airlock.chz");
 }
 
 /// Tuple destructuring + match-on-tuple + guards golden: `examples/tuple_match.chz` — `a, b :=
@@ -7068,10 +6972,10 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
 
 /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
 /// uniform by-reference capture rule — a plain local is shared and sees later writes (`20`), a
-/// `ref` local is a shared box (`20`), and a global is referenced live (`20`). Byte-identical
-/// on the VM, the interpreter, the `--parallel` engine, and its `.expected`. The example uses
-/// `import std.ref` (the `ref int` annotation resolves to `Ref`), so it runs through the real
-/// module graph via `run_file` (a temp entry), not `run_capture`/`compile_module_standalone`.
+/// nested fn writes a captured local visible to the caller (`20`), and a global is referenced live
+/// (`20`). Byte-identical on the VM, the interpreter, the `--parallel` engine, and its `.expected`.
+/// It runs through the real module graph via `run_file` (a temp entry), not
+/// `run_capture`/`compile_module_standalone`.
 #[test]
 fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
     let src = include_str!("../../examples/closure_capture_scopes.chz");
@@ -7351,26 +7255,6 @@ fn golden_capture_rebind_heap() {
     );
 }
 
-/// G2 — a `ref` PARAM (pass-by-reference into a callee) still mutates the caller's binding, unchanged
-/// by uniform-capture boxing. Uses `std.ref`, so it runs through the module graph.
-#[test]
-fn golden_capture_ref_param() {
-    let src = include_str!("../../examples/capture_ref_param.chz");
-    let expected = include_str!("../../examples/capture_ref_param.expected");
-    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
-    assert_eq!(out, expected, "serial == M:N == .expected");
-}
-
-/// B6 — a `ref` local captured by a closure still shares by reference (sees a later write); confirms
-/// boxing a `ref` binding is harmless (the Ref struct handle rides inside the cell).
-#[test]
-fn golden_capture_ref_capture_still_shares() {
-    let src = include_str!("../../examples/capture_ref_capture_still_shares.chz");
-    let expected = include_str!("../../examples/capture_ref_capture_still_shares.expected");
-    let out = assert_parity_file(&[("main.chz", src)], "main.chz");
-    assert_eq!(out, expected, "serial == M:N == .expected");
-}
-
 /// F2 — cross-task shared mutation uses `Shared[T]` (crosses by reference); N tasks over one `Shared`
 /// all accumulate. Uses `std.concurrency`, so it runs through the module graph.
 #[test]
@@ -7608,8 +7492,8 @@ main()";
 fn capture_mutable_box_mutation_parity() {
     // A captured mutable heap box (a list), mutated after capture — the handle is captured by
     // value, mutation flows through the shared object. Two closures capture the SAME list at
-    // distinct slots; the writer's append is visible through the reader's slot. (Mirrors the
-    // Ref[T] box pattern without needing a file-path module import.)
+    // distinct slots; the writer's append is visible through the reader's slot. (A shared mutable
+    // box pattern without needing a file-path module import.)
     let src = "\
 fn main():
     box := [0]
@@ -8721,111 +8605,9 @@ main()";
 }
 
 #[test]
-fn module_global_ref_spawn_callee_runs_parity() {
-    // The checker non-regression's RUN side: a MODULE-GLOBAL `ref` is a read-only global (not a
-    // per-task capture) reachable from a `spawn`ed function; the program runs 42 on both engines. A
-    // `ref` import needs the graph path, so this uses `parity_entry`.
-    let out = parity_entry(
-        "import std.ref\ncounter: ref int = 0\nfn work(ch: Channel[int]):\n    ch.send(42)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
-    );
-    assert_eq!(out, "42\n");
-}
-
-// ===== Task 2b — runtime backstop: a `ref`/`Ref` captured by a CROSSING closure faults =====
-// The Task-2a checker gate rejects a captured-local `ref` at DIRECT spawn callee/arg sites; a
-// `ref`-capturing closure that reaches the airlock INDIRECTLY (as a `Channel[fn]` value, or inside a
-// struct field crossing a spawn arg) used to type-check and then SILENTLY deep-copy the ref — the
-// write vanished (parity-consistent serial == M:N, but a WRONG answer). These pin the loud runtime
-// fault, identical on both engines, so NO silent `ref` path remains. (`ref`/`Ref` need `std.ref`
-// linked, which only happens on the module-graph path, so both the fault cases and the module-global
-// regression pins run through the graph helpers.)
-
-#[test]
-fn ref_capturing_closure_through_channel_faults() {
-    // indirect_chan: a nested fn writes a captured LOCAL `ref`, sent over a `Channel[fn() -> int]` and
-    // invoked by the receiver. WAS: ran silently, mutating an isolated copy (`f()`=99, parent `r`=0).
-    // NOW: faults on BOTH engines (the `Channel.send` `to_wire` closure-arm scan).
-    let src = "\
-import std.ref
-fn main():
-    r: ref int = 0
-    ch := Channel[fn() -> int]()
-    fn bump() -> int:
-        r = 99
-        return r
-    ch.send(bump)
-    f := ch.recv()
-    print(f())
-    print(r)
-main()";
-    let e = parity_entry_fault(src);
-    assert!(e.contains("ref/Ref"), "fault msg: {e}");
-}
-
-#[test]
-fn ref_capturing_closure_in_struct_field_spawn_arg_faults() {
-    // indirect_struct: a `ref`-capturing nested fn stored in a struct field, the struct passed as a
-    // `spawn` arg. WAS: parent `r` silently unchanged. NOW: faults on both engines (the struct-field
-    // recursion reaches the closure arm's scan on the spawn-arg crossing).
-    let src = "\
-import std.ref
-struct Holder:
-    f: fn() -> int
-fn worker(h: Holder):
-    print(h.f())
-fn main():
-    r: ref int = 0
-    fn bump() -> int:
-        r = 99
-        return r
-    h := Holder(bump)
-    parallel:
-        spawn worker(h)
-    print(r)
-main()";
-    let e = parity_entry_fault(src);
-    assert!(e.contains("ref/Ref"), "fault msg: {e}");
-}
-
-#[test]
-fn ref_nested_in_captured_list_faults() {
-    // Proves the scan is DEEP, not just top-level: a closure captures a `List[Ref[int]]` (an explicit
-    // `Ref` box nested one container deep). Crossing the airlock over a `Channel[fn]` faults on both
-    // engines — the wire walk descends the captured list and finds the `Ref` inside.
-    let src = "\
-import std.ref
-fn main():
-    box := [Ref(0)]
-    ch := Channel[fn() -> int]()
-    fn readit() -> int:
-        return box[0].get()
-    ch.send(readit)
-    f := ch.recv()
-    print(f())
-main()";
-    let e = parity_entry_fault(src);
-    assert!(e.contains("ref/Ref"), "fault msg: {e}");
-}
-
-// ----- REGRESSION PINS (the whole safety story): a module-global `ref` and a sendable capture must
-// NOT be caught by the closure-capture scan. -----
-
-#[test]
-fn module_global_ref_read_in_task_still_ok() {
-    // A task that actually READS a module-global `ref` (through the global slot, not a closure
-    // capture) still runs on both engines — the ref crosses via the module-globals deep-copy snapshot,
-    // NEVER the closure-capture scan, so no fault. (Complements `module_global_ref_spawn_callee_runs_parity`,
-    // which pins the write side.) Prints the global's value, 42, both engines.
-    let out = parity_entry(
-        "import std.ref\ncounter: ref int = 42\nfn work(ch: Channel[int]):\n    ch.send(counter)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
-    );
-    assert_eq!(out, "42\n");
-}
-
-#[test]
 fn sendable_capturing_closure_through_channel_still_runs() {
     // A closure capturing ONLY sendable data (an int + a `List[int]`) sent over a `Channel[fn() -> int]`
-    // still crosses by value and runs — no false fault from the ref scan. `21*2 + 1` = 43, both engines.
+    // still crosses by value and runs. `21*2 + 1` = 43, both engines.
     let src = "\
 fn main():
     n := 21

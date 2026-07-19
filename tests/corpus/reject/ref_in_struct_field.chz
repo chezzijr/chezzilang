@@ -1,4 +1,0 @@
-# rule: structDecl
-# expect: expected identifier, found 'ref'
-struct S:
-    count: ref int

@@ -980,10 +980,11 @@ widening to an existential is frequently *implicit* (a struct used where `Error`
 must be found; a missed one is a soundness hole, an over-eager one rejects legal in-task code). Do NOT
 attempt before the JIT freeze. The concrete-error-type workaround covers the practical need until then.
 Related: [B2](#b2--between-disjoint-types-type-checks-a-proposed-tightening-not-a-clear-bug) (another
-typed-language tightening), and the note that **dropping `ref`/`Ref` is the WRONG lever for F2** — it is
-breaking (22+ example uses, 83 in `src`), its by-reference-*param* role (`fn bump(x: ref int)`, Go `*int` /
-Rust `&mut`) has no replacement and is not vestigial, and it would not close the generator-field laundering
-anyway; this milestone fixes F2 *while keeping* `ref`.
+typed-language tightening), and the note that **dropping `ref`/`Ref` was the WRONG lever *for F2*** — it
+would not close the generator-field laundering that F2 is about, so this milestone stands on its own.
+(NOTE 2026-07-19: `ref`/`Ref`/`std.ref` were later removed *separately*, on minimalism/coherence
+grounds — they only added scalar aliasing over Chezzi's Python object model — **not** as an F2/sendability
+fix. That removal neither addresses nor blocks this L7 milestone; the two are orthogonal.)
 
 ## Tooling / ecosystem (category added 2026-07-14 — this file previously had none)
 

@@ -28,8 +28,8 @@
 # the entry program's import order. Without it, `r.read(...)`/`r.write(...)` here can fail to resolve.
 import std.concurrency
 
-# A private one-field mutable box (like `std.ref.Ref`, but local so there is no cross-module
-# constructor dependency). A struct is a shared reference, so a write closure that closes over a
+# A private one-field mutable box (a local struct, so there is no cross-module constructor
+# dependency). A struct is a shared reference, so a write closure that closes over a
 # `_Cell` and `set`s it persists the value to the caller — the trick that lets `get_or_insert` capture
 # its result inside the single write lock.
 struct _Cell[T]:

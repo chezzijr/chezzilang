@@ -219,71 +219,10 @@ p, q, r = r, p, q                        # three-way rotation (RHS evaluated fir
 a, b = compute()                         # compute() returns (int, int)
 ```
 
-### `ref T` — transparent by-reference bindings
-
-`ref T` is a **binding modifier** (on **locals and params only**) that makes a binding carry
-*reference* semantics while still being spelled and used as a plain `T`. It is pure sugar over the
-`Ref[T]` box. `Ref` is a **reserved global** (like `Result`/`Option`/`Iterator`) that backs the
-`ref` keyword, so **no import is needed** — both `ref T` and the explicit `Ref[T]` work standalone.
-(`import std.ref` still works as a harmless no-op for older code.) Roughly C++'s `int&`, where the
-explicit `Ref[T]` (`r.get()/.set()/.update()`) is closer to Rust's `Rc`.
-
-```chezzi
-r: ref int = 0     # a fresh box holding 0 — no import needed
-r = 5              # WRITE mutates the pointee (never rebinds the box)
-r += 1             # compound works too → 6
-print(r)           # 6   — a READ auto-derefs (no `.get()`, no `^` operator)
-print(r + 100)     # 106 — usable anywhere its value is
-```
-
-- **Read / write lowering (automatic).** A read of `r` lowers to `r.get()`; `r = v` to `r.set(v)`;
-  `r += 1` to `r.set(r.get() + 1)`. There is **no deref operator** and **no `ref` marker at the call
-  site** — it is all inferred from the binding/param.
-- **Create vs alias (driven by the RHS).** `r: ref int = 0` creates a **fresh** box. `r2: ref int = r`
-  (RHS already a `ref`) **aliases** the same box — a write through either is visible through both.
-  A plain `y := r` (no annotation) **auto-derefs to a copy** (`y: int`), which does *not* share.
-- **Pass by reference.** A `ref T` argument into a `ref T` param **aliases** the caller's box, so the
-  callee's writes persist:
-
-  ```chezzi
-  fn bump(x: ref int):
-      x += 1
-  bump(r)            # mutates the caller's binding
-  ```
-
-  A `ref T` argument into a plain `T` param **auto-derefs to a copy** (a ref is usable as its value).
-  The reverse — a by-value local or a literal into a `ref T` param — is a **type error** (you can't
-  take a reference to a by-value local or a temporary; declare the local `ref` to pass by reference).
-  The alias-vs-deref-vs-error decision is **type-directed**: it follows the *resolved* callee's
-  parameter, so it works uniformly through a local fn-value (`g := bump; g(r)`), a **closure** `ref`
-  param (`fn(x: ref int)` — a `ref` arg aliases, a by-value arg is the same error as a named fn), and
-  a method name shared by structs that disagree on ref-ness (the receiver's type picks the method).
-- **Capture.** Capture is by reference for every binding now (see "Closure capture" below), so a
-  plain local shares its binding with a closure just like a `ref` local shares its box — you no longer
-  need `ref` to make a closure see or make outer writes. `ref` is still for by-reference **params**.
-- **One transparency gap — string interpolation.** Inside a `"{ ... }"` interpolation, a bare `ref`
-  binding is **not** auto-dereferenced (interpolation fragments are parsed out-of-band, after the
-  desugar pass), so `"{r}"` prints the underlying box (`Ref(value=…)`), exactly as an explicit
-  `Ref[T]` would. Bind a copy first (`v := r`) and interpolate `"{v}"` if you need the value in a
-  string — the auto-deref that applies to `r` in arithmetic does **not** reach inside an interpolation
-  fragment, so `"{r + 0}"` is itself a type error (`Ref[int]` + `int`).
-  Everywhere else (`print(r)`, arithmetic, args, indexing) `r` reads as its value.
-- **Where it's allowed.** Locals + params **only**. `ref` is a **parse error** as a return type, a
-  generic argument, a collection element, a tuple element, a struct field, or on a destructuring binding
-  — use a first-class `Ref[T]` there.
-- **Concurrency (important).** `ref`/`Ref` are **same-task** aliasing only. A `ref T` is a `Ref[T]`
-  box, which is **non-sendable**: capturing or passing the box across the `spawn` / `parallel:` /
-  `Channel` airlock is **rejected** by the checker — whether the `ref` is captured by a `spawn:` block
-  or by a **closure/nested-fn used as a `spawn f()` callee/arg** (the capture crosses as a silent copy,
-  so it is a compile error either way). To move a value across, deref the ref into a plain copy first;
-  for genuine cross-task shared mutation use `Shared[T]`, never `ref`. A **module-global** `ref` is the
-  exception: it is a **read-only global** resolvable in every task (not a per-task capture), so reading
-  it inside a task is fine and it is never gated.
-
 ### `const T` — immutable bindings
 
-`const T` is a **binding modifier** (in the same type-slot as `ref`) that freezes the **name**: the
-checker rejects any later reassignment. It is an **immutable binding**, *not* a compile-time
+`const T` is a **binding modifier** (in the type slot of a single-name typed let) that freezes the
+**name**: the checker rejects any later reassignment. It is an **immutable binding**, *not* a compile-time
 constant (Rust `const`/Go `const`) — the RHS is any runtime expression, evaluated once. Think JS
 `const` / Java `final`.
 
@@ -304,8 +243,7 @@ ANSWER += 1                   # ✗ every compound form is caught too
   xs = [4]                      # ✗ rebinding the NAME is the error
   ```
 - **Where it's allowed.** Locals + module globals **only**, and a **single-name typed** let. `const`
-  is a **parse error** on a parameter, on a `:=`/destructuring binding, and combined with `ref`
-  (`ref const` — an immutable by-reference alias is a contradiction). An explicit type is required
+  is a **parse error** on a parameter and on a `:=`/destructuring binding. An explicit type is required
   (`const` sits in the type slot).
 - **No laundering via re-declaration.** A live const cannot be re-declared in the **same scope** —
   `PI := 9.0` or a second `PI: float = 9.0` after `PI: const float = 3.14` is a **type error**, so
@@ -322,13 +260,12 @@ ANSWER += 1                   # ✗ every compound form is caught too
 Capture is **by reference, always**. A closure (and a `spawn:` / `parallel:` / `defer:` block)
 shares the *closest binding* of each captured name: reads see later writes, and a write through the
 capture is visible in the defining scope and across sibling closures. There is no by-binding-kind
-distinction any more — plain local, global, and `ref` local all share the live binding.
+distinction any more — a plain local and a global both share the live binding.
 
 | binding | captured as | `x := 10; f := fn() -> int: x; x = 20; f()` |
 |---|---|---|
 | plain local | shared (live) | `20` |
 | global | shared (live) | `20` |
-| `ref` local | shared box | `20` |
 
 A closure captures **only the names its body actually references** (its free variables) — not every
 local visible in the enclosing scope. So an unrelated non-sendable sibling in scope (another closure
@@ -360,8 +297,7 @@ declaration** (below), which also has a statement body — `fn bump(): n = n + 1
 in the enclosing scope always works; it's only *inside a closure value* that you need a method call.)
 
 If you relied on the old snapshot-at-creation behaviour, take an explicit copy: `snap := x` and
-capture `snap` (a fresh binding nothing else writes is effectively frozen). `ref T` / `Ref[T]` still
-work but are rarely needed for capture now — `ref` remains for by-reference **params** (above).
+capture `snap` (a fresh binding nothing else writes is effectively frozen).
 Runnable demo: [`examples/closure_capture_scopes.chz`](../examples/closure_capture_scopes.chz).
 
 ### Nested function declarations
@@ -1931,7 +1867,7 @@ match p:
 The constructor may be written **bare** (`Point(x, y)`, for a local or `from`-imported struct) or
 **module-qualified** (`geo.Point(x, y)` — the only spelling for a struct reached through a whole-module
 `import geo`, since the bare name isn't in scope; this mirrors qualified construction `geo.Point(3, 4)`).
-Only **user** structs destructure — a native/reserved struct handle (`Socket`, `Ref`, a `regex.Match`)
+Only **user** structs destructure — a native/reserved struct handle (`Socket`, a `regex.Match`)
 does not. A wrong constructor name, a field-count mismatch (`Point(x)` on a two-field struct), a qualifier
 that is not a module (`E.Point`), and a duplicate constructor arm are all clean **checker** errors, never a
 runtime panic. (`let`-destructuring of a struct — `let Point(x, y) = p` — and struct destructuring in
@@ -2642,16 +2578,10 @@ fn fetch_all(urls: List[str]):
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
   (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender can't reuse a sent
   value.
-- **`Ref[T]`** (reserved global, no import needed) — the **in-task** mutable box: `Ref(v)` then `r.get() -> T`,
-  `r.set(v)`, `r.update(fn(x): ...)`. Backed by `Rc<RefCell>`, so it is a true *shared reference*
-  within one task: a closure that closes over a `Ref[T]` and any other holder see each other's writes
-  — the answer to "I need a mutable value to close over or pass by reference" without hand-rolling a
-  one-field struct. It is **not sendable**: copying a `Ref` across a `spawn`/`submit` would silently
-  duplicate the box, so the checker rejects it (`non-sendable value of type Ref[T]`). Cross a task
-  boundary with `Shared[T]` instead.
-- **`Shared[T]`** (`import std.concurrency`) — the cross-task mutable box, same `s.get()` / `s.set(v)`
-  / `s.update(fn(x): ...)` API as `Ref` but synchronized and **sendable**. The mutation ladder is
-  `value` (copied) → `Ref[T]` (in-task, unsynchronized) → `Shared[T]` (cross-task, synchronized).
+- **`Shared[T]`** (`import std.concurrency`) — the cross-task mutable box: `s.get()` / `s.set(v)`
+  / `s.update(fn(x): ...)`, synchronized and **sendable**. For an in-task mutable value to close over
+  or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
+  ladder is `value` (copied) → a mutable `struct`/collection (in-task) → `Shared[T]` (cross-task).
   `Shared`/`RwShared`/`Atomic`/`Executor` require `import std.concurrency` (whole-module licenses all
   four; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
   **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global; `timer` now
@@ -2724,7 +2654,7 @@ fn fetch_all(urls: List[str]):
   in the task stay local — the F1 divergence); reassigning that captured local is fine, but a captured
   **module global** is frozen and reassigning it is rejected. Only sendable types
   (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
-  cross by reference — not closures, native handles, or `Ref`.
+  cross by reference — not closures or native handles.
 
 ## 12. Imports & modules  (M4.5)
 
@@ -2779,7 +2709,7 @@ import COUNT, LST from lib.st
 LST.push(7)     # ok — same heap object as lib.st's LST
 COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' (a from-imported
                 #        global is a snapshot copy — call a mutator fn in that module, or use a
-                #        Shared/Ref). Writing through the module (`st.COUNT = 5`) is rejected too:
+                #        Shared). Writing through the module (`st.COUNT = 5`) is rejected too:
                 #        a module global is writable only from inside its own module.
 COUNT := 99     # ok — a fresh binding this module owns; `COUNT = 100` after it is fine too
 ```
@@ -2827,7 +2757,7 @@ no collision; each is importable. Under the hood every user type has ONE canonic
 **identity key** (`<module-key>::Name`) used as the runtime tag + every layout lookup, while its **bare
 name** is what prints — so output stays byte-identical regardless of module and two colliding `Point`s
 both render `Point(...)` (the module is never shown). Reserved/native types (`Result`/`Option`/`Some`/
-`Ok`, `Ref`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
+`Ok`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
 imported `type` alias is transparent (its body resolves in the defining module's scope, carrying any
 FFI-width license).
 
@@ -3112,7 +3042,7 @@ returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-s
 The **internal** analog of `extern "lib":`. Where `extern` binds a C function, a `native` decl declares
 the **signature** of a built-in whose body is implemented natively (in the engine), name-keyed. This is
 how the **universe builtins** are declared: their signatures live in **`std/prelude.chz`** (always linked
-into every program, like `std/ref.chz`), not hidden in the compiler.
+into every program, like `std/prelude.chz`), not hidden in the compiler.
 
 ```chezzi
 native fn ord(c: str) -> int      # first-class universe FUNCTION
@@ -3268,7 +3198,7 @@ Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
 
 Modules are `import std.X` then `X.func(...)`. Importable:
 `std.io`, `std.math`, `std.string`, `std.cmp`, `std.os`, `std.json`, `std.process`, `std.fs`,
-`std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.ref`, `std.cancel`.
+`std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.cancel`.
 
 A few cross-cutting notes (full detail in `stdlib.md`):
 
@@ -3289,10 +3219,7 @@ A few cross-cutting notes (full detail in `stdlib.md`):
   same module is a collision, rejected at check (`type 'Response' is reserved (builtin)`) — never accept-
   then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (This applies
   to `Match`/`Response`/`ProcResult` and every import-gated std struct.) A merely-similar name (`struct
-  ResponseBox`) stays legal. **`Ref` (`std.ref`) is different**: it backs the `ref` keyword, so it is a
-  full **reserved program-global** (like `Result`/`Option`/`Iterator`) — always present, usable bare
-  with **no import**, and a user `struct Ref` is *always* rejected as reserved. `import std.ref` is a
-  harmless no-op kept for compatibility.
+  ResponseBox`) stays legal.
 
 ---
 

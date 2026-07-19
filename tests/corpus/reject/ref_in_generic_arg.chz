@@ -1,3 +1,0 @@
-# rule: type
-# expect: expected identifier, found 'ref'
-xs: List[ref int] = []

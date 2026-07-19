@@ -8,7 +8,6 @@ impl Checker {
         let mut c = Checker {
             errors: Vec::new(),
             scopes: Vec::new(),
-            ref_decls: Vec::new(),
             const_decls: Vec::new(),
             loop_vars: Vec::new(),
             capture_table: Vec::new(),
@@ -74,7 +73,6 @@ impl Checker {
             loop_depth: 0,
             capture_floors: Vec::new(),
             current_module_is_stdlib: false,
-            ref_seed: None,
             net_socket_seed: None,
             net_listener_seed: None,
             io_writer_seed: None,
@@ -275,23 +273,10 @@ impl Checker {
                 ("is_symlink", Ty::Bool),
             ]),
         );
-        // `Ref` is a reserved global backing the `ref` keyword: its layout+methods (harvested from the
-        // always-linked std.ref module into `ref_seed`) are seeded BARE — unlike Match/Response/
-        // ProcResult above, whose bare NAME stays import-gated. So both the keyword's lowered
-        // `.get()/.set()` calls AND an explicit `Ref[int]`/`Ref(0)` typecheck import-free (`struct_names`
-        // + `bare_types` make the bare name resolvable; `self.structs` carries the layout). `import
-        // std.ref` re-inserting the same info via `bind_import` is idempotent (no dup/shadow error).
-        if let Some(info) = self.ref_seed.clone() {
-            self.structs.insert("Ref".into(), info);
-            self.struct_names.insert("Ref".into());
-            self.bare_types
-                .entry("Ref".into())
-                .or_insert_with(|| "Ref".into());
-        }
         // Phase 4c-net — re-seed std.net's `Socket`/`Listener` METHOD tables (harvested from
         // `std/net.chz`) under their bare names so `socket.read(...)`/`listener.accept(...)` resolve via
         // the normal method path (the `Ty::Socket`/`Ty::Listener` method arms look the table up here).
-        // Unlike `Ref` above, NO `struct_names`/`bare_types` licensing is added: `Socket`/`Listener`
+        // NO `struct_names`/`bare_types` licensing is added: `Socket`/`Listener`
         // resolve to the RESERVED `Ty::Socket`/`Ty::Listener` (opaque handles, not nominal structs) via
         // `resolve_type`'s reserved arm, which stays import-gated by `imported_net`. The method table is
         // reached only from a value whose `Ty` is already `Ty::Socket`/`Ty::Listener`, so a bare
@@ -1176,7 +1161,7 @@ impl Checker {
                         if is_std {
                             self.struct_names.insert(sname.clone());
                             self.bare_types.entry(sname.clone()).or_insert(key);
-                            // A Builtin-origin std struct (Ref/Match/Response/ProcResult, Token/Heap/
+                            // A Builtin-origin std struct (Match/Response/ProcResult, Token/Heap/
                             // …) licensed bare by THIS import: record the name so a same-named user
                             // `struct` decl below is a clean `reserved (builtin)` error, not an
                             // accept-then-trap (the user layout would shadow the native shape).
@@ -1816,31 +1801,14 @@ impl Checker {
     pub(super) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
-        self.ref_decls.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.capture_table.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         self.scopes.pop();
         self.loop_vars.pop();
-        self.ref_decls.pop();
         self.const_decls.pop();
         self.capture_table.pop();
-    }
-    /// Record `name` (already declared in the current scope) as a `ref T` binding/param.
-    pub(super) fn declare_ref(&mut self, name: &str) {
-        if let Some(set) = self.ref_decls.last_mut() {
-            set.insert(name.to_string());
-        }
-    }
-    /// Is `name` an in-scope `ref T` binding/param (innermost binding wins, shadowing-aware)?
-    pub(super) fn is_ref_decl(&self, name: &str) -> bool {
-        for (vars, refs) in self.scopes.iter().zip(self.ref_decls.iter()).rev() {
-            if vars.contains_key(name) {
-                return refs.contains(name);
-            }
-        }
-        false
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding.
     pub(super) fn declare_const(&mut self, name: &str) {
@@ -1850,7 +1818,7 @@ impl Checker {
     }
     /// Is `name` an in-scope `const T` binding (innermost binding wins, shadowing-aware)? A `const`
     /// captured by a nested fn stays const inside the closure body — the enclosing scope is still on
-    /// the stack, so this resolves through it exactly like `is_ref_decl`.
+    /// the stack, so this resolves through it.
     pub(super) fn is_const_decl(&self, name: &str) -> bool {
         for (vars, consts) in self.scopes.iter().zip(self.const_decls.iter()).rev() {
             if vars.contains_key(name) {
@@ -2124,7 +2092,6 @@ impl Checker {
             }
             caps.push(Capture {
                 name: name.clone(),
-                is_ref: self.is_ref_decl(name),
                 ty,
             });
         }
@@ -2177,14 +2144,10 @@ impl Checker {
     }
 
     /// Emit the block-form diagnostic (verbatim, so `spawn:` block ≡ callee/arg) at `span` for each
-    /// non-sendable capture — a `ref` binding renders `ref T`, an explicit box renders its own type.
+    /// non-sendable capture, rendering the captured binding's type.
     pub(super) fn emit_capture_errors(&mut self, caps: &[Capture], span: Span) {
         for c in caps {
-            let disp = if c.is_ref {
-                ref_display(&c.ty)
-            } else {
-                c.ty.to_string()
-            };
+            let disp = c.ty.to_string();
             self.error(
                 span,
                 format!(
@@ -2441,16 +2404,12 @@ impl Checker {
                     ..
                 } => {
                     // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
-                    // struct (Ref/Match/Response/ProcResult, …) is reserved against a same-named user
+                    // struct (Match/Response/ProcResult, …) is reserved against a same-named user
                     // `struct` decl — declaring it would overwrite the native seed yet the runtime
                     // still constructs/returns the native shape, so the check-clean program would trap
                     // at runtime on a field mismatch. (A bare unimported `struct Match` stays legal —
                     // the name isn't in the set without the import event.)
-                    // `Ref` is a reserved global, but std.ref's OWN `struct Ref[T]` decl is the single
-                    // source of its layout — exempt it (a trusted std authoring boundary, the same
-                    // `current_module_is_stdlib` licensing pattern the concurrency/time/net gates use).
-                    let ref_self_decl = name == "Ref" && self.current_module_is_stdlib;
-                    if (is_reserved_type(name) && !ref_self_decl)
+                    if is_reserved_type(name)
                         || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
                         || self.imported_builtin_types.contains(name)

@@ -1870,7 +1870,7 @@ impl Vm {
                     // The task closure crosses the airlock **by value** on BOTH engines
                     // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
                     // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
-                    // routing coop through the SAME wire path runs the ref/Ref + generator airlock
+                    // routing coop through the SAME wire path runs the generator airlock
                     // enforcement on the cooperative engine too, and isolates captures at submit time, so
                     // serial and M:N behave identically for every submitted closure. (Earlier the coop
                     // branch queued the callable's own `Handle` — captures shared by reference, bypassing

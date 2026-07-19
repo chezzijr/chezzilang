@@ -291,17 +291,14 @@ fn bump(s: Shared[int]):
 > lock-guarded wire form so it can cross OS threads safely), so `get` deep-copies it *out* into a
 > fresh value each call. Mutating that value — `s.get().push(x)`, `s.get().value = 1` — changes a
 > throwaway, **not** the box: the write is silently lost. Mutate only via `update` (or `set` a whole
-> new value). Same for `RwShared` (`read`/`write`) and `Atomic` (`load`/`store`). This is *unlike*
-> `Ref[T]`, an in-task struct whose `get()` aliases the live value (push-through works) but which
+> new value). Same for `RwShared` (`read`/`write`) and `Atomic` (`load`/`store`). This is *unlike* a
+> plain in-task `struct`/collection, whose reads alias the live value (push-through works) but which
 > can't cross the airlock.
 
-**The ladder:** bare value (copied) → `Ref[T]` (in-task box, `std/ref.chz`) → `Shared[T]` (cross-task
-box). One `get`/`set`/`update` API across the two boxes; the **type names the scope**. `Ref[T]` is
-**not** sendable (copy-on-spawn gives each task its own box); `Shared[T]` **is** (the handle is
-copied, the value isn't). Naming: `Ref` (a box *here*) ↔ `Shared` (a box other tasks can reach too).
-The `ref T` binding modifier (syntax.md §3) is sugar over `Ref[T]`, so it sits at the same rung:
-**same-task only** — capturing/passing a `ref` across the airlock is rejected exactly like a `Ref[T]`
-(deref to a value to send a copy; use `Shared[T]` for cross-task mutation).
+**The ladder:** bare value (copied) → a mutable in-task `struct`/collection → `Shared[T]` (cross-task
+box). An in-task mutable value (a one-field `struct`, a `List`, …) is a shared reference *within one
+task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Shared[T]` **is** sendable
+(the handle is copied, the value isn't) — reach for it for genuine cross-task mutation.
 
 Under the sequential executor a single thread already serialises every write, so `Shared` is correct
 from C3 with no locking; under C5 it becomes a real owner-task + channel, same API.
@@ -731,16 +728,9 @@ aggregate) inside a task is a **compile error** (see below).
   `Channel[fn(int)->int]` type-checks and a closure sent over a channel or returned from a factory runs.
   The rule is: **a closure crosses iff its captures are sendable.** The bare `fn` type cannot carry its
   captures, so that per-closure check runs at the airlock **sites**: a closure/nested-fn value whose
-  captures include a **non-sendable local** (a `ref` — see below) at a `spawn f()` **callee** or
-  `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. A ref-capturing closure
-  that reaches the airlock **indirectly** — stored *inside a struct field or a `Channel[fn]` value* —
-  slips past the checker, so a **runtime backstop (Task 2b, landed)** closes it: when the airlock
-  serializes a crossing closure it scans the closure's **entire capture graph** (top-level or nested
-  inside a captured `List`/`Tuple`/`Map`/`Set`/struct/enum/newtype/`Cell`/nested closure), and a `Ref`
-  anywhere in it raises the **recoverable** error `cannot send a non-sendable ref/Ref captured by a
-  closure across tasks — use Shared/Atomic/Channel` — **byte-identical on both engines**, never a
-  silent deep-copy that drops the write. Together with the Task-2a gate, **no silent `ref` path
-  remains**. A bare **native** handle is a different case and stays non-sendable (below).
+  captures include a **non-sendable local** (a protocol existential, a live generator, a native handle
+  — see below) at a `spawn f()` **callee** or `spawn f(g)` **arg** is a **compile error**, matching the
+  `spawn:` block form. A bare **native** handle is a different case and stays non-sendable (below).
 - **A recursive *local* `fn` cannot cross the airlock (clear diagnostic, deferred support).** A nested
   `fn` that calls itself captures its own name for recursion — the compiler's letrec gives it a
   self-cell, so the closure's capture graph is **self-referential** (it reaches its own heap handle).
@@ -754,17 +744,13 @@ aggregate) inside a task is a **compile error** (see below).
   self-referential closure gets this one.
 - **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
   **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
-  producing heap), and **`Ref[T]`** — and therefore the **`ref T`** binding modifier, which is sugar
-  over it (an in-task-only box; capturing/passing it across the airlock is an **error**, not a
-  silent copy — deref to a value first, or use `Shared[T]` for cross-task mutation). At a **direct**
-  spawn site it is a **compile error**; when it crosses **indirectly** (inside a struct field or a
-  `Channel[fn]` value) it is a **recoverable runtime fault** (Task 2b) — either way, never a silent
-  write-dropping copy. This holds whether
-  the `ref` is captured directly by a `spawn:` block, or by a closure/nested-fn used as a `spawn f()`
-  **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global** `ref`, by contrast, is
-  a **read-only global** resolvable in every task (like a free fn), **not** a per-task capture — reading
-  it inside a task is fine and it is never gated (only *reassigning* or *in-place mutating* a module global
-  inside a task is the error, below). The checker
+  producing heap), a **protocol existential** (it may wrap a non-sendable value), and a **module
+  namespace**. Capturing or passing any of these across the airlock is a **compile error** at a direct
+  spawn/`Channel` site — whether captured directly by a `spawn:` block, or by a closure/nested-fn used
+  as a `spawn f()` **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global**
+  non-sendable value, by contrast, is a **read-only global** resolvable in every task (like a free fn),
+  **not** a per-task capture — reading it inside a task is fine and it is never gated (only *reassigning*
+  or *in-place mutating* a module global inside a task is the error, below). The checker
   cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing a task
   airlock **as data** (passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic`)
   is reported at **runtime** as a **graceful, catchable** error (`a generator cannot be sent across
@@ -859,7 +845,7 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > skips `defer`); a faulting program is not auto-drained (it is already erroring).
 > **Captures cross by value on both engines:** `submit` wires the closure through the same by-value
 > airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
-> at submit time and the ref/Ref + generator sendability enforcement runs — identically on the
+> at submit time and the generator sendability enforcement runs — identically on the
 > cooperative default and `--parallel` (serial == M:N for every submitted closure). A mutation of a
 > captured collection between `submit` and the drain is NOT observed by the job.
 
@@ -968,7 +954,7 @@ Ships the canonical worker/fan-out example.
   `update(fn(T)->T)->nil`; `Shared(v)` constructor → `Ty::Shared(typeof v)`; `Shared` is sendable.
 - **Interp** `value.rs`: `Value::Shared(Rc<RefCell<Value>>)`; `eval_shared_method`; `Shared()`
   constructor; passed by handle in `deep_clone`.
-- **Tests:** cross-task increment via `Shared`; `Ref` is **not** sendable while `Shared` is.
+- **Tests:** cross-task increment via `Shared`; an in-task mutable struct is **not** sendable while `Shared` is.
 
 ### C4 — VM parity
 Port C1–C3 to the bytecode engine (`src/vm`, `src/compiler`) — the standing parity invariant.
@@ -999,12 +985,12 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 | # | Item | Status |
 |---|------|--------|
 | **A2** | `Executor` **program-exit auto-drain** — reap any executor never explicitly `shutdown`-ed at a clean exit (per-engine registry that doubles as a GC root; FIFO creation order; `os.exit` skips it; a faulting program is not drained). | ✅ **done, both engines** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
-| **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable `ref` etc.** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`; a nested closure that itself captures a `ref` is caught by the runtime backstop (Task 2b). |
+| **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable local** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`. |
 | **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done, both engines, parity-tested** (it never suspends, so both engines run it identically — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
 > *Dropped from Group A, shipped in B3.6:* **A3b** (`Executor.submit` capture sendability gate). The
 > submitted closure now crosses **by value on both engines** (`wire_callable` → `to_wire`), so a
-> non-sendable capture (`ref`/`Ref`, a live generator) faults at submit — identically on the
+> non-sendable capture (a live generator, a native handle) faults at submit — identically on the
 > cooperative default and `--parallel`.
 
 **Group B — the real engine (deferred epic)**
@@ -1193,7 +1179,7 @@ parity oracle + reproducible-debug engine. Not a date; a checklist.
   types (`Type::Generic` — `src/ast/mod.rs`; `Ty::List/Map/Set` — `src/checker/ty.rs`;
   `infer_method_call` — `src/checker/mod.rs`); the re-entrant call-into-Chezzi path (list HOFs) for
   `JoinNursery`; block parsing/scoping (`parse_block`, `exec_scoped_block`/`exec_block`, defer-scope
-  markers); `Option` constructors (`some`/`none`, `alloc_enum`) for `recv`; `Ref[T]` (`std/ref.chz`)
+  markers); `Option` constructors (`some`/`none`, `alloc_enum`) for `recv`; a one-field mutable struct
   as the `Shared[T]` template.
 
 **Go vs BEAM — the borrow decision (settled).** Chezzi *already has BEAM's memory model* (private
