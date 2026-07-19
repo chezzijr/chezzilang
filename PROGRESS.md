@@ -33,6 +33,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `generic_fn_over_native_handles_run_parity`, `generic_wrapper_struct_channel_run_parity` (RUN parity,
 > serial==M:N). `cargo test`/`clippy`/`conformance` green.
 >
+> **✅ DRIFT-FIX (2026-07-19, `auto-task/gen-reach-argc-methods`) — generator-reach gate EXTENDED to
+> argc>0 direct global calls + builtin container methods (still zero under-gate).** Follow-up to the
+> gate below: `Vm::proto_reaches_generator_rec` (`src/vm/sched.rs`) still OPAQUE'd out on `Call(argc>0)`/
+> `SpawnCall(argc>0)`, on every argc>0 `CallMethod` (builtin `push`/`pop`/`map`/…), and on list/arith
+> ops — so a task doing `takes(5)` / `print(square(3))` / `xs.push(4)` / `xs.map(cleanfn)` wrongly
+> faulted. Fix (all sound-conservative, over-gate OK / under-gate = bug): (1) `Call`/`SpawnCall` any
+> argc — resolve the callee via a straight-line single-push operand window (`resolve_global_call_callee`;
+> misalignment → OPAQUE) and recurse into the known module-global `Func`/`Closure`; (2) `CallMethod`
+> any argc — INERT only if `name` is no struct-field name (`struct_field_names_contains`, the by-name
+> over-approx that keeps fn-typed-field calls `recv.field(args)` OPAQUE **without resolving the
+> receiver** — the exact serial≠M:N hole that sank a prior attempt), no generator-reaching user impl of
+> `name`, and all callable args clean (`method_arg_reaches_generator` resolves a `GetGlobalSlot` fn arg
+> and recurses — catches `xs.map(dirty)`); (3) list/tuple literals unconditionally inert; map/set
+> literals + arith/`compare`/`in` (incl. fused `BinLocal*`/`IncLocal`) inert only when no
+> operator-overload/`hash` hook can reach a generator — the `print_hazard` flag broadened to
+> `hook_hazard` and its producer `any_str_hook_reaches_generator`→`any_hook_reaches_generator` (scans
+> `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`/`contains`/`hash`). Tests: 17 new
+> (`genreach_*` — A–F clean, G–N/P1–P3 fault, incl. P1/P2/P3 fn-typed-field global-recv / local-alias /
+> spawn-arg all faulting on both engines). Manual CLI: P2 faults identically serial+M:N, B prints 9
+> both. Docs: `concurrency-b3.md`. Full `cargo test`/`clippy`/`conformance` green.
+>
 > **✅ DRIFT-FIX (2026-07-18, `auto-task/gen-reach-recurse`) — generator-reach airlock gate OVER-FIRED
 > (check-OK-then-run-fault).** `Vm::proto_reaches_generator` (`src/vm/sched.rs`) opaqued out at the
 > FIRST call/method/operator/nursery op (`_ => return true`), so a spawned task that merely called a
