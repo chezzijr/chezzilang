@@ -8360,6 +8360,41 @@ fn genreach_fn_field_spawn_arg_faults_both() {
     assert_genreach_faults(&src, "P3");
 }
 
+/// Bug 1 regression: a task builds a list of structs and calls an argc==0 builtin method (`sort`)
+/// that re-enters the elements' user `compare` hook, which reads g. The builtin `CallMethod` arm
+/// must gate on `hook_hazard` (some hook reaches a generator) — the receiver-side hook re-entry is
+/// invisible to the three name/arg checks. Was serial-clean / M:N-fault (a soundness divergence).
+#[test]
+fn genreach_builtin_sort_hook_reentry_faults_both() {
+    let src = format!(
+        "{GENREACH_G}struct Bx:\n    x: int\n    fn compare(self, other: Bx) -> int:\n        for v in g:\n            return v\n        return 0\nfn runsort(b: Bx):\n    xs := [b, b]\n    xs.sort()\nfn main():\n    parallel:\n        spawn runsort(Bx(1))\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug1-sort");
+}
+
+/// Bug 2 regression: a conditional-expression callee `(if true: readerx else: cleanx)(5)` where the
+/// then-branch fn reads g. The straight-line callee resolver reads a fixed operand slot (the
+/// else-branch push), missing the then-branch producer. The window must be rejected as OPAQUE when
+/// any op in it is an incoming jump target (an `if`-expr merge point). Was serial-clean / M:N-fault.
+#[test]
+fn genreach_conditional_callee_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn readerx(n: int) -> int:\n    for x in g:\n        print(x)\n    return n\nfn cleanx(n: int) -> int:\n    return n\nfn main():\n    parallel:\n        spawn:\n            r := (if true: readerx else: cleanx)(5)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug2-cond-callee");
+}
+
+/// Bug 3 regression: a conditional-expression higher-order builtin arg `xs.map(if true: dirty else:
+/// clean)` where the then-branch fn reads g. `method_arg_reaches_generator` reads a fixed operand
+/// slot (the else-branch push), missing the then-branch producer — same jump-target hole as Bug 2.
+#[test]
+fn genreach_conditional_method_arg_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn dirty(x: int) -> int:\n    for y in g:\n        print(y)\n    return x\nfn clean(x: int) -> int:\n    return x\nfn main():\n    parallel:\n        spawn:\n            xs := [1, 2, 3]\n            ys := xs.map(if true: dirty else: clean)\n            print(ys.len())\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug3-cond-arg");
+}
+
 /// Option B TOCTOU — an `Executor` module global that is a NON-generator (`[7].iter()`) when the job
 /// is `submit`ted but is REASSIGNED to a live generator BEFORE `shutdown`. The submit-site gate sees a
 /// cursor and passes; the DRAIN-time re-gate (`gate_executor_queue`, the `Executor` analogue of the

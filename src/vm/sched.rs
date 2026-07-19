@@ -431,10 +431,17 @@ impl Vm {
                 //     a reach in any impl gates.
                 // (c) scan each of the `argc` argument-producing ops (a builtin higher-order method such
                 //     as `.map(f)` re-enters a callable arg): a callable arg that could reach a generator
-                //     forces a gate. Only when all three prove clean is the native builtin method itself
-                //     INERT (it reads no Chezzi module global).
+                //     forces a gate.
+                // (d) `hook_hazard`: a builtin method can re-enter a user hook on the RECEIVER's elements
+                //     (`sort`/`min`/`max`/`sort_by_key` → each element's `compare`; a hashed lookup → `hash`)
+                //     — invisible to (a)/(b)/(c), which only see the method NAME and its ARG ops, not the
+                //     receiver element type. When some hook could reach a generator, gate every builtin
+                //     method (coarse but sound, mirroring the arith/print hook_hazard treatment).
+                // Only when all four prove clean is the native builtin method itself INERT (reads no
+                // Chezzi module global, re-enters no reaching hook).
                 Op::CallMethod { name, argc, .. } => {
-                    if self.struct_field_names_contains(name)
+                    if hook_hazard
+                        || self.struct_field_names_contains(name)
                         || self.any_user_method_impl_reaches(
                             name,
                             hook_hazard,
@@ -546,6 +553,12 @@ impl Vm {
         {
             return DirectCallee::Opaque;
         }
+        // …AND no branch may land inside `[callee_idx, call_idx)`: a merge point there (a conditional
+        // callee like `(if c: dirty else: clean)(…)`) means the fixed callee slot is not the real
+        // producer, so the resolver would scan only ONE branch. Reject → OPAQUE.
+        if !Self::window_has_no_incoming_jump(code, callee_idx, call_idx) {
+            return DirectCallee::Opaque;
+        }
         let slot = match code.get(callee_idx) {
             Some(Op::GetGlobalSlot(s)) => *s as usize,
             _ => return DirectCallee::Opaque,
@@ -586,6 +599,28 @@ impl Vm {
         )
     }
 
+    /// Straight-line guard for an operand window `[start, end)`: does execution reach it ONLY by
+    /// falling through from `start` (no control-flow merge inside)? True iff NO op ANYWHERE in the
+    /// proto branches to a target inside the window. A target landing in the window is a merge point
+    /// (e.g. an `if`-expr callee/arg `(if c: a else: b)(…)` / `xs.map(if c: a else: b)`), so the value
+    /// at a fixed operand position could have been produced on ANOTHER path — the resolver's alignment
+    /// no longer holds, and it must fall to OPAQUE/gate. (Branch ops WITHIN the window are separately
+    /// rejected by the callers' single-push / recognized-op scans.) A false negative here is a safe
+    /// over-gate; a false positive would be the serial≠M:N under-gate this closes.
+    fn window_has_no_incoming_jump(code: &[Op], start: usize, end: usize) -> bool {
+        !code.iter().any(|op| {
+            let t = match op {
+                Op::Jump(t)
+                | Op::JumpIfFalse(t)
+                | Op::JumpIfFalseKeep(t)
+                | Op::JumpIfTrueKeep(t)
+                | Op::PushHandler(t) => *t,
+                _ => return false,
+            };
+            t >= start && t < end
+        })
+    }
+
     /// Is `name` a FIELD name on ANY user struct? A coarse over-approximation (`StructDef.fields` is
     /// names-only, so a `fn`-typed field cannot be distinguished from a data field) used to keep a
     /// possible fn-typed-field `CallMethod` OPAQUE without resolving the receiver value — the sound
@@ -620,6 +655,12 @@ impl Vm {
             Some(s) => s,
             None => return true, // can't locate the args → gate
         };
+        // A branch landing inside the arg window means an arg is a conditional expression (e.g.
+        // `xs.map(if c: dirty else: clean)`) whose fixed operand slot holds only ONE branch's push;
+        // the other branch's callable is never scanned. Reject → gate.
+        if !Self::window_has_no_incoming_jump(code, start, call_idx) {
+            return true;
+        }
         for op in &code[start..call_idx] {
             match op {
                 Op::ConstInt(_)

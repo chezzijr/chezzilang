@@ -49,10 +49,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > literals + arith/`compare`/`in` (incl. fused `BinLocal*`/`IncLocal`) inert only when no
 > operator-overload/`hash` hook can reach a generator — the `print_hazard` flag broadened to
 > `hook_hazard` and its producer `any_str_hook_reaches_generator`→`any_hook_reaches_generator` (scans
-> `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`/`contains`/`hash`). Tests: 17 new
-> (`genreach_*` — A–F clean, G–N/P1–P3 fault, incl. P1/P2/P3 fn-typed-field global-recv / local-alias /
-> spawn-arg all faulting on both engines). Manual CLI: P2 faults identically serial+M:N, B prints 9
-> both. Docs: `concurrency-b3.md`. Full `cargo test`/`clippy`/`conformance` green.
+> `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`/`contains`/`hash`). **Adversarial-review round 2
+> fixed 3 confirmed under-gates (serial-clean / M:N-fault soundness holes):** (i) a builtin `CallMethod`
+> that re-enters a RECEIVER-element hook (`xs.sort()`→`compare`) was not gated — the arm now also gates
+> on `hook_hazard` (invisible to the name/arg checks); (ii)/(iii) a **conditional-expression** callee
+> `(if c: dirty else: clean)(…)` / higher-order builtin arg `xs.map(if c: dirty else: clean)` slipped
+> past `resolve_global_call_callee` / `method_arg_reaches_generator`, which read a FIXED operand slot
+> (the else-branch push) and missed the then-branch producer — both operand windows now require
+> `window_has_no_incoming_jump` (no branch may land inside the window; an `if`-expr merge point → OPAQUE/
+> gate). Tests: 20 new (`genreach_*` — A–F clean, G–N/P1–P3 fault, + 3 review-bug repros
+> `genreach_builtin_sort_hook_reentry` / `_conditional_callee` / `_conditional_method_arg`, all
+> RED-first then GREEN, faulting on both engines). Manual CLI: bug1/bug2 fault identically serial+M:N,
+> B prints 9 both. Docs: `concurrency-b3.md`. Full `cargo test`/`clippy`/`conformance` green.
 >
 > **✅ DRIFT-FIX (2026-07-18, `auto-task/gen-reach-recurse`) — generator-reach airlock gate OVER-FIRED
 > (check-OK-then-run-fault).** `Vm::proto_reaches_generator` (`src/vm/sched.rs`) opaqued out at the

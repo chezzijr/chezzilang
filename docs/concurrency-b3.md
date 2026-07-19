@@ -284,10 +284,14 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      the graceful `a generator cannot be sent across tasks` error IFF a spawned task can reach a
      generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
      a **resolvable** transfer whose target proto the scan FOLLOWS — a direct `Call(argc)`/`SpawnCall(argc)`
-     of a known module-global fn (the callee resolved through a straight-line single-push operand window;
-     `argc>0` misalignment → OPAQUE), a `Type.method()` static, a builtin container method (`push`/`pop`/
-     `map`/…) that is no struct-field name, no generator-reaching user impl of that name, and whose
-     callable args are all clean, an `argc==0` method (by-name over all user impls), a static `spawn:`
+     of a known module-global fn (the callee resolved through a straight-line single-push operand window
+     with no branch landing inside it; `argc>0` misalignment or a conditional-expression callee
+     `(if c: a else: b)(…)` → OPAQUE), a `Type.method()` static, a builtin container method (`push`/
+     `pop`/`map`/…) that is no struct-field name, no generator-reaching user impl of that name, whose
+     callable args are all clean (their operand window straight-line, no conditional-expression arg),
+     and with no generator-reaching operator/`hash`/`str` hook in the program (a builtin can re-enter
+     the receiver ELEMENTS' hook, e.g. `sort`→`compare` — the `hook_hazard` gate below), an `argc==0`
+     method (by-name over all user impls), a static `spawn:`
      block, and list/tuple/map/set literal construction — recursing memoized + cycle-guarded into any
      followed callee's own home). A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an argc>0
      call whose operand window is not straight-line, a fn-typed-field call `recv.field(args)` — gated
@@ -326,8 +330,9 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      short-circuits when no generator is actually resident in a global. `print` (`CallPrint`/
      `CallPrintSep`) is **not** a blanket-inert op: it stringifies its operands, and a struct/enum/
      newtype `str(self)` hook runs arbitrary code (a hidden call) that can read a generator global — so
-     a print (and, symmetrically, an arith / `in` / map-set-literal op, which can dispatch to an
-     operator-overload / `hash` hook) is treated as a reach whenever some such hook could reach a
+     a print (and, symmetrically, an arith / `in` / map-set-literal op, or a builtin container method,
+     each of which can dispatch to an operator-overload / `hash` / `str` hook — the latter on the
+     receiver's elements) is treated as a reach whenever some such hook could reach a
      generator global (`any_hook_reaches_generator` scans `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/
      `compare`/`contains`/`hash` impls), while with no generator-reaching hook in the program those ops
      stay inert (keeps the primary `print("literal")` + integer-arithmetic safe cases un-gated). This is
