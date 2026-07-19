@@ -33,6 +33,47 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `generic_fn_over_native_handles_run_parity`, `generic_wrapper_struct_channel_run_parity` (RUN parity,
 > serial==M:N). `cargo test`/`clippy`/`conformance` green.
 >
+> **✅ DRIFT-FIX (2026-07-19, `auto-task/gen-reach-argc-methods`) — generator-reach gate EXTENDED to
+> argc>0 direct global calls + builtin container methods (still zero under-gate).** Follow-up to the
+> gate below: `Vm::proto_reaches_generator_rec` (`src/vm/sched.rs`) still OPAQUE'd out on `Call(argc>0)`/
+> `SpawnCall(argc>0)`, on every argc>0 `CallMethod` (builtin `push`/`pop`/`map`/…), and on list/arith
+> ops — so a task doing `takes(5)` / `print(square(3))` / `xs.push(4)` / `xs.map(cleanfn)` wrongly
+> faulted. Fix (all sound-conservative, over-gate OK / under-gate = bug): (1) `Call`/`SpawnCall` any
+> argc — resolve the callee via a straight-line single-push operand window (`resolve_global_call_callee`;
+> misalignment → OPAQUE) and recurse into the known module-global `Func`/`Closure`; (2) `CallMethod`
+> any argc — INERT only if `name` is no struct-field name (`struct_field_names_contains`, the by-name
+> over-approx that keeps fn-typed-field calls `recv.field(args)` OPAQUE **without resolving the
+> receiver** — the exact serial≠M:N hole that sank a prior attempt), no generator-reaching user impl of
+> `name`, and all callable args clean (`method_arg_reaches_generator` resolves a `GetGlobalSlot` fn arg
+> and recurses — catches `xs.map(dirty)`); (3) list/tuple literals unconditionally inert; map/set
+> literals + arith/`compare`/`in` (incl. fused `BinLocal*`/`IncLocal`) inert only when no
+> operator-overload/`hash` hook can reach a generator — the `print_hazard` flag broadened to
+> `hook_hazard` and its producer `any_str_hook_reaches_generator`→`any_hook_reaches_generator` (scans
+> `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`/`contains`/`hash`). **Adversarial-review round 2
+> fixed 3 confirmed under-gates (serial-clean / M:N-fault soundness holes):** (i) a builtin `CallMethod`
+> that re-enters a RECEIVER-element hook (`xs.sort()`→`compare`) was not gated — the arm now also gates
+> on `hook_hazard` (invisible to the name/arg checks); (ii)/(iii) a **conditional-expression** callee
+> `(if c: dirty else: clean)(…)` / higher-order builtin arg `xs.map(if c: dirty else: clean)` slipped
+> past `resolve_global_call_callee` / `method_arg_reaches_generator`, which read a FIXED operand slot
+> (the else-branch push) and missed the then-branch producer — both operand windows now require
+> `window_has_no_incoming_jump` (no branch may land inside the window; an `if`-expr merge point → OPAQUE/
+> gate). Tests: 20 new (`genreach_*` — A–F clean, G–N/P1–P3 fault, + 3 review-bug repros
+> `genreach_builtin_sort_hook_reentry` / `_conditional_callee` / `_conditional_method_arg`, all
+> RED-first then GREEN, faulting on both engines). Manual CLI: bug1/bug2 fault identically serial+M:N,
+> B prints 9 both. Docs: `concurrency-b3.md`. Full `cargo test`/`clippy`/`conformance` green.
+> **Adversarial-review round 3 fixed 1 more confirmed under-gate:** a cross-module member call
+> `mod.fn(args)` — `CallMethod{name:"fn",argc}` preceded by `GetGlobalSlot(mod)` — slipped every
+> `CallMethod` guard (module fns live in no method table; the receiver `GetGlobalSlot(Module)` is not
+> a generator-embedding slot), so a spawned task calling a module-global fn that read a generator in
+> ITS home module was serial-clean (prints 13) / M:N-fault (nil-iterate). Fix: modules are first-class,
+> so the `CallMethod` arm now, when `name` is a member of ANY module (`module_member_name_exists`),
+> resolves a DIRECT `GetGlobalSlot→Module` receiver (`resolve_module_member_callee`) and recurses into
+> the member's own home — an INDIRECT receiver (`m := mod; m.fn()`, spawn arg) is unresolvable → OPAQUE
+> gate (the P2-class hole for modules, NEVER receiver-resolved). Also closes the pre-existing argc==0
+> `mod.baz()` sibling hole. Tests: 4 new cross-module parity tests (`genreach_cross_module_*` — direct
+> + argc0 + alias fault, clean member call still runs). Full `cargo test` (3715 lib)/`clippy`/
+> `conformance` green.
+>
 > **✅ DRIFT-FIX (2026-07-18, `auto-task/gen-reach-recurse`) — generator-reach airlock gate OVER-FIRED
 > (check-OK-then-run-fault).** `Vm::proto_reaches_generator` (`src/vm/sched.rs`) opaqued out at the
 > FIRST call/method/operator/nursery op (`_ => return true`), so a spawned task that merely called a

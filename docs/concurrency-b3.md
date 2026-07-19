@@ -283,12 +283,28 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      (`Vm::check_task_generator_reach`) — run on **both** engines during body execution — faults with
      the graceful `a generator cannot be sent across tasks` error IFF a spawned task can reach a
      generator-embedding module global (a direct `GetGlobalSlot`/`SetGlobalSlot` read of that slot, or
-     a **resolvable** transfer whose target proto the scan FOLLOWS — a direct `Call(0)`/`SpawnCall(0)`
-     of a known module-global fn, a `Type.method()` static, an `argc==0` method (by-name over all user
-     impls), a static `spawn:` block — recursing memoized + cycle-guarded into the callee's own home).
-     A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an argc>0 call or its callable arg, an
-     operator overload, an index/field/hash hook, a builtin re-entry, a `spawn recv.m()`, a
-     `GetCaptured` home-global read). Nursery-management ops (`EnterNursery`/`JoinNursery`/
+     a **resolvable** transfer whose target proto the scan FOLLOWS — a direct `Call(argc)`/`SpawnCall(argc)`
+     of a known module-global fn (the callee resolved through a straight-line single-push operand window
+     with no branch landing inside it; `argc>0` misalignment or a conditional-expression callee
+     `(if c: a else: b)(…)` → OPAQUE), a `Type.method()` static, a builtin container method (`push`/
+     `pop`/`map`/…) that is no struct-field name, no generator-reaching user impl of that name, whose
+     callable args are all clean (their operand window straight-line, no conditional-expression arg),
+     and with no generator-reaching operator/`hash`/`str` hook in the program (a builtin can re-enter
+     the receiver ELEMENTS' hook, e.g. `sort`→`compare` — the `hook_hazard` gate below), an `argc==0`
+     method (by-name over all user impls), a **module-member call `mod.fn(args)`** (a `CallMethod`
+     whose name is a member of any module — modules are first-class, so this could dispatch to a
+     module-global fn reading a generator in ITS home module; resolved through a DIRECT
+     `GetGlobalSlot→Module` receiver and recursed into the member's own home, else OPAQUE), a static
+     `spawn:` block, and list/tuple/map/set literal construction — recursing memoized + cycle-guarded
+     into any followed callee's own home). A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an
+     argc>0 call whose operand window is not straight-line, a fn-typed-field call `recv.field(args)` —
+     gated by the **struct-field-name over-approximation**, NOT by resolving the receiver, which would
+     under-gate an indirect receiver such as a local alias / spawn arg — an **indirect module-member
+     receiver** `m := mod; m.fn(args)` (same by-name over-approximation: gated, never receiver-resolved),
+     an index/field hook, a
+     `spawn recv.m()`, a `GetCaptured` home-global read; arith/`in`/map-set-literal ops stay OPAQUE
+     whenever some operator-overload / `hash` hook could reach a generator — see the `hook_hazard`
+     note below). Nursery-management ops (`EnterNursery`/`JoinNursery`/
      `ReclaimNursery`) are inert (the tasks they run were registered by the followed `Spawn*` ops).
      The gate runs at **four** choke points to keep serial == M:N: (a) `register_task` (the single
      common spawn choke — covers eager nurseries, whose worker + snapshot are built at spawn time); (b)
@@ -319,15 +335,19 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      short-circuits when no generator is actually resident in a global. `print` (`CallPrint`/
      `CallPrintSep`) is **not** a blanket-inert op: it stringifies its operands, and a struct/enum/
      newtype `str(self)` hook runs arbitrary code (a hidden call) that can read a generator global — so
-     a print is treated as a reach whenever some `str` hook could reach a generator global
-     (`any_str_hook_reaches_generator`), while a print with no generator-reaching hook in the program
-     stays inert (keeps the primary `print("literal")` safe case un-gated). Conservative by design:
-     over-gates the residual OPAQUE transfers (an argc>0 call / operator overload / builtin re-entry —
-     or any print, when a generator-reaching `str` hook exists — while a generator global is live is
-     gated), never under-gates. In the CONSERVATIVE outer-nursery mode every `Spawn*` op also stays
-     OPAQUE (its reach depends on globals that may be reassigned in the frozen-vs-live window). A future
-     precision refinement is scanning operator-overload impls by operator name (the same by-name
-     over-approximation the `argc==0` method scan already uses).
+     a print (and, symmetrically, an arith / `in` / map-set-literal op, or a builtin container method,
+     each of which can dispatch to an operator-overload / `hash` / `str` hook — the latter on the
+     receiver's elements) is treated as a reach whenever some such hook could reach a
+     generator global (`any_hook_reaches_generator` scans `str`/`add`/`sub`/`mul`/`div`/`mod`/`neg`/
+     `compare`/`contains`/`hash` impls), while with no generator-reaching hook in the program those ops
+     stay inert (keeps the primary `print("literal")` + integer-arithmetic safe cases un-gated). This is
+     the single `hook_hazard` flag threaded through the scan. Conservative by design: over-gates the
+     residual OPAQUE transfers (a non-straight-line argc>0 call, a fn-typed-field call, a builtin
+     re-entry — or any print/arith, when a generator-reaching hook exists — while a generator global is
+     live is gated), never under-gates. In the CONSERVATIVE outer-nursery mode `hook_hazard` is forced
+     true and every `Spawn*` op also stays OPAQUE (its reach depends on globals that may be reassigned
+     in the frozen-vs-live window). `hook_hazard` is coarse (ANY reaching hook flips it program-wide);
+     a future precision refinement is a per-type hook analysis.
 2. **Condvar-blocked-recv cancellation** (G2) — lost wakeups; resolved via the `wait_timeout` re-check loop.
 3. **Pool starvation** (G3) — parent-participates + documented "don't out-block the pool" rule for v1.
 4. **Output contract** (G4) — settled (decision F) but pervasive; threaded through B3.2/B3.3.

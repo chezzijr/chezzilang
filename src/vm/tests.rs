@@ -8125,6 +8125,276 @@ fn generator_module_global_executor_transitive_helper_faults_both() {
     }
 }
 
+// ===== Generator-reach gate: argc>0 direct global calls + builtin container methods =====
+// The reach scan (`proto_reaches_generator_rec`) now resolves argc>0 direct global-fn calls and
+// allowlists inert builtin container methods / list-tuple literals, WITHOUT under-gating any real
+// reach. Every case has a generator module-global `g := gen()`.
+
+const GENREACH_G: &str = "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n";
+
+/// A: argc>0 direct call of a clean global fn inside a task body runs CLEAN on both engines.
+#[test]
+fn genreach_argc_clean_direct_call_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn takes(x: int):\n",
+        "    y := x\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            takes(5)\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).expect("serial A"), "done\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N A"), "done\n");
+}
+
+/// B: argc>0 call whose callee body only does arithmetic (`x*x` → BinLocalLocal) runs CLEAN.
+#[test]
+fn genreach_argc_arith_callee_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn square(x: int) -> int:\n",
+        "    return x * x\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            print(square(3))\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).expect("serial B"), "9\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N B"), "9\n");
+}
+
+/// C: builtin container method with an arg (`xs.push(4)`) + a list literal run CLEAN.
+#[test]
+fn genreach_builtin_push_len_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            xs := [1, 2, 3]\n",
+        "            xs.push(4)\n",
+        "            print(xs.len())\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).expect("serial C"), "4\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N C"), "4\n");
+}
+
+/// D: builtin `xs.pop()` runs CLEAN and byte-identically on both engines.
+#[test]
+fn genreach_builtin_pop_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            xs := [1, 2, 3]\n",
+        "            print(xs.pop())\n",
+        "main()\n"
+    );
+    let s = run_capture(src).expect("serial D");
+    assert_eq!(s, run_capture_parallel(src).expect("M:N D"));
+}
+
+/// E: deep transitive clean chain (task→a(n)→b(n)) runs CLEAN.
+#[test]
+fn genreach_transitive_clean_with_args_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn b(n: int):\n",
+        "    c := n\n",
+        "fn a(n: int):\n",
+        "    b(n)\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            a(5)\n",
+        "    print(\"done\")\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).expect("serial E"), "done\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N E"), "done\n");
+}
+
+/// F: builtin HOF (`xs.map(dbl)`) with a CLEAN named fn arg runs CLEAN.
+#[test]
+fn genreach_builtin_map_clean_fn_ok_both() {
+    let src = concat!(
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\n",
+        "fn dbl(x: int) -> int:\n",
+        "    return x * 2\n",
+        "fn main():\n",
+        "    parallel:\n",
+        "        spawn:\n",
+        "            xs := [1, 2, 3]\n",
+        "            ys := xs.map(dbl)\n",
+        "            print(ys.len())\n",
+        "main()\n"
+    );
+    assert_eq!(run_capture(src).expect("serial F"), "3\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N F"), "3\n");
+}
+
+/// Helper: assert BOTH engines fault with the generator-airlock message.
+fn assert_genreach_faults(src: &str, label: &str) {
+    for (engine, r) in [
+        ("serial", run_capture(src)),
+        ("M:N", run_capture_parallel(src)),
+    ] {
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{label}/{engine}: expected a fault, got Ok"));
+        assert!(
+            err.message
+                .contains("a generator cannot be sent across tasks"),
+            "{label}/{engine}: got: {}",
+            err.message
+        );
+    }
+}
+
+/// G: direct `for x in g` in a task body FAULTS.
+#[test]
+fn genreach_direct_read_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn main():\n    parallel:\n        spawn:\n            for x in g:\n                print(x)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "G");
+}
+
+/// H: argc>0 transitive reach — `readerx(5)` where `readerx` reads g — FAULTS (the argc>0 recursion
+/// catching a real reach; the non-negotiable soundness net for the new arm).
+#[test]
+fn genreach_argc_transitive_reach_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn readerx(n: int):\n    for x in g:\n        print(x + n)\nfn main():\n    parallel:\n        spawn:\n            readerx(5)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "H");
+}
+
+/// I: deep transitive-with-args reach (task→a(n)→b(n)→reads g) FAULTS.
+#[test]
+fn genreach_deep_transitive_reach_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn breads(n: int):\n    for x in g:\n        print(x + n)\nfn areads(n: int):\n    breads(n)\nfn main():\n    parallel:\n        spawn:\n            areads(5)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "I");
+}
+
+/// J: a struct whose `str(self)` hook reads g, printed via a data-arg receiver, FAULTS (print hazard).
+#[test]
+fn genreach_str_hook_reach_faults_both() {
+    let src = format!(
+        "{GENREACH_G}struct Sj:\n    x: int\n    fn str(self) -> str:\n        for v in g:\n            return \"got\"\n        return \"empty\"\nfn showit(s: Sj):\n    print(s)\nfn main():\n    parallel:\n        spawn showit(Sj(1))\nmain()\n"
+    );
+    assert_genreach_faults(&src, "J");
+}
+
+/// K: by-name method dispatch where a user impl of the called (argc==0) method reads g FAULTS.
+#[test]
+fn genreach_by_name_method_reach_faults_both() {
+    let src = format!(
+        "{GENREACH_G}struct Sk:\n    x: int\n    fn dostuff(self):\n        for v in g:\n            print(v)\nfn workk(s: Sk):\n    s.dostuff()\nfn main():\n    parallel:\n        spawn workk(Sk(1))\nmain()\n"
+    );
+    assert_genreach_faults(&src, "K");
+}
+
+/// L: `Executor.submit` of a closure reaching g FAULTS.
+#[test]
+fn genreach_executor_reach_faults_both() {
+    let src = format!(
+        "import std.concurrency\n{GENREACH_G}fn readsg():\n    for x in g:\n        print(x)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): readsg())\n    ex.shutdown()\nmain()\n"
+    );
+    assert_genreach_faults(&src, "L");
+}
+
+/// M: builtin HOF with a DIRTY named fn arg (`xs.map(dirty)` where `dirty` reads g) FAULTS — the
+/// arg-callable scan of the new builtin-method allowlist (the non-negotiable soundness net).
+#[test]
+fn genreach_builtin_map_dirty_fn_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn dirty(x: int) -> int:\n    for y in g:\n        print(y)\n    return x\nfn main():\n    parallel:\n        spawn:\n            xs := [1, 2, 3]\n            ys := xs.map(dirty)\n            print(ys.len())\nmain()\n"
+    );
+    assert_genreach_faults(&src, "M");
+}
+
+/// N: a nested `spawn` reaching g FAULTS.
+#[test]
+fn genreach_nested_spawn_reach_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn innerreads():\n    for x in g:\n        print(x)\nfn outern():\n    parallel:\n        spawn innerreads()\nfn main():\n    parallel:\n        spawn:\n            outern()\nmain()\n"
+    );
+    assert_genreach_faults(&src, "N");
+}
+
+/// P1: fn-typed field call with a GLOBAL receiver (`bx.handler(3)`) FAULTS — the field-name
+/// over-approximation gates without resolving the receiver (the exact rejected-attempt bug).
+#[test]
+fn genreach_fn_field_global_recv_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn rd(n: int) -> int:\n    for x in g:\n        print(x)\n    return n\nstruct Bx:\n    handler: fn(int) -> int\nbx := Bx(rd)\nfn main():\n    parallel:\n        spawn:\n            bx.handler(3)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "P1");
+}
+
+/// P2: fn-typed field call via a LOCAL ALIAS (`local := bx; local.handler(3)`) FAULTS — the exact
+/// serial≠M:N under-gate that sank the prior attempt; MUST fault on BOTH engines now.
+#[test]
+fn genreach_fn_field_local_alias_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn rd(n: int) -> int:\n    for x in g:\n        print(x)\n    return n\nstruct Bx:\n    handler: fn(int) -> int\nbx := Bx(rd)\nfn main():\n    parallel:\n        spawn:\n            local := bx\n            local.handler(3)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "P2");
+}
+
+/// P3: fn-typed field call via a SPAWN ARG (`spawn runb(Bx(rd))`; body `b.handler(3)`) FAULTS.
+#[test]
+fn genreach_fn_field_spawn_arg_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn rd(n: int) -> int:\n    for x in g:\n        print(x)\n    return n\nstruct Bx:\n    handler: fn(int) -> int\nfn runb(b: Bx):\n    b.handler(3)\nfn main():\n    parallel:\n        spawn runb(Bx(rd))\nmain()\n"
+    );
+    assert_genreach_faults(&src, "P3");
+}
+
+/// Bug 1 regression: a task builds a list of structs and calls an argc==0 builtin method (`sort`)
+/// that re-enters the elements' user `compare` hook, which reads g. The builtin `CallMethod` arm
+/// must gate on `hook_hazard` (some hook reaches a generator) — the receiver-side hook re-entry is
+/// invisible to the three name/arg checks. Was serial-clean / M:N-fault (a soundness divergence).
+#[test]
+fn genreach_builtin_sort_hook_reentry_faults_both() {
+    let src = format!(
+        "{GENREACH_G}struct Bx:\n    x: int\n    fn compare(self, other: Bx) -> int:\n        for v in g:\n            return v\n        return 0\nfn runsort(b: Bx):\n    xs := [b, b]\n    xs.sort()\nfn main():\n    parallel:\n        spawn runsort(Bx(1))\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug1-sort");
+}
+
+/// Bug 2 regression: a conditional-expression callee `(if true: readerx else: cleanx)(5)` where the
+/// then-branch fn reads g. The straight-line callee resolver reads a fixed operand slot (the
+/// else-branch push), missing the then-branch producer. The window must be rejected as OPAQUE when
+/// any op in it is an incoming jump target (an `if`-expr merge point). Was serial-clean / M:N-fault.
+#[test]
+fn genreach_conditional_callee_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn readerx(n: int) -> int:\n    for x in g:\n        print(x)\n    return n\nfn cleanx(n: int) -> int:\n    return n\nfn main():\n    parallel:\n        spawn:\n            r := (if true: readerx else: cleanx)(5)\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug2-cond-callee");
+}
+
+/// Bug 3 regression: a conditional-expression higher-order builtin arg `xs.map(if true: dirty else:
+/// clean)` where the then-branch fn reads g. `method_arg_reaches_generator` reads a fixed operand
+/// slot (the else-branch push), missing the then-branch producer — same jump-target hole as Bug 2.
+#[test]
+fn genreach_conditional_method_arg_faults_both() {
+    let src = format!(
+        "{GENREACH_G}fn dirty(x: int) -> int:\n    for y in g:\n        print(y)\n    return x\nfn clean(x: int) -> int:\n    return x\nfn main():\n    parallel:\n        spawn:\n            xs := [1, 2, 3]\n            ys := xs.map(if true: dirty else: clean)\n            print(ys.len())\nmain()\n"
+    );
+    assert_genreach_faults(&src, "bug3-cond-arg");
+}
+
 /// Option B TOCTOU — an `Executor` module global that is a NON-generator (`[7].iter()`) when the job
 /// is `submit`ted but is REASSIGNED to a live generator BEFORE `shutdown`. The submit-site gate sees a
 /// cursor and passes; the DRAIN-time re-gate (`gate_executor_queue`, the `Executor` analogue of the

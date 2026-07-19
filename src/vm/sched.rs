@@ -240,8 +240,8 @@ impl Vm {
             },
             PendingCall::Method { .. } => return Err(self.generator_airlock_err(span)),
         };
-        // `print_hazard = true` + `conservative = true`: a home-global access OR any print (a hidden
-        // `str`-hook re-entry) OR any OPAQUE op faults — the frozen-vs-live snapshot cannot be trusted.
+        // `hook_hazard = true` + `conservative = true`: a home-global access OR any print/arith (a
+        // hidden hook re-entry) OR any OPAQUE op faults — the frozen-vs-live snapshot cannot be trusted.
         if self.proto_reaches_generator(proto, home, true, true) {
             return Err(self.generator_airlock_err(span));
         }
@@ -250,19 +250,20 @@ impl Vm {
 
     /// Option B (d) — scan one proto's code for a reach to a live generator held in a module global,
     /// faulting (with the spawn-site `span`) if one is found. Wraps the boolean core
-    /// [`Vm::proto_reaches_generator`]; the `print_hazard` it threads in is `true` iff SOME user
-    /// `str(self)` hook could itself reach a generator global ([`Vm::any_str_hook_reaches_generator`]),
-    /// because `CallPrint`/`CallPrintSep` re-enter the VM through that hook (a hidden call). When no
-    /// hook can reach a generator, a print is provably inert (a plain string/scalar has no hook), so
-    /// the common `print("literal")` in a spawned task stays un-gated (the Option B SAFE case).
+    /// [`Vm::proto_reaches_generator`]; the `hook_hazard` it threads in is `true` iff SOME user hook
+    /// (`str` / operator-overload) could itself reach a generator global ([`Vm::any_hook_reaches_generator`]),
+    /// because `CallPrint`/`CallPrintSep` and arith/`in`/map-set-literal ops re-enter the VM through
+    /// such a hook (a hidden call). When no hook can reach a generator, a print/arith is provably inert
+    /// (a plain string/scalar/int has no hook), so the common `print("literal")` / integer arithmetic
+    /// in a spawned task stays un-gated (the Option B SAFE case).
     fn scan_proto_reaches_generator(
         &self,
         proto: ProtoId,
         home: GcRef,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let print_hazard = self.any_str_hook_reaches_generator();
-        if self.proto_reaches_generator(proto, home, print_hazard, false) {
+        let hook_hazard = self.any_hook_reaches_generator();
+        if self.proto_reaches_generator(proto, home, hook_hazard, false) {
             return Err(self.generator_airlock_err(span));
         }
         Ok(())
@@ -274,15 +275,20 @@ impl Vm {
     /// `spawn`/`spawn:`) is FOLLOWED — recursing (memoized + cycle-guarded) into the callee proto with
     /// the callee's OWN home — so a task that only routes through provably-generator-free bodies stops
     /// gating (the doc contract in `docs/concurrency.md`: "an untouched generator global does NOT
-    /// fault"). A genuinely-UNRESOLVABLE / dynamic transfer (an argc>0 call, an operator overload, an
-    /// index/field/hash hook, a builtin re-entry, a closure value, the `GetCaptured` cold path, …) stays
-    /// OPAQUE → reach. Over-approximates by design (acceptable), never under-approximates.
+    /// fault"). An argc>0 call is followed the SAME way when its callee resolves through a straight-line
+    /// operand window (else OPAQUE); a builtin container method is followed when its name is no struct
+    /// field, no user impl reaches, and its callable args are clean. A genuinely-UNRESOLVABLE / dynamic
+    /// transfer (an index/field/`str`/hash hook, a builtin re-entry, a closure value, a fn-typed-field
+    /// call, the `GetCaptured` cold path, …) stays OPAQUE → reach. Over-approximates by design
+    /// (acceptable), never under-approximates.
     ///
-    /// `print_hazard`: `CallPrint`/`CallPrintSep` STRINGIFY their operands, and a struct/enum/newtype
-    /// `str(self)` hook runs arbitrary user code (`stmt.rs` stringify → `run_proto`) that can read a
-    /// generator module-global — so a print is a HIDDEN call. When `print_hazard` is set (some `str`
-    /// hook could reach a generator global) a print is a reach; otherwise no hook can reach a generator,
-    /// so a print cannot either and keeps scanning (keeps the SAFE `print("literal")` case un-gated).
+    /// `hook_hazard`: `CallPrint`/`CallPrintSep` STRINGIFY their operands and arith/`in`/map-set-literal
+    /// ops can dispatch to an operator-overload / `hash` hook — each runs arbitrary user code
+    /// (`stmt.rs` stringify → `run_proto`, `arith` → `run_proto`) that can read a generator
+    /// module-global, so each is a HIDDEN call. When `hook_hazard` is set (some `str`/operator/`hash`
+    /// hook could reach a generator global) such an op is a reach; otherwise no hook can reach a
+    /// generator, so it cannot either and the scan continues (keeps the SAFE `print("literal")` /
+    /// integer-arithmetic case un-gated).
     ///
     /// `conservative` (the nested-nursery TOCTOU path): treat ANY home-global read/write as a reach,
     /// regardless of the slot's CURRENT value, AND keep every nested `Spawn*` op OPAQUE (its reach
@@ -294,14 +300,14 @@ impl Vm {
         &self,
         proto: ProtoId,
         home: GcRef,
-        print_hazard: bool,
+        hook_hazard: bool,
         conservative: bool,
     ) -> bool {
         // The `visited` set is both the cycle-guard (a proto may be mutually recursive) and a memo: a
         // proto scanned clean-so-far on this stack is not re-scanned. Sound because a genuine reach
         // returns `true` and short-circuits UP the stack before any clean/false result is trusted.
         let mut visited: std::collections::HashSet<ProtoId> = std::collections::HashSet::new();
-        self.proto_reaches_generator_rec(proto, home, print_hazard, conservative, &mut visited)
+        self.proto_reaches_generator_rec(proto, home, hook_hazard, conservative, &mut visited)
     }
 
     /// Recursive core of [`Vm::proto_reaches_generator`] — see that wrapper's doc for the contract.
@@ -309,7 +315,7 @@ impl Vm {
         &self,
         proto: ProtoId,
         home: GcRef,
-        print_hazard: bool,
+        hook_hazard: bool,
         conservative: bool,
         visited: &mut std::collections::HashSet<ProtoId>,
     ) -> bool {
@@ -331,20 +337,24 @@ impl Vm {
                 }
                 // A print re-enters a user `str` hook — a reach IFF some hook could reach a generator.
                 Op::CallPrint(_) | Op::CallPrintSep { .. } => {
-                    if print_hazard {
+                    if hook_hazard {
                         return true;
                     }
                 }
-                // A direct call of a KNOWN module-global fn (`GetGlobalSlot(s); Call(0)`): resolve the
-                // slot to a `Func`/`Closure` and recurse into it with the callee's OWN home. A
-                // builtin/native global reads no module global (inert); an unresolvable callee
-                // (local/captured/computed value) stays OPAQUE.
-                Op::Call(0) => match self.resolve_global_direct_callee(home, code, i) {
+                // A direct call of a KNOWN module-global fn. `argc==0`: the callee is the immediately-
+                // preceding `GetGlobalSlot(s)`. `argc>0`: the callee sits `argc` deep — resolvable ONLY
+                // when the `argc` operand ops are all single-push (a straight-line window), else OPAQUE.
+                // Either way resolve the slot to a `Func`/`Closure` and recurse into it with the callee's
+                // OWN home; a builtin/native global reads no module global (inert). The `argc` operands
+                // are visited in the main loop (each `GetGlobalSlot` arg is gated / recursed on its own,
+                // and a callable local/captured arg forces its window OPAQUE), so a dirty callable arg
+                // cannot escape: it is caught either as a visited op or when the resolved callee invokes it.
+                Op::Call(n) => match self.resolve_global_call_callee(home, code, i, *n) {
                     DirectCallee::Scan(p, h) => {
                         if self.proto_reaches_generator_rec(
                             p,
                             h,
-                            print_hazard,
+                            hook_hazard,
                             conservative,
                             visited,
                         ) {
@@ -354,18 +364,18 @@ impl Vm {
                     DirectCallee::Inert => {}
                     DirectCallee::Opaque => return true,
                 },
-                // A nested `spawn f()` — same resolution as a direct call, EXCEPT in `conservative`
+                // A nested `spawn f(args)` — same resolution as a direct call, EXCEPT in `conservative`
                 // (nested-nursery TOCTOU) mode, where a `Spawn*` op must stay OPAQUE.
-                Op::SpawnCall(0) => {
+                Op::SpawnCall(n) => {
                     if conservative {
                         return true;
                     }
-                    match self.resolve_global_direct_callee(home, code, i) {
+                    match self.resolve_global_call_callee(home, code, i, *n) {
                         DirectCallee::Scan(p, h) => {
                             if self.proto_reaches_generator_rec(
                                 p,
                                 h,
-                                print_hazard,
+                                hook_hazard,
                                 conservative,
                                 visited,
                             ) {
@@ -386,7 +396,7 @@ impl Vm {
                     if self.proto_reaches_generator_rec(
                         *p,
                         home,
-                        print_hazard,
+                        hook_hazard,
                         conservative,
                         visited,
                     ) {
@@ -402,7 +412,7 @@ impl Vm {
                         if self.proto_reaches_generator_rec(
                             p,
                             h,
-                            print_hazard,
+                            hook_hazard,
                             conservative,
                             visited,
                         ) {
@@ -411,14 +421,103 @@ impl Vm {
                     }
                     None => return true,
                 },
-                // A method call with NO extra args: the receiver type is not in the bytecode, so scan
-                // EVERY user impl named `name` (a by-name over-approximation, mirroring the `str`-hook
-                // scan). A pure-builtin method (no user impl, e.g. `len`/`upper`) reaches nothing. An
-                // argc>0 method (a higher-order builtin re-entry like `.map(f)`) falls to the OPAQUE
-                // catch-all below — a callable arg could escape scanning.
-                Op::CallMethod { name, argc: 0, .. } => {
-                    if self.any_user_method_impl_reaches(name, print_hazard, conservative, visited)
+                // A method call (any argc). The receiver type is erased in the bytecode, so:
+                // (a) if `name` is a `fn`-typed struct FIELD name (an over-approximation over ALL struct
+                //     field names — `StructDef.fields` is names-only), the receiver could be a fn value
+                //     holding an arbitrary generator-reaching fn → OPAQUE. We do NOT resolve the receiver
+                //     (an indirect receiver — local alias, spawn arg — cannot be resolved soundly; that
+                //     is the exact serial≠M:N hole this closes).
+                // (b) scan EVERY user impl named `name` (by-name over-approximation, like the hook scan);
+                //     a reach in any impl gates.
+                // (c) scan each of the `argc` argument-producing ops (a builtin higher-order method such
+                //     as `.map(f)` re-enters a callable arg): a callable arg that could reach a generator
+                //     forces a gate.
+                // (d) `hook_hazard`: a builtin method can re-enter a user hook on the RECEIVER's elements
+                //     (`sort`/`min`/`max`/`sort_by_key` → each element's `compare`; a hashed lookup → `hash`)
+                //     — invisible to (a)/(b)/(c), which only see the method NAME and its ARG ops, not the
+                //     receiver element type. When some hook could reach a generator, gate every builtin
+                //     method (coarse but sound, mirroring the arith/print hook_hazard treatment).
+                // Only when all four prove clean is the native builtin method itself INERT (reads no
+                // Chezzi module global, re-enters no reaching hook).
+                Op::CallMethod { name, argc, .. } => {
+                    if hook_hazard
+                        || self.struct_field_names_contains(name)
+                        || self.any_user_method_impl_reaches(
+                            name,
+                            hook_hazard,
+                            conservative,
+                            visited,
+                        )
+                        || self.method_arg_reaches_generator(
+                            home,
+                            code,
+                            i,
+                            *argc,
+                            hook_hazard,
+                            conservative,
+                            visited,
+                        )
                     {
+                        return true;
+                    }
+                    // (e) A `mod.member(args)` module-member call. Modules are FIRST-CLASS values
+                    // (`m := somemod` then `m.fn()`), so a `CallMethod` whose `name` is a member of
+                    // ANY module could dispatch to a module-global fn that reads a generator in ITS
+                    // OWN home module — invisible to the method-table scan in (b) (module fns are not
+                    // in `structs`/`enum_methods`/…) and to the arg scan in (c). If `name` is a
+                    // module member, resolve a DIRECT (`GetGlobalSlot(s)`→`Module`) receiver and
+                    // recurse into the member with its own home; an INDIRECT receiver (a local alias,
+                    // a spawn arg, a computed value) is unresolvable → OPAQUE gate (the P2-class hole
+                    // for modules). We do NOT resolve the receiver VALUE — only a straight-line
+                    // global-slot module reference, exactly like the direct-call resolver.
+                    if self.module_member_name_exists(name) {
+                        match self.resolve_module_member_callee(
+                            home,
+                            code,
+                            i,
+                            *argc,
+                            name,
+                            conservative,
+                        ) {
+                            DirectCallee::Scan(p, h) => {
+                                if self.proto_reaches_generator_rec(
+                                    p,
+                                    h,
+                                    hook_hazard,
+                                    conservative,
+                                    visited,
+                                ) {
+                                    return true;
+                                }
+                            }
+                            DirectCallee::Inert => {}
+                            DirectCallee::Opaque => return true,
+                        }
+                    }
+                }
+                // List/tuple LITERAL construction builds from stack values already scanned (no hook,
+                // no module global) — unconditionally inert.
+                Op::NewList(_) | Op::NewTuple(_) => {}
+                // Map/set literal construction + arithmetic/compare/`in` (incl. the fused superinstrs)
+                // can dispatch to a user `hash`/operator-overload hook that runs arbitrary code. Inert
+                // only when NO hook can reach a generator (`hook_hazard` false); otherwise OPAQUE.
+                Op::NewMap(_)
+                | Op::NewSet(_)
+                | Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::Neg
+                | Op::Lt
+                | Op::LtEq
+                | Op::Gt
+                | Op::GtEq
+                | Op::Contains
+                | Op::BinLocalLocal { .. }
+                | Op::BinLocalConst { .. }
+                | Op::IncLocal { .. } => {
+                    if hook_hazard {
                         return true;
                     }
                 }
@@ -452,28 +551,50 @@ impl Vm {
                 | Op::EnterNursery
                 | Op::JoinNursery
                 | Op::ReclaimNursery => {}
-                // Everything else can transfer control into an UNSCANNABLE target (an argc>0 call or
-                // its callable arg, an operator overload, an index/field/`str`/hash hook, a builtin
-                // re-entry, a `spawn recv.m()`, a home-global read via the `GetCaptured` cold path, …).
-                // We cannot PROVE it never reaches the generator, so conservatively treat it as a reach.
+                // Everything else can transfer control into an UNSCANNABLE target (an index/field/`str`/
+                // hash hook, a builtin re-entry, a `spawn recv.m()`, a home-global read via the
+                // `GetCaptured` cold path, …). We cannot PROVE it never reaches the generator, so
+                // conservatively treat it as a reach.
                 _ => return true,
             }
         }
         false
     }
 
-    /// Resolve a direct `Call(0)` / `SpawnCall(0)` whose callee is the immediately-preceding
-    /// `GetGlobalSlot(s)` in `code` (index `call_idx`) to a scannable target, reading `home`'s live
-    /// module slot. `Func`/`Closure` → `Scan` (recurse); builtin/native → `Inert` (keep scanning);
-    /// anything else (no preceding `GetGlobalSlot`, a non-callable slot) → `Opaque` (gate).
-    fn resolve_global_direct_callee(
+    /// Resolve a direct `Call(argc)` / `SpawnCall(argc)` at `call_idx` in `code` to its module-global
+    /// callee. The stack layout is `[callee, arg0, …, arg{argc-1}]`, so the callee's `GetGlobalSlot(s)`
+    /// sits at `call_idx - argc - 1` — but ONLY if the `argc` operand ops between it and the call are
+    /// all single-push ([`Vm::simple_push_op`]), i.e. a straight-line window where alignment is provable.
+    /// Any non-single-push operand (a multi-op arg expression) breaks alignment → OPAQUE. `Func`/
+    /// `Closure` slot → `Scan`; builtin/native → `Inert`; anything else → `Opaque` (gate).
+    fn resolve_global_call_callee(
         &self,
         home: GcRef,
         code: &[Op],
         call_idx: usize,
+        argc: usize,
     ) -> DirectCallee {
-        let slot = match code.get(call_idx.wrapping_sub(1)) {
-            Some(Op::GetGlobalSlot(s)) if call_idx > 0 => *s as usize,
+        // The callee index, guarding underflow: `call_idx` must be ≥ `argc + 1`.
+        let callee_idx = match call_idx.checked_sub(argc + 1) {
+            Some(idx) => idx,
+            None => return DirectCallee::Opaque,
+        };
+        // The `argc` operand ops must all be single-push, else the window is not straight-line and the
+        // callee position cannot be trusted.
+        if !code[callee_idx + 1..call_idx]
+            .iter()
+            .all(Self::simple_push_op)
+        {
+            return DirectCallee::Opaque;
+        }
+        // …AND no branch may land inside `[callee_idx, call_idx)`: a merge point there (a conditional
+        // callee like `(if c: dirty else: clean)(…)`) means the fixed callee slot is not the real
+        // producer, so the resolver would scan only ONE branch. Reject → OPAQUE.
+        if !Self::window_has_no_incoming_jump(code, callee_idx, call_idx) {
+            return DirectCallee::Opaque;
+        }
+        let slot = match code.get(callee_idx) {
+            Some(Op::GetGlobalSlot(s)) => *s as usize,
             _ => return DirectCallee::Opaque,
         };
         let Obj::Module { slots, .. } = self.heap.get(home) else {
@@ -488,6 +609,224 @@ impl Vm {
             },
             None => DirectCallee::Opaque,
         }
+    }
+
+    /// A single-value-push, side-effect-free op — the ONLY operand shapes for which a straight-line
+    /// `Call`/`CallMethod` operand window has provable stack alignment. A literal (`Const*`/`True`/
+    /// `False`/`Nil`) is never a callable value. `GetGlobalSlot`/`GetLocal`/`GetCaptured`/`LoadBuiltin`
+    /// each push exactly one value; the arg-callable scans re-inspect these by op kind, so admitting
+    /// them here only asserts single-push, never cleanliness.
+    fn simple_push_op(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::GetLocal(_)
+                | Op::GetGlobalSlot(_)
+                | Op::GetCaptured(_)
+                | Op::LoadBuiltin(_)
+        )
+    }
+
+    /// Straight-line guard for an operand window `[start, end)`: does execution reach it ONLY by
+    /// falling through from `start` (no control-flow merge inside)? True iff NO op ANYWHERE in the
+    /// proto branches to a target inside the window. A target landing in the window is a merge point
+    /// (e.g. an `if`-expr callee/arg `(if c: a else: b)(…)` / `xs.map(if c: a else: b)`), so the value
+    /// at a fixed operand position could have been produced on ANOTHER path — the resolver's alignment
+    /// no longer holds, and it must fall to OPAQUE/gate. (Branch ops WITHIN the window are separately
+    /// rejected by the callers' single-push / recognized-op scans.) A false negative here is a safe
+    /// over-gate; a false positive would be the serial≠M:N under-gate this closes.
+    fn window_has_no_incoming_jump(code: &[Op], start: usize, end: usize) -> bool {
+        !code.iter().any(|op| {
+            let t = match op {
+                Op::Jump(t)
+                | Op::JumpIfFalse(t)
+                | Op::JumpIfFalseKeep(t)
+                | Op::JumpIfTrueKeep(t)
+                | Op::PushHandler(t) => *t,
+                _ => return false,
+            };
+            t >= start && t < end
+        })
+    }
+
+    /// Is `name` a FIELD name on ANY user struct? A coarse over-approximation (`StructDef.fields` is
+    /// names-only, so a `fn`-typed field cannot be distinguished from a data field) used to keep a
+    /// possible fn-typed-field `CallMethod` OPAQUE without resolving the receiver value — the sound
+    /// handling of `recv.field(args)` where the receiver is indirect (a local alias / spawn arg).
+    fn struct_field_names_contains(&self, name: &str) -> bool {
+        self.program
+            .structs
+            .values()
+            .any(|def| def.fields.iter().any(|f| f == name))
+    }
+
+    /// Is `name` a member (top-level binding — fn/var/type/import) of ANY loaded module? Modules are
+    /// first-class values (`m := somemod; m.fn()`), so a `CallMethod` whose name is a module member
+    /// could be a `mod.fn(args)` call whose callee reads a generator global in ITS home module. A
+    /// coarse over-approximation (any module) used to TRIGGER module-member resolution without
+    /// resolving a possibly-indirect receiver value.
+    fn module_member_name_exists(&self, name: &str) -> bool {
+        self.module_objs.iter().any(|&pm| {
+            matches!(self.heap.get(pm), Obj::Module { index, .. } if index.contains_key(name))
+        })
+    }
+
+    /// Resolve a `mod.member(args)` `CallMethod` at `call_idx` to its module-member callee WITHOUT
+    /// resolving an indirect receiver. Sound only when the receiver is a straight-line
+    /// `GetGlobalSlot(s)` (in `home`) resolving to a live `Obj::Module`: look up `name` in that module
+    /// and return its `(proto, home)` (`Scan`) / `Inert` (builtin/native member or a non-module
+    /// receiver global) / `Opaque` (member missing / non-callable). Any INDIRECT receiver (a local
+    /// alias, a spawn arg, a computed value) is unresolvable → `Opaque` (gate). `conservative` →
+    /// `Opaque` (the frozen snapshot may diverge from the live slot). Mirrors
+    /// [`Vm::resolve_global_call_callee`]'s straight-line window (single-push args, no incoming jump).
+    fn resolve_module_member_callee(
+        &self,
+        home: GcRef,
+        code: &[Op],
+        call_idx: usize,
+        argc: usize,
+        name: &str,
+        conservative: bool,
+    ) -> DirectCallee {
+        if conservative {
+            return DirectCallee::Opaque;
+        }
+        // Receiver sits `argc` deep: at `call_idx - argc - 1`. The `argc` arg ops between it and the
+        // call must all be single-push (straight-line alignment) with no jump landing in the window.
+        let recv_idx = match call_idx.checked_sub(argc + 1) {
+            Some(idx) => idx,
+            None => return DirectCallee::Opaque,
+        };
+        if !code[recv_idx + 1..call_idx]
+            .iter()
+            .all(Self::simple_push_op)
+        {
+            return DirectCallee::Opaque;
+        }
+        if !Self::window_has_no_incoming_jump(code, recv_idx, call_idx) {
+            return DirectCallee::Opaque;
+        }
+        let slot = match code.get(recv_idx) {
+            Some(Op::GetGlobalSlot(s)) => *s as usize,
+            _ => return DirectCallee::Opaque,
+        };
+        let Obj::Module { slots, .. } = self.heap.get(home) else {
+            return DirectCallee::Opaque;
+        };
+        // The receiver global must itself be a live module for this to be a module-member call.
+        let recv = match slots.get(slot).and_then(|v| v.as_obj()) {
+            Some(h) => h,
+            None => return DirectCallee::Opaque,
+        };
+        let Obj::Module {
+            index,
+            slots: mod_slots,
+            ..
+        } = self.heap.get(recv)
+        else {
+            // Receiver global is NOT a module (e.g. a list/struct global) → this is an ordinary
+            // builtin/user method call, already vetted by (a)–(d) above → inert here.
+            return DirectCallee::Inert;
+        };
+        match index
+            .get(name)
+            .and_then(|&i| mod_slots.get(i as usize))
+            .and_then(|v| v.as_obj())
+        {
+            Some(mh) => match self.heap.get(mh) {
+                Obj::Func { proto, home } => DirectCallee::Scan(*proto, *home),
+                Obj::Closure { proto, home, .. } => DirectCallee::Scan(*proto, *home),
+                Obj::Builtin(_) | Obj::Native { .. } => DirectCallee::Inert,
+                _ => DirectCallee::Opaque,
+            },
+            None => DirectCallee::Opaque,
+        }
+    }
+
+    /// Scan the `argc` argument-producing ops immediately preceding a `CallMethod` at `call_idx`: a
+    /// higher-order builtin (`.map(f)`, `.filter(f)`, `.fold(f)`) re-enters a callable arg, so a
+    /// callable that could reach a generator must gate. Args are the `argc` ops in `[call_idx-argc,
+    /// call_idx)` (the receiver sits before them). A literal is never callable; a `GetGlobalSlot`
+    /// callable is resolved-and-recursed (or gated in conservative / generator-embedding cases); a
+    /// `LoadBuiltin` is a universe builtin that reads no module global UNLESS a `str` hook could reach
+    /// a generator (it may stringify — `hook_hazard`); ANY other operand shape is OPAQUE (a `GetLocal`/
+    /// `GetCaptured`/`MakeClosure`/computed callable cannot be resolved soundly). Underflow → gate.
+    #[allow(clippy::too_many_arguments)]
+    fn method_arg_reaches_generator(
+        &self,
+        home: GcRef,
+        code: &[Op],
+        call_idx: usize,
+        argc: usize,
+        hook_hazard: bool,
+        conservative: bool,
+        visited: &mut std::collections::HashSet<ProtoId>,
+    ) -> bool {
+        let start = match call_idx.checked_sub(argc) {
+            Some(s) => s,
+            None => return true, // can't locate the args → gate
+        };
+        // A branch landing inside the arg window means an arg is a conditional expression (e.g.
+        // `xs.map(if c: dirty else: clean)`) whose fixed operand slot holds only ONE branch's push;
+        // the other branch's callable is never scanned. Reject → gate.
+        if !Self::window_has_no_incoming_jump(code, start, call_idx) {
+            return true;
+        }
+        for op in &code[start..call_idx] {
+            match op {
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil => {}
+                // A universe builtin value — reads no module global; but if a `str` hook could reach a
+                // generator it might stringify one, so gate under `hook_hazard`.
+                Op::LoadBuiltin(_) => {
+                    if hook_hazard {
+                        return true;
+                    }
+                }
+                // A module-global callable arg: gate conservatively / when it embeds a generator, else
+                // resolve the slot and recurse (a dirty fn arg like `xs.map(dirty)` is caught here).
+                Op::GetGlobalSlot(s) => {
+                    if conservative || self.module_slot_embeds_generator(home, *s as usize) {
+                        return true;
+                    }
+                    let Obj::Module { slots, .. } = self.heap.get(home) else {
+                        return true;
+                    };
+                    match slots.get(*s as usize).and_then(|v| v.as_obj()) {
+                        Some(h) => match self.heap.get(h) {
+                            Obj::Func { proto, home } | Obj::Closure { proto, home, .. } => {
+                                if self.proto_reaches_generator_rec(
+                                    *proto,
+                                    *home,
+                                    hook_hazard,
+                                    conservative,
+                                    visited,
+                                ) {
+                                    return true;
+                                }
+                            }
+                            Obj::Builtin(_) | Obj::Native { .. } => {}
+                            _ => return true,
+                        },
+                        None => return true,
+                    }
+                }
+                // A local/captured/computed callable can't be resolved soundly → gate.
+                _ => return true,
+            }
+        }
+        false
     }
 
     /// Resolve a `Type.method()` static call to `(proto, home)` — struct first, then enum. `None` if
@@ -512,12 +851,12 @@ impl Vm {
     /// By-name method over-approximation for an `argc==0` `CallMethod` whose receiver type is erased in
     /// the bytecode: scan EVERY user impl named `name` (struct / enum / newtype / native-bodied),
     /// recursing each with its declaring module's home; reach iff ANY reaches. Mirrors
-    /// [`Vm::any_str_hook_reaches_generator`]'s scan-all-impls pattern. Shares `visited` with the
+    /// [`Vm::any_hook_reaches_generator`]'s scan-all-impls pattern. Shares `visited` with the
     /// caller (cycle-guard + memo). A name with no user impl (a pure builtin) reaches nothing.
     fn any_user_method_impl_reaches(
         &self,
         name: &str,
-        print_hazard: bool,
+        hook_hazard: bool,
         conservative: bool,
         visited: &mut std::collections::HashSet<ProtoId>,
     ) -> bool {
@@ -527,7 +866,7 @@ impl Vm {
                 && self.proto_reaches_generator_rec(
                     p,
                     self.module_objs[def.module_idx],
-                    print_hazard,
+                    hook_hazard,
                     conservative,
                     visited,
                 )
@@ -542,7 +881,7 @@ impl Vm {
                 && self.proto_reaches_generator_rec(
                     p,
                     self.module_objs[idx],
-                    print_hazard,
+                    hook_hazard,
                     conservative,
                     visited,
                 )
@@ -557,7 +896,7 @@ impl Vm {
                 && self.proto_reaches_generator_rec(
                     p,
                     self.module_objs[idx],
-                    print_hazard,
+                    hook_hazard,
                     conservative,
                     visited,
                 )
@@ -572,7 +911,7 @@ impl Vm {
                 && self.proto_reaches_generator_rec(
                     p,
                     self.module_objs[idx],
-                    print_hazard,
+                    hook_hazard,
                     conservative,
                     visited,
                 )
@@ -583,50 +922,57 @@ impl Vm {
         false
     }
 
-    /// Option B (bug-fix) — could printing a value inside a spawned task re-enter the VM through a user
-    /// `str(self)` hook that reaches a live generator module-global? A struct/enum/newtype `str` hook
-    /// runs arbitrary code when a value of its type is stringified (`CallPrint`, interpolation), so it
-    /// is a hidden call the straight-line scan cannot pair to a printed value. Conservatively scan
-    /// EVERY 1-arg `str` hook (with `print_hazard = true`, so a hook printing another hooked value is
-    /// itself a reach — this also breaks any print→hook→print recursion): if ANY could reach a
-    /// generator global, every print in a spawned task is a potential reach. Only consulted on the cold
-    /// gate path (a live generator global is already present), so its `O(#str-hooks)` cost is not hot.
-    fn any_str_hook_reaches_generator(&self) -> bool {
-        // Struct `str` hooks.
-        for def in self.program.structs.values() {
-            if let Some(&proto) = def.methods.get("str")
-                && self.program.protos[proto].arity == 1
-                && def.module_idx < self.module_objs.len()
-                && self.proto_reaches_generator(
-                    proto,
-                    self.module_objs[def.module_idx],
-                    true,
-                    false,
-                )
-            {
-                return true;
+    /// Option B (bug-fix) — could a HIDDEN user hook re-entry inside a spawned task reach a live
+    /// generator module-global? Two hook classes run arbitrary user code the straight-line scan cannot
+    /// pair to an op: a `str(self)` hook (fired by `CallPrint` / interpolation) and an operator-overload
+    /// hook — `add`/`sub`/`mul`/`div`/`mod`/`neg` (arith), `compare` (ordered compare), `contains`
+    /// (`in`), `hash` (map/set key). Conservatively scan EVERY user impl of these names across
+    /// struct/enum/newtype (with `hook_hazard = true`, so a hook re-entering another hook is itself a
+    /// reach — this also breaks hook→hook recursion): if ANY could reach a generator global, then every
+    /// print/arith/`in`/map-set-literal in a spawned task is a potential reach (the flag is threaded as
+    /// `hook_hazard`). Only consulted on the cold gate path (a live generator global is already
+    /// present), so its `O(#hooks)` cost is not hot.
+    // ponytail: coarse — ANY reaching hook flips the flag for the WHOLE program (gates all task-side
+    // arith+prints). Sound over-gate; a per-type hook analysis would be the refinement if a real
+    // overload-using concurrent program measurably suffers.
+    fn any_hook_reaches_generator(&self) -> bool {
+        const HOOK_NAMES: &[&str] = &[
+            "str", "add", "sub", "mul", "div", "mod", "neg", "compare", "contains", "hash",
+        ];
+        for &name in HOOK_NAMES {
+            // Struct hooks.
+            for def in self.program.structs.values() {
+                if let Some(&proto) = def.methods.get(name)
+                    && def.module_idx < self.module_objs.len()
+                    && self.proto_reaches_generator(
+                        proto,
+                        self.module_objs[def.module_idx],
+                        true,
+                        false,
+                    )
+                {
+                    return true;
+                }
             }
-        }
-        // Enum `str` hooks.
-        for (key, methods) in &self.program.enum_methods {
-            if let Some(&proto) = methods.get("str")
-                && self.program.protos[proto].arity == 1
-                && let Some(&idx) = self.program.enum_home.get(key)
-                && idx < self.module_objs.len()
-                && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
-            {
-                return true;
+            // Enum hooks.
+            for (key, methods) in &self.program.enum_methods {
+                if let Some(&proto) = methods.get(name)
+                    && let Some(&idx) = self.program.enum_home.get(key)
+                    && idx < self.module_objs.len()
+                    && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
+                {
+                    return true;
+                }
             }
-        }
-        // Newtype `str` hooks.
-        for (key, methods) in &self.program.newtype_methods {
-            if let Some(&proto) = methods.get("str")
-                && self.program.protos[proto].arity == 1
-                && let Some(&idx) = self.program.newtype_home.get(key)
-                && idx < self.module_objs.len()
-                && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
-            {
-                return true;
+            // Newtype hooks.
+            for (key, methods) in &self.program.newtype_methods {
+                if let Some(&proto) = methods.get(name)
+                    && let Some(&idx) = self.program.newtype_home.get(key)
+                    && idx < self.module_objs.len()
+                    && self.proto_reaches_generator(proto, self.module_objs[idx], true, false)
+                {
+                    return true;
+                }
             }
         }
         false
