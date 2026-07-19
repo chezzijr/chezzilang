@@ -8559,6 +8559,106 @@ main()";
     );
 }
 
+/// Cross-module generator-reach fault: run a MULTI-FILE program on BOTH engines and assert each
+/// faults with the airlock message. Mirrors the single-file `assert_genreach_faults` for the
+/// `mod.fn(args)` reach that only a module graph can express.
+fn assert_genreach_faults_file(files: &[(&str, &str)], entry: &str, label: &str) {
+    let t = TmpDir::new();
+    let mut entry_path = None;
+    for (rel, contents) in files {
+        let p = t.write(rel, contents);
+        if *rel == entry {
+            entry_path = Some(p);
+        }
+    }
+    let entry_path = entry_path.expect("entry must be one of the files");
+    for (engine, out) in [
+        ("serial", run_file(&entry_path)),
+        ("M:N", run_file_p(&entry_path)),
+    ] {
+        let (_, _, r, _) = out;
+        let err = r
+            .err()
+            .unwrap_or_else(|| panic!("{label}/{engine}: expected a fault, got Ok"));
+        assert!(
+            err.to_string()
+                .contains("a generator cannot be sent across tasks"),
+            "{label}/{engine}: got: {err}"
+        );
+    }
+}
+
+/// Confirmed cross-module under-gate (the argc>0 `CallMethod` regression): a spawned task calls a
+/// module-member fn `genmod.bar(10)` whose body reads a live generator global in ITS OWN module.
+/// The reach scan must resolve the module member and gate — was serial-clean (prints 13) / M:N-fault
+/// (nil-iterate), a soundness divergence.
+#[test]
+fn genreach_cross_module_member_call_faults_both() {
+    let genmod = (
+        "genmod.chz",
+        "fn gen() -> Iterator[int]:\n    yield 1\n    yield 2\ng := gen()\nfn bar(n: int) -> int:\n    total := n\n    for x in g:\n        total = total + x\n    return total\n",
+    );
+    let main = (
+        "main.chz",
+        "import genmod\nparallel:\n    spawn:\n        r := genmod.bar(10)\n        print(r)\n",
+    );
+    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-direct");
+}
+
+/// The argc==0 sibling of the above (`genmod.baz()`) — a module-member call with NO args — must also
+/// gate (it was a pre-existing hole on both main and the branch: `any_user_method_impl_reaches`
+/// scans method tables, never module-global fns).
+#[test]
+fn genreach_cross_module_member_call_argc0_faults_both() {
+    let genmod = (
+        "genmod.chz",
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\nfn baz() -> int:\n    total := 0\n    for x in g:\n        total = total + x\n    return total\n",
+    );
+    let main = (
+        "main.chz",
+        "import genmod\nparallel:\n    spawn:\n        r := genmod.baz()\n        print(r)\n",
+    );
+    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-argc0");
+}
+
+/// The INDIRECT-receiver form: aliasing the module into a local (`m := genmod; m.bar(10)`) inside the
+/// task body. The receiver is a `GetLocal`, unresolvable → OPAQUE gate (the P2-class hole for
+/// modules — must fault on BOTH engines).
+#[test]
+fn genreach_cross_module_member_alias_faults_both() {
+    let genmod = (
+        "genmod.chz",
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\nfn bar(n: int) -> int:\n    total := n\n    for x in g:\n        total = total + x\n    return total\n",
+    );
+    let main = (
+        "main.chz",
+        "import genmod\nparallel:\n    spawn:\n        m := genmod\n        r := m.bar(10)\n        print(r)\n",
+    );
+    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-alias");
+}
+
+/// A CLEAN cross-module member call (`geomod.helper()` reads no generator) must STILL run clean on
+/// both engines even with a generator global resident — the resolver must recurse and prove the
+/// callee clean, not blanket-gate every module-member name.
+#[test]
+fn genreach_cross_module_clean_member_call_ok_both() {
+    let t = TmpDir::new();
+    t.write(
+        "geomod.chz",
+        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\nfn helper(n: int) -> int:\n    return n + 1\n",
+    );
+    let ep = t.write(
+        "main.chz",
+        "import geomod\nparallel:\n    spawn:\n        r := geomod.helper(10)\n        print(r)\n",
+    );
+    let (so, _, sr, _) = run_file(&ep);
+    let (po, _, pr, _) = run_file_p(&ep);
+    sr.expect("serial clean cross-mod member call");
+    pr.expect("M:N clean cross-mod member call");
+    assert_eq!(so, "11\n");
+    assert_eq!(po, "11\n");
+}
+
 #[test]
 fn bare_func_crosses_spawn_callee_renders_fn_name_parity() {
     // A bare top-level fn captured into a spawn callee crosses as a distinct `WireValue::Func` (not a

@@ -291,12 +291,17 @@ is a known low-rate timing flake under heavy full-suite parallel load; passes in
      callable args are all clean (their operand window straight-line, no conditional-expression arg),
      and with no generator-reaching operator/`hash`/`str` hook in the program (a builtin can re-enter
      the receiver ELEMENTS' hook, e.g. `sort`→`compare` — the `hook_hazard` gate below), an `argc==0`
-     method (by-name over all user impls), a static `spawn:`
-     block, and list/tuple/map/set literal construction — recursing memoized + cycle-guarded into any
-     followed callee's own home). A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an argc>0
-     call whose operand window is not straight-line, a fn-typed-field call `recv.field(args)` — gated
-     by the **struct-field-name over-approximation**, NOT by resolving the receiver, which would
-     under-gate an indirect receiver such as a local alias / spawn arg — an index/field hook, a
+     method (by-name over all user impls), a **module-member call `mod.fn(args)`** (a `CallMethod`
+     whose name is a member of any module — modules are first-class, so this could dispatch to a
+     module-global fn reading a generator in ITS home module; resolved through a DIRECT
+     `GetGlobalSlot→Module` receiver and recursed into the member's own home, else OPAQUE), a static
+     `spawn:` block, and list/tuple/map/set literal construction — recursing memoized + cycle-guarded
+     into any followed callee's own home). A genuinely-UNRESOLVABLE / dynamic transfer stays OPAQUE (an
+     argc>0 call whose operand window is not straight-line, a fn-typed-field call `recv.field(args)` —
+     gated by the **struct-field-name over-approximation**, NOT by resolving the receiver, which would
+     under-gate an indirect receiver such as a local alias / spawn arg — an **indirect module-member
+     receiver** `m := mod; m.fn(args)` (same by-name over-approximation: gated, never receiver-resolved),
+     an index/field hook, a
      `spawn recv.m()`, a `GetCaptured` home-global read; arith/`in`/map-set-literal ops stay OPAQUE
      whenever some operator-overload / `hash` hook could reach a generator — see the `hook_hazard`
      note below). Nursery-management ops (`EnterNursery`/`JoinNursery`/

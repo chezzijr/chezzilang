@@ -460,6 +460,40 @@ impl Vm {
                     {
                         return true;
                     }
+                    // (e) A `mod.member(args)` module-member call. Modules are FIRST-CLASS values
+                    // (`m := somemod` then `m.fn()`), so a `CallMethod` whose `name` is a member of
+                    // ANY module could dispatch to a module-global fn that reads a generator in ITS
+                    // OWN home module — invisible to the method-table scan in (b) (module fns are not
+                    // in `structs`/`enum_methods`/…) and to the arg scan in (c). If `name` is a
+                    // module member, resolve a DIRECT (`GetGlobalSlot(s)`→`Module`) receiver and
+                    // recurse into the member with its own home; an INDIRECT receiver (a local alias,
+                    // a spawn arg, a computed value) is unresolvable → OPAQUE gate (the P2-class hole
+                    // for modules). We do NOT resolve the receiver VALUE — only a straight-line
+                    // global-slot module reference, exactly like the direct-call resolver.
+                    if self.module_member_name_exists(name) {
+                        match self.resolve_module_member_callee(
+                            home,
+                            code,
+                            i,
+                            *argc,
+                            name,
+                            conservative,
+                        ) {
+                            DirectCallee::Scan(p, h) => {
+                                if self.proto_reaches_generator_rec(
+                                    p,
+                                    h,
+                                    hook_hazard,
+                                    conservative,
+                                    visited,
+                                ) {
+                                    return true;
+                                }
+                            }
+                            DirectCallee::Inert => {}
+                            DirectCallee::Opaque => return true,
+                        }
+                    }
                 }
                 // List/tuple LITERAL construction builds from stack values already scanned (no hook,
                 // no module global) — unconditionally inert.
@@ -630,6 +664,89 @@ impl Vm {
             .structs
             .values()
             .any(|def| def.fields.iter().any(|f| f == name))
+    }
+
+    /// Is `name` a member (top-level binding — fn/var/type/import) of ANY loaded module? Modules are
+    /// first-class values (`m := somemod; m.fn()`), so a `CallMethod` whose name is a module member
+    /// could be a `mod.fn(args)` call whose callee reads a generator global in ITS home module. A
+    /// coarse over-approximation (any module) used to TRIGGER module-member resolution without
+    /// resolving a possibly-indirect receiver value.
+    fn module_member_name_exists(&self, name: &str) -> bool {
+        self.module_objs.iter().any(|&pm| {
+            matches!(self.heap.get(pm), Obj::Module { index, .. } if index.contains_key(name))
+        })
+    }
+
+    /// Resolve a `mod.member(args)` `CallMethod` at `call_idx` to its module-member callee WITHOUT
+    /// resolving an indirect receiver. Sound only when the receiver is a straight-line
+    /// `GetGlobalSlot(s)` (in `home`) resolving to a live `Obj::Module`: look up `name` in that module
+    /// and return its `(proto, home)` (`Scan`) / `Inert` (builtin/native member or a non-module
+    /// receiver global) / `Opaque` (member missing / non-callable). Any INDIRECT receiver (a local
+    /// alias, a spawn arg, a computed value) is unresolvable → `Opaque` (gate). `conservative` →
+    /// `Opaque` (the frozen snapshot may diverge from the live slot). Mirrors
+    /// [`Vm::resolve_global_call_callee`]'s straight-line window (single-push args, no incoming jump).
+    fn resolve_module_member_callee(
+        &self,
+        home: GcRef,
+        code: &[Op],
+        call_idx: usize,
+        argc: usize,
+        name: &str,
+        conservative: bool,
+    ) -> DirectCallee {
+        if conservative {
+            return DirectCallee::Opaque;
+        }
+        // Receiver sits `argc` deep: at `call_idx - argc - 1`. The `argc` arg ops between it and the
+        // call must all be single-push (straight-line alignment) with no jump landing in the window.
+        let recv_idx = match call_idx.checked_sub(argc + 1) {
+            Some(idx) => idx,
+            None => return DirectCallee::Opaque,
+        };
+        if !code[recv_idx + 1..call_idx]
+            .iter()
+            .all(Self::simple_push_op)
+        {
+            return DirectCallee::Opaque;
+        }
+        if !Self::window_has_no_incoming_jump(code, recv_idx, call_idx) {
+            return DirectCallee::Opaque;
+        }
+        let slot = match code.get(recv_idx) {
+            Some(Op::GetGlobalSlot(s)) => *s as usize,
+            _ => return DirectCallee::Opaque,
+        };
+        let Obj::Module { slots, .. } = self.heap.get(home) else {
+            return DirectCallee::Opaque;
+        };
+        // The receiver global must itself be a live module for this to be a module-member call.
+        let recv = match slots.get(slot).and_then(|v| v.as_obj()) {
+            Some(h) => h,
+            None => return DirectCallee::Opaque,
+        };
+        let Obj::Module {
+            index,
+            slots: mod_slots,
+            ..
+        } = self.heap.get(recv)
+        else {
+            // Receiver global is NOT a module (e.g. a list/struct global) → this is an ordinary
+            // builtin/user method call, already vetted by (a)–(d) above → inert here.
+            return DirectCallee::Inert;
+        };
+        match index
+            .get(name)
+            .and_then(|&i| mod_slots.get(i as usize))
+            .and_then(|v| v.as_obj())
+        {
+            Some(mh) => match self.heap.get(mh) {
+                Obj::Func { proto, home } => DirectCallee::Scan(*proto, *home),
+                Obj::Closure { proto, home, .. } => DirectCallee::Scan(*proto, *home),
+                Obj::Builtin(_) | Obj::Native { .. } => DirectCallee::Inert,
+                _ => DirectCallee::Opaque,
+            },
+            None => DirectCallee::Opaque,
+        }
     }
 
     /// Scan the `argc` argument-producing ops immediately preceding a `CallMethod` at `call_idx`: a

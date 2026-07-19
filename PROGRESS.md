@@ -61,6 +61,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `genreach_builtin_sort_hook_reentry` / `_conditional_callee` / `_conditional_method_arg`, all
 > RED-first then GREEN, faulting on both engines). Manual CLI: bug1/bug2 fault identically serial+M:N,
 > B prints 9 both. Docs: `concurrency-b3.md`. Full `cargo test`/`clippy`/`conformance` green.
+> **Adversarial-review round 3 fixed 1 more confirmed under-gate:** a cross-module member call
+> `mod.fn(args)` — `CallMethod{name:"fn",argc}` preceded by `GetGlobalSlot(mod)` — slipped every
+> `CallMethod` guard (module fns live in no method table; the receiver `GetGlobalSlot(Module)` is not
+> a generator-embedding slot), so a spawned task calling a module-global fn that read a generator in
+> ITS home module was serial-clean (prints 13) / M:N-fault (nil-iterate). Fix: modules are first-class,
+> so the `CallMethod` arm now, when `name` is a member of ANY module (`module_member_name_exists`),
+> resolves a DIRECT `GetGlobalSlot→Module` receiver (`resolve_module_member_callee`) and recurses into
+> the member's own home — an INDIRECT receiver (`m := mod; m.fn()`, spawn arg) is unresolvable → OPAQUE
+> gate (the P2-class hole for modules, NEVER receiver-resolved). Also closes the pre-existing argc==0
+> `mod.baz()` sibling hole. Tests: 4 new cross-module parity tests (`genreach_cross_module_*` — direct
+> + argc0 + alias fault, clean member call still runs). Full `cargo test` (3715 lib)/`clippy`/
+> `conformance` green.
 >
 > **✅ DRIFT-FIX (2026-07-18, `auto-task/gen-reach-recurse`) — generator-reach airlock gate OVER-FIRED
 > (check-OK-then-run-fault).** `Vm::proto_reaches_generator` (`src/vm/sched.rs`) opaqued out at the
