@@ -508,10 +508,15 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   widening inside a merged type-arg slot — the `float! = Ok(3)` error above). The `Result` **error
   slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
   `Error`** (`return Err("a")` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
-  because `str` satisfies `Error`; two distinct `Error`-satisfying payloads across branches unify to
-  `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` is preserved
-  (not laundered into the `Error` existential); a deliberate concrete error type is spelled explicitly
-  (`-> Result[str, str]` / `-> int!DbErr`). See [`docs/syntax.md`](syntax.md) "Return type inference".
+  because `str` satisfies `Error`; two distinct **sendable** `Error`-satisfying payloads across branches
+  unify to `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` — **or
+  satisfies it but is not sendable** — is preserved (not laundered into the `Error` existential); a
+  deliberate concrete error type is spelled explicitly (`-> Result[str, str]` / `-> int!DbErr`). The
+  built-in `Error` existential is **sendable-bounded** (L7): it is itself sendable — so `Channel[int!]` /
+  `Channel[Error]` are admitted — precisely *because* every value widened into it must be sendable,
+  checked at the widening site (a non-sendable witness is rejected there, not laundered). This bounds
+  only `Error` (errors are almost always plain data), not every protocol existential — `Channel[Drawable]`
+  still rejects. See [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte

@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CHECKER / CONCURRENCY (2026-07-20, `feat/l7-sendable-error`) — L7: sendability-bounded `Error`
+> existential landed; `Channel[int!]` / `Channel[Error]` now admitted and sound.** The built-in `Error`
+> protocol is **sendable-bounded** (`Error`-only, by default): its existential is itself sendable AND
+> every value widened into it is required sendable *at the widening site*, so a struct that satisfies
+> `Error` but holds a non-sendable field (a non-`Error` protocol / `Module` field) is **rejected there,
+> not laundered** across a task boundary (closes the F2 check-OK-then-run-fault). Reference model is
+> **Rust's `Send`** (Chezzi's airlock deep-copies), not Go's share-by-reference channels — so this bounds
+> only `Error`, not every protocol (`Channel[Drawable]` still rejects), matching Rust's opt-in
+> `dyn Error + Send`. Design ("Option B", 5 checker edits): inference sites **preserve** a non-sendable
+> concrete error (in-task use stays legal); the explicit/direct-literal widening chokepoint
+> (`assignable`'s `Protocol` arm) rejects. Commits `c1b4ab4` · `997e642` · `2b29ed3` · `ba2ea7c`. Full
+> suite green (3667 lib + integration). Details + deferred follow-ups: `docs/gaps.md §L7`.
+
 > **✅ LANGUAGE (2026-07-19, `auto-task/remove-ref`) — the `ref` keyword, the `Ref[T]` reserved box, and
 > `std.ref` were REMOVED entirely (pure subtraction, minimalism/coherence — NOT a sendability change).**
 > `ref T` (a binding modifier lowering to a `Ref[T]` box) and the explicit `Ref[T]` box only ever added
@@ -28,6 +41,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **✅ CHECKER (2026-07-18, `auto-task/checker-overreject-fixes`) — two disjoint over-rejection /
 > diagnostic fixes (all checker-side, parity-neutral, runtime unchanged).**
+> **F2 (dropped — was unsound) — ✅ SUPERSEDED by L7 (2026-07-20): the SOUND version landed.** See the
+> L7 entry below / `docs/gaps.md §L7`. The naive whitelist was unsound because it erased field-level
+> sendability; L7 ships the sound form (sendable-*bounded* `Error`: the existential is sendable AND
+> every value widened into it is required sendable at the widening site). `Channel[int!]`/`Channel[Error]`
+> now type-check and cross a task boundary; the `channel_of_protocol_existential_is_non_sendable` test
+> was flipped to `channel_of_error_existential_is_sendable_but_other_protocols_not`. Original note kept
+> for history:
 > **F2 (dropped — was unsound)** — a proposed whitelist of the built-in `Error` existential as sendable
 > (to admit `Channel[int!]`/`Channel[Error]`) was **rejected on review**: the `Error` existential erases
 > field-level sendability, so a struct that satisfies `Error` yet carries a non-sendable field (a

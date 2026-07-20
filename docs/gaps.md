@@ -937,7 +937,45 @@ dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
 - **Not a gap:** spread/unpack (`f(*args)`) was deliberately dropped in `spec.md` and varargs +
   `.concat`/`.merge` cover it.
 
-### L7. Sendability-bounded protocol existentials — the sound way to admit `Channel[Error]` (POST-FREEZE milestone)
+### L7. Sendability-bounded protocol existentials — the sound way to admit `Channel[Error]` (✅ LANDED 2026-07-20)
+
+**✅ LANDED (branch `feat/l7-sendable-error`, commits `c1b4ab4` core gate · `997e642` direct-literal
+guard · `2b29ed3` regression/residual tests · `ba2ea7c` recover diagnostic).** Surface shipped:
+**`Error`-only, sendable-bounded by default** (not all protocols — that over-rejects in-task
+non-sendable protocol values and diverges from Rust's opt-in `dyn Error + Send`; reference model is
+Rust's `Send`, not Go's share-by-reference channels). `Channel[int!]` / `Channel[Error]` now
+type-check and cross a task boundary on both engines; a non-sendable error witness is **rejected at
+the widening site**, never laundered.
+
+Design ("Option B", 5 edits, all `src/checker/`): `sendable_rec`'s `Ty::Protocol` arm returns
+`self.sendable_bounded(p)` (`== "Error"`, the single surface knob); the three Error-**inference**
+synthesis sites (`fill_ret` sig.rs, `default_expr_result_e` pattern.rs, `join_err_slot` sig.rs) default
+to the `Error` existential **only if the concrete payload is sendable, else preserve the concrete
+type** (so in-task use of a non-sendable error stays legal — the concrete survives to the boundary);
+the explicit/direct-literal widening chokepoint (`assignable`'s `Protocol` arm) **rejects** a
+non-sendable concrete when the target is sendable-bounded. Every value write-site routes through
+`assignable`, so that one guard covers all explicit widenings including `?`-propagation.
+
+Clarifications learned in implementation: (1) `Iterator[T]` is `Ty::Struct`, **structurally sendable**
+— a live generator is handled by the runtime reach-gate, not the checker — so the *type-level*
+non-sendable witness is a struct holding a **non-`Error` protocol / `Module` field**, not a generator
+field (the old F2 framing below overstated the generator case). (2) A `recover:` block's error slot is
+the (now sendable-bounded) `Error`, so `recover: f()?` requires `f`'s error to be sendable too; the
+diagnostic distinguishes *doesn't-satisfy-Error* from *satisfies-but-non-sendable*.
+
+**Deferred follow-ups (non-blocking):** (a) the direct-literal send rejection surfaces as a generic
+type-mismatch (`expected Result[int], found Result[GErr]`), not the friendly "must be sendable" hint —
+`assignable` returns `bool` with no reason channel; wire `sendable_error_hint` at the send call site
+later. (b) `join_err_slot` is branch-order-sensitive for 3+ branches mixing sendable/non-sendable
+`Error` payloads (over-rejection, not a soundness gap). (c) Full Option-B for `recover` (preserve the
+concrete error in the recover *result* so in-task non-sendable recover stays legal) — deferred as rare
++ risky; the current construct-imposed `Error` slot rejecting non-sendable is consistent with explicit
+annotations. (d) Per-use `+ send` bounding (Rust's `dyn Draw` vs `dyn Draw + Send`) if a second bounded
+protocol ever appears.
+
+*Original deferral note (historical — superseded by the landing above):*
+
+
 
 **Motivation (F2, 2026-07-18 bug-hunt).** `Channel[int!]` / `Channel[Error]` are rejected today because a
 protocol existential is non-sendable (`sendable_rec`, `src/checker/proto.rs`). A one-line whitelist of the
