@@ -4,6 +4,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT (2026-07-20) — pre-JIT-freeze 5-domain adversarial hunt: 2 checker fixes + 1 doc fix
+> landed, 1 held.** Five parallel subagents (airlock, cancel/defer, channel/nursery, checker⊋compiler,
+> stdlib) swept the surface on both engines; airlock/channel/stdlib came back clean (consistent with 5+
+> prior waves). Fixed:
+> - **F1 — `?` in a `defer:` block was over-rejected by the *enclosing* fn's return type** (checker↔doc
+>   drift). The `defer:` block is its own closure with a `?`-DISCARDING contract (`syntax.md`), but
+>   `infer_try` validated the `?` against the enclosing `current_ret` — so it rejected under a nil/int
+>   fn and only accepted under a `Result` fn *by coincidence* (wrong model — the runtime discards, never
+>   propagates). Fix: an `in_defer_block` checker flag (mirrors `recover_depth`; reset at fn/closure
+>   boundaries, zeroes `recover_depth` on entry since the block can't target an outer recover) makes
+>   `infer_try` discard the `?` (accept any Result/Option, yield the payload, no enclosing-return
+>   constraint). Checker-only, parity-neutral; runtime discard verified byte-identical on both engines.
+> - **F4 — `int()`/`float()`/`bool()` accepted an AGGREGATE arg (List/Map/Set/tuple) at check, faulted
+>   at runtime** (check-OK-then-run-fault). Those types are outside the scalar-cast domain and can never
+>   convert (unlike a `struct`, whose `Convert` witnessing is a documented deferral), so the runtime
+>   always faulted. New `reject_aggregate_scalar_cast` turns it into a clean compile error.
+> - **F2 (doc) — `Shared.update` lock semantics + reentrancy limit** were only documented under
+>   `RwShared`; added the note at `Shared.update` itself (`docs/stdlib.md`): `update(f)` runs under the
+>   box's exclusive write lock, and re-touching the same box inside `f` self-deadlocks (M:N hangs;
+>   `--serial` silently loses the inner write).
+> - **F3 (HELD) — generator reach-gate over-gates** (any task that makes a call/captures faults if any
+>   module-global generator exists), contradicting the docs' "an untouched generator global does not
+>   fault." NOT fixed: tightening the reach analysis risks an unsafe *under*-gate (a live generator
+>   crossing the airlock = VM frames on another thread), the exact hazard the gate over-approximates to
+>   avoid — too risky pre-freeze. Needs a scoped precision spike; see `docs/gaps.md`.
+
 > **✅ CHECKER / CONCURRENCY (2026-07-20, `feat/l7-sendable-error`) — L7: sendability-bounded `Error`
 > existential landed; `Channel[int!]` / `Channel[Error]` now admitted and sound.** The built-in `Error`
 > protocol is **sendable-bounded** (`Error`-only, by default): its existential is itself sendable AND

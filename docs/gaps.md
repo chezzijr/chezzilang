@@ -11,6 +11,53 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Session log — 2026-07-20 (bug-hunt: 4 findings — 2 checker fixes + 1 doc fix, 1 held)
+
+Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib) on
+both engines. Airlock, channel/nursery, and stdlib came back **clean** (35/19/46 programs; consistent
+with 5+ prior waves). Four findings survived re-verification on the real binary:
+
+- **F1 — `?` in a `defer:` block over-rejected by the enclosing fn's return type — FIXED.** The `defer:`
+  block is its own closure with a `?`-DISCARDING contract (`syntax.md`: "a `?` short-circuit inside the
+  block is discarded"), but `infer_try` (`src/checker/pattern.rs`) validated the `?` against the enclosing
+  `current_ret`, so `defer: v := g()?` **rejected** under a nil/int-returning fn and only **accepted**
+  under a `Result`-returning one *by coincidence* (wrong model — the runtime discards, never propagates
+  to the enclosing return). Fix: an `in_defer_block` checker flag (mirrors `recover_depth`; saved/reset
+  at every fn/closure boundary, and zeroes `recover_depth` on entry — the block can't target an outer
+  `recover:`). When set, `infer_try` discards the `?`: accept any `Result`/`Option`, yield the success
+  payload, no enclosing-return constraint; a non-sum operand still rejects. Checker-only, parity-neutral;
+  runtime discard verified byte-identical on both engines. Tests: `defer_block_q_discards_regardless_of_
+  enclosing_return`, `..._still_rejects_non_sum_operand`, `fn_declared_in_defer_block_gets_own_q_context`
+  (checker) + `defer_block_q_discards_fired_err_parity` (both engines).
+
+- **F4 — `int()`/`float()`/`bool()` accepted an aggregate arg (List/Map/Set/tuple) at check, faulted at
+  runtime — FIXED.** Check-OK-then-run-fault: the scalar-cast domain is int/float/bool/str (`spec.md`);
+  an aggregate is outside it and — unlike a `struct` (whose structural `Convert` witnessing is a
+  documented deferral) — can never carry a conversion, so the runtime always faulted (`float() cannot
+  convert List`). New `reject_aggregate_scalar_cast` (`src/checker/expr.rs`) rejects at check. `str`-of-
+  aggregate (a display) still passes. Test: `scalar_cast_rejects_aggregate_arg`.
+
+- **F2 (doc) — `Shared.update` lock semantics + reentrancy limit** were documented only under `RwShared`.
+  Added the note at `Shared.update` itself (`docs/stdlib.md`): `update(f)` runs under the box's exclusive
+  write lock (atomic RMW — the reason it exists over `get`-then-`set`), and re-touching the **same** box
+  inside `f` self-deadlocks — on M:N it **hangs** (no `deadlock` diagnostic; the channel-deadlock detector
+  doesn't cover a mutex self-deadlock), and on the `--serial` oracle it **silently loses the inner write**
+  (no real lock). So a same-box-reentrant `update` is a `--serial` ≠ M:N masker; documented, not chased.
+
+- **F3 (HELD, not fixed) — generator reach-gate over-gates; docs contradict it.** Any spawned task that
+  makes a call (`spawn: ch.send(99)`) or captures a local **faults** (`a generator cannot be sent across
+  tasks`) whenever ANY module-global generator exists — even though the task never touches it. Both
+  engines identical → **no soundness/parity bug**. But `docs/concurrency.md:761` + `docs/spec.md:219`
+  claim "an untouched generator global does **not** fault," which is false for essentially every realistic
+  task (the reach analysis conservatively treats any call as maybe-reaching). **Why held:** the memory note
+  `generator-airlock-option-b-reach-gate` accepts over-gating deliberately — tightening the reach analysis
+  to accept the repro risks an unsafe *under*-gate (a live generator, holding VM frames, crossing the
+  airlock onto another OS thread = memory-safety/parity divergence), the exact hazard the over-approximation
+  avoids. That is the single riskiest change to attempt pre-JIT-freeze, so it needs its **own scoped
+  precision spike** (prove a task provably cannot reach the generic, with heavy two-engine + airlock
+  verification) — not a casual tighten, and NOT batched with F1/F4. Either make the gate precise enough to
+  honor the docs, or (interim) correct the two doc sentences to the conservative reality.
+
 ## Session log — 2026-07-18 (8-byte `Value` shipped — one perf item BACKLOGGED)
 
 The 8-byte `Value` milestone landed (int-favoring pointer-tag; commits `6c67eb9`/`fa3c014`, merge context

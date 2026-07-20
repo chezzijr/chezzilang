@@ -198,6 +198,12 @@ Iterate received values with `for v in ch:` (ends when closed and drained).
 (the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
 throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
 `RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
+`update(f)` runs `f` **under the box's exclusive write lock** (read-modify-write is atomic against other
+tasks — this is why it exists over a `get`-then-`set`, which races). **Reentrancy limit:** `f` must not
+touch the **same** box — calling `s.update`/`s.set`/`s.get` on `s` from inside `s.update`'s own `f`
+re-acquires a lock it already holds and **self-deadlocks** (on the real M:N engine it hangs; the
+cooperative `--serial` oracle has no real lock, so it instead completes with a silently lost inner
+write — either way, don't). Mutate a *different* box, or restructure so the nested step runs after `update` returns.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
