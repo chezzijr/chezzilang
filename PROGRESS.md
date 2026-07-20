@@ -13,10 +13,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > rejects AT SERIALIZE TIME** — the safer-in-direction property (a slot check can only over-reject, never
 > under-gate). Three parked-frame shapes are **HARD ARMS** rejected cleanly (graceful, byte-identical on
 > both engines, never a silent mishandle): a suspension **inside a `recover:`** (live handler), a
-> suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension. **NOT
-> touched:** `to_snap`'s module-global path (still `SnapValue::Poison` — F1 shared-ref contract intact) and
-> the reach-gate `check_task_generator_reach` (**retained** as now-redundant; its over-gate + doc cleanup
-> is the remaining open F3 follow-up in `docs/gaps.md`). No checker change (`Iterator[T]` already
+> suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension.
+> `to_snap`'s module-global path stays `SnapValue::Poison` for generators (F1 shared-ref contract
+> intact) — but this needed a **main-loop judge-phase fix** (`7b73e7c`): making `to_wire` succeed for a
+> sendable generator silently made `to_snap`'s wire **fast path** catch a module-global generator BY
+> VALUE (bypassing the `Poison` arm, eroding the Option-B net); the fast path now excludes any
+> generator-embedding value (`!value_embeds_generator`) so it stays Poison→Nil. The auto-task panel had
+> DISMISSED this as unobservable — caught on independent re-verification of the merged HEAD (VM
+> soundness: never trust the auto-task's own review). The reach-gate `check_task_generator_reach` is
+> **retained** (now-redundant; its over-gate + doc cleanup is the remaining open F3 follow-up in
+> `docs/gaps.md`). No checker change (`Iterator[T]` already
 > sendable-permissive). No hot-path change (`CallFrame` already derived `Clone`; the diff is additive to
 > the cold wire arms). Touched: `src/vm/wire.rs` (`WireValue::Generator` + `WireGenState` + `WireCallFrame`
 > + `has_handle`), `src/vm/sched.rs` (`to_wire`/`from_wire`), `src/vm/core.rs` (`collect_core_gcrefs`),
