@@ -371,8 +371,17 @@ impl Checker {
             // A protocol existential slot: the actual type must satisfy the protocol WITH the carried
             // args (empty for a bare existential — reproduces the old `satisfies(a, p)`). This single
             // witness is shared by every value write-site (param/return/field/reassign) since they all
-            // route assignment through `assignable`.
-            (Protocol(p, pargs), a) => self.satisfies_args(a, p, pargs).is_ok(),
+            // route assignment through `assignable`. L7 round 2: when the target protocol is
+            // sendable-bounded (`Error`), the CONCRETE witness `a` must itself be sendable too — round
+            // 1 made the bare existential sendable, but a direct-literal/explicit-annotation write
+            // still carries a concrete `a` that could smuggle a non-sendable payload (e.g. a struct
+            // holding a generator) through the widened slot. `a` already being `Protocol("Error", ..)`
+            // (a prior widening) is always sendable (round 1), so this only rejects a genuine
+            // non-sendable concrete witness, not Error-to-Error.
+            (Protocol(p, pargs), a) => {
+                self.satisfies_args(a, p, pargs).is_ok()
+                    && (!self.sendable_bounded(p) || self.sendable(a))
+            }
             // `Option`/`Result` are IMMUTABLE carriers — covariant element assignment stays sound
             // (no write-through alias), so they keep recursing via `assignable`. `List`/`Set`/`Map`
             // and user generic `Struct`/`Enum` are MUTABLE, by-reference containers: covariant type

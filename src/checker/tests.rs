@@ -18358,6 +18358,23 @@ fn channel_of_error_existential_is_sendable_but_other_protocols_not() {
     );
 }
 
+/// L7 round 2 — a DIRECT-LITERAL `Err(..)` carrying a non-sendable concrete error witness (one
+/// holding a non-`Error` protocol-existential field, which `sendable` never admits) must be rejected
+/// at the `Channel.send` boundary, not laundered by the `Error` existential's sendable-bounded
+/// widening (round 1). `Channel[int!]`'s `send` param is `Result[int, Error]`; assignability recurses
+/// into the error slot, hits the `Protocol("Error", ..)` arm, and — pre-fix — admitted ANY witness
+/// satisfying `Error` regardless of its own sendability. (An `Iterator[T]` field does NOT reproduce
+/// the leak: the checker's static `sendable` treats `Iterator[T]` structurally, by its element type,
+/// same as any other container — it doesn't distinguish a VM-only generator from a data-snapshot
+/// cursor, so it's already sendable=true either way and can't witness this bug.)
+#[test]
+fn channel_send_rejects_non_sendable_error_literal() {
+    entry_rejects(
+        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nc := Channel[int!]()\nc.send(Err(GErr(Impl())))\n",
+        "expected Result[int], found Result[",
+    );
+}
+
 /// F3 — a generic fn over a native reserved handle (`Shared`/`Channel`/`Atomic`/`RwShared`) binds its
 /// type param `T` from the argument, exactly like the identical shape over `List[T]`.
 #[test]
