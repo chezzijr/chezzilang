@@ -1041,14 +1041,18 @@ impl Checker {
     fn default_expr_result_e(&self, t: Ty) -> Ty {
         match t {
             // An UNANNOTATED if/match-expression's `Result` error slot defaults to the `Error`
-            // protocol when un-pinned (`Unknown`) OR the pinned payload satisfies `Error` — matching
-            // the return-inference E-default (`sig.rs fill_ret`). A concrete payload that does NOT
-            // satisfy `Error` is PRESERVED: unlike the return path there is no post-hoc assignability
-            // re-check here, so forcing `Error` would launder a non-Error value into the `Error`
-            // existential (`match x: Err(e): e.message()` would check-pass then fault at runtime).
-            // Fires only on the no-hint path (an explicit `x: Result[str, str] = if …` keeps its
-            // declared E).
-            Ty::Result(v, e) if e.is_unknown() || self.assignable(&Ty::error_proto(), &e) => {
+            // protocol when un-pinned (`Unknown`) OR the pinned payload satisfies `Error` AND IS
+            // SENDABLE — matching the return-inference E-default (`sig.rs fill_ret`). A concrete
+            // payload that does NOT satisfy `Error`, OR satisfies `Error` but is NOT sendable (L7
+            // round 1 — the `Error` existential is sendable-bounded), is PRESERVED: unlike the
+            // return path there is no post-hoc assignability re-check here, so forcing `Error` would
+            // launder a non-Error (or non-sendable) value into the `Error` existential (`match x:
+            // Err(e): e.message()` would check-pass then fault at runtime). Fires only on the
+            // no-hint path (an explicit `x: Result[str, str] = if …` keeps its declared E).
+            Ty::Result(v, e)
+                if e.is_unknown()
+                    || (self.assignable(&Ty::error_proto(), &e) && self.sendable(&e)) =>
+            {
                 Ty::Result(v, Box::new(Ty::error_proto()))
             }
             other => other,

@@ -2350,6 +2350,36 @@ main()
     assert_eq!(run_capture_parallel(src).expect("parallel run"), "99\n");
 }
 
+/// L7 round 1 — `Channel[int!]` (the `Error`-existential is sendable-bounded) runs identically on
+/// both engines: a spawned task sends `Ok`/`Err` over the channel, the parent recvs and matches.
+/// Two-engine parity (serial == M:N) on the newly-admitted `Channel[Error-existential]` shape.
+#[test]
+fn channel_of_error_existential_ok_err_two_engine_parity() {
+    let src = "\
+fn worker(ch: Channel[int!]):
+    ch.send(Ok(7))
+    ch.send(Err(\"boom\"))
+
+fn main():
+    ch := Channel[int!]()
+    parallel:
+        spawn worker(ch)
+    a := ch.recv()
+    b := ch.recv()
+    match a:
+        Ok(v): print(\"ok {v}\")
+        Err(e): print(\"err {e.message()}\")
+    match b:
+        Ok(v): print(\"ok {v}\")
+        Err(e): print(\"err {e.message()}\")
+
+main()
+";
+    let expected = "ok 7\nerr boom\n";
+    assert_eq!(run_capture(src).expect("serial run"), expected);
+    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+}
+
 /// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
 /// host `Vm`'s when the fiber is scheduled in, and back out when it parks — the prerequisite for
 /// D2b parking a fiber across worker threads. Round-trip: a fiber heap holding `"fiber-obj"` and

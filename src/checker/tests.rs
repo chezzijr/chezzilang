@@ -18330,24 +18330,16 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
 /// non-sendable fields; the built-in `Error` existential is likewise NOT provably sendable, so
 /// `Channel[int!]`/`Channel[Error]` stay rejected — use a concrete sendable error type, e.g. a typed enum).
 #[test]
-fn channel_of_protocol_existential_is_non_sendable() {
+fn channel_of_error_existential_is_sendable_but_other_protocols_not() {
     entry_rejects(
         "protocol Drawable:\n    fn draw(self) -> str\nc := Channel[Drawable]()\nprint(\"x\")\n",
         "must be sendable",
     );
-    entry_rejects(
-        "import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n",
-        "must be sendable",
-    );
-    entry_rejects(
-        "import std.concurrency\nc := Channel[Error]()\nprint(\"x\")\n",
-        "must be sendable",
-    );
-    // The `Error`-carrying element gets the concrete-error-type hint pointing at `Channel[int!str]`.
-    entry_rejects(
-        "import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n",
-        "name a concrete error type",
-    );
+    // `Error` is sendable-bounded (Option B): `Channel[int!]` / `Channel[Error]` type-check. A
+    // non-sendable concrete error witness is preserved as its concrete type and rejected later at
+    // the send boundary, not laundered — that's a separate round, not this test.
+    entry_ok("import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n");
+    entry_ok("import std.concurrency\nc := Channel[Error]()\nprint(\"x\")\n");
     // A non-Error non-sendable element (a protocol existential) does NOT get the Error hint (just the
     // base message + the plain gloss).
     let errs = check_entry(

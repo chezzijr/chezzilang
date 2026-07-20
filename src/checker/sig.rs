@@ -540,9 +540,11 @@ impl Checker {
 
     /// Merge two inferred `Result` **error slots**. Like [`Self::join_slot`] (equal → keep; one
     /// `Unknown` → the other), EXCEPT two DIFFERENT concrete payloads that BOTH satisfy the `Error`
-    /// protocol merge to `Unknown` — `fill_ret` then unifies them to the uniform `Error` existential,
-    /// so branches returning distinct *error* types (`Err(EA())` vs `Err(EB())`) don't spuriously
-    /// conflict. A pair where at least one side is a non-`Error` concrete keeps `join_slot`'s strict
+    /// protocol AND ARE BOTH SENDABLE merge to `Unknown` — `fill_ret` then unifies them to the
+    /// uniform `Error` existential, so branches returning distinct *error* types (`Err(EA())` vs
+    /// `Err(EB())`) don't spuriously conflict. A pair where at least one side is a non-`Error`
+    /// concrete, OR satisfies `Error` but is NOT sendable (L7 round 1 — the `Error` existential is
+    /// sendable-bounded; order-coupled with `fill_ret`'s same guard), keeps `join_slot`'s strict
     /// equal-or-conflict rule (a real type mismatch is still reported; forcing `Error` there would be
     /// unsound). Equal concretes are kept as-is — `fill_ret` decides Error-defaulting per slot.
     fn join_err_slot(&self, a: &Ty, b: &Ty) -> Option<Ty> {
@@ -555,7 +557,11 @@ impl Checker {
         if b.is_unknown() {
             return Some(a.clone());
         }
-        if self.assignable(&Ty::error_proto(), a) && self.assignable(&Ty::error_proto(), b) {
+        if self.assignable(&Ty::error_proto(), a)
+            && self.assignable(&Ty::error_proto(), b)
+            && self.sendable(a)
+            && self.sendable(b)
+        {
             return Some(Ty::Unknown);
         }
         None
@@ -635,17 +641,23 @@ impl Checker {
             }
             // An inferred `Result` E-slot defaults to the `Error` protocol (the `T!` / single-arg
             // `Result[T]` semantics) when it is un-pinned (`Unknown`) OR the pinned payload actually
-            // SATISFIES `Error` — so the common `Err("msg")` / custom-error branches unify to the
-            // uniform `Error` existential. A concrete E that does NOT satisfy `Error` (a struct with
-            // no `message`, or `int`) is PRESERVED — forcing it to `Error` would launder a non-Error
-            // value into the `Error` existential (the pass-2 return check / a downstream method-call
-            // check then rejects any Error-method use soundly). A deliberate concrete non-`Error` E
-            // needs an explicit `-> Result[T, E]` annotation (resolved by `resolve_type`, a separate
-            // path). The T-slot is an ordinary value slot — a residual `Unknown` there is
-            // un-inferable → `bad` (preserving the `Err`-only / `None`-only / `[]` leak guards).
+            // SATISFIES `Error` AND IS SENDABLE — so the common `Err("msg")` / custom-error branches
+            // unify to the uniform `Error` existential. A concrete E that does NOT satisfy `Error`
+            // (a struct with no `message`, or `int`), OR satisfies `Error` but is NOT sendable (L7
+            // round 1 — the `Error` existential is sendable-bounded, so widening a non-sendable
+            // concrete into it would launder a value that could never legally cross a `Channel`/
+            // `spawn` boundary), is PRESERVED — forcing it to `Error` would launder a non-Error (or
+            // non-sendable) value into the `Error` existential (the pass-2 return check / a
+            // downstream method-call check then rejects any Error-method use soundly). A deliberate
+            // concrete non-`Error` E needs an explicit `-> Result[T, E]` annotation (resolved by
+            // `resolve_type`, a separate path). The T-slot is an ordinary value slot — a residual
+            // `Unknown` there is un-inferable → `bad` (preserving the `Err`-only / `None`-only / `[]`
+            // leak guards).
             Ty::Result(a, b) => {
                 let na = self.fill_ret(a, bad);
-                let nb = if b.is_unknown() || self.assignable(&Ty::error_proto(), b) {
+                let nb = if b.is_unknown()
+                    || (self.assignable(&Ty::error_proto(), b) && self.sendable(b))
+                {
                     Ty::error_proto()
                 } else {
                     self.fill_ret(b, bad)

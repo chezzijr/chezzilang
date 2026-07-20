@@ -1340,6 +1340,16 @@ impl Checker {
         self.sendable_rec(ty, &mut Vec::new())
     }
 
+    /// L7 round 1 — the single surface knob for which protocol EXISTENTIALS are sendable-bounded
+    /// (i.e. the witness itself, independent of its concrete payload, is allowed to cross a task
+    /// boundary). Only the built-in `Error` protocol qualifies today: its witness is commonly a
+    /// plain `str` or a simple struct, so `Channel[int!]` / `Channel[Error]` should type-check —
+    /// a non-sendable CONCRETE error (e.g. one wrapping a closure) is still caught, just later, at
+    /// the `Channel.send`/`spawn` boundary against the concrete type (not laundered here).
+    pub(super) fn sendable_bounded(&self, p: &str) -> bool {
+        p == "Error"
+    }
+
     /// `sendable` with a cycle guard (`stack` holds the struct/enum names currently being walked,
     /// so a recursive type like `Node { next: Option[Node] }` terminates).
     pub(super) fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
@@ -1388,10 +1398,13 @@ impl Checker {
             // VALUE now (the runtime `to_wire`/`to_snap` lowering carries its proto + wired captures),
             // so the bare `fn` type is sendable. The bare type cannot carry its captures, so the
             // per-closure capture-sendability check is done at the airlock SITES (the `spawn:` block
-            // read gate + the spawn callee/arg gate in `sig.rs`), NOT here. `Ty::Module`/`Ty::Protocol`
-            // stay non-sendable (a module namespace / protocol witness never crosses).
+            // read gate + the spawn callee/arg gate in `sig.rs`), NOT here. `Ty::Module` stays
+            // non-sendable (a module namespace never crosses); a protocol existential is
+            // non-sendable UNLESS it's sendable-bounded (see `sendable_bounded` — currently just
+            // `Error`, L7 round 1), since a general protocol witness may wrap a closure.
             Ty::Func { .. } => true,
-            Ty::Module(_) | Ty::Protocol(_, _) => false,
+            Ty::Module(_) => false,
+            Ty::Protocol(p, _) => self.sendable_bounded(p),
             // A first-class builtin fn value is pure code (no captured environment) — always
             // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
             // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable
