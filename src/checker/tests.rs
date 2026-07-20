@@ -18375,6 +18375,24 @@ fn channel_send_rejects_non_sendable_error_literal() {
     );
 }
 
+/// L7 final review — a `recover:` result's error slot is the built-in `Error` existential, which
+/// round 1 makes sendable-bounded; the recover result (`Result[_, Error]`) is therefore itself
+/// sendable and could be sent. So a `?` propagating a non-sendable-but-Error-satisfying error is
+/// (soundly) rejected here — allowing it would launder the non-sendable payload through the erased
+/// slot across a task boundary. The diagnostic must NOT lie ("must satisfy Error"): `GErr` DOES
+/// satisfy Error (has `message`), it is merely non-sendable — so the split message names sendability.
+#[test]
+fn recover_try_rejects_non_sendable_error_with_honest_message() {
+    let errs = check_entry(
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn bar(x: int) -> Result[int, GErr]:\n    if x == 0:\n        return Ok(1)\n    return Err(GErr(Impl()))\nfn main():\n    r := recover: bar(1)?\n    print(\"unreached\")\nmain()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("satisfies Error but isn't sendable")),
+        "expected the honest non-sendable (not 'must satisfy Error') message, got: {errs:?}"
+    );
+}
+
 /// L7 round 3, Test 2 — the inference-vs-annotation asymmetry that IS Option B's intended tax: an
 /// EXPLICIT `-> int!` annotation is `Result[int, Error]` where `Error` is now sendable-bounded (round
 /// 1), so unlike Test 1's inferred `Result[int, GErr]` (concrete, preserved), here the concrete
