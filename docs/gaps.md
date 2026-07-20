@@ -65,12 +65,24 @@ with 5+ prior waves). Four findings survived re-verification on the real binary:
   direction — a slot check can only over-reject, never under-gate). Three parked-frame shapes are **HARD
   ARMS** rejected cleanly (byte-identical on both engines): a suspension **inside a `recover:`** (live
   handler), a suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension.
-  `to_snap`'s module-global path is **untouched** (still `SnapValue::Poison`), so the F1 shared-ref
-  contract holds and a module-global generator still nil-replays + reach-gates. Touched: `src/vm/wire.rs`
+  `to_snap`'s module-global path stays `SnapValue::Poison` for generators, so the F1 shared-ref
+  contract holds and a module-global generator still nil-replays + reach-gates. **Judge-phase fix
+  (commit `7b73e7c`, applied during the main-loop review of the auto-task branch — the auto-task panel
+  had DISMISSED this as unobservable):** making `to_wire` *succeed* for a sendable generator silently
+  broke `to_snap`, because `to_snap`'s wire **fast path** (`if let Ok(w)=to_wire(v) && !w.has_handle()`)
+  then caught a sendable module-global generator BY VALUE and returned `SnapValue::Wire`, bypassing the
+  mandated `Obj::Generator => Poison` arm and eroding the Option-B defense-in-depth net (a reach-gate
+  MISS would flip from an obvious Nil-replay to a silent serial-shared-vs-M:N-copy divergence). The fast
+  path now excludes any generator-embedding value (`&& !self.value_embeds_generator(v, depth)`) so it
+  falls through to the Poison arm — restoring "a module-global generator snapshots inert" while leaving
+  the LOCAL `to_wire`/`from_wire` crossing feature intact. Not observably regression-testable (it is the
+  backstop FOR a gate hole); guarded by the full suite + the ~15 unchanged reach-gate tests, and 3
+  now-false airlock doc-comments were de-staled in the same commit. Touched: `src/vm/wire.rs`
   (`WireValue::Generator` + `WireGenState` + `WireCallFrame` + `has_handle`), `src/vm/sched.rs`
-  (`to_wire`/`from_wire` arms), `src/vm/core.rs` (`collect_core_gcrefs`), `src/vm/stmt.rs`
-  (`display_wire`). The reach-gate (`check_task_generator_reach`) is **retained** (redundant); its
-  over-gate + doc-contradiction cleanup is the remaining open F3 follow-up.
+  (`to_wire`/`from_wire` arms + the `to_snap` fast-path generator guard), `src/vm/core.rs`
+  (`collect_core_gcrefs`), `src/vm/stmt.rs` (`display_wire`). The reach-gate
+  (`check_task_generator_reach`) is **retained** (now redundant belt-and-suspenders); its over-gate +
+  doc-contradiction cleanup is the remaining open F3 follow-up.
 
 ## Session log — 2026-07-18 (8-byte `Value` shipped — one perf item BACKLOGGED)
 
