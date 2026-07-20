@@ -3010,19 +3010,21 @@ impl Vm {
     /// Implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then `from_wire`
     /// (reconstruct into this heap). Byte-identical to the old direct deep-copy; the wire form is what
     /// de-risks the cores-as-`Arc` and real-OS-thread-boundary crossings. By-reference objects cross
-    /// as `Handle`; the ONE non-sendable value is a frame-holding generator (its parked frames
-    /// reference this heap), so this is **fallible**: a generator (or one nested in a container) faults
-    /// gracefully here, re-stamped with the real spawn-site `span` (the caller has it) via `to_wire_at`
-    /// — a catchable error instead of a panic.
+    /// as `Handle`. Since F3 path-C a live generator crosses BY VALUE (its parked frame serialized,
+    /// rebuilt as an independent copy on `from_wire`), so this is **fallible** only for the generator
+    /// HARD ARMS `to_wire` rejects — a generator suspended mid-`recover:` (live handler) or with a
+    /// pending `defer`, or one whose parked slot is itself non-sendable — each re-stamped with the real
+    /// spawn-site `span` (the caller has it) via `to_wire_at`, a catchable error instead of a panic.
     pub(super) fn deep_clone(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
         let w = self.to_wire_at(v, span)?;
         Ok(self.from_wire(w))
     }
 
-    /// `to_wire` re-stamped with a real call-site `span`. `to_wire`'s only `Err` (a frame-holding
-    /// generator crossing the airlock) carries a placeholder `Span{0,0}`; every method-level airlock
-    /// site (`Channel.send`/`Shared.set`/`Atomic.store`/…) has a real span, so route through this so
-    /// the catchable error reports the operation's location rather than line 0.
+    /// `to_wire` re-stamped with a real call-site `span`. `to_wire`'s `Err`s (a generator HARD ARM —
+    /// suspended mid-`recover:`, a parked `defer`, a non-sendable parked slot — or a recursive local
+    /// `fn`) carry a placeholder `Span{0,0}`; every method-level airlock site (`Channel.send`/
+    /// `Shared.set`/`Atomic.store`/…) has a real span, so route through this so the catchable error
+    /// reports the operation's location rather than line 0.
     pub(super) fn to_wire_at(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
         self.to_wire(v).map_err(|e| self.err(e.message, span))
     }
@@ -4035,11 +4037,15 @@ impl Vm {
     ///   `Module` → `ModuleAlias(idx)`; `Native` → fn pointer; containers → element-wise (map/set
     ///   hashes are value-derived, carried unchanged).
     ///
-    /// Fallible: a frame-holding generator (`Obj::Generator`) is NOT sendable — its parked frames
-    /// reference this heap. Reaching that arm (smuggled past the permissive `Iterator[T]` checker
-    /// branch — a cursor and a generator share that existential type) returns a graceful airlock
-    /// error (re-stamped with the real nursery span by `ensure_snapshot`) instead of a panic. The
-    /// recursion propagates that error with `?`, so a generator nested in any container faults too.
+    /// A MODULE-GLOBAL generator (or a value embedding one) snapshots to [`SnapValue::Poison`]
+    /// (→ `Nil` on the worker), NOT to a by-value wire copy: the fast path excludes it via
+    /// `value_embeds_generator`, so the slow `Obj::Generator => Poison` arm (and container recursion)
+    /// applies. This keeps the Option-B reach-gate contract — a module global is shared-by-reference on
+    /// serial, so serializing it by value here would diverge (an independent copy vs shared mutation).
+    /// Poison keeps the worker's view inert, so the reach-gate (which faults any task that reaches the
+    /// generator) is the sole observable behaviour, identical on both engines. (The F3 path-C
+    /// local-crossing of a live generator is a separate `to_wire`/`from_wire` concern — `to_snap` is
+    /// the module-global-snapshot path only, and stays Poison for generators by design.)
     pub(super) fn to_snap(&self, v: Value) -> Result<SnapValue, RuntimeError> {
         self.to_snap_depth(v, 0)
     }
@@ -4068,12 +4074,20 @@ impl Vm {
                 ));
             }
         };
-        // Fast path: no embedded callable/module → the wire form is exact and cheap. A generator's
-        // `to_wire` errors (so the `if let Ok` fails) — we fall through to the `Obj::Generator` arm,
-        // which re-produces the same graceful error below. Threads the SHARED `depth` so a cyclic
-        // pure-data global trips `to_wire_depth`'s guard at the same budget as the M:N spawn-arg path.
+        // Fast path: no embedded callable/module → the wire form is exact and cheap. Threads the
+        // SHARED `depth` so a cyclic pure-data global trips `to_wire_depth`'s guard at the same budget
+        // as the M:N spawn-arg path. A value that EMBEDS A GENERATOR is EXCLUDED here
+        // (`!value_embeds_generator`): F3 path-C taught `to_wire` to serialize a generator BY VALUE for
+        // the LOCAL crossing paths (`Channel.send`/spawn), but a MODULE-GLOBAL generator must still
+        // snapshot to `Poison` (→ Nil on a worker) — the Option-B reach-gate contract. The gate is
+        // defense-in-depth; the snapshot must stay inert so a gate miss is memory-safe AND observably
+        // dead (Nil), never a silent serial(shared-ref)-vs-M:N(by-value-copy) divergence. An embedded
+        // generator therefore falls through to the slow arm, where `Obj::Generator => Poison` (and
+        // recursion into containers) applies. (`to_snap` is the module-global-snapshot path only; this
+        // does NOT touch the `to_wire`/`from_wire` local-crossing feature.)
         if let Ok(w) = self.to_wire_depth(v, depth)
             && !w.has_handle()
+            && !self.value_embeds_generator(v, depth)
         {
             return Ok(SnapValue::Wire(w));
         }
