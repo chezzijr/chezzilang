@@ -18324,11 +18324,11 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
 
 // ===== F2/F3/F4 — checker over-rejection / diagnostic fixes =====
 
-/// F2 — `Channel[int!]` / `Channel[Error]` are sendable: the built-in `Error` protocol existential
-/// is the one the runtime already wires across the airlock (task-fault propagation), so a worker can
-/// A `Channel` over a USER protocol existential is non-sendable (an Error-satisfying witness can carry
-/// non-sendable fields; the built-in `Error` existential is likewise NOT provably sendable, so
-/// `Channel[int!]`/`Channel[Error]` stay rejected — use a concrete sendable error type, e.g. a typed enum).
+/// F2 — `Channel[int!]` / `Channel[Error]` ARE sendable (L7 round 1): the built-in `Error` protocol
+/// existential is sendable-bounded, so the bare existential may cross a task boundary — a non-sendable
+/// CONCRETE witness is still caught later, at the `Channel.send` boundary (round 2), not here. A
+/// `Channel` over any OTHER user protocol existential stays non-sendable (no such bound exists for it;
+/// a witness may carry non-sendable fields) — use a concrete sendable type instead.
 #[test]
 fn channel_of_error_existential_is_sendable_but_other_protocols_not() {
     entry_rejects(
@@ -18372,6 +18372,55 @@ fn channel_send_rejects_non_sendable_error_literal() {
     entry_rejects(
         "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nc := Channel[int!]()\nc.send(Err(GErr(Impl())))\n",
         "expected Result[int], found Result[",
+    );
+}
+
+/// L7 round 3, Test 2 — the inference-vs-annotation asymmetry that IS Option B's intended tax: an
+/// EXPLICIT `-> int!` annotation is `Result[int, Error]` where `Error` is now sendable-bounded (round
+/// 1), so unlike Test 1's inferred `Result[int, GErr]` (concrete, preserved), here the concrete
+/// `Err(GErr(..))` branch must be assignable to the already-widened `Error` slot at the `return` site
+/// — which the round-2 `assignable` guard rejects for a non-sendable concrete witness. Same struct
+/// shape as round 2 (`GErr` holds a non-`Error` protocol field `Odd`, so it's Error-satisfying but
+/// non-sendable).
+#[test]
+fn explicit_bang_annotation_over_non_sendable_error_is_rejected() {
+    entry_rejects(
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return Ok(1)\n    return Err(GErr(Impl()))\nprint(\"x\")\n",
+        "expected return type Result[int], found Result[",
+    );
+}
+
+/// L7 round 3, Test 3 (residual) — `sendable_rec`'s `Ty::Param(_) => true` arm treats a bare generic
+/// param as sendable, deferring the real check to the call site's instantiation. This verifies the
+/// deferral is actually re-checked: a generic `fn wrap[E](e: E) -> int!E` instantiated with a
+/// non-sendable concrete `E` (`GErr`, same shape as above) and then SENT over a `Channel[int!]` is
+/// REJECTED — by the time `c.send(wrap(GErr(Impl())))` is checked, `E` has already been substituted to
+/// the concrete `GErr`, so the argument's actual type is `Result[int, GErr]` and the round-2
+/// `Channel.send` boundary guard (not the generic-param arm itself) catches it. Pinning this on record:
+/// REJECTED — no soundness hole through the generic-param deferral (verified via `cargo run -- check`
+/// on the exact source below before writing this assertion).
+#[test]
+fn generic_fn_non_sendable_err_instantiation_rejected_at_channel_send() {
+    entry_rejects(
+        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn wrap[E](e: E) -> int!E:\n    return Err(e)\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
+        "expected Result[int], found Result[",
+    );
+}
+
+/// L7 round 3, Test 4 (residual, over-rejection not soundness) — round-1 review flagged that
+/// `join_ret`'s left-fold over 3+ inferred-return branches makes `join_err_slot` branch-order
+/// sensitive when mixing sendable and non-sendable Error-satisfying payloads: an `Unknown` slot (from
+/// two sendable Errs merging) absorbs a THIRD non-sendable concrete witness without re-checking
+/// sendability against it, but a non-sendable witness adjacent to a sendable one in the fold instead
+/// hard-conflicts. Pinning the CURRENT reality for this specific order (two sendable `EA`/`EB`
+/// separated by non-sendable `GErr`, so `EA` folds against `GErr` first): REJECTED with the hard
+/// "conflicting branches" diagnostic (verified via `cargo run -- check`). This is over-rejection, not
+/// a soundness gap — record it so a future `join_err_slot` change notices if this shifts.
+#[test]
+fn three_branch_mixed_sendability_error_inference_is_order_sensitive() {
+    entry_rejects(
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int):\n    if x == 0:\n        return Ok(1)\n    elif x == 1:\n        return Err(EA())\n    elif x == 2:\n        return Err(GErr(Impl()))\n    else:\n        return Err(EB())\nprint(\"x\")\n",
+        "cannot infer return type: conflicting branches",
     );
 }
 

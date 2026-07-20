@@ -2380,6 +2380,49 @@ main()
     assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
 }
 
+/// L7 round 3, Test 1 (Option-B regression) — an INFERRED return (no `-> int!`/`-> Result[..]`
+/// annotation) that yields both an `Ok(int)` and an `Err(GErr(..))` branch, where `GErr` satisfies
+/// `Error` but is itself non-sendable (holds a non-`Error` protocol field `Odd`), stays legal used
+/// PURELY IN-TASK (no channel/spawn): `T` pins to `int`, the `E` slot infers `GErr` and is PRESERVED
+/// concrete (`Result[int, GErr]`), not widened/laundered to `Error`. This is the whole point of
+/// Option B — inference never triggers the sendable-bounded widening (only an explicit `Error`/`int!`
+/// annotation, or a `Channel.send`, does), so it must type-check clean and run byte-identically on
+/// both engines.
+#[test]
+fn inferred_non_sendable_error_in_task_ok_both_engines() {
+    let src = "\
+protocol Odd:
+    fn tag(self) -> int
+
+struct Impl:
+    fn tag(self) -> int:
+        return 1
+
+struct GErr:
+    w: Odd
+    fn message(self) -> str:
+        return \"x\"
+
+fn f(x: int):
+    if x == 0:
+        return Ok(1)
+    return Err(GErr(Impl()))
+
+fn main():
+    match f(0):
+        Ok(v): print(v)
+        Err(e): print(e.message())
+    match f(1):
+        Ok(v): print(v)
+        Err(e): print(e.message())
+
+main()
+";
+    let expected = "1\nx\n";
+    assert_eq!(run_capture(src).expect("serial run"), expected);
+    assert_eq!(run_capture_parallel(src).expect("parallel run"), expected);
+}
+
 /// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
 /// host `Vm`'s when the fiber is scheduled in, and back out when it parks — the prerequisite for
 /// D2b parking a fiber across worker threads. Round-trip: a fiber heap holding `"fiber-obj"` and
