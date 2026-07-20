@@ -8505,10 +8505,10 @@ fn generator_module_global_executor_reassigned_before_shutdown_faults_both() {
     }
 }
 
-/// A generator passed DIRECTLY as a spawn arg (the deep_clone airlock-copy path). Previously
-/// PANICKED at deep_clone's `.expect`; now a graceful error with a real span.
+/// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES the airlock BY VALUE
+/// (deep copy) — the callee runs on its own copy instead of faulting. serial == M:N.
 #[test]
-fn generator_passed_to_spawn_is_graceful_vm() {
+fn generator_passed_to_spawn_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
@@ -8519,34 +8519,14 @@ fn generator_passed_to_spawn_is_graceful_vm() {
         "        spawn work(gen())\n",
         "main()\n"
     );
-    // A generator crossing DIRECTLY as a spawn arg faults on BOTH engines (the `deep_clone` airlock
-    // copy hits `to_wire`'s Generator arm on serial and M:N alike) — this is a real crossing, gated
-    // exactly as before Option B (only an UNTOUCHED module-global generator changed behaviour).
-    for (engine, r) in [
-        ("serial", run_capture(src)),
-        ("M:N", run_capture_parallel(src)),
-    ] {
-        let err = r
-            .err()
-            .unwrap_or_else(|| panic!("{engine}: must reject a spawned generator arg"));
-        assert!(
-            err.message
-                .contains("a generator cannot be sent across tasks"),
-            "{engine}: got: {}",
-            err.message
-        );
-        assert!(
-            err.span.line >= 1,
-            "{engine}: needs a real span, got line {}",
-            err.span.line
-        );
-    }
+    assert_eq!(run_capture(src).expect("serial"), "hi\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "hi\n");
 }
 
-/// A generator embedded inside a LIST spawn arg — the nested-position guard. The recursive `?`
-/// through containers must fault on the leaf generator.
+/// F3 path C: a generator nested inside a LIST spawn arg crosses BY VALUE too (the container recursion
+/// in `to_wire` serializes the leaf generator instead of faulting). serial == M:N.
 #[test]
-fn generator_in_list_arg_to_spawn_is_graceful_vm() {
+fn generator_in_list_arg_to_spawn_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
@@ -8557,83 +8537,46 @@ fn generator_in_list_arg_to_spawn_is_graceful_vm() {
         "        spawn work([gen()])\n",
         "main()\n"
     );
-    // A generator nested in a list spawn arg faults on BOTH engines (the container recursion in
-    // `deep_clone`/`to_wire` reaches the leaf generator on serial and M:N alike).
-    for (engine, r) in [
-        ("serial", run_capture(src)),
-        ("M:N", run_capture_parallel(src)),
-    ] {
-        let err = r
-            .err()
-            .unwrap_or_else(|| panic!("{engine}: must reject a generator nested in a list arg"));
-        assert!(
-            err.message
-                .contains("a generator cannot be sent across tasks"),
-            "{engine}: got: {}",
-            err.message
-        );
-        assert!(
-            err.span.line >= 1,
-            "{engine}: needs a real span, got line {}",
-            err.span.line
-        );
-    }
+    assert_eq!(run_capture(src).expect("serial"), "hi\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "hi\n");
 }
 
-/// A generator into `Shared(...)` — the Op::NewShared airlock-out. Previously PANICKED.
+/// F3 path C: a generator stored into `Shared(...)` now crosses BY VALUE (deep copy into the box)
+/// instead of faulting; the program runs to completion. serial == M:N.
 #[test]
-fn generator_into_shared_is_graceful_vm() {
+fn generator_into_shared_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
         "    s := Shared(gen())\n",
-        "    print(\"unreachable\")\n",
+        "    print(\"stored\")\n",
         "main()\n"
     );
-    let err = run_capture(src).expect_err("Shared(generator) must be rejected gracefully");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    assert_eq!(run_capture(src).expect("serial"), "stored\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "stored\n");
 }
 
-/// A generator into `Atomic(...)` — the new_atomic airlock-out. Previously PANICKED.
+/// F3 path C: a generator stored into `Atomic(...)` now crosses BY VALUE (deep copy into the box).
+/// serial == M:N.
 #[test]
-fn generator_into_atomic_is_graceful_vm() {
+fn generator_into_atomic_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
         "    a := Atomic(gen())\n",
-        "    print(\"unreachable\")\n",
+        "    print(\"stored\")\n",
         "main()\n"
     );
-    let err = run_capture(src).expect_err("Atomic(generator) must be rejected gracefully");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    assert_eq!(run_capture(src).expect("serial"), "stored\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "stored\n");
 }
 
-/// A closure CAPTURING a generator submitted to an `Executor` under `--parallel` — the
-/// `wire_callable` airlock-out. Faults gracefully (via `to_wire_at`) with a real span.
+/// F3 path C: a closure CAPTURING a local generator submitted to an `Executor` under `--parallel` now
+/// crosses BY VALUE — the submitted task drives its own copy instead of faulting. Runs to completion.
 #[test]
-fn generator_captured_in_executor_submit_is_graceful_vm() {
+fn generator_captured_in_executor_submit_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
@@ -8644,26 +8587,13 @@ fn generator_captured_in_executor_submit_is_graceful_vm() {
         "    ex.shutdown()\n",
         "main()\n"
     );
-    let err = run_capture_parallel(src)
-        .expect_err("Executor.submit capturing a generator must be rejected");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "Some(1)\n");
 }
 
-/// An `Executor` task that RETURNS a generator under `--parallel` — the return-value airlock
-/// (`run_outcome`). Faults gracefully with a REAL span (regression: previously `run_outcome` used
-/// raw `to_wire`, leaking the placeholder `Span{0,0}` so the error reported line 0).
+/// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now crosses the return
+/// value BY VALUE (deep copy back to the parent). The Executor discards task returns, so no output.
 #[test]
-fn generator_returned_from_executor_task_is_graceful_vm() {
+fn generator_returned_from_executor_task_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
@@ -8675,45 +8605,24 @@ fn generator_returned_from_executor_task_is_graceful_vm() {
         "    ex.shutdown()\n",
         "main()\n"
     );
-    let err = run_capture_parallel(src)
-        .expect_err("an Executor task returning a generator must be rejected");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "");
 }
 
-/// A generator into `Channel.send(...)` — already graceful (the `?` path); pins it.
+/// F3 path C: a generator into `Channel.send(...)` now crosses BY VALUE (deep copy into the queue)
+/// instead of faulting; the program runs to completion. serial == M:N.
 #[test]
-fn generator_into_channel_is_graceful_vm() {
+fn generator_into_channel_crosses_by_value() {
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
         "    ch := Channel[Iterator[int]]()\n",
         "    ch.send(gen())\n",
-        "    print(\"unreachable\")\n",
+        "    print(\"sent\")\n",
         "main()\n"
     );
-    let err = run_capture(src).expect_err("Channel.send(generator) must be rejected gracefully");
-    assert!(
-        err.message
-            .contains("a generator cannot be sent across tasks"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        err.span.line >= 1,
-        "needs a real span, got line {}",
-        err.span.line
-    );
+    assert_eq!(run_capture(src).expect("serial"), "sent\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N"), "sent\n");
 }
 
 /// Captured args mutate across yields; an infinite generator terminates via `break`.

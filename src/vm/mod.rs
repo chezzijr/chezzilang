@@ -25,7 +25,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use value::{GcRef, Value, ValueView};
-use wire::WireValue;
+use wire::{WireCallFrame, WireGenState, WireValue};
 
 use crate::ast::Span;
 #[cfg(test)]

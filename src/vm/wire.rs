@@ -15,6 +15,7 @@ use super::core::{
 };
 use super::op::ProtoId;
 use super::value::GcRef;
+use crate::ast::Span;
 use std::sync::Arc;
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
@@ -162,6 +163,61 @@ pub enum WireValue {
         proto: ProtoId,
         home: Option<usize>,
     },
+    /// F3 path C — a LOCAL frame-holding generator carried across the airlock **by value** as a DEEP
+    /// COPY. Unlike a cursor (plain snapshot data), a generator is frozen VM execution state; this arm
+    /// serializes exactly that: its `proto` (shared via `Arc<Program>`), its `home` index (like
+    /// [`Closure`](WireValue::Closure)), its backing closure (if any, wired recursively), and its
+    /// lifecycle `state`. Every parked `Value` (a `Pending` call arg or a `Suspended` operand-stack
+    /// slot) is wired recursively, so a non-sendable parked slot rejects AT SERIALIZE TIME exactly as a
+    /// list of that value would — the safer-in-direction property vs the reach-gate. `from_wire`
+    /// rebuilds a FRESH independent `GeneratorCore` on the receiving heap (deep-copy independence, like
+    /// `Cell`/`Iter`). A generator whose parked frame is mid-`recover:` (live handler) or holds a
+    /// pending `defer`, or that has more than one parked frame, is a HARD ARM: `to_wire` rejects it
+    /// cleanly (a recoverable, byte-identical-on-both-engines fault) rather than mis-serialize.
+    Generator {
+        proto: ProtoId,
+        home: Option<usize>,
+        closure: Option<Box<WireValue>>,
+        state: WireGenState,
+    },
+}
+
+/// F3 path C — the serialized lifecycle of a [`WireValue::Generator`]. Mirrors the runtime `GenState`
+/// but with parked `Value`s replaced by owned `WireValue`s (and the parked `CallFrame` reduced to its
+/// plain-data [`WireCallFrame`]).
+#[derive(Debug, Clone)]
+pub enum WireGenState {
+    /// Created but not yet driven: the not-yet-consumed call args (each wired recursively).
+    Pending(Vec<WireValue>),
+    /// Driven at least once, suspended at a `yield`: the single parked body frame plus its private
+    /// operand stack (base-0), with the private `call_depth`/`cur_base`. `handlers` is always empty
+    /// (a mid-`recover:` suspension is a HARD ARM rejected in `to_wire`) and the frame carries no
+    /// `deferred` (a pending `defer` is likewise rejected), so neither is serialized.
+    Suspended {
+        frame: WireCallFrame,
+        stack: Vec<WireValue>,
+        call_depth: usize,
+        cur_base: usize,
+    },
+    /// Body returned / fell off the end: no parked context at all.
+    Done,
+}
+
+/// F3 path C — the plain-data (Send, `GcRef`-free) fields of a suspended generator's single parked
+/// [`CallFrame`](super::CallFrame). The frame's `home`/`closure` are NOT carried here — they equal the
+/// generator core's own `home`/`closure` (asserted at serialize time), so `from_wire` reuses the
+/// rebuilt core's `GcRef`s. `deferred` is not carried (a pending defer is a rejected HARD ARM).
+#[derive(Debug, Clone)]
+pub struct WireCallFrame {
+    pub proto: ProtoId,
+    pub ip: usize,
+    pub base: usize,
+    pub counted: bool,
+    pub is_toplevel: bool,
+    pub defer_markers: Vec<usize>,
+    pub nursery_len: usize,
+    pub has_implicit_nursery: bool,
+    pub call_span: Span,
 }
 
 impl WireValue {
@@ -196,6 +252,20 @@ impl WireValue {
             // A cell follows its inner value: a cell over pure data stays on the snapshot fast path;
             // a cell embedding a handle takes the slow path so its handle is deep-copied.
             WireValue::Cell(inner) => inner.has_handle(),
+            // F3 path C: a generator crosses by value, but a parked slot (a `Pending` arg or a
+            // `Suspended` operand-stack slot) or its backing closure could itself embed a `Handle` —
+            // recurse so a `Module`/`Native` handle parked in a slot is still flagged (the M:N worker
+            // airlock rejects it) and the invariant stays honest.
+            WireValue::Generator { closure, state, .. } => {
+                closure.as_ref().is_some_and(|c| c.has_handle())
+                    || match state {
+                        WireGenState::Pending(args) => args.iter().any(WireValue::has_handle),
+                        WireGenState::Suspended { stack, .. } => {
+                            stack.iter().any(WireValue::has_handle)
+                        }
+                        WireGenState::Done => false,
+                    }
+            }
             _ => false,
         }
     }

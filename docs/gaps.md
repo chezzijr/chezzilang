@@ -44,19 +44,33 @@ with 5+ prior waves). Four findings survived re-verification on the real binary:
   doesn't cover a mutex self-deadlock), and on the `--serial` oracle it **silently loses the inner write**
   (no real lock). So a same-box-reentrant `update` is a `--serial` ≠ M:N masker; documented, not chased.
 
-- **F3 (HELD, not fixed) — generator reach-gate over-gates; docs contradict it.** Any spawned task that
-  makes a call (`spawn: ch.send(99)`) or captures a local **faults** (`a generator cannot be sent across
-  tasks`) whenever ANY module-global generator exists — even though the task never touches it. Both
-  engines identical → **no soundness/parity bug**. But `docs/concurrency.md:761` + `docs/spec.md:219`
-  claim "an untouched generator global does **not** fault," which is false for essentially every realistic
-  task (the reach analysis conservatively treats any call as maybe-reaching). **Why held:** the memory note
-  `generator-airlock-option-b-reach-gate` accepts over-gating deliberately — tightening the reach analysis
-  to accept the repro risks an unsafe *under*-gate (a live generator, holding VM frames, crossing the
-  airlock onto another OS thread = memory-safety/parity divergence), the exact hazard the over-approximation
-  avoids. That is the single riskiest change to attempt pre-JIT-freeze, so it needs its **own scoped
-  precision spike** (prove a task provably cannot reach the generic, with heavy two-engine + airlock
-  verification) — not a casual tighten, and NOT batched with F1/F4. Either make the gate precise enough to
-  honor the docs, or (interim) correct the two doc sentences to the conservative reality.
+- **F3 — generator reach-gate over-gates; docs contradict it.** *(Path C LANDED — see below; the
+  reach-gate itself is RETAINED as a now-redundant belt-and-suspenders and the over-gate/doc-contradiction
+  cleanup is the remaining open follow-up.)* Any spawned task that
+  makes a call (`spawn: ch.send(99)`) or captures a **module-global** generator **faults** (`a generator
+  cannot be sent across tasks`) whenever ANY module-global generator exists — even though the task never
+  touches it. Both engines identical → **no soundness/parity bug**. But `docs/concurrency.md` +
+  `docs/spec.md` claim "an untouched generator global does **not** fault," which is false for essentially
+  every realistic task (the reach analysis conservatively treats any call as maybe-reaching). **Why held:**
+  the memory note `generator-airlock-option-b-reach-gate` accepts over-gating deliberately — tightening the
+  reach analysis to accept the repro risks an unsafe *under*-gate (a live generator, holding VM frames,
+  crossing the airlock onto another OS thread = memory-safety/parity divergence), the exact hazard the
+  over-approximation avoids.
+
+  **F3 path C — LANDED (a LOCAL live generator is now sendable BY VALUE).** Instead of tightening the
+  reach-gate (the risky, under-gate-prone direction), the airlock VALUE serializer (`to_wire`/`from_wire`
+  only) now serializes a **frame-local** generator by value and rebuilds an **independent deep copy** on
+  the receiver: `proto` (shared `Arc<Program>`), backing closure, and the parked operand-stack/args, each
+  parked slot wired recursively so a **non-sendable parked slot rejects AT SERIALIZE TIME** (safer-in-
+  direction — a slot check can only over-reject, never under-gate). Three parked-frame shapes are **HARD
+  ARMS** rejected cleanly (byte-identical on both engines): a suspension **inside a `recover:`** (live
+  handler), a suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension.
+  `to_snap`'s module-global path is **untouched** (still `SnapValue::Poison`), so the F1 shared-ref
+  contract holds and a module-global generator still nil-replays + reach-gates. Touched: `src/vm/wire.rs`
+  (`WireValue::Generator` + `WireGenState` + `WireCallFrame` + `has_handle`), `src/vm/sched.rs`
+  (`to_wire`/`from_wire` arms), `src/vm/core.rs` (`collect_core_gcrefs`), `src/vm/stmt.rs`
+  (`display_wire`). The reach-gate (`check_task_generator_reach`) is **retained** (redundant); its
+  over-gate + doc-contradiction cleanup is the remaining open F3 follow-up.
 
 ## Session log — 2026-07-18 (8-byte `Value` shipped — one perf item BACKLOGGED)
 

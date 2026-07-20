@@ -2275,6 +2275,9 @@ impl Vm {
             WireValue::Iter { .. } => "<iterator>".to_string(),
             // A cell is a transparent box — render its inner value (never user-visible in practice).
             WireValue::Cell(inner) => self.display_wire(inner),
+            // F3 path C: a wired generator renders like its heap counterpart (`Obj::Generator` →
+            // "<generator>").
+            WireValue::Generator { .. } => "<generator>".to_string(),
         }
     }
 

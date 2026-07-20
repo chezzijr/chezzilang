@@ -77,9 +77,11 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    (the `-> Iterator[T]` annotation is optional — the element type is inferred from the first `yield`);
    the call returns a suspendable generator (one-shot cooperative coroutine, own private
    frame/stack swapped into the VM, resumed by an intrinsic `.next()`). Generators run on **both** VM
-   engines (serial `--serial` and default M:N); the only caveat is runtime, not a parity waiver — a
-   **live** generator holds a VM frame and so is not sendable across a task airlock on the M:N engine
-   (passing one over a channel/`spawn` faults gracefully). The adapter-struct pattern stays the default for lazy streaming.
+   engines (serial `--serial` and default M:N). A **live** generator held in a frame **local** is now
+   sendable across a task airlock **BY VALUE** (F3 path C — deep-copied + rebuilt on the receiver, parked
+   slots checked sendable at serialize time; mid-`recover:` / pending-`defer` / multi-frame suspensions
+   reject cleanly). A **module-global** generator is not serialized by value — it stays reach-gated + a
+   poison snapshot on M:N. The adapter-struct pattern stays the default for lazy streaming.
 4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
    `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
    dropped. `examples/concat_merge.chz`.

@@ -4,6 +4,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
+> SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`
+> only) serializes a **frame-local** generator — `proto` (shared `Arc<Program>`), backing closure, and the
+> parked operand-stack/args — and rebuilds an **independent `GeneratorCore`** on the receiving heap
+> (advancing one copy never affects the other; proven both engines over `Channel[Iterator[int]]` + `spawn:`
+> capture, Pending AND Suspended). Every parked slot is wired recursively, so a **non-sendable parked slot
+> rejects AT SERIALIZE TIME** — the safer-in-direction property (a slot check can only over-reject, never
+> under-gate). Three parked-frame shapes are **HARD ARMS** rejected cleanly (graceful, byte-identical on
+> both engines, never a silent mishandle): a suspension **inside a `recover:`** (live handler), a
+> suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension. **NOT
+> touched:** `to_snap`'s module-global path (still `SnapValue::Poison` — F1 shared-ref contract intact) and
+> the reach-gate `check_task_generator_reach` (**retained** as now-redundant; its over-gate + doc cleanup
+> is the remaining open F3 follow-up in `docs/gaps.md`). No checker change (`Iterator[T]` already
+> sendable-permissive). No hot-path change (`CallFrame` already derived `Clone`; the diff is additive to
+> the cold wire arms). Touched: `src/vm/wire.rs` (`WireValue::Generator` + `WireGenState` + `WireCallFrame`
+> + `has_handle`), `src/vm/sched.rs` (`to_wire`/`from_wire`), `src/vm/core.rs` (`collect_core_gcrefs`),
+> `src/vm/stmt.rs` (`display_wire`). ~15 module-global reach-gate faults + Poison→nil unchanged; the
+> local-generator direct-crossing "graceful-fault" tests re-scoped to expect-success + deep-copy.
+
 > **✅ BUG-HUNT (2026-07-20) — pre-JIT-freeze 5-domain adversarial hunt: 2 checker fixes + 1 doc fix
 > landed, 1 held.** Five parallel subagents (airlock, cancel/defer, channel/nursery, checker⊋compiler,
 > stdlib) swept the surface on both engines; airlock/channel/stdlib came back clean (consistent with 5+

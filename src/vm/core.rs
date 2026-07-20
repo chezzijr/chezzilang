@@ -13,7 +13,7 @@
 //! parks the *fiber* (it does not block on a primitive), so the condvar is dead on that engine.
 
 use super::value::GcRef;
-use super::wire::WireValue;
+use super::wire::{WireGenState, WireValue};
 use std::collections::VecDeque;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -299,6 +299,23 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
         WireValue::Iter { items, .. } => {
             items.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
+        }
+        // F3 path C: a generator queued in a channel/executor crosses by value, but its backing
+        // closure or a parked slot could still embed a `Handle` into the live heap — root them while
+        // the generator sits in the queue (like `Closure`/`Iter`).
+        WireValue::Generator { closure, state, .. } => {
+            if let Some(c) = closure {
+                collect_core_gcrefs(c, out, seen);
+            }
+            match state {
+                WireGenState::Pending(args) => {
+                    args.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
+                }
+                WireGenState::Suspended { stack, .. } => {
+                    stack.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
+                }
+                WireGenState::Done => {}
+            }
         }
         WireValue::Channel(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             core.q

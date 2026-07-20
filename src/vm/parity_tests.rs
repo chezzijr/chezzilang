@@ -978,10 +978,11 @@ fn executor_autodrain_skipped_on_os_exit() {
 // isolate identically on both engines.
 
 #[test]
-fn executor_submit_generator_capturing_closure_faults_both_engines() {
-    // Repro #2: a submitted closure captures a LIVE local generator (`it`). The generator lives in a
-    // local, not a module global, so the submit-time reach-gate does not fire — only the by-value
-    // airlock (`to_wire`) catches it. WAS: serial ran (bypassed to_wire), M:N faulted. NOW: BOTH fault.
+fn executor_submit_generator_capturing_closure_crosses_by_value() {
+    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The generator
+    // lives in a LOCAL, not a module global, so the submit-time reach-gate does not fire — the by-value
+    // airlock (`to_wire`) now serializes it and the submitted task drives its own copy. WAS: both
+    // faulted the generator crossing; NOW: both run it, byte-identical on serial and M:N.
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -994,11 +995,7 @@ fn main():
     ex.submit(task)
     ex.shutdown()
 main()";
-    let e = parity_entry_fault(src);
-    assert!(
-        e.contains("a generator cannot be sent across tasks"),
-        "fault msg: {e}"
-    );
+    assert_eq!(parity_entry(src), "1\n");
 }
 
 #[test]
@@ -8433,9 +8430,10 @@ main()";
 }
 
 #[test]
-fn generator_captured_into_spawn_callee_still_faults() {
-    // Regression pin: a spawn callee that REACHES a live generator still faults identically on BOTH
-    // engines — closures crossing by value must not open a hole for a frame-holding generator.
+fn generator_captured_into_spawn_callee_crosses_by_value() {
+    // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) now crosses it BY VALUE —
+    // the task drives its own copy. The module global `g := 7` is a non-generator, so the reach-gate
+    // stays inert; only the by-value airlock runs. serial == M:N, byte-identical.
     let src = "\
 g := 7
 fn gen() -> Iterator[int]:
@@ -8448,16 +8446,216 @@ fn main():
     parallel:
         spawn task()
 main()";
-    let ve = vm_outcome(src).expect_err("serial: captured generator must fault");
-    let pe = parallel_outcome(src).expect_err("M:N: captured generator must fault");
-    assert!(
-        ve.contains("a generator cannot be sent across tasks"),
-        "serial fault msg: {ve}"
-    );
-    assert!(
-        pe.contains("a generator cannot be sent across tasks"),
-        "M:N fault msg: {pe}"
-    );
+    assert_eq!(vm_outcome(src).expect("serial"), "1\n");
+    assert_eq!(parallel_outcome(src).expect("M:N"), "1\n");
+}
+
+// ----- F3 path C: a LOCAL frame-holding generator crosses the airlock BY VALUE (deep copy) -----
+// A generator held in a frame LOCAL (not a module global) is serialized by `to_wire`/`from_wire` and
+// rebuilt on the receiving heap as an INDEPENDENT copy. Every parked slot is checked sendable at
+// serialize time, so a non-sendable slot still rejects at the crossing. The MODULE-GLOBAL reach-gate
+// is untouched (those still fault). All tests assert serial (`--serial` oracle) == M:N.
+
+/// A PENDING generator (never driven) captured into a `spawn:` block crosses by value; the receiving
+/// task drives it fully, and the sender's copy is INDEPENDENT (deep-copy: sender also drives the full
+/// sequence). Byte-identical on serial and M:N.
+#[test]
+fn generator_pending_sent_into_spawn_deep_copy_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+fn main():
+    it := gen()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+            out.send(0)
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
+    for x in it:
+        print(x)
+main()";
+    let expect = "1\n2\n3\n0\n1\n2\n3\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A SUSPENDED generator (driven once → one parked frame) captured into a `spawn:` block crosses by
+/// value; the task drives the REMAINDER, and the sender's copy independently drives its own remainder
+/// (deep-copy). Byte-identical on serial and M:N.
+#[test]
+fn generator_suspended_sent_keeps_deep_copy_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+            out.send(0)
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
+    for x in it:
+        print(x)
+main()";
+    let expect = "2\n3\n0\n2\n3\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A CLOSURE-backed generator (a nested `fn` capturing a local) crosses by value: `to_wire` wires the
+/// generator's backing closure (carrying the captured `base`) and `from_wire` rebuilds it, so the
+/// received copy yields the captured-relative values independently of the sender. Covers the
+/// `closure = Some(..)` serialize/rebuild arm. serial == M:N.
+#[test]
+fn generator_closure_backed_sent_deep_copy_both() {
+    let src = "\
+fn main():
+    base := 100
+    fn gen() -> Iterator[int]:
+        yield base + 1
+        yield base + 2
+    it := gen()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+            out.send(0)
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
+    for x in it:
+        print(x)
+main()";
+    let expect = "101\n102\n0\n101\n102\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A generator crossing over an explicit `Channel[Iterator[int]]` into a task: the parent SENDS it
+/// (deep-copied into the channel), the task RECVs its own copy and drives it, and the sender's `it`
+/// is untouched (deep-copy). Byte-identical on serial and M:N.
+#[test]
+fn generator_sent_over_channel_into_task_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 10
+    yield 20
+fn main():
+    gench := Channel[Iterator[int]]()
+    out := Channel[int]()
+    it := gen()
+    gench.send(it)
+    parallel:
+        spawn:
+            g := gench.recv()
+            for x in g:
+                out.send(x)
+    print(out.recv())
+    print(out.recv())
+    for x in it:
+        print(x)
+main()";
+    let expect = "10\n20\n10\n20\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A suspended generator whose PARKED SLOT holds a non-sendable value (a self-referential recursive
+/// local fn) rejects cleanly at the crossing — the per-slot sendable-at-serialize-time check walks
+/// the parked stack and routes the recursive closure through the existing reject. Byte-identical on
+/// both engines.
+#[test]
+fn generator_parked_slot_nonsendable_rejects_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    fn rec(n: int) -> int:
+        if n <= 0:
+            return 0
+        return rec(n - 1)
+    keep := rec
+    yield 1
+    yield keep(3)
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+main()";
+    let ve = vm_outcome(src).expect_err("serial: non-sendable parked slot must reject");
+    let pe = parallel_outcome(src).expect_err("M:N: non-sendable parked slot must reject");
+    assert!(ve.contains("recursive local fn"), "serial: {ve}");
+    assert!(pe.contains("recursive local fn"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// HARD ARM (deferred → clean reject): a generator suspended with a pending `defer` in its parked
+/// frame cannot cross — reject cleanly, byte-identical on both engines.
+#[test]
+fn generator_parked_defer_rejects_clean_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    defer print(\"cleanup\")
+    yield 1
+    yield 2
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+main()";
+    let ve = vm_outcome(src).expect_err("serial: parked defer must reject");
+    let pe = parallel_outcome(src).expect_err("M:N: parked defer must reject");
+    assert!(ve.contains("pending `defer`"), "serial: {ve}");
+    assert!(pe.contains("pending `defer`"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// HARD ARM (deferred → clean reject): a generator suspended INSIDE a `recover:` block (a live
+/// handler in its parked context) cannot cross — reject cleanly, byte-identical on both engines.
+#[test]
+fn generator_yield_inside_recover_rejects_clean_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    r := recover:
+        yield 1
+        yield 2
+        99
+    yield 3
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+main()";
+    let ve = vm_outcome(src).expect_err("serial: mid-recover suspension must reject");
+    let pe = parallel_outcome(src).expect_err("M:N: mid-recover suspension must reject");
+    assert!(ve.contains("`recover:`"), "serial: {ve}");
+    assert!(pe.contains("`recover:`"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
 }
 
 /// Cross-module generator-reach fault: run a MULTI-FILE program on BOTH engines and assert each

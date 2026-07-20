@@ -182,10 +182,16 @@ that reaches no `yield`) errors `cannot infer generator element type; annotate t
 Iterator[T]`; and a **numeric mix** (`yield 1` then `yield 2.0`) is rejected — there is no `int`→`float`
 coercion at a `yield`, so the second yield conflicts with the pinned `int` (annotate `-> Iterator[float]`
 to opt in). An explicit `-> Iterator[T]` still overrides inference and validates every yield against `T`.
-Generators run on **both** VM engines (serial `--serial` and the default M:N). The only caveat is a
-runtime one, not a parity waiver: a **live** generator is not sendable across a task airlock on the M:N
-engine (it holds a VM frame), so passing one over a channel/`spawn` faults gracefully. The adapter-struct
-model remains the recommended way to write lazy sequences. Live status is tracked in
+Generators run on **both** VM engines (serial `--serial` and the default M:N). A **live** generator held
+in a frame **local** is now **sendable across a task airlock BY VALUE** (F3 path C): it is serialized —
+its `proto`, backing closure, and parked operand-stack/args — and rebuilt as an **independent deep copy**
+on the receiver (advancing one copy never affects the other), with every parked slot checked sendable at
+serialize time (a non-sendable parked slot rejects at the crossing). Three parked-frame shapes remain
+**HARD ARMS** that reject cleanly (a graceful, byte-identical-on-both-engines error) rather than
+mis-serialize: a suspension **inside a `recover:`** (a live handler), a suspension **with a pending
+`defer`**, and a (structurally-unreachable) **multi-frame** suspension. A generator held in a **module
+global** is still handled by the reach-gate (below) and snapshotted as a poison leaf on M:N. The
+adapter-struct model remains the recommended way to write lazy sequences. Live status is tracked in
 [`PROGRESS.md`](../PROGRESS.md).
 
 **`Iterable[T]` protocol + `.iter()`** (additive over the `Iterator[T]` iteration model, both
@@ -198,14 +204,14 @@ then idempotent None). This lets a plain `list` flow into the same Take/Mapped a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
 The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
-snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** (a value
-returned by calling a generator `fn`) shares the same `Iterator[T]` existential but is **not**
-sendable — its parked frames reference the producing heap. The checker cannot distinguish the two
-(both are `Iterator[T]`), so the runtime is the enforcement point: a generator crossing **any** task
-airlock as data — passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic` —
-raises a **graceful, catchable** runtime error (`a generator cannot be sent across tasks`) with the real
-spawn-site location, **never** a panic. A generator held as a **module global** is handled by **Option
-B — gated iff reachable**: it is faulted with the *same* graceful error **only when a spawned task can
+snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** held in a
+frame **local** (a value returned by calling a generator `fn`) is likewise **sendable BY VALUE** (F3
+path C): it crosses **any** task airlock as data — passed/captured into a `spawn`, or stored in a
+`Channel`/`Shared`/`RwShared`/`Atomic` — as an **independent deep copy** (its parked frame rebuilt on the
+receiver), with each parked slot recursively wired so a non-sendable slot rejects at the crossing. The
+three HARD-ARM parked shapes (mid-`recover:`, pending `defer`, multi-frame) reject cleanly with a
+graceful, catchable `... cannot be sent across tasks` error, **never** a panic. A generator held as a
+**module global** is handled by **Option B — gated iff reachable**: it is faulted with the *same* graceful error **only when a spawned task can
 actually reach it** — a direct home-global read, or *any* call / operator overload / protocol hook /
 `print` of a value whose `str(self)` hook reads the generator / unresolvable dispatch through which it
 could transitively be reached (a conservative reach analysis: if it cannot prove the task never reaches

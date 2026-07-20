@@ -742,20 +742,28 @@ aggregate) inside a task is a **compile error** (see below).
   recursive `fn` crosses as a plain `Func` (recursion resolves via its home-global slot, no capture) and
   IS sendable. Genuine cyclic *data* still reports the `maximum structural depth …` message; only a
   self-referential closure gets this one.
-- **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a
-  **frame-holding generator** (a value from calling a generator `fn`, whose parked frames reference the
-  producing heap), a **protocol existential** (it may wrap a non-sendable value), and a **module
-  namespace**. Capturing or passing any of these across the airlock is a **compile error** at a direct
-  spawn/`Channel` site — whether captured directly by a `spawn:` block, or by a closure/nested-fn used
-  as a `spawn f()` **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global**
-  non-sendable value, by contrast, is a **read-only global** resolvable in every task (like a free fn),
-  **not** a per-task capture — reading it inside a task is fine and it is never gated (only *reassigning*
-  or *in-place mutating* a module global inside a task is the error, below). The checker
-  cannot distinguish a generator from a cursor (both are `Iterator[T]`), so a generator crossing a task
-  airlock **as data** (passed/captured into a `spawn`, or stored in a `Channel`/`Shared`/`RwShared`/`Atomic`)
-  is reported at **runtime** as a **graceful, catchable** error (`a generator cannot be sent across
-  tasks`) carrying the real spawn-site location, **never** a panic. A generator held as a **module
-  global** follows **Option B — gated iff reachable**: it faults with the *same* error only when a
+- **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a **protocol existential** (it may
+  wrap a non-sendable value), and a **module namespace**. Capturing or passing any of these across the
+  airlock is a **compile error** at a direct spawn/`Channel` site — whether captured directly by a
+  `spawn:` block, or by a closure/nested-fn used as a `spawn f()` **callee**/**arg** (Task 2a gates the
+  callee/arg sites too). A **module-global** non-sendable value, by contrast, is a **read-only global**
+  resolvable in every task (like a free fn), **not** a per-task capture — reading it inside a task is fine
+  and it is never gated (only *reassigning* or *in-place mutating* a module global inside a task is the
+  error, below).
+- **Frame-holding generator (F3 path C — sendable BY VALUE from a frame local):** a live generator held
+  in a frame **local** crosses **any** task airlock **as data** (passed/captured into a `spawn`, or stored
+  in a `Channel`/`Shared`/`RwShared`/`Atomic`) as an **independent deep copy** — `to_wire`/`from_wire`
+  serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
+  `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
+  carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
+  **non-sendable parked slot** (e.g. a self-referential recursive local fn) still **rejects at the
+  crossing** — the safer-in-direction property vs the reach-gate (a slot is checked at serialize time, so
+  there is no under-gate). Three parked-frame shapes are **HARD ARMS** rejected cleanly (a graceful,
+  byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a panic, **never** a
+  silent mishandle): a suspension **inside a `recover:`** (a live handler), a suspension **with a pending
+  `defer`**, and a (checker-unreachable, defensively-guarded) **multi-frame** suspension. A generator held
+  as a **module global** is NOT serialized by value — it follows **Option B — gated iff reachable**
+  (below) and snapshots as a poison leaf on M:N (the F1 shared-ref contract): it faults with the *same* error only when a
   spawned task can actually reach it (a direct home-global read, or *any* call / operator / hook /
   `print` of a value whose `str` hook reads it / unresolvable dispatch it could transitively reach — a
   conservative reach analysis; an untouched generator global does **not** fault). The gate runs during

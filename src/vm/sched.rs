@@ -3284,14 +3284,90 @@ impl Vm {
                     type_key: type_key.clone(),
                     inner: Box::new(self.to_wire_depth(*inner, depth + 1)?),
                 },
-                // Experimental generators cannot cross an OS-thread heap boundary — their parked
-                // frames reference this heap. The checker marks them non-sendable, so this is a
-                // defensive fault (an erased path that smuggled one into a `spawn`/channel).
-                Obj::Generator(_) => {
-                    return Err(self.err(
-                        "a generator cannot be sent across tasks".to_string(),
-                        Span { line: 0, col: 0 },
-                    ));
+                // F3 path C — a LOCAL frame-holding generator crosses the airlock BY VALUE as a DEEP
+                // COPY: its `proto` (shared via `Arc<Program>`), `home` index, backing closure, and
+                // lifecycle state, with every parked slot wired recursively so a non-sendable slot
+                // rejects AT SERIALIZE TIME (safer-in-direction than the reach-gate). A generator held
+                // in a MODULE GLOBAL never reaches here — it snapshots via `to_snap` (→ Poison) and is
+                // guarded by `check_task_generator_reach`; only a frame-local generator does. The
+                // single-frame Suspended invariant is load-bearing (the checker resets `in_generator`
+                // at every fn/closure boundary, so a suspension always parks exactly the generator body
+                // frame); a mid-`recover:` handler, a pending `defer`, or >1 parked frame is a HARD ARM
+                // rejected cleanly below (never mis-serialized).
+                Obj::Generator(g) => {
+                    let home = self.home_index(g.home);
+                    let closure = match g.closure {
+                        Some(c) => Some(Box::new(self.to_wire_depth(Value::obj(c), depth + 1)?)),
+                        None => None,
+                    };
+                    let state = match &g.state {
+                        GenState::Pending(args) => {
+                            let mut wargs = Vec::with_capacity(args.len());
+                            for a in args {
+                                wargs.push(self.to_wire_depth(*a, depth + 1)?);
+                            }
+                            WireGenState::Pending(wargs)
+                        }
+                        GenState::Done => WireGenState::Done,
+                        GenState::Suspended => {
+                            // HARD ARMS — reject cleanly (same code path on both engines → byte-
+                            // identical error) rather than silently mis-serialize.
+                            if g.ctx.frames.len() != 1 {
+                                return Err(self.err(
+                                    "a generator suspended across more than one call frame cannot be sent across tasks".to_string(),
+                                    Span { line: 0, col: 0 },
+                                ));
+                            }
+                            if !g.ctx.handlers.is_empty() {
+                                return Err(self.err(
+                                    "a generator suspended inside a `recover:` cannot be sent across tasks".to_string(),
+                                    Span { line: 0, col: 0 },
+                                ));
+                            }
+                            let frame = &g.ctx.frames[0];
+                            if !frame.deferred.is_empty() {
+                                return Err(self.err(
+                                    "a generator suspended with a pending `defer` cannot be sent across tasks".to_string(),
+                                    Span { line: 0, col: 0 },
+                                ));
+                            }
+                            // The sole body frame's home/closure equal the core's by construction
+                            // (`push_frame(proto, g.home, g.closure, …)`); assert defensively and
+                            // reject rather than wire a mismatched frame.
+                            if frame.home != g.home || frame.closure != g.closure {
+                                return Err(self.err(
+                                    "a generator with an inconsistent parked frame cannot be sent across tasks".to_string(),
+                                    Span { line: 0, col: 0 },
+                                ));
+                            }
+                            let mut wstack = Vec::with_capacity(g.ctx.stack.len());
+                            for v in &g.ctx.stack {
+                                wstack.push(self.to_wire_depth(*v, depth + 1)?);
+                            }
+                            WireGenState::Suspended {
+                                frame: WireCallFrame {
+                                    proto: frame.proto,
+                                    ip: frame.ip,
+                                    base: frame.base,
+                                    counted: frame.counted,
+                                    is_toplevel: frame.is_toplevel,
+                                    defer_markers: frame.defer_markers.clone(),
+                                    nursery_len: frame.nursery_len,
+                                    has_implicit_nursery: frame.has_implicit_nursery,
+                                    call_span: frame.call_span,
+                                },
+                                stack: wstack,
+                                call_depth: g.ctx.call_depth,
+                                cur_base: g.ctx.cur_base,
+                            }
+                        }
+                    };
+                    WireValue::Generator {
+                        proto: g.proto,
+                        home,
+                        closure,
+                        state,
+                    }
                 }
                 // A `Cell` (a by-reference-captured local's box) crosses the airlock by value as a
                 // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell, so a
@@ -3456,6 +3532,80 @@ impl Vm {
             WireValue::Func { proto, home } => {
                 let home = self.worker_home(home);
                 Value::obj(self.heap.alloc(Obj::Func { proto, home }))
+            }
+            // F3 path C: rebuild a FRESH, independent `GeneratorCore` on this heap (deep-copy
+            // independence, like `Cell`/`Iter`). `worker_home` resolves the home index; the backing
+            // closure + parked slots reconstruct bottom-up into this heap. `Pending` reuses
+            // `alloc_generator`; `Done`/`Suspended` build the core directly (this method is in-module,
+            // so it can construct the private `CallFrame`/`GenCtx`/`GeneratorCore`). The rebuilt frame's
+            // `home`/`closure` reuse the core's rebuilt `GcRef`s (they were equal at serialize time).
+            WireValue::Generator {
+                proto,
+                home,
+                closure,
+                state,
+            } => {
+                let home = self.worker_home(home);
+                let closure = closure.map(|c| {
+                    self.from_wire(*c)
+                        .as_obj()
+                        .expect("a generator's backing closure wire rebuilds to a heap object")
+                });
+                match state {
+                    WireGenState::Pending(wargs) => {
+                        let args: Vec<Value> =
+                            wargs.into_iter().map(|w| self.from_wire(w)).collect();
+                        self.alloc_generator(proto, home, closure, args)
+                    }
+                    WireGenState::Done => {
+                        let core = GeneratorCore {
+                            proto,
+                            home,
+                            closure,
+                            state: GenState::Done,
+                            ctx: GenCtx::default(),
+                        };
+                        Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+                    }
+                    WireGenState::Suspended {
+                        frame,
+                        stack,
+                        call_depth,
+                        cur_base,
+                    } => {
+                        let stack: Vec<Value> =
+                            stack.into_iter().map(|w| self.from_wire(w)).collect();
+                        let rebuilt = CallFrame {
+                            proto: frame.proto,
+                            ip: frame.ip,
+                            base: frame.base,
+                            home,
+                            closure,
+                            counted: frame.counted,
+                            is_toplevel: frame.is_toplevel,
+                            deferred: Vec::new(),
+                            defer_markers: frame.defer_markers,
+                            nursery_len: frame.nursery_len,
+                            has_implicit_nursery: frame.has_implicit_nursery,
+                            call_span: frame.call_span,
+                        };
+                        let ctx = GenCtx {
+                            frames: vec![rebuilt],
+                            stack,
+                            call_depth,
+                            cur_base,
+                            handlers: Vec::new(),
+                        };
+                        let core = GeneratorCore {
+                            proto,
+                            home,
+                            closure,
+                            state: GenState::Suspended,
+                            ctx,
+                        };
+                        Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+                    }
+                }
             }
         }
     }
