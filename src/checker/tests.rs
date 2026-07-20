@@ -13170,6 +13170,31 @@ fn newtype_cast_unwrap_ok() {
 }
 
 #[test]
+fn scalar_cast_rejects_aggregate_arg() {
+    // int/float/bool over an aggregate (List/Map/Set/tuple) is outside the scalar-cast domain and
+    // always faults at runtime (`{cast}() cannot convert List`). Reject at check — a check-OK-then-
+    // run-fault hole. (`str` of an aggregate is a legal display and must still pass.)
+    rejects(
+        "fn main():\n    print(float([1, 2]))\nmain()\n",
+        "float() cannot convert List",
+    );
+    rejects(
+        "fn main():\n    print(int((1, 2)))\nmain()\n",
+        "int() cannot convert tuple",
+    );
+    rejects(
+        "fn main():\n    print(bool({1, 2}))\nmain()\n",
+        "bool() cannot convert Set",
+    );
+    rejects(
+        "fn main():\n    m := {\"a\": 1}\n    print(int(m))\nmain()\n",
+        "int() cannot convert Map",
+    );
+    // str-of-aggregate is a display, not a scalar cast — still accepted:
+    ok("fn main():\n    print(str([1, 2]))\nmain()\n");
+}
+
+#[test]
 fn newtype_str_underlying_unwrap_ok() {
     // For newtype N = str, str(n) unwraps to the inner str.
     ok(
@@ -17535,6 +17560,77 @@ fn defer_block_q_still_allowed() {
     // expression, not a statement: the escaping-flow guard never sees it.
     entry_ok(
         "fn g() -> int!:\n    return Ok(2)\nfn f() -> int!:\n    defer:\n        v := g()?\n        print(v)\n    return Ok(1)\nprint(f())\n",
+    );
+}
+
+#[test]
+fn defer_block_q_discards_regardless_of_enclosing_return() {
+    // The `?`-in-defer contract is DISCARD — the enclosing fn's return type is irrelevant (the block
+    // is its own closure). Before the fix, `infer_try` validated the defer-block `?` against the
+    // enclosing `current_ret`, so it over-rejected under a nil/int-returning fn and only accepted
+    // under a Result-returning one by coincidence. All of these must check clean now:
+    // nil-returning enclosing fn:
+    entry_ok(
+        "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        v := g()?\n        print(v)\n    print(\"body\")\nf()\n",
+    );
+    // plain int-returning enclosing fn:
+    entry_ok(
+        "fn g() -> int!:\n    return Ok(2)\nfn f() -> int:\n    defer:\n        v := g()?\n        print(v)\n    return 7\nprint(f())\n",
+    );
+    // Option `?` discarded under a nil-returning fn (its kind need not match the enclosing return):
+    entry_ok(
+        "fn h() -> int?:\n    return None\nfn f():\n    defer:\n        v := h()?\n        print(v)\n    print(\"body\")\nf()\n",
+    );
+    // module top-level defer block:
+    entry_ok(
+        "fn g() -> int!:\n    return Err(\"x\")\ndefer:\n    v := g()?\n    print(v)\nprint(\"top\")\n",
+    );
+}
+
+#[test]
+fn defer_block_q_still_rejects_non_sum_operand() {
+    // The discard arm must still reject a `?` on a non-Result/Option operand.
+    let errs = check_entry(
+        "fn f():\n    defer:\n        v := (1 + 2)?\n        print(v)\n    print(\"b\")\nf()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expects Result or Option")),
+        "expected non-sum `?` rejection in defer block, got: {errs:?}"
+    );
+}
+
+#[test]
+fn fn_declared_in_defer_block_gets_own_q_context() {
+    // `in_defer_block` must reset across the fn boundary: a nil-returning fn DECLARED inside a defer
+    // block still rejects `?` (it is not itself a defer block), while a Result-returning one accepts.
+    let errs = check_entry(
+        "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        fn inner():\n            v := g()?\n            print(v)\n        inner()\n    print(\"b\")\nf()\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("returns nil, not Result or Option")),
+        "a nil fn declared inside a defer block must still reject `?`, got: {errs:?}"
+    );
+    entry_ok(
+        "fn src() -> int!:\n    return Ok(5)\nfn f():\n    defer:\n        fn inner() -> int!:\n            return Ok(src()? + 1)\n        print(\"in {inner()}\")\n    print(\"b\")\nf()\n",
+    );
+}
+
+#[test]
+fn spawn_block_in_defer_does_not_inherit_q_discard() {
+    // `in_defer_block` must NOT leak across a spawn task boundary: a spawned task is its own closure,
+    // so a `?` inside it targets the task (nil-returning → reject), exactly like a bare
+    // `spawn: v := g()?` — NOT the enclosing defer's discard. (Regression for the leak the F1 flag
+    // introduced.) Both the defer-wrapped and the bare spawn form must reject identically.
+    let wrapped = check_entry(
+        "import std.concurrency\nfn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        spawn:\n            v := g()?\n            print(v)\n    print(\"b\")\nf()\n",
+    );
+    assert!(
+        wrapped
+            .iter()
+            .any(|e| e.message.contains("returns nil, not Result or Option")),
+        "a `?` in a spawn block inside a defer must still reject (task is nil-returning), got: {wrapped:?}"
     );
 }
 

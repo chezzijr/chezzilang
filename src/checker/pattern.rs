@@ -2914,6 +2914,22 @@ impl Checker {
                 }
             };
         }
+        // Inside a `defer:` block (but not a `recover:` nested in it — that's handled above), a `?`
+        // is DISCARDED at the block boundary: the block is its own closure with no error-return
+        // contract, so a fired Err/None just short-circuits the cleanup and is dropped
+        // (`syntax.md`). The enclosing function's return type is therefore irrelevant — accept any
+        // Result/Option and yield the success payload; a non-sum operand is rejected as everywhere.
+        if self.in_defer_block {
+            return match t {
+                Ty::Result(ok, _) => *ok,
+                Ty::Option(inner) => *inner,
+                Ty::Unknown => Ty::Unknown,
+                other => {
+                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    Ty::Unknown
+                }
+            };
+        }
         // The enclosing function must be able to early-return the Err/None. The operand's sum-type
         // KIND must match the enclosing return's KIND — a Result-`?` early-returns an `Err`, so the
         // function must itself return `Result`; an Option-`?` early-returns a `None`, so it must
@@ -3360,6 +3376,7 @@ impl Checker {
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
         // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
@@ -3457,6 +3474,7 @@ impl Checker {
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
+        self.in_defer_block = saved_in_defer;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.yield_ty = saved_yield;

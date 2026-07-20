@@ -8311,6 +8311,23 @@ fn d_defer_block_free_capture_parity() {
 }
 
 #[test]
+fn defer_block_q_discards_fired_err_parity() {
+    // The `?`-in-defer contract is DISCARD (the block is its own closure — `syntax.md`). A FIRED
+    // Err short-circuits the block and is dropped: the tail `print` never runs, the enclosing
+    // nil-returning fn returns normally, and both engines agree. (The checker fix that made this
+    // program compile under a nil-returning fn — F1 — must not change the runtime discard.)
+    assert_parity_out(
+        "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        v := g()?\n        print(\"never {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
+        "body\ndone\n",
+    );
+    // An Ok value flows past `?` into the rest of the cleanup body:
+    assert_parity_out(
+        "fn g() -> int!:\n    return Ok(7)\nfn f():\n    defer:\n        v := g()?\n        print(\"got {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
+        "body\ngot 7\ndone\n",
+    );
+}
+
+#[test]
 fn d_no_undercapture_method_call_on_captured_receiver_parity() {
     // A method call on a captured receiver (outer local `xs`) inside a nested fn.
     assert_parity_out(

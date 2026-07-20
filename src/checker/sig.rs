@@ -2231,7 +2231,18 @@ impl Checker {
                     self.error(sp, format!("'{kw}' is not allowed inside a defer block"));
                 }
                 let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+                // The `defer:` block is its own closure with a `?`-DISCARDING contract: a fired
+                // Err/None short-circuits the block and is dropped, never reaching the enclosing
+                // fn's return (`syntax.md`). So a `?` here must be typed against a defer-local
+                // discarding context, NOT the enclosing `current_ret` (which over-rejects when the
+                // fn returns nil/int, and mis-accepts-by-coincidence when it returns Result). Zero
+                // `recover_depth` too — this closure boundary means a `?` in the block cannot target
+                // an enclosing `recover:` boundary (a `recover:` nested INSIDE the block re-arms it).
+                let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+                let saved_in_defer = std::mem::replace(&mut self.in_defer_block, true);
                 self.check_block(body);
+                self.in_defer_block = saved_in_defer;
+                self.recover_depth = saved_recover;
                 self.loop_depth = saved_loop_depth;
             }
             StmtKind::Parallel { body } => {
@@ -2367,11 +2378,17 @@ impl Checker {
                         // `Continue` fires at check time; a legitimate loop INSIDE the block
                         // re-increments from 0, keeping its own break/continue legal.
                         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+                        // A spawned task is its OWN closure (fresh child proto), so an enclosing
+                        // `defer:` block's `?`-discard contract must not extend into it: a `?` in
+                        // this task targets the task (nil-returning → reject), exactly as a bare
+                        // `spawn: v := g()?` does. Reset the flag across this task boundary.
+                        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
                         }
                         self.pop_scope();
+                        self.in_defer_block = saved_in_defer;
                         self.loop_depth = saved_loop_depth;
                         self.capture_floors.pop();
                     }
@@ -3217,6 +3234,8 @@ impl Checker {
         // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
         // not an enclosing recover at the definition site.
         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
+        // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
+        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         self.push_scope();
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
         // off-probe; parity-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
@@ -3336,6 +3355,7 @@ impl Checker {
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
+        self.in_defer_block = saved_in_defer;
         self.exit_type_params(saved_tps);
     }
 

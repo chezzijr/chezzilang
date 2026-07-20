@@ -41,6 +41,7 @@ impl Checker {
             collected_rets: Vec::new(),
             in_generator: false,
             in_fn_body: false,
+            in_defer_block: false,
             collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),

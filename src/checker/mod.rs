@@ -1535,6 +1535,13 @@ struct Checker {
     /// the runtime unwinds an unhandled Err/None at the program boundary) vs a nil-returning fn body
     /// (illegal — the propagated Err/None would be silently swallowed). See `infer_try`.
     in_fn_body: bool,
+    /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
+    /// fn/closure boundaries, like `recover_depth`). A `?` here is DISCARDED at the block boundary
+    /// (`syntax.md`: "a `?` short-circuit inside the block is discarded — a cleanup body has no
+    /// error-return contract"), so it must NOT be validated against the enclosing function's return
+    /// type. See `infer_try`. Entering a defer block also zeroes `recover_depth` (the block is its
+    /// own closure — a `?` in it cannot target an outer `recover:` boundary).
+    in_defer_block: bool,
     /// Element types gathered from every `yield` during a generator's return-type inference
     /// (`infer_fn_ret`, `inferring_ret` mode). The FIRST pins the generator's element `T`
     /// (strict-first-yield); pass-2 `check_yield` validates the rest against it. Drained per-fn.
