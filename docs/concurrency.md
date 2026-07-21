@@ -838,13 +838,17 @@ aggregate) inside a task is a **compile error** (see below).
   generator held as a **module global** crosses **BY VALUE too** (backlog item B): a task that reaches it
   gets its own independent deep copy through the same `to_wire`/`from_wire` path, via the per-task
   module-global snapshot (`to_snap`) each task already takes. So two tasks reaching the same module-global
-  generator each drive their **own** copy (and the parent keeps its own), and the same reject shapes apply
-  (a non-sendable parked slot, a value cycle) — the reject is the real `to_wire` fault, re-stamped with the
-  nursery span, byte-identical on both engines. Memory safety rests on `from_wire` rebuilding a fresh
-  `GeneratorCore` on the worker heap (never a shared cross-heap `GcRef`) plus `ensure_crossable` barring
-  any parked host handle. (The earlier **Option-B reach-gate + poison→`nil`** model — which faulted any
-  task that *could reach* a module-global generator and snapshotted it inert — is **retired**: by-value
-  crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
+  generator each drive their **own** copy (and the parent keeps its own). Memory safety rests on `from_wire`
+  rebuilding a fresh `GeneratorCore` on the worker heap (never a shared cross-heap `GcRef`). A **non-sendable**
+  module-global generator (a non-sendable parked slot, a value cycle, a parked host handle) differs from the
+  frame-local case in ONE way: `snapshot_modules` walks **every** global once at the first `spawn`, reached
+  or not, so it must NOT eager-fault on a generator the program merely *holds*. Instead `to_snap`'s slow arm
+  snapshots such a generator as an inert **`Nil` placeholder** — a task that never touches it runs **clean**,
+  and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`), byte-identical
+  on both engines. (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
+  `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
+  reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
+  by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
 - **Captured locals are isolated copies; module globals are frozen.** Reassigning (or in-place mutating)
   a captured **local** inside a task is fine — it mutates that task's own copy, invisible to the parent (so
   it can't share state by accident). Both **reassigning** a captured **module global** AND **mutating it in

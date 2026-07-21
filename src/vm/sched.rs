@@ -3472,8 +3472,10 @@ impl Vm {
     /// proto, backing closure, and parked slots) and `from_wire` rebuilds a FRESH independent
     /// `GeneratorCore` on the worker heap, so each task drives its own copy (consistent with the F1
     /// per-task snapshot). It rides the fast path when handle-free; the slow `Obj::Generator` arm
-    /// re-raises the real `to_wire` reject if a parked slot is non-sendable (host handle / >depth-cap
-    /// nest) or the value forms a reference cycle. The old Option-B poison-Nil leaf + reach-gate are gone.
+    /// snapshots a sendable generator BY VALUE and a non-sendable one (parked host handle / >depth-cap
+    /// nest / reference cycle) as an inert `Nil` placeholder — so a module that merely *holds* a
+    /// non-sendable generator it never sends still spawns cleanly (fault only when a task REACHES it,
+    /// at the use site). The old Option-B reach-gate is gone; safety is by-value deep copy or `Nil`.
     pub(super) fn to_snap(&self, v: Value) -> Result<SnapValue, RuntimeError> {
         self.to_snap_depth(v, 0)
     }
@@ -3646,21 +3648,26 @@ impl Vm {
             }
             // Backlog item B — a module-global live generator crosses BY VALUE, exactly like a
             // frame-local one. A generator reaches this SLOW arm only because the fast-path `to_wire`
-            // either errored (a non-sendable parked slot / a reference cycle → the `?` re-raises that
-            // REAL reject, byte-identically on both engines) OR the value had a `has_handle()` sibling
-            // (a container embedding both a handle-bearing value AND this generator: the whole value
-            // fails the fast lane, but the generator itself may still be sendable). Re-run `to_wire` for
-            // this node and `ensure_crossable` it: a parked module/native/FFI handle → reject (emitting
-            // `Wire` would replay a parent `GcRef` on the worker — the memory-safety hole); otherwise
-            // encode the by-value wire copy. `from_wire` rebuilds a fresh independent `GeneratorCore` on
-            // the worker heap. Span{0,0} is re-stamped to the nursery span by `ensure_snapshot`'s
-            // `map_err`, so the fault is `serial == M:N` byte-identical. (The old Option-B poison→Nil
-            // leaf + reach-gate are retired: safety is now by-value deep copy, not an inert Nil.)
-            Obj::Generator(_) => {
-                let w = self.to_wire_depth(v, depth, &mut WireMemo::default())?;
-                self.ensure_crossable(&w, Span { line: 0, col: 0 })?;
-                SnapValue::Wire(w)
-            }
+            // either errored (a non-sendable parked slot / a reference cycle) OR the value had a
+            // `has_handle()` sibling (a container embedding both a handle-bearing value AND this
+            // generator: the whole value fails the fast lane, but the generator itself may still be
+            // sendable). Re-run `to_wire` for this node:
+            //   - Ok + no handle  → encode the by-value wire copy; `from_wire` rebuilds a fresh
+            //     independent `GeneratorCore` on the worker heap (the feature).
+            //   - otherwise (non-sendable parked slot / reference cycle / a parked module/native/FFI
+            //     handle) → snapshot an inert `Nil` placeholder, NOT the `?`-propagated reject. Emitting
+            //     `Wire(w)` for a handle-bearing generator would replay a parent `GcRef` on the worker
+            //     (the memory-safety hole), so it must not cross — but eager-faulting the WHOLE snapshot
+            //     here would abort every `spawn` in a module that merely *holds* a non-sendable generator
+            //     it never sends (a regression: `snapshot_modules` walks EVERY global once, reached or
+            //     not). `Nil` keeps the snapshot infallible and inert: a task that never touches the
+            //     generator runs clean, and one that DOES reach it faults at the use site (iterating a
+            //     `Nil` is not iterable) — "fault only when reached", `serial == M:N` by construction
+            //     (both engines snapshot from the same memoized frozen copy).
+            Obj::Generator(_) => match self.to_wire_depth(v, depth, &mut WireMemo::default()) {
+                Ok(w) if !w.has_handle() => SnapValue::Wire(w),
+                _ => SnapValue::Wire(WireValue::Nil),
+            },
             // A `Cell` embedding a handle snaps like a 1-field box (its inner recursively snapped) —
             // replayed as a FRESH independent cell (design §4 F1). A pure-data cell took the `to_wire`
             // fast path above (`WireValue::Cell`).

@@ -139,23 +139,31 @@ gen+container cycle reject). `src/vm/{wire.rs,sched.rs,fxhash.rs,core.rs,stmt.rs
 frame-local one (F3 path C) — the reach-gate + Option-B poison→`nil` model is RETIRED. `to_snap_depth`'s
 fast path no longer excludes generator-embedding values (`!value_embeds_generator` clause dropped), so a
 handle-free module-global generator with all-sendable parked slots rides the `SnapValue::Wire(to_wire…)`
-lane; its slow `Obj::Generator` arm re-raises the real `to_wire` reject (non-sendable parked slot /
-reference cycle) and `ensure_crossable`s any parked host handle, instead of silently poisoning to `nil`.
+lane. Its slow `Obj::Generator` arm, however, must **NOT** re-raise the `to_wire` reject: `snapshot_modules`
+walks EVERY module global once at the first `spawn`, reached or not, so eager-faulting there aborts any
+program that merely *holds* a non-sendable module-global generator it never sends (a regression vs the old
+poison→`nil`-then-reach-gate model). Instead the slow arm snapshots a non-sendable generator (non-sendable
+parked slot / reference cycle / parked host handle) as an inert **`Nil` placeholder** — the untouched-global
+program runs CLEAN, and a task that REACHES it faults recoverably at the use site (`cannot iterate over nil`),
+byte-identical serial == M:N. (Fault only when reached — the "when reached" contract; the frame-local F3
+path-C crossing still rejects eagerly at `to_wire` because it only crosses the value actually sent.)
 Each task already snapshots every module global per-task (`ensure_snapshot`, both engines since `6dca22c`),
-so two tasks reaching the same module-global generator each drive their OWN independent copy — memory-safe
-because `from_wire` rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap `GcRef`).
+so two tasks reaching the same SENDABLE module-global generator each drive their OWN independent copy —
+memory-safe because `from_wire` rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap
+`GcRef`); a non-sendable one is inert `Nil` on every worker, so no cross-heap handle can escape either.
 **Net-deletion:** the whole reach-gate machinery is gone — `check_task_generator_reach`,
 `check_outer_pending_generator_reach`, `check_task_reach_conservative`, `scan_proto_reaches_generator`,
 `proto_reaches_generator(+_rec)` and its resolve/scan helpers, `any_hook_reaches_generator`,
 `any_module_global_embeds_generator`, `module_slot_embeds_generator`, `value_embeds_generator`, the
-`gate_executor_queue` executor path, the `has_generators` VM field, and the `SnapValue::Poison` variant.
+`gate_executor_queue` executor path, and the `has_generators` VM field. (The `SnapValue::Poison` variant is
+gone too; the inert placeholder reuses `SnapValue::Wire(WireValue::Nil)`.)
 **CORRECTION to the original spec premise:** the "serial=shared-ref vs M:N=by-value-copy divergence" that
 rated this MED-HIGH (why the `value_embeds` clause + `Poison` were kept, commit `7b73e7c`) was STALE after
 `6dca22c` — the serial engine ALSO snapshots module globals per-task via the same memoized
 `ensure_snapshot`/`to_snap`, so a per-task by-value generator copy is `serial == M:N` by construction.
 Tests: `generator_module_global_{reached_crosses,suspended_reached_resumes,two_tasks_independent_copies,
-parked_slot_nonsendable_rejects,in_data_cycle_rejects,via_executor_crosses}_both` +
-`generator_cross_module_member_call_crosses_both` (`src/vm/parity_tests.rs`). The memories
+parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs_clean,via_executor_crosses}_both`
++ `generator_cross_module_member_call_crosses_both` (`src/vm/parity_tests.rs`). The memories
 `generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the retired model.
 
 ### NOT on the backlog (settled — not limitations)

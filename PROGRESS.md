@@ -9,12 +9,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > exactly like a frame-local one (F3 path C). The reach-gate + Option-B poison→`nil` model is RETIRED.**
 > `to_snap_depth`'s fast path no longer excludes generator-embedding values (`!value_embeds_generator`
 > clause dropped), so a handle-free module-global generator with all-sendable parked slots rides the
-> `SnapValue::Wire(to_wire…)` lane; the slow `Obj::Generator` arm re-raises the real `to_wire` reject (a
-> non-sendable parked slot / reference cycle) and `ensure_crossable`s any parked host handle — instead of
-> silently emitting `SnapValue::Poison` (→`nil`). Memory safety is now by-value deep copy: `from_wire`
-> rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap `GcRef`); each task already
+> `SnapValue::Wire(to_wire…)` lane. The slow `Obj::Generator` arm, however, snapshots a NON-sendable
+> module-global generator (non-sendable parked slot / reference cycle / parked host handle) as an inert
+> `SnapValue::Wire(WireValue::Nil)` placeholder — it must NOT re-raise the `to_wire` reject there, because
+> `snapshot_modules` walks EVERY global once at the first `spawn`, so eager-faulting would abort any program
+> that merely HOLDS such a generator without sending it (a regression a review round caught on the real
+> binary — see the item-B remediation note below). So an untouched non-sendable global runs CLEAN; a task
+> that REACHES it faults recoverably at the use site (`cannot iterate over nil`), byte-identical serial ==
+> M:N ("fault only when reached"). Memory safety is by-value deep copy for the sendable case: `from_wire`
+> rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap `GcRef`); a non-sendable one is
+> inert `Nil` on every worker, so no cross-heap handle escapes. Each task already
 > snapshots every module global per-task (`ensure_snapshot`, both engines since `6dca22c`), so two tasks
-> reaching the same module-global generator each drive their OWN independent copy — `serial == M:N` by
+> reaching the same SENDABLE module-global generator each drive their OWN independent copy — `serial == M:N` by
 > construction (verified byte-identical on the real binary, both engines). **The stale MED-HIGH risk
 > premise** — a "serial=shared-ref vs M:N=by-value-copy divergence" (why `7b73e7c` kept the
 > `value_embeds` clause + `Poison`) — was dead after `6dca22c` made serial snapshot per-task too.
@@ -22,12 +28,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `check_outer_pending_generator_reach`, `check_task_reach_conservative`, `scan_proto_reaches_generator`,
 > `proto_reaches_generator(+_rec)` + resolve/scan helpers, `any_hook_reaches_generator`,
 > `any_module_global_embeds_generator`, `module_slot_embeds_generator`, `value_embeds_generator`,
-> `gate_executor_queue` (netio), the `has_generators` VM field, and the `SnapValue::Poison` variant — plus
-> the ~30 now-obsolete reach-gate `*_faults_both`/`genreach_*` tests (their scenarios now cross or reject
-> for a real serialize-time reason). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
+> `gate_executor_queue` (netio), the `has_generators` VM field, and the `SnapValue::Poison` variant (the
+> inert placeholder reuses `SnapValue::Wire(WireValue::Nil)`) — plus
+> the ~30 now-obsolete reach-gate `*_faults_both`/`genreach_*` tests (their scenarios now cross or fault
+> at the reach site). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
 > `generator_module_global_{reached_crosses,suspended_reached_resumes,two_tasks_independent_copies,
-> parked_slot_nonsendable_rejects,in_data_cycle_rejects,via_executor_crosses}_both` +
-> `generator_cross_module_member_call_crosses_both`. The memories
+> parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs_clean,via_executor_crosses}_both`
+> + `generator_cross_module_member_call_crosses_both`. **Remediation (main-loop judge, post-review):** the
+> auto-task's first cut made the slow `Obj::Generator` arm re-raise the `to_wire` reject, which regressed
+> any program merely HOLDING a non-sendable module-global generator (confirmed on the real binary: a cyclic
+> global generator + an unrelated `spawn` that never touched it faulted on the branch but ran clean on main).
+> Fixed by the inert-`Nil` fallback above; a review prosecutor had flagged exactly this (defense wrongly
+> dismissed it — re-verified by hand per `auto-task-review-unreliable`). The memories
 > `generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the RETIRED model.
 
 > **✅ CONCURRENCY / SOUNDNESS (2026-07-21, `auto-task/serial-module-globals`) — `docs/gaps.md` §B3

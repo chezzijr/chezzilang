@@ -9096,8 +9096,11 @@ main()";
 }
 
 /// A module-global generator carrying a genuinely NON-SENDABLE parked slot (a >10000-deep acyclic nest,
-/// tripping `MAX_STRUCTURAL_DEPTH`) still REJECTS recoverably when reached — the direct `to_wire`
-/// reject via the slow-arm `?`, NOT a poison→Nil, NOT a crash. Byte-identical serial == M:N.
+/// tripping `MAX_STRUCTURAL_DEPTH`) is snapshotted as an inert `Nil` placeholder (the `to_snap` slow arm
+/// no longer eager-faults the whole snapshot — that regressed any module merely *holding* such a
+/// generator). A task that REACHES it therefore faults recoverably AT THE USE SITE ("cannot iterate over
+/// nil"), NOT a crash, NOT a silent skip. Byte-identical serial == M:N. (The unreached case runs clean —
+/// see `generator_module_global_unreached_nonsendable_runs_clean_both`.)
 #[test]
 fn generator_module_global_parked_slot_nonsendable_rejects_both() {
     let src = "\
@@ -9117,16 +9120,18 @@ fn main():
             for x in g:
                 out.send(x)
 main()";
-    let ve = vm_outcome(src).expect_err("serial: non-sendable parked slot must reject");
-    let pe = parallel_outcome(src).expect_err("M:N: non-sendable parked slot must reject");
-    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
-    assert!(pe.contains("maximum structural depth"), "M:N: {pe}");
+    let ve = vm_outcome(src).expect_err("serial: reached non-sendable generator must fault");
+    let pe = parallel_outcome(src).expect_err("M:N: reached non-sendable generator must fault");
+    assert!(ve.contains("cannot iterate over nil"), "serial: {ve}");
+    assert!(pe.contains("cannot iterate over nil"), "M:N: {pe}");
     assert_eq!(ve, pe, "serial == M:N fault");
 }
 
-/// A module-global generator in a reference CYCLE still rejects (item A's `gens_on_stack` guard, via the
-/// `to_snap` → `to_wire` path). `box` (module global) holds `g` and `g`'s Pending arg holds `box`, so
-/// `box -> g -> box` is a cycle through the non-preservable generator. Byte-identical serial == M:N.
+/// A module-global generator in a reference CYCLE is snapshotted as an inert `Nil` placeholder (its
+/// `to_wire` trips item A's `gens_on_stack` cycle guard → the `to_snap` slow arm falls back to `Nil`
+/// rather than eager-faulting the whole snapshot). `box` (module global) holds `g` and `g`'s Pending arg
+/// holds `box`, so `box -> g -> box`. A task that REACHES it faults recoverably at the use site ("cannot
+/// iterate over nil"), byte-identical serial == M:N.
 #[test]
 fn generator_module_global_in_data_cycle_rejects_both() {
     let src = "\
@@ -9142,12 +9147,38 @@ fn main():
                 print(\"got {x}\")
 main()";
     let ve =
-        vm_outcome(src).expect_err("serial: module-global generator in a data cycle must reject");
+        vm_outcome(src).expect_err("serial: reached module-global generator in a cycle must fault");
     let pe = parallel_outcome(src)
-        .expect_err("M:N: module-global generator in a data cycle must reject");
-    assert!(ve.contains("reference cycle"), "serial: {ve}");
-    assert!(pe.contains("reference cycle"), "M:N: {pe}");
+        .expect_err("M:N: reached module-global generator in a cycle must fault");
+    assert!(ve.contains("cannot iterate over nil"), "serial: {ve}");
+    assert!(pe.contains("cannot iterate over nil"), "M:N: {pe}");
     assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// REGRESSION LOCK (backlog item B remediation): a module module that merely HOLDS a non-sendable
+/// module-global generator (here in a reference cycle) but whose spawned task NEVER reaches it must run
+/// CLEAN — the `to_snap` slow arm snapshots the untouched generator as an inert `Nil`, so `snapshot_modules`
+/// (which walks EVERY global once at the first spawn) no longer eager-faults the whole program. Before the
+/// remediation this faulted "as part of a reference cycle" at the first spawn on BOTH engines. Byte-identical
+/// serial == M:N. (Reached-behaviour is covered by `generator_module_global_in_data_cycle_rejects_both`.)
+#[test]
+fn generator_module_global_unreached_nonsendable_runs_clean_both() {
+    let src = "\
+fn gen(box: List[Iterator[int]]) -> Iterator[int]:
+    yield box.len()
+box: List[Iterator[int]] = []
+g := gen(box)
+pushed := box.push(g)
+fn hello():
+    print(\"hello\")
+fn main():
+    parallel:
+        spawn hello()
+    print(\"done\")
+main()";
+    let expect = "hello\ndone\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
 }
 
 /// The deleted `gate_executor_queue` path: a module-global generator reached inside an `Executor.submit`
