@@ -81,9 +81,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (advancing one copy never affects the other; proven both engines over `Channel[Iterator[int]]` + `spawn:`
 > capture, Pending AND Suspended). Every parked slot is wired recursively, so a **non-sendable parked slot
 > rejects AT SERIALIZE TIME** — the safer-in-direction property (a slot check can only over-reject, never
-> under-gate). Three parked-frame shapes are **HARD ARMS** rejected cleanly (graceful, byte-identical on
-> both engines, never a silent mishandle): a suspension **inside a `recover:`** (live handler), a
-> suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension.
+> under-gate). A suspension **inside a `recover:`** (a live handler stack) is ALSO sendable (backlog item 3
+> arm b, 2026-07-21): a `Handler` is pure plain-data (`usize`-only, `Copy`, no `GcRef`/`Value`), serialized
+> as-is and rebuilt coherently so the recover boundary resumes intact; `generator_next` rebases every parked
+> handler/frame `nursery_len` to the resuming driver's floor (a generator opens no nursery, so its
+> escape-drain must be a no-op — also fixes a latent same-heap over-drain that cancelled sibling `spawn`s
+> when a mid-`recover:` generator resumed at a deeper nursery floor). The two remaining rejected shapes are
+> **checker-unreachable** and kept only as defensive guards: a suspension **with a pending `defer`** (`defer`
+> banned in a generator) and a **multi-frame** suspension (`yield` fires only in the generator's own frame).
 > `to_snap`'s module-global path stays `SnapValue::Poison` for generators (F1 shared-ref contract
 > intact) — but this needed a **main-loop judge-phase fix** (`7b73e7c`): making `to_wire` succeed for a
 > sendable generator silently made `to_snap`'s wire **fast path** catch a module-global generator BY

@@ -63,14 +63,31 @@ closure_captures_outer_local_round_trips`, `airlock_aliased_closure_stays_indepe
 carrying_recursive_closure_round_trips_both` (and `generator_parked_slot_nonsendable_rejects_both`
 repointed to a cyclic-struct witness, which stays a both-engines depth-cap reject).
 
-### 3. Reject-case generators — mid-`recover:` / pending-`defer` / multi-frame (VERY LOW value, research-grade)
-A local live generator IS sendable (F3 path C, `40003f3`), but three parked-frame shapes are HARD-ARM
-rejected at serialize time (`src/vm/wire.rs:174-176`): suspended mid-`recover:` (live handler), holding a
-pending `defer`, or multi-frame. They hold live VM **control** context (handler / side-effecting defer
-obligation / deep call stack), not data — path C serializes generator DATA only. NOT physically
-impossible (unlike FFI): doable with full **continuation serialization** (handlers + defers + stack), but
-a big lift for states you must *try* to hit. Both engines reject IDENTICALLY (no parity/soundness bug —
-a completeness gap only). If ever pursued: subagent-driven, never auto-task.
+### 3. Reject-case generators — mid-`recover:` (arm b) DONE; pending-`defer`/multi-frame (arms a,c) checker-unreachable
+**Arm (b) — suspended mid-`recover:` — DONE (2026-07-21).** A generator suspended inside a `recover:`
+block (a live handler stack in its parked context) now CROSSES the airlock and RESUMES with its recover
+boundary intact. A `Handler` (`src/vm/mod.rs`) is pure plain-data (all `usize`, `Copy`, no `GcRef`/`Value`),
+so it serializes as-is on `WireGenState::Suspended` (`src/vm/wire.rs`) with no value recursion; `from_wire`
+rebuilds the frame/stack coherently so the handler indices stay valid. `generator_next` (`src/vm/exec.rs`)
+rebases every parked frame's / handler's `nursery_len` to the resuming driver's floor at swap-in — a
+generator provably opens no nursery of its own (`spawn`/`parallel:` are checker-banned inside a generator,
+recover blocks included), so its escape-drain must be a no-op; this makes the stale cross-heap `nursery_len`
+inert and also fixes a latent SAME-HEAP over-drain (resuming a mid-`recover:` generator at a deeper nursery
+floor than it was first driven wrongly cancelled the driver's live sibling `spawn`s). Tests (`src/vm/
+parity_tests.rs`): `generator_recover_suspended_resumes_both`, `generator_crossed_recover_catches_fault_
+matches_control_both` (+ its inline `generator_recover_fault_control_inline` control — the item-#2 semantic
+guard: the resumed recover must CATCH and produce the correct recovered value, matching a no-airlock
+control), `generator_crossed_recover_fault_leaves_siblings_intact_serial` (the rebase, serial oracle).
+
+**Arms (a) multi-frame + (c) pending-`defer` — NOT built; CHECKER-UNREACHABLE by construction; clean
+reject KEPT as a defensive guard.** (a) `yield` only fires in a generator's own body frame (`in_generator`
+resets at every fn/closure boundary), so a suspended generator always has exactly one frame — no
+checker-valid source constructs a multi-frame suspension. (c) `defer` is banned inside a generator body
+(`checker::sig`: "`defer` is not supported inside a generator", recover blocks recursed into), so a parked
+frame can never carry a pending `defer`. The `to_wire` rejects (`src/vm/sched.rs`) stay as belt-and-braces
+guards against the type-blind compiler path (the parity harness `run_program_inner` compiles WITHOUT the
+checker); there is no coherent state to serialize, so nothing is built. Reject test kept:
+`generator_parked_defer_rejects_clean_both`. Both engines reject IDENTICALLY (completeness, not a bug).
 
 ## Session log — 2026-07-20 (bug-hunt: 4 findings — 2 checker fixes + 1 doc fix, 1 held)
 
@@ -123,9 +140,11 @@ with 5+ prior waves). Four findings survived re-verification on the real binary:
   only) now serializes a **frame-local** generator by value and rebuilds an **independent deep copy** on
   the receiver: `proto` (shared `Arc<Program>`), backing closure, and the parked operand-stack/args, each
   parked slot wired recursively so a **non-sendable parked slot rejects AT SERIALIZE TIME** (safer-in-
-  direction — a slot check can only over-reject, never under-gate). Three parked-frame shapes are **HARD
-  ARMS** rejected cleanly (byte-identical on both engines): a suspension **inside a `recover:`** (live
-  handler), a suspension **with a pending `defer`**, and a checker-unreachable **multi-frame** suspension.
+  direction — a slot check can only over-reject, never under-gate). A suspension **inside a `recover:`**
+  (a live handler stack) now ALSO crosses by value (backlog item 3 arm b, 2026-07-21 — handlers are pure
+  plain-data). The remaining rejected shapes are **checker-unreachable** and kept as defensive guards
+  only: a suspension **with a pending `defer`** (`defer` is banned in a generator) and a **multi-frame**
+  suspension (`yield` fires only in the generator's own body frame).
   `to_snap`'s module-global path stays `SnapValue::Poison` for generators, so the F1 shared-ref
   contract holds and a module-global generator still nil-replays + reach-gates. **Judge-phase fix
   (commit `7b73e7c`, applied during the main-loop review of the auto-task branch — the auto-task panel

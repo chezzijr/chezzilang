@@ -779,10 +779,15 @@ aggregate) inside a task is a **compile error** (see below).
   **non-sendable parked slot** (e.g. a cyclic *struct* held live across a `yield`) still **rejects at the
   crossing** with the `maximum structural depth …` depth-cap fault — the safer-in-direction property vs the
   reach-gate (a slot is checked at serialize time, so there is no under-gate). A parked **recursive local
-  `fn`**, by contrast, now round-trips like any other capture (its self-cell cycle back-references cleanly). Three parked-frame shapes are **HARD ARMS** rejected cleanly (a graceful,
-  byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a panic, **never** a
-  silent mishandle): a suspension **inside a `recover:`** (a live handler), a suspension **with a pending
-  `defer`**, and a (checker-unreachable, defensively-guarded) **multi-frame** suspension. A generator held
+  `fn`**, by contrast, now round-trips like any other capture (its self-cell cycle back-references cleanly).
+  A suspension **inside a `recover:`** (a live handler stack) is ALSO sendable — a `Handler` is pure
+  plain-data (all `usize`, no `GcRef`/`Value`), serialized as-is on the wire and rebuilt so the recover
+  boundary resumes intact; the resume path rebases each parked handler/frame `nursery_len` to the resuming
+  driver's floor (a generator opens no nursery of its own, so its escape-drain must be a no-op). The two
+  remaining rejected shapes are **checker-unreachable** and kept only as defensive guards that reject
+  cleanly (a graceful, byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a
+  panic, **never** a silent mishandle): a suspension **with a pending `defer`** (`defer` is banned inside a
+  generator) and a **multi-frame** suspension (`yield` fires only in the generator's own body frame). A generator held
   as a **module global** is NOT serialized by value — it follows **Option B — gated iff reachable**
   (below) and snapshots as a poison leaf on M:N (the F1 shared-ref contract): it faults with the *same* error only when a
   spawned task can actually reach it (a direct home-global read, or *any* call / operator / hook /

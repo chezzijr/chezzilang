@@ -8855,8 +8855,13 @@ main()";
     assert_parity_out(src, "3\n");
 }
 
-/// HARD ARM (deferred → clean reject): a generator suspended with a pending `defer` in its parked
-/// frame cannot cross — reject cleanly, byte-identical on both engines.
+/// CHECKER-UNREACHABLE defensive guard (backlog arm c): `defer` is banned inside a generator body
+/// (`checker::sig` — "`defer` is not supported inside a generator"), so a suspended generator's
+/// parked frame can NEVER carry a pending `defer` from checker-valid source. This test reaches the
+/// guard only because the parity harness (`run_program_inner`) compiles WITHOUT the checker (the
+/// compiler is type-blind); the `to_wire` reject in `sched.rs` is a belt-and-braces guard against
+/// that type-blind path. Kept as a reject (nothing built): the state is unreachable, so there is
+/// nothing coherent to serialize.
 #[test]
 fn generator_parked_defer_rejects_clean_both() {
     let src = "\
@@ -8880,10 +8885,15 @@ main()";
     assert_eq!(ve, pe, "serial == M:N fault");
 }
 
-/// HARD ARM (deferred → clean reject): a generator suspended INSIDE a `recover:` block (a live
-/// handler in its parked context) cannot cross — reject cleanly, byte-identical on both engines.
+/// Backlog arm (b) — a generator suspended INSIDE a `recover:` block (a LIVE handler in its parked
+/// context) now CROSSES the airlock and RESUMES with its recover boundary intact. The generator is
+/// advanced once at top level (suspending at `yield 1`, inside the recover), sent into a spawned
+/// task, and driven to exhaustion there. The recover block completes NORMALLY after crossing (the
+/// trailing `99` becomes `Ok(99)`), and the bound `r` flows through the post-crossing `match` — so
+/// the resumed values are `2, 3, 99`, proving the serialized `Handler` (stack_len/frame_len/ip)
+/// reconstructs a coherent boundary. Was a clean HARD-ARM reject; now a resume-semantics test.
 #[test]
-fn generator_yield_inside_recover_rejects_clean_both() {
+fn generator_recover_suspended_resumes_both() {
     let src = "\
 fn gen() -> Iterator[int]:
     r := recover:
@@ -8891,6 +8901,9 @@ fn gen() -> Iterator[int]:
         yield 2
         99
     yield 3
+    match r:
+        Ok(v): yield v
+        Err(e): yield -1
 fn main():
     it := gen()
     started := it.next()
@@ -8899,12 +8912,112 @@ fn main():
         spawn:
             for x in it:
                 out.send(x)
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
 main()";
-    let ve = vm_outcome(src).expect_err("serial: mid-recover suspension must reject");
-    let pe = parallel_outcome(src).expect_err("M:N: mid-recover suspension must reject");
-    assert!(ve.contains("`recover:`"), "serial: {ve}");
-    assert!(pe.contains("`recover:`"), "M:N: {pe}");
-    assert_eq!(ve, pe, "serial == M:N fault");
+    assert_parity_out(src, "2\n3\n99\n");
+}
+
+/// Backlog arm (b), the item-#2 SEMANTIC guard (not just a non-faulting round-trip): after crossing
+/// the airlock, the generator's `recover:` must actually CATCH a post-crossing fault and produce the
+/// correct recovered value — not silently drop the handler and let the fault abort the task. The
+/// generator suspends at `yield 10` inside the recover; when resumed in the spawned task the `1 / 0`
+/// fires, the (serialized) recover catches it (`r = Err`), and the post-recover `match` yields `99`
+/// down the Err arm. Asserted EQUAL to a same-heap, NO-airlock control that drives the identical
+/// generator inline (`generator_recover_fault_control_inline`): if the handler were NOT serialized,
+/// the crossed fault would be UNCAUGHT and abort the task, diverging from the control.
+#[test]
+fn generator_crossed_recover_catches_fault_matches_control_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    r := recover:
+        yield 10
+        boom := 1 / 0
+        boom
+    yield 20
+    match r:
+        Ok(v): yield v
+        Err(e): yield 99
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+    print(out.recv())
+    print(out.recv())
+main()";
+    // Expected value is pinned by the same-heap control below (plain, well-tested generator
+    // semantics with no airlock): catch → r=Err → yield 20, then match Err → yield 99.
+    assert_parity_out(src, "20\n99\n");
+}
+
+/// Same-heap NO-airlock control for `generator_crossed_recover_catches_fault_matches_control_both`:
+/// the identical generator driven INLINE (never crossing a task boundary). This pins the correct
+/// recovered semantics with the plain, well-exercised generator+recover path; the crossed test must
+/// match this exact output or the airlock changed the computation.
+#[test]
+fn generator_recover_fault_control_inline() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    r := recover:
+        yield 10
+        boom := 1 / 0
+        boom
+    yield 20
+    match r:
+        Ok(v): yield v
+        Err(e): yield 99
+fn main():
+    it := gen()
+    started := it.next()
+    for x in it:
+        print(x)
+main()";
+    assert_parity_out(src, "20\n99\n");
+}
+
+/// Backlog arm (b), the nursery-floor rebase (load-bearing, SERIAL oracle). A generator's `recover:`
+/// handler captures an ABSOLUTE `nursery_len` at `PushHandler` — here `0` (the recover is entered by
+/// the top-level `it.next()`, before any `parallel:`). The generator is then RESUMED at a DEEPER
+/// nursery floor: inside a `parallel:` (nurseries==1) in the parent fiber, alongside a sibling
+/// `spawn`. When the resumed `1 / 0` is caught, the recover-catch path calls
+/// `drain_escaped_nursery(handler.nursery_len)`. Without the resume-time rebase that stale `0` would
+/// truncate the LIVE parallel nursery to `0`, cancelling the sibling `spawn` (`out.send(77)`), and
+/// `out.recv()` would then deadlock. A generator provably cannot open a nursery (spawn/parallel are
+/// checker-banned inside one), so its handler's escape-drain must be a no-op — `generator_next`
+/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. Serial-only:
+/// this drain is deterministic on the cooperative engine (the sibling is an unstarted `PendingCall`
+/// when the drain would fire); on M:N the sibling may already be running on another worker, so the
+/// bug is not deterministically reachable there — the shared `generator_next` fix covers both.
+#[test]
+fn generator_crossed_recover_fault_leaves_siblings_intact_serial() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    r := recover:
+        yield 1
+        boom := 1 / 0
+        yield boom
+    yield 2
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            out.send(77)
+        for x in it:
+            print(x)
+    print(out.recv())
+main()";
+    assert_eq!(
+        vm_outcome(src),
+        Ok("2\n77\n".to_string()),
+        "the sibling spawn's sentinel must survive the recover-caught fault (nursery_len rebase)",
+    );
 }
 
 /// Cross-module generator-reach fault: run a MULTI-FILE program on BOTH engines and assert each

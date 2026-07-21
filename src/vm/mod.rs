@@ -987,7 +987,7 @@ struct Nursery {
 /// A snapshot taken at a `recover:` boundary (`Op::PushHandler`). On a caught fault the VM restores
 /// the operand stack, call frames, and call-depth to these values, then jumps to `ip` in the
 /// boundary's frame with the fault message pushed as the operand.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Handler {
     stack_len: usize,
     frame_len: usize,

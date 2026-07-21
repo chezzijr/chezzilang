@@ -191,9 +191,10 @@ pub enum WireValue {
     /// slot) is wired recursively, so a non-sendable parked slot rejects AT SERIALIZE TIME exactly as a
     /// list of that value would — the safer-in-direction property vs the reach-gate. `from_wire`
     /// rebuilds a FRESH independent `GeneratorCore` on the receiving heap (deep-copy independence, like
-    /// `Cell`/`Iter`). A generator whose parked frame is mid-`recover:` (live handler) or holds a
-    /// pending `defer`, or that has more than one parked frame, is a HARD ARM: `to_wire` rejects it
-    /// cleanly (a recoverable, byte-identical-on-both-engines fault) rather than mis-serialize.
+    /// `Cell`/`Iter`). A generator suspended mid-`recover:` also crosses — its live handler stack is
+    /// pure plain-data (carried on `WireGenState::Suspended`). A generator with a pending `defer` or
+    /// more than one parked frame is a HARD ARM (`to_wire` rejects cleanly) — but both are
+    /// checker-unreachable, so the reject is only a defensive guard against the type-blind compiler.
     Generator {
         proto: ProtoId,
         home: Option<usize>,
@@ -210,14 +211,19 @@ pub enum WireGenState {
     /// Created but not yet driven: the not-yet-consumed call args (each wired recursively).
     Pending(Vec<WireValue>),
     /// Driven at least once, suspended at a `yield`: the single parked body frame plus its private
-    /// operand stack (base-0), with the private `call_depth`/`cur_base`. `handlers` is always empty
-    /// (a mid-`recover:` suspension is a HARD ARM rejected in `to_wire`) and the frame carries no
-    /// `deferred` (a pending `defer` is likewise rejected), so neither is serialized.
+    /// operand stack (base-0), with the private `call_depth`/`cur_base`, and the live `recover:`
+    /// handlers stacked over that frame (backlog arm b). A [`Handler`](super::Handler) is pure
+    /// plain-data (all `usize`, `Copy`, no `GcRef`/`Value`), so it serializes as-is with no value
+    /// recursion — the frame/stack it indexes are serialized coherently alongside, so the indices
+    /// stay valid after `from_wire` rebuilds them on the receiver heap. The frame carries no
+    /// `deferred` (a pending `defer` is a checker-unreachable HARD ARM still rejected in `to_wire`),
+    /// so that is not serialized.
     Suspended {
         frame: WireCallFrame,
         stack: Vec<WireValue>,
         call_depth: usize,
         cur_base: usize,
+        handlers: Vec<super::Handler>,
     },
     /// Body returned / fell off the end: no parked context at all.
     Done,

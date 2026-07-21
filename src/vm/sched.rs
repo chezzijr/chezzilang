@@ -3356,17 +3356,19 @@ impl Vm {
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Suspended => {
-                            // HARD ARMS — reject cleanly (same code path on both engines → byte-
-                            // identical error) rather than silently mis-serialize.
+                            // CHECKER-UNREACHABLE HARD ARMS — reject cleanly (same code path on both
+                            // engines → byte-identical error) rather than silently mis-serialize.
+                            // Neither shape can arise from checker-valid source; these are defensive
+                            // guards against the type-blind compiler path (see the parity tests).
+                            //  - multi-frame (a): `yield` only fires in the generator's own body frame
+                            //    (`in_generator` resets at every fn/closure boundary), so a suspended
+                            //    generator always has exactly one frame.
+                            //  - pending `defer` (c): `defer` is banned inside a generator body.
+                            // A mid-`recover:` suspension (arm b) is NO LONGER rejected — a live
+                            // handler stack is pure plain-data and now serialized below.
                             if g.ctx.frames.len() != 1 {
                                 return Err(self.err(
                                     "a generator suspended across more than one call frame cannot be sent across tasks".to_string(),
-                                    Span { line: 0, col: 0 },
-                                ));
-                            }
-                            if !g.ctx.handlers.is_empty() {
-                                return Err(self.err(
-                                    "a generator suspended inside a `recover:` cannot be sent across tasks".to_string(),
                                     Span { line: 0, col: 0 },
                                 ));
                             }
@@ -3390,6 +3392,10 @@ impl Vm {
                             for v in &g.ctx.stack {
                                 wstack.push(self.to_wire_depth(*v, depth + 1, memo)?);
                             }
+                            // Backlog arm (b): carry the live `recover:` handlers. Each `Handler` is
+                            // `Copy` plain-data (all `usize`, no `GcRef`/`Value`), so it crosses as-is
+                            // with no value recursion; its indices address the frame/stack serialized
+                            // above and are reconstructed coherently in `from_wire`.
                             WireGenState::Suspended {
                                 frame: WireCallFrame {
                                     proto: frame.proto,
@@ -3405,6 +3411,7 @@ impl Vm {
                                 stack: wstack,
                                 call_depth: g.ctx.call_depth,
                                 cur_base: g.ctx.cur_base,
+                                handlers: g.ctx.handlers.clone(),
                             }
                         }
                     };
@@ -3712,6 +3719,7 @@ impl Vm {
                         stack,
                         call_depth,
                         cur_base,
+                        handlers,
                     } => {
                         let stack: Vec<Value> = stack
                             .into_iter()
@@ -3731,12 +3739,17 @@ impl Vm {
                             has_implicit_nursery: frame.has_implicit_nursery,
                             call_span: frame.call_span,
                         };
+                        // Backlog arm (b): the live `recover:` handlers cross as plain-data (`Copy`,
+                        // `GcRef`-free), so they need no reconstruction — their `usize` indices
+                        // address the frame/stack rebuilt just above and stay valid on this heap.
+                        // `generator_next` rebases each handler's `nursery_len` to the resuming
+                        // driver's floor, so the (now stale, cross-heap) sender value is inert.
                         let ctx = GenCtx {
                             frames: vec![rebuilt],
                             stack,
                             call_depth,
                             cur_base,
-                            handlers: Vec::new(),
+                            handlers,
                         };
                         let core = GeneratorCore {
                             proto,

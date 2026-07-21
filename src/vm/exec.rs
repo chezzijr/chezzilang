@@ -339,6 +339,29 @@ impl Vm {
         let mut host = GenCtx::default();
         self.swap_gen_ctx(&mut host); // self.* now default-empty; `host` holds the real host context
         self.swap_gen_ctx(&mut gen_ctx); // self.* now the generator's (suspended) context; gen_ctx empty
+        // NURSERY-FLOOR REBASE. `nurseries` is NOT part of `GenCtx` (never swapped by `swap_gen_ctx`),
+        // so `self.nurseries` is the RESUMING driver's stack, while a parked frame's / recover
+        // handler's `nursery_len` was captured (absolutely) against whatever floor existed when the
+        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, across the
+        // airlock, a stale SENDER floor). A generator provably opens NO nursery of its own (`spawn` /
+        // `parallel:` are checker-banned inside a generator, recover blocks included), so its
+        // frame-return drain (`do_return` → `drain_escaped_nursery(frame.nursery_len)`) and its
+        // recover-catch drain (`drain_escaped_nursery(handler.nursery_len)`) MUST be no-ops — they
+        // must never truncate the driver's own live nurseries. Rebase both to the current floor so
+        // every generator-internal drain is a no-op. Identity when the drive floor is unchanged (the
+        // common case: existing generators drive at a fixed depth), so it is behaviour-preserving
+        // there; it fixes a latent same-heap over-drain when a generator is resumed deeper than it
+        // was first driven, and makes a cross-airlock handler's stale `nursery_len` safe.
+        // On the first (Pending) drive `self.frames`/`self.handlers` are empty here (the body frame is
+        // pushed just below), so this is a no-op then; the pushed frame gets the correct floor from
+        // `push_frame`.
+        let floor = self.nurseries.len();
+        for f in &mut self.frames {
+            f.nursery_len = floor;
+        }
+        for hd in &mut self.handlers {
+            hd.nursery_len = floor;
+        }
         self.gen_host_ctx.push(host);
         self.active_generators.push(h);
 

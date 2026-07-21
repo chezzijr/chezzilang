@@ -186,10 +186,13 @@ Generators run on **both** VM engines (serial `--serial` and the default M:N). A
 in a frame **local** is now **sendable across a task airlock BY VALUE** (F3 path C): it is serialized —
 its `proto`, backing closure, and parked operand-stack/args — and rebuilt as an **independent deep copy**
 on the receiver (advancing one copy never affects the other), with every parked slot checked sendable at
-serialize time (a non-sendable parked slot rejects at the crossing). Three parked-frame shapes remain
-**HARD ARMS** that reject cleanly (a graceful, byte-identical-on-both-engines error) rather than
-mis-serialize: a suspension **inside a `recover:`** (a live handler), a suspension **with a pending
-`defer`**, and a (structurally-unreachable) **multi-frame** suspension. A generator held in a **module
+serialize time (a non-sendable parked slot rejects at the crossing). A suspension **inside a `recover:`**
+(a live handler stack) is ALSO sendable — its handlers are pure plain-data, serialized and rebuilt
+coherently so the recover boundary resumes intact. The two remaining rejected shapes are both
+**checker-unreachable** (no valid program constructs them) and kept only as defensive guards that reject
+cleanly (a byte-identical-on-both-engines error): a suspension **with a pending `defer`** (`defer` is
+banned inside a generator) and a **multi-frame** suspension (`yield` fires only in the generator's own
+body frame). A generator held in a **module
 global** is still handled by the reach-gate (below) and snapshotted as a poison leaf on M:N. The
 adapter-struct model remains the recommended way to write lazy sequences. Live status is tracked in
 [`PROGRESS.md`](../PROGRESS.md).
