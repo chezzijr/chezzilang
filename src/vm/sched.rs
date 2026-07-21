@@ -1365,6 +1365,8 @@ impl Vm {
             let span = fiber.span;
             match self.run_one_fiber(&mut fiber, span) {
                 Disp::Park(key, core) => sched.park(key, &core, fiber),
+                // Bounded backpressure — the send-side park (gap re-check = space, not a message).
+                Disp::SendPark(key, core) => sched.park_send(key, &core, fiber),
                 // §6d — multi-channel `wait` park: file ONE shared token in every arm's bucket.
                 Disp::WaitPark(arms) => sched.park_wait(arms, fiber),
                 Disp::Yield => sched.yield_fiber(fiber),
@@ -1429,6 +1431,7 @@ impl Vm {
         }
         self.suspend = None;
         self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
+        self.send_suspend = None; // set by a full bounded `send` (→ `Disp::SendPark`)
         self.offload = None;
         self.poll_park = None;
         self.cancelled = false;
@@ -1486,6 +1489,11 @@ impl Vm {
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
                 // GcRef into it); `park` re-checks the queue through this `Arc` under the sched lock.
                 Disp::Park(self.channel_core_ptr(h), self.channel_core(h))
+            } else if res.is_ok() && self.send_suspend.is_some() {
+                // Bounded backpressure — the fiber blocked on a full `send`. Capture the key + core
+                // WHILE the fiber heap is live (like `Disp::Park`); `park_send` re-checks SPACE.
+                let h = self.send_suspend.take().unwrap();
+                Disp::SendPark(self.channel_core_ptr(h), self.channel_core(h))
             } else if res.is_ok() && self.wait_suspend.is_some() {
                 // §6d — the fiber blocked on a multi-channel `wait`. Capture each arm's (key, core)
                 // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
@@ -1953,6 +1961,7 @@ impl Vm {
         self.swap_ctx(&mut child.ctx); // self.* = child's execution context
         self.suspend = None; // clear any prior wait before (re)running
         self.wait_suspend = None;
+        self.send_suspend = None;
         // `wait` (§6d) multi-channel park: this fiber may be filed under SEVERAL `blocked_on` keys.
         // A sibling `send` to ONE of them woke it (draining only that bucket); sweep the index out of
         // every other bucket here, before it re-runs, so a later `send` to one of those channels can
@@ -1992,7 +2001,11 @@ impl Vm {
                     }
                     FiberState::Blocked
                 } else {
-                    match self.suspend.take() {
+                    // A `recv` park (`suspend`) OR a full-bounded-`send` park (`send_suspend`): both
+                    // file under the channel key so a sibling that frees the gap (`send` for a recv
+                    // waiter, `recv` for a send waiter — both drain `blocked_on[key]` via
+                    // `wake_on_send`/`wake_senders`) re-runs this fiber, which re-checks + proceeds.
+                    match self.suspend.take().or_else(|| self.send_suspend.take()) {
                         Some(h) => {
                             let key = self.channel_core_ptr(h);
                             self.scheduler_stack

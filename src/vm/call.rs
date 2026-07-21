@@ -988,8 +988,10 @@ impl Vm {
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
         if matches!(self.heap.get(h), Obj::Channel(_)) {
             let result = self.channel_method(h, method, &args, span)?;
-            if self.suspend.is_some() {
-                return Ok(()); // B1: `recv` parked this fiber and re-rooted the receiver itself.
+            if self.suspend.is_some() || self.send_suspend.is_some() {
+                // B1: `recv` parked this fiber (re-rooted the receiver itself); or a bounded `send`
+                // parked it on a full channel (re-rooted receiver + value). Either way, no result push.
+                return Ok(());
             }
             self.push(result);
             return Ok(());

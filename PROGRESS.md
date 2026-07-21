@@ -4,6 +4,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CONCURRENCY (2026-07-22, `auto-task/bounded-channel-pmap`) — BOUNDED `Channel[T](cap)` +
+> `pmap`/`pmap_limited` stdlib helpers.** *(1) Bounded channel:* `Channel[T]()` stays unbounded (`send`
+> never blocks — byte-identical to before); `Channel[T](cap)` (`cap > 0`; `cap <= 0` is a runtime fault
+> `"Channel capacity must be > 0"`) is a bounded FIFO whose `send` **blocks/parks** while `cap` messages
+> are queued and resumes on a `recv` freeing a slot (Go's buffered channel). New surface: `cap() -> int`
+> (0 for unbounded); `try_send` now returns `false` on **full OR closed** (was closed-only). Only
+> `send`/`try_send` changed — `recv`/`try_recv`/`close`/`for`-drain/`trip`/`len` untouched. The send-park
+> is the send-side twin of the recv park: a new `send_suspend` sentinel + `Disp::SendPark` +
+> `MnSched::park_send` (gap re-check = *space available*, the opposite of `park`'s *message waiting*) +
+> `send_wake_bounded` (atomic space-check+enqueue+wake under the sched lock, no over-cap race) +
+> `recv_wake`/`Vm::wake_senders` called after every bounded pop (`recv`/`for`-drain/`try_recv`/`wait:`/
+> demote). A parked sender is filed as an ordinary `ParkedEntry::Recv` — the bucket is homogeneous
+> per-instant (a `cap>=1` channel is never simultaneously full and empty), so `is_deadlocked` is
+> UNCHANGED and a full-send with no consumer (top level / native callback) faults with one shared
+> `FULL_SEND_DEADLOCK` string (identical text both engines → parity). Parity holds by the blocking-`recv`
+> argument: backpressure changes *which* task runs *when*, never the value sequence a consumer sees.
+> **Deferred (noted, not built):** send-arms in `wait:` (a bounded send *can* block, so a send-arm is
+> meaningful — needs a grammar+checker change), and a demote-in-place bounded send inside a native
+> callback (`ponytail:` upgrade path; v1 faults). *(2) `pmap`/`pmap_limited`:* pure-Chezzi scoped
+> parallel-map helpers in `std/concurrency/pmap.chz` (results in **submission order** via sort-by-index,
+> never completion order; `pmap_limited` caps in-flight tasks with a channel-as-semaphore token bucket).
+> Tests: `src/vm/tests.rs` `bounded_channel_*` (cap/try_send-full/zero-cap-fault/full-send-deadlock/
+> fan-out golden, all serial==M:N) + `pmap_*`; checker `channel_bounded_capacity_*`. Docs: this note,
+> `docs/concurrency.md` §5/§6d, `docs/stdlib.md`, `docs/spec.md`.
+
 > **✅ CONCURRENCY / AIRLOCK (2026-07-21, `auto-task/module-global-generator-sendable`) — `docs/gaps.md`
 > backlog item **B** CLOSED: a MODULE-GLOBAL live generator now crosses the airlock BY VALUE (deep copy),
 > exactly like a frame-local one (F3 path C). The reach-gate + Option-B poison→`nil` model is RETIRED.**

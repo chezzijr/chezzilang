@@ -2316,6 +2316,84 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     assert_eq!(handle.join().unwrap(), Value::int(42));
 }
 
+// ----- bounded Channel[T](cap): capacity + backpressure -----
+
+/// `cap()` reports the bound (`Channel[T](n)` → n) or 0 for unbounded — identical on both engines.
+#[test]
+fn bounded_channel_cap_method_both_engines() {
+    let src = "b := Channel[int](3)\nprint(b.cap())\nu := Channel[int]()\nprint(u.cap())\n";
+    let out = run(src);
+    assert_eq!(out, "3\n0\n");
+    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+}
+
+/// `Channel[T](0)` / a negative capacity is a runtime fault (cap must be > 0), on both engines with
+/// the byte-identical message.
+#[test]
+fn bounded_channel_zero_cap_faults_both_engines() {
+    for src in [
+        "c := Channel[int](0)\nprint(c.len())\n",
+        "c := Channel[int](-1)\nprint(c.len())\n",
+    ] {
+        let e = run_err(src);
+        assert!(e.contains("Channel capacity must be > 0"), "serial: {e}");
+        let ep = run_capture_parallel(src)
+            .expect_err("M:N should fault")
+            .message;
+        assert_eq!(e, ep, "serial and M:N fault text must match");
+    }
+}
+
+/// `try_send` on a FULL bounded channel returns `false` (not true — the old unbounded contract);
+/// after a `recv` frees a slot it returns `true`. Single fiber, so fully deterministic on both.
+#[test]
+fn bounded_channel_try_send_full_returns_false_both_engines() {
+    let src = "c := Channel[int](1)\n\
+               print(c.try_send(1))\n\
+               print(c.try_send(2))\n\
+               print(c.recv())\n\
+               print(c.try_send(3))\n\
+               print(c.recv())\n";
+    let out = run(src);
+    assert_eq!(out, "true\nfalse\n1\ntrue\n3\n");
+    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+}
+
+/// A `send` on a FULL bounded channel with NO possible consumer (top level, no nursery) is a
+/// deadlock fault on both engines with a byte-identical message — NOT a silent over-fill.
+#[test]
+fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
+    let src = "c := Channel[int](1)\nc.send(1)\nc.send(2)\nprint(\"unreached\")\n";
+    let e = run_err(src);
+    assert!(e.contains("send on a full channel"), "serial: {e}");
+    let ep = run_capture_parallel(src)
+        .expect_err("M:N should fault")
+        .message;
+    assert_eq!(e, ep, "serial and M:N deadlock text must match");
+}
+
+/// Bounded fan-out golden: a single producer sends 0..5 into a cap-2 channel while a consumer
+/// drains 5 in order. Backpressure (producer parks when full) changes WHICH task runs WHEN but not
+/// the value sequence — so the output is byte-identical serial vs M:N. Single producer ⇒ no
+/// multi-sender contention nondeterminism.
+#[test]
+fn bounded_channel_fanout_golden_both_engines() {
+    let src = "fn main():\n\
+               \x20   c := Channel[int](2)\n\
+               \x20   parallel:\n\
+               \x20       spawn:\n\
+               \x20           for i in range(0, 5):\n\
+               \x20               c.send(i)\n\
+               \x20           c.close()\n\
+               \x20       spawn:\n\
+               \x20           for v in c:\n\
+               \x20               print(v)\n\
+               main()\n";
+    let out = run(src);
+    assert_eq!(out, "0\n1\n2\n3\n4\n");
+    assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
+}
+
 /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function
 /// frames deep** (`main → collect → deep_recv ×6`, all `Op::Call`, parking at `ip > 0`) must
 /// suspend with its frames intact and, on a sibling `send`, resume through `run_until(0)` and

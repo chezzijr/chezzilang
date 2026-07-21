@@ -447,8 +447,10 @@ pub enum Op {
     /// sleep to the soonest live timer and take it; else fault (all-closed) or block (cooperative
     /// multi-channel park: keep the handles, rewind to re-poll on wake). See `Vm::op_wait_poll`.
     WaitPoll(Box<WaitMeta>),
-    /// `Channel[T]()` — push a fresh empty mailbox (`Obj::Channel`).
-    NewChannel,
+    /// `Channel[T]()` / `Channel[T](cap)` — push a fresh empty mailbox (`Obj::Channel`). The bool is
+    /// `has_cap`: when `true`, a capacity int is on the operand stack (pop it; `<= 0` faults, else the
+    /// channel is bounded to that many queued messages). When `false`, the channel is unbounded.
+    NewChannel(bool),
     /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
     NewShared,
     /// `RwShared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::RwShared(init)`.

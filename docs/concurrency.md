@@ -232,21 +232,32 @@ A `Channel[T]` is **not** an object in any task's heap. It is a separate runtime
 the airlock, never live in two heaps at once.
 
 ```chezzi
-ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]
+ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]. Unbounded FIFO.
+bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
 ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
 v := ch.recv()             # value reconstructed IN the receiver's heap
 opt := ch.try_recv()       # non-blocking poll: Some(v) if queued, None if empty
 n := ch.len()              # current queued count
+c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
 ```
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value |
+| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv` |
+| `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, or a **bounded** channel is **full**. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
+| `cap`  | `cap(self) -> int` | capacity: the bound passed to `Channel[T](cap)`, or `0` for an unbounded `Channel[T]()` |
 
-- **Buffered (unbounded) FIFO** under the sequential executor, so `send` never blocks.
+- **`Channel[T]()` is an unbounded FIFO** — `send` never blocks. **`Channel[T](cap)`** (`cap > 0`; a
+  `cap <= 0` is a runtime fault) is a **bounded** FIFO: a `send` blocks/parks once `cap` messages are
+  queued and resumes when a `recv` frees a slot (Go's buffered channel). Backpressure changes *which*
+  task runs *when*, never the value sequence a consumer sees, so a bounded channel is byte-identical
+  serial vs M:N by the same argument as a blocking `recv`. A full `send` with no possible consumer
+  (top level, no nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill.
+  As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
+  — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
 - **`recv` on an empty channel** is a **deadlock-detect RuntimeError** under C1–C4 (*"recv would block
   forever — sequential executor; real blocking arrives in C5"*), preserving the C5 blocking surface.
   In the fan-out pattern (workers `send` during the block, main `recv`s after the dedent) the queue is
@@ -448,8 +459,10 @@ deadlock; the cooperative `--serial` VM inline-sleeps to the deadline (single-th
 > buckets) instead of faulting. See `examples/wait_select.chz` (byte-identical across serial `--serial` / default M:N).
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
-and run that arm. Because Chezzi channels are **unbounded** (a `send` never blocks), `wait` is purely
-*recv*-oriented — there are no send-arms (a send is always instantly ready, so it would be pointless).
+and run that arm. `wait` is currently *recv*-oriented — there are no send-arms. (On an unbounded channel
+a `send` is always instantly ready, so a send-arm would be pointless; a **bounded** `send` *can* block,
+so a send-arm would be meaningful there — but that needs a separate grammar + checker change and is not
+yet implemented. Poll a bounded channel's readiness with `try_send` for now.)
 Combined with `timer`, `wait` subsumes a bounded-wait `recv` (`ch.recv_timeout(500)` ≡ a `wait` over `ch`
 and `timer(500)`), which is why no separate `recv_timeout` exists.
 
@@ -1366,8 +1379,9 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   - **`close()`** — idempotent, wakes every parked/demoted receiver.
   - **`send` after close → faults** `"send on a closed channel"`; **`recv` on closed-and-empty →
     faults** `"receive on a closed channel"` (drains buffered first).
-  - **`try_send(v) -> bool`** — the safe partner of `send` (mirrors `try_recv` vs `recv`); `false` =
-    closed. Channels are unbounded, so closed is `send`'s only failure → `bool`, not `Option`.
+  - **`try_send(v) -> bool`** — the non-blocking partner of `send` (mirrors `try_recv` vs `recv`);
+    `false` = the send can't proceed: the channel is **closed** OR a **bounded** channel is **full**.
+    `true` once queued. (An unbounded channel is never full, so there `false` means only closed.)
   - `try_recv` unchanged (closed reads as `None`); comprehension-over-channel rejected (use the `for`
     form). Implementation notes in PROGRESS.md + [`concurrency-tier-d.md`](concurrency-tier-d.md).
 

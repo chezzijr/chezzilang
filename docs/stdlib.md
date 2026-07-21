@@ -189,9 +189,15 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > unchanged; the bare-after-import spelling stays fully supported.
 
 ### `Channel[T]` — FIFO mailbox
-`send(x: T) -> nil` · `try_send(x: T) -> bool` · `recv() -> T` · `try_recv() -> Option[T]` ·
-`close() -> nil` · `trip() -> nil` (permanent level-trigger latch) · `len() -> int`.
-Iterate received values with `for v in ch:` (ends when closed and drained).
+`Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Channel[T](cap)` (`cap > 0`) is a
+**bounded** FIFO whose `send` **blocks/parks** while `cap` messages are queued and resumes once a `recv`
+frees a slot (Go's buffered channel; a full `send` with no possible consumer is a deadlock fault, not an
+over-fill). Methods: `send(x: T) -> nil` · `try_send(x: T) -> bool` (`false` = closed **or** full — never
+blocks) · `recv() -> T` · `try_recv() -> Option[T]` · `close() -> nil` ·
+`trip() -> nil` (permanent level-trigger latch) · `len() -> int` · `cap() -> int` (the bound, or `0` for
+unbounded). Iterate received values with `for v in ch:` (ends when closed and drained). Backpressure only
+changes *which* task runs *when*, never the value sequence a consumer sees — bounded channels are
+byte-identical serial vs M:N.
 
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**

@@ -116,7 +116,8 @@ new syntax.
 
 **Concurrency — SHIPPED (Tiers A–D).** No longer deferred: Chezzi has a shared-nothing actor model
 (`spawn` cheap tasks + a `parallel:` structured-concurrency nursery), `Channel[T]` (move-on-send,
-`close`/`for v in ch`/`try_send`), `Shared[T]`, and `Executor`. `chezzi run` defaults to the real
+unbounded `Channel[T]()` or bounded `Channel[T](cap)` with backpressure,
+`close`/`for v in ch`/`try_send`/`cap`), `Shared[T]`, and `Executor`. `chezzi run` defaults to the real
 OS-thread engine (size its worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores);
 `--serial` selects the cooperative engine (kept as the byte-identical parity oracle). The OS-thread
 engine is a **M:N work-stealing scheduler** (reduction-counting

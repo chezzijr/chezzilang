@@ -4482,7 +4482,13 @@ impl Compiler {
             // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
             // deep-copied init value. The checker validated arity (Channel: 0 args, Shared: 1).
             if name == "Channel" {
-                fc.emit(Op::NewChannel, span);
+                // `Channel[T](cap)` — compile the optional capacity expr so it sits on the operand
+                // stack for `NewChannel(true)` to pop. `Channel[T]()` → `NewChannel(false)` (unbounded).
+                let has_cap = !args.is_empty();
+                if has_cap {
+                    self.compile_expr(fc, &args[0])?;
+                }
+                fc.emit(Op::NewChannel(has_cap), span);
                 return Ok(());
             }
             if name == "Shared" {

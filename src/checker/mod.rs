@@ -2756,7 +2756,7 @@ const SET_METHODS: &[&str] = &[
     "difference",
 ];
 const CHANNEL_METHODS: &[&str] = &[
-    "send", "try_send", "recv", "try_recv", "close", "trip", "len",
+    "send", "try_send", "recv", "try_recv", "close", "trip", "len", "cap",
 ];
 const SHARED_METHODS: &[&str] = &["get", "set", "update"];
 const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
@@ -2823,8 +2823,10 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
 fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
     let (params, ret) = match method {
         "send" => (vec![elem.clone()], Ty::Nil),
-        // `try_send` is the safe partner of `send` (mirrors `try_recv` vs `recv`): channels are
-        // unbounded, so its only failure is a closed channel — returns `false` then, `true` on send.
+        // `try_send` is the non-blocking partner of `send` (mirrors `try_recv` vs `recv`): returns
+        // `false` when the send can't proceed — the channel is CLOSED, or a BOUNDED channel is FULL —
+        // and `true` once the value is queued. (An unbounded channel is never full, so its only
+        // `false` there is closed.)
         "try_send" => (vec![elem.clone()], Ty::Bool),
         "recv" => (vec![], elem.clone()),
         "try_recv" => (vec![], Ty::option(elem.clone())),
@@ -2836,6 +2838,9 @@ fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
         // `std.cancel`'s `done()`). Idempotent; takes no args.
         "trip" => (vec![], Ty::Nil),
         "len" => (vec![], Ty::Int),
+        // `cap()` reports the channel's capacity: the bound passed to `Channel[T](cap)`, or `0` for an
+        // unbounded `Channel[T]()`.
+        "cap" => (vec![], Ty::Int),
         _ => return None,
     };
     Some(FnSig::plain(params, ret))

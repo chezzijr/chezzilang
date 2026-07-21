@@ -8980,6 +8980,30 @@ fn channel_construct_and_methods_ok() {
 }
 
 #[test]
+fn channel_bounded_capacity_and_cap_method_ok() {
+    // `Channel[T](cap)` accepts an int capacity; `cap()` infers int on both bounded and unbounded.
+    ok(
+        "fn main():\n    b := Channel[int](4)\n    print(b.cap())\n    u := Channel[int]()\n    print(u.cap())\nmain()\n",
+    );
+}
+
+#[test]
+fn channel_capacity_must_be_int_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int](\"x\")\n    print(ch.len())\nmain()\n",
+        "Channel capacity must be int",
+    );
+}
+
+#[test]
+fn channel_too_many_ctor_args_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int](1, 2)\n    print(ch.len())\nmain()\n",
+        "takes an optional capacity",
+    );
+}
+
+#[test]
 fn channel_send_wrong_type_rejected() {
     rejects(
         "fn main():\n    ch := Channel[int]()\n    ch.send(\"x\")\nmain()\n",

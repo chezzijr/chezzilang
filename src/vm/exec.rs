@@ -102,6 +102,7 @@ impl Vm {
             executors: Vec::new(),
             suspend: None,
             wait_suspend: None,
+            send_suspend: None,
             offload: None,
             poll_park: None,
             pending_connect: None,
@@ -217,6 +218,7 @@ impl Vm {
     pub(super) fn paused(&self) -> bool {
         self.suspend.is_some()
             || self.wait_suspend.is_some()
+            || self.send_suspend.is_some()
             || self.yield_now
             || self.offload.is_some()
             || self.poll_park.is_some()
@@ -2012,6 +2014,7 @@ impl Vm {
                 };
                 match self.chan_recv_step(h, span)? {
                     RecvStep::Got(w) => {
+                        self.wake_senders(h); // `for v in ch:` freed a slot — wake a parked bounded sender
                         let val = self.from_wire(w);
                         let opt = self.alloc_enum("Option", "Some", vec![val]);
                         self.push(opt);
@@ -2095,10 +2098,25 @@ impl Vm {
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::WaitPoll(meta) => self.op_wait_poll(meta, span)?,
-            Op::NewChannel => {
-                let h = self
-                    .heap
-                    .alloc(Obj::Channel(Arc::new(ChannelCore::default())));
+            Op::NewChannel(has_cap) => {
+                let cap = if *has_cap {
+                    let cap_v = self.pop();
+                    let n = self.int_of(cap_v);
+                    if n <= 0 {
+                        return Err(self.err(
+                            "Channel capacity must be > 0 (use Channel[T]() for an unbounded channel)"
+                                .to_string(),
+                            span,
+                        ));
+                    }
+                    Some(n as usize)
+                } else {
+                    None
+                };
+                let h = self.heap.alloc(Obj::Channel(Arc::new(ChannelCore {
+                    cap,
+                    ..Default::default()
+                })));
                 self.push(Value::obj(h));
             }
             Op::NewShared => {

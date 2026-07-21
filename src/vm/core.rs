@@ -19,8 +19,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
-/// `Channel[T]` core (B3.1): the shared mailbox, an unbounded FIFO of wire-form messages. `send`
-/// locks + `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len.
+/// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
+/// `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len. `cap` is `None` for an
+/// unbounded `Channel[T]()` (the default — `send` never blocks) and `Some(n)` for a bounded
+/// `Channel[T](n)`: once `n` messages are queued a `send` BLOCKS/parks until a `recv` frees a slot
+/// (backpressure), and `try_send` returns `false`. A freed slot wakes parked senders exactly as a
+/// `send` wakes parked receivers (the not-full waiter set mirrors the not-empty one).
 ///
 /// B3.3-threads: `cv` is the real-OS-thread blocking primitive. A `recv` on an empty queue waits on
 /// `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing. `cv` is **dead on the
@@ -34,6 +38,10 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
     pub cv: Condvar,
+    /// Bounded-channel capacity: `None` = unbounded (`send` never blocks); `Some(n>0)` = a bounded
+    /// FIFO whose `send` parks the fiber once `n` messages are queued and whose `try_send` returns
+    /// `false` when full. Immutable after construction (set once by `Op::NewChannel`).
+    pub cap: Option<usize>,
     /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
     /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
     /// recvs it once, in a `wait` arm). Delivery is handled at `recv` time in the receiver's own

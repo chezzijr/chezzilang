@@ -607,6 +607,14 @@ pub struct Vm {
     /// exclusive with `suspend` (a fiber parks via one or the other, never both). A VM-global like
     /// `suspend` (one fiber runs at a time).
     wait_suspend: Option<Vec<GcRef>>,
+    /// Bounded-channel backpressure — the send-side analogue of `suspend`: set by a blocking `send`
+    /// on a FULL `Channel[T](cap)` running inside an active scheduler. Records the channel handle the
+    /// running fiber is waiting for SPACE on. Routed by the worker loop to [`MnSched::park_send`] (M:N)
+    /// / filed into `blocked_on` by [`Vm::run_child`] (cooperative), whose gap re-check waits for the
+    /// OPPOSITE condition of a `recv` park (space-available, not message-waiting). A sibling `recv`
+    /// that frees a slot wakes it ([`Vm::wake_senders`]). Mutually exclusive with `suspend`/
+    /// `wait_suspend` (a fiber parks via exactly one). VM-global like `suspend` (one fiber runs at once).
+    send_suspend: Option<GcRef>,
     /// D5 — set when a blocking native call (`is_blocking`) is reached under the M:N engine: instead
     /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
     /// sentinel; the worker loop hands it to the dirty/blocking pool ([`Disp::Offload`]) and is freed.
@@ -2118,6 +2126,76 @@ impl MnSched {
         }
     }
 
+    /// Bounded-channel backpressure — the send-side twin of [`MnSched::park`]. The running fiber
+    /// blocked on a `send` into a FULL bounded channel; park it in `key`'s bucket (as an ordinary
+    /// [`ParkedEntry::Recv`] — the bucket is homogeneous per-instant since a bounded channel is never
+    /// simultaneously full and empty, so no new entry variant is needed). The gap re-check is the
+    /// OPPOSITE of `park`'s: requeue `Ready` if a concurrent `recv` freed a SLOT (space available), the
+    /// channel was `close`d (the re-run faults "send on a closed channel"), or the scope was cancelled;
+    /// else park. `core.cap` is `Some` here by construction. Lock order core-OUTER / q-INNER matches
+    /// `park`. A freed slot wakes this fiber via [`MnSched::recv_wake`] (called from every bounded pop).
+    fn park_send(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
+        let mut c = self.lock();
+        c.running -= 1;
+        let cap = core.cap.expect("park_send on an unbounded channel");
+        let (space, closed) = {
+            let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            (g.queue.len() < cap, g.closed)
+        };
+        let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
+        if space || closed || cancelled {
+            fiber.state = FiberState::Ready;
+            c.global.push_back(fiber);
+            self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued, re-checks space)
+            self.cv.notify_all();
+        } else {
+            fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
+            c.parked
+                .entry(key)
+                .or_default()
+                .push(ParkedEntry::Recv(fiber));
+            c.parked_n += 1;
+        }
+    }
+
+    /// Bounded-channel `send` when the queue may be at capacity: the space-check + enqueue + wake of
+    /// any parked receivers, ALL atomic under the sched lock so two concurrent senders can't both see
+    /// space and over-fill. Returns `true` if the value was enqueued (space was free), `false` if the
+    /// channel was full (the value is dropped — the caller re-serializes it on its send re-run after
+    /// parking). Same lock discipline / wake fan-out as [`MnSched::send_wake`] on the enqueue path.
+    fn send_wake_bounded(
+        &self,
+        key: usize,
+        core: &Arc<ChannelCore>,
+        w: WireValue,
+        cap: usize,
+    ) -> bool {
+        let mut c = self.lock();
+        {
+            let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            if q.queue.len() >= cap {
+                return false; // full — caller parks (both guards drop on return)
+            }
+            q.queue.push_back(w);
+        }
+        self.wake_bucket(&mut c, key);
+        drop(c);
+        self.cv.notify_all();
+        self.wake_parent_chain(key);
+        core.cv.notify_all();
+        true
+    }
+
+    /// Bounded-channel backpressure — a `recv` freed a slot on `key`, so wake every parked SENDER
+    /// (all filed as [`ParkedEntry::Recv`]) to re-run and grab the space. Identical fan-out to
+    /// [`MnSched::close_wake`] (wake the bucket + notify + walk the parent chain) — a recv freeing a
+    /// slot and a close both just "make the waiters on this key runnable"; only the reason differs.
+    /// The woken senders race for the one slot; losers re-park (the documented multi-sender
+    /// nondeterminism). No-op fan-out cost is bounded by the (usually 0 or 1) parked senders.
+    fn recv_wake(&self, key: usize, core: &Arc<ChannelCore>) {
+        self.close_wake(key, core);
+    }
+
     /// §6d M:N multi-channel `wait` park — the N-key generalization of [`MnSched::park`]. The running
     /// fiber blocked on a `wait` whose every arm channel was empty/live; `arms` is `(key, core)` for
     /// each live arm (captured by the worker loop while the fiber heap was live, exactly like
@@ -2987,6 +3065,10 @@ impl ReadyWorker {
 /// queue under the sched lock) or finish it with a terminal outcome.
 enum Disp {
     Park(usize, Arc<ChannelCore>),
+    /// Bounded-channel backpressure — the fiber blocked on a full `send` (the send-side twin of
+    /// `Park`). Carries `(key, core)` captured WHILE the fiber heap was live; the worker loop hands it
+    /// to [`MnSched::park_send`], whose gap re-check waits for SPACE (not a message).
+    SendPark(usize, Arc<ChannelCore>),
     /// §6d — the fiber blocked on a multi-channel `wait` (every arm empty/live). Carries `(key, core)`
     /// for each live arm, captured WHILE the fiber heap was live (like `Park`); the worker loop hands
     /// it to [`MnSched::park_wait`], which files ONE shared `WaitPark` token in every arm bucket.
@@ -3046,6 +3128,14 @@ enum SockPoll {
 enum RecvStep {
     Got(WireValue),
     ClosedEmpty,
+    Parked,
+}
+
+/// The outcome of one bounded `send` step ([`Vm::chan_send_step`]): the value was queued (or the
+/// channel was unbounded — never blocks), or the fiber parked on a full channel (re-runs on wake).
+/// A closed/deadlock case is returned as an `Err` from `chan_send_step`, not a variant here.
+enum SendStep {
+    Sent,
     Parked,
 }
 

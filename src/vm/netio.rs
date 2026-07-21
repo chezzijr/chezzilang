@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// The shared fault for a `send` on a FULL bounded channel that cannot park (top level with no
+/// nursery, or inside a native callback). ONE const so every non-parkable full-send path — on BOTH
+/// engines — emits byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
+const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bounded channel is at \
+    capacity and no runnable task can receive to free a slot. If a consumer is spawned in the same \
+    `parallel:` nursery, note the nursery body runs before its spawned tasks start, so a blocking \
+    send in the body can't reach it — put the producer in a `spawn:` too.";
+
 /// B1 — the outcome of decoding one socket chunk (+ the socket's carried tail) as UTF-8.
 pub(super) enum Decoded {
     /// A complete, valid `str` (possibly empty — the EOF sentinel).
@@ -1153,16 +1161,32 @@ impl Vm {
                 if self.channel_core(h).q.lock().unwrap().closed {
                     return Err(self.err("send on a closed channel".to_string(), span));
                 }
-                self.channel_send_wire(h, w);
-                Ok(Value::nil())
+                // Unbounded: enqueue immediately (byte-identical to the pre-bounded path). Bounded +
+                // full: park the fiber (`SendStep::Parked` — the receiver+value were re-rooted) or, in
+                // a non-parkable context, fault. On park, `do_method_call` skips the result push.
+                match self.chan_send_step(h, w, args[0], span)? {
+                    SendStep::Sent | SendStep::Parked => Ok(Value::nil()),
+                }
             }
-            // `try_send` is the safe partner of `send`: channels are unbounded, so its only failure is
-            // a closed channel — returns `false` then (never faults), `true` once the value is queued.
+            // `try_send` is the non-blocking partner of `send`: it never parks. It returns `false` when
+            // the send can't proceed — the channel is CLOSED, or a BOUNDED channel is FULL (queue at
+            // capacity) — and `true` once the value is queued. (An unbounded channel is never full.)
+            // NOTE: the full-vs-not decision on a bounded channel under multi-sender contention is the
+            // SAME nondeterminism class as `try_recv` returning `None`-vs-`Some` under contention.
             "try_send" => {
                 self.arity_err("try_send", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
-                if self.channel_core(h).q.lock().unwrap().closed {
-                    return Ok(Value::bool(false));
+                {
+                    let core = self.channel_core(h);
+                    let g = core.q.lock().unwrap();
+                    if g.closed {
+                        return Ok(Value::bool(false));
+                    }
+                    if let Some(cap) = core.cap
+                        && g.queue.len() >= cap
+                    {
+                        return Ok(Value::bool(false)); // bounded + full — non-blocking, so decline
+                    }
                 }
                 self.channel_send_wire(h, w);
                 Ok(Value::bool(true))
@@ -1182,7 +1206,10 @@ impl Vm {
                     && self.channel_core(h).timer.is_none()
                 {
                     return match self.demote_recv_block(h, span)? {
-                        RecvStep::Got(w) => Ok(self.from_wire(w)),
+                        RecvStep::Got(w) => {
+                            self.wake_senders(h); // freed a slot — wake a parked bounded sender
+                            Ok(self.from_wire(w))
+                        }
                         RecvStep::ClosedEmpty => {
                             Err(self.err("receive on a closed channel".to_string(), span))
                         }
@@ -1191,7 +1218,10 @@ impl Vm {
                     };
                 }
                 match self.chan_recv_step(h, span)? {
-                    RecvStep::Got(w) => Ok(self.from_wire(w)),
+                    RecvStep::Got(w) => {
+                        self.wake_senders(h); // freed a slot — wake a parked bounded sender
+                        Ok(self.from_wire(w))
+                    }
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
@@ -1208,6 +1238,9 @@ impl Vm {
                 self.arity_err("try_recv", args, 0, span)?;
                 let core = self.channel_core(h);
                 let popped = core.q.lock().unwrap().queue.pop_front();
+                if popped.is_some() {
+                    self.wake_senders(h); // a real pop freed a slot — wake a parked bounded sender
+                }
                 // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline has passed, even
                 // with nothing queued — the level-triggered, non-blocking poll (used by `wait`'s
                 // source-order scan and the `else` arm). `--parallel` may also have a real `true`
@@ -1273,6 +1306,12 @@ impl Vm {
                 let n = self.channel_core(h).q.lock().unwrap().queue.len();
                 Ok(Value::int(n as i64))
             }
+            // `cap()` reports the channel's capacity: `Channel[T](n)` → `n`; unbounded `Channel[T]()` → 0.
+            "cap" => {
+                self.arity_err("cap", args, 0, span)?;
+                let cap = self.channel_core(h).cap.unwrap_or(0);
+                Ok(Value::int(cap as i64))
+            }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }
     }
@@ -1296,6 +1335,106 @@ impl Vm {
             sched.send_wake(key, &core, w);
         } else {
             core.q.lock().unwrap().queue.push_back(w);
+            core.cv.notify_all();
+            self.wake_on_send(h);
+        }
+    }
+
+    /// One `send` step for [`Vm::channel_method`]'s `send` (after its closed-channel guard). Unbounded
+    /// channels enqueue immediately (byte-identical to the historical path). A bounded channel enqueues
+    /// while it has space, else BLOCKS: it parks the fiber (an active scheduler resumes it once a
+    /// sibling `recv` frees a slot — the send-side mirror of [`Vm::chan_recv_step`]) or, in a context
+    /// that cannot park (top level with no nursery, or inside a native callback where the host stack
+    /// can't be unwound), faults with the shared full-deadlock message. The space-check + enqueue is
+    /// kept atomic under the sched lock (M:N: [`MnSched::send_wake_bounded`]) so concurrent senders
+    /// can't over-fill; the cooperative engine is single-thread, so a bare core-lock check suffices.
+    pub(super) fn chan_send_step(
+        &mut self,
+        h: GcRef,
+        w: WireValue,
+        orig: Value,
+        span: Span,
+    ) -> Result<SendStep, RuntimeError> {
+        let core = self.channel_core(h);
+        let Some(cap) = core.cap else {
+            // Unbounded — never blocks. Byte-identical to the historical `send`.
+            self.channel_send_wire(h, w);
+            return Ok(SendStep::Sent);
+        };
+        // Bounded. A fiber woken by `cancel_drain` (its scope faulted) must fault here rather than
+        // re-park (mirrors `chan_recv_step`'s checkpoint). `native_reentry == 0` gates it exactly as
+        // the park gate does — inside a callback the host stack can't be unwound.
+        if self.native_reentry == 0 && self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        // M:N (or the inline outermost-`parallel:` builder holding the sched in `mn_enlist_sched`):
+        // the space-check + enqueue + receiver-wake is atomic under the sched lock.
+        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
+            let key = self.channel_core_ptr(h);
+            if sched.send_wake_bounded(key, &core, w, cap) {
+                return Ok(SendStep::Sent);
+            }
+            // Full. Inside a native callback we cannot snapshot-park (the caller's host-stack loop
+            // frame is not capturable) — fault for v1 (the `ponytail:` upgrade path is a demote-in-
+            // place send block, like `demote_recv_block`).
+            if self.native_reentry > 0 {
+                return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+            }
+            self.park_send(h, orig);
+            return Ok(SendStep::Parked);
+        }
+        // Cooperative / no-scheduler: single-thread, so a plain core-lock space-check is race-free.
+        let has_space = {
+            let mut g = core.q.lock().unwrap();
+            if g.queue.len() < cap {
+                g.queue.push_back(w);
+                true
+            } else {
+                false
+            }
+        };
+        if has_space {
+            core.cv.notify_all();
+            self.wake_on_send(h); // wake a cooperative receiver parked on this channel's `recv`
+            return Ok(SendStep::Sent);
+        }
+        // Full + a cooperative nursery scheduler (and not in a native callback): park; a sibling `recv`
+        // re-runs us via `blocked_on`. No scheduler / native callback: no sibling can drain — deadlock.
+        if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
+            self.park_send(h, orig);
+            return Ok(SendStep::Parked);
+        }
+        Err(self.err(FULL_SEND_DEADLOCK.to_string(), span))
+    }
+
+    /// Park the running fiber on a full bounded `send`: re-root the receiver AND the value argument on
+    /// the operand stack (send is 1-arg, unlike recv's 0-arg — both must be re-pushed or the rewound
+    /// `CallMethod(send)` mis-reads the stack), rewind `ip` so the send re-executes on resume, and set
+    /// the `send_suspend` sentinel. The scheduler / worker loop files the fiber into the channel's wait
+    /// set; a sibling `recv` freeing a slot ([`Vm::wake_senders`]) wakes it. The value is re-serialized
+    /// on the re-run (`to_wire_at(orig)` is idempotent), so the wire form built before parking is dropped.
+    pub(super) fn park_send(&mut self, h: GcRef, value: Value) {
+        self.push(Value::obj(h)); // receiver (deeper on the stack)
+        self.push(value); // its one arg, back on top
+        self.frames.last_mut().unwrap().ip -= 1;
+        self.send_suspend = Some(h);
+    }
+
+    /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
+    /// parked on a full `send` to it. No-op for an unbounded channel (no sender ever parks there — the
+    /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `channel_send_wire`'s
+    /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else the cooperative
+    /// engine drains `blocked_on[key]` (`wake_on_send`) + notifies the core condvar (a demoted sender).
+    pub(super) fn wake_senders(&mut self, h: GcRef) {
+        let core = self.channel_core(h);
+        if core.cap.is_none() {
+            return;
+        }
+        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
+            let key = self.channel_core_ptr(h);
+            sched.recv_wake(key, &core);
+        } else {
             core.cv.notify_all();
             self.wake_on_send(h);
         }
@@ -1464,6 +1603,7 @@ impl Vm {
                 (g.queue.pop_front(), g.closed)
             };
             if let Some(w) = popped {
+                self.wake_senders(h); // a `wait:` arm freed a slot — wake a parked bounded sender
                 let v = self.from_wire(w);
                 self.take_wait_arm(base, v, meta.arm_targets[i]);
                 return Ok(());
@@ -1568,6 +1708,7 @@ impl Vm {
                 .map(|&h| (self.channel_core_ptr(h), self.channel_core(h)))
                 .collect();
             let (arm_index, w) = self.demote_wait_block(arms, soonest, span)?;
+            self.wake_senders(keys[arm_index]); // demoted `wait:` freed a slot — wake a bounded sender
             let v = self.from_wire(w);
             self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
             return Ok(());

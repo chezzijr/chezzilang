@@ -1644,9 +1644,15 @@ impl Checker {
                 Some(Ty::Bytes)
             }
             "Channel" => {
-                // `Channel[T]()` — a fresh empty mailbox. The element type comes from the explicit
-                // type argument (it can't be inferred from a no-arg call), and must be sendable.
-                self.check_arity("Channel", 0, args, span);
+                // `Channel[T]()` — an unbounded mailbox; `Channel[T](cap)` — a bounded FIFO whose
+                // `send` blocks when `cap` messages are queued. The element type comes from the explicit
+                // type argument (it can't be inferred), and must be sendable. The optional capacity is a
+                // runtime int expr (validated `> 0` at runtime, so it can't be arity-checked away here).
+                if args.len() > 1 {
+                    self.error(span, "Channel[T]() takes an optional capacity argument");
+                } else if args.len() == 1 {
+                    self.expect_int(&args[0], "Channel capacity");
+                }
                 let elem = match targs {
                     [t] => t.clone(),
                     [] => {
