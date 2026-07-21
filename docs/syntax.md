@@ -2650,11 +2650,13 @@ fn fetch_all(urls: List[str]):
   loops). See [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
-- **Sendability:** a captured local crosses into a task as an **independent per-task copy** (writes
-  in the task stay local — the F1 divergence); reassigning that captured local is fine, but a captured
-  **module global** is frozen and reassigning it is rejected. Only sendable types
+- **Sendability:** a captured local — AND every module global — crosses into a task as an **independent
+  per-task copy** (writes in the task stay local, on both engines; a module global is deep-copied at the
+  spawn boundary just like a captured local, so reassigning or in-place-mutating either inside a task is
+  fine and simply invisible to the parent). Only sendable types
   (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
-  cross by reference — not closures or native handles.
+  cross by reference — not closures or native handles. To share mutable state across tasks use a
+  `Shared`/`Atomic`/`Channel` (they cross by shared handle, so a task-side write IS visible to the parent).
 
 ## 12. Imports & modules  (M4.5)
 

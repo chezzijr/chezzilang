@@ -245,9 +245,11 @@ reusing an exhausted one yields nothing.
 > **uniformly by reference**: a capturing frame shares the closest binding of a captured name and both
 > reads and writes are live (was: a plain local snapshotted by value; a global was already live). A
 > captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). The one place sharing stops is
-> the **task boundary**: a plain captured local sent across `spawn`/`parallel:` is snapshot-copied into
-> an independent per-task cell (F1 — the sole deliberate divergence from Go, byte-identical serial vs
-> M:N), so cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
+> the **task boundary**: a plain captured local — **and every module global** — sent across
+> `spawn`/`parallel:` is snapshot-copied into an independent per-task view (F1 — the sole deliberate
+> divergence from Go, byte-identical serial vs M:N; module globals are deep-copied per task at the spawn
+> boundary on BOTH engines as of 2026-07-21, replacing the earlier frozen-module-global checker rule), so
+> cross-task shared mutation still requires `Shared[T]` et al. Internally a captured local is
 > boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`). This reverses
 > the earlier snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`
 > "Closure capture".

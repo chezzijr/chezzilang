@@ -1028,7 +1028,6 @@ impl Checker {
         for stmt in stmts {
             self.check_stmt(stmt);
         }
-        self.check_spawn_global_mutation(stmts);
         let sig = self.capture_sig(stmts);
         self.finalize_empty_coll_sites();
         self.finalize_hover_pending();
@@ -1720,81 +1719,6 @@ impl Checker {
     /// body to a `Ty` in the current (defining) module's scope without emitting errors.
     pub(super) fn resolve_type_ro_pub(&self, t: &Type) -> Ty {
         self.resolve_ty_ro(t)
-    }
-
-    /// G1 (B3.3b): under `--parallel` a module global is **read-only after init** — cross-task
-    /// mutable state must go through `Shared[T]` (the `value → Ref[T] → Shared[T]` mutation ladder's
-    /// top rung). A reassignment — OR an index/field in-place mutation (`m[k]=v`, `s.field=x`, B3) — of a
-    /// module global reachable, directly or **transitively through free-function calls**, from a `spawn`
-    /// task is an error. Flow-scoped to `spawn` reachability: the same global mutated only from sequential
-    /// code stays legal (the default cooperative engine is single-heap and unaffected). This transitive
-    /// scan flags index/field-assign ONLY (a method-name match here would be type-blind and false-reject
-    /// `Shared.update`/`Atomic.add`/user methods); callee-form *method*-mutation (`obj.push()` reached
-    /// through a spawned free fn) remains a documented gap (gaps.md §B3 residual C). Direct in-spawn-body
-    /// method-mutation whose receiver ROOT is the module global (`xs.push()`, `cfg.items.push()`) IS caught,
-    /// type-aware, in `infer_method_call`; a receiver reached through a task-local ALIAS
-    /// (`local := xs; local.push()`) is NOT — the root resolves to the local — and stays a documented
-    /// residual (gaps.md §B3 residual D).
-    pub(super) fn check_spawn_global_mutation(&mut self, stmts: &[Stmt]) {
-        // Module globals = top-level `let` binding names.
-        let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for s in stmts {
-            if let StmtKind::Let { names, .. } = &s.kind {
-                globals.extend(names.iter().cloned());
-            }
-        }
-        if globals.is_empty() {
-            return;
-        }
-
-        // Free (top-level) functions by name — the only `Ident`-callable nodes in the call graph.
-        let mut fns: HashMap<&str, &FnDecl> = HashMap::new();
-        for s in stmts {
-            if let StmtKind::Fn(d) = &s.kind {
-                fns.insert(d.name.as_str(), d);
-            }
-        }
-
-        // Spawn roots: every `spawn` anywhere in the module contributes its target free fn(s).
-        let mut roots: Vec<String> = Vec::new();
-        collect_spawn_roots(stmts, &fns, &mut roots);
-
-        // Transitive closure over the free-function call graph (`reachable` doubles as the cycle guard).
-        let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut work = roots;
-        while let Some(name) = work.pop() {
-            if !reachable.insert(name.clone()) {
-                continue;
-            }
-            if let Some(d) = fns.get(name.as_str()) {
-                let mut callees = Vec::new();
-                let mut scopes = vec![d.params.iter().map(|p| p.name.clone()).collect()];
-                collect_free_calls_block(&d.body, &fns, &mut scopes, &mut callees);
-                for c in callees {
-                    if !reachable.contains(&c) {
-                        work.push(c);
-                    }
-                }
-            }
-        }
-
-        // Each reachable free fn: flag its module-global reassignments (shadow-aware).
-        let mut hits: Vec<(Span, String)> = Vec::new();
-        for name in &reachable {
-            if let Some(d) = fns.get(name.as_str()) {
-                let mut scopes: Vec<std::collections::HashSet<String>> =
-                    vec![d.params.iter().map(|p| p.name.clone()).collect()];
-                find_global_mutations(&d.body, &globals, &mut scopes, &mut hits);
-            }
-        }
-        // Deterministic diagnostic order (the reachable set's iteration order is not stable).
-        hits.sort_by_key(|(sp, _)| (sp.line, sp.col));
-        for (sp, name) in hits {
-            self.error(
-                sp,
-                format!("cannot mutate module global '{name}' from a parallel task; use Shared[T]"),
-            );
-        }
     }
 
     // ===== scopes =====

@@ -2561,24 +2561,29 @@ fn eager_scope_round_trips_with_fiber_ctx() {
     ));
 }
 
-/// D2b companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a cooperative fiber
-/// (`heap: None`) must leave the shell's `out`/`module_objs`/`executors` untouched too, so the
-/// cooperative engine stays byte-identical.
+/// D2b / Task 1 companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a cooperative
+/// fiber (`heap: None`) still leaves the shell's HEAP-GATED side state (`out`/`executors`) untouched —
+/// but `module_objs`/`module_faulted` now swap UNCONDITIONALLY (Task 1: a serial child carries its own
+/// deep-copied module view). So swapping in a child with an empty view parks the host's REAL modules
+/// into the ctx (where `root_ctx` keeps them rooted).
 #[test]
-fn mn_swap_ctx_leaves_side_state_untouched_for_cooperative_fiber() {
+fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.out.push_str("host-out");
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
     vm.module_objs = vec![host_mod];
     let mut ctx = FiberCtx::default();
     vm.swap_ctx(&mut ctx);
+    // Heap-gated state (out) stays on the shell for a cooperative fiber.
     assert_eq!(vm.out, "host-out");
-    assert_eq!(vm.module_objs, vec![host_mod]);
     assert!(
         ctx.out.is_empty(),
-        "swap must not give a cooperative fiber side state"
+        "swap must not give a cooperative fiber heap-gated side state"
     );
-    assert!(ctx.module_objs.is_empty());
+    // Task 1 — module_objs swaps: the host's real modules parked into the ctx, the shell now holds the
+    // child's (empty) view.
+    assert!(vm.module_objs.is_empty());
+    assert_eq!(ctx.module_objs, vec![host_mod]);
 }
 
 // ---- D2b MnSched scheduler mechanics (Step 2 — hand-built fibers, no bytecode) ----

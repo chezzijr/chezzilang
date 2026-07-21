@@ -1918,8 +1918,14 @@ impl Vm {
                         // Pop under the lock, then DROP the guard before the re-entrant call.
                         let task = core.inner.lock().unwrap().queue.pop_front();
                         let Some(task) = task else { break };
-                        let task = self.from_wire(task);
-                        self.push(task);
+                        // Task 1 — freeze the module globals ONCE (memoized `ensure_snapshot`, matching
+                        // the M:N drain via `prepare_worker_from_wire`) and give this task its OWN
+                        // deep-copied module-global view in the shared heap. Both the `from_wire` rebuild
+                        // of the closure AND its `invoke_value` run under that view, so a module global
+                        // mutated by the submitted task hits its private copy — invisible to the parent,
+                        // `serial == M:N` by construction. `Shared`/`Atomic`/`Channel`/`Cffi` globals
+                        // still cross by shared `Arc` (via `to_snap`), so the escape hatch is unaffected.
+                        let snap = self.ensure_snapshot(span)?;
                         // gaps.md B4: the submitted task runs INLINE on this entry Vm, so its callee
                         // frames get captured into `fault_trace` while intact. We must drop ONLY the
                         // inline task's own frames — never a superseding OUTER fault already captured
@@ -1931,8 +1937,13 @@ impl Vm {
                         // discards the isolated worker's `fault_trace`) and a plain nursery-task panic.
                         let outer_trace = self.fault_trace.take();
                         let outer_depth = std::mem::replace(&mut self.fault_trace_depth, 0);
-                        let r = self.guarded(|vm| vm.invoke_value(task, vec![], span));
-                        self.pop();
+                        let r = self.with_serial_child_modules(snap, |vm| {
+                            let task = vm.from_wire(task);
+                            vm.push(task);
+                            let r = vm.guarded(|vm| vm.invoke_value(task, vec![], span));
+                            vm.pop();
+                            r
+                        });
                         self.fault_trace = outer_trace;
                         self.fault_trace_depth = outer_depth;
                         r?;

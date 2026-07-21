@@ -128,6 +128,7 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
+            pinned_module_roots: Vec::new(),
             mn: None,
         }
     }
@@ -166,11 +167,21 @@ impl Vm {
         // fiber reads the same `Vm::host.stdin` the entry task does — see `Stdin` and `spawn_worker`,
         // which hands the M:N worker the same shared handle.
         //
+        // Task 1 — the fiber's module-globals view swaps for EVERY fiber, cooperative OR M:N. A serial
+        // child now carries its OWN deep-copied `module_objs` (allocated in the shared heap by
+        // `prepare_serial_child`) so its module-global mutations hit its private copy — `serial == M:N`
+        // by construction. (For M:N these `GcRef`s index the fiber's own heap swapped just below; for a
+        // cooperative fiber they index the shared heap. Either way they travel WITH the fiber.) The
+        // parent's REAL modules move into `ctx.module_objs` on its swap-out and are GC-rooted there by
+        // `root_ctx`. `module_snapshot` is deliberately VM-global (not swapped): serial children are
+        // eager-faulted with `module_snapshot = None`, M:N shells install one shared snapshot.
+        std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
+        std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
         // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
         // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
-        // the fiber's heap-keyed side state (out/stderr/module roots/executors), so they move
-        // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of it.
+        // the fiber's remaining heap-keyed side state (out/stderr/executors/intern), so they move
+        // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of that.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             debug_assert!(
                 self.parallel,
@@ -179,8 +190,6 @@ impl Vm {
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
             std::mem::swap(&mut self.stderr, &mut ctx.stderr);
-            std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
-            std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
             // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
             // atomically with the heap (same heap-keyed argument as `module_objs`). A cooperative fiber
@@ -1126,6 +1135,11 @@ impl Vm {
                 work.extend(task.roots());
             }
         }
+        // Task 1 — a cooperative fiber now carries its OWN deep-copied module globals (allocated in the
+        // SHARED heap by `prepare_serial_child`), reachable ONLY via this `FiberCtx` while the fiber is
+        // parked. Root them or a sibling's alloc-triggered GC would sweep the child's live module copy
+        // (and, after the parent's swap-out, the REAL modules parked in `nursery.parent.module_objs`).
+        work.extend(ctx.module_objs.iter().copied());
     }
 
     pub(super) fn collect(&mut self) {
@@ -1177,6 +1191,10 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
+        // Task 1 — the shell's REAL module_objs while swapped out for a serial child-modules window
+        // (empty otherwise). Without this a safepoint GC during the window — when live frames don't root
+        // them (the serial `Executor` exit-drain runs with empty frames) — sweeps them → UAF on restore.
+        work.extend(self.pinned_module_roots.iter().copied());
         // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).

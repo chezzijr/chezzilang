@@ -707,6 +707,14 @@ pub struct Vm {
     /// (module globals are frozen under `--parallel`, decision G1), so one build serves the whole
     /// run. A worker reuses its `module_snapshot` instead of this (see [`Vm::ensure_snapshot`]).
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
+    /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
+    /// `self.module_objs` during a serial child-modules window (`with_serial_child_modules` /
+    /// `prepare_serial_child`). `collect()` roots `self.module_objs` (the child copy) but not the
+    /// swapped-out shell modules; when the window runs with EMPTY frames (the serial `Executor`
+    /// exit-drain) nothing else roots them, so an alloc-triggered safepoint GC would sweep them and the
+    /// restore would reinstall dangling `GcRef`s (use-after-free). Stashing them here — scanned by
+    /// `collect()` — keeps them live for the window. Empty outside such a window.
+    pinned_module_roots: Vec<GcRef>,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
     /// legacy condvar-block; `None` on the cooperative engine, the top-level VM, and a prepared task
@@ -865,10 +873,13 @@ struct FiberCtx {
     /// (`heap.is_some()`); a cooperative fiber keeps `String::new()` and aliases the shell's buffers.
     out: String,
     stderr: String,
-    /// D2b — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef` into the
-    /// fiber's OWN heap, which travels via `heap` above; a `GcRef` is only valid against the heap it
-    /// was allocated in, so these roots MUST swap atomically with that heap. Empty for cooperative
-    /// fibers (they alias the shell's `module_objs`/`module_faulted`).
+    /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). For an M:N fiber
+    /// each is a `GcRef` into the fiber's OWN heap (travels via `heap` above). For a COOPERATIVE fiber
+    /// (Task 1) it is the fiber's own DEEP COPY of the module globals in the SHARED heap, built by
+    /// `prepare_serial_child` at the spawn boundary — so a serially-spawned task mutates its private
+    /// copy, matching M:N by construction. Either way these roots swap per-fiber (`swap_ctx` swaps them
+    /// UNCONDITIONALLY now) and are GC-rooted while parked by `root_ctx`. `module_faulted` is inert on
+    /// cooperative fibers (eager-faulted, `module_snapshot` cleared) but still swaps for symmetry.
     module_objs: Vec<GcRef>,
     module_faulted: Vec<bool>,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as

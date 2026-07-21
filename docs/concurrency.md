@@ -82,10 +82,22 @@ means stdin is genuinely exhausted. Details + the v1 core-worker-pinning limit: 
 counter := 0
 parallel:
     spawn: counter = counter + 1   # compiles, but each task mutates its OWN isolated copy of
-                                    # `counter` (captured locals cross the airlock by deep copy),
-                                    # so the parent's `counter` stays 0 — no shared write, no race.
+                                    # `counter` — a module global is deep-copied per spawned task at
+                                    # the spawn boundary on BOTH engines, so the parent's `counter`
+                                    # stays 0 — no shared write, no race.
 print(counter)                     # 0  — to actually share, use a Shared[int] (below)
 ```
+
+**Module globals isolate per task on both engines.** A `spawn`ed task gets its own deep copy of every
+module global (and of every captured local) — mutating one inside a task never propagates out, on
+`--serial` or the default M:N engine alike (they snapshot identically; `serial == M:N` by construction).
+The snapshot is taken **once, at the first nursery**, and reused for every later task and nested nursery
+(module globals are effectively frozen thereafter): a mutation by ordinary sequential code *between* two
+nurseries, or by a task *before* it opens a nested `parallel:`, is NOT seen by tasks that read the global
+afterward — again identical on both engines. (To thread a fresh value into a task, pass it as a spawn
+argument or through a `Channel`.)
+To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
+`Channel[T]` — those cross by shared handle, not by copy, so a task-side write IS visible to the parent.
 
 **The trade in one line:** Tier D lets you share → fast sends, but races are your problem. A+C
 forbids sharing → the race literally cannot be expressed. For a scripting language that's a *good*

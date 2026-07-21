@@ -1010,6 +1010,42 @@ fn executor_submit_mutating_closure_isolated_parity() {
 }
 
 #[test]
+fn executor_submit_module_global_inplace_mutation_isolates_parity() {
+    // Task 1 (Executor path) — a submitted closure mutating a MODULE-GLOBAL aggregate in place must
+    // isolate on BOTH engines, exactly like the nursery path. The cooperative Executor drain snapshots
+    // the module globals per task (mirroring M:N's `drain_executor_on_pool` → `install_snapshot`), so
+    // the parent's post-shutdown read sees the PRE-task value. Before the fix the serial inline drain
+    // ran the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
+    let out = parity_entry(
+        "xs := [1, 2, 3]\nfn main():\n    ex := Executor()\n    ex.submit(fn(): xs.push(99))\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+    );
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn executor_submit_module_global_callee_reassign_isolates_parity() {
+    // Task 1 (Executor path) — a submitted closure whose free-fn callee REASSIGNS a module global
+    // (`bump()` does `count = count + 1`). Pre-dated the diff and still diverged (serial=2 / M:N=0)
+    // because the serial Executor drain aliased the shell globals. Now each submitted task runs against
+    // its own module-global copy → the parent reads the frozen 0 on both engines.
+    let out = parity_entry(
+        "count := 0\nfn bump():\n    count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+    );
+    assert_eq!(out, "0\n");
+}
+
+#[test]
+fn executor_submit_atomic_visible_to_parent_parity() {
+    // Task 1 (Executor escape hatch) — an `Atomic` module global crosses the Executor drain by shared
+    // `Arc` (via `to_snap`), NOT deep-copied, so a task-side `add` IS visible to the parent. Guards that
+    // the per-task serial snapshot does not clone the Arc away (trap #1) on the Executor path too.
+    let out = parity_entry(
+        "import std.concurrency\na := Atomic(0)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): a.add(1))\n    ex.submit(fn(): a.add(1))\n    ex.shutdown()\n    print(a.load())\nmain()\n",
+    );
+    assert_eq!(out, "2\n");
+}
+
+#[test]
 fn executor_submit_sendable_closure_runs_parity() {
     // Control: a captured `Channel` is a genuinely-shared handle (crosses as its shared Arc, NOT
     // deep-copied), so a value sent from inside the submitted job is visible to the parent's `recv`.
@@ -4340,6 +4376,49 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     vm.run()
         .unwrap_or_else(|e| panic!("unexpected error under GC stress: {e}"));
     vm.out
+}
+
+/// Task 1 — the SERIAL `Executor` PROGRAM-EXIT drain (`drain_live_executors`) runs each queued job
+/// via `with_serial_child_modules` against EMPTY frames (it runs AFTER `run()` popped the top-level
+/// frame). This exercises that path under `gc_stress` (collect before every instruction): both
+/// un-`shutdown()`'d jobs mutate a module-global aggregate (forcing the snapshot path) and allocate,
+/// and the drain must complete with no error and full isolation (the parent's `xs` untouched).
+///
+/// Defense-in-depth note on `pinned_module_roots`: on this empty-frames path the swapped-out shell
+/// `module_objs` are otherwise unrooted, so a mid-job collection frees them and the restore reinstalls
+/// dangling `GcRef`s. The pin keeps the invariant "`module_objs` is always valid". This test does NOT
+/// distinguish the pin (it still passes with the pin's root scan removed) because normal post-exit-
+/// drain flow never DEREFERENCES those refs — every downstream read uses the memoized, heap-
+/// independent snapshot, not `self.module_objs`. The pin is retained to close the latent hazard
+/// (a future caller that touches module globals after an empty-frames drain would UAF), matching the
+/// adversarial-review finding; it is not claimed to be caught by an assertion here.
+#[test]
+fn serial_executor_exit_drain_module_globals_survive_gc_stress() {
+    let src = "\
+import std.concurrency
+xs := [1, 2, 3]
+fn worker():
+    xs.push(99)
+    junk := []
+    for i in range(30):
+        junk.push([str(i), str(i + 1)])
+fn main():
+    ex := concurrency.Executor()
+    ex.submit(worker)
+    ex.submit(worker)
+main()";
+    // No `shutdown()` → both jobs run at the EMPTY-frames program-exit drain. Each mutates its
+    // private copy (isolated); the parent's `xs` is untouched. The point is it does not UAF/abort.
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).unwrap();
+    let program = crate::compiler::compile_graph(&graph).unwrap();
+    let mut vm = Vm::new(Arc::new(program));
+    vm.gc_stress = true;
+    vm.host = crate::native::HostConfig::default();
+    vm.run().unwrap();
+    vm.drain_live_executors(Span { line: 1, col: 1 }).unwrap();
+    assert_eq!(vm.out, "");
 }
 
 /// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs on both
@@ -10447,14 +10526,189 @@ fn reader_annotation_requires_import() {
 }
 
 /// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so both
-/// engines AGREE (serial == M:N == 3): the parent's list is untouched by the isolated task copy. This
-/// locks that the accepted path (the boundary the B3 checker fix keeps allowing) still runs identically
-/// on both engines post-fix. The MODULE-GLOBAL form — which used to diverge (serial 4 / M:N 3) — is now
-/// a compile error (see the checker unit tests), so it cannot be parity-tested here.
+/// engines AGREE (serial == M:N == 3): the parent's list is untouched by the isolated task copy. Task 1
+/// gave the MODULE-GLOBAL form the same isolation (both engines snapshot module globals per task now —
+/// see `serial_module_global_direct_mutation_forms_isolate_parity`), so this fn-local case is just the
+/// sibling boundary: a captured local was already deep-copied on both engines and still is.
 #[test]
 fn module_global_aggregate_mutation_in_task_parity() {
     let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
     assert_parity_out(src, "3\n");
+}
+
+/// Task 1 — a module-global mutated via a cross-module FN CALL from a task isolates on BOTH engines.
+/// `counter.bump()` reassigns `count` inside the helper module; each spawned task snapshots the module
+/// globals (serial now deep-copies at the spawn boundary exactly as M:N does), so the parent's post-join
+/// read sees the PRE-task value. Before the fix serial printed 2 (shared) / M:N printed 0 (snapshot);
+/// after it both print 0. This program COMPILES today (a cross-module fn-call reassign escaped every
+/// old checker gate) and used to DIVERGE at runtime — the exact gaps.md §B3 (A) residual.
+#[test]
+fn serial_module_global_method_call_mutation_isolates_parity() {
+    let out = assert_parity_file(
+        &[
+            (
+                "counter.chz",
+                "count := 0\nfn bump():\n    count = count + 1\nfn get() -> int:\n    return count\n",
+            ),
+            (
+                "main.chz",
+                "import counter\nfn main():\n    parallel:\n        spawn:\n            counter.bump()\n            counter.bump()\n    print(counter.get())\nmain()\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "0\n");
+}
+
+/// Task 1 — gaps.md §B3 (D): aliasing a module-global aggregate into a task-local (`local := xs`) then
+/// mutating the alias. The receiver root resolves to `local`, so the old flow-blind gate never caught it
+/// and the program silently diverged (serial 4 / M:N 3). With serial snapshotting module globals per
+/// task, the alias points at the task's OWN copy — both engines now read 3.
+#[test]
+fn serial_module_global_task_local_alias_isolates_parity() {
+    let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\n    print(xs.len())\nmain()\n";
+    let out = parity_entry(src);
+    assert_eq!(out, "3\n");
+}
+
+/// Task 1 — the ESCAPE HATCH must survive the serial snapshot change: `Atomic`/`Shared`/`Channel` cross
+/// the spawn boundary by shared `Arc` core (via `to_snap`), NOT by deep copy, so a task-side mutation IS
+/// visible to the parent. Two tasks each `add(1)` to a module-global `Atomic`; the parent reads 2 on both
+/// engines. This is the regression guard for trap #1 (a hand-rolled copier would clone the Arc away → 0).
+#[test]
+fn atomic_incremented_in_task_visible_to_parent_parity() {
+    let src = "import std.concurrency\na := Atomic(0)\nfn main():\n    parallel:\n        spawn:\n            a.add(1)\n        spawn:\n            a.add(1)\n    print(a.load())\nmain()\n";
+    let out = parity_entry(src);
+    assert_eq!(out, "2\n");
+}
+
+/// Task 1 — direct in-block mutation forms (previously REJECTED by the frozen-module-global gates, now
+/// deleted): list `.push`, map index-assign, struct field-assign, set `.add`, bytearray `.extend`, and a
+/// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent → serial == M:N.
+#[test]
+fn serial_module_global_direct_mutation_forms_isolate_parity() {
+    // list .push
+    assert_eq!(
+        parity_entry(
+            "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n"
+        ),
+        "3\n",
+    );
+    // map index-assign
+    assert_eq!(
+        parity_entry(
+            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            m[1] = 9\n    print(m[1])\nmain()\n"
+        ),
+        "2\n",
+    );
+    // struct field-assign
+    assert_eq!(
+        parity_entry(
+            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            s.n = 9\n    print(s.n)\nmain()\n"
+        ),
+        "0\n",
+    );
+    // set .add
+    assert_eq!(
+        parity_entry(
+            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            st.add(9)\n    print(st.len())\nmain()\n"
+        ),
+        "2\n",
+    );
+    // bytearray .extend
+    assert_eq!(
+        parity_entry(
+            "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            ba.extend([1, 2, 3])\n    print(ba.len())\nmain()\n"
+        ),
+        "0\n",
+    );
+    // bare reassign
+    assert_eq!(
+        parity_entry(
+            "g := 0\nfn main():\n    parallel:\n        spawn:\n            g = g + 1\n    print(g)\nmain()\n"
+        ),
+        "0\n",
+    );
+}
+
+/// Task 1 — a module global mutated through a directly-spawned free-fn callee (`spawn worker()` where
+/// `worker` does `m[1] = 9`) — the old transitive-scan gate's job. Now it just isolates: the callee runs
+/// against the task's module-global copy, so the parent's map is untouched on both engines.
+#[test]
+fn serial_module_global_spawned_callee_mutation_isolates_parity() {
+    let src = "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
+    assert_eq!(parity_entry(src), "2\n");
+}
+
+/// Task 1 — a NESTED serial spawn (a task that itself opens a `parallel:` nursery and spawns) still
+/// isolates the module global at every level: the inner task copies the (already-copied) outer view, so
+/// its mutation is invisible even to the intermediate task. Guards the recursion in the snapshot path.
+#[test]
+fn nested_serial_spawn_module_global_isolates_parity() {
+    let src = "g := 0\nfn inner():\n    g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
+    assert_eq!(parity_entry(src), "0\n");
+}
+
+/// Task 1 — a task that mutates its module-global copy, PARKS on a channel recv, resumes, then reads the
+/// global keeps its per-fiber snapshot across the park (the copy lives in `FiberCtx`, travels with the
+/// fiber). Both engines agree the task sees its own mutation (1) and the parent sees the untouched global
+/// (0). Guards trap #3 (snapshot survives a park).
+#[test]
+fn channel_park_keeps_module_snapshot_parity() {
+    let src = "\
+import std.concurrency
+g := 0
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            g = g + 1
+            v := ch.recv()
+            print(\"task sees {g} got {v}\")
+        spawn:
+            ch.send(7)
+    print(\"parent sees {g}\")
+main()
+";
+    // task-order buffered output (decision F): the task's line flushes before the parent's read.
+    assert_eq!(parity_entry(src), "task sees 1 got 7\nparent sees 0\n");
+}
+
+/// Task 1 (regression) — a task that mutates a module global and THEN opens a NESTED `parallel:` must
+/// give its grandchild the SAME frozen view on both engines. M:N freezes globals at the first nursery
+/// (`ensure_snapshot` memoizes, never invalidated) and every worker/nested nursery reuses that snapshot,
+/// so the grandchild reads the PRE-mutation value (0). Serial must reuse the identical memoized snapshot
+/// — a FRESH per-nursery `snapshot_modules()` would read the parent-task's live mutated copy and diverge
+/// (serial 1 / M:N 0). Distinct from `nested_serial_spawn_module_global_isolates_parity`, which mutates
+/// AFTER the nested spawn (so the memo-vs-fresh difference never bites).
+#[test]
+fn nested_serial_spawn_mutation_before_nested_reads_frozen_parity() {
+    let src = "g := 0\nfn worker():\n    g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
+    assert_eq!(parity_entry(src), "0\n");
+}
+
+/// Task 1 (regression) — TWO sequential top-level nurseries with ordinary (non-task) parent code mutating
+/// a module global BETWEEN them. M:N snapshots globals ONCE at the first nursery (`ensure_snapshot`
+/// memo, invalidated nowhere), so the second nursery's task reads the FROZEN first-nursery value, not the
+/// mutated one. Serial must reuse the same memo — a fresh per-nursery snapshot would see the between-
+/// nursery mutation live and diverge (serial reads the mutated value / M:N reads the frozen one). Both
+/// tasks read the frozen count (0), so the second prints 0 (not 200).
+#[test]
+fn sequential_mutation_between_nurseries_reads_frozen_parity() {
+    let out = assert_parity_file(
+        &[
+            (
+                "counter.chz",
+                "count := 0\nfn bump():\n    count = count + 1\nfn get() -> int:\n    return count\n",
+            ),
+            (
+                "main.chz",
+                "import counter\nfn main():\n    parallel:\n        spawn:\n            print(counter.get())\n    counter.bump()\n    counter.bump()\n    parallel:\n        spawn:\n            print(counter.get() * 100)\nmain()\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "0\n0\n");
 }
 
 /// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a

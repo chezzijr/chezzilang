@@ -1979,26 +1979,11 @@ impl Checker {
             ExprKind::Ident(name) => self.lookup(name).unwrap_or(obj_ty),
             _ => obj_ty,
         };
-        // B3: reject an IN-PLACE MUTATION (`xs.push(v)`, `m.update(o)`, `s.add(v)`, …) of a captured
-        // MODULE-GLOBAL aggregate inside a spawned task — the same freeze the whole-name reassign gate
-        // enforces (`check_assign` Ident arm). A module global is read-only under --parallel: serial
-        // shares it by ref (the write LEAKS to the parent) while M:N gives each task a snapshot (the
-        // write is SILENTLY LOST) — a two-engine divergence. Gated on `is_inplace_aggregate_mutator`
-        // (concrete receiver type ∈ {List,Map,Set,bytearray} + a mutator name) so Shared.update /
-        // Atomic.add / a user-struct method with a colliding name can never fire, and on the receiver
-        // ROOT (`root_ident`) resolving to a captured module global (scope 0, below the task floor) —
-        // a fn-LOCAL aggregate is `is_local_capture` (deep-copies per task on both engines) and stays
-        // allowed. Error-and-continue: `push`/… returns nil, so normal inference proceeds cascade-free.
-        if let Some(root) = root_ident(obj)
-            && self.is_captured(root)
-            && !self.is_local_capture(root)
-            && is_inplace_aggregate_mutator(&obj_ty, method)
-        {
-            self.error(
-                span,
-                format!("cannot mutate the captured module global '{root}' inside a spawned task (module globals are frozen under --parallel — use a Shared or Channel)"),
-            );
-        }
+        // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
+        // a compile error: the serial engine now deep-copies module globals per spawned task (matching
+        // M:N), so the write hits the task's OWN copy — invisible to the parent, consistent on both
+        // engines. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
+        // hatch for genuinely-shared cross-task state; they cross by shared Arc via `to_snap`).
         // A member-level turbofish (`obj.method[A, B](...)`) is only valid on a USER method that
         // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
         // non-generic user method it is an arity error — checked BEFORE the `.iter` fast-path below

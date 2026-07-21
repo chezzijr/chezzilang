@@ -4,6 +4,50 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CONCURRENCY / SOUNDNESS (2026-07-21, `auto-task/serial-module-globals`) — `docs/gaps.md` §B3
+> CLOSED by construction: the SERIAL engine now snapshots module globals per spawned task, matching M:N.**
+> Root cause: a cooperative child aliased the shell's real `module_objs` while an M:N fiber installed its
+> own snapshot — so a task mutating a module global leaked on `--serial` (shared) but was lost on M:N
+> (snapshot), a `serial ≠ M:N` divergence. Fix (approach **b**, superseding the 2026-07-17 checker
+> freeze): `join_nursery`'s serial branch reuses the SAME memoized `ensure_snapshot` M:N uses (module
+> globals freeze once at the first nursery — NOT a fresh per-nursery `snapshot_modules()`, which would let
+> serial read a between-nursery / pre-nested-spawn mutation that M:N's frozen memo hides) and a new
+> `prepare_serial_child` deep-copies the module globals into each child's OWN `module_objs` view **in the
+> shared heap** (reusing the exact M:N `to_snap` lowering + eager `fault_module`); `swap_ctx` now swaps
+> `module_objs`/`module_faulted` **unconditionally** (per-fiber, cooperative or M:N), and `root_ctx` roots
+> `ctx.module_objs` so a parked child's shared-heap copy (and the parent's real modules) survive GC.
+> `serial == M:N` **by construction** for every mutation form — a task mutates its private copy; the
+> parent is untouched on both engines. This holds for EVERY task-entry path: the cooperative
+> `Executor.shutdown` inline drain (`src/vm/netio.rs`) also runs each submitted task under a fresh per-task
+> child module view (`with_serial_child_modules`, the serial analogue of M:N's `drain_executor_on_pool`),
+> so a module global mutated inside an `Executor.submit` closure isolates too
+> (`executor_submit_module_global_inplace_mutation_isolates_parity`,
+> `executor_submit_module_global_callee_reassign_isolates_parity`,
+> `executor_submit_atomic_visible_to_parent_parity`). The escape hatch is unchanged: `Shared`/`Atomic`/`Channel` cross by
+> shared `Arc` (via `to_snap`), so a task-side `a.add(1)` on a module-global `Atomic` IS visible to the
+> parent. **GC safety:** the shell's real `module_objs`, swapped out during a serial child-modules
+> window, are GC-rooted via a new `pinned_module_roots` field (`collect()` scans it) — the cooperative
+> `Executor` **exit-drain runs with empty frames**, so frame-homes root nothing there; the pin keeps the
+> invariant "`module_objs` is always valid" and closes a dangling-`GcRef` hazard the first (auto-task)
+> attempt missed and was rejected for. (Honest scope: that hazard is latent — normal post-exit-drain flow
+> never dereferences the stale refs, since downstream reads use the memoized heap-independent snapshot —
+> so the pin is defense-in-depth, verified by adversarial review, not by a crashing test.) **Deleted** (were compensating for the divergence): `check_spawn_global_mutation` + its free-fn
+> helpers, the method-mutation gate (`infer_method_call`), the index/field-assign gate (`check_assign`),
+> the reassign gate, and their `rejects()` checker tests (net-negative lines). **Kept**: the local-capture
+> sendability gate + `to_snap`'s Poison/Arc arms + the (redundant-but-harmless) generator reach-gate
+> (retiring it is a separate follow-up). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
+> `serial_module_global_method_call_mutation_isolates_parity` (residual A, cross-module fn call),
+> `serial_module_global_spawned_callee_mutation_isolates_parity` (C), `..._task_local_alias_...` (D),
+> `..._direct_mutation_forms_...` (list/map/struct/set/bytearray/reassign),
+> `atomic_incremented_in_task_visible_to_parent_parity` (escape hatch), `nested_serial_spawn_...`, and
+> `channel_park_keeps_module_snapshot_parity`; the freeze-timing (memoized, not fresh-per-nursery) is
+> pinned by `nested_serial_spawn_mutation_before_nested_reads_frozen_parity` + `sequential_mutation_between_
+> nurseries_reads_frozen_parity` (both serial≠M:N under a fresh snapshot — the bug the review caught).
+> **Behavior change (honest):** a program that mutated a
+> module global from a task and relied on the write propagating out used to work on `--serial` but was
+> already broken (lost) on the shipping M:N engine — serial now matches M:N (no propagation). Residuals
+> (A)/(C)/(D) resolved by construction. Docs: `gaps.md` §B3, `concurrency.md`, `syntax.md`, `spec.md`.
+
 > **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
 > SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`
 > only) serializes a **frame-local** generator — `proto` (shared `Arc<Program>`), backing closure, and the

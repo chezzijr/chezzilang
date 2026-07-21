@@ -9273,62 +9273,7 @@ fn reassign_captured_local_in_spawn_block_ok() {
     );
 }
 
-#[test]
-fn reassign_captured_module_global_in_spawn_block_rejected() {
-    // A captured MODULE GLOBAL stays rejected inside a spawn: globals are frozen under --parallel, and
-    // writing one would diverge serial (shared global) from M:N (worker's snapshot copy).
-    rejects(
-        "g := 0\nfn main():\n    parallel:\n        spawn:\n            g = g + 1\nmain()\n",
-        "cannot reassign the captured module global 'g'",
-    );
-}
-
 // ----- B3: in-place mutation of a captured MODULE GLOBAL aggregate is frozen too -----
-
-#[test]
-fn mutate_captured_module_global_list_method_in_spawn_rejected() {
-    // A `.push`/`.pop`/… on a captured module-global List inside a spawn: leaks on serial (shared by
-    // ref) but is silently lost on M:N (per-task snapshot) — the same freeze the reassign gate applies.
-    rejects(
-        "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            xs.push(99)\nmain()\n",
-        "cannot mutate the captured module global 'xs'",
-    );
-}
-
-#[test]
-fn mutate_captured_module_global_map_index_assign_in_spawn_rejected() {
-    // `m[k] = v` on a captured module-global Map inside a spawn: — index-assign form.
-    rejects(
-        "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            m[1] = 9\nmain()\n",
-        "cannot mutate the captured module global 'm'",
-    );
-}
-
-#[test]
-fn mutate_captured_module_global_struct_field_assign_in_spawn_rejected() {
-    // `s.field = x` on a captured module-global struct inside a spawn: — field-assign form.
-    rejects(
-        "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            s.n = 9\nmain()\n",
-        "cannot mutate the captured module global 's'",
-    );
-}
-
-#[test]
-fn mutate_captured_module_global_set_method_in_spawn_rejected() {
-    rejects(
-        "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            st.add(9)\nmain()\n",
-        "cannot mutate the captured module global 'st'",
-    );
-}
-
-#[test]
-fn mutate_module_global_index_assign_via_spawned_callee_rejected() {
-    // Transitive-callee form (Path A): a free fn reached from `spawn` does the index-assign.
-    rejects(
-        "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\nmain()\n",
-        "cannot mutate module global 'm'",
-    );
-}
 
 #[test]
 fn mutate_fn_local_aggregate_in_spawn_block_ok() {
@@ -9363,31 +9308,6 @@ fn shared_update_on_captured_module_global_in_spawn_ok() {
     // typed on the receiver so a captured module-global Shared stays accepted (that IS the cross-task box).
     entry_ok(
         "import std.concurrency\ng := Shared(0)\nfn main():\n    parallel:\n        spawn:\n            g.update(fn(x): x + 1)\nmain()\n",
-    );
-}
-
-#[test]
-fn mutate_captured_module_global_bytearray_extend_in_spawn_rejected() {
-    // `bytearray` is a mutable aggregate too: `.extend` mutates in place (returns nil) like `List.extend`,
-    // and a bytearray is copied across the airlock (per-task snapshot on M:N, shared by ref on --serial) —
-    // so it must be frozen alongside `.push`/`.pop`. Regression guard for the extend-omitted-from-the-
-    // mutator-set gap.
-    rejects(
-        "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            ba.extend([1, 2, 3])\nmain()\n",
-        "cannot mutate the captured module global 'ba'",
-    );
-}
-
-#[test]
-fn mutate_captured_module_global_via_task_local_alias_in_spawn_residual_gap() {
-    // KNOWN RESIDUAL v1 GAP (gaps.md §B3 (D)): aliasing a captured module-global aggregate into a
-    // task-local (`local := xs`) then mutating the alias defeats the receiver-root gate — `root_ident`
-    // resolves to the task-local `local`, not the global `xs`. Catching it needs flow-sensitive alias
-    // tracking (a much larger change with false-positive risk), the same indirect-dispatch class as A/B/C.
-    // This test PINS the gap: it currently type-checks OK (the program silently diverges serial 4 / M:N 3
-    // at runtime). If a future fix rejects it, update this test + gaps.md §B3.
-    ok(
-        "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\nmain()\n",
     );
 }
 
@@ -10538,34 +10458,6 @@ fn closure_returned_across_task_typechecks() {
 // ----- G1 (B3.3b): module globals are read-only across tasks (`--parallel`) -----
 
 #[test]
-fn spawn_transitive_global_mutation_rejected() {
-    // A module global reassigned inside a function reachable from `spawn` is illegal — cross-task
-    // mutable state must go through Shared[T] (the value → Ref → Shared mutation ladder's top rung).
-    rejects(
-        "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
-fn spawn_block_calls_global_mutator_rejected() {
-    // The mutator is reached through a `spawn:` block that calls it (not a direct `spawn f()`).
-    rejects(
-        "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
-fn spawn_deeply_transitive_global_mutation_rejected() {
-    // `spawn a()` → `a()` calls `b()` → `b()` mutates the global. Proves transitive reachability.
-    rejects(
-        "n := 0\nfn b():\n    n = n + 1\nfn a():\n    b()\nfn main():\n    parallel:\n        spawn a()\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
 fn sequential_global_mutation_ok() {
     // Flow-scoped: the same mutation reached only from sequential (non-spawn) code stays legal.
     ok("n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump()\n    print(n)\nmain()\n");
@@ -10597,48 +10489,11 @@ fn shared_update_in_spawn_ok() {
 }
 
 #[test]
-fn spawn_compound_assign_global_rejected() {
-    // `+=` / `-=` are reassignments too — the gate must treat them like `=`.
-    rejects(
-        "n := 0\nfn bump():\n    n += 1\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
-fn spawn_global_mutation_inside_if_rejected() {
-    // Mutation nested in control flow (not at the function-body top level) is still caught.
-    rejects(
-        "n := 0\nfn bump(c: bool):\n    if c:\n        n = n + 1\nfn main():\n    parallel:\n        spawn bump(true)\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
-fn spawn_reaches_mutator_through_arg_expr_rejected() {
-    // The call graph follows a callee buried in an argument expression (`print(mutator())`).
-    rejects(
-        "n := 0\nfn mutate() -> int:\n    n = n + 1\n    return n\nfn caller():\n    print(mutate())\nfn main():\n    parallel:\n        spawn caller()\nmain()\n",
-        "use Shared[T]",
-    );
-}
-
-#[test]
 fn spawn_callee_shadowed_by_local_ok() {
     // A local binding shadowing a free function's name at the spawn site means `spawn bump()`
     // targets the LOCAL (inert) closure, not the global-mutating free fn — must not be flagged.
     ok(
         "n := 0\nfn bump():\n    n = n + 1\nfn main():\n    bump := fn(): 1\n    parallel:\n        spawn bump()\nmain()\n",
-    );
-}
-
-#[test]
-fn spawn_global_mutation_inside_recover_rejected() {
-    // A `recover:` block is an expression that embeds a full statement block — a global mutation
-    // hidden inside one in a spawn-reachable fn must still be caught.
-    rejects(
-        "n := 0\nfn bump():\n    x := recover:\n        n = n + 1\n    print(x)\nfn main():\n    parallel:\n        spawn bump()\nmain()\n",
-        "use Shared[T]",
     );
 }
 

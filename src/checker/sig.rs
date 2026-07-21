@@ -2519,24 +2519,10 @@ impl Checker {
     }
 
     pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
-        // B3: an INDEX-assign (`m[k]=v`, `xs[i]=v`) or FIELD-assign (`s.field=x`) whose receiver ROOT
-        // is a captured MODULE GLOBAL is frozen under --parallel, exactly like the whole-name reassign
-        // gate in the `Ident` arm below (serial shares by ref → leak; M:N snapshots → silent lost
-        // write). A fn-LOCAL aggregate root is `is_local_capture` (deep-copied per task, agrees on both
-        // engines) and stays allowed. Method-form mutators are gated in `infer_method_call`.
-        if matches!(
-            &target.kind,
-            ExprKind::Index { .. } | ExprKind::Field { .. }
-        ) && let Some(root) = root_ident(target)
-            && self.is_captured(root)
-            && !self.is_local_capture(root)
-        {
-            self.error(
-                target.span,
-                format!("cannot mutate the captured module global '{root}' inside a spawned task (module globals are frozen under --parallel — use a Shared or Channel)"),
-            );
-            return;
-        }
+        // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
+        // task is no longer rejected: the serial engine now deep-copies module globals per spawned task
+        // (matching M:N), so the write hits the task's OWN copy — consistent on both engines. Gate
+        // deleted alongside the sibling method-mutation + reassign gates (see `infer_method_call`).
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
@@ -2591,13 +2577,11 @@ impl Checker {
                     self.error(target.span, msg);
                     return;
                 }
-                if self.is_captured(name) && !self.is_local_capture(name) {
-                    self.error(
-                        target.span,
-                        format!("cannot reassign the captured module global '{name}' inside a spawned task (module globals are frozen under --parallel — use a Shared or Channel)"),
-                    );
-                    return;
-                }
+                // Task 1 — reassigning a captured MODULE GLOBAL inside a task (`g = g + 1`) is no longer
+                // rejected: the serial engine now deep-copies module globals per spawned task (matching
+                // M:N), so the write mutates the task's OWN copy — invisible to the parent, consistent
+                // on both engines (exactly like a captured LOCAL, which already deep-copies). The
+                // frozen-module-global gate is deleted; `Shared`/`Channel` stay the shared-state hatch.
                 // A `defer:` block runs in the SAME task (no airlock), so it shares the enclosing
                 // binding's cell — reassigning a captured local mutates the shared cell (A2/A3/E1).
                 // Editor hover (decl-site): a reassignment's LHS `i` is an `Ident` lvalue the probe

@@ -1205,18 +1205,40 @@ impl Vm {
         if self.parallel {
             return self.run_mn_nursery(tasks);
         }
-        let children: Vec<Fiber> = tasks
-            .into_iter()
-            .enumerate()
-            .map(|(i, t)| Fiber {
-                span: t.span(),
-                ctx: FiberCtx::default(),
-                state: FiberState::Pending(t),
+        // Task 1 — snapshot the module globals, then deep-copy them into each child's OWN `module_objs`
+        // view (in the shared heap) via `prepare_serial_child`, exactly as M:N does per worker. A
+        // cooperative child now mutates its private copy → invisible to the parent → `serial == M:N` by
+        // construction. Use the MEMOIZED `ensure_snapshot`, NOT a fresh per-nursery `snapshot_modules()`:
+        // M:N snapshots module globals ONCE at the first nursery and every worker + nested nursery reuses
+        // that frozen `Arc` (the memo is invalidated nowhere), so under M:N a module global mutated after
+        // the first nursery — by sequential parent code BETWEEN nurseries, or by a task before it opens a
+        // NESTED nursery — is invisible to later tasks. Serial must freeze at the same instant from the
+        // same memo or it diverges (a fresh snapshot would read the live, post-mutation `module_objs`).
+        // Faults (a module-global generator → Poison, a cyclic global) surface re-stamped with the
+        // nursery span inside `ensure_snapshot`, identical to M:N.
+        let nursery_span = tasks
+            .first()
+            .map(|t| t.span())
+            .unwrap_or(Span { line: 1, col: 1 });
+        let snap = self.ensure_snapshot(nursery_span)?;
+        let mut children: Vec<Fiber> = Vec::with_capacity(tasks.len());
+        for (i, t) in tasks.into_iter().enumerate() {
+            let span = t.span();
+            let (pending, module_objs, module_faulted) =
+                self.prepare_serial_child(t, Arc::clone(&snap))?;
+            children.push(Fiber {
+                span,
+                ctx: FiberCtx {
+                    module_objs,
+                    module_faulted,
+                    ..FiberCtx::default()
+                },
+                state: FiberState::Pending(pending),
                 task_index: i,
                 scope_id: 0,
                 resume_native: None,
-            })
-            .collect();
+            });
+        }
         // D0: every child starts `Pending` ⇒ runnable, so seed `ready` with all indices in order.
         let ready = (0..children.len()).collect();
         // Park the parent: move its live context into the nursery, leaving `self.*` as the fresh,
@@ -3693,6 +3715,26 @@ impl Vm {
     ) -> Result<ReadyWorker, RuntimeError> {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
+        let lowered = self.lower_task(task)?;
+        // 2. Build the worker + install the shared read-only module snapshot (D1): pre-alloc empty
+        //    module objs (indices line up with the parent), faulting each module's globals into the
+        //    worker heap lazily on first access — instead of eagerly reconstructing the whole graph
+        //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
+        //    resolves to a pre-alloced empty module that faults on first global read). The actual
+        //    invoke is `ReadyWorker::run`.
+        let snap = self.ensure_snapshot(lowered.span())?;
+        let mut worker = self.spawn_worker();
+        worker.install_snapshot(snap);
+        let (call, span) = worker.rebuild_ready(lowered);
+        Ok(ReadyWorker { worker, call, span })
+    }
+
+    /// PHASE 1 of task preparation — lower a [`PendingCall`] to a heap-independent [`Lowered`] against
+    /// the CURRENT (parent/shell) heap: home indices resolve against `self.module_objs`, and every
+    /// crossing value goes through `to_wire`/`ensure_crossable` (rejecting a non-isolable callee). Split
+    /// out of [`Vm::prepare_worker`] so the serial engine can reuse the exact M:N lowering
+    /// ([`Vm::prepare_serial_child`]) — a behavior-preserving extraction.
+    pub(super) fn lower_task(&mut self, task: PendingCall) -> Result<Lowered, RuntimeError> {
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
                 let wargs = self.wire_args(args, span)?;
@@ -3775,17 +3817,16 @@ impl Vm {
                 }
             }
         };
+        Ok(lowered)
+    }
 
-        // 2. Build the worker + install the shared read-only module snapshot (D1): pre-alloc empty
-        //    module objs (indices line up with the parent), faulting each module's globals into the
-        //    worker heap lazily on first access — instead of eagerly reconstructing the whole graph
-        //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
-        //    resolves to a pre-alloced empty module that faults on first global read). The actual
-        //    invoke is `ReadyWorker::run`.
-        let snap = self.ensure_snapshot(lowered.span())?;
-        let mut worker = self.spawn_worker();
-        worker.install_snapshot(snap);
-        let (call, span) = match lowered {
+    /// PHASE 3 of task preparation — rebuild a [`Lowered`] task's callable/receiver + args INTO THIS
+    /// VM's heap, resolving home indices against `self.module_objs` (the just-installed module view).
+    /// Split out of [`Vm::prepare_worker`] so both the M:N worker (into its own heap) and the serial
+    /// child (into the shared heap, under a per-child module view — [`Vm::prepare_serial_child`]) reuse
+    /// the identical reconstruction. Infallible (all crossing checks happened in [`Vm::lower_task`]).
+    pub(super) fn rebuild_ready(&mut self, lowered: Lowered) -> (ReadyCall, Span) {
+        match lowered {
             Lowered::Closure {
                 proto,
                 captured,
@@ -3793,18 +3834,18 @@ impl Vm {
                 home,
                 span,
             } => {
-                let home = worker.worker_home(home);
+                let home = self.worker_home(home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
                 let cap: Vec<Value> = captured
                     .into_iter()
-                    .map(|(_k, w)| worker.from_wire(w))
+                    .map(|(_k, w)| self.from_wire(w))
                     .collect();
-                let callee = Value::obj(worker.heap.alloc(Obj::Closure {
+                let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
                     home,
                 }));
-                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Func {
@@ -3813,14 +3854,14 @@ impl Vm {
                 home,
                 span,
             } => {
-                let home = worker.worker_home(home);
-                let callee = Value::obj(worker.heap.alloc(Obj::Func { proto, home }));
-                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                let home = self.worker_home(home);
+                let callee = Value::obj(self.heap.alloc(Obj::Func { proto, home }));
+                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Builtin { name, args, span } => {
-                let callee = Value::obj(worker.heap.alloc(Obj::Builtin(name)));
-                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                let callee = Value::obj(self.heap.alloc(Obj::Builtin(name)));
+                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Method {
@@ -3829,12 +3870,115 @@ impl Vm {
                 args,
                 span,
             } => {
-                let recv = worker.from_wire(recv);
-                let args = args.into_iter().map(|w| worker.from_wire(w)).collect();
+                let recv = self.from_wire(recv);
+                let args = args.into_iter().map(|w| self.from_wire(w)).collect();
                 (ReadyCall::Method { recv, name, args }, span)
             }
+        }
+    }
+
+    /// Task 1 — the SERIAL analogue of [`Vm::prepare_worker`]: deep-copy this module graph into a fresh
+    /// per-child `module_objs` view **in the SHARED heap** (not a separate worker heap), so a cooperative
+    /// child mutates its OWN copy of every module global — making `serial == M:N` by construction. Reuses
+    /// the exact `to_snap` lowering (so `Shared`/`Atomic`/`Channel`/`Cffi` still cross by shared `Arc`,
+    /// NOT by deep copy — the escape hatch) and the eager `fault_module` replay.
+    ///
+    /// Returns the re-homed [`PendingCall`] (callee/receiver/args now point at the child's module copy)
+    /// plus the child's `module_objs` + `module_faulted`, which the caller stores in the child's
+    /// [`FiberCtx`] so they swap in per-fiber via [`Vm::swap_ctx`].
+    ///
+    /// GC-safe: no dispatch safepoint runs between install and restore (allocation never collects
+    /// inline — only [`Vm::run_until`] does), so the shell's real modules parked in `saved_objs` cannot
+    /// be swept during the window. The child modules are reachable via `self.module_objs` while being
+    /// built; once installed in a `FiberCtx`, `root_ctx` roots them.
+    pub(super) fn prepare_serial_child(
+        &mut self,
+        task: PendingCall,
+        snap: Arc<ModuleSnapshot>,
+    ) -> Result<(PendingCall, Vec<GcRef>, Vec<bool>), RuntimeError> {
+        // Phase 1: lower against the SHELL's live module_objs (home indices resolve to the parent).
+        let lowered = self.lower_task(task)?;
+        // Phase 2: install a fresh child module view into the SHARED heap and eager-fault every global,
+        // materializing the deep copy. `module_snapshot` is VM-global (NOT swapped by `swap_ctx`), so it
+        // must be cleared before the child runs — else `ensure_module_faulted` would try to lazy-fault
+        // the shell's REAL modules. Eager fault + `module_snapshot = None` sidesteps all lazy machinery.
+        let saved_objs = std::mem::take(&mut self.module_objs);
+        let saved_faulted = std::mem::take(&mut self.module_faulted);
+        let saved_snap = self.module_snapshot.take();
+        self.install_snapshot(snap);
+        for i in 0..self.module_objs.len() {
+            self.fault_module(i);
+        }
+        self.module_snapshot = None;
+        // Phase 3: rebuild callee/receiver + args — home indices now resolve to the CHILD copy.
+        let (call, span) = self.rebuild_ready(lowered);
+        // Capture the child view, restore the shell's real modules/snapshot.
+        let child_objs = std::mem::replace(&mut self.module_objs, saved_objs);
+        let child_faulted = std::mem::replace(&mut self.module_faulted, saved_faulted);
+        self.module_snapshot = saved_snap;
+        let pending = match call {
+            ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
+            ReadyCall::Method { recv, name, args } => PendingCall::Method {
+                recv,
+                name,
+                args,
+                span,
+            },
         };
-        Ok(ReadyWorker { worker, call, span })
+        Ok((pending, child_objs, child_faulted))
+    }
+
+    /// Task 1 (Executor path) — run `body` with a fresh per-task child `module_objs` view installed in
+    /// the SHARED heap (a deep copy of every module global via `snap`), then restore the shell's real
+    /// modules on every path. The SERIAL cooperative analogue of the M:N `prepare_worker_from_wire` →
+    /// own-heap snapshot: an `Executor` task drained inline on the cooperative engine mutates its OWN
+    /// module-global copy — so `serial == M:N` for a module global mutated from a submitted closure,
+    /// exactly like the nursery path ([`Vm::prepare_serial_child`]). Both the `from_wire` rebuild of the
+    /// task closure AND its `invoke_value` must run inside `body` so its `home` resolves to — and its
+    /// mutations land on — the child copy. Reuses `to_snap`/`install_snapshot`, so `Shared`/`Atomic`/
+    /// `Channel`/`Cffi` module globals still cross by shared `Arc` (the escape hatch), never deep-copied.
+    ///
+    /// GC-safe: `self.module_objs` (swapped to the child view for the duration) is a GC root, so the
+    /// child copy survives an alloc-triggered collection during the task's `invoke_value`; the shell's
+    /// real modules parked in `saved_objs` are only swept if unrooted, but they are restored before any
+    /// safepoint runs on the shell again.
+    pub(super) fn with_serial_child_modules<R>(
+        &mut self,
+        snap: Arc<ModuleSnapshot>,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        // Install a fresh child module view into the SHARED heap and eager-fault every global (the same
+        // dance as `prepare_serial_child`). `module_snapshot` is VM-global (NOT swapped per fiber), so
+        // clear it after eager-faulting — else `ensure_module_faulted` would try to lazy-fault the
+        // shell's REAL modules once we restore them below.
+        let saved_objs = std::mem::take(&mut self.module_objs);
+        // GC PIN (Task 1 fix): this window can run with EMPTY frames (the serial `Executor` exit-drain,
+        // after `run()` pops the top-level frame), so the shell's real modules — now only in `saved_objs`
+        // — are rooted by nothing. `install_snapshot`/`fault_module`/`body` all allocate on the SHARED
+        // heap and can trip a safepoint GC; without this pin those modules get swept and the restore
+        // below reinstalls dangling `GcRef`s (use-after-free). `collect()` scans `pinned_module_roots`.
+        // NOT panic-safe: a raw Rust unwind through `body` skips the `truncate`/restore below, leaving
+        // `pinned_module_roots` + `module_objs` corrupt. Safe today — `guarded` re-raises panics and the
+        // serial VM is discarded on unwind (no catch-and-reuse); recoverable faults return via `Err`,
+        // which restores cleanly. Revisit if serial-VM panic recovery is ever added.
+        // Append (not assign) so a NESTED serial drain — an Executor job that drains another Executor —
+        // keeps every outer level's shell modules pinned too; truncate back to the base on exit.
+        let pin_base = self.pinned_module_roots.len();
+        self.pinned_module_roots.extend_from_slice(&saved_objs);
+        let saved_faulted = std::mem::take(&mut self.module_faulted);
+        let saved_snap = self.module_snapshot.take();
+        self.install_snapshot(snap);
+        for i in 0..self.module_objs.len() {
+            self.fault_module(i);
+        }
+        self.module_snapshot = None;
+        let r = body(self);
+        // Restore the shell's real modules/snapshot (the child copy is dropped — GC reclaims it).
+        self.pinned_module_roots.truncate(pin_base);
+        self.module_objs = saved_objs;
+        self.module_faulted = saved_faulted;
+        self.module_snapshot = saved_snap;
+        r
     }
 
     /// B3.6 — the `Executor`-drain analogue of [`prepare_worker`]: build a worker, install the shared

@@ -258,7 +258,7 @@ CPU load-generators (`yes`, spin loops) that burned cores for hours; reap anythi
 
 ## Bugs found by the 2026-07-14 audit — FIX, do not backlog
 
-### B3. Mutating a captured MODULE-GLOBAL aggregate inside a task diverges serial (shared) vs M:N (lost) — serial≠M:N soundness — **FIXED (core forms) — residual v1 limits documented (2026-07-17)**
+### B3. Mutating a captured MODULE-GLOBAL aggregate inside a task diverges serial (shared) vs M:N (lost) — serial≠M:N soundness — **CLOSED by construction: serial now snapshots module globals per task, matching M:N (2026-07-21)**
 A task (`spawn`/`parallel:`) that **mutates a captured module-global mutable aggregate** in place
 (`List`/`Map`/`Set`/`struct` — `.push`, `m[k]=v`, `s.add`, `s.field=x`, nested) diverges between engines:
 on **`--serial`** the module global is shared by reference so the mutation **leaks** (visible to the parent
@@ -287,48 +287,60 @@ those repros bound `xs` at top level):
   `Channel.send` of an aggregate; `Shared.get()` snapshot; `Executor.submit` (the
   [#3](#3-executorsubmit-coop-vs-mn-capture-sharing-divergence--resolved-2026-07-11) fix holds).
 
-**Fix (landed) — checker fix (a), the frozen-module-global rule extended to in-place mutation.** The
-checker already treated a captured module global as **frozen / read-only** and REJECTED reassignment inside
-a task (`cannot reassign the captured module global 'x' … module globals are frozen`). It now ALSO rejects
-**in-place mutation** of a captured module-global aggregate whose receiver root is that global — closing the
-half-enforcement (`cannot mutate the captured module global 'x' … module globals are frozen under --parallel
-— use a Shared or Channel`). Checker-only, parity-neutral (no VM / dispatch / deep-copy change). Chose (a)
-over (b) `--serial` deep-copying globals: smallest diff, no pre-JIT-freeze VM risk, matches the documented
-read-only-module-global model. Three gates reuse the existing `is_captured(root) && !is_local_capture(root)`
-boundary (selects scope-0 module globals only; a `fn`-local aggregate is `is_local_capture` and stays
-accepted — it deep-copies correctly on both engines):
-- **method-mutation** (`xs.push`, `m.update`, `s.add`, …) in `infer_method_call` — gated on the concrete
-  receiver type ∈ {List, Map, Set, bytearray} + an in-place-mutator name, so `Shared.update` / `Atomic.add`
-  / a user-struct method with a colliding name can NEVER false-fire (collision-free by construction);
-- **index-assign** (`m[k]=v`, `xs[i]=v`, nested) + **field-assign** (`s.field=x`, nested) at the top of
-  `check_assign`, keyed on the receiver root via a shared `root_ident` chain-walk.
+**Fix (landed 2026-07-21) — approach (b): the SERIAL engine now snapshots module globals per spawned
+task, exactly as M:N already did.** The 2026-07-17 checker fix (a) — a frozen-module-global rule that
+REJECTED the mutation — was an interprocedural, brittle, leaky patch (its residuals (A)/(C)/(D) below were
+the cases the transitive scan could not follow). It is **deleted**. The root cause was that a cooperative
+child aliased the shell's real `module_objs` while an M:N fiber installed its own snapshot; now
+`join_nursery`'s serial branch reuses the SAME memoized `ensure_snapshot` M:N uses (NOT a fresh
+per-nursery `snapshot_modules()`) and `prepare_serial_child` deep-copies the module globals into each
+child's OWN `module_objs` view **in the shared heap** (reusing the exact M:N `to_snap` lowering + eager
+`fault_module`), swapped in/out per fiber by `swap_ctx`. So `counter.bump()` / `xs.push(99)` / `g = g + 1`
+in a task all mutate the task's **private copy** on BOTH engines — `serial == M:N` **by construction**,
+nothing to reject. The memo matters: M:N snapshots module globals **once at the first nursery** and every
+worker + nested nursery reuses that frozen `Arc` (invalidated nowhere), so a global mutated after the first
+nursery — by sequential parent code between nurseries, or by a task before it opens a nested `parallel:` —
+is invisible to later tasks; serial freezes at the same instant from the same memo, else it would read the
+live post-mutation copy and diverge.
 
-Covers: (i) the direct `parallel: spawn: xs.push(99)` repro, (ii) `Executor.submit` closures, (iii) closures
-DECLARED INSIDE a `spawn:` block, (iv) `spawn f()` callee with INDEX/FIELD-assign (via the transitive-callee
-scan `check_spawn_global_mutation`, extended index/field-only — no method-name matching there, which would be
-type-blind and false-reject `Shared.update`/`Atomic.add`/user methods). Regression net:
-`module_global_aggregate_mutation_in_task_parity` (`src/vm/parity_tests.rs`) locks the fn-local accepted path
-still agrees (serial == M:N == 3); the module-global forms are now compile errors (checker unit tests).
+Every task-entry path snapshots — not just the nursery. `Executor.submit` closures also mutate their OWN
+module-global copy on both engines: the cooperative `Executor.shutdown` inline drain
+(`src/vm/netio.rs`) runs each submitted task under a fresh per-task child module view
+(`with_serial_child_modules`, the serial analogue of M:N's `drain_executor_on_pool` →
+`prepare_worker_from_wire` → `install_snapshot`), reusing the same memoized `ensure_snapshot`. Before this
+the serial drain aliased the shell globals — an in-place `xs.push(99)` or a free-fn-callee `bump()` reassign
+inside a submitted closure leaked on serial while M:N isolated. Now both isolate (proved by
+`executor_submit_module_global_inplace_mutation_isolates_parity` and
+`executor_submit_module_global_callee_reassign_isolates_parity`).
 
-**Residual v1 limits still leaking silently (same pre-existing indirect-dispatch gap class as commit
-`b478834` — not new; impossible for scalars, newly reachable only for aggregate mutation; closing them
-needs call-graph-through-closures / method-receiver modeling, a much larger change with false-positive risk
-that violates minimal-diff):**
-- **(A)** a **top-level-bound closure** `w := fn(): xs.push(..)` then `spawn w()` — the static call graph
-  cannot follow a spawn root that is a closure value.
-- **(B)** a closure reached **through a captured struct field** `spawn: w.f()`.
-- **(C)** **callee-form method-mutation** — a free fn reached from `spawn` that does `g.push()` / `g.add()` /
-  `g.update()` (the transitive scan is type-blind, so it flags only the collision-free index/field-assign
-  forms there, never method names). `spawn: s.bump()` on a user struct is the same class.
-- **(D)** a **task-local ALIAS** of the module global — `local := xs` inside the task, then `local.push(..)`.
-  The method-mutation gate keys on the receiver ROOT (`root_ident`), which resolves to the task-local `local`,
-  not the module global `xs`; catching it needs flow-sensitive alias tracking (a much larger change with
-  false-positive risk on rebind/control-flow) — same indirect class. Pinned by
-  `mutate_captured_module_global_via_task_local_alias_in_spawn_residual_gap`.
+The mutation does **not** propagate to the parent on either engine (it never did on the shipping M:N
+engine — this makes serial agree). The escape hatch for genuinely-shared cross-task state is unchanged:
+`Shared[T]` / `RwShared[T]` / `Atomic[T]` / `Channel[T]` cross by shared `Arc` core (via `to_snap`), so a
+task-side `a.add(1)` on a module-global `Atomic` IS visible to the parent — through a nursery
+(`atomic_incremented_in_task_visible_to_parent_parity`) AND through an `Executor.submit`
+(`executor_submit_atomic_visible_to_parent_parity`).
 
-Verified still diverging post-fix (serial 4 / M:N 3, check OK): forms (A), (C) and (D). Documented here so the
-honesty of the `serial == M:N` parity invariant is preserved — these are the boundary of a checker-only
-minimal diff, not a claim of full coverage.
+Deleted (were compensating for the divergence): `check_spawn_global_mutation` (the transitive scan) + its
+free-fn helpers, the method-mutation gate (`infer_method_call`), the index/field-assign gate
+(`check_assign`), and the reassign gate — plus their `rejects()` checker tests. KEPT: the local-capture
+sendability gate (`is_local_capture(name) && !sendable(ty)`) and `to_snap`'s non-sendable arms (Poison for a
+frame-holding generator, Arc-share for handles). The generator reach-gate is left in place this run
+(redundant-but-harmless; a separate follow-up).
+
+**Residuals (A)/(C)/(D) — RESOLVED by construction.** The forms the checker scan could not follow
+(closure-valued spawn root, callee-form method-mutation, task-local alias `local := xs; local.push(..)`) now
+just isolate like every other form — the task mutates its own copy regardless of how the mutation is
+reached, so there is nothing to statically follow. Regression net (all `src/vm/parity_tests.rs`, serial ==
+M:N): `serial_module_global_method_call_mutation_isolates_parity` (A, cross-module fn call),
+`serial_module_global_spawned_callee_mutation_isolates_parity` (C), `serial_module_global_task_local_alias_isolates_parity`
+(D), `serial_module_global_direct_mutation_forms_isolate_parity` (list/map/struct/set/bytearray/reassign),
+`nested_serial_spawn_module_global_isolates_parity`, and `channel_park_keeps_module_snapshot_parity`.
+The freeze timing (memoized snapshot, not fresh-per-nursery) is pinned by
+`nested_serial_spawn_mutation_before_nested_reads_frozen_parity` (a task mutates then opens a nested
+nursery — grandchild reads the frozen pre-mutation value) and
+`sequential_mutation_between_nurseries_reads_frozen_parity` (a global mutated by sequential code between
+two nurseries stays frozen for the second nursery's task) — both were serial≠M:N under a fresh-per-nursery
+snapshot, now equal.
 
 ### B4. An `Executor`-task uncaught error prints more backtrace frames on `--serial` than M:N — cosmetic serial≠M:N — **FIXED (found 2026-07-17, fixed 2026-07-17)**
 **Fix:** serial dropped the inline task's callee frames to match M:N (and a plain nursery-task panic).
@@ -918,8 +930,9 @@ Verified against the parser/checker, not the docs. **Not gaps** (checked, and wo
 `examples/poly_method.chz`); `defer` is block-scoped and strictly more general than `with` for a
 language with no destructors (`future.md §1` rejected `with` and is still right); generators/`yield`,
 comprehensions, varargs, default args, keyword args, newtype, type aliases, static methods, enums with
-methods — all shipped. The mutability model (`ref T`, by-reference capture, `Shared`/`Atomic`/`Channel`)
-is coherent.
+methods — all shipped. The mutability model (aggregates share by reference like Python objects,
+`Shared`/`Atomic`/`Channel` for cross-task shared mutation) is coherent. (`ref T`/`Ref[T]` were removed
+2026-07-19 — see `future.md §12`.)
 
 ### L1. `Result` / `Option` have **ZERO methods** — **DEPRIORITIZED (2026-07-15): not imitating Rust's method surface**
 `native enum Option[T]` / `Result[T, E]` (`std/prelude.chz`) declare no methods, and there is no
@@ -1053,8 +1066,8 @@ protocol ever appears.
 **Motivation (F2, 2026-07-18 bug-hunt).** `Channel[int!]` / `Channel[Error]` are rejected today because a
 protocol existential is non-sendable (`sendable_rec`, `src/checker/proto.rs`). A one-line whitelist of the
 built-in `Error` existential was tried and **reverted as unsound**: the existential *erases field-level
-sendability*, so a struct that satisfies `Error` yet holds a non-sendable field (a builtin `Ref[T]`, a
-**live generator**) launders past the gate that the concrete `Channel[MyErr]` correctly rejects —
+sendability*, so a struct that satisfies `Error` yet holds a non-sendable field (a **live generator**,
+a non-`Error` protocol / `Module` field) launders past the gate that the concrete `Channel[MyErr]` correctly rejects —
 check-OK-then-run-fault (verified: `Err(GErr(gen()))` over `Channel[int!]` type-checked then faulted `a
 generator cannot be sent across tasks`, both engines). The current **conservative rejection is correct**;
 the workaround (a concrete sendable error type) already works: `Channel[int!str]`, `Channel[int!MyEnum]`,
