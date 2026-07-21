@@ -272,6 +272,21 @@ c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
   can also drain a mailbox's residue after a blocking `recv` resumes. `recv -> T` stays primary; reach
   for `try_recv` to poll without guarding on `len()`.
 
+### 5a. `std.concurrency.pmap` — scoped parallel map (the ergonomic wrapper)
+
+The report-channel + one-`spawn`-per-element + join + reassemble pattern is common enough that
+`std.concurrency.pmap` bakes it in (pure Chezzi over a `parallel:` nursery + `Channel`):
+
+- `pmap[T, U](xs, f) -> List[U]` — spawn a task per element, run `f` in parallel, results in
+  **submission order**.
+- `pmap_limited[T, U](xs, f, limit) -> List[U]` — same, capping in-flight `f`-executions at `limit`
+  via a channel-as-semaphore token bucket (also the standard **concurrency limiter**; `limit > 0`).
+
+Determinism/parity comes from reassembling by submission INDEX (`sort_by_key`), never completion
+order — so serial `--serial` == M:N byte-for-byte. The nursery lives inside the helper and joins
+before the collect (structured concurrency — a task can't outlive the call); `f` crosses the airlock
+into each task by value. See `docs/stdlib.md` for signatures.
+
 ---
 
 ## 6. `Shared[T]` — the cross-task mutable box

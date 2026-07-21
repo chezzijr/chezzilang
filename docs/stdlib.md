@@ -993,6 +993,22 @@ their read-modify-write inside **one** closure, so N tasks each incrementing the
 **Not provided (intentional):** a concurrent **queue** is already `Channel[T]`; an **atomic scalar** is
 already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`.
 
+### `std.concurrency.pmap` — scoped parallel map
+`import pmap from std.concurrency.pmap` (or `import std.concurrency.pmap`). Pure Chezzi over a
+`parallel:` nursery + `Channel[T]`, so it runs byte-identically on every engine.
+
+| function | signature | semantics |
+| --- | --- | --- |
+| `pmap` | `pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]` | spawn one task per element, run `f` on each in parallel, return the results in **submission order** (`[f(xs[0]), f(xs[1]), …]`). |
+| `pmap_limited` | `pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]` | same, but at most `limit` tasks run `f` at once (a channel-as-semaphore token bucket). `limit > 0` required (`limit <= 0` deadlocks — no permits). |
+
+Determinism comes from reassembling by submission index (a `sort_by_key` on the tagged results),
+**never** completion order — so two engines that finish tasks in different orders still return the
+identical `List[U]`. The nursery lives inside the helper and joins before the collect, so a task can
+never outlive the call (structured concurrency); `f` crosses the airlock into each task by value.
+`pmap_limited` is also the standard concurrency limiter — cap parallel calls into a rate-limited
+resource with it instead of hand-rolling a semaphore each time.
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.

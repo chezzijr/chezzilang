@@ -2394,6 +2394,73 @@ fn bounded_channel_fanout_golden_both_engines() {
     assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
 }
 
+// ----- std.concurrency.pmap: scoped parallel-map helpers (Item 2) -----
+
+/// Run `src` from a temp entry file on BOTH engines (a real graph resolve, so `import … from
+/// std.concurrency.pmap` pulls the embedded module) and assert identical stdout + clean run.
+#[cfg(test)]
+fn pmap_both(tag: &str, src: &str) -> String {
+    let entry = write_temp_chz(tag, src);
+    let (s_out, _e, s_res, _c) = run_file(&entry);
+    let (m_out, _e2, m_res, _c2) = run_file_parallel(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(s_res.is_ok(), "serial faulted: {s_res:?}");
+    assert!(m_res.is_ok(), "M:N faulted: {m_res:?}");
+    assert_eq!(s_out, m_out, "serial vs M:N output diverged");
+    s_out
+}
+
+/// `pmap` returns results in SUBMISSION order (sort-by-index, never completion order) —
+/// byte-identical serial vs M:N. Uses the real embedded std module, so it also proves discovery.
+#[test]
+fn pmap_submission_order_both_engines() {
+    let src = "import pmap from std.concurrency.pmap\n\
+               fn main():\n\
+               \x20   print(pmap([1, 2, 3, 4], fn(x: int) -> int: x * 2))\n\
+               main()\n";
+    assert_eq!(pmap_both("pmap_order", src), "[2, 4, 6, 8]\n");
+}
+
+/// `pmap_limited` gives the same submission-order result as `pmap` regardless of the in-flight cap.
+#[test]
+fn pmap_limited_matches_pmap_both_engines() {
+    let src = "import pmap_limited from std.concurrency.pmap\n\
+               fn main():\n\
+               \x20   print(pmap_limited([1, 2, 3, 4, 5, 6, 7, 8], fn(x: int) -> int: x + 100, 2))\n\
+               main()\n";
+    assert_eq!(
+        pmap_both("pmap_limited", src),
+        "[101, 102, 103, 104, 105, 106, 107, 108]\n"
+    );
+}
+
+/// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never
+/// exceeds `limit`. (Serial runs tasks one at a time so max is trivially <= limit; the M:N run is the
+/// real test — the semaphore caps concurrent f-execution.)
+#[test]
+fn pmap_limited_bounds_in_flight_both_engines() {
+    // A nested named fn (multi-statement) captures the two Atomics by-ref; both cross the airlock as
+    // shared handles, so every task sees the one live counter/max pair. `cur` is incremented on entry
+    // and decremented on exit, so it never exceeds the number of tasks running `f` at once — which the
+    // token bucket caps at `limit`. `mx` records the peak, so `mx <= limit` proves the bound holds.
+    let src = "import std.concurrency\n\
+               import pmap_limited from std.concurrency.pmap\n\
+               fn main():\n\
+               \x20   cur := Atomic(0)\n\
+               \x20   mx := Atomic(0)\n\
+               \x20   fn probe(x: int) -> int:\n\
+               \x20       n := cur.add(1)\n\
+               \x20       m := mx.load()\n\
+               \x20       if n > m:\n\
+               \x20           mx.store(n)\n\
+               \x20       cur.sub(1)\n\
+               \x20       return x\n\
+               \x20   r := pmap_limited([1, 2, 3, 4, 5, 6, 7, 8], probe, 2)\n\
+               \x20   print(mx.load() <= 2)\n\
+               main()\n";
+    assert_eq!(pmap_both("pmap_bound", src), "true\n");
+}
+
 /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function
 /// frames deep** (`main → collect → deep_recv ×6`, all `Op::Call`, parking at `ip > 0`) must
 /// suspend with its frames intact and, on a sibling `send`, resume through `run_until(0)` and

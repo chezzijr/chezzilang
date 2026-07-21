@@ -1,0 +1,77 @@
+# std.concurrency.pmap — scoped parallel-map helpers. Pure Chezzi over existing primitives (a
+# `parallel:` nursery + `spawn:` blocks + a `Channel[T]`), so every engine (cooperative `--serial`
+# oracle, real-thread M:N) behaves identically.
+#
+# WHY: every concurrent "map a fn over a list in parallel, collect the results" program here repeats
+# the same boilerplate — a report channel, one `spawn` per element, a join, then reassemble. These
+# helpers bake it in, and (crucially) reassemble by SUBMISSION INDEX, so the result is deterministic
+# and byte-identical serial vs M:N — never in completion order.
+#
+# DETERMINISM / PARITY: each task tags its result with the element's index `i` and sends an
+# `_PmapCell(i, f(xs[i]))`; after the nursery joins, the cells are sorted by `idx` and projected to
+# their values. Order comes from the sort, NEVER from which task finished first — so two engines that
+# complete tasks in different orders still produce the identical `List[U]`.
+#
+# STRUCTURED CONCURRENCY: the `parallel:` lives INSIDE the helper body and joins at its dedent (before
+# the collect), so a spawned task can never outlive `pmap`. Closures cross the airlock into each task
+# by value (they are sendable); `xs[i]` is snapshotted per-iteration into a fresh `spawn:` capture.
+#
+# LIMITER: `pmap_limited` caps the number of tasks running `f` at once with a channel-as-semaphore —
+# a bucket pre-seeded with `limit` tokens; a task must `recv` a token before running `f` and `send`
+# one back after (the standard Go semaphore pattern). `limit > 0` is required — `limit <= 0` seeds no
+# tokens, so every task blocks forever on the acquire (a deadlock fault, no consumer).
+
+# Depend on std.concurrency so its native module is harvested before this one is checked (mirrors
+# std.concurrency.collection); the helpers themselves use only global `Channel`, but the import keeps
+# the graph edge explicit for any future concurrency-type use.
+import std.concurrency
+
+# A private tagged result: the element's submission index alongside `f`'s output. A struct of
+# all-sendable fields (int + U) is itself sendable, so it rides a `Channel[_PmapCell[U]]` cleanly —
+# and it avoids depending on tuple-field-access lowering.
+struct _PmapCell[U]:
+    idx: int
+    val: U
+
+# Map `f` over `xs` IN PARALLEL, returning the results in SUBMISSION order (`[f(xs[0]), f(xs[1]), …]`).
+# Every element is spawned as its own task; the nursery joins before the results are collected.
+fn pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
+    n := xs.len()
+    results := Channel[_PmapCell[U]]()
+    parallel:
+        for i in range(0, n):
+            x := xs[i]
+            spawn:
+                results.send(_PmapCell(idx=i, val=f(x)))
+    return _collect_sorted(results, n)
+
+# Like `pmap`, but at most `limit` tasks run `f` at once (the rest wait). `limit` must be `> 0`. Result
+# is still in submission order — the limiter only bounds concurrency, not the reassembly.
+fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
+    n := xs.len()
+    results := Channel[_PmapCell[U]]()
+    # Semaphore: a token bucket seeded with `limit` permits. `recv` acquires, `send` releases.
+    sem := Channel[int]()
+    for _ in range(0, limit):
+        sem.send(0)
+    parallel:
+        for i in range(0, n):
+            x := xs[i]
+            spawn:
+                # acquire a permit (blocks while `limit` tasks already run `f`), run, then release
+                token := sem.recv()
+                results.send(_PmapCell(idx=i, val=f(x)))
+                sem.send(token)
+    return _collect_sorted(results, n)
+
+# Drain `n` cells off `results`, sort by submission index, and project the values. `results` holds all
+# `n` sends by the time this runs (the nursery has joined), so no `recv` here blocks.
+fn _collect_sorted[U](results: Channel[_PmapCell[U]], n: int) -> List[U]:
+    cells: List[_PmapCell[U]] = []
+    for _ in range(0, n):
+        cells.push(results.recv())
+    cells.sort_by_key(fn(c: _PmapCell[U]) -> int: c.idx)
+    out: List[U] = []
+    for c in cells:
+        out.push(c.val)
+    return out
