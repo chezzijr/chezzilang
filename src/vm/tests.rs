@@ -2554,6 +2554,45 @@ fn pmap_limited_bounds_in_flight_both_engines() {
     assert_eq!(pmap_both("pmap_bound", src), "true\n");
 }
 
+/// `std.concurrency.task` — `submit_task` returns a `Task[T]` handle whose `.get()`, awaited in
+/// SUBMISSION order, is byte-identical serial vs M:N (the value is deterministic; only timing varies).
+#[test]
+fn task_submit_get_submission_order_both_engines() {
+    let src = "import std.concurrency\n\
+               import submit_task from std.concurrency.task\n\
+               fn work(n: int) -> int:\n\
+               \x20   return n * n\n\
+               fn main():\n\
+               \x20   ex := Executor()\n\
+               \x20   ts := []\n\
+               \x20   for i in range(1, 6):\n\
+               \x20       x := i\n\
+               \x20       ts.push(submit_task(ex, fn() -> int: work(x)))\n\
+               \x20   ex.shutdown()\n\
+               \x20   for t in ts:\n\
+               \x20       print(t.get())\n\
+               main()\n";
+    assert_eq!(pmap_both("task_order", src), "1\n4\n9\n16\n25\n");
+}
+
+/// `Task.get()` MEMOIZES: a second `.get()` returns the cached value (it must NOT `recv` the drained
+/// one-shot channel again, which would block forever). `.done()` is true once the result is in hand.
+#[test]
+fn task_get_idempotent_and_done_both_engines() {
+    let src = "import std.concurrency\n\
+               import submit_task from std.concurrency.task\n\
+               fn main():\n\
+               \x20   ex := Executor()\n\
+               \x20   t := submit_task(ex, fn() -> int: 42)\n\
+               \x20   ex.shutdown()\n\
+               \x20   print(t.done())\n\
+               \x20   print(t.get())\n\
+               \x20   print(t.get())\n\
+               \x20   print(t.done())\n\
+               main()\n";
+    assert_eq!(pmap_both("task_idem", src), "true\n42\n42\ntrue\n");
+}
+
 /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function
 /// frames deep** (`main → collect → deep_recv ×6`, all `Op::Call`, parking at `ip > 0`) must
 /// suspend with its frames intact and, on a sibling `send`, resume through `run_until(0)` and

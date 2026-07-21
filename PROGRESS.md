@@ -29,6 +29,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fan-out golden, all serial==M:N) + `pmap_*`; checker `channel_bounded_capacity_*`. Docs: this note,
 > `docs/concurrency.md` §5/§6d, `docs/stdlib.md`, `docs/spec.md`.
 
+> **✅ CONCURRENCY (2026-07-22) — `std.concurrency.task`: result handles for `Executor` work.** Bare
+> `Executor.submit(f)` is fire-and-forget (returns nothing); `submit_task[T](ex, f) -> Task[T]` returns a
+> future-style handle. **Pure Chezzi** (`std/concurrency/task.chz`) over the cap-1 bounded `Channel[T]`
+> just landed — a one-shot result slot: `submit_task` wraps the closure to `ch.send(f())`, hands back a
+> `Task{ch, cached}`. `Task.get() -> T` blocks then **memoizes** (idempotent — a 2nd call returns the
+> cache, never a 2nd `recv` on the drained slot); `Task.done() -> bool` polls `ch.len() > 0` (non-block).
+> **Parity:** a task's value is deterministic (`f()`), only its timing varies — so `.get()` is serial==M:N
+> byte-identical *iff awaited in a fixed (submission) order*; deliberately **no `join_next()`**
+> (completion-order = parity-hostile). Canonical shape: submit all → `shutdown()` → `.get()` each. No
+> native/VM change (like `pmap`). Tests: `src/vm/tests.rs` `task_submit_get_submission_order_both_engines`,
+> `task_get_idempotent_and_done_both_engines`. Docs: this note, `docs/concurrency.md` §5b, `docs/stdlib.md`.
+> **Deferred:** making `Executor.submit` itself return `Task[T]` natively (needs a native/VM change +
+> always-alloc a result channel on every detached submit — the free helper avoids both).
+
 > **✅ CONCURRENCY / AIRLOCK (2026-07-21, `auto-task/module-global-generator-sendable`) — `docs/gaps.md`
 > backlog item **B** CLOSED: a MODULE-GLOBAL live generator now crosses the airlock BY VALUE (deep copy),
 > exactly like a frame-local one (F3 path C). The reach-gate + Option-B poison→`nil` model is RETIRED.**

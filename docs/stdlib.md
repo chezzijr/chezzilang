@@ -1009,6 +1009,22 @@ never outlive the call (structured concurrency); `f` crosses the airlock into ea
 `pmap_limited` is also the standard concurrency limiter — cap parallel calls into a rate-limited
 resource with it instead of hand-rolling a semaphore each time.
 
+### `std.concurrency.task` — result handles for `Executor` work
+`import submit_task from std.concurrency.task` (or `import std.concurrency.task`). Pure Chezzi over a
+cap-1 `Channel[T]` (a one-shot result slot), so it runs byte-identically on every engine. Fills the
+gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
+
+| item | signature | semantics |
+| --- | --- | --- |
+| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work runs when `ex` drains (`shutdown()` or program-exit). |
+| `Task.get` | `get(self) -> T` | block until the result is available, then return it. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cache, not a second `recv`). |
+| `Task.done` | `done(self) -> bool` | whether the result has landed yet. Never blocks. |
+
+Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Parity rule:** a `Task`'s value
+is deterministic (it is `f()`); only *when* it runs varies by engine — so `.get()` is byte-identical
+serial vs M:N **as long as you await in a fixed (e.g. submission) order**. There is deliberately no
+`join_next()`/select-on-completion API — completion order is nondeterministic and would break parity.
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.

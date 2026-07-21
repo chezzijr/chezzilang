@@ -287,6 +287,21 @@ order — so serial `--serial` == M:N byte-for-byte. The nursery lives inside th
 before the collect (structured concurrency — a task can't outlive the call); `f` crosses the airlock
 into each task by value. See `docs/stdlib.md` for signatures.
 
+### 5b. `std.concurrency.task` — result handles for `Executor` work
+
+Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. `std.concurrency.task` adds a
+future-style handle (pure Chezzi over a cap-1 `Channel[T]` as a one-shot result slot):
+
+- `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle. The work runs when `ex`
+  drains (`shutdown()` or exit).
+- `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
+- `Task.done() -> bool` — non-blocking readiness poll.
+
+Canonical shape: submit all → `shutdown()` → `.get()` each. **Parity rule:** a task's value is
+deterministic (`f()`); only its *timing* varies by engine, so `.get()` is byte-identical serial vs
+M:N **as long as you await in a fixed (submission) order**. There is deliberately **no**
+`join_next()`/select-on-completion — completion order is nondeterministic and would break parity.
+
 ---
 
 ## 6. `Shared[T]` — the cross-task mutable box

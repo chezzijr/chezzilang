@@ -25,6 +25,10 @@ pub const STD_FILES: &[(&str, &str)] = &[
         "concurrency/pmap.chz",
         include_str!("../../std/concurrency/pmap.chz"),
     ),
+    (
+        "concurrency/task.chz",
+        include_str!("../../std/concurrency/task.chz"),
+    ),
     ("crypto.chz", include_str!("../../std/crypto.chz")),
     ("csv.chz", include_str!("../../std/csv.chz")),
     ("datetime.chz", include_str!("../../std/datetime.chz")),
