@@ -47,6 +47,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > module global from a task and relied on the write propagating out used to work on `--serial` but was
 > already broken (lost) on the shipping M:N engine — serial now matches M:N (no propagation). Residuals
 > (A)/(C)/(D) resolved by construction. Docs: `gaps.md` §B3, `concurrency.md`, `syntax.md`, `spec.md`.
+> **NEXT SESSION** (not this one) — sendability completeness, ranked, each its own spec: (1) protocol
+> sendable under option (a) — Go `chan interface` parity, decision settled; (2) recursive-local-fn
+> sendability; (3) reject-case generators (mid-`recover:`/`defer`/multi-frame). Full backlog +
+> decisions: `docs/gaps.md` "NEXT-SESSION BACKLOG".
 
 > **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
 > SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`

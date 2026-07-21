@@ -11,6 +11,45 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## NEXT-SESSION BACKLOG — sendability completeness (deferred from 2026-07-21)
+
+Three items to make the airlock sendability model Go-consistent (Go sends interfaces + closures over
+channels; Chezzi should too). All DEFERRED to their OWN future sessions — do NOT bundle. Each is its own
+spec. Ranked by value ÷ risk. (Context: Task 1 "align serial" landed 2026-07-21, `serial == M:N` by
+construction; these three finish the sendability story.)
+
+### 1. Protocol sendable under **(a)** — "Task 2" (HIGH value: Go `chan interface` parity)
+`sendable_bounded` (`src/checker/proto.rs`) is a hardcoded `p == "Error"` today — only `Channel[Error]`
+crosses; `Channel[UserProtocol]` is rejected (`"element type must be sendable, found Shape"`).
+**Decision (settled 2026-07-21): option (a)** — all-protocols-sendable-by-default, enforce "the widened
+witness must be sendable" at **every implicit widening site** (call args, `Ok`/`Err` payloads, struct
+fields, returns, channel `send`, collection literals); FFI + thread-affine handles are the ONLY rejected
+witnesses. NOT (b) opt-in `+Send` (drifts from Go), NOT (c) infer-per-use (non-local, confusing).
+Rationale: once the non-sendable floor is just FFI/handles, (a)'s false-positive set ≈ 0, and it is one
+simple Go-intuitive rule that generalizes what `Error` already does (the runtime deep-copies the concrete
+witness by its runtime type tag — existential erasure is compile-time-only). EXECUTION: spec against the
+post-Task-1 checker state → auto-task WITH spec → post-merge-gate + manual both-engine verify. Validation
+step: grep for real protocol values carrying FFI/handle fields used purely in-task (expect ≈0). Real risk
+= widening-site COVERAGE (a missed site is a soundness hole) — the reason it is post-JIT-freeze. Full
+decision record: `~/.claude/plans/2026-07-21-task2-protocol-sendable-decision.md`.
+
+### 2. Recursive-local-fn sendability (LOW value, memory-safety-critical)
+A nested recursive `fn` crossing the airlock is REJECTED today with a clear diagnostic (`src/vm/sched.rs`
+~3162/4112: *"a recursive local fn cannot be sent across a task boundary — hoist it to module scope"*).
+Only the DIAGNOSTIC landed (`5326181`), NOT the capability. Making it sendable means serializing a
+self-referential letrec closure graph (`Closure→Cell→Closure`) cross-thread — cycle-safe serialize +
+reconstruct the self-cell on the receiver. Low value (trivial hoist workaround, error already guides),
+memory-safety-critical. If pursued: **subagent-driven with per-delta adversarial review, NOT auto-task.**
+
+### 3. Reject-case generators — mid-`recover:` / pending-`defer` / multi-frame (VERY LOW value, research-grade)
+A local live generator IS sendable (F3 path C, `40003f3`), but three parked-frame shapes are HARD-ARM
+rejected at serialize time (`src/vm/wire.rs:174-176`): suspended mid-`recover:` (live handler), holding a
+pending `defer`, or multi-frame. They hold live VM **control** context (handler / side-effecting defer
+obligation / deep call stack), not data — path C serializes generator DATA only. NOT physically
+impossible (unlike FFI): doable with full **continuation serialization** (handlers + defers + stack), but
+a big lift for states you must *try* to hit. Both engines reject IDENTICALLY (no parity/soundness bug —
+a completeness gap only). If ever pursued: subagent-driven, never auto-task.
+
 ## Session log — 2026-07-20 (bug-hunt: 4 findings — 2 checker fixes + 1 doc fix, 1 held)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib) on
