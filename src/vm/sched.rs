@@ -24,8 +24,12 @@ enum DirectCallee {
 /// in `path` (a true back-edge) the arm emits `WireValue::Backref(id)` and stops; the node is REMOVED
 /// from `path` on DFS exit, so an acyclic DAG alias revisited off-stack is re-serialized as an
 /// independent deep copy (preserving the deep-copy-independence contract for both closures and data).
-/// A `Generator` is the sole remaining unpreserved container (its parked frame holds no id), so a cycle
-/// threaded through a generator's parked slot still trips the depth cap — the documented backstop.
+/// A `Generator` is the sole remaining unpreserved container (its parked frame holds no id). It is NOT
+/// identity-preserved (its parked frame can't back-reference), so a cycle re-entering the SAME generator
+/// on the DFS stack is REJECTED cleanly (`gens_on_stack`): with the containers now back-referencing, the
+/// depth cap no longer trips on such a cycle, and re-serializing the generator would silently DUPLICATE
+/// it — the e8dcad7 wrong-result class. The documented backstop is thus two-pronged: an acyclic parked
+/// slot too deep trips the depth cap; a generator inside a value cycle trips `gens_on_stack`.
 #[derive(Default)]
 struct WireMemo {
     /// GcRef of an identity-preserved node (`Cell`/`Closure`/container) currently on the serialize DFS
@@ -33,6 +37,11 @@ struct WireMemo {
     /// → `Backref(id)`; removed on DFS exit so an off-stack alias is deep-copied independently.
     path: super::fxhash::FxHashMap<GcRef, u32>,
     next_id: u32,
+    /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. A generator carries no id (its
+    /// parked frame can't be a `Backref` target), so re-entering one still on the stack is a cycle
+    /// through a non-preservable node → reject (never duplicate). Removed on DFS exit, so a generator
+    /// revisited off-stack (an acyclic DAG alias) is deep-copied independently, like the containers.
+    gens_on_stack: super::fxhash::FxHashSet<GcRef>,
 }
 
 impl Vm {
@@ -3374,10 +3383,24 @@ impl Vm {
                 // rejected cleanly below (never mis-serialized).
                 Obj::Generator(g) => {
                     // The SOLE remaining non-identity-preserved container: a generator's parked frame
-                    // holds no `WireValue` id, so a cycle threaded through a parked slot re-enters this
-                    // arm and walks to the shared `MAX_STRUCTURAL_DEPTH` cap (the documented backstop) —
-                    // rejected cleanly, never mis-back-referenced. A recursive closure PARKED in the
+                    // holds no `WireValue` id, so it can't be a `Backref` target. With the containers now
+                    // identity-preserved, a cycle re-entering THIS generator no longer trips the depth cap
+                    // (a container back-edge cuts the recursion first) — so re-serializing it would
+                    // silently DUPLICATE the generator (two independent copies sharing one container), the
+                    // e8dcad7 wrong-result class. Guard it directly: if `h` is already on the DFS stack we
+                    // are closing a value cycle through a non-preservable node → reject cleanly (both
+                    // engines run this identical path → byte-identical fault). Insert BEFORE recursing;
+                    // remove on exit, so a generator revisited OFF the stack (an acyclic DAG alias) is
+                    // deep-copied independently, like the containers. A recursive closure PARKED in the
                     // generator is still fine: its self-cell cycle is identity-preserved and back-refs.
+                    if memo.gens_on_stack.contains(&h) {
+                        return Err(self.err(
+                            "a generator cannot be sent across tasks as part of a reference cycle"
+                                .to_string(),
+                            Span { line: 0, col: 0 },
+                        ));
+                    }
+                    memo.gens_on_stack.insert(h);
                     let home = self.home_index(g.home);
                     let closure = match g.closure {
                         Some(c) => Some(Box::new(self.to_wire_depth(
@@ -3456,6 +3479,8 @@ impl Vm {
                             }
                         }
                     };
+                    // Off the DFS stack: a later off-stack revisit is an acyclic alias → deep-copied.
+                    memo.gens_on_stack.remove(&h);
                     WireValue::Generator {
                         proto: g.proto,
                         home,

@@ -9,7 +9,7 @@
 //!
 //! Not used for any cryptographic / untrusted-input boundary — purely an in-process speed lever.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// 64-bit FxHash seed (the rustc-hash constant).
@@ -73,6 +73,8 @@ impl Hasher for FxHasher {
 pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
 /// A `HashMap` that hashes with [`FxHasher`]. Drop-in for `std::collections::HashMap`.
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+/// A `HashSet` that hashes with [`FxHasher`]. Drop-in for `std::collections::HashSet`.
+pub type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 #[cfg(test)]
 mod tests {

@@ -8906,6 +8906,67 @@ main()";
     assert_eq!(ve, pe, "serial == M:N fault");
 }
 
+/// REGRESSION (silent generator DUPLICATION, the e8dcad7 wrong-result class): a value CYCLE that passes
+/// through BOTH an identity-preserved container AND a generator must REJECT, not round-trip. A generator
+/// carries no `WireValue` id (its parked frame can't be a `Backref` target), so once the containers
+/// back-reference, the depth cap no longer trips on such a cycle — re-serializing the generator would
+/// silently deep-copy it TWICE (two independent copies sharing one container). Here a PENDING generator
+/// `gen(box)` parks `box` in its call args and `box` holds the generator (`box.push(g)`), so
+/// `box -> g -> box` is a cycle through the (non-preservable) generator. The `gens_on_stack` guard
+/// rejects it cleanly on BOTH engines (byte-identical fault). Without the guard the program prints
+/// `got 1` (the duplicated generator round-trips) — parity-blind, both engines agree on the wrong result.
+#[test]
+fn generator_in_data_cycle_rejects_both() {
+    let src = "\
+fn gen(box: List[Iterator[int]]) -> Iterator[int]:
+    yield box.len()
+fn main():
+    box: List[Iterator[int]] = []
+    g := gen(box)
+    box.push(g)
+    parallel:
+        spawn:
+            for x in g:
+                print(\"got {x}\")
+main()";
+    let ve = vm_outcome(src).expect_err("serial: generator in a data cycle must reject");
+    let pe = parallel_outcome(src).expect_err("M:N: generator in a data cycle must reject");
+    assert!(ve.contains("reference cycle"), "serial: {ve}");
+    assert!(pe.contains("reference cycle"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// REGRESSION (bug #2, the SUSPENDED shape): a SUSPENDED single-frame generator whose PARKED STACK SLOT
+/// holds a container that transitively references the generator is the same cycle-through-a-generator
+/// wrong-result as `generator_in_data_cycle_rejects_both`, reached via the `Suspended` arm (parked
+/// operand stack) instead of `Pending` (call args). `keep := box` parks `box` across the first `yield`;
+/// `box.push(g)` closes `box -> g -> box`. Must reject cleanly on both engines (never duplicate the
+/// suspended generator's live drive-state).
+#[test]
+fn suspended_generator_in_data_cycle_rejects_both() {
+    let src = "\
+fn gen(box: List[Iterator[int]]) -> Iterator[int]:
+    keep := box
+    yield 0
+    yield keep.len()
+fn main():
+    box: List[Iterator[int]] = []
+    g := gen(box)
+    started := g.next()
+    box.push(g)
+    parallel:
+        spawn:
+            for x in g:
+                print(\"got {x}\")
+main()";
+    let ve = vm_outcome(src).expect_err("serial: suspended generator in a data cycle must reject");
+    let pe =
+        parallel_outcome(src).expect_err("M:N: suspended generator in a data cycle must reject");
+    assert!(ve.contains("reference cycle"), "serial: {ve}");
+    assert!(pe.contains("reference cycle"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
 /// Identity-preserving airlock, generator path — a suspended generator whose PARKED SLOT holds a
 /// recursive local `fn` (`keep := rec`, a self-cycle closure) now ROUND-TRIPS: the generator serializes
 /// its parked stack via `to_wire`, which back-references the self-cell, and `from_wire` ties the knot.

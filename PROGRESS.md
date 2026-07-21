@@ -90,13 +90,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the container arms recursed children BEFORE alloc, so the `from_wire` rewrite was the bulk of the work.
 > `examples/airlock_cycle.chz` + golden FLIPPED (sections 1-3 round-trip). Depth cap STAYS as the backstop
 > for genuinely-unbounded ACYCLIC nesting; the SOLE remaining value cycle that rejects is one threaded
-> through a live **generator's parked frame** (no wire id). Consequence flips: `airlock_cyclic_module_global_
-> crosses_mn` (was `_recoverable_mn`), `airlock_cyclic_{struct,via_channel_send_and_shared}_crosses` (was
-> `_recoverable`), `generator_parked_slot_nonsendable_rejects_both` re-pointed to a >10000-deep ACYCLIC
-> parked slot. New tests: `airlock_self_ref_{struct,list,map}_round_trips_both`, `airlock_mixed_struct_
-> closure_cycle_round_trips_both`, `airlock_struct_dag_alias_stays_independent` (adversarial parity-blind
-> independence), `airlock_self_ref_struct_round_trips_under_gc_stress`. `src/vm/{wire.rs,sched.rs,core.rs,
-> stmt.rs}`. Docs: `gaps.md` item A (→ DONE), `concurrency.md`.
+> through a live **generator's parked frame** (no wire id) — caught by the `WireMemo.gens_on_stack` guard
+> (re-entering the same generator on the serialize DFS stack → clean `a generator cannot be sent across
+> tasks as part of a reference cycle` reject, NOT a silent duplicate: since the containers now
+> back-reference, the container back-edge cuts the recursion before the depth cap would trip, so the
+> generator arm guards the cycle directly — the fix for the adversarial-review reject of the first cut,
+> which had deleted the mixed-cycle guard wholesale and let a gen+container cycle deep-copy the generator
+> twice). Consequence flips: `airlock_cyclic_module_global_crosses_mn` (was `_recoverable_mn`),
+> `airlock_cyclic_{struct,via_channel_send_and_shared}_crosses` (was `_recoverable`),
+> `generator_parked_slot_nonsendable_rejects_both` re-pointed to a >10000-deep ACYCLIC parked slot. New
+> tests: `airlock_self_ref_{struct,list,map}_round_trips_both`, `airlock_mixed_struct_closure_cycle_round_
+> trips_both`, `airlock_struct_dag_alias_stays_independent` (adversarial parity-blind independence),
+> `airlock_self_ref_struct_round_trips_under_gc_stress`, `generator_in_data_cycle_rejects_both` +
+> `suspended_generator_in_data_cycle_rejects_both` (gen+container cycle reject). `src/vm/{wire.rs,sched.rs,
+> fxhash.rs,core.rs,stmt.rs}`. Docs: `gaps.md` item A (→ DONE), `concurrency.md`.
 
 > **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
 > SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`

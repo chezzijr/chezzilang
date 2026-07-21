@@ -123,11 +123,16 @@ placeholder-allocs + registers before recursing) was the bulk of the work. `exam
 its golden now ROUND-TRIP (sections 1-3); the depth cap STAYS as the backstop for genuinely-unbounded
 ACYCLIC nesting (section 4 control + `generator_parked_slot_nonsendable_rejects_both`, re-pointed at a
 >10000-deep acyclic parked slot). The **sole** remaining non-identity-preserved container is `Generator`
-(its parked frame holds no `WireValue` id) — a cycle threaded through a generator's parked slot still
-depth-cap-rejects, the documented backstop. Tests: `airlock_self_ref_{struct,list,map}_round_trips_both`,
-`airlock_mixed_struct_closure_cycle_round_trips_both`, `airlock_struct_dag_alias_stays_independent`
-(adversarial parity-blind independence), `airlock_self_ref_struct_round_trips_under_gc_stress`,
-`airlock_cyclic_module_global_crosses_mn`. `src/vm/{wire.rs,sched.rs,core.rs,stmt.rs}`.
+(its parked frame holds no `WireValue` id, so it can't back-reference) — a cycle threaded through a
+generator is caught by the `WireMemo.gens_on_stack` guard (re-entering the same generator on the
+serialize DFS stack → clean `a generator cannot be sent across tasks as part of a reference cycle`
+reject, NOT a silent duplicate: once the containers back-reference, the container back-edge cuts the
+recursion before the depth cap would trip, so the generator arm must guard the cycle itself). Tests:
+`airlock_self_ref_{struct,list,map}_round_trips_both`, `airlock_mixed_struct_closure_cycle_round_trips_both`,
+`airlock_struct_dag_alias_stays_independent` (adversarial parity-blind independence),
+`airlock_self_ref_struct_round_trips_under_gc_stress`, `airlock_cyclic_module_global_crosses_mn`,
+`generator_in_data_cycle_rejects_both` + `suspended_generator_in_data_cycle_rejects_both` (the
+gen+container cycle reject). `src/vm/{wire.rs,sched.rs,fxhash.rs,core.rs,stmt.rs}`.
 
 ### B. Module-GLOBAL live generator sendable by value (LOWER value, MED-HIGH risk)
 **The inconsistency:** a FRAME-LOCAL live generator crosses the airlock by value (F3 path C, deep copy of

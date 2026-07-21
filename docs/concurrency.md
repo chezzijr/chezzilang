@@ -794,8 +794,11 @@ aggregate) inside a task is a **compile error** (see below).
   local as an independent deep copy. A **mixed** struct+closure cycle — a self-capturing closure held
   *inside* a struct/list/map so the cycle passes through a container — now **also round-trips** (every
   container is identity-preserved too, so the old mixed-cycle reject is gone). The **only** value cycle
-  that still rejects (`maximum structural depth …`) is one threaded through a live **generator's parked
-  slot** (a generator's frozen frame carries no wire id — the documented backstop).
+  that still rejects is one threaded through a live **generator's parked slot** (a generator's frozen
+  frame carries no wire id, so it can't back-reference): re-entering the same generator on the serialize
+  stack faults cleanly with `a generator cannot be sent across tasks as part of a reference cycle` —
+  never a silent duplicate. (The depth cap stays as a *separate* backstop for a genuinely-unbounded
+  **acyclic** nest.)
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
   a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
@@ -815,13 +818,17 @@ aggregate) inside a task is a **compile error** (see below).
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
   carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
-  **non-sendable parked slot** (e.g. a genuinely-unbounded >10000-deep **acyclic** nest held live across a
-  `yield`, or a value cycle threaded *through* the generator's own parked frame) still **rejects at the
-  crossing** with the `maximum structural depth …` depth-cap fault — the safer-in-direction property vs the
-  reach-gate (a slot is checked at serialize time, so there is no under-gate). A parked **recursive local
-  `fn`** (or a parked **self-referential struct/list/map**), by contrast, now round-trips like any other
-  capture — its cycle back-references cleanly (only a cycle passing through the generator's frame itself,
-  which carries no wire id, still trips the cap).
+  **non-sendable parked slot** still **rejects at the crossing** — the safer-in-direction property vs the
+  reach-gate (a slot is checked at serialize time, so there is no under-gate). Two reject shapes: a
+  genuinely-unbounded >10000-deep **acyclic** nest held live across a `yield` trips the `maximum
+  structural depth …` depth cap; a value **cycle** threaded *through* the generator's own parked frame
+  (the generator carries no wire id, so it can't back-reference) is caught by re-entering the same
+  generator on the serialize stack — a clean `a generator cannot be sent across tasks as part of a
+  reference cycle` fault (never a silent duplicate — the container-back-edge cuts the recursion before
+  the depth cap would trip, so the generator arm guards it directly). A parked **recursive local `fn`**
+  (or a parked **self-referential struct/list/map**), by contrast, now round-trips like any other
+  capture — its cycle back-references cleanly (only a cycle passing through the generator's frame itself
+  rejects).
   A suspension **inside a `recover:`** (a live handler stack) is ALSO sendable — a `Handler` is pure
   plain-data (all `usize`, no `GcRef`/`Value`), serialized as-is on the wire and rebuilt so the recover
   boundary resumes intact; the resume path rebases each parked handler/frame `nursery_len` to the resuming
@@ -865,9 +872,11 @@ aggregate) inside a task is a **compile error** (see below).
   the receiver ties the knot — so the copy on the other side is an independent cyclic value with the same
   shape (like Python's `deepcopy`, which memoizes). **Byte-identical on the serial and M:N engines.** The
   depth-guard (`MAX_STRUCTURAL_DEPTH = 10000`, the same bound the display / `==` paths use) now fires
-  **only** for a genuinely >10000-deep **acyclic** nest (or a cycle threaded through a live generator's
-  parked frame, which carries no wire id) — a **recoverable** `maximum structural depth (10000) exceeded
-  (cyclic data structure?)` fault, re-stamped with the real airlock site and catchable by `recover:`.
+  **only** for a genuinely >10000-deep **acyclic** nest — a **recoverable** `maximum structural depth
+  (10000) exceeded (cyclic data structure?)` fault, re-stamped with the real airlock site and catchable
+  by `recover:`. (A cycle threaded through a live generator's parked frame — the generator carries no
+  wire id — is instead caught by the generator-on-stack guard, a clean `a generator cannot be sent
+  across tasks as part of a reference cycle` fault.)
   Large-but-**shallow** data (e.g. a 100k-element list) crosses fine — the counter measures nesting
   depth, not element count.
 
