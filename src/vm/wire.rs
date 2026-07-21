@@ -89,7 +89,24 @@ pub enum WireValue {
     /// plain captured local sent into a `spawn` task is an isolated per-task copy — never a shared
     /// mutable box across an OS-thread boundary (the memory-safety line, design §4 F1). `has_handle`
     /// follows the inner value, so a cell over pure data rides the cheap snapshot fast path.
-    Cell(Box<WireValue>),
+    ///
+    /// The `id` is a per-serialization identity assigned on first visit (see [`WireValue::Backref`]),
+    /// so a `Cell`/`Closure` cycle — the letrec self-cell a recursive local `fn` produces — round-trips
+    /// instead of overflowing the depth cap. On reconstruction the `id` is registered BEFORE recursing
+    /// `inner`, so a `Backref(id)` nested inside resolves to the already-alloc'd placeholder cell.
+    Cell {
+        id: u32,
+        inner: Box<WireValue>,
+    },
+    /// A BACK-REFERENCE to an already-serialized [`Cell`](WireValue::Cell)/[`Closure`](WireValue::Closure)
+    /// currently on the serialize DFS stack — the encoding that lets a `Cell`/`Closure` cycle (a recursive
+    /// local `fn`'s letrec self-cell, or a mutually-recursive closure pair) cross the airlock. Serialize
+    /// assigns each `Cell`/`Closure` an `id` on first visit and, on a REVISIT of a node still on the stack
+    /// (a true back-edge), emits `Backref(id)` and stops the descent; a node revisited OFF the stack (an
+    /// acyclic DAG alias) is re-serialized as an independent deep copy — preserving the `Cell`/closure
+    /// deep-copy-independence contract. `from_wire` resolves it to the placeholder registered under that
+    /// `id`, tying the knot. Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.
+    Backref(u32),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
     /// same heap). As of B3.3 this wraps only the objects that genuinely CANNOT cross an OS-thread
     /// heap boundary: `Module` (mutable globals), `Native`, and `Cffi` (both share the parent address
@@ -148,6 +165,9 @@ pub enum WireValue {
     /// every airlock (spawn args/callees, Channel/Shared, module snapshot) on both engines identically.
     /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
     Closure {
+        /// Per-serialization identity (see [`WireValue::Backref`]) — a self-capturing recursive closure
+        /// back-references this `id` from a nested `Cell`, so the cycle round-trips.
+        id: u32,
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
         home: Option<usize>,
@@ -251,7 +271,14 @@ impl WireValue {
             WireValue::Closure { captured, .. } => captured.iter().any(|(_, v)| v.has_handle()),
             // A cell follows its inner value: a cell over pure data stays on the snapshot fast path;
             // a cell embedding a handle takes the slow path so its handle is deep-copied.
-            WireValue::Cell(inner) => inner.has_handle(),
+            WireValue::Cell { inner, .. } => inner.has_handle(),
+            // A back-reference TERMINATES the walk: its target (an already-visited Cell/Closure on the
+            // serialize stack) is reachable elsewhere in the graph, where its handle-status is already
+            // folded in. Treating it as `false` here is load-bearing — it keeps `has_handle` from
+            // infinite-looping on the now-cyclic wire graph (the `to_snap` fast-path `!has_handle()`
+            // hazard), and is correct because a cycle passing ONLY through Cell/Closure carries no
+            // `Handle` on the back-edge itself.
+            WireValue::Backref(_) => false,
             // F3 path C: a generator crosses by value, but a parked slot (a `Pending` arg or a
             // `Suspended` operand-stack slot) or its backing closure could itself embed a `Handle` —
             // recurse so a `Module`/`Native` handle parked in a slot is still flagged (the M:N worker

@@ -295,7 +295,7 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
             .for_each(|x| collect_core_gcrefs(x, out, seen)),
         WireValue::NewType { inner, .. } => collect_core_gcrefs(inner, out, seen),
         // A cell queued in a channel/executor roots its inner value's handles (like `NewType`).
-        WireValue::Cell(inner) => collect_core_gcrefs(inner, out, seen),
+        WireValue::Cell { inner, .. } => collect_core_gcrefs(inner, out, seen),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
         WireValue::Iter { items, .. } => {
             items.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
@@ -356,7 +356,10 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
         // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
         // R2b: a `Reader` core holds a BufReader<File> + a key — likewise no `WireValue`s, no `GcRef`s.
-        WireValue::Str(_)
+        // A back-reference roots nothing: its target (an already-walked Cell/Closure) is reachable
+        // elsewhere in the same wire graph, so its handles are already collected there.
+        WireValue::Backref(_)
+        | WireValue::Str(_)
         | WireValue::Bytes(_)
         | WireValue::ByteArray(_)
         | WireValue::Int(_)

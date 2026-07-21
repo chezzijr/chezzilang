@@ -48,9 +48,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > already broken (lost) on the shipping M:N engine — serial now matches M:N (no propagation). Residuals
 > (A)/(C)/(D) resolved by construction. Docs: `gaps.md` §B3, `concurrency.md`, `syntax.md`, `spec.md`.
 > **NEXT SESSION** (not this one) — sendability completeness, ranked, each its own spec: (1) protocol
-> sendable under option (a) — Go `chan interface` parity, decision settled; (2) recursive-local-fn
-> sendability; (3) reject-case generators (mid-`recover:`/`defer`/multi-frame). Full backlog +
-> decisions: `docs/gaps.md` "NEXT-SESSION BACKLOG".
+> sendable under option (a) — Go `chan interface` parity, decision settled **[DONE]**; (2) recursive-local-fn
+> sendability **[DONE 2026-07-21 — see below]**; (3) reject-case generators (mid-`recover:`/`defer`/multi-frame).
+> Full backlog + decisions: `docs/gaps.md` "NEXT-SESSION BACKLOG".
+
+> **✅ RECURSIVE-LOCAL-FN SENDABILITY (2026-07-21, `auto-task/recursive-fn-sendable`) — a nested recursive
+> `fn` (and a mutually-recursive closure pair) now CROSSES the airlock and computes correctly on both
+> engines.** Identity-preserving airlock serialization SCOPED to the `Obj::Cell` + `Obj::Closure` arms: a
+> new `WireValue::Backref(u32)` + an `id` on the `Cell`/`Closure` wire arms. `to_wire_depth` threads a
+> back-edge memo (`WireMemo` — an `FxHashMap<GcRef,u32>` DFS-stack set + id counter); on a revisit of a
+> Cell/Closure still on the serialize stack it emits `Backref(id)` and stops. `from_wire` ties the knot:
+> alloc a placeholder `Cell(Nil)`/`Closure(captured=[Nil;n])` FIRST, register `id→GcRef`, recurse children
+> (a nested `Backref` resolves to the placeholder), then `heap.get_mut`-patch — **memory-safe** because
+> `Heap::alloc` never collects (no GC between placeholder and patch) and `GcRef` is a GC-traced index, not
+> a raw pointer (verified under GC stress). The old `graph_reaches_handle` reject + its two call sites +
+> the fn are DELETED. **Design deviation from the literal spec (recorded):** the memo is BACK-EDGE-ONLY
+> (pops a node off the stack on DFS exit), so only a TRUE cycle earns a `Backref`; an acyclic DAG alias
+> (`[f, f]`) is deep-copied independently — preserving the Cell/closure deep-copy-independence contract
+> (`airlock_aliased_closure_stays_independent` pins it) that a plain visited-set would have silently
+> regressed. **Struct/List/Map earn no id** — a pure-data cycle still trips the depth cap and rejects
+> (`airlock_cycle.chz` UNCHANGED). Corrected premise: there was NO pre-existing cycle-safe serializer to
+> mirror; this is brand-new machinery. Tests: `airlock_recursive_local_fn_round_trips_both_engines` +
+> `_under_gc_stress`, `airlock_mutually_recursive_pair_round_trips`, `airlock_recursive_closure_captures_
+> outer_local_round_trips`, `generator_carrying_recursive_closure_round_trips_both`; the generator
+> parked-slot reject test repointed to a cyclic-struct witness (both-engines depth-cap reject). Docs:
+> `gaps.md` §2 (→ DONE), `concurrency.md`.
 
 > **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
 > SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`

@@ -746,17 +746,17 @@ aggregate) inside a task is a **compile error** (see below).
   is a different case and stays non-sendable (below). (A protocol existential is **sendable** — Task 2,
   Go `chan interface` parity — so capturing one is fine; a witness that carries an FFI/native handle is
   caught at the runtime airlock, not here.)
-- **A recursive *local* `fn` cannot cross the airlock (clear diagnostic, deferred support).** A nested
-  `fn` that calls itself captures its own name for recursion — the compiler's letrec gives it a
-  self-cell, so the closure's capture graph is **self-referential** (it reaches its own heap handle).
-  Full recursive-local-fn sendability is a deferred VM change, so the same capture-graph scan detects the
-  self-reference and raises the **recoverable** error `a recursive local fn cannot be sent across a task
-  boundary — hoist it to module scope (a module-global recursive fn is sendable)` — **byte-identical on
-  both engines**, at every airlock arm (`spawn:` block, `spawn f()` callee, `spawn f(g)` arg,
-  `Channel[fn].send`). The fix is in the message: **hoist the `fn` to module scope** — a module-global
-  recursive `fn` crosses as a plain `Func` (recursion resolves via its home-global slot, no capture) and
-  IS sendable. Genuine cyclic *data* still reports the `maximum structural depth …` message; only a
-  self-referential closure gets this one.
+- **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself
+  captures its own name for recursion — the compiler's letrec gives it a self-cell, so the closure's
+  capture graph is **cyclic** (`Closure → Cell → Closure`). The airlock serializer preserves that
+  identity: a `WireValue::Backref(id)` (scoped to the `Cell`/`Closure` arms) encodes the back-edge, and
+  `from_wire` ties the knot on the receiver (placeholder-alloc → register `id` → recurse → patch). So a
+  recursive local `fn` — and a **mutually-recursive closure pair** (`Closure_f → Cell_g → Closure_g →
+  Cell_f`) — crosses **any** airlock (`spawn:` block, `spawn f()` callee, `spawn f(g)` arg,
+  `Channel[fn].send`) and computes correctly, **byte-identical on both engines**. A recursive closure that
+  ALSO reads an outer local carries the self-edge as a `Backref` and the outer local as an independent deep
+  copy. Only `Cell`/`Closure` earn an identity — genuine cyclic *data* (a struct pointing back at itself)
+  still reports `maximum structural depth …` and rejects, since it forms no callable cycle.
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
   a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
@@ -776,9 +776,10 @@ aggregate) inside a task is a **compile error** (see below).
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
   carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
-  **non-sendable parked slot** (e.g. a self-referential recursive local fn) still **rejects at the
-  crossing** — the safer-in-direction property vs the reach-gate (a slot is checked at serialize time, so
-  there is no under-gate). Three parked-frame shapes are **HARD ARMS** rejected cleanly (a graceful,
+  **non-sendable parked slot** (e.g. a cyclic *struct* held live across a `yield`) still **rejects at the
+  crossing** with the `maximum structural depth …` depth-cap fault — the safer-in-direction property vs the
+  reach-gate (a slot is checked at serialize time, so there is no under-gate). A parked **recursive local
+  `fn`**, by contrast, now round-trips like any other capture (its self-cell cycle back-references cleanly). Three parked-frame shapes are **HARD ARMS** rejected cleanly (a graceful,
   byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a panic, **never** a
   silent mishandle): a suspension **inside a `recover:`** (a live handler), a suspension **with a pending
   `defer`**, and a (checker-unreachable, defensively-guarded) **multi-frame** suspension. A generator held

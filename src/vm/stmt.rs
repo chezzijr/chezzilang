@@ -2274,7 +2274,10 @@ impl Vm {
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
             WireValue::Iter { .. } => "<iterator>".to_string(),
             // A cell is a transparent box — render its inner value (never user-visible in practice).
-            WireValue::Cell(inner) => self.display_wire(inner),
+            WireValue::Cell { inner, .. } => self.display_wire(inner),
+            // A back-reference closes a Cell/Closure cycle; render a stable marker rather than recurse
+            // (never user-visible in practice — a wire value is only rendered on the error path).
+            WireValue::Backref(_) => "<cycle>".to_string(),
             // F3 path C: a wired generator renders like its heap counterpart (`Obj::Generator` →
             // "<generator>").
             WireValue::Generator { .. } => "<generator>".to_string(),

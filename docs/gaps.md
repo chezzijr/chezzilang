@@ -36,13 +36,32 @@ a value), so the witness-sendable clause is near-vacuous — protocols behave li
 Genuine-rejection coverage moved to the runtime: `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
 Decision record: `~/.claude/plans/2026-07-21-task2-protocol-sendable-decision.md`.
 
-### 2. Recursive-local-fn sendability (LOW value, memory-safety-critical)
-A nested recursive `fn` crossing the airlock is REJECTED today with a clear diagnostic (`src/vm/sched.rs`
-~3162/4112: *"a recursive local fn cannot be sent across a task boundary — hoist it to module scope"*).
-Only the DIAGNOSTIC landed (`5326181`), NOT the capability. Making it sendable means serializing a
-self-referential letrec closure graph (`Closure→Cell→Closure`) cross-thread — cycle-safe serialize +
-reconstruct the self-cell on the receiver. Low value (trivial hoist workaround, error already guides),
-memory-safety-critical. If pursued: **subagent-driven with per-delta adversarial review, NOT auto-task.**
+### 2. Recursive-local-fn sendability — **DONE (2026-07-21)**
+A nested recursive `fn` (and a mutually-recursive closure pair) now CROSSES the airlock and computes
+correctly on both engines — the reject diagnostic is gone. Implemented via identity-preserving airlock
+serialization SCOPED to the `Obj::Cell` + `Obj::Closure` arms: a new `WireValue::Backref(u32)` + an `id`
+on the `Cell`/`Closure` wire arms. `to_wire_depth` threads a back-edge memo (`WireMemo` — a
+`FxHashMap<GcRef,u32>` DFS-stack set + id counter); on a revisit of a Cell/Closure still on the serialize
+stack it emits `Backref(id)` and stops. `from_wire` ties the knot: alloc a placeholder `Cell(Nil)`/
+`Closure(captured=[Nil;n])` FIRST, register `id→GcRef`, recurse children, then `heap.get_mut`-patch —
+memory-safe because `Heap::alloc` never collects (no GC between placeholder and patch) and `GcRef` is a
+GC-traced index. The old `graph_reaches_handle` reject (both call sites + the fn) is deleted.
+
+**Corrected premise (the pre-work brief was wrong):** there was NO pre-existing cycle-safe airlock
+serializer to mirror — `WireValue`/`SnapValue` were owned Box/Vec TREES with no identity/placeholder arm,
+and `examples/airlock_cycle.chz` REJECTS cycles (`maximum structural depth exceeded`), it never
+round-tripped them. This is brand-new identity-preserving machinery. **Design deviation from the literal
+task spec (recorded):** the memo is BACK-EDGE-ONLY (pops a node off the stack on DFS exit), so only a TRUE
+cycle earns a `Backref`; an acyclic DAG alias (e.g. one arg `[f, f]`) is re-serialized as an independent
+deep copy — preserving the documented Cell/closure deep-copy-independence contract (`wire.rs` §F1). A
+plain visited-set (the literal spec) would have SHARED such aliases, a silent regression. Byte-identical
+to the spec on every genuine-cycle case (self-recursion, mutual recursion, recursive-closure-capturing-an-
+outer-local). **Struct/List/Map/etc. earn NO id** — a pure-data cycle still trips the depth cap and still
+rejects (`airlock_cycle.chz` behavior UNCHANGED, verified). Tests: `airlock_recursive_local_fn_round_trips_
+both_engines` + `_under_gc_stress`, `airlock_mutually_recursive_pair_round_trips`, `airlock_recursive_
+closure_captures_outer_local_round_trips`, `airlock_aliased_closure_stays_independent`, `generator_
+carrying_recursive_closure_round_trips_both` (and `generator_parked_slot_nonsendable_rejects_both`
+repointed to a cyclic-struct witness, which stays a both-engines depth-cap reject).
 
 ### 3. Reject-case generators — mid-`recover:` / pending-`defer` / multi-frame (VERY LOW value, research-grade)
 A local live generator IS sendable (F3 path C, `40003f3`), but three parked-frame shapes are HARD-ARM

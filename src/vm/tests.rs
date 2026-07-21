@@ -13179,31 +13179,49 @@ main()
     );
 }
 
-/// 2026-07-18 bug-hunt — a nested (local) recursive `fn` crossing the airlock has a self-referential
-/// capture graph (the letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). It used to
-/// trip the generic depth guard and emit the misleading `maximum structural depth ...` message. It now
-/// gets a CLEAR, recoverable diagnostic pointing at the fix (hoist to module scope). Byte-identical on
-/// both engines (serial `deep_clone`→`to_wire`, M:N spawn-block `to_wire`/`to_snap`).
+/// A nested (local) recursive `fn` crossing the airlock has a self-referential capture graph (the
+/// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). Identity-preserving airlock
+/// serialization (`WireValue::Backref`, scoped to the Cell/Closure arms) ties that knot back together
+/// on the far heap, so the recursive fn is now SENDABLE and computes correctly — `fact(5) == 120`,
+/// byte-identical on both engines (serial `deep_clone`→`to_wire`, M:N spawn-block `to_wire`/`to_snap`).
 #[test]
-fn airlock_recursive_local_fn_clear_diagnostic_both_engines() {
+fn airlock_recursive_local_fn_round_trips_both_engines() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
         if n <= 1: return 1
         return n * fact(n - 1)
-    r := recover:
-        parallel:
-            spawn: fact(5)
-        \"done\"
-    match r:
-        Ok(v):  print(\"ok: {v}\")
-        Err(e): print(\"caught: {e.message()}\")
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(fact(5))
+    print(\"ok: {ch.recv()}\")
 main()
 ";
-    assert_mc_parity(
-        src,
-        "caught: a recursive local fn cannot be sent across a task boundary — hoist it to module scope (a module-global recursive fn is sendable)\n",
-    );
+    assert_mc_parity(src, "ok: 120\n");
+}
+
+/// Memory-safety lock for the tie-the-knot reconstruction: the same recursive-fn airlock crossing under
+/// GC STRESS. The reconstructed closure/cell cycle (placeholder-alloc → patch) must be fully GC-traced —
+/// if the placeholder patch left a dangling `GcRef`, a collection at the next safepoint would panic
+/// ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
+#[test]
+fn airlock_recursive_local_fn_round_trips_under_gc_stress() {
+    let src = "\
+fn main():
+    fn fact(n: int) -> int:
+        if n <= 1: return 1
+        return n * fact(n - 1)
+    junk := [1, 2, 3, 4, 5]
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(fact(6))
+    got := ch.recv()
+    more := [got, got]
+    print(\"ok: {got}\")
+main()
+";
+    assert_eq!(run_capture_stress(src), "ok: 720\n");
+    assert_eq!(run_capture_stress(src), run(src));
 }
 
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it

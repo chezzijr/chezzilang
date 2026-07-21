@@ -7412,6 +7412,94 @@ main()";
     assert_parity_out(src, "120\n");
 }
 
+/// Identity-preserving airlock (`WireValue::Backref`): a self-recursive nested `fn` crossing the
+/// airlock has a `Closure -> Cell -> Closure` self-cycle; the wire form assigns the Closure/Cell ids
+/// and back-references the self-edge, and `from_wire` ties the knot back (placeholder-alloc → patch).
+/// `fact(5) == 120` on both engines — previously this rejected ("recursive local fn cannot be sent").
+#[test]
+fn airlock_recursive_local_fn_round_trips_parity() {
+    let src = "\
+fn main():
+    fn fact(n: int) -> int:
+        if n <= 1:
+            return 1
+        return n * fact(n - 1)
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(fact(5))
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "120\n");
+}
+
+/// Identity-preserving airlock — a MUTUALLY-recursive closure PAIR (`Cell_even -> Closure_even ->
+/// Cell_odd -> Closure_odd -> Cell_even`, a 4-node cycle threaded through two Cells and two Closures)
+/// crosses the airlock inside a spawned task's captured environment and ties BOTH directions of the
+/// knot. `even(10) == true` on both engines. (Nested `fn`s can't forward-reference each other, so the
+/// pair is built from reassigned fn-typed cells — the same closure/cell cycle a mutual `fn` would form.)
+#[test]
+fn airlock_mutually_recursive_pair_round_trips() {
+    let src = "\
+fn main():
+    even := fn(n: int) -> bool: n == 0
+    odd := fn(n: int) -> bool: n == 0
+    even = fn(n: int) -> bool: n == 0 or odd(n - 1)
+    odd = fn(n: int) -> bool: n != 0 and even(n - 1)
+    ch := Channel[bool]()
+    parallel:
+        spawn: ch.send(even(10))
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "true\n");
+}
+
+/// Identity-preserving airlock — a recursive nested `fn` that ALSO reads an outer local (`base`). Its
+/// capture graph has the self-cell (on the DFS stack → `Backref`) AND the `base`-cell (visited once,
+/// OFF the stack → inline deep copy). The visited-set distinguishes them: the self-edge round-trips as
+/// a cycle, the outer local as an independent copy. `f(3)` reads `base == 100` on both engines.
+#[test]
+fn airlock_recursive_closure_captures_outer_local_round_trips() {
+    let src = "\
+fn main():
+    base := 100
+    fn f(n: int) -> int:
+        if n <= 0:
+            return base
+        return f(n - 1)
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(f(3))
+    print(ch.recv())
+main()";
+    assert_parity_out(src, "100\n");
+}
+
+/// Deep-copy-independence contract (regression lock): a list holding the SAME closure twice (`[f, f]`,
+/// f closing over a mutable outer local) crosses the airlock. The two list slots are an ACYCLIC alias
+/// (off the serialize DFS stack), so each is re-serialized as an INDEPENDENT deep copy — never shared.
+/// After crossing, calling slot 0 (increments its OWN count) then reading slot 1 yields `1`, not `2`:
+/// the mutation is not observed through the other reference. Pins the back-edge-only memo design
+/// (`WireMemo` pops on DFS exit) against a plain-visited-set that would SHARE the alias.
+#[test]
+fn airlock_aliased_closure_stays_independent() {
+    let src = "\
+fn main():
+    count := 0
+    fn bump() -> int:
+        count = count + 1
+        return count
+    pair := [bump, bump]
+    r := Channel[int]()
+    parallel:
+        spawn:
+            a := pair[0]()
+            b := pair[1]()
+            r.send(b)
+    print(r.recv())
+main()";
+    assert_parity_out(src, "1\n");
+}
+
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that
 /// local AFTER the fn is defined is visible when the fn is later called (shared cell) — matches
 /// closure semantics → `42`.
@@ -8682,21 +8770,27 @@ main()";
     assert_eq!(parallel_outcome(src).expect("M:N"), expect);
 }
 
-/// A suspended generator whose PARKED SLOT holds a non-sendable value (a self-referential recursive
-/// local fn) rejects cleanly at the crossing — the per-slot sendable-at-serialize-time check walks
-/// the parked stack and routes the recursive closure through the existing reject. Byte-identical on
-/// both engines.
+/// A suspended generator whose PARKED SLOT holds a non-sendable value rejects cleanly at the crossing —
+/// the per-slot sendable-at-serialize-time check walks the parked stack. The witness is a CYCLIC STRUCT
+/// (a `Node` self-loop), which trips the shared `MAX_STRUCTURAL_DEPTH` guard in `to_wire_depth` — a
+/// to_wire-TIME fault that fires byte-identically on BOTH engines (unlike a captured `Module`/native/FFI
+/// handle, which rejects on M:N only since the serial `deep_clone` skips `ensure_crossable`). A recursive
+/// local `fn` is NO LONGER a valid witness here — it is now sendable (`WireValue::Backref` ties its
+/// self-cell cycle); see `generator_carrying_recursive_closure_round_trips_both` below.
 #[test]
 fn generator_parked_slot_nonsendable_rejects_both() {
     let src = "\
+struct Node:
+    val: int
+    next: List[Node]
 fn gen() -> Iterator[int]:
-    fn rec(n: int) -> int:
-        if n <= 0:
-            return 0
-        return rec(n - 1)
-    keep := rec
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    keep := a
     yield 1
-    yield keep(3)
+    yield keep.val
 fn main():
     it := gen()
     started := it.next()
@@ -8708,9 +8802,38 @@ fn main():
 main()";
     let ve = vm_outcome(src).expect_err("serial: non-sendable parked slot must reject");
     let pe = parallel_outcome(src).expect_err("M:N: non-sendable parked slot must reject");
-    assert!(ve.contains("recursive local fn"), "serial: {ve}");
-    assert!(pe.contains("recursive local fn"), "M:N: {pe}");
+    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
+    assert!(pe.contains("maximum structural depth"), "M:N: {pe}");
     assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// Identity-preserving airlock, generator path — a suspended generator whose PARKED SLOT holds a
+/// recursive local `fn` (`keep := rec`, a self-cycle closure) now ROUND-TRIPS: the generator serializes
+/// its parked stack via `to_wire`, which back-references the self-cell, and `from_wire` ties the knot.
+/// The generator crosses into the spawned task, resumes, and `keep(3) == 3` on both engines. Pairs with
+/// `generator_parked_slot_nonsendable_rejects_both` (which now uses a cyclic struct, not a recursive fn).
+#[test]
+fn generator_carrying_recursive_closure_round_trips_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    fn rec(n: int) -> int:
+        if n <= 0:
+            return 0
+        return rec(n - 1) + 1
+    keep := rec
+    yield 1
+    yield keep(3)
+fn main():
+    it := gen()
+    started := it.next()
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in it:
+                out.send(x)
+    print(out.recv())
+main()";
+    assert_parity_out(src, "3\n");
 }
 
 /// HARD ARM (deferred → clean reject): a generator suspended with a pending `defer` in its parked
