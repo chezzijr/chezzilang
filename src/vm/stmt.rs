@@ -2123,7 +2123,7 @@ impl Vm {
             WireValue::Bytes(b) => crate::slice::bytes_repr(b),
             WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
             WireValue::Handle(h) => self.display(Value::obj(*h)),
-            WireValue::List(items) => {
+            WireValue::List { items, .. } => {
                 let inner = items
                     .iter()
                     .map(|v| self.display_wire(v))
@@ -2131,7 +2131,7 @@ impl Vm {
                     .join(", ");
                 format!("[{inner}]")
             }
-            WireValue::Tuple(items) => {
+            WireValue::Tuple { items, .. } => {
                 let inner = items
                     .iter()
                     .map(|v| self.display_wire(v))
@@ -2139,7 +2139,7 @@ impl Vm {
                     .join(", ");
                 format!("({inner})")
             }
-            WireValue::Map(entries) => {
+            WireValue::Map { entries, .. } => {
                 let inner = entries
                     .iter()
                     .map(|(_, k, v)| format!("{}: {}", self.display_wire(k), self.display_wire(v)))
@@ -2147,7 +2147,7 @@ impl Vm {
                     .join(", ");
                 format!("{{{inner}}}")
             }
-            WireValue::Set(entries) => {
+            WireValue::Set { entries, .. } => {
                 if entries.is_empty() {
                     "Set()".to_string()
                 } else {
@@ -2159,7 +2159,7 @@ impl Vm {
                     format!("{{{inner}}}")
                 }
             }
-            WireValue::Struct { name, fields } => {
+            WireValue::Struct { name, fields, .. } => {
                 let inner = fields
                     .iter()
                     .map(|(k, v)| format!("{k}={}", self.display_wire(v)))
@@ -2177,6 +2177,7 @@ impl Vm {
             WireValue::Enum {
                 variant_id,
                 payload,
+                ..
             } => {
                 // M19 lever #2 — the wire form carries the id; resolve the variant name on this cold
                 // display path via the shared program's `variants_by_id`.
@@ -2192,7 +2193,9 @@ impl Vm {
                     format!("{variant}({inner})")
                 }
             }
-            WireValue::NewType { type_key, inner } => {
+            WireValue::NewType {
+                type_key, inner, ..
+            } => {
                 let display = crate::compiler::bare_display(type_key.as_ref());
                 format!("{display}({})", self.display_wire(inner))
             }

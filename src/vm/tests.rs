@@ -2019,7 +2019,7 @@ fn cursor_crosses_airlock_by_deep_copy() {
         .expect("a cursor is sendable by deep copy");
     assert!(!wire.has_handle(), "a cursor of scalars carries no handle");
     match &wire {
-        WireValue::Iter { items, pos } => {
+        WireValue::Iter { items, pos, .. } => {
             assert_eq!(*pos, 1, "pos carried across the wire");
             assert_eq!(items.len(), 2, "both snapshot items wired");
         }
@@ -13094,13 +13094,13 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, run_capture_parallel(src).expect("interp run"));
 }
 
-/// Bug A regression — a CYCLIC value crossing the concurrency airlock (`spawn` arg) used to recurse
-/// unbounded in `to_wire` on the HOST stack and SIGABRT (uncatchable process kill). It is now the
-/// SAME recoverable `maximum structural depth` `RuntimeError` the display/`==` paths already raise,
-/// catchable by `recover:`, byte-identical on the serial and M:N engines (both copy the local cyclic
-/// value via `deep_clone`→`to_wire`).
+/// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
+/// crossing the concurrency airlock (`spawn` arg) now ROUND-TRIPS via identity-preserving container
+/// serialization (`WireValue::Backref` on every container arm), instead of tripping the depth cap. The
+/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical on
+/// the serial and M:N engines (both copy the local cyclic value via `deep_clone`→`to_wire`).
 #[test]
-fn airlock_cyclic_struct_recoverable_both_engines() {
+fn airlock_cyclic_struct_crosses_both_engines() {
     let src = "\
 struct Node:
     val: int
@@ -13121,17 +13121,14 @@ fn main():
         Err(e): print(\"caught: {e.message()}\")
 main()
 ";
-    assert_mc_parity(
-        src,
-        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
-    );
+    assert_mc_parity(src, "got 1\nok: done\n");
 }
 
-/// Bug A regression — the same cyclic value crossing via `Channel.send` and `Shared(...)` (both route
-/// through `to_wire_at`) also degrades to the recoverable depth error, not a SIGABRT. Regression lock
-/// on the other airlock entry points beyond a bare `spawn` arg.
+/// FLIPPED (item A, was `airlock_cyclic_via_channel_send_and_shared_recoverable`) — the same self-
+/// referential value crossing via `Channel.send` and `Shared(...)` (both route through `to_wire_at`)
+/// also now ROUND-TRIPS. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
 #[test]
-fn airlock_cyclic_via_channel_send_and_shared_recoverable() {
+fn airlock_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
 import std.concurrency
 struct Node:
@@ -13151,10 +13148,7 @@ fn main():
         Err(e): print(\"caught: {e.message()}\")
 main()
 ";
-    assert_mc_parity(
-        chan_src,
-        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
-    );
+    assert_mc_parity(chan_src, "ok: done\n");
     let shared_src = "\
 import std.concurrency
 struct Node:
@@ -13173,10 +13167,7 @@ fn main():
         Err(e): print(\"caught: {e.message()}\")
 main()
 ";
-    assert_mc_parity(
-        shared_src,
-        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
-    );
+    assert_mc_parity(shared_src, "ok: done\n");
 }
 
 /// A nested (local) recursive `fn` crossing the airlock has a self-referential capture graph (the
@@ -13224,6 +13215,36 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
+/// Memory-safety lock for the CONTAINER tie-the-knot reconstruction (item A): a self-referential
+/// `struct` crossing the airlock under GC STRESS. The reconstructed struct/list cycle (placeholder-
+/// alloc → patch) must be fully GC-traced — if the placeholder patch left a dangling `GcRef`, a
+/// collection at the next safepoint would panic ("dangling GcRef"). A GC pass runs before/after the
+/// spawn, then the crossed cyclic node is read (`a.val == 1`, and the cycle is intact: `a.next[0]` is
+/// `b` and `b.next[0]` is `a`). Mirrors `airlock_recursive_local_fn_round_trips_under_gc_stress`.
+#[test]
+fn airlock_self_ref_struct_round_trips_under_gc_stress() {
+    let src = "\
+struct Node:
+    val: int
+    next: List[Node]
+fn use_it(n: Node):
+    print(\"ok: {n.val} {n.next[0].val} {n.next[0].next[0].val}\")
+fn main():
+    junk := [1, 2, 3, 4, 5]
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    ch := Channel[int]()
+    parallel:
+        spawn use_it(a)
+    more := [a, b]
+main()
+";
+    assert_eq!(run_capture_stress(src), "ok: 1 2 1\n");
+    assert_eq!(run_capture_stress(src), run(src));
+}
+
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
@@ -13243,12 +13264,16 @@ main()
     assert_mc_parity(src, "120\n");
 }
 
-/// Bug A regression — a cyclic MODULE-GLOBAL value snapshotted for an M:N worker (`to_snap`) is also
-/// depth-guarded. This path is M:N-ONLY: the serial engine never snapshots module globals, so this is
-/// a `run_capture_parallel`-only assertion (NOT `assert_mc_parity`). The empty `parallel:` nursery
-/// forces worker-prep (`snapshot_modules` → `to_snap`) to walk the cyclic global.
+/// FLIPPED (was `airlock_cyclic_module_global_recoverable_mn`): a cyclic MODULE-GLOBAL value
+/// snapshotted for an M:N worker (`to_snap`) now CROSSES via the `to_wire && !has_handle` fast path —
+/// once containers are identity-preserved, the cyclic `Node` serializes with a `Backref` instead of
+/// tripping the depth cap, and `to_snap` rides that fast path. Self-referential module-global data now
+/// crosses exactly like local self-referential data (the consistent, no-drift behavior). This path is
+/// M:N-ONLY: the serial engine never snapshots module globals, so this is a `run_capture_parallel`-only
+/// assertion (NOT `assert_mc_parity`). The `parallel:` nursery forces worker-prep (`snapshot_modules` →
+/// `to_snap`) to walk the cyclic global; the worker prints `w`, then the recover returns `done`.
 #[test]
-fn airlock_cyclic_module_global_recoverable_mn() {
+fn airlock_cyclic_module_global_crosses_mn() {
     let src = "\
 struct Node:
     val: int
@@ -13270,10 +13295,7 @@ fn main():
 main()
 ";
     let out = run_capture_parallel(src).expect("M:N run should not crash");
-    assert_eq!(
-        out,
-        "caught: maximum structural depth (10000) exceeded (cyclic data structure?)\n",
-    );
+    assert_eq!(out, "w\nok: done\n");
 }
 
 /// Bug A guard-precision — a BREADTH-shaped acyclic value (~100k shallow siblings, structural depth
@@ -13296,10 +13318,11 @@ main()
     assert_mc_parity(src, "len 100000 first 0 last 99999\n");
 }
 
-/// Golden: `examples/airlock_cycle.chz` — a cyclic sendable crossing the airlock (`spawn` arg /
-/// `Channel.send` / `Shared`) degrades to a recoverable depth error, and a wide-acyclic sendable
-/// still crosses fine. All sections use LOCAL cyclic values (the `to_wire` path), so the output is
-/// byte-identical on the serial and M:N engines.
+/// Golden: `examples/airlock_cycle.chz` — a SELF-REFERENTIAL sendable now ROUND-TRIPS across the
+/// airlock (`spawn` arg / `Channel.send` / `Shared`) via identity-preserving container serialization,
+/// and a wide-acyclic sendable still crosses fine (the depth cap stays the acyclic-nesting backstop).
+/// All sections use LOCAL self-referential values (the `to_wire` path), so the output is byte-identical
+/// on the serial and M:N engines.
 #[test]
 fn golden_airlock_cycle_chz_matches_expected() {
     let src = include_str!("../../examples/airlock_cycle.chz");

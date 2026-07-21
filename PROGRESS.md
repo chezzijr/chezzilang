@@ -66,13 +66,37 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (pops a node off the stack on DFS exit), so only a TRUE cycle earns a `Backref`; an acyclic DAG alias
 > (`[f, f]`) is deep-copied independently — preserving the Cell/closure deep-copy-independence contract
 > (`airlock_aliased_closure_stays_independent` pins it) that a plain visited-set would have silently
-> regressed. **Struct/List/Map earn no id** — a pure-data cycle still trips the depth cap and rejects
-> (`airlock_cycle.chz` UNCHANGED). Corrected premise: there was NO pre-existing cycle-safe serializer to
+> regressed. Corrected premise: there was NO pre-existing cycle-safe serializer to
 > mirror; this is brand-new machinery. Tests: `airlock_recursive_local_fn_round_trips_both_engines` +
 > `_under_gc_stress`, `airlock_mutually_recursive_pair_round_trips`, `airlock_recursive_closure_captures_
-> outer_local_round_trips`, `generator_carrying_recursive_closure_round_trips_both`; the generator
-> parked-slot reject test repointed to a cyclic-struct witness (both-engines depth-cap reject). Docs:
-> `gaps.md` §2 (→ DONE), `concurrency.md`.
+> outer_local_round_trips`, `generator_carrying_recursive_closure_round_trips_both`. **(Originally
+> Struct/List/Map earned no id, so a pure-data cycle still tripped the depth cap; item A below GENERALIZED
+> the machinery to every container arm — self-referential DATA now crosses too and `airlock_cycle.chz`
+> FLIPPED to round-tripping.)** Docs: `gaps.md` §2 (→ DONE), `concurrency.md`.
+
+> **✅ SELF-REFERENTIAL DATA SENDABLE (2026-07-21, `auto-task/self-ref-airlock`, gaps.md item A) — a self-
+> referential struct/list/map/set/tuple/enum/newtype/cursor (`a.next = b; b.next = a`, a list holding
+> itself, a map whose value refers to the map) now CROSSES the airlock and round-trips on both engines.**
+> Generalized the recursive-fn `id`+`Backref` machinery from the `Cell`/`Closure` arms to **every container
+> `WireValue` arm** (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`): each earns a per-
+> serialization `id`; `to_wire_depth` inserts its GcRef into the `WireMemo` DFS stack BEFORE recursing
+> (back-edge → `Backref(id)`, removed on DFS exit so an off-stack DAG alias stays an INDEPENDENT deep copy);
+> `from_wire_memo` ties the knot in every arm (placeholder-alloc → register `id` → recurse → `heap.get_mut`-
+> patch; `Map`/`Set` reuse the carried hash, never re-hashing a cyclic key). **NET-DELETION change:** the
+> `WireMemo.nonpreserved_depth` field + BOTH mixed-cycle guards (commit e8dcad7) are GONE — a mixed
+> struct+closure cycle now just round-trips. The `List`/`Tuple`/`Map`/`Set` tuple variants became struct
+> variants `{id, items}`/`{id, entries}` so read-only match sites ignore `id` via `..`. **CORRECTED
+> premise:** the spec's "`from_wire` already threads `rebuild` … tie-the-knot largely in place" was WRONG —
+> the container arms recursed children BEFORE alloc, so the `from_wire` rewrite was the bulk of the work.
+> `examples/airlock_cycle.chz` + golden FLIPPED (sections 1-3 round-trip). Depth cap STAYS as the backstop
+> for genuinely-unbounded ACYCLIC nesting; the SOLE remaining value cycle that rejects is one threaded
+> through a live **generator's parked frame** (no wire id). Consequence flips: `airlock_cyclic_module_global_
+> crosses_mn` (was `_recoverable_mn`), `airlock_cyclic_{struct,via_channel_send_and_shared}_crosses` (was
+> `_recoverable`), `generator_parked_slot_nonsendable_rejects_both` re-pointed to a >10000-deep ACYCLIC
+> parked slot. New tests: `airlock_self_ref_{struct,list,map}_round_trips_both`, `airlock_mixed_struct_
+> closure_cycle_round_trips_both`, `airlock_struct_dag_alias_stays_independent` (adversarial parity-blind
+> independence), `airlock_self_ref_struct_round_trips_under_gc_stress`. `src/vm/{wire.rs,sched.rs,core.rs,
+> stmt.rs}`. Docs: `gaps.md` item A (→ DONE), `concurrency.md`.
 
 > **✅ F3 PATH C (2026-07-20, `auto-task/generator-airlock-sendable`) — a LOCAL live generator is now
 > SENDABLE across the airlock BY VALUE (deep copy).** The airlock VALUE serializer (`to_wire`/`from_wire`
@@ -5337,6 +5361,9 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
     through `to_wire_at` so the error reports the real site, not line 0. Wide-but-shallow sendables (100k
     elements) still cross fine (the counter measures nesting depth). golden `examples/airlock_cycle.chz`
     + 5 unit tests (both-engine spawn/channel/shared, M:N-only module-global, wide-acyclic-crosses-fine).
+    **(SUPERSEDED 2026-07-21, gaps.md item A:** self-referential data now ROUND-TRIPS via identity-
+    preserving container serialization — the depth cap stays only for genuinely-unbounded ACYCLIC nesting,
+    and `airlock_cycle.chz` FLIPPED to crossing. See the item-A entry near the top of this file.)
 - **`defer:` block form** — `defer` takes an indented block as well as a single call (multi-action cleanup
   without N `defer` lines), mirroring `spawn`'s dual form with no new VM op. Body runs top-to-bottom at
   scope exit, LIFO as a unit, free vars snapshot by value at the `defer` point, runs on all exit paths.

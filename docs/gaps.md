@@ -39,8 +39,9 @@ Decision record: `~/.claude/plans/2026-07-21-task2-protocol-sendable-decision.md
 ### 2. Recursive-local-fn sendability — **DONE (2026-07-21)**
 A nested recursive `fn` (and a mutually-recursive closure pair) now CROSSES the airlock and computes
 correctly on both engines — the reject diagnostic is gone. Implemented via identity-preserving airlock
-serialization SCOPED to the `Obj::Cell` + `Obj::Closure` arms: a new `WireValue::Backref(u32)` + an `id`
-on the `Cell`/`Closure` wire arms. `to_wire_depth` threads a back-edge memo (`WireMemo` — a
+serialization on the `Obj::Cell` + `Obj::Closure` arms: a new `WireValue::Backref(u32)` + an `id`
+on the wire arms. (Item **A** below since GENERALIZED this to every container arm, so self-referential
+DATA crosses too.) `to_wire_depth` threads a back-edge memo (`WireMemo` — a
 `FxHashMap<GcRef,u32>` DFS-stack set + id counter); on a revisit of a Cell/Closure still on the serialize
 stack it emits `Backref(id)` and stops. `from_wire` ties the knot: alloc a placeholder `Cell(Nil)`/
 `Closure(captured=[Nil;n])` FIRST, register `id→GcRef`, recurse children, then `heap.get_mut`-patch —
@@ -49,19 +50,21 @@ GC-traced index. The old `graph_reaches_handle` reject (both call sites + the fn
 
 **Corrected premise (the pre-work brief was wrong):** there was NO pre-existing cycle-safe airlock
 serializer to mirror — `WireValue`/`SnapValue` were owned Box/Vec TREES with no identity/placeholder arm,
-and `examples/airlock_cycle.chz` REJECTS cycles (`maximum structural depth exceeded`), it never
-round-tripped them. This is brand-new identity-preserving machinery. **Design deviation from the literal
+and `examples/airlock_cycle.chz` REJECTED cycles (`maximum structural depth exceeded`), it never
+round-tripped them. This is brand-new identity-preserving machinery. (Item **A** later extended it to
+container arms, and `airlock_cycle.chz` now ROUND-TRIPS — see below.) **Design deviation from the literal
 task spec (recorded):** the memo is BACK-EDGE-ONLY (pops a node off the stack on DFS exit), so only a TRUE
 cycle earns a `Backref`; an acyclic DAG alias (e.g. one arg `[f, f]`) is re-serialized as an independent
 deep copy — preserving the documented Cell/closure deep-copy-independence contract (`wire.rs` §F1). A
 plain visited-set (the literal spec) would have SHARED such aliases, a silent regression. Byte-identical
 to the spec on every genuine-cycle case (self-recursion, mutual recursion, recursive-closure-capturing-an-
-outer-local). **Struct/List/Map/etc. earn NO id** — a pure-data cycle still trips the depth cap and still
-rejects (`airlock_cycle.chz` behavior UNCHANGED, verified). Tests: `airlock_recursive_local_fn_round_trips_
+outer-local). **(SUPERSEDED by item A:** originally Struct/List/Map/etc. earned NO id — a pure-data cycle
+tripped the depth cap; item A gave every container arm an id + `Backref`, so self-referential data now
+round-trips too and `airlock_cycle.chz` FLIPPED to crossing.) Tests: `airlock_recursive_local_fn_round_trips_
 both_engines` + `_under_gc_stress`, `airlock_mutually_recursive_pair_round_trips`, `airlock_recursive_
 closure_captures_outer_local_round_trips`, `airlock_aliased_closure_stays_independent`, `generator_
 carrying_recursive_closure_round_trips_both` (and `generator_parked_slot_nonsendable_rejects_both`
-repointed to a cyclic-struct witness, which stays a both-engines depth-cap reject).
+repointed by item A to a >10000-deep ACYCLIC parked slot, which stays a both-engines depth-cap reject).
 
 ### 3. Reject-case generators — mid-`recover:` (arm b) DONE; pending-`defer`/multi-frame (arms a,c) checker-unreachable
 **Arm (b) — suspended mid-`recover:` — DONE (2026-07-21).** A generator suspended inside a `recover:`
@@ -103,26 +106,28 @@ identity-preserving `WireMemo`/`Backref` machinery built for recursive-fn sendab
 close both, and doing so removes exactly the kind of "why can THIS cross but not THAT?" drift the no-drift
 north-star forbids. Each is its OWN spec/session — do NOT bundle. Ranked by value ÷ risk.
 
-### A. Self-referential DATA sendable — extend `Backref` to container arms (HIGHER value, LOW-MED risk)
-**The inconsistency:** a recursive `fn` is a self-referential value (`Closure→Cell→Closure`) and now
-CROSSES; a self-referential struct/list/map (`a.next = b; b.next = a`) is sendable-by-parts and refers to
-itself via a (sendable) ref, yet is REJECTED with `maximum structural depth exceeded` — purely because the
-`Backref` identity-preservation (item 2) was SCOPED to `Obj::Cell`/`Obj::Closure` only; `Struct`/`List`/
-`Map`/`Set`/`Tuple`/`Enum`/`NewType`/`Iter` get no id. **The fix:** give those container arms an id + a
-`Backref` too (thread the same `WireMemo` DFS-stack memo through them; `from_wire` already threads the
-`rebuild` map through every container arm, so the tie-the-knot reconstruction is largely in place — verify
-each arm placeholder-allocs before recursing). This makes self-referential data round-trip like a recursive
-fn. **Consequences to handle:** (1) `examples/airlock_cycle.chz` + its golden currently ASSERT cyclic data
-REJECTS — they must flip to round-trip (or be re-pointed at the genuinely-unserializable case, a
-handle-in-a-cycle). (2) The mixed struct+closure cycle reject (`nonpreserved_depth` guard, commit e8dcad7)
-becomes UNNECESSARY once containers are identity-preserved too — delete it, or keep it only for the
-truly-unserializable case. (3) Keep the back-edge-only (pop-on-DFS-exit) discipline so a DAG alias is still
-an independent deep copy (the `airlock_aliased_closure_stays_independent` contract). (4) The depth cap stays
-as the backstop for genuinely-unbounded ACYCLIC nesting. **Risk:** LOW-MED — same serializer, machinery
-exists; the trap is the golden/behavior flip + not regressing DAG-alias independence. Memory-safety is a
-non-issue (GcRef indices + `heap.get_mut`, like item 2). Subagent-driven or auto-task WITH a spec; both-
-engine parity + adversarial wrong-result tests mandatory (a duplicated-vs-shared node is parity-blind — the
-item-2 lesson).
+### A. Self-referential DATA sendable — extend `Backref` to container arms — ✅ DONE (2026-07-21)
+**LANDED.** Every container `WireValue` arm (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`)
+now carries a per-serialization `id` + a `Backref` exactly like `Cell`/`Closure`, so a self-referential
+struct/list/map (`a.next = b; b.next = a`) ROUND-TRIPS across the airlock (`spawn` arg / `Channel.send` /
+`Shared` / module-global snapshot) instead of tripping `maximum structural depth exceeded`. `to_wire_depth`
+inserts each container's GcRef into the `WireMemo` DFS stack BEFORE recursing (back-edge → `Backref(id)`,
+removed on DFS exit so an off-stack DAG alias stays an independent deep copy); `from_wire_memo` ties the
+knot in every container arm (placeholder-alloc → register `id` → recurse → `heap.get_mut`-patch). This was
+a **net-deletion** change: the `WireMemo.nonpreserved_depth` machinery + BOTH mixed-cycle guards (commit
+e8dcad7) are GONE — a mixed struct+closure cycle now just round-trips. **CORRECTION to the original spec
+premise:** the note "`from_wire` already threads the `rebuild` map through every container arm, so the
+tie-the-knot reconstruction is largely in place" was **WRONG** — the container arms recursed children
+BEFORE alloc, so a nested `Backref` would have hit an unregistered id; the `from_wire` rewrite (every arm
+placeholder-allocs + registers before recursing) was the bulk of the work. `examples/airlock_cycle.chz` +
+its golden now ROUND-TRIP (sections 1-3); the depth cap STAYS as the backstop for genuinely-unbounded
+ACYCLIC nesting (section 4 control + `generator_parked_slot_nonsendable_rejects_both`, re-pointed at a
+>10000-deep acyclic parked slot). The **sole** remaining non-identity-preserved container is `Generator`
+(its parked frame holds no `WireValue` id) — a cycle threaded through a generator's parked slot still
+depth-cap-rejects, the documented backstop. Tests: `airlock_self_ref_{struct,list,map}_round_trips_both`,
+`airlock_mixed_struct_closure_cycle_round_trips_both`, `airlock_struct_dag_alias_stays_independent`
+(adversarial parity-blind independence), `airlock_self_ref_struct_round_trips_under_gc_stress`,
+`airlock_cyclic_module_global_crosses_mn`. `src/vm/{wire.rs,sched.rs,core.rs,stmt.rs}`.
 
 ### B. Module-GLOBAL live generator sendable by value (LOWER value, MED-HIGH risk)
 **The inconsistency:** a FRAME-LOCAL live generator crosses the airlock by value (F3 path C, deep copy of

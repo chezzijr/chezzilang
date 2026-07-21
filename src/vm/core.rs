@@ -277,14 +277,14 @@ pub struct ExecutorCore {
 pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<usize>) {
     match w {
         WireValue::Handle(g) => out.push(*g),
-        WireValue::List(xs) | WireValue::Tuple(xs) => {
+        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
             xs.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
         }
-        WireValue::Map(entries) => entries.iter().for_each(|(_, k, v)| {
+        WireValue::Map { entries, .. } => entries.iter().for_each(|(_, k, v)| {
             collect_core_gcrefs(k, out, seen);
             collect_core_gcrefs(v, out, seen);
         }),
-        WireValue::Set(entries) => entries
+        WireValue::Set { entries, .. } => entries
             .iter()
             .for_each(|(_, e)| collect_core_gcrefs(e, out, seen)),
         WireValue::Struct { fields, .. } => fields
@@ -356,8 +356,9 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
         // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
         // R2b: a `Reader` core holds a BufReader<File> + a key — likewise no `WireValue`s, no `GcRef`s.
-        // A back-reference roots nothing: its target (an already-walked Cell/Closure) is reachable
-        // elsewhere in the same wire graph, so its handles are already collected there.
+        // A back-reference roots nothing: its target (an already-walked identity-preserved node — a
+        // Cell/Closure or a container) is reachable elsewhere in the same wire graph, so its handles
+        // are already collected there. It also TERMINATES the walk on a now-cyclic wire graph.
         WireValue::Backref(_)
         | WireValue::Str(_)
         | WireValue::Bytes(_)

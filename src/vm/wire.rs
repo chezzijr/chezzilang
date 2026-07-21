@@ -20,13 +20,20 @@ use std::sync::Arc;
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
-/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`) own their contents recursively; `Str`
-/// crosses **by value** (owned bytes — [`WireValue::Str`]). Callables cross **by value** too — a
-/// closure as [`WireValue::Closure`] (proto + wired captures + home index), a bare fn as
+/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) own their contents
+/// recursively; `Str` crosses **by value** (owned bytes — [`WireValue::Str`]). Callables cross **by
+/// value** too — a closure as [`WireValue::Closure`] (proto + wired captures + home index), a bare fn as
 /// [`WireValue::Func`]. Only `Module`/`Native`/`Cffi` stay by-reference as [`WireValue::Handle`]. The
 /// `Channel`/`Shared`/`Executor` handles cross as their shared `Arc<…Core>` (B3.1). `Map`/`Set` carry
 /// their cached `u64` hashes so reconstruction never re-hashes (byte-identical iteration order +
 /// index — see [`super::heap::MapData`]).
+///
+/// Every container/callable arm carries a per-serialization `id` (see [`WireValue::Backref`]): assigned
+/// on first visit and registered on the serialize DFS stack BEFORE recursing children, so a self-
+/// referential value (`a.next = b; b.next = a`, a list holding itself, a mixed struct+closure cycle)
+/// round-trips instead of overflowing the depth cap — a back-edge to a node still on the stack emits
+/// `Backref(id)` and `from_wire` ties the knot. (The depth cap stays as the backstop for genuinely-
+/// unbounded ACYCLIC nesting.)
 #[derive(Debug, Clone, Default)]
 pub enum WireValue {
     Int(i64),
@@ -35,12 +42,30 @@ pub enum WireValue {
     /// The default wire value (an empty `Shared` box starts here before its first `set`).
     #[default]
     Nil,
-    List(Vec<WireValue>),
-    Tuple(Vec<WireValue>),
-    /// `(cached hash, key, value)` triples in insertion order.
-    Map(Vec<(u64, WireValue, WireValue)>),
-    /// `(cached hash, element)` pairs in insertion order.
-    Set(Vec<(u64, WireValue)>),
+    /// A `list` crossing by value (deep copy). The `id` is a per-serialization identity (see
+    /// [`WireValue::Backref`]) so a self-referential list (`xs.push(xs)`) or any cycle passing through
+    /// it round-trips: the id is registered on the DFS stack BEFORE recursing `items`, so a nested
+    /// back-edge resolves to the already-alloc'd placeholder list.
+    List {
+        id: u32,
+        items: Vec<WireValue>,
+    },
+    Tuple {
+        id: u32,
+        items: Vec<WireValue>,
+    },
+    /// `(cached hash, key, value)` triples in insertion order. `id` as [`List`](WireValue::List) — a
+    /// self-referential map round-trips; reconstruction reuses the carried hash (never re-hashes a
+    /// cyclic key).
+    Map {
+        id: u32,
+        entries: Vec<(u64, WireValue, WireValue)>,
+    },
+    /// `(cached hash, element)` pairs in insertion order. `id` as [`List`](WireValue::List).
+    Set {
+        id: u32,
+        entries: Vec<(u64, WireValue)>,
+    },
     /// B3.3a — a `str` carried across the airlock **by value** (owned bytes). `str` is immutable and
     /// value-compared (Chezzi has no identity operator), so `from_wire` allocating a fresh heap `str`
     /// is observationally identical to sharing the original handle — and unlike a `Handle(GcRef)`,
@@ -62,10 +87,12 @@ pub enum WireValue {
     /// items are recursively wired, so a cursor over a non-sendable element (e.g. a `Channel`) faults
     /// recoverably exactly as a `list` of that element would.
     Iter {
+        id: u32,
         items: Vec<WireValue>,
         pos: usize,
     },
     Struct {
+        id: u32,
         name: Box<str>,
         fields: Vec<(Box<str>, WireValue)>,
     },
@@ -75,12 +102,15 @@ pub enum WireValue {
         /// re-resolution. Carrying the id (not the name) is also correct under variant-name shadowing:
         /// a user enum declaring `Some`/`Ok`/… reuses the name but has its own id, so a name round-trip
         /// (`enum_names` → `variant_id`) would collapse a native `Some` (`VID_SOME`) into the user's id.
+        id: u32,
         variant_id: u32,
         payload: Vec<WireValue>,
     },
     /// A `newtype` crossing the airlock by value (deep copy) like a 1-field struct: its runtime
-    /// `type_key` (meaningful in any worker, shared `Arc<Program>`) plus its wired inner value.
+    /// `type_key` (meaningful in any worker, shared `Arc<Program>`) plus its wired inner value. `id` as
+    /// [`List`](WireValue::List).
     NewType {
+        id: u32,
         type_key: Box<str>,
         inner: Box<WireValue>,
     },
@@ -98,14 +128,16 @@ pub enum WireValue {
         id: u32,
         inner: Box<WireValue>,
     },
-    /// A BACK-REFERENCE to an already-serialized [`Cell`](WireValue::Cell)/[`Closure`](WireValue::Closure)
-    /// currently on the serialize DFS stack — the encoding that lets a `Cell`/`Closure` cycle (a recursive
-    /// local `fn`'s letrec self-cell, or a mutually-recursive closure pair) cross the airlock. Serialize
-    /// assigns each `Cell`/`Closure` an `id` on first visit and, on a REVISIT of a node still on the stack
-    /// (a true back-edge), emits `Backref(id)` and stops the descent; a node revisited OFF the stack (an
-    /// acyclic DAG alias) is re-serialized as an independent deep copy — preserving the `Cell`/closure
-    /// deep-copy-independence contract. `from_wire` resolves it to the placeholder registered under that
-    /// `id`, tying the knot. Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.
+    /// A BACK-REFERENCE to an already-serialized identity-preserved node (`Cell`/`Closure` OR any
+    /// container arm — `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) currently on the
+    /// serialize DFS stack — the encoding that lets ANY value cycle cross the airlock: a recursive local
+    /// `fn`'s letrec self-cell, a mutually-recursive closure pair, a self-referential struct/list/map,
+    /// or a mixed struct+closure cycle. Serialize assigns each such node an `id` on first visit and, on a
+    /// REVISIT of a node still on the stack (a true back-edge), emits `Backref(id)` and stops the descent;
+    /// a node revisited OFF the stack (an acyclic DAG alias) is re-serialized as an independent deep copy
+    /// — preserving the deep-copy-independence contract for BOTH closures and data. `from_wire` resolves
+    /// it to the placeholder registered under that `id`, tying the knot. Holds no `GcRef` and terminates
+    /// the walk, so `has_handle` leaves it `false`.
     Backref(u32),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
     /// same heap). As of B3.3 this wraps only the objects that genuinely CANNOT cross an OS-thread
@@ -261,11 +293,13 @@ impl WireValue {
     pub fn has_handle(&self) -> bool {
         match self {
             WireValue::Handle(_) => true,
-            WireValue::List(xs) | WireValue::Tuple(xs) | WireValue::Enum { payload: xs, .. } => {
-                xs.iter().any(WireValue::has_handle)
-            }
-            WireValue::Map(es) => es.iter().any(|(_, k, v)| k.has_handle() || v.has_handle()),
-            WireValue::Set(es) => es.iter().any(|(_, e)| e.has_handle()),
+            WireValue::List { items: xs, .. }
+            | WireValue::Tuple { items: xs, .. }
+            | WireValue::Enum { payload: xs, .. } => xs.iter().any(WireValue::has_handle),
+            WireValue::Map { entries, .. } => entries
+                .iter()
+                .any(|(_, k, v)| k.has_handle() || v.has_handle()),
+            WireValue::Set { entries, .. } => entries.iter().any(|(_, e)| e.has_handle()),
             WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
             WireValue::NewType { inner, .. } => inner.has_handle(),
             // A cursor's snapshot items could themselves embed a `Handle` (e.g. a cursor over a list
@@ -278,12 +312,12 @@ impl WireValue {
             // A cell follows its inner value: a cell over pure data stays on the snapshot fast path;
             // a cell embedding a handle takes the slow path so its handle is deep-copied.
             WireValue::Cell { inner, .. } => inner.has_handle(),
-            // A back-reference TERMINATES the walk: its target (an already-visited Cell/Closure on the
-            // serialize stack) is reachable elsewhere in the graph, where its handle-status is already
-            // folded in. Treating it as `false` here is load-bearing — it keeps `has_handle` from
-            // infinite-looping on the now-cyclic wire graph (the `to_snap` fast-path `!has_handle()`
-            // hazard), and is correct because a cycle passing ONLY through Cell/Closure carries no
-            // `Handle` on the back-edge itself.
+            // A back-reference TERMINATES the walk: its target (an already-visited identity-preserved
+            // node — a Cell/Closure or a container — on the serialize stack) is reachable elsewhere in
+            // the graph, where its handle-status is already folded in. Treating it as `false` here is
+            // load-bearing — it keeps `has_handle` from infinite-looping on the now-cyclic wire graph
+            // (the `to_snap` fast-path `!has_handle()` hazard), and is correct because the back-edge
+            // itself carries no `Handle`.
             WireValue::Backref(_) => false,
             // F3 path C: a generator crosses by value, but a parked slot (a `Pending` arg or a
             // `Suspended` operand-stack slot) or its backing closure could itself embed a `Handle` —

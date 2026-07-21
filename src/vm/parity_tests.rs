@@ -7500,23 +7500,106 @@ main()";
     assert_parity_out(src, "1\n");
 }
 
-/// REGRESSION LOCK (recursive-fn-sendable, correctness-0): a cycle that passes through BOTH a
-/// non-identity-preserved container (here a `struct` field) AND a `Cell`/`Closure` must be REJECTED,
-/// not encoded as a `Backref`. Serialize gives the closure/cell an id but NOT the struct, so a Backref
-/// here would tie the closure's captured struct to a DUPLICATE of the delivered struct — silently
-/// breaking aliasing (the closure would read a stale copy) where the parity gate is blind (both engines
-/// agree on the wrong value). The `nonpreserved_depth` guard rejects it cleanly and identically on both
-/// engines. Only PURE `Cell`/`Closure` cycles (a recursive local fn) round-trip; a mixed data cycle is
-/// unsupported — hoist the fn to module scope. (A pure struct cycle still depth-cap-rejects, unchanged —
-/// see `golden_airlock_cycle_chz_matches_expected`.)
+/// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
+/// a cycle threaded through struct fields + lists) crosses the airlock as a `spawn` argument and round-
+/// trips (was `maximum structural depth exceeded`). The container arms now earn a `WireValue` id +
+/// `Backref` exactly like `Cell`/`Closure`, so the cycle is preserved instead of overflowing the cap.
+/// `use_it(a)` reads `a.val == 1` on both engines.
 #[test]
-fn airlock_mixed_struct_closure_cycle_rejects_both() {
+fn airlock_self_ref_struct_round_trips_both() {
+    let src = "\
+struct Node:
+    val: int
+    next: List[Node]
+fn use_it(n: Node):
+    print(\"got {n.val}\")
+fn main():
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    parallel:
+        spawn use_it(a)
+main()";
+    assert_parity_out(src, "got 1\n");
+}
+
+/// Identity-preserving airlock, DATA path — a self-referential `list` (`xs.push(xs)`, a list holding
+/// itself) crosses a `Channel[List[List[int]]].send` and round-trips. The receiving task reads the
+/// first element (`10`) and that the self-slot is the list itself (`ys[1].len() == 2`) on both engines.
+#[test]
+fn airlock_self_ref_list_round_trips_both() {
+    let src = "\
+fn main():
+    xs: List[List[int]] = [[10]]
+    xs.push(xs)
+    ch := Channel[List[List[int]]]()
+    ch.send(xs)
+    parallel:
+        spawn:
+            ys := ch.recv()
+            print(\"{ys[0][0]} {ys[1].len()}\")
+main()";
+    assert_parity_out(src, "10 2\n");
+}
+
+/// Identity-preserving airlock, DATA path — a self-referential `map` (a map whose value refers back to
+/// the map) crosses a `Channel` and round-trips using the CARRIED hash on reconstruction (never re-hashes
+/// a cyclic key/value). The task reads the leaf entry's self-length on both engines.
+#[test]
+fn airlock_self_ref_map_round_trips_both() {
+    let src = "\
+fn main():
+    m: Map[str, List[Map[str, int]]] = {\"leaf\": []}
+    m[\"leaf\"].push(m)
+    ch := Channel[Map[str, List[Map[str, int]]]]()
+    ch.send(m)
+    parallel:
+        spawn:
+            n := ch.recv()
+            self_ref := n[\"leaf\"][0]
+            depth := self_ref[\"leaf\"].len()
+            print(\"{depth}\")
+main()";
+    assert_parity_out(src, "1\n");
+}
+
+/// FLIPPED (was `airlock_mixed_struct_closure_cycle_rejects_both`): a cycle passing through BOTH a
+/// container (`struct` field) AND a `Closure` now ROUND-TRIPS. Once every container is identity-
+/// preserved (its own id + `Backref`), the mixed cycle is no different from a pure `Cell`/`Closure`
+/// cycle — the old `nonpreserved_depth` mixed-cycle reject (commit e8dcad7) is deleted as dead. The
+/// closure `n.f = fn: n.x` closes `Closure -> Struct(n) -> Closure`; the task calls `n.f()` and reads
+/// `n.x == 5` on both engines.
+#[test]
+fn airlock_mixed_struct_closure_cycle_round_trips_both() {
     let src = "struct Node:\n    f: fn() -> int\n    x: int\nfn main():\n    n := Node(fn() -> int: 0, 5)\n    n.f = fn() -> int: n.x\n    parallel:\n        spawn:\n            print(n.f())\nmain()\n";
-    let fault = parity_entry_fault(src);
-    assert!(
-        fault.contains("cyclic data structure"),
-        "expected the mixed-cycle reject, got: {fault}"
-    );
+    assert_parity_out(src, "5\n");
+}
+
+/// ADVERSARIAL, parity-blind (the item-2 lesson): a mutable `struct` appearing TWICE as an ACYCLIC
+/// alias in a spawned payload must stay TWO INDEPENDENT deep copies — the back-edge-only (pop-on-DFS-
+/// exit) memo discipline re-serializes an off-stack alias as an independent copy, never a shared node.
+/// A shared-vs-duplicated node is stdout-identical on both engines, so this asserts INDEPENDENCE
+/// explicitly: mutate one alias in the task, observe the other is UNAFFECTED (`9 1`, not `9 9`). Guards
+/// against a future visited-set regression collapsing DAG aliases into one shared node (mirror
+/// `airlock_aliased_closure_stays_independent` for the data path).
+#[test]
+fn airlock_struct_dag_alias_stays_independent() {
+    let src = "\
+struct Box:
+    n: int
+fn main():
+    box := Box(1)
+    pair := [box, box]
+    r := Channel[str]()
+    parallel:
+        spawn:
+            p := pair
+            p[0].n = 9
+            r.send(\"{p[0].n} {p[1].n}\")
+    print(r.recv())
+main()";
+    assert_parity_out(src, "9 1\n");
 }
 
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that
@@ -8790,26 +8873,23 @@ main()";
 }
 
 /// A suspended generator whose PARKED SLOT holds a non-sendable value rejects cleanly at the crossing —
-/// the per-slot sendable-at-serialize-time check walks the parked stack. The witness is a CYCLIC STRUCT
-/// (a `Node` self-loop), which trips the shared `MAX_STRUCTURAL_DEPTH` guard in `to_wire_depth` — a
-/// to_wire-TIME fault that fires byte-identically on BOTH engines (unlike a captured `Module`/native/FFI
-/// handle, which rejects on M:N only since the serial `deep_clone` skips `ensure_crossable`). A recursive
-/// local `fn` is NO LONGER a valid witness here — it is now sendable (`WireValue::Backref` ties its
-/// self-cell cycle); see `generator_carrying_recursive_closure_round_trips_both` below.
+/// the per-slot sendable-at-serialize-time check walks the parked stack. The witness is a >10000-DEEP
+/// ACYCLIC nested list (`keep = [keep]` in a loop), which trips the shared `MAX_STRUCTURAL_DEPTH` guard
+/// in `to_wire_depth` — a to_wire-TIME fault that fires byte-identically on BOTH engines. (A CYCLIC
+/// struct is NO LONGER a valid witness — self-referential data now round-trips via `WireValue::Backref`;
+/// see `airlock_self_ref_struct_round_trips_both`. A genuinely-unbounded ACYCLIC nest is the remaining
+/// both-engines-identical serialize-time reject: the depth cap stays as that backstop. A recursive local
+/// `fn` is also sendable now — see `generator_carrying_recursive_closure_round_trips_both` below.)
 #[test]
 fn generator_parked_slot_nonsendable_rejects_both() {
     let src = "\
-struct Node:
-    val: int
-    next: List[Node]
 fn gen() -> Iterator[int]:
-    a := Node(1, [])
-    b := Node(2, [])
-    a.next.push(b)
-    b.next.push(a)
-    keep := a
+    keep: List[int] = []
+    deep: List[List[int]] = [keep]
+    for i in 0..10001:
+        deep = [deep]
     yield 1
-    yield keep.val
+    yield deep.len()
 fn main():
     it := gen()
     started := it.next()

@@ -739,12 +739,6 @@ engines, **never UB**):
   `Response`/FFI extern — NOT the concurrency handles above, which *do* cross). A foreign OS/library
   resource can't be copied into another heap — rejected at the runtime airlock (`ensure_crossable`). This
   one is intrinsic and stays.
-- **[carve-out — planned fix]** a **cyclic data structure** — a struct/list/map that points back at
-  itself, or a *mixed* cycle where a closure is captured inside such a container. Today only a pure
-  `Cell`/`Closure` cycle (a recursive fn) is identity-preserved and crosses; data cycles reject with
-  `maximum structural depth …` or `cyclic data structure … hoist to module scope`. This is an arbitrary
-  inconsistency (a recursive fn is *also* a self-referential value) — the `Backref` machinery can extend
-  to container arms to close it. See `gaps.md` "sendability CONSISTENCY carve-outs" **A**.
 - **[carve-out — planned fix]** a **module-GLOBAL live generator** a task reaches (a *frame-local*
   generator crosses by value; the global path poisons instead of deep-copying). See `gaps.md` carve-out
   **B**.
@@ -779,22 +773,29 @@ aggregate) inside a task is a **compile error** (see below).
   is a different case and stays non-sendable (below). (A protocol existential is **sendable** — Task 2,
   Go `chan interface` parity — so capturing one is fine; a witness that carries an FFI/native handle is
   caught at the runtime airlock, not here.)
+- **Self-referential DATA IS sendable (identity-preserving airlock).** A struct/list/map/set/tuple/enum/
+  newtype/cursor that points back at itself (`a.next = b; b.next = a`, a list holding itself, a map whose
+  value refers to the map) crosses **any** airlock (`spawn:` block, `spawn` arg, `Channel.send`, `Shared`,
+  module-global snapshot) and **round-trips** — every container `WireValue` arm carries a per-serialization
+  `id` + a `WireValue::Backref(id)` for a back-edge, exactly like `Cell`/`Closure`. `from_wire` ties the
+  knot on the receiver (placeholder-alloc → register `id` → recurse → patch); `Map`/`Set` reuse the carried
+  hash so a cyclic key is never re-hashed. **Byte-identical on both engines.** The identity is **back-edge-
+  only** (a node is popped off the serialize DFS stack on exit), so an acyclic **DAG alias** (the same node
+  appearing twice off the cycle) is re-serialized as **two independent deep copies**, never collapsed into
+  one shared node (mutating one copy in a task leaves the other untouched). The depth cap (`maximum
+  structural depth …`) stays **only** as the backstop for a genuinely-unbounded **acyclic** nest.
 - **A recursive *local* `fn` IS sendable (identity-preserving airlock).** A nested `fn` that calls itself
   captures its own name for recursion — the compiler's letrec gives it a self-cell, so the closure's
-  capture graph is **cyclic** (`Closure → Cell → Closure`). The airlock serializer preserves that
-  identity: a `WireValue::Backref(id)` (scoped to the `Cell`/`Closure` arms) encodes the back-edge, and
-  `from_wire` ties the knot on the receiver (placeholder-alloc → register `id` → recurse → patch). So a
-  recursive local `fn` — and a **mutually-recursive closure pair** (`Closure_f → Cell_g → Closure_g →
-  Cell_f`) — crosses **any** airlock (`spawn:` block, `spawn f()` callee, `spawn f(g)` arg,
-  `Channel[fn].send`) and computes correctly, **byte-identical on both engines**. A recursive closure that
-  ALSO reads an outer local carries the self-edge as a `Backref` and the outer local as an independent deep
-  copy. Only `Cell`/`Closure` earn an identity — genuine cyclic *data* (a struct pointing back at itself)
-  still reports `maximum structural depth …` and rejects, since it forms no callable cycle. A **mixed**
-  cycle — a recursive/self-capturing closure held *inside* a struct/list/map so the cycle passes through
-  a non-identity-preserved container — also **rejects** (the container would be duplicated while the
-  closure is shared, silently breaking aliasing), with the `cyclic data structure … hoist the fn to
-  module scope` fault, byte-identical on both engines. Only a cycle running purely through `Cell`/`Closure`
-  crosses.
+  capture graph is **cyclic** (`Closure → Cell → Closure`). The same `id` + `Backref` machinery (above)
+  preserves that identity. So a recursive local `fn` — and a **mutually-recursive closure pair**
+  (`Closure_f → Cell_g → Closure_g → Cell_f`) — crosses **any** airlock (`spawn:` block, `spawn f()`
+  callee, `spawn f(g)` arg, `Channel[fn].send`) and computes correctly, **byte-identical on both engines**.
+  A recursive closure that ALSO reads an outer local carries the self-edge as a `Backref` and the outer
+  local as an independent deep copy. A **mixed** struct+closure cycle — a self-capturing closure held
+  *inside* a struct/list/map so the cycle passes through a container — now **also round-trips** (every
+  container is identity-preserved too, so the old mixed-cycle reject is gone). The **only** value cycle
+  that still rejects (`maximum structural depth …`) is one threaded through a live **generator's parked
+  slot** (a generator's frozen frame carries no wire id — the documented backstop).
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
   a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
@@ -814,10 +815,13 @@ aggregate) inside a task is a **compile error** (see below).
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
   carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
-  **non-sendable parked slot** (e.g. a cyclic *struct* held live across a `yield`) still **rejects at the
+  **non-sendable parked slot** (e.g. a genuinely-unbounded >10000-deep **acyclic** nest held live across a
+  `yield`, or a value cycle threaded *through* the generator's own parked frame) still **rejects at the
   crossing** with the `maximum structural depth …` depth-cap fault — the safer-in-direction property vs the
   reach-gate (a slot is checked at serialize time, so there is no under-gate). A parked **recursive local
-  `fn`**, by contrast, now round-trips like any other capture (its self-cell cycle back-references cleanly).
+  `fn`** (or a parked **self-referential struct/list/map**), by contrast, now round-trips like any other
+  capture — its cycle back-references cleanly (only a cycle passing through the generator's frame itself,
+  which carries no wire id, still trips the cap).
   A suspension **inside a `recover:`** (a live handler stack) is ALSO sendable — a `Handler` is pure
   plain-data (all `usize`, no `GcRef`/`Value`), serialized as-is on the wire and rebuilt so the recover
   boundary resumes intact; the resume path rebases each parked handler/frame `nursery_len` to the resuming
@@ -853,17 +857,19 @@ aggregate) inside a task is a **compile error** (see below).
   struct field, callee-form *method*-mutation reached transitively through a `spawn f()` free fn, and a
   method-mutation through a task-local alias of the global — `local := xs; local.push(..)`) remain a
   documented v1 gap — see `docs/gaps.md §B3`.
-- **Cyclic sendables degrade gracefully, not copied.** The airlock copies a sendable by a structural
-  deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global snapshot),
-  so a value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b; b.next = a`)
-  is not deep-copyable. Rather than recurse unbounded on the host stack and abort the process, the walk
-  is **depth-guarded** (the same `MAX_STRUCTURAL_DEPTH = 10000` bound the display / `==` paths use):
-  crossing the airlock with a cyclic value raises the **recoverable** runtime error `maximum structural
-  depth (10000) exceeded (cyclic data structure?)`, re-stamped with the real airlock site and catchable
-  by `recover:` — byte-identical on the serial and M:N engines. (A genuinely >10000-deep *acyclic*
-  sendable trips the same bound; large-but-**shallow** data — e.g. a 100k-element list — crosses fine,
-  since the counter measures nesting depth, not element count. Chezzi does not memo/copy the cycle the
-  way Python's `deepcopy` does.)
+- **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
+  structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
+  snapshot). A value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b;
+  b.next = a`, a list holding itself) is deep-copied **identity-preservingly**: every container +
+  closure/cell node earns a per-serialization `id`, a back-edge becomes a `WireValue::Backref(id)`, and
+  the receiver ties the knot — so the copy on the other side is an independent cyclic value with the same
+  shape (like Python's `deepcopy`, which memoizes). **Byte-identical on the serial and M:N engines.** The
+  depth-guard (`MAX_STRUCTURAL_DEPTH = 10000`, the same bound the display / `==` paths use) now fires
+  **only** for a genuinely >10000-deep **acyclic** nest (or a cycle threaded through a live generator's
+  parked frame, which carries no wire id) — a **recoverable** `maximum structural depth (10000) exceeded
+  (cyclic data structure?)` fault, re-stamped with the real airlock site and catchable by `recover:`.
+  Large-but-**shallow** data (e.g. a 100k-element list) crosses fine — the counter measures nesting
+  depth, not element count.
 
 ```chezzi
 fn worker(id: int, prefix: str, out: Channel[str]):
