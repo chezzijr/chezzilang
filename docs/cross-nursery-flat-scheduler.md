@@ -87,8 +87,9 @@ fn main():
 main()
 ```
 ```
-runtime error: deadlock: every task in this parallel: block is blocked on an empty channel
-recv() and no sibling can send — the nursery cannot progress   (at inner / at main)
+runtime error: deadlock: every task in this parallel: block is blocked on a channel it cannot
+proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery cannot
+progress   (at inner / at main)
 ```
 
 **B — function runs inline (no `spawn`) → not even concurrent** (the blocking `recv` runs on the

@@ -1268,8 +1268,9 @@ impl Drop for DoneSignal {
 /// The `deadlock` fault message, shared by the cooperative scheduler ([`Vm::run_scheduler`]) and
 /// the `--parallel` M:N detector ([`MnSched::take_runnable`]) so the error is byte-identical across
 /// engines.
-const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on an empty \
-     channel recv() and no sibling can send — the nursery cannot progress";
+const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on a channel it \
+     cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery \
+     cannot progress";
 
 /// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
 /// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,

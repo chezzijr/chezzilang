@@ -2372,6 +2372,31 @@ fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
     assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
+/// Bugs 3/4 — a bounded `send` that parks inside a nursery and then genuinely deadlocks must report a
+/// diagnostic that names the ACTUAL stall (a full `send()`), not the recv-only wording. The stuck task
+/// is a SENDER blocked on a FULL channel, not a receiver on an empty one; the generic nursery message
+/// must name `full send()` so a debugger is not misdirected toward a nonexistent receiver. Parity:
+/// both engines emit byte-identical text.
+#[test]
+fn bounded_channel_nursery_send_deadlock_names_full_send_both_engines() {
+    let src = "fn main():\n\
+               \x20   c := Channel[int](1)\n\
+               \x20   parallel:\n\
+               \x20       spawn:\n\
+               \x20           c.send(1)\n\
+               \x20           c.send(2)\n\
+               main()\n";
+    let e = run_err(src);
+    assert!(
+        e.contains("full send()"),
+        "serial diagnostic must name the send stall: {e}"
+    );
+    let ep = run_capture_parallel(src)
+        .expect_err("M:N should fault")
+        .message;
+    assert_eq!(e, ep, "serial and M:N deadlock text must match");
+}
+
 /// Bounded fan-out golden: a single producer sends 0..5 into a cap-2 channel while a consumer
 /// drains 5 in order. Backpressure (producer parks when full) changes WHICH task runs WHEN but not
 /// the value sequence — so the output is byte-identical serial vs M:N. Single producer ⇒ no
