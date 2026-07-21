@@ -1176,20 +1176,22 @@ impl Vm {
             "try_send" => {
                 self.arity_err("try_send", args, 1, span)?;
                 let w = self.to_wire_at(args[0], span)?;
-                {
-                    let core = self.channel_core(h);
-                    let g = core.q.lock().unwrap();
-                    if g.closed {
-                        return Ok(Value::bool(false));
-                    }
-                    if let Some(cap) = core.cap
-                        && g.queue.len() >= cap
-                    {
-                        return Ok(Value::bool(false)); // bounded + full — non-blocking, so decline
-                    }
+                let core = self.channel_core(h);
+                let closed = core.q.lock().unwrap().closed;
+                if closed {
+                    return Ok(Value::bool(false));
                 }
-                self.channel_send_wire(h, w);
-                Ok(Value::bool(true))
+                match core.cap {
+                    // Unbounded: never full — enqueue immediately (byte-identical to `send`).
+                    None => {
+                        self.channel_send_wire(h, w);
+                        Ok(Value::bool(true))
+                    }
+                    // Bounded: the space-check + enqueue MUST be atomic (same path as blocking `send`),
+                    // or two concurrent `try_send`s both see space and over-fill past `cap`. Returns
+                    // `false` when full — non-blocking, so decline (never parks).
+                    Some(cap) => Ok(Value::bool(self.enqueue_bounded(h, &core, cap, w))),
+                }
             }
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
@@ -1368,24 +1370,55 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
-        // M:N (or the inline outermost-`parallel:` builder holding the sched in `mn_enlist_sched`):
-        // the space-check + enqueue + receiver-wake is atomic under the sched lock.
-        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
-            let key = self.channel_core_ptr(h);
-            if sched.send_wake_bounded(key, &core, w, cap) {
-                return Ok(SendStep::Sent);
-            }
-            // Full. Inside a native callback we cannot snapshot-park (the caller's host-stack loop
-            // frame is not capturable) — fault for v1 (the `ponytail:` upgrade path is a demote-in-
-            // place send block, like `demote_recv_block`).
-            if self.native_reentry > 0 {
-                return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
-            }
+        // Atomic space-check + enqueue + receiver-wake (shared with `try_send` — see
+        // [`Vm::enqueue_bounded`]). On success the value is delivered; on `false` the channel was full
+        // and we decide how to block.
+        if self.enqueue_bounded(h, &core, cap, w) {
+            return Ok(SendStep::Sent);
+        }
+        // FULL. Inside a native callback the caller's host-stack loop frame is not capturable, so we
+        // cannot snapshot-park — fault for v1 (the `ponytail:` upgrade path is a demote-in-place send
+        // block, like `demote_recv_block`).
+        if self.native_reentry > 0 {
+            return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+        }
+        // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` → `Disp::SendPark`.
+        if self.mn.is_some() {
             self.park_send(h, orig);
             return Ok(SendStep::Parked);
         }
-        // Cooperative / no-scheduler: single-thread, so a plain core-lock space-check is race-free.
-        let has_space = {
+        // `mn == None`. The INLINE outermost-`parallel:` builder (holds only `mn_enlist_sched`) has NO
+        // worker loop to drive its `send_suspend` — parking there would leak it forever (`paused()`
+        // stuck true → silent halt), so it must NOT park: fault (the inline-owner-never-parks
+        // invariant, mirroring `chan_recv_step` gating its snapshot-park on `self.mn.is_some()` ONLY).
+        // A cooperative nursery (no enlist sched, active `scheduler_stack`) DOES park via
+        // `send_suspend` — `run_child` re-runs it on a sibling `recv`.
+        if self.mn_enlist_sched.is_none() && !self.scheduler_stack.is_empty() {
+            self.park_send(h, orig);
+            return Ok(SendStep::Parked);
+        }
+        Err(self.err(FULL_SEND_DEADLOCK.to_string(), span))
+    }
+
+    /// Atomic space-check + enqueue + receiver-wake on a BOUNDED channel; returns whether the value
+    /// was enqueued (`false` = full). Shared by the blocking `send` (parks on `false`) and `try_send`
+    /// (declines on `false`) so BOTH route through the ONE atomic path — else a `try_send` that
+    /// check-then-enqueues in two steps over-fills past `cap` when it races a concurrent sender. M:N /
+    /// inline-enlist: atomic under the sched lock ([`MnSched::send_wake_bounded`], which re-checks
+    /// space under the lock and wakes parked receivers). Cooperative / no-sched: single-thread, so a
+    /// plain core-lock check is race-free.
+    pub(super) fn enqueue_bounded(
+        &mut self,
+        h: GcRef,
+        core: &Arc<ChannelCore>,
+        cap: usize,
+        w: WireValue,
+    ) -> bool {
+        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
+            let key = self.channel_core_ptr(h);
+            return sched.send_wake_bounded(key, core, w, cap);
+        }
+        let enqueued = {
             let mut g = core.q.lock().unwrap();
             if g.queue.len() < cap {
                 g.queue.push_back(w);
@@ -1394,18 +1427,11 @@ impl Vm {
                 false
             }
         };
-        if has_space {
+        if enqueued {
             core.cv.notify_all();
             self.wake_on_send(h); // wake a cooperative receiver parked on this channel's `recv`
-            return Ok(SendStep::Sent);
         }
-        // Full + a cooperative nursery scheduler (and not in a native callback): park; a sibling `recv`
-        // re-runs us via `blocked_on`. No scheduler / native callback: no sibling can drain — deadlock.
-        if !self.scheduler_stack.is_empty() && self.native_reentry == 0 {
-            self.park_send(h, orig);
-            return Ok(SendStep::Parked);
-        }
-        Err(self.err(FULL_SEND_DEADLOCK.to_string(), span))
+        enqueued
     }
 
     /// Park the running fiber on a full bounded `send`: re-root the receiver AND the value argument on

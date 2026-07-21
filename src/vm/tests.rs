@@ -2394,6 +2394,74 @@ fn bounded_channel_fanout_golden_both_engines() {
     assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
 }
 
+/// Bugs 1/3 — `try_send` on a bounded channel must be ATOMIC (check-space + enqueue under the same
+/// lock the blocking `send` uses), or two concurrent M:N `try_send`s both see space and both push,
+/// over-filling past `cap`. The invariant `len <= cap` must hold on every engine. Many trials of
+/// 16 concurrent `try_send`s into a fresh cap-1 channel that no one drains: with the atomic path at
+/// most ONE succeeds per trial, so `len` is never > 1. Buggy (non-atomic) M:N over-fills on ~1-in-5
+/// trials → `over > 0` (reliably RED across 200 trials). Serial is single-thread so it is always 0.
+#[test]
+fn bounded_channel_try_send_atomic_no_overfill_both_engines() {
+    let src = "fn producer(c: Channel[int]):\n\
+               \x20   c.try_send(1)\n\
+               fn main():\n\
+               \x20   over := 0\n\
+               \x20   for trial in range(0, 200):\n\
+               \x20       c := Channel[int](1)\n\
+               \x20       parallel:\n\
+               \x20           for k in range(0, 16):\n\
+               \x20               spawn producer(c)\n\
+               \x20       if c.len() > 1:\n\
+               \x20           over = over + 1\n\
+               \x20   print(over)\n\
+               main()\n";
+    assert_eq!(run(src), "0\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N run"), "0\n");
+}
+
+/// Bug 2 — a full bounded `send` issued on the INLINE outermost-`parallel:` builder VM (`self.mn ==
+/// None`, sched held only in `mn_enlist_sched`) has NO worker loop to drive `send_suspend` →
+/// `Disp::SendPark`, so it must NOT snapshot-park: parking there leaks `send_suspend` set forever
+/// (`paused()` stays true → the main VM silently halts / hangs). It must FAULT with the shared
+/// full-channel deadlock message instead (the documented inline-owner-never-parks invariant).
+///
+/// `inner()`'s nested join early-enlists the OUTER nursery (seeding sibling O) and holds the sched in
+/// `mn_enlist_sched`; the outer body then fills a cap-1 channel `t` (nobody drains it — O recvs a
+/// DIFFERENT channel) and `t.send(42)` is full ⇒ a non-parkable inline-builder send ⇒ fault, not
+/// hang. M:N-only (case A is M:N-only), 30s watchdog catches the buggy silent-halt/hang.
+#[test]
+fn bounded_channel_inline_builder_full_send_faults_not_hang() {
+    let src = "fn inner():\n\
+               \x20   spawn:\n\
+               \x20       print(\"inner ran\")\n\
+               fn main():\n\
+               \x20   t := Channel[int](1)\n\
+               \x20   g := Channel[int]()\n\
+               \x20   parallel:\n\
+               \x20       spawn:\n\
+               \x20           g.recv()\n\
+               \x20       inner()\n\
+               \x20       t.try_send(7)\n\
+               \x20       t.send(42)\n\
+               \x20   print(\"done\")\n\
+               main()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture_parallel(src));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(r) => {
+            let e = r.expect_err("full inline-builder send must fault, not silently complete");
+            assert!(
+                e.message.contains("send on a full channel"),
+                "unexpected fault: {}",
+                e.message
+            );
+        }
+        Err(_) => panic!("hung — inline-builder full send parked and leaked send_suspend (bug 2)"),
+    }
+}
+
 // ----- std.concurrency.pmap: scoped parallel-map helpers (Item 2) -----
 
 /// Run `src` from a temp entry file on BOTH engines (a real graph resolve, so `import … from
