@@ -734,15 +734,22 @@ closures & bare/`fn` and even **recursive** local fns, **protocol existentials**
 and **live generators** — including one suspended mid-`recover:`). The residual **NOT-sendable** set is
 small and each case is rejected cleanly (a recoverable fault or compile error, byte-identical on both
 engines, **never UB**):
-- a **module namespace** itself (you can't send `math`; its globals are read-only in every task);
-- a value carrying a **native / FFI handle** (a `file`/regex/HTTP `Response`/raw FFI resource — NOT the
-  concurrency handles above, which *do* cross) — rejected at the runtime airlock (`ensure_crossable`);
-- a **cyclic data structure** — a struct/list/map that points back at itself, or a *mixed* cycle where a
-  closure is captured inside such a container (only a pure `Cell`/`Closure` cycle, i.e. a recursive fn,
-  is identity-preserved and crosses); these reject with `maximum structural depth …` or the
-  `cyclic data structure … hoist to module scope` fault;
-- two **checker-unreachable** suspended-generator shapes (multi-frame, pending-`defer`) kept only as
-  defensive guards — no valid program can construct them.
+- **[fundamental]** a value carrying a **live host handle** — a **module namespace** itself, a bound
+  **native** handle, or a **raw FFI** resource (`Obj::Module`/`Native`/`Cffi`; a `file`/regex/HTTP
+  `Response`/FFI extern — NOT the concurrency handles above, which *do* cross). A foreign OS/library
+  resource can't be copied into another heap — rejected at the runtime airlock (`ensure_crossable`). This
+  one is intrinsic and stays.
+- **[carve-out — planned fix]** a **cyclic data structure** — a struct/list/map that points back at
+  itself, or a *mixed* cycle where a closure is captured inside such a container. Today only a pure
+  `Cell`/`Closure` cycle (a recursive fn) is identity-preserved and crosses; data cycles reject with
+  `maximum structural depth …` or `cyclic data structure … hoist to module scope`. This is an arbitrary
+  inconsistency (a recursive fn is *also* a self-referential value) — the `Backref` machinery can extend
+  to container arms to close it. See `gaps.md` "sendability CONSISTENCY carve-outs" **A**.
+- **[carve-out — planned fix]** a **module-GLOBAL live generator** a task reaches (a *frame-local*
+  generator crosses by value; the global path poisons instead of deep-copying). See `gaps.md` carve-out
+  **B**.
+- **[not a real limit]** two **checker-unreachable** suspended-generator shapes (multi-frame,
+  pending-`defer`) kept only as defensive guards — no valid program can construct them.
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write

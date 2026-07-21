@@ -89,6 +89,63 @@ guards against the type-blind compiler path (the parity harness `run_program_inn
 checker); there is no coherent state to serialize, so nothing is built. Reject test kept:
 `generator_parked_defer_rejects_clean_both`. Both engines reject IDENTICALLY (completeness, not a bug).
 
+## NEXT-SESSION BACKLOG — sendability CONSISTENCY carve-outs (deferred from 2026-07-21)
+
+After the 3 items above landed, the airlock is ~99% complete. Auditing "what's still unsendable" surfaced
+that the genuinely-FUNDAMENTAL limit is only ONE thing — **a value carrying a live host handle**
+(`Obj::Module`/`Obj::Native`/`Obj::Cffi` → `has_handle` → `ensure_crossable` "module/native/FFI handle
+cannot cross"). A foreign OS/library resource cannot be memcpy'd into another heap; this is correct and
+stays. (The concurrency handles `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/
+`Reader`/`Writer` cross as shared `Arc` cores; `ptr` crosses by value — none are in this set.)
+
+The OTHER two remaining rejects are **arbitrary carve-outs**, not fundamental limits — the
+identity-preserving `WireMemo`/`Backref` machinery built for recursive-fn sendability (item 2 above) can
+close both, and doing so removes exactly the kind of "why can THIS cross but not THAT?" drift the no-drift
+north-star forbids. Each is its OWN spec/session — do NOT bundle. Ranked by value ÷ risk.
+
+### A. Self-referential DATA sendable — extend `Backref` to container arms (HIGHER value, LOW-MED risk)
+**The inconsistency:** a recursive `fn` is a self-referential value (`Closure→Cell→Closure`) and now
+CROSSES; a self-referential struct/list/map (`a.next = b; b.next = a`) is sendable-by-parts and refers to
+itself via a (sendable) ref, yet is REJECTED with `maximum structural depth exceeded` — purely because the
+`Backref` identity-preservation (item 2) was SCOPED to `Obj::Cell`/`Obj::Closure` only; `Struct`/`List`/
+`Map`/`Set`/`Tuple`/`Enum`/`NewType`/`Iter` get no id. **The fix:** give those container arms an id + a
+`Backref` too (thread the same `WireMemo` DFS-stack memo through them; `from_wire` already threads the
+`rebuild` map through every container arm, so the tie-the-knot reconstruction is largely in place — verify
+each arm placeholder-allocs before recursing). This makes self-referential data round-trip like a recursive
+fn. **Consequences to handle:** (1) `examples/airlock_cycle.chz` + its golden currently ASSERT cyclic data
+REJECTS — they must flip to round-trip (or be re-pointed at the genuinely-unserializable case, a
+handle-in-a-cycle). (2) The mixed struct+closure cycle reject (`nonpreserved_depth` guard, commit e8dcad7)
+becomes UNNECESSARY once containers are identity-preserved too — delete it, or keep it only for the
+truly-unserializable case. (3) Keep the back-edge-only (pop-on-DFS-exit) discipline so a DAG alias is still
+an independent deep copy (the `airlock_aliased_closure_stays_independent` contract). (4) The depth cap stays
+as the backstop for genuinely-unbounded ACYCLIC nesting. **Risk:** LOW-MED — same serializer, machinery
+exists; the trap is the golden/behavior flip + not regressing DAG-alias independence. Memory-safety is a
+non-issue (GcRef indices + `heap.get_mut`, like item 2). Subagent-driven or auto-task WITH a spec; both-
+engine parity + adversarial wrong-result tests mandatory (a duplicated-vs-shared node is parity-blind — the
+item-2 lesson).
+
+### B. Module-GLOBAL live generator sendable by value (LOWER value, MED-HIGH risk)
+**The inconsistency:** a FRAME-LOCAL live generator crosses the airlock by value (F3 path C, deep copy of
+its execution state); the SAME generator stored in a MODULE GLOBAL is instead **reach-gated** (Option B —
+`generator_airlock_err`/`check_task_generator_reach`, `src/vm/sched.rs`) and snapshotted as a poison→`nil`
+leaf, so a task that reaches it FAULTS `a generator cannot be sent across tasks`. The reason is purely
+mechanical: the module-global SNAPSHOT path (`to_snap`) poisons generators instead of deep-copying them,
+whereas the crossing path (`to_wire`) now serializes them by value. **The fix:** make the `to_snap`
+generator arm deep-copy the generator by value (reuse the `to_wire` path — the `to_wire && !has_handle`
+fast lane already exists) instead of emitting `SnapValue::Poison`, then drop the reach-gate for the
+now-sendable states. This is consistent with the F1 module-global-isolation contract: each task ALREADY
+gets its own frozen copy of every module global, so a per-task generator copy fits the model. **Risk:**
+MED-HIGH — touches the `to_snap`/poison path + the whole reach-gate machinery + the F1 memory-safety
+guarantee (poison→nil is what currently guarantees an M:N worker can never obtain a real cross-heap
+generator from a global). Must preserve: a generator carrying a genuinely non-sendable slot still rejects;
+the reach-gate deletion doesn't reopen a memory-safety hole. Subagent-driven with per-delta review, NOT a
+blind auto-task. Related memory: `generator-airlock-option-b-reach-gate`, `airlock-sendability-architecture`.
+
+### NOT on the backlog (settled — not limitations)
+- **Host handles** (Module/Native/Cffi in a value) — fundamental, stays rejected. Correct.
+- **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
+  program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
+
 ## Session log — 2026-07-20 (bug-hunt: 4 findings — 2 checker fixes + 1 doc fix, 1 held)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib) on
