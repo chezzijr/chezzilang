@@ -718,6 +718,32 @@ once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `cl
 
 ## 7. Sendability
 
+**The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
+parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
+deep-copied, module globals are snapshot-copied once at the first nursery — much like a forked child
+copies the parent's address space. Two deliberate differences from a real `fork`:
+1. It copies only the **reachable captured environment**, not the whole heap.
+2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
+   `RwShared`, `Atomic`, `Executor`, and the socket/reader/writer handles carry their one underlying
+   `Arc` core across, so all tasks reach the *same* mailbox/box/queue/fd. These handles are the *only*
+   way tasks share mutable state; everything else is copied. That is why the shared-mutation data race
+   is unrepresentable — a plain captured value mutated in a task changes only that task's copy.
+
+**Almost everything is sendable now** (scalars, `str`, containers/structs of sendable contents,
+closures & bare/`fn` and even **recursive** local fns, **protocol existentials**, `.iter()` cursors,
+and **live generators** — including one suspended mid-`recover:`). The residual **NOT-sendable** set is
+small and each case is rejected cleanly (a recoverable fault or compile error, byte-identical on both
+engines, **never UB**):
+- a **module namespace** itself (you can't send `math`; its globals are read-only in every task);
+- a value carrying a **native / FFI handle** (a `file`/regex/HTTP `Response`/raw FFI resource — NOT the
+  concurrency handles above, which *do* cross) — rejected at the runtime airlock (`ensure_crossable`);
+- a **cyclic data structure** — a struct/list/map that points back at itself, or a *mixed* cycle where a
+  closure is captured inside such a container (only a pure `Cell`/`Closure` cycle, i.e. a recursive fn,
+  is identity-preserved and crosses); these reject with `maximum structural depth …` or the
+  `cyclic data structure … hoist to module scope` fault;
+- two **checker-unreachable** suspended-generator shapes (multi-frame, pending-`defer`) kept only as
+  defensive guards — no valid program can construct them.
+
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
 stays on the isolated copy, invisible to the parent); a captured **module global** is **frozen** and
@@ -756,7 +782,12 @@ aggregate) inside a task is a **compile error** (see below).
   `Channel[fn].send`) and computes correctly, **byte-identical on both engines**. A recursive closure that
   ALSO reads an outer local carries the self-edge as a `Backref` and the outer local as an independent deep
   copy. Only `Cell`/`Closure` earn an identity — genuine cyclic *data* (a struct pointing back at itself)
-  still reports `maximum structural depth …` and rejects, since it forms no callable cycle.
+  still reports `maximum structural depth …` and rejects, since it forms no callable cycle. A **mixed**
+  cycle — a recursive/self-capturing closure held *inside* a struct/list/map so the cycle passes through
+  a non-identity-preserved container — also **rejects** (the container would be duplicated while the
+  closure is shared, silently breaking aliasing), with the `cyclic data structure … hoist the fn to
+  module scope` fault, byte-identical on both engines. Only a cycle running purely through `Cell`/`Closure`
+  crosses.
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
   a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
