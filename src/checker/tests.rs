@@ -8996,14 +8996,14 @@ fn channel_needs_element_type() {
 }
 
 #[test]
-fn channel_non_sendable_element_rejected() {
-    // A non-sendable element type (a protocol existential, which may wrap a closure) is rejected as a
-    // `Channel` element. (B3.3 Task 2a: a `fn`-typed element is now SENDABLE — closures cross by value
-    // — so the gate keys on a genuinely non-sendable type; the closure case is
-    // `channel_of_closures_typechecks`.)
-    entry_rejects(
+fn channel_protocol_element_is_sendable() {
+    // Task 2 (option a): a protocol existential element type is now SENDABLE (Go `chan interface`
+    // parity) — the erased witness crosses by value. A witness that genuinely can't serialize (an
+    // FFI/native handle) is rejected at the RUNTIME airlock, not here — see
+    // `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`. (Was rejected under the old
+    // Error-only sendable-bounded rule.)
+    entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nfn main():\n    ch := Channel[NS]()\n    print(ch.len())\nmain()\n",
-        "Channel element type must be sendable",
     );
 }
 
@@ -9132,58 +9132,47 @@ fn spawn_capture_free_closure_arg_ok() {
 }
 
 #[test]
-fn spawn_arg_closure_capturing_ref_rejected() {
-    // B3.3 (Task 2a): a closure ARG whose captures include a non-sendable local is rejected — via the
-    // capture gate, not the bare-type sendability check (a `fn` value is now sendable). The captured
-    // value crosses the airlock as a silent deep copy, so it must be a compile error.
-    entry_rejects(
+fn spawn_arg_closure_capturing_protocol_local_ok() {
+    // Task 2 (option a): a closure ARG capturing a protocol-typed local `p: NS = Boxy(0)` is now
+    // ACCEPTED — a protocol existential is sendable (its witness `Boxy` crosses by deep value copy).
+    // The capture gate routes through `self.sendable()`, so this flipped when protocols became
+    // sendable; the old rejection was a false positive. A capture that genuinely can't cross (an
+    // FFI/native handle) is still rejected at the RUNTIME airlock — see
+    // `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+    entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn run(g)\nmain()\n",
-        "non-sendable captured binding 'p'",
     );
 }
 
 #[test]
-fn spawn_keyword_arg_closure_capturing_ref_rejected() {
-    // The capture gate must fire whether the capturing closure crosses positionally OR by LABEL
-    // through a function VALUE. Regression guard: the gate must iterate keyword args too, so
-    // `spawn h(f=g)` cannot smuggle a non-sendable-capturing closure past the airlock while
-    // `spawn h(g)` is rejected — the checker-accepts / runtime-diverges hole.
+fn spawn_keyword_arg_closure_capturing_protocol_local_ok() {
+    // Task 2 (option a): a closure capturing a protocol-typed local, passed by LABEL or positionally
+    // through a function VALUE, is now ACCEPTED — a protocol existential is sendable (witness `Boxy`
+    // crosses by deep value copy). Both spellings agree (the capture gate routes both through
+    // `self.sendable()`). Genuine non-sendability (FFI handle) is caught at the runtime airlock.
     let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\n";
-    entry_rejects(
-        &format!(
-            "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(f=g)\nmain()\n"
-        ),
-        "non-sendable captured binding 'p'",
-    );
-    // The positional form of the SAME call is (and stays) rejected — parity of the two spellings.
-    entry_rejects(
-        &format!(
-            "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(g)\nmain()\n"
-        ),
-        "non-sendable captured binding 'p'",
-    );
+    entry_ok(&format!(
+        "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(f=g)\nmain()\n"
+    ));
+    // The positional form of the SAME call is accepted identically — parity of the two spellings.
+    entry_ok(&format!(
+        "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(g)\nmain()\n"
+    ));
 }
 
 #[test]
-fn spawn_non_sendable_ref_keyword_arg_rejected() {
-    // A non-sendable value (a protocol existential) passed by label to a spawned function value must
-    // be rejected, exactly like the positional form (else the task silently mutates a deep-cloned copy
-    // — the footgun the gate exists to prevent). Uses the graph path (`entry_rejects`) so the spawn
-    // gate is exercised through `check_graph` too (checker-test-helper-key-divergence).
+fn spawn_protocol_value_keyword_arg_ok() {
+    // Task 2 (option a): a protocol-typed value passed by label OR positionally to a spawned function
+    // value is now ACCEPTED — a protocol existential is sendable (its witness `Boxy` crosses by deep
+    // value copy, agrees serial==M:N). Both spellings agree. (Was rejected under the old rule.)
     let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(r: NS):\n    print(r.tag())\n";
-    entry_rejects(
-        &format!(
-            "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(r=b)\nmain()\n"
-        ),
-        "non-sendable value of type NS",
-    );
-    // Positional form of the same call — rejected identically.
-    entry_rejects(
-        &format!(
-            "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(b)\nmain()\n"
-        ),
-        "non-sendable value of type NS",
-    );
+    entry_ok(&format!(
+        "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(r=b)\nmain()\n"
+    ));
+    // Positional form of the same call — accepted identically.
+    entry_ok(&format!(
+        "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(b)\nmain()\n"
+    ));
 }
 
 #[test]
@@ -9236,22 +9225,20 @@ fn spawn_bad_arg_reports_one_error() {
 }
 
 #[test]
-fn channel_non_sendable_struct_field_rejected() {
-    // A non-sendable value smuggled inside a struct field must be caught (deep field sendability). The
-    // field is a protocol existential (a genuinely non-sendable type — it may wrap a closure).
-    entry_rejects(
+fn channel_protocol_struct_field_is_sendable() {
+    // Task 2 (option a): a struct with a protocol-typed field is now a SENDABLE channel element — the
+    // field's erased witness crosses by deep value copy. (Was rejected under the old rule.)
+    entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Holder:\n    f: NS\nfn main():\n    ch := Channel[Holder]()\n    print(ch.len())\nmain()\n",
-        "Channel element type must be sendable",
     );
 }
 
 #[test]
-fn spawn_non_sendable_struct_field_arg_rejected() {
-    // A struct carrying a non-sendable field (a protocol existential) is a non-sendable spawn arg
-    // (deep field sendability).
-    entry_rejects(
+fn spawn_protocol_struct_field_arg_ok() {
+    // Task 2 (option a): a struct carrying a protocol-typed field is a SENDABLE spawn arg — the whole
+    // aggregate (`Holder{f: Boxy(0)}`) crosses by deep value copy. (Was rejected under the old rule.)
+    entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nstruct Holder:\n    f: NS\nfn run_it(h: Holder):\n    print(h.f.tag())\nfn main():\n    h := Holder(Boxy(0))\n    parallel:\n        spawn run_it(h)\nmain()\n",
-        "non-sendable value of type Holder",
     );
 }
 
@@ -10341,12 +10328,12 @@ fn read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok() 
 // ----- A3b (B3.6): Executor.submit gates its closure captures like `spawn` -----
 
 #[test]
-fn submit_non_sendable_capture_rejected() {
-    // A submitted closure reading a non-sendable captured binding (a protocol existential) crosses
-    // the airlock to a pool thread under `--parallel` — rejected exactly like a `spawn` capture.
-    entry_rejects(
+fn submit_protocol_capture_ok() {
+    // Task 2 (option a): a submitted closure capturing a protocol-typed binding is now ACCEPTED — a
+    // protocol existential is sendable (witness `Boxy` crosses by deep value copy to the pool thread).
+    // (Was rejected under the old rule; the submit capture gate routes through `self.sendable()`.)
+    entry_ok(
         "import std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    ex := Executor()\n    ex.submit(fn(): print(p.tag()))\n    ex.shutdown()\nmain()\n",
-        "non-sendable captured binding 'p'",
     );
 }
 
@@ -10405,16 +10392,12 @@ fn top_level_closure_submitted_ok() {
 // capture — never gated. (The probe is a protocol existential — a genuinely non-sendable value.)
 
 #[test]
-fn nonsendable_captured_by_spawn_callee_closure_rejected() {
-    // A function-local non-sendable value captured by a closure VALUE that is the spawn CALLEE
-    // crosses the airlock as a silent deep copy — a compile error, exactly like the block form.
-    let errs = check_entry(
+fn protocol_local_captured_by_spawn_callee_closure_ok() {
+    // Task 2 (option a): a function-local protocol-typed value captured by a closure VALUE that is the
+    // spawn CALLEE is now ACCEPTED — a protocol existential is sendable (witness `Boxy` crosses by
+    // deep value copy). (Was rejected under the old rule.)
+    entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    grab := fn() -> int: p.tag()\n    parallel:\n        spawn grab()\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("non-sendable captured binding 'p'")),
-        "got: {errs:?}"
     );
 }
 
@@ -18275,121 +18258,101 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
 
 // ===== F2/F3/F4 — checker over-rejection / diagnostic fixes =====
 
-/// F2 — `Channel[int!]` / `Channel[Error]` ARE sendable (L7 round 1): the built-in `Error` protocol
-/// existential is sendable-bounded, so the bare existential may cross a task boundary — a non-sendable
-/// CONCRETE witness is still caught later, at the `Channel.send` boundary (round 2), not here. A
-/// `Channel` over any OTHER user protocol existential stays non-sendable (no such bound exists for it;
-/// a witness may carry non-sendable fields) — use a concrete sendable type instead.
+/// Task 2 (option a) — EVERY protocol existential is sendable now (Go `chan interface` parity), not
+/// just the built-in `Error`: `Channel[Drawable]`, `Channel[int!]`, `Channel[Error]`, and
+/// `Channel[NS]` over any user protocol all type-check. A genuinely-unserializable element (one
+/// carrying an FFI/native handle) is rejected at the RUNTIME airlock, not at construction — see
+/// `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
 #[test]
-fn channel_of_error_existential_is_sendable_but_other_protocols_not() {
-    entry_rejects(
+fn channel_of_any_protocol_existential_is_sendable() {
+    entry_ok(
         "protocol Drawable:\n    fn draw(self) -> str\nc := Channel[Drawable]()\nprint(\"x\")\n",
-        "must be sendable",
     );
-    // `Error` is sendable-bounded (Option B): `Channel[int!]` / `Channel[Error]` type-check. A
-    // non-sendable concrete error witness is preserved as its concrete type and rejected later at
-    // the send boundary, not laundered — that's a separate round, not this test.
     entry_ok("import std.concurrency\nc := Channel[int!]()\nprint(\"x\")\n");
     entry_ok("import std.concurrency\nc := Channel[Error]()\nprint(\"x\")\n");
-    // A non-Error non-sendable element (a protocol existential) does NOT get the Error hint (just the
-    // base message + the plain gloss).
-    let errs = check_entry(
+    entry_ok(
         "import std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nc := Channel[NS]()\nprint(\"x\")\n",
     );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("cross a task boundary")),
-        "expected the plain gloss, got: {errs:?}"
+}
+
+/// Task 2 (option a) — a user protocol existential is now SENDABLE across the airlock (Go
+/// `chan interface` parity): the erased witness crosses by value like any other type; a witness that
+/// genuinely can't cross (one carrying an FFI/native handle) is rejected at the runtime airlock, not
+/// at construction (see `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`).
+#[test]
+fn protocol_existential_is_sendable_across_airlock() {
+    // Bare `Channel[UserProto]()` type-checks.
+    entry_ok(
+        "protocol Drawable:\n    fn draw(self) -> str\nc := Channel[Drawable]()\nprint(\"x\")\n",
     );
-    assert!(
-        !errs
-            .iter()
-            .any(|e| e.message.contains("concrete error type")),
-        "a non-Error element must NOT get the Error hint, got: {errs:?}"
+    // A protocol-typed struct field carried as a channel element type-checks.
+    entry_ok(
+        "protocol Drawable:\n    fn draw(self) -> str\nstruct H:\n    f: Drawable\nc := Channel[H]()\nprint(\"x\")\n",
+    );
+    // A protocol-typed spawn arg type-checks.
+    entry_ok(
+        "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    fn draw(self) -> str:\n        return \"sq\"\nfn use_it(d: Drawable):\n    print(d.draw())\nfn main():\n    parallel:\n        spawn use_it(Sq())\nmain()\n",
     );
 }
 
-/// L7 round 2 — a DIRECT-LITERAL `Err(..)` carrying a non-sendable concrete error witness (one
-/// holding a non-`Error` protocol-existential field, which `sendable` never admits) must be rejected
-/// at the `Channel.send` boundary, not laundered by the `Error` existential's sendable-bounded
-/// widening (round 1). `Channel[int!]`'s `send` param is `Result[int, Error]`; assignability recurses
-/// into the error slot, hits the `Protocol("Error", ..)` arm, and — pre-fix — admitted ANY witness
-/// satisfying `Error` regardless of its own sendability. (An `Iterator[T]` field does NOT reproduce
-/// the leak: the checker's static `sendable` treats `Iterator[T]` structurally, by its element type,
-/// same as any other container — it doesn't distinguish a VM-only generator from a data-snapshot
-/// cursor, so it's already sendable=true either way and can't witness this bug.)
+/// Task 2 (option a) — `GErr{w: Odd}` where `Odd` is a user protocol is now SENDABLE (`Odd` is
+/// sendable ⇒ `GErr` is sendable), so a DIRECT-LITERAL `Err(GErr(..))` sent over `Channel[int!]`
+/// type-checks (and runs: prints `sent`). This was rejected under the old Error-only rule, where a
+/// protocol-field struct was the canonical "non-sendable Error witness"; that class no longer exists
+/// at the checker level. A witness carrying an FFI/native handle is checker-sendable and rejected at
+/// the RUNTIME airlock instead (`vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`).
 #[test]
-fn channel_send_rejects_non_sendable_error_literal() {
-    entry_rejects(
+fn channel_send_sendable_error_literal_ok() {
+    entry_ok(
         "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nc := Channel[int!]()\nc.send(Err(GErr(Impl())))\n",
-        "expected Result[int], found Result[",
     );
 }
 
-/// L7 final review — a `recover:` result's error slot is the built-in `Error` existential, which
-/// round 1 makes sendable-bounded; the recover result (`Result[_, Error]`) is therefore itself
-/// sendable and could be sent. So a `?` propagating a non-sendable-but-Error-satisfying error is
-/// (soundly) rejected here — allowing it would launder the non-sendable payload through the erased
-/// slot across a task boundary. The diagnostic must NOT lie ("must satisfy Error"): `GErr` DOES
-/// satisfy Error (has `message`), it is merely non-sendable — so the split message names sendability.
+/// Task 2 (option a) — a `?` propagating `GErr{w: Odd}` inside a `recover:` block is now ACCEPTED:
+/// `GErr` satisfies `Error` (has `message`) AND is sendable (its `Odd` field is a sendable protocol),
+/// so the recover result `Result[_, Error]` accepts it. Was rejected with the "satisfies Error but
+/// isn't sendable" split message under the old rule, when a protocol field made the witness
+/// non-sendable.
 #[test]
-fn recover_try_rejects_non_sendable_error_with_honest_message() {
-    let errs = check_entry(
+fn recover_try_sendable_error_ok() {
+    entry_ok(
         "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn bar(x: int) -> Result[int, GErr]:\n    if x == 0:\n        return Ok(1)\n    return Err(GErr(Impl()))\nfn main():\n    r := recover: bar(1)?\n    print(\"unreached\")\nmain()\n",
     );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("satisfies Error but isn't sendable")),
-        "expected the honest non-sendable (not 'must satisfy Error') message, got: {errs:?}"
-    );
 }
 
-/// L7 round 3, Test 2 — the inference-vs-annotation asymmetry that IS Option B's intended tax: an
-/// EXPLICIT `-> int!` annotation is `Result[int, Error]` where `Error` is now sendable-bounded (round
-/// 1), so unlike Test 1's inferred `Result[int, GErr]` (concrete, preserved), here the concrete
-/// `Err(GErr(..))` branch must be assignable to the already-widened `Error` slot at the `return` site
-/// — which the round-2 `assignable` guard rejects for a non-sendable concrete witness. Same struct
-/// shape as round 2 (`GErr` holds a non-`Error` protocol field `Odd`, so it's Error-satisfying but
-/// non-sendable).
+/// Task 2 (option a) — an EXPLICIT `-> int!` (`Result[int, Error]`) return whose concrete `Err`
+/// branch is `GErr{w: Odd}` is now ACCEPTED at the `return` widening site: `GErr` is sendable (its
+/// `Odd` field is a sendable protocol), so the `assignable`-to-`Error` guard admits it. Was rejected
+/// under the old rule.
 #[test]
-fn explicit_bang_annotation_over_non_sendable_error_is_rejected() {
-    entry_rejects(
+fn explicit_bang_annotation_over_sendable_error_ok() {
+    entry_ok(
         "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return Ok(1)\n    return Err(GErr(Impl()))\nprint(\"x\")\n",
-        "expected return type Result[int], found Result[",
     );
 }
 
-/// L7 round 3, Test 3 (residual) — `sendable_rec`'s `Ty::Param(_) => true` arm treats a bare generic
-/// param as sendable, deferring the real check to the call site's instantiation. This verifies the
-/// deferral is actually re-checked: a generic `fn wrap[E](e: E) -> int!E` instantiated with a
-/// non-sendable concrete `E` (`GErr`, same shape as above) and then SENT over a `Channel[int!]` is
-/// REJECTED — by the time `c.send(wrap(GErr(Impl())))` is checked, `E` has already been substituted to
-/// the concrete `GErr`, so the argument's actual type is `Result[int, GErr]` and the round-2
-/// `Channel.send` boundary guard (not the generic-param arm itself) catches it. Pinning this on record:
-/// REJECTED — no soundness hole through the generic-param deferral (verified via `cargo run -- check`
-/// on the exact source below before writing this assertion).
+/// Task 2 (option a) — a generic `fn wrap[E](e: E) -> int!E` instantiated with concrete `E = GErr`
+/// (sendable, since its `Odd` field is a sendable protocol) and SENT over `Channel[int!]` is now
+/// ACCEPTED. Was rejected under the old rule at the `Channel.send` boundary (`GErr` counted as
+/// non-sendable). The generic-param deferral (`Ty::Param => true` re-checked at instantiation) is
+/// unchanged; the concrete substitution is simply sendable now.
 #[test]
-fn generic_fn_non_sendable_err_instantiation_rejected_at_channel_send() {
-    entry_rejects(
+fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
+    entry_ok(
         "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn wrap[E](e: E) -> int!E:\n    return Err(e)\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
-        "expected Result[int], found Result[",
     );
 }
 
-/// L7 round 3, Test 4 (residual, over-rejection not soundness) — round-1 review flagged that
-/// `join_ret`'s left-fold over 3+ inferred-return branches makes `join_err_slot` branch-order
-/// sensitive when mixing sendable and non-sendable Error-satisfying payloads: an `Unknown` slot (from
-/// two sendable Errs merging) absorbs a THIRD non-sendable concrete witness without re-checking
-/// sendability against it, but a non-sendable witness adjacent to a sendable one in the fold instead
-/// hard-conflicts. Pinning the CURRENT reality for this specific order (two sendable `EA`/`EB`
-/// separated by non-sendable `GErr`, so `EA` folds against `GErr` first): REJECTED with the hard
-/// "conflicting branches" diagnostic (verified via `cargo run -- check`). This is over-rejection, not
-/// a soundness gap — record it so a future `join_err_slot` change notices if this shifts.
+/// Task 2 (option a) — a 3+ branch inferred `Result` return mixing `EA`/`GErr{w:Odd}`/`EB` now folds
+/// cleanly to `Result[int, Error]` and is ACCEPTED. All three witnesses are sendable now (`GErr`'s
+/// `Odd` field is a sendable protocol), so `join_err_slot` unifies them to the `Error` existential
+/// instead of hard-conflicting on the old sendable-vs-non-sendable split. Was rejected under the old
+/// rule with "cannot infer return type: conflicting branches" — the order-sensitivity that caused it
+/// only existed because a protocol-field struct read as non-sendable.
 #[test]
-fn three_branch_mixed_sendability_error_inference_is_order_sensitive() {
-    entry_rejects(
+fn three_branch_mixed_error_inference_ok() {
+    entry_ok(
         "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int):\n    if x == 0:\n        return Ok(1)\n    elif x == 1:\n        return Err(EA())\n    elif x == 2:\n        return Err(GErr(Impl()))\n    else:\n        return Err(EB())\nprint(\"x\")\n",
-        "cannot infer return type: conflicting branches",
     );
 }
 

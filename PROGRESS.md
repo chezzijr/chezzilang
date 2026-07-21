@@ -103,18 +103,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   crossing the airlock = VM frames on another thread), the exact hazard the gate over-approximates to
 >   avoid — too risky pre-freeze. Needs a scoped precision spike; see `docs/gaps.md`.
 
+> **✅ CHECKER / CONCURRENCY (2026-07-21, `auto-task/protocol-sendable`) — Task 2: ALL user protocol
+> existentials are now sendable (Go `chan interface` parity), generalizing the earlier `Error`-only
+> rule.** `Channel[P]`, protocol-typed spawn args / struct fields / `Ok`/`Err` payloads / returns all
+> type-check — the erased witness crosses the airlock by deep value copy like any other value. **One
+> logic line** (not a widening-site sweep, and NOT the risk the original backlog note framed): deleted
+> `sendable_bounded` (`proto.rs`), flipped `sendable_rec`'s `Ty::Protocol` arm to `true`, and kept
+> `assignable`'s existing `&& self.sendable(a)` concrete-witness guard uniformly. **Corrected framing:**
+> `assignable` is the SOLE concrete→Protocol widening chokepoint (no coverage risk), and the CHECKER
+> marks FFI/`Func`/handles **sendable** — the **runtime airlock** (`ensure_crossable` over `has_handle`)
+> is the real gate for a genuinely-unserializable witness (FFI handle in a field, mid-`recover:`
+> generator), rejecting it recoverably and identically on serial == M:N. Post-change `sendable_rec` is
+> `false` only for `Ty::Module`. **Bench-neutral** (checker-only, no VM change). Migration: 14 old-policy
+> tests flipped to accepted (each a genuinely-sendable witness — the old rejection was a false positive);
+> genuine-rejection coverage moved to `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+> Full suite green. Details: `docs/gaps.md` item 1 + §L7 (superseded banner).
+
 > **✅ CHECKER / CONCURRENCY (2026-07-20, `feat/l7-sendable-error`) — L7: sendability-bounded `Error`
-> existential landed; `Channel[int!]` / `Channel[Error]` now admitted and sound.** The built-in `Error`
-> protocol is **sendable-bounded** (`Error`-only, by default): its existential is itself sendable AND
+> existential landed; `Channel[int!]` / `Channel[Error]` now admitted and sound.** *(Superseded
+> 2026-07-21 by Task 2, which generalized this to ALL protocols — see entry above.)* The built-in `Error`
+> protocol was **sendable-bounded** (`Error`-only, by default): its existential is itself sendable AND
 > every value widened into it is required sendable *at the widening site*, so a struct that satisfies
 > `Error` but holds a non-sendable field (a non-`Error` protocol / `Module` field) is **rejected there,
-> not laundered** across a task boundary (closes the F2 check-OK-then-run-fault). Reference model is
-> **Rust's `Send`** (Chezzi's airlock deep-copies), not Go's share-by-reference channels — so this bounds
-> only `Error`, not every protocol (`Channel[Drawable]` still rejects), matching Rust's opt-in
-> `dyn Error + Send`. Design ("Option B", 5 checker edits): inference sites **preserve** a non-sendable
-> concrete error (in-task use stays legal); the explicit/direct-literal widening chokepoint
-> (`assignable`'s `Protocol` arm) rejects. Commits `c1b4ab4` · `997e642` · `2b29ed3` · `ba2ea7c`. Full
-> suite green (3667 lib + integration). Details + deferred follow-ups: `docs/gaps.md §L7`.
+> not laundered** across a task boundary (closes the F2 check-OK-then-run-fault). Design ("Option B", 5
+> checker edits): inference sites **preserve** a non-sendable concrete error (in-task use stays legal);
+> the explicit/direct-literal widening chokepoint (`assignable`'s `Protocol` arm) rejects. Commits
+> `c1b4ab4` · `997e642` · `2b29ed3` · `ba2ea7c`. Details + deferred follow-ups: `docs/gaps.md §L7`.
 
 > **✅ LANGUAGE (2026-07-19, `auto-task/remove-ref`) — the `ref` keyword, the `Ref[T]` reserved box, and
 > `std.ref` were REMOVED entirely (pure subtraction, minimalism/coherence — NOT a sendability change).**

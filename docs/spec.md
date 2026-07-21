@@ -520,11 +520,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   unify to `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` — **or
   satisfies it but is not sendable** — is preserved (not laundered into the `Error` existential); a
   deliberate concrete error type is spelled explicitly (`-> Result[str, str]` / `-> int!DbErr`). The
-  built-in `Error` existential is **sendable-bounded** (L7): it is itself sendable — so `Channel[int!]` /
-  `Channel[Error]` are admitted — precisely *because* every value widened into it must be sendable,
-  checked at the widening site (a non-sendable witness is rejected there, not laundered). This bounds
-  only `Error` (errors are almost always plain data), not every protocol existential — `Channel[Drawable]`
-  still rejects. See [`docs/syntax.md`](syntax.md) "Return type inference".
+  **every** protocol existential is **sendable** (Go `chan interface` parity, Task 2): `Channel[Error]`,
+  `Channel[int!]`, and `Channel[Drawable]` over any user protocol all type-check — the erased witness
+  crosses the airlock by deep value copy, and the concrete witness's own sendability is checked at each
+  widening site (a non-sendable witness is rejected there, not laundered). A witness that genuinely
+  can't serialize (one carrying an FFI/native handle) is rejected at the **runtime airlock**, not at
+  construction. See [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte

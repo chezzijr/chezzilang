@@ -2653,9 +2653,10 @@ fn fetch_all(urls: List[str]):
 - **Sendability:** a captured local — AND every module global — crosses into a task as an **independent
   per-task copy** (writes in the task stay local, on both engines; a module global is deep-copied at the
   spawn boundary just like a captured local, so reassigning or in-place-mutating either inside a task is
-  fine and simply invisible to the parent). Only sendable types
-  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel` `Token`)
-  cross by reference — not closures or native handles. To share mutable state across tasks use a
+  fine and simply invisible to the parent). Sendable types
+  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel`
+  `Token`/closures/**protocol existentials** — Task 2, Go `chan interface` parity) cross the airlock;
+  a native handle (or a witness carrying an FFI/native handle) does not. To share mutable state across tasks use a
   `Shared`/`Atomic`/`Channel` (they cross by shared handle, so a task-side write IS visible to the parent).
 
 ## 12. Imports & modules  (M4.5)

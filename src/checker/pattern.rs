@@ -1043,8 +1043,8 @@ impl Checker {
             // An UNANNOTATED if/match-expression's `Result` error slot defaults to the `Error`
             // protocol when un-pinned (`Unknown`) OR the pinned payload satisfies `Error` AND IS
             // SENDABLE — matching the return-inference E-default (`sig.rs fill_ret`). A concrete
-            // payload that does NOT satisfy `Error`, OR satisfies `Error` but is NOT sendable (L7
-            // round 1 — the `Error` existential is sendable-bounded), is PRESERVED: unlike the
+            // payload that does NOT satisfy `Error`, OR satisfies `Error` but is NOT sendable (the
+            // `Error` existential is sendable like every protocol), is PRESERVED: unlike the
             // return path there is no post-hoc assignability re-check here, so forcing `Error` would
             // launder a non-Error (or non-sendable) value into the `Error` existential (`match x:
             // Err(e): e.message()` would check-pass then fault at runtime). Fires only on the
@@ -2884,8 +2884,8 @@ impl Checker {
         if self.recover_depth > 0 {
             return match t {
                 Ty::Result(ok, err) => {
-                    // A `recover:` result's error slot is the built-in `Error` existential, which L7
-                    // makes sendable-bounded — the recover result (`Result[_, Error]`) is itself
+                    // A `recover:` result's error slot is the built-in `Error` existential (sendable,
+                    // like every protocol) — the recover result (`Result[_, Error]`) is itself
                     // sendable, so a propagated error must satisfy Error AND be sendable, else a
                     // non-sendable payload would launder through the erased slot across a task
                     // boundary. Split the diagnostic so a satisfies-but-non-sendable error is not

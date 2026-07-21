@@ -727,10 +727,11 @@ aggregate) inside a task is a **compile error** (see below).
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
   a **`RwShared[T]`** handle,
-  a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree), and a
+  a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree), a
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor
-  is plain data).
+  is plain data), and a **user protocol existential** (Task 2, Go `chan interface` parity — `Channel[P]`
+  and protocol-typed spawn args cross; the erased witness rides by deep value copy).
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
   home module index, never a by-reference heap handle — on **both** engines identically. So a `spawn f()`
@@ -740,9 +741,11 @@ aggregate) inside a task is a **compile error** (see below).
   `Channel[fn(int)->int]` type-checks and a closure sent over a channel or returned from a factory runs.
   The rule is: **a closure crosses iff its captures are sendable.** The bare `fn` type cannot carry its
   captures, so that per-closure check runs at the airlock **sites**: a closure/nested-fn value whose
-  captures include a **non-sendable local** (a protocol existential, a live generator, a native handle
-  — see below) at a `spawn f()` **callee** or `spawn f(g)` **arg** is a **compile error**, matching the
-  `spawn:` block form. A bare **native** handle is a different case and stays non-sendable (below).
+  captures include a **non-sendable local** (a native handle — see below) at a `spawn f()` **callee** or
+  `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. A bare **native** handle
+  is a different case and stays non-sendable (below). (A protocol existential is **sendable** — Task 2,
+  Go `chan interface` parity — so capturing one is fine; a witness that carries an FFI/native handle is
+  caught at the runtime airlock, not here.)
 - **A recursive *local* `fn` cannot cross the airlock (clear diagnostic, deferred support).** A nested
   `fn` that calls itself captures its own name for recursion — the compiler's letrec gives it a
   self-cell, so the closure's capture graph is **self-referential** (it reaches its own heap handle).
@@ -754,11 +757,16 @@ aggregate) inside a task is a **compile error** (see below).
   recursive `fn` crosses as a plain `Func` (recursion resolves via its home-global slot, no capture) and
   IS sendable. Genuine cyclic *data* still reports the `maximum structural depth …` message; only a
   self-referential closure gets this one.
-- **Not sendable:** native handles (file/regex/HTTP `Response`/etc.), a **protocol existential** (it may
-  wrap a non-sendable value), and a **module namespace**. Capturing or passing any of these across the
-  airlock is a **compile error** at a direct spawn/`Channel` site — whether captured directly by a
-  `spawn:` block, or by a closure/nested-fn used as a `spawn f()` **callee**/**arg** (Task 2a gates the
-  callee/arg sites too). A **module-global** non-sendable value, by contrast, is a **read-only global**
+- **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
+  a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
+  witness crosses by deep value copy like any other value. The concrete witness's own sendability is
+  checked at each widening site; a witness that genuinely can't serialize (one carrying an FFI/native
+  handle) is rejected at the **runtime airlock** (`ensure_crossable`), recoverably and identically on
+  serial == M:N — not at construction.
+- **Not sendable (checker):** native handles (file/regex/HTTP `Response`/etc.) and a **module
+  namespace**. Capturing or passing either across the airlock is a **compile error** at a direct
+  spawn/`Channel` site — whether captured directly by a `spawn:` block, or by a closure/nested-fn used
+  as a `spawn f()` **callee**/**arg** (Task 2a gates the callee/arg sites too). A **module-global** non-sendable value, by contrast, is a **read-only global**
   resolvable in every task (like a free fn), **not** a per-task capture — reading it inside a task is fine
   and it is never gated (only *reassigning* or *in-place mutating* a module global inside a task is the
   error, below).

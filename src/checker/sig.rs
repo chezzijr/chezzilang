@@ -543,8 +543,9 @@ impl Checker {
     /// protocol AND ARE BOTH SENDABLE merge to `Unknown` — `fill_ret` then unifies them to the
     /// uniform `Error` existential, so branches returning distinct *error* types (`Err(EA())` vs
     /// `Err(EB())`) don't spuriously conflict. A pair where at least one side is a non-`Error`
-    /// concrete, OR satisfies `Error` but is NOT sendable (L7 round 1 — the `Error` existential is
-    /// sendable-bounded; order-coupled with `fill_ret`'s same guard), keeps `join_slot`'s strict
+    /// concrete, OR satisfies `Error` but is NOT sendable (the `Error` existential is sendable, like
+    /// every protocol, so a non-sendable concrete under it must stay concrete; order-coupled with
+    /// `fill_ret`'s same guard), keeps `join_slot`'s strict
     /// equal-or-conflict rule (a real type mismatch is still reported; forcing `Error` there would be
     /// unsound). Equal concretes are kept as-is — `fill_ret` decides Error-defaulting per slot.
     fn join_err_slot(&self, a: &Ty, b: &Ty) -> Option<Ty> {
@@ -643,8 +644,8 @@ impl Checker {
             // `Result[T]` semantics) when it is un-pinned (`Unknown`) OR the pinned payload actually
             // SATISFIES `Error` AND IS SENDABLE — so the common `Err("msg")` / custom-error branches
             // unify to the uniform `Error` existential. A concrete E that does NOT satisfy `Error`
-            // (a struct with no `message`, or `int`), OR satisfies `Error` but is NOT sendable (L7
-            // round 1 — the `Error` existential is sendable-bounded, so widening a non-sendable
+            // (a struct with no `message`, or `int`), OR satisfies `Error` but is NOT sendable (the
+            // `Error` existential is sendable like every protocol, so widening a non-sendable
             // concrete into it would launder a value that could never legally cross a `Channel`/
             // `spawn` boundary), is PRESERVED — forcing it to `Error` would launder a non-Error (or
             // non-sendable) value into the `Error` existential (the pass-2 return check / a

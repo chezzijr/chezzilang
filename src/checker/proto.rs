@@ -371,17 +371,14 @@ impl Checker {
             // A protocol existential slot: the actual type must satisfy the protocol WITH the carried
             // args (empty for a bare existential — reproduces the old `satisfies(a, p)`). This single
             // witness is shared by every value write-site (param/return/field/reassign) since they all
-            // route assignment through `assignable`. L7 round 2: when the target protocol is
-            // sendable-bounded (`Error`), the CONCRETE witness `a` must itself be sendable too — round
-            // 1 made the bare existential sendable, but a direct-literal/explicit-annotation write
-            // still carries a concrete `a` that could smuggle a non-sendable payload (e.g. a struct
-            // holding a generator) through the widened slot. `a` already being `Protocol("Error", ..)`
-            // (a prior widening) is always sendable (round 1), so this only rejects a genuine
-            // non-sendable concrete witness, not Error-to-Error.
-            (Protocol(p, pargs), a) => {
-                self.satisfies_args(a, p, pargs).is_ok()
-                    && (!self.sendable_bounded(p) || self.sendable(a))
-            }
+            // route assignment through `assignable`. Task 2 (option a): EVERY protocol widening now
+            // requires the concrete witness `a` be sendable (Go `chan interface` parity — all protocol
+            // existentials are sendable, not just `Error`). `a` already being a `Protocol(..)` (a prior
+            // widening) is always sendable, so this only rejects a genuine non-sendable concrete
+            // witness — in practice one reaching `Ty::Module` (near-unconstructible). A witness that
+            // carries an FFI/native handle is checker-sendable (its `Ty::Func`/handle type is
+            // sendable) and rejected at the RUNTIME airlock instead (`ensure_crossable`), not here.
+            (Protocol(p, pargs), a) => self.satisfies_args(a, p, pargs).is_ok() && self.sendable(a),
             // `Option`/`Result` are IMMUTABLE carriers — covariant element assignment stays sound
             // (no write-through alias), so they keep recursing via `assignable`. `List`/`Set`/`Map`
             // and user generic `Struct`/`Enum` are MUTABLE, by-reference containers: covariant type
@@ -1349,16 +1346,6 @@ impl Checker {
         self.sendable_rec(ty, &mut Vec::new())
     }
 
-    /// L7 round 1 — the single surface knob for which protocol EXISTENTIALS are sendable-bounded
-    /// (i.e. the witness itself, independent of its concrete payload, is allowed to cross a task
-    /// boundary). Only the built-in `Error` protocol qualifies today: its witness is commonly a
-    /// plain `str` or a simple struct, so `Channel[int!]` / `Channel[Error]` should type-check —
-    /// a non-sendable CONCRETE error (e.g. one wrapping a closure) is still caught, just later, at
-    /// the `Channel.send`/`spawn` boundary against the concrete type (not laundered here).
-    pub(super) fn sendable_bounded(&self, p: &str) -> bool {
-        p == "Error"
-    }
-
     /// `sendable` with a cycle guard (`stack` holds the struct/enum names currently being walked,
     /// so a recursive type like `Node { next: Option[Node] }` terminates).
     pub(super) fn sendable_rec(&self, ty: &Ty, stack: &mut Vec<String>) -> bool {
@@ -1408,12 +1395,17 @@ impl Checker {
             // so the bare `fn` type is sendable. The bare type cannot carry its captures, so the
             // per-closure capture-sendability check is done at the airlock SITES (the `spawn:` block
             // read gate + the spawn callee/arg gate in `sig.rs`), NOT here. `Ty::Module` stays
-            // non-sendable (a module namespace never crosses); a protocol existential is
-            // non-sendable UNLESS it's sendable-bounded (see `sendable_bounded` — currently just
-            // `Error`, L7 round 1), since a general protocol witness may wrap a closure.
+            // non-sendable (a module namespace never crosses).
             Ty::Func { .. } => true,
             Ty::Module(_) => false,
-            Ty::Protocol(p, _) => self.sendable_bounded(p),
+            // Task 2 (option a) — a protocol existential is SENDABLE (Go `chan interface` parity): the
+            // erased witness crosses by value like any other type, and the concrete witness is
+            // sendable-checked at each widening site (`assignable`). A witness that genuinely can't be
+            // serialized (one carrying an FFI/native handle, or a mid-`recover:` generator) is caught
+            // at the RUNTIME airlock (`ensure_crossable` over `has_handle`), which is an exhaustive,
+            // recoverable safety net identical on both engines — a checker-permissive type here is
+            // never UB, at worst a deferred fault.
+            Ty::Protocol(..) => true,
             // A first-class builtin fn value is pure code (no captured environment) — always
             // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
             // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable

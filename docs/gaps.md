@@ -18,20 +18,23 @@ channels; Chezzi should too). All DEFERRED to their OWN future sessions — do N
 spec. Ranked by value ÷ risk. (Context: Task 1 "align serial" landed 2026-07-21, `serial == M:N` by
 construction; these three finish the sendability story.)
 
-### 1. Protocol sendable under **(a)** — "Task 2" (HIGH value: Go `chan interface` parity)
-`sendable_bounded` (`src/checker/proto.rs`) is a hardcoded `p == "Error"` today — only `Channel[Error]`
-crosses; `Channel[UserProtocol]` is rejected (`"element type must be sendable, found Shape"`).
-**Decision (settled 2026-07-21): option (a)** — all-protocols-sendable-by-default, enforce "the widened
-witness must be sendable" at **every implicit widening site** (call args, `Ok`/`Err` payloads, struct
-fields, returns, channel `send`, collection literals); FFI + thread-affine handles are the ONLY rejected
-witnesses. NOT (b) opt-in `+Send` (drifts from Go), NOT (c) infer-per-use (non-local, confusing).
-Rationale: once the non-sendable floor is just FFI/handles, (a)'s false-positive set ≈ 0, and it is one
-simple Go-intuitive rule that generalizes what `Error` already does (the runtime deep-copies the concrete
-witness by its runtime type tag — existential erasure is compile-time-only). EXECUTION: spec against the
-post-Task-1 checker state → auto-task WITH spec → post-merge-gate + manual both-engine verify. Validation
-step: grep for real protocol values carrying FFI/handle fields used purely in-task (expect ≈0). Real risk
-= widening-site COVERAGE (a missed site is a soundness hole) — the reason it is post-JIT-freeze. Full
-decision record: `~/.claude/plans/2026-07-21-task2-protocol-sendable-decision.md`.
+### 1. Protocol sendable under **(a)** — "Task 2" — **DONE 2026-07-21**
+**LANDED.** All user protocol existentials are now sendable (Go `chan interface` parity): `Channel[P]`,
+protocol-typed spawn args / struct fields / `Ok`/`Err` payloads / returns all type-check. The change was
+**one logic line**, not a widening-site sweep: `sendable_rec`'s `Ty::Protocol` arm → `true` (was the
+hardcoded `sendable_bounded(p) == "Error"`, now deleted), and `assignable`'s Protocol arm keeps the
+existing `&& self.sendable(a)` concrete-witness guard uniformly.
+**Premise correction (the old note above was wrong on two points):** (1) `assignable`
+(`src/checker/proto.rs`) is the SOLE concrete→Protocol widening chokepoint — every widening category
+routes through it, so there was **no widening-site coverage risk** and no sweep to do. (2) The
+"non-sendable floor is FFI/handles" framing was backwards: the CHECKER marks FFI/`Func`/handles
+**sendable** (`Ty::Func`/handle types are sendable) — the RUNTIME airlock (`ensure_crossable` over
+`has_handle`, `src/vm/{sched,wire}.rs`) is the real gate for a genuinely-unserializable witness (one
+carrying an FFI handle, a mid-`recover:` generator), rejecting it recoverably and identically on
+serial == M:N. Post-change `sendable_rec` returns `false` only for `Ty::Module` (near-unconstructible as
+a value), so the witness-sendable clause is near-vacuous — protocols behave like every other type.
+Genuine-rejection coverage moved to the runtime: `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+Decision record: `~/.claude/plans/2026-07-21-task2-protocol-sendable-decision.md`.
 
 ### 2. Recursive-local-fn sendability (LOW value, memory-safety-critical)
 A nested recursive `fn` crossing the airlock is REJECTED today with a clear diagnostic (`src/vm/sched.rs`
@@ -1063,6 +1066,14 @@ dispatch to it, yielding `bool`; container `in` (list/set/map/str) is unchanged.
   `.concat`/`.merge` cover it.
 
 ### L7. Sendability-bounded protocol existentials — the sound way to admit `Channel[Error]` (✅ LANDED 2026-07-20)
+
+**⚠️ SUPERSEDED by Task 2 (2026-07-21, backlog item 1 above).** The `Error`-only / "Rust `Send`, not
+Go" framing below was **reversed**: all user protocol existentials are now sendable (Go `chan interface`
+parity), `sendable_bounded` is deleted, and the genuine-non-sendable gate is the **runtime airlock**
+(FFI/native handles), not a checker widening-site sweep. The "a struct satisfying `Error` yet holding a
+non-`Error` protocol field launders past the gate" concern below is moot — that struct is genuinely
+sendable now (a protocol field crosses by deep value copy); a field holding an FFI/generator handle is
+caught at the runtime airlock. The historical Error-only record is kept below for provenance.
 
 **✅ LANDED (branch `feat/l7-sendable-error`, commits `c1b4ab4` core gate · `997e642` direct-literal
 guard · `2b29ed3` regression/residual tests · `ba2ea7c` recover diagnostic).** Surface shipped:

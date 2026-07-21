@@ -284,6 +284,34 @@ fn parity_entry_fault(src: &str) -> String {
     ve.to_string()
 }
 
+// ----- Task 2 (option a): user protocol existentials cross the airlock -----
+
+/// A concrete struct widened to a user protocol existential rides a `Channel[Proto]` to a spawned
+/// task, which calls a protocol method and prints — byte-identical serial == M:N. (Was checker-
+/// rejected pre-change: `Channel[Drawable]` "must be sendable".)
+#[test]
+fn protocol_value_crosses_channel_three_engine() {
+    let src = "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    s: int\n    fn draw(self) -> str:\n        return \"sq\"\nfn main():\n    ch := Channel[Drawable]()\n    d: Drawable = Sq(1)\n    ch.send(d)\n    parallel:\n        spawn:\n            print(ch.recv().draw())\nmain()\n";
+    assert_parity(src);
+}
+
+/// Moved genuine-rejection coverage: an FFI handle (`Cffi`) crossing the airlock is rejected at
+/// RUNTIME on BOTH engines identically. NOTE: the checker no longer catches this — an extern fn's
+/// type is `fn(float)->float` (`Ty::Func`, always sendable), so the runtime airlock is the sole gate
+/// for genuinely-unserializable witnesses now that all protocol existentials are checker-sendable
+/// (Task 2 corollary). This is the replacement for the old checker-level "non-sendable protocol"
+/// rejections, which flipped to accepted because a plain protocol witness is a deep-copyable value.
+#[test]
+fn ffi_handle_cannot_cross_airlock_three_engine() {
+    let fault = parity_entry_fault(
+        "extern \"libm.so.6\":\n    fn cos(x: float) -> float\nfn use_fn(g: fn(float) -> float):\n    print(g(0.0))\nf := cos\nparallel:\n    spawn use_fn(f)\n",
+    );
+    assert!(
+        fault.contains("module/native/FFI handle cannot cross"),
+        "expected the airlock handle-reject fault, got: {fault}"
+    );
+}
+
 // ----- named-factory-import member resolution: RUNTIME unaffected (gap #4) -----
 // These runs bypass the checker (compile+run directly), so they pass pre- AND post-fix — they lock
 // that the checker-only member-resolution fix leaves the runtime output byte-identical on both
