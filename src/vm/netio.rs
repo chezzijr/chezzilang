@@ -1851,22 +1851,6 @@ impl Vm {
                             span,
                         ));
                     }
-                    // Option B — gate the submitted job for generator-global reachability, exactly like a
-                    // nursery spawn's spawn-site gate (`register_task` → `check_task_generator_reach`). An
-                    // `Executor` job is a zero-arg closure invoked with `vec![]`, so wrap the live callee in a
-                    // no-arg `PendingCall::Call` and run the SAME conservative reach scan. This reads
-                    // submit-time globals; the drain (`shutdown`) re-gates against the globals as they then
-                    // stand, closing the submit→shutdown TOCTOU. Runs on the host VM during body execution on
-                    // BOTH engines (serial and M:N), so their verdicts agree by construction. A generator-free
-                    // program short-circuits at zero cost inside `check_task_generator_reach`.
-                    self.check_task_generator_reach(
-                        &PendingCall::Call {
-                            callee: args[0],
-                            args: Vec::new(),
-                            span,
-                        },
-                        span,
-                    )?;
                     // The task closure crosses the airlock **by value** on BOTH engines
                     // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
                     // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
@@ -1890,16 +1874,6 @@ impl Vm {
                 let core = self.executor_core(h);
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
                 core.inner.lock().unwrap().shut = true;
-                // Option B (drain-time re-gate) — mirror the LAZY-nursery join re-gate: before draining,
-                // conservatively fault if ANY queued job could reach a live generator module-global AS THE
-                // GLOBALS STAND NOW. `submit` gates against submit-time globals, but a job only RUNS — and the
-                // M:N drain snapshot (`drain_executor_on_pool` → `ensure_snapshot`, which freezes a generator
-                // global to a `Poison`→`Nil`) is only taken — at shutdown, so a global reassigned to a
-                // generator between `submit` and `shutdown` would slip past the submit gate (serial then runs
-                // the real generator while an M:N worker replays Nil, diverging). This runs on the host VM on
-                // BOTH engines against the same live globals, BEFORE the M:N snapshot freezes them, so serial
-                // == M:N by construction.
-                self.gate_executor_queue(&core, span)?;
                 if self.parallel {
                     // B3.6: drain the whole queue under the lock (drop the guard before running any
                     // task — never hold the core lock across an invoke), then run the tasks on the
@@ -1962,41 +1936,6 @@ impl Vm {
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
         }
-    }
-
-    /// Option B (drain-time re-gate) — before a shut `Executor` drains its queue, conservatively fault
-    /// if ANY pending job could reach a live generator held in a module global AS THE GLOBALS STAND NOW.
-    /// This is the `Executor` analogue of the lazy-nursery JOIN-time re-gate ([`Vm::join_nursery`] →
-    /// [`Vm::check_task_generator_reach`]). Each queued job is a zero-arg closure, so we reconstruct its
-    /// live callee (`from_wire` — a `Handle` on the coop engine resolves to the same closure, a by-value
-    /// `Closure` on M:N rebuilds it over the host home module) and run the SAME reach scan the nursery
-    /// path uses. The queue is peeked (cloned), never consumed — the real drain still runs every job.
-    /// Short-circuits at zero cost when no generator body exists, or no module global embeds a live
-    /// generator, so no per-job `from_wire` happens for the common case.
-    pub(super) fn gate_executor_queue(
-        &mut self,
-        core: &Arc<ExecutorCore>,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        // Same two short-circuits as `check_task_generator_reach`, hoisted so a generator-free (or
-        // no-live-global-generator) program never pays a per-job `from_wire`.
-        if !self.has_generators || !self.any_module_global_embeds_generator() {
-            return Ok(());
-        }
-        // Peek (clone) the queued wire values — gating must not consume the queue the drain will run.
-        let queued: Vec<WireValue> = core.inner.lock().unwrap().queue.iter().cloned().collect();
-        for w in queued {
-            let callee = self.from_wire(w);
-            self.check_task_generator_reach(
-                &PendingCall::Call {
-                    callee,
-                    args: Vec::new(),
-                    span,
-                },
-                span,
-            )?;
-        }
-        Ok(())
     }
 
     /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully

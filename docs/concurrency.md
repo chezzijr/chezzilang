@@ -739,11 +739,9 @@ engines, **never UB**):
   `Response`/FFI extern — NOT the concurrency handles above, which *do* cross). A foreign OS/library
   resource can't be copied into another heap — rejected at the runtime airlock (`ensure_crossable`). This
   one is intrinsic and stays.
-- **[carve-out — planned fix]** a **module-GLOBAL live generator** a task reaches (a *frame-local*
-  generator crosses by value; the global path poisons instead of deep-copying). See `gaps.md` carve-out
-  **B**.
 - **[not a real limit]** two **checker-unreachable** suspended-generator shapes (multi-frame,
-  pending-`defer`) kept only as defensive guards — no valid program can construct them.
+  pending-`defer`) kept only as defensive guards — no valid program can construct them. (A frame-local
+  AND a module-global live generator both cross **by value** now — see the generator note below.)
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
@@ -818,8 +816,8 @@ aggregate) inside a task is a **compile error** (see below).
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
   carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
-  **non-sendable parked slot** still **rejects at the crossing** — the safer-in-direction property vs the
-  reach-gate (a slot is checked at serialize time, so there is no under-gate). Two reject shapes: a
+  **non-sendable parked slot** still **rejects at the crossing** — a slot is checked at serialize time,
+  so there is no under-gate. Two reject shapes: a
   genuinely-unbounded >10000-deep **acyclic** nest held live across a `yield` trips the `maximum
   structural depth …` depth cap; a value **cycle** threaded *through* the generator's own parked frame
   (the generator carries no wire id, so it can't back-reference) is caught by re-entering the same
@@ -836,22 +834,17 @@ aggregate) inside a task is a **compile error** (see below).
   remaining rejected shapes are **checker-unreachable** and kept only as defensive guards that reject
   cleanly (a graceful, byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a
   panic, **never** a silent mishandle): a suspension **with a pending `defer`** (`defer` is banned inside a
-  generator) and a **multi-frame** suspension (`yield` fires only in the generator's own body frame). A generator held
-  as a **module global** is NOT serialized by value — it follows **Option B — gated iff reachable**
-  (below) and snapshots as a poison leaf on M:N (the F1 shared-ref contract): it faults with the *same* error only when a
-  spawned task can actually reach it (a direct home-global read, or *any* call / operator / hook /
-  `print` of a value whose `str` hook reads it / unresolvable dispatch it could transitively reach — a
-  conservative reach analysis; an untouched generator global does **not** fault). The gate runs during
-  body execution on **both** engines — at the spawn site, re-checked at the lazy nursery join (so a
-  global reassigned to a generator between `spawn` and the join is still caught), and re-checked
-  conservatively over any still-pending **outer** nursery at a **nested** nursery's join (so a global
-  reassigned to a generator across nested nurseries, where M:N early-enlists the outer task against a
-  frozen snapshot, is caught too). The **same** gate covers the `Executor` task-entry path: a job is
-  checked at `Executor.submit` (the spawn-site analogue) and the whole pending queue is re-checked at
-  `Executor.shutdown`/drain (the join analogue, so a global reassigned to a generator between `submit`
-  and `shutdown` is still caught) — so serial and M:N agree by construction, and a poisoned snapshot
-  leaf (which replays as `nil`) guarantees an M:N worker can never obtain a real cross-heap generator
-  from a module global.
+  generator) and a **multi-frame** suspension (`yield` fires only in the generator's own body frame). A
+  generator held as a **module global** crosses **BY VALUE too** (backlog item B): a task that reaches it
+  gets its own independent deep copy through the same `to_wire`/`from_wire` path, via the per-task
+  module-global snapshot (`to_snap`) each task already takes. So two tasks reaching the same module-global
+  generator each drive their **own** copy (and the parent keeps its own), and the same reject shapes apply
+  (a non-sendable parked slot, a value cycle) — the reject is the real `to_wire` fault, re-stamped with the
+  nursery span, byte-identical on both engines. Memory safety rests on `from_wire` rebuilding a fresh
+  `GeneratorCore` on the worker heap (never a shared cross-heap `GcRef`) plus `ensure_crossable` barring
+  any parked host handle. (The earlier **Option-B reach-gate + poison→`nil`** model — which faulted any
+  task that *could reach* a module-global generator and snapshotted it inert — is **retired**: by-value
+  crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
 - **Captured locals are isolated copies; module globals are frozen.** Reassigning (or in-place mutating)
   a captured **local** inside a task is fine — it mutates that task's own copy, invisible to the parent (so
   it can't share state by accident). Both **reassigning** a captured **module global** AND **mutating it in

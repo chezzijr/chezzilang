@@ -1007,9 +1007,8 @@ fn executor_autodrain_skipped_on_os_exit() {
 
 #[test]
 fn executor_submit_generator_capturing_closure_crosses_by_value() {
-    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The generator
-    // lives in a LOCAL, not a module global, so the submit-time reach-gate does not fire — the by-value
-    // airlock (`to_wire`) now serializes it and the submitted task drives its own copy. WAS: both
+    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The by-value
+    // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: both
     // faulted the generator crossing; NOW: both run it, byte-identical on serial and M:N.
     let src = "\
 fn gen() -> Iterator[int]:
@@ -8728,9 +8727,9 @@ main()";
 
 #[test]
 fn generator_captured_into_spawn_callee_crosses_by_value() {
-    // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) now crosses it BY VALUE —
-    // the task drives its own copy. The module global `g := 7` is a non-generator, so the reach-gate
-    // stays inert; only the by-value airlock runs. serial == M:N, byte-identical.
+    // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) crosses it BY VALUE —
+    // the task drives its own copy. The module global `g := 7` is a non-generator, unrelated to the
+    // crossing. serial == M:N, byte-identical.
     let src = "\
 g := 7
 fn gen() -> Iterator[int]:
@@ -8747,11 +8746,11 @@ main()";
     assert_eq!(parallel_outcome(src).expect("M:N"), "1\n");
 }
 
-// ----- F3 path C: a LOCAL frame-holding generator crosses the airlock BY VALUE (deep copy) -----
-// A generator held in a frame LOCAL (not a module global) is serialized by `to_wire`/`from_wire` and
-// rebuilt on the receiving heap as an INDEPENDENT copy. Every parked slot is checked sendable at
-// serialize time, so a non-sendable slot still rejects at the crossing. The MODULE-GLOBAL reach-gate
-// is untouched (those still fault). All tests assert serial (`--serial` oracle) == M:N.
+// ----- F3 path C: a frame-holding generator crosses the airlock BY VALUE (deep copy) -----
+// A generator (whether held in a frame LOCAL or a MODULE GLOBAL — see the item-B tests below) is
+// serialized by `to_wire`/`from_wire` and rebuilt on the receiving heap as an INDEPENDENT copy. Every
+// parked slot is checked sendable at serialize time, so a non-sendable slot still rejects at the
+// crossing. All tests assert serial (`--serial` oracle) == M:N.
 
 /// A PENDING generator (never driven) captured into a `spawn:` block crosses by value; the receiving
 /// task drives it fully, and the sender's copy is INDEPENDENT (deep-copy: sender also drives the full
@@ -8996,6 +8995,186 @@ main()";
     assert_parity_out(src, "3\n");
 }
 
+// ----- Backlog item B: a MODULE-GLOBAL live generator crosses the airlock BY VALUE (deep copy) -----
+// The reach-gate + Option-B poison→Nil model is RETIRED. A module-global generator reached by a spawned
+// task now crosses BY VALUE exactly like a frame-local one (F3 path C): each task gets its own frozen
+// per-task snapshot (F1) whose generator arm deep-copies via `to_wire`/`from_wire` into the worker heap.
+// A genuinely non-sendable parked slot (deep acyclic nest) or a reference cycle still REJECTS at
+// serialize time — the direct `to_wire` reject, NOT a silent poison→Nil. serial (`--serial` oracle) == M:N.
+
+/// A module-global PENDING generator reached by a spawned task crosses by value and drives fully; the
+/// parent's own `g` is an INDEPENDENT copy (drives the full sequence after the join). Was the reach-gate
+/// fault (`a generator cannot be sent across tasks`); now crosses. Byte-identical serial == M:N.
+#[test]
+fn generator_module_global_reached_crosses_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+g := gen()
+fn main():
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in g:
+                out.send(x)
+    print(out.recv())
+    print(out.recv())
+    print(out.recv())
+    print(\"parent:\")
+    for x in g:
+        print(x)
+main()";
+    let expect = "1\n2\n3\nparent:\n1\n2\n3\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A module-global generator driven ONCE at top level (suspended, one parked frame) then reached by a
+/// spawned task crosses by value and RESUMES from its parked position. serial == M:N.
+#[test]
+fn generator_module_global_suspended_reached_resumes_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+g := gen()
+started := g.next()
+fn main():
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in g:
+                out.send(x)
+    print(out.recv())
+    print(out.recv())
+main()";
+    let expect = "2\n3\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// ISOLATION (adversarial, parity-blind, the memory-safety witness): TWO tasks each reach the SAME
+/// module-global generator and each gets an INDEPENDENT copy — both see the full `1,2,3`, and the
+/// parent's own `g` is likewise independent (full `1,2,3` after the join). A shared `GcRef` would show
+/// split/interleaved consumption instead. serial == M:N byte-identical.
+#[test]
+fn generator_module_global_two_tasks_independent_copies_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+g := gen()
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:
+        spawn:
+            for x in g:
+                a.send(x)
+        spawn:
+            for x in g:
+                b.send(x)
+    print(\"a:\")
+    print(a.recv())
+    print(a.recv())
+    print(a.recv())
+    print(\"b:\")
+    print(b.recv())
+    print(b.recv())
+    print(b.recv())
+    print(\"parent:\")
+    for x in g:
+        print(x)
+main()";
+    let expect = "a:\n1\n2\n3\nb:\n1\n2\n3\nparent:\n1\n2\n3\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
+/// A module-global generator carrying a genuinely NON-SENDABLE parked slot (a >10000-deep acyclic nest,
+/// tripping `MAX_STRUCTURAL_DEPTH`) still REJECTS recoverably when reached — the direct `to_wire`
+/// reject via the slow-arm `?`, NOT a poison→Nil, NOT a crash. Byte-identical serial == M:N.
+#[test]
+fn generator_module_global_parked_slot_nonsendable_rejects_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    keep: List[int] = []
+    deep: List[List[int]] = [keep]
+    for i in 0..10001:
+        deep = [deep]
+    yield 1
+    yield deep.len()
+g := gen()
+started := g.next()
+fn main():
+    out := Channel[int]()
+    parallel:
+        spawn:
+            for x in g:
+                out.send(x)
+main()";
+    let ve = vm_outcome(src).expect_err("serial: non-sendable parked slot must reject");
+    let pe = parallel_outcome(src).expect_err("M:N: non-sendable parked slot must reject");
+    assert!(ve.contains("maximum structural depth"), "serial: {ve}");
+    assert!(pe.contains("maximum structural depth"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// A module-global generator in a reference CYCLE still rejects (item A's `gens_on_stack` guard, via the
+/// `to_snap` → `to_wire` path). `box` (module global) holds `g` and `g`'s Pending arg holds `box`, so
+/// `box -> g -> box` is a cycle through the non-preservable generator. Byte-identical serial == M:N.
+#[test]
+fn generator_module_global_in_data_cycle_rejects_both() {
+    let src = "\
+fn gen(box: List[Iterator[int]]) -> Iterator[int]:
+    yield box.len()
+box: List[Iterator[int]] = []
+g := gen(box)
+pushed := box.push(g)
+fn main():
+    parallel:
+        spawn:
+            for x in g:
+                print(\"got {x}\")
+main()";
+    let ve =
+        vm_outcome(src).expect_err("serial: module-global generator in a data cycle must reject");
+    let pe = parallel_outcome(src)
+        .expect_err("M:N: module-global generator in a data cycle must reject");
+    assert!(ve.contains("reference cycle"), "serial: {ve}");
+    assert!(pe.contains("reference cycle"), "M:N: {pe}");
+    assert_eq!(ve, pe, "serial == M:N fault");
+}
+
+/// The deleted `gate_executor_queue` path: a module-global generator reached inside an `Executor.submit`
+/// job now crosses by value and drives (was the executor reach-gate fault). serial == M:N.
+#[test]
+fn generator_module_global_via_executor_crosses_both() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+    yield 2
+g := gen()
+out := Channel[int]()
+fn job():
+    for x in g:
+        out.send(x)
+fn main():
+    ex := Executor()
+    ex.submit(job)
+    ex.shutdown()
+    print(out.recv())
+    print(out.recv())
+main()";
+    let expect = "1\n2\n";
+    assert_eq!(vm_outcome(src).expect("serial"), expect);
+    assert_eq!(parallel_outcome(src).expect("M:N"), expect);
+}
+
 /// CHECKER-UNREACHABLE defensive guard (backlog arm c): `defer` is banned inside a generator body
 /// (`checker::sig` — "`defer` is not supported inside a generator"), so a suspended generator's
 /// parked frame can NEVER carry a pending `defer` from checker-valid source. This test reaches the
@@ -9161,87 +9340,31 @@ main()";
     );
 }
 
-/// Cross-module generator-reach fault: run a MULTI-FILE program on BOTH engines and assert each
-/// faults with the airlock message. Mirrors the single-file `assert_genreach_faults` for the
-/// `mod.fn(args)` reach that only a module graph can express.
-fn assert_genreach_faults_file(files: &[(&str, &str)], entry: &str, label: &str) {
-    let t = TmpDir::new();
-    let mut entry_path = None;
-    for (rel, contents) in files {
-        let p = t.write(rel, contents);
-        if *rel == entry {
-            entry_path = Some(p);
-        }
-    }
-    let entry_path = entry_path.expect("entry must be one of the files");
-    for (engine, out) in [
-        ("serial", run_file(&entry_path)),
-        ("M:N", run_file_p(&entry_path)),
-    ] {
-        let (_, _, r, _) = out;
-        let err = r
-            .err()
-            .unwrap_or_else(|| panic!("{label}/{engine}: expected a fault, got Ok"));
-        assert!(
-            err.to_string()
-                .contains("a generator cannot be sent across tasks"),
-            "{label}/{engine}: got: {err}"
-        );
-    }
-}
-
-/// Confirmed cross-module under-gate (the argc>0 `CallMethod` regression): a spawned task calls a
-/// module-member fn `genmod.bar(10)` whose body reads a live generator global in ITS OWN module.
-/// The reach scan must resolve the module member and gate — was serial-clean (prints 13) / M:N-fault
-/// (nil-iterate), a soundness divergence.
+/// Backlog item B, cross-module path: a spawned task calls a module-member fn `genmod.bar(10)` whose
+/// body drives a live generator global in ITS OWN module. The generator crosses BY VALUE via the
+/// other module's per-task snapshot, so the task drives its own copy: `10 + 1 + 2 = 13`. Byte-identical
+/// serial == M:N (was the cross-module reach-gate fault).
 #[test]
-fn genreach_cross_module_member_call_faults_both() {
-    let genmod = (
+fn generator_cross_module_member_call_crosses_both() {
+    let t = TmpDir::new();
+    t.write(
         "genmod.chz",
         "fn gen() -> Iterator[int]:\n    yield 1\n    yield 2\ng := gen()\nfn bar(n: int) -> int:\n    total := n\n    for x in g:\n        total = total + x\n    return total\n",
     );
-    let main = (
+    let ep = t.write(
         "main.chz",
         "import genmod\nparallel:\n    spawn:\n        r := genmod.bar(10)\n        print(r)\n",
     );
-    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-direct");
+    let (so, _, sr, _) = run_file(&ep);
+    let (po, _, pr, _) = run_file_p(&ep);
+    sr.expect("serial cross-mod generator crossing");
+    pr.expect("M:N cross-mod generator crossing");
+    assert_eq!(so, "13\n");
+    assert_eq!(po, "13\n");
 }
 
-/// The argc==0 sibling of the above (`genmod.baz()`) — a module-member call with NO args — must also
-/// gate (it was a pre-existing hole on both main and the branch: `any_user_method_impl_reaches`
-/// scans method tables, never module-global fns).
-#[test]
-fn genreach_cross_module_member_call_argc0_faults_both() {
-    let genmod = (
-        "genmod.chz",
-        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\nfn baz() -> int:\n    total := 0\n    for x in g:\n        total = total + x\n    return total\n",
-    );
-    let main = (
-        "main.chz",
-        "import genmod\nparallel:\n    spawn:\n        r := genmod.baz()\n        print(r)\n",
-    );
-    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-argc0");
-}
-
-/// The INDIRECT-receiver form: aliasing the module into a local (`m := genmod; m.bar(10)`) inside the
-/// task body. The receiver is a `GetLocal`, unresolvable → OPAQUE gate (the P2-class hole for
-/// modules — must fault on BOTH engines).
-#[test]
-fn genreach_cross_module_member_alias_faults_both() {
-    let genmod = (
-        "genmod.chz",
-        "fn gen() -> Iterator[int]:\n    yield 1\ng := gen()\nfn bar(n: int) -> int:\n    total := n\n    for x in g:\n        total = total + x\n    return total\n",
-    );
-    let main = (
-        "main.chz",
-        "import genmod\nparallel:\n    spawn:\n        m := genmod\n        r := m.bar(10)\n        print(r)\n",
-    );
-    assert_genreach_faults_file(&[genmod, main], "main.chz", "cross-mod-alias");
-}
-
-/// A CLEAN cross-module member call (`geomod.helper()` reads no generator) must STILL run clean on
-/// both engines even with a generator global resident — the resolver must recurse and prove the
-/// callee clean, not blanket-gate every module-member name.
+/// A CLEAN cross-module member call (`geomod.helper()` reads no generator) runs clean on both engines
+/// with a generator global resident in the imported module.
 #[test]
 fn genreach_cross_module_clean_member_call_ok_both() {
     let t = TmpDir::new();

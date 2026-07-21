@@ -193,7 +193,9 @@ coherently so the recover boundary resumes intact. The two remaining rejected sh
 cleanly (a byte-identical-on-both-engines error): a suspension **with a pending `defer`** (`defer` is
 banned inside a generator) and a **multi-frame** suspension (`yield` fires only in the generator's own
 body frame). A generator held in a **module
-global** is still handled by the reach-gate (below) and snapshotted as a poison leaf on M:N. The
+global** crosses **BY VALUE too** (backlog item B): a task that reaches it gets its own independent
+deep copy, exactly like a frame-local one (each task already snapshots every module global per-task, so
+a per-task generator copy fits the model). The
 adapter-struct model remains the recommended way to write lazy sequences. Live status is tracked in
 [`PROGRESS.md`](../PROGRESS.md).
 
@@ -207,29 +209,21 @@ then idempotent None). This lets a plain `list` flow into the same Take/Mapped a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
 The cursor is **sendable** — it crosses the `spawn`/channel airlock as a deep copy (an independent
-snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** held in a
-frame **local** (a value returned by calling a generator `fn`) is likewise **sendable BY VALUE** (F3
-path C): it crosses **any** task airlock as data — passed/captured into a `spawn`, or stored in a
-`Channel`/`Shared`/`RwShared`/`Atomic` — as an **independent deep copy** (its parked frame rebuilt on the
-receiver), with each parked slot recursively wired so a non-sendable slot rejects at the crossing. The
-three HARD-ARM parked shapes (mid-`recover:`, pending `defer`, multi-frame) reject cleanly with a
-graceful, catchable `... cannot be sent across tasks` error, **never** a panic. A generator held as a
-**module global** is handled by **Option B — gated iff reachable**: it is faulted with the *same* graceful error **only when a spawned task can
-actually reach it** — a direct home-global read, or *any* call / operator overload / protocol hook /
-`print` of a value whose `str(self)` hook reads the generator / unresolvable dispatch through which it
-could transitively be reached (a conservative reach analysis: if it cannot prove the task never reaches
-the generator, it gates). An **untouched** generator global does **not** fault. Crucially this decision
-is made during body execution on **both** engines — at the spawn site, re-checked at the lazy
-nursery join (so a global reassigned to a generator between `spawn` and the join is still caught), and
-re-checked conservatively over any still-pending **outer** nursery at a **nested** nursery's join (a
-generator reassigned across nested nurseries, where M:N early-enlists the outer task against a frozen
-snapshot, is caught too), and — via the same gate — at the `Executor` task-entry path (`submit` is the
-spawn-site check, `shutdown`/drain the join re-check, closing the submit→shutdown TOCTOU) — so the
-serial and M:N engines agree by construction: an untouched generator global runs clean on both, a
-reached one faults identically on both. (Earlier, the M:N engine
-eagerly snapshotted every module global and faulted on the generator even when no task touched it,
-diverging from the serial engine, which never snapshots; the reach gate + a poisoned snapshot leaf,
-which replays as `nil` and can never fabricate a cross-heap generator, close that divergence.)
+snapshot + position on the receiver), exactly like a `list`. A frame-holding **generator** is likewise
+**sendable BY VALUE** — whether held in a frame **local** (F3 path C) or in a **module global**
+(backlog item B): it crosses **any** task airlock as data — passed/captured into a `spawn`, stored in a
+`Channel`/`Shared`/`RwShared`/`Atomic`, submitted to an `Executor`, or reached via a module global — as
+an **independent deep copy** (its parked frame rebuilt on the receiver), with each parked slot
+recursively wired so a non-sendable slot rejects at the crossing. Because every task already gets its own
+frozen per-task copy of every module global, two tasks reaching the same module-global generator each
+drive their **own** independent copy (and the parent keeps its own), on both engines byte-identically.
+The reject shapes stay: a genuinely non-sendable parked slot (a host `Module`/`Native`/FFI handle, or a
+>depth-cap acyclic nest), a value cycle threaded through the generator, and the three HARD-ARM parked
+shapes (mid-`recover:` is now sendable; pending `defer` and multi-frame are checker-unreachable defensive
+guards) all reject cleanly with a graceful, catchable `... cannot be sent across tasks` error, **never** a
+panic, identically on both engines. (The earlier **Option-B reach-gate + poison→`nil`** model for
+module-global generators is retired — safety is now provided by the by-value deep copy, which rebuilds a
+fresh generator on the receiving heap and never shares a cross-heap handle, not by an inert `nil` leaf.)
 
 A generator is likewise **not re-entrant**: resuming one that is *already running* — a `.next()` or a
 `for` over the generator currently executing, reached from inside its own body — raises the same shape

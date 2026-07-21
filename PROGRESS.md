@@ -4,6 +4,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CONCURRENCY / AIRLOCK (2026-07-21, `auto-task/module-global-generator-sendable`) — `docs/gaps.md`
+> backlog item **B** CLOSED: a MODULE-GLOBAL live generator now crosses the airlock BY VALUE (deep copy),
+> exactly like a frame-local one (F3 path C). The reach-gate + Option-B poison→`nil` model is RETIRED.**
+> `to_snap_depth`'s fast path no longer excludes generator-embedding values (`!value_embeds_generator`
+> clause dropped), so a handle-free module-global generator with all-sendable parked slots rides the
+> `SnapValue::Wire(to_wire…)` lane; the slow `Obj::Generator` arm re-raises the real `to_wire` reject (a
+> non-sendable parked slot / reference cycle) and `ensure_crossable`s any parked host handle — instead of
+> silently emitting `SnapValue::Poison` (→`nil`). Memory safety is now by-value deep copy: `from_wire`
+> rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap `GcRef`); each task already
+> snapshots every module global per-task (`ensure_snapshot`, both engines since `6dca22c`), so two tasks
+> reaching the same module-global generator each drive their OWN independent copy — `serial == M:N` by
+> construction (verified byte-identical on the real binary, both engines). **The stale MED-HIGH risk
+> premise** — a "serial=shared-ref vs M:N=by-value-copy divergence" (why `7b73e7c` kept the
+> `value_embeds` clause + `Poison`) — was dead after `6dca22c` made serial snapshot per-task too.
+> **Net-deletion:** removed the whole reach-gate — `check_task_generator_reach`,
+> `check_outer_pending_generator_reach`, `check_task_reach_conservative`, `scan_proto_reaches_generator`,
+> `proto_reaches_generator(+_rec)` + resolve/scan helpers, `any_hook_reaches_generator`,
+> `any_module_global_embeds_generator`, `module_slot_embeds_generator`, `value_embeds_generator`,
+> `gate_executor_queue` (netio), the `has_generators` VM field, and the `SnapValue::Poison` variant — plus
+> the ~30 now-obsolete reach-gate `*_faults_both`/`genreach_*` tests (their scenarios now cross or reject
+> for a real serialize-time reason). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
+> `generator_module_global_{reached_crosses,suspended_reached_resumes,two_tasks_independent_copies,
+> parked_slot_nonsendable_rejects,in_data_cycle_rejects,via_executor_crosses}_both` +
+> `generator_cross_module_member_call_crosses_both`. The memories
+> `generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the RETIRED model.
+
 > **✅ CONCURRENCY / SOUNDNESS (2026-07-21, `auto-task/serial-module-globals`) — `docs/gaps.md` §B3
 > CLOSED by construction: the SERIAL engine now snapshots module globals per spawned task, matching M:N.**
 > Root cause: a cooperative child aliased the shell's real `module_objs` while an M:N fiber installed its
@@ -34,8 +60,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > so the pin is defense-in-depth, verified by adversarial review, not by a crashing test.) **Deleted** (were compensating for the divergence): `check_spawn_global_mutation` + its free-fn
 > helpers, the method-mutation gate (`infer_method_call`), the index/field-assign gate (`check_assign`),
 > the reassign gate, and their `rejects()` checker tests (net-negative lines). **Kept**: the local-capture
-> sendability gate + `to_snap`'s Poison/Arc arms + the (redundant-but-harmless) generator reach-gate
-> (retiring it is a separate follow-up). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
+> sendability gate + `to_snap`'s Arc arms (the generator reach-gate + `SnapValue::Poison` are now GONE —
+> see the item-B banner at the top of this file; module-global generators cross BY VALUE). New parity RUN tests (serial == M:N, `src/vm/parity_tests.rs`):
 > `serial_module_global_method_call_mutation_isolates_parity` (residual A, cross-module fn call),
 > `serial_module_global_spawned_callee_mutation_isolates_parity` (C), `..._task_local_alias_...` (D),
 > `..._direct_mutation_forms_...` (list/map/struct/set/bytearray/reassign),

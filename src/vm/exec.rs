@@ -71,9 +71,6 @@ impl Vm {
             acc += p.code.len() as u32;
         }
         let quicken = vec![Q_COLD; acc as usize];
-        // Option B — cache whether the program contains ANY generator body, so the module-global
-        // generator reachability gate short-circuits to zero cost for generator-free programs.
-        let has_generators = program.protos.iter().any(|p| p.is_generator);
         Vm {
             program,
             heap: Heap::new(),
@@ -95,7 +92,6 @@ impl Vm {
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: false,
-            has_generators,
             parallel: false,
             nurseries: Vec::new(),
             mn_scopes: Vec::new(),

@@ -134,22 +134,29 @@ recursion before the depth cap would trip, so the generator arm must guard the c
 `generator_in_data_cycle_rejects_both` + `suspended_generator_in_data_cycle_rejects_both` (the
 gen+container cycle reject). `src/vm/{wire.rs,sched.rs,fxhash.rs,core.rs,stmt.rs}`.
 
-### B. Module-GLOBAL live generator sendable by value (LOWER value, MED-HIGH risk)
-**The inconsistency:** a FRAME-LOCAL live generator crosses the airlock by value (F3 path C, deep copy of
-its execution state); the SAME generator stored in a MODULE GLOBAL is instead **reach-gated** (Option B —
-`generator_airlock_err`/`check_task_generator_reach`, `src/vm/sched.rs`) and snapshotted as a poison→`nil`
-leaf, so a task that reaches it FAULTS `a generator cannot be sent across tasks`. The reason is purely
-mechanical: the module-global SNAPSHOT path (`to_snap`) poisons generators instead of deep-copying them,
-whereas the crossing path (`to_wire`) now serializes them by value. **The fix:** make the `to_snap`
-generator arm deep-copy the generator by value (reuse the `to_wire` path — the `to_wire && !has_handle`
-fast lane already exists) instead of emitting `SnapValue::Poison`, then drop the reach-gate for the
-now-sendable states. This is consistent with the F1 module-global-isolation contract: each task ALREADY
-gets its own frozen copy of every module global, so a per-task generator copy fits the model. **Risk:**
-MED-HIGH — touches the `to_snap`/poison path + the whole reach-gate machinery + the F1 memory-safety
-guarantee (poison→nil is what currently guarantees an M:N worker can never obtain a real cross-heap
-generator from a global). Must preserve: a generator carrying a genuinely non-sendable slot still rejects;
-the reach-gate deletion doesn't reopen a memory-safety hole. Subagent-driven with per-delta review, NOT a
-blind auto-task. Related memory: `generator-airlock-option-b-reach-gate`, `airlock-sendability-architecture`.
+### B. Module-GLOBAL live generator sendable by value — ✅ DONE (2026-07-21)
+**LANDED.** A module-global live generator now crosses the airlock BY VALUE (deep copy), exactly like a
+frame-local one (F3 path C) — the reach-gate + Option-B poison→`nil` model is RETIRED. `to_snap_depth`'s
+fast path no longer excludes generator-embedding values (`!value_embeds_generator` clause dropped), so a
+handle-free module-global generator with all-sendable parked slots rides the `SnapValue::Wire(to_wire…)`
+lane; its slow `Obj::Generator` arm re-raises the real `to_wire` reject (non-sendable parked slot /
+reference cycle) and `ensure_crossable`s any parked host handle, instead of silently poisoning to `nil`.
+Each task already snapshots every module global per-task (`ensure_snapshot`, both engines since `6dca22c`),
+so two tasks reaching the same module-global generator each drive their OWN independent copy — memory-safe
+because `from_wire` rebuilds a fresh `GeneratorCore` on the worker heap (no shared cross-heap `GcRef`).
+**Net-deletion:** the whole reach-gate machinery is gone — `check_task_generator_reach`,
+`check_outer_pending_generator_reach`, `check_task_reach_conservative`, `scan_proto_reaches_generator`,
+`proto_reaches_generator(+_rec)` and its resolve/scan helpers, `any_hook_reaches_generator`,
+`any_module_global_embeds_generator`, `module_slot_embeds_generator`, `value_embeds_generator`, the
+`gate_executor_queue` executor path, the `has_generators` VM field, and the `SnapValue::Poison` variant.
+**CORRECTION to the original spec premise:** the "serial=shared-ref vs M:N=by-value-copy divergence" that
+rated this MED-HIGH (why the `value_embeds` clause + `Poison` were kept, commit `7b73e7c`) was STALE after
+`6dca22c` — the serial engine ALSO snapshots module globals per-task via the same memoized
+`ensure_snapshot`/`to_snap`, so a per-task by-value generator copy is `serial == M:N` by construction.
+Tests: `generator_module_global_{reached_crosses,suspended_reached_resumes,two_tasks_independent_copies,
+parked_slot_nonsendable_rejects,in_data_cycle_rejects,via_executor_crosses}_both` +
+`generator_cross_module_member_call_crosses_both` (`src/vm/parity_tests.rs`). The memories
+`generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the retired model.
 
 ### NOT on the backlog (settled — not limitations)
 - **Host handles** (Module/Native/Cffi in a value) — fundamental, stays rejected. Correct.
@@ -189,9 +196,12 @@ with 5+ prior waves). Four findings survived re-verification on the real binary:
   doesn't cover a mutex self-deadlock), and on the `--serial` oracle it **silently loses the inner write**
   (no real lock). So a same-box-reentrant `update` is a `--serial` ≠ M:N masker; documented, not chased.
 
-- **F3 — generator reach-gate over-gates; docs contradict it.** *(Path C LANDED — see below; the
-  reach-gate itself is RETAINED as a now-redundant belt-and-suspenders and the over-gate/doc-contradiction
-  cleanup is the remaining open follow-up.)* Any spawned task that
+- **F3 — generator reach-gate over-gates; docs contradict it.** *(✅ FULLY RESOLVED 2026-07-21 by
+  backlog item B — the reach-gate is now DELETED, not retained. A module-global generator crosses BY
+  VALUE like a frame-local one, so there is no gate left to over-fire and the doc-contradiction is moot.
+  The historical write-up below — Path C landing + the `7b73e7c` judge-phase Poison-restore — is kept as
+  the record of the intermediate state; the "retained belt-and-suspenders" and "remaining open follow-up"
+  it describes no longer apply.)* Any spawned task that
   makes a call (`spawn: ch.send(99)`) or captures a **module-global** generator **faults** (`a generator
   cannot be sent across tasks`) whenever ANY module-global generator exists — even though the task never
   touches it. Both engines identical → **no soundness/parity bug**. But `docs/concurrency.md` +

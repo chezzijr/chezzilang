@@ -215,13 +215,14 @@ pub enum WireValue {
         proto: ProtoId,
         home: Option<usize>,
     },
-    /// F3 path C — a LOCAL frame-holding generator carried across the airlock **by value** as a DEEP
-    /// COPY. Unlike a cursor (plain snapshot data), a generator is frozen VM execution state; this arm
-    /// serializes exactly that: its `proto` (shared via `Arc<Program>`), its `home` index (like
+    /// A frame-holding generator carried across the airlock **by value** as a DEEP COPY — whether held
+    /// in a frame LOCAL (F3 path C) or a MODULE GLOBAL (backlog item B, via `to_snap`). Unlike a cursor
+    /// (plain snapshot data), a generator is frozen VM execution state; this arm serializes exactly that:
+    /// its `proto` (shared via `Arc<Program>`), its `home` index (like
     /// [`Closure`](WireValue::Closure)), its backing closure (if any, wired recursively), and its
     /// lifecycle `state`. Every parked `Value` (a `Pending` call arg or a `Suspended` operand-stack
     /// slot) is wired recursively, so a non-sendable parked slot rejects AT SERIALIZE TIME exactly as a
-    /// list of that value would — the safer-in-direction property vs the reach-gate. `from_wire`
+    /// list of that value would. `from_wire`
     /// rebuilds a FRESH independent `GeneratorCore` on the receiving heap (deep-copy independence, like
     /// `Cell`/`Iter`). A generator suspended mid-`recover:` also crosses — its live handler stack is
     /// pure plain-data (carried on `WireGenState::Suspended`). A generator with a pending `defer` or
