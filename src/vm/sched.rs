@@ -25,8 +25,19 @@ enum DirectCallee {
 /// contract). Struct/List/Map/… earn no id, so a pure-data cycle still trips the depth cap and rejects.
 #[derive(Default)]
 struct WireMemo {
-    path: super::fxhash::FxHashMap<GcRef, u32>,
+    /// GcRef of a `Cell`/`Closure` currently on the serialize DFS stack → `(id, nonpreserved_depth)`,
+    /// where `nonpreserved_depth` is [`WireMemo::nonpreserved_depth`] captured when the node was pushed.
+    /// The stored depth is load-bearing: a back-edge may only be encoded as a `Backref` when the cycle
+    /// it closes passes ONLY through `Cell`/`Closure` nodes (the identity-preserved ones). If a
+    /// non-preserved container (`Struct`/`List`/`Map`/…) was entered AFTER this node was pushed, the
+    /// cycle runs through a node that serialize would DUPLICATE (containers get no id), so the round-trip
+    /// would silently break aliasing — that mixed cycle is rejected, not back-referenced.
+    path: super::fxhash::FxHashMap<GcRef, (u32, u32)>,
     next_id: u32,
+    /// Count of non-identity-preserved containers (`Struct`/`List`/`Tuple`/`Map`/`Set`/`Enum`/`NewType`/
+    /// `Iter`/`Generator`) currently on the serialize DFS stack. Bumped around each such arm's recursion;
+    /// compared against a `Cell`/`Closure`'s stored depth at a back-edge to reject mixed cycles.
+    nonpreserved_depth: u32,
 }
 
 impl Vm {
@@ -3151,12 +3162,18 @@ impl Vm {
                     captured,
                     home,
                 } => {
-                    if let Some(&id) = memo.path.get(&h) {
+                    if let Some(&(id, np_at_push)) = memo.path.get(&h) {
+                        if memo.nonpreserved_depth > np_at_push {
+                            return Err(self.err(
+                                "a recursive local fn captured inside a cyclic data structure cannot be sent across a task boundary — the cycle passes through a struct/list/map (hoist the fn to module scope: a module-global recursive fn is sendable)".to_string(),
+                                Span { line: 0, col: 0 },
+                            ));
+                        }
                         WireValue::Backref(id)
                     } else {
                         let id = memo.next_id;
                         memo.next_id += 1;
-                        memo.path.insert(h, id);
+                        memo.path.insert(h, (id, memo.nonpreserved_depth));
                         let names = &self.program.protos[*proto].capture_names;
                         let mut wcap = Vec::with_capacity(captured.len());
                         for (i, cv) in captured.iter().enumerate() {
@@ -3205,20 +3222,28 @@ impl Vm {
                 // value-compared). Cross-safe for both the serial and M:N engines.
                 Obj::Ptr(a) => WireValue::Ptr(*a),
                 Obj::List(items) => {
+                    // Non-identity-preserved container: mark it on the DFS stack so a `Cell`/`Closure`
+                    // back-edge that closes a cycle THROUGH this list is rejected (it would be
+                    // duplicated, not shared) rather than mis-encoded as a `Backref`.
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
                         out.push(self.to_wire_depth(*x, depth + 1, memo)?);
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::List(out)
                 }
                 Obj::Tuple(items) => {
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
                         out.push(self.to_wire_depth(*x, depth + 1, memo)?);
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Tuple(out)
                 }
                 Obj::Map(m) => {
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(m.entries.len());
                     for (hash, k, val) in &m.entries {
                         out.push((
@@ -3227,13 +3252,16 @@ impl Vm {
                             self.to_wire_depth(*val, depth + 1, memo)?,
                         ));
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Map(out)
                 }
                 Obj::Set(s) => {
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(s.entries.len());
                     for (hash, e) in &s.entries {
                         out.push((*hash, self.to_wire_depth(*e, depth + 1, memo)?));
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Set(out)
                 }
                 Obj::Struct { name, fields, .. } => {
@@ -3252,6 +3280,7 @@ impl Vm {
                         })
                         .unwrap_or_default();
                     let vals: Vec<Value> = fields.clone();
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(vals.len());
                     for (i, val) in vals.iter().enumerate() {
                         let k = names
@@ -3260,16 +3289,19 @@ impl Vm {
                             .unwrap_or_else(|| i.to_string().into_boxed_str());
                         out.push((k, self.to_wire_depth(*val, depth + 1, memo)?));
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Struct { name, fields: out }
                 }
                 Obj::Enum {
                     variant_id,
                     payload,
                 } => {
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(payload.len());
                     for x in payload {
                         out.push(self.to_wire_depth(*x, depth + 1, memo)?);
                     }
+                    memo.nonpreserved_depth -= 1;
                     // M19 lever #2 — carry the dense `variant_id` directly on the COLD wire path. All
                     // workers share one `Arc<Program>`, so the id is meaningful on both sides; carrying
                     // it (not the name) preserves native-vs-user identity under variant-name shadowing.
@@ -3280,10 +3312,15 @@ impl Vm {
                 }
                 // A newtype crosses by value (deep copy), like a 1-field struct: carry its key + the
                 // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
-                Obj::NewType { type_key, inner } => WireValue::NewType {
-                    type_key: type_key.clone(),
-                    inner: Box::new(self.to_wire_depth(*inner, depth + 1, memo)?),
-                },
+                Obj::NewType { type_key, inner } => {
+                    memo.nonpreserved_depth += 1;
+                    let winner = self.to_wire_depth(*inner, depth + 1, memo)?;
+                    memo.nonpreserved_depth -= 1;
+                    WireValue::NewType {
+                        type_key: type_key.clone(),
+                        inner: Box::new(winner),
+                    }
+                }
                 // F3 path C — a LOCAL frame-holding generator crosses the airlock BY VALUE as a DEEP
                 // COPY: its `proto` (shared via `Arc<Program>`), `home` index, backing closure, and
                 // lifecycle state, with every parked slot wired recursively so a non-sendable slot
@@ -3295,6 +3332,11 @@ impl Vm {
                 // frame); a mid-`recover:` handler, a pending `defer`, or >1 parked frame is a HARD ARM
                 // rejected cleanly below (never mis-serialized).
                 Obj::Generator(g) => {
+                    // Non-identity-preserved (no id/Backref): a cycle through a generator's parked
+                    // slots would be duplicated, so mark it on the stack (rejects a mixed cycle at the
+                    // inner `Cell`/`Closure` back-edge). A recursive closure PARKED in the generator is
+                    // still fine — its self-cell cycle stays at this same depth, so it back-references.
+                    memo.nonpreserved_depth += 1;
                     let home = self.home_index(g.home);
                     let closure = match g.closure {
                         Some(c) => Some(Box::new(self.to_wire_depth(
@@ -3366,6 +3408,7 @@ impl Vm {
                             }
                         }
                     };
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Generator {
                         proto: g.proto,
                         home,
@@ -3383,12 +3426,18 @@ impl Vm {
                 // `WireValue::Backref(id)` and stops. Removed from `path` on exit, so an off-path alias
                 // is deep-copied independently (the deep-copy-independence contract holds).
                 Obj::Cell(v) => {
-                    if let Some(&id) = memo.path.get(&h) {
+                    if let Some(&(id, np_at_push)) = memo.path.get(&h) {
+                        if memo.nonpreserved_depth > np_at_push {
+                            return Err(self.err(
+                                "a recursive local fn captured inside a cyclic data structure cannot be sent across a task boundary — the cycle passes through a struct/list/map (hoist the fn to module scope: a module-global recursive fn is sendable)".to_string(),
+                                Span { line: 0, col: 0 },
+                            ));
+                        }
                         WireValue::Backref(id)
                     } else {
                         let id = memo.next_id;
                         memo.next_id += 1;
-                        memo.path.insert(h, id);
+                        memo.path.insert(h, (id, memo.nonpreserved_depth));
                         let inner = self.to_wire_depth(*v, depth + 1, memo)?;
                         memo.path.remove(&h);
                         WireValue::Cell {
@@ -3407,10 +3456,12 @@ impl Vm {
                 Obj::Iter { items, pos } => {
                     let pos = *pos;
                     let items = items.clone();
+                    memo.nonpreserved_depth += 1;
                     let mut out = Vec::with_capacity(items.len());
                     for x in items {
                         out.push(self.to_wire_depth(x, depth + 1, memo)?);
                     }
+                    memo.nonpreserved_depth -= 1;
                     WireValue::Iter { items: out, pos }
                 }
             },

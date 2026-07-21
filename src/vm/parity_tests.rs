@@ -7500,6 +7500,25 @@ main()";
     assert_parity_out(src, "1\n");
 }
 
+/// REGRESSION LOCK (recursive-fn-sendable, correctness-0): a cycle that passes through BOTH a
+/// non-identity-preserved container (here a `struct` field) AND a `Cell`/`Closure` must be REJECTED,
+/// not encoded as a `Backref`. Serialize gives the closure/cell an id but NOT the struct, so a Backref
+/// here would tie the closure's captured struct to a DUPLICATE of the delivered struct — silently
+/// breaking aliasing (the closure would read a stale copy) where the parity gate is blind (both engines
+/// agree on the wrong value). The `nonpreserved_depth` guard rejects it cleanly and identically on both
+/// engines. Only PURE `Cell`/`Closure` cycles (a recursive local fn) round-trip; a mixed data cycle is
+/// unsupported — hoist the fn to module scope. (A pure struct cycle still depth-cap-rejects, unchanged —
+/// see `golden_airlock_cycle_chz_matches_expected`.)
+#[test]
+fn airlock_mixed_struct_closure_cycle_rejects_both() {
+    let src = "struct Node:\n    f: fn() -> int\n    x: int\nfn main():\n    n := Node(fn() -> int: 0, 5)\n    n.f = fn() -> int: n.x\n    parallel:\n        spawn:\n            print(n.f())\nmain()\n";
+    let fault = parity_entry_fault(src);
+    assert!(
+        fault.contains("cyclic data structure"),
+        "expected the mixed-cycle reject, got: {fault}"
+    );
+}
+
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that
 /// local AFTER the fn is defined is visible when the fn is later called (shared cell) — matches
 /// closure semantics → `42`.
