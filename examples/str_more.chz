@@ -15,7 +15,7 @@ fn main():
     print(text.index_of("abcabc", "zz"))
     print(text.index_of("abc", ""))
 
-    # count: non-overlapping ("aaa","aa" -> 1), none, empty substring (0).
+    # count: non-overlapping ("aaa","aa" -> 1), none, empty substring (len+1, Python/Go parity).
     print(text.count("aaa", "aa"))
     print(text.count("a.b.c.d", "."))
     print(text.count("abc", "z"))
