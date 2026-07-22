@@ -2225,11 +2225,16 @@ impl MnSched {
             for (_, core, is_send) in &arms {
                 let ready = {
                     let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    if g.closed {
-                        true
-                    } else if *is_send {
-                        core.cap.is_none_or(|cap| g.queue.len() < cap)
+                    if *is_send {
+                        // SEND arm: ready with a FREE slot (bounded below cap, or unbounded) OR on
+                        // close (the send then FAULTS, matching op_wait_poll's ready-then-fault).
+                        g.closed || core.cap.is_none_or(|cap| g.queue.len() < cap)
                     } else {
+                        // RECV arm: ready ONLY with a queued value (a closed channel still drains its
+                        // buffered messages). A closed+EMPTY recv arm is DEAD — op_wait_poll SKIPS it
+                        // (it only counts toward `all_closed`), so treating `closed` as ready HERE spins
+                        // requeue→re-poll(skip)→re-park forever (parity-perf-0). Close-to-signal is done
+                        // via `done_latch` (checked below), not a plain channel close.
                         !g.queue.is_empty()
                     }
                 };

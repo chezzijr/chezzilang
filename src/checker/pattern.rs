@@ -904,7 +904,14 @@ impl Checker {
             // `op_wait_poll` calls `channel_core` on the handle — a non-channel receiver hits an
             // `unreachable!` VM panic (the checker-superset-of-compiler soundness class). Gate it
             // here, mirroring the recv-arm's `Ty::Channel(e)` guard, before the ordinary call infer.
-            match self.infer(obj) {
+            // Infer the receiver for its TYPE only — snapshot + truncate its errors, because the
+            // `self.infer(call)` below re-infers the same `obj` sub-expression and would re-report
+            // them, doubling a diagnostic (e.g. an undefined receiver → two "undefined variable"s).
+            // Mirrors the RwShared `read` recovery-only re-inference idiom.
+            let mark = self.errors.len();
+            let recv_ty = self.infer(obj);
+            self.errors.truncate(mark);
+            match recv_ty {
                 Ty::Channel(_) | Ty::Unknown => {}
                 other => {
                     self.error(
@@ -914,8 +921,9 @@ impl Checker {
                     return;
                 }
             }
-            // Receiver is a channel — infer the whole call to surface element-type/arg errors so a
-            // send arm and a plain `ch.send(v)` type-check identically.
+            // Receiver is a channel — infer the whole call to surface element-type/arg errors (and the
+            // receiver's own errors, reported exactly once here) so a send arm and a plain
+            // `ch.send(v)` type-check identically.
             self.infer(call);
             return;
         }
