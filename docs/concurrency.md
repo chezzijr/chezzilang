@@ -759,6 +759,37 @@ out to any number of receivers — like a passed `timer` deadline, but flipped o
 once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
 `wait:` arm stays *ready* rather than *skipped*). See `examples/channel_trip.chz`.
 
+### 6g. Run the parity oracle yourself: `--check-parity`
+
+The test suite proves **serial == M:N** for every example (the in-tree `assert_file_parity` oracle:
+run once on `--serial`, once on the default M:N engine, assert byte-identical stdout/stderr/terminal
+result). `chezzi run --check-parity <file>` exposes that same oracle as a one-command check on **your
+own** program:
+
+```sh
+chezzi run --check-parity examples/concurrent_jobs.chz
+# … program stdout printed once …
+# parity OK (serial == M:N)        (on stderr; exit 0)
+```
+
+It type-checks once, then runs the program **twice** — the cooperative serial oracle, then the M:N
+OS-thread engine — each into a buffered sink, and diffs the two captures byte-for-byte. Identical →
+the captured output is printed once and `parity OK (serial == M:N)` goes to stderr (exit 0, even if
+BOTH engines errored *identically* — a held parity is a pass). Divergent → a greppable side-by-side
+report headed `parity DIVERGENCE (serial != M:N)` naming the first differing stream and line, and a
+non-zero exit.
+
+A divergence is a **signal to investigate**, not automatically a bug: it can be a genuine
+order-dependence / airlock / scheduler fault (the real prize), *or* one of the documented
+serial-vs-M:N asymmetries above — a task cancelled mid-loop emitting a different **line set** (§6e), a
+non-deterministic cross-task **print order** (byte-identical compare flags order too), or an accepted
+`--parallel`-only path (`std.net`).
+
+`--check-parity` is mutually exclusive with `--serial`/`--parallel` (it runs both). `--threads=N`
+still sizes its M:N leg (the serial leg ignores it). **Limitation:** both legs share the one real
+process stdin fd and run sequentially, so a **stdin-reading** program diverges by construction — leg 2
+sees EOF after leg 1 drains the input. Don't use `--check-parity` on programs that read stdin.
+
 ---
 
 ## 7. Sendability

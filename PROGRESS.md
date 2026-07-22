@@ -48,6 +48,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > bodied methods stay unharvested (hot `core_method` arm untouched — M19 perf); `ex.submit_task(f)` dot-form
 > still needs the deferred Task-placement change (Option A).
 
+> **✅ CLI (2026-07-22) — `chezzi run --check-parity <file>`: run the parity oracle yourself.** The
+> test-only serial==M:N oracle (`assert_file_parity`) is now a one-command user check. `--check-parity`
+> type-checks once, then runs the program TWICE — the cooperative serial oracle (`parallel=false`),
+> then the M:N engine (`parallel=true`) — each into a BUFFERED sink (`run_file_with_entry` with the
+> default `stream=false`), and diffs stdout/stderr/rendered-terminal-error byte-for-byte (exit code
+> ignored, exactly like the oracle). Identical → prints the captured output once + `parity OK (serial ==
+> M:N)` to stderr, exit 0 (a held parity is a pass even if BOTH engines errored identically). Diverged →
+> a greppable `parity DIVERGENCE (serial != M:N)` report (first differing stream + line, serial-vs-M:N
+> side by side), non-zero exit. **Additive** — no VM/checker/concurrency change, seam is `src/main.rs`
+> (new flag + `run_check_parity`/`report_stream_diff`) + `tests/check_parity.rs` + docs. Mutually
+> exclusive with `--serial`/`--parallel`; `--threads=N` still sizes the M:N leg. **Limitation:** both
+> legs share the one real stdin fd sequentially → a stdin-reading program diverges by construction (used
+> as the negative test). A divergence is a signal to investigate (order-dependence / airlock / scheduler
+> / accepted `--parallel`-only path), not automatically a bug. Tests: `tests/check_parity.rs` (conflict,
+> OK on `concurrent_jobs.chz`, stdin-drain divergence). Docs: this note, `docs/concurrency.md` §6g,
+> `chezzi run` `--help`.
+
 > **✅ CONCURRENCY (2026-07-22) — `std.concurrency.task`: result handles for `Executor` work.** Bare
 > `Executor.submit(f)` is fire-and-forget (returns nothing); `submit_task[T](ex, f) -> Task[T]` returns a
 > future-style handle. **Pure Chezzi** (`std/concurrency/task.chz`) over the cap-1 bounded `Channel[T]`
