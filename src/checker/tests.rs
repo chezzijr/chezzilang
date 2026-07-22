@@ -9123,6 +9123,17 @@ fn wait_non_channel_arm_rejected() {
 }
 
 #[test]
+fn wait_send_arm_non_channel_receiver_rejected() {
+    // A send-arm receiver that merely HAS a `send` method (a user struct) but is not a `Channel[T]`
+    // MUST be rejected — the compiler lowers a send-arm as a raw channel op, so a non-channel
+    // receiver panics the VM (`channel_core on non-channel`) at runtime. Mirrors the recv-arm guard.
+    rejects(
+        "struct Box:\n    n: int\n    fn send(self, v: int): print(v)\nfn main():\n    b := Box(0)\n    wait:\n        b.send(5): print(\"x\")\n        else: print(\"idle\")\nmain()\n",
+        "Channel",
+    );
+}
+
+#[test]
 fn channel_close_ok() {
     ok("fn main():\n    ch := Channel[int]()\n    ch.close()\nmain()\n");
 }

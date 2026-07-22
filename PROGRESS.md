@@ -20,11 +20,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `park_wait` gap re-check is now **kind-aware** — a send-arm is ready with a FREE slot (`queue.len()<cap` or
 > unbounded) / on close, a recv-arm with a queued value / on close; the **wake side is unchanged** (a receiver
 > freeing a slot already calls `wake_senders`→`recv_wake`, which wakes the filed `WaitPark` token). A full
-> bounded send-arm reached inside a native callback (`--parallel`) **faults** (v1 limit, mirrors the existing
-> in-callback full-`send` demote fault; upgrade path noted). *Tests:* `examples/wait_send.chz` +
+> bounded send-arm reached inside a native callback **faults** on **both** engines with byte-identical text
+> (v1 limit; the fault is decided before the engine split, mirroring the existing in-callback full-`send`
+> demote fault; upgrade path noted). *Checker soundness:* a send-arm's receiver is verified to be a
+> `Channel[T]` (a user type that merely HAS a `send` method is rejected — else the compiler lowers it as a
+> channel op and `op_wait_poll`→`channel_core` `unreachable!`-panics). *Tests:* `examples/wait_send.chz` +
 > `golden_wait_send_both_engines`, `wait_send_arm_park_wake_stress_parallel` (40 M:N trials),
 > `wait_send_arm_closed_channel_faults_both_engines`, `wait_unbounded_send_arm_always_ready_both_engines`,
-> `wait_send_source_order_first_ready_wins_both_engines`; checker `wait_send_arm_*` / `wait_bare_*`; parser
+> `wait_send_source_order_first_ready_wins_both_engines`, `wait_send_arm_in_callback_faults_same_on_both_engines`;
+> checker `wait_send_arm_*` (incl. `wait_send_arm_non_channel_receiver_rejected`) / `wait_bare_*`; parser
 > `parses_wait_bare_send_arm`. Docs: this note, `docs/grammar.bnf` (new `<waitArm>` bare-expr form),
 > `docs/concurrency.md §6d`, `docs/syntax.md`. `cargo test` / `conformance` / `clippy` green.
 

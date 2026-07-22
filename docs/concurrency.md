@@ -556,12 +556,14 @@ the same with an `Arc<WaitPark>` token. The park-gap re-check is **kind-aware**:
 queued value / on close, a send-arm with a **free slot** (`queue.len() < cap`, or unbounded) / on close — using
 the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
 
-> **v1 limitation — send-arm inside a native callback (`--parallel`).** A **full bounded** send-arm reached
-> *inside a native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) on the M:N engine
-> can't snapshot-park, and the in-callback demote path pops arm queues (recv semantics) — so a `wait` with any
-> send-arm on that path **faults** (the same full-send-in-callback fault `chan_send_step` already raises),
-> rather than blocking. Same class as the existing in-callback full-`send` / `timer.recv()` v1 limits; the
-> upgrade path is a demote-in-place send block.
+> **v1 limitation — send-arm inside a native callback.** A **full bounded** send-arm reached *inside a
+> native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) can only block, and neither
+> engine can carry it: the M:N engine can't snapshot-park there and its in-callback demote path pops arm
+> queues (recv semantics), while the cooperative `--serial` VM has no yield point inside a callback. So a
+> `wait` with a live send-arm on that path **faults** — with the **byte-identical** full-send-in-callback
+> message `chan_send_step` already raises, on **both** engines (the fault is decided before the engine
+> split, preserving serial == M:N parity), rather than blocking. Same class as the existing in-callback
+> full-`send` / `timer.recv()` v1 limits; the upgrade path is a demote-in-place send block.
 
 > **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
 > differently per engine. The cooperative `--serial` VM is single-threaded, so it **inline-sleeps** to the

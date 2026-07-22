@@ -887,23 +887,46 @@ impl Checker {
     /// the shape IS `chan.send(value)`, inferring the call reuses the ordinary channel-`send` checks
     /// (element-type match + sendability) so a send arm and a plain `ch.send(v)` type-check identically.
     fn check_wait_send(&mut self, call: &Expr) {
-        let is_send_call = matches!(
-            &call.kind,
-            ExprKind::Call { callee, args, named, .. }
-                if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "send")
-                    && args.len() == 1
-                    && named.is_empty()
-        );
-        // Always infer (surfaces the channel/arg type errors and any nested-expr errors).
-        self.infer(call);
-        if !is_send_call {
-            self.error(
-                call.span,
-                "a wait arm must be a recv (`x := ch.recv()`), a send (`ch.send(v)`), a timer, \
-                 or `else`"
-                    .to_string(),
-            );
+        // Decompose the required shape `<recv>.send(<1 positional arg>)`, no named args.
+        if let ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } = &call.kind
+            && let ExprKind::Field { obj, name, .. } = &callee.kind
+            && name == "send"
+            && args.len() == 1
+            && named.is_empty()
+        {
+            // The receiver MUST be a `Channel[T]`. A user type that merely HAS a `send` method
+            // would type-check clean, but the compiler lowers a send-arm as a raw channel op and
+            // `op_wait_poll` calls `channel_core` on the handle — a non-channel receiver hits an
+            // `unreachable!` VM panic (the checker-superset-of-compiler soundness class). Gate it
+            // here, mirroring the recv-arm's `Ty::Channel(e)` guard, before the ordinary call infer.
+            match self.infer(obj) {
+                Ty::Channel(_) | Ty::Unknown => {}
+                other => {
+                    self.error(
+                        obj.span,
+                        format!("a wait send arm must send to a Channel, found {other}"),
+                    );
+                    return;
+                }
+            }
+            // Receiver is a channel — infer the whole call to surface element-type/arg errors so a
+            // send arm and a plain `ch.send(v)` type-check identically.
+            self.infer(call);
+            return;
         }
+        // Not `chan.send(value)` — surface any nested-expr errors, then list the legal arm forms.
+        self.infer(call);
+        self.error(
+            call.span,
+            "a wait arm must be a recv (`x := ch.recv()`), a send (`ch.send(v)`), a timer, \
+             or `else`"
+                .to_string(),
+        );
     }
 
     pub(super) fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {

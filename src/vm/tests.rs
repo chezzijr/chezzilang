@@ -2493,6 +2493,37 @@ fn wait_send_arm_closed_channel_faults_both_engines() {
     assert_eq!(e, ep, "serial and M:N closed-send fault text must match");
 }
 
+/// A full bounded send-arm reached INSIDE a native callback (`list.map`, `native_reentry > 0`) can
+/// only block, and cannot be parked/demoted on either engine — so it FAULTS. The fault text must be
+/// byte-identical on serial and M:N (parity): before this fix M:N emitted FULL_SEND_DEADLOCK while
+/// serial fell through to the generic "wait on channels that are all empty" deadlock.
+#[test]
+fn wait_send_arm_in_callback_faults_same_on_both_engines() {
+    let src = "c := Channel[int](1)\n\
+               fn f(x: int) -> int:\n\
+               \x20   wait:\n\
+               \x20       c.send(9): pass\n\
+               \x20   return x\n\
+               fn main():\n\
+               \x20   c.send(0)\n\
+               \x20   parallel:\n\
+               \x20       spawn:\n\
+               \x20           print([1].map(f))\n\
+               main()\n";
+    let serial = run_capture(src).expect_err("serial should fault").message;
+    let par = run_capture_parallel(src)
+        .expect_err("M:N should fault")
+        .message;
+    assert_eq!(
+        serial, par,
+        "wait send-arm in-callback fault text must be byte-identical on both engines"
+    );
+    assert!(
+        serial.contains("send on a full channel"),
+        "expected the bounded full-send deadlock message, got: {serial}"
+    );
+}
+
 /// An UNBOUNDED send-arm is always ready → placed first it wins immediately and `else` never runs.
 #[test]
 fn wait_unbounded_send_arm_always_ready_both_engines() {

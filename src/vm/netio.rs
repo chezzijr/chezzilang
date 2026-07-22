@@ -1714,6 +1714,18 @@ impl Vm {
             }
             v
         };
+        // v1 limit (§6d): a live SEND arm reaching the block section INSIDE a native callback
+        // (`native_reentry > 0`) can only be a FULL bounded send (a ready arm — unbounded/closed/
+        // free-slot — was taken at poll), and it cannot be parked or demoted on EITHER engine: the
+        // M:N demote path POPS recv queues (`demote_wait_block`) and would wrongly steal a send-arm
+        // channel's queued message as a received value, and the serial engine has no cooperative
+        // yield inside a callback. Fault identically on BOTH engines here — before the engine split —
+        // so serial and M:N emit byte-identical text (the FULL_SEND_DEADLOCK doc-comment's parity
+        // contract), matching the plain in-callback full-send fault (`chan_send_step`, netio.rs:1383).
+        // ponytail: upgrade path = a demote-in-place send block (mirror `demote_recv_block`).
+        if self.native_reentry > 0 && keys.iter().any(|&(_, is_send)| is_send) {
+            return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+        }
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
         // `wait_suspend`; the worker loop captures each arm's (key, core) WHILE the fiber heap is live
         // (`Disp::WaitPark`) and `MnSched::park_wait` files ONE shared token in every arm bucket. A
@@ -1769,15 +1781,8 @@ impl Vm {
         // loop takes the timer arm once `now >= deadline` (so a real send still beats the timer), and
         // clamps its backoff to the deadline. Lower throughput but sound — the documented v1 limit (§6d).
         if self.mn.is_some() {
-            // v1 limit: a SEND arm reaching the demote path (a full bounded send inside a native
-            // callback) is unsupported — `demote_wait_block` POPS arm queues (recv semantics) and
-            // would wrongly steal a send-arm channel's queued message as a received value. Fault like
-            // the existing in-callback full-send demote (`chan_send_step`, netio.rs:1383).
-            // ponytail: upgrade path = a demote-in-place send block (mirror `demote_recv_block`),
-            //           the same follow-up the recv-side demote already carries.
-            if keys.iter().any(|&(_, is_send)| is_send) {
-                return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
-            }
+            // (A live SEND arm reaching this demote path already faulted above, before the engine
+            // split — on BOTH engines — so every arm here is a recv/timer arm the demote loop pops.)
             let arms: Vec<(usize, Arc<ChannelCore>)> = keys
                 .iter()
                 .map(|&(h, _)| (self.channel_core_ptr(h), self.channel_core(h)))
