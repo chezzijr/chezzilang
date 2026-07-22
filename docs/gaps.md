@@ -11,6 +11,53 @@ cross-cutting **root causes** that were each recorded as unrelated footnotes, an
 and never de-staled**. Re-audit periodically: a gap backlog nobody re-reads rots into a to-do list for
 work already done.
 
+## Checker / type system
+
+### Generic methods on RESERVED built-in receiver types — turbofish rejected + bodied-method inference fails (found 2026-07-22)
+
+A *generic* method call (`recv.m[U](...)` or inference of `U`) works on a **user struct** receiver
+(`Ty::Struct`) but is **broken when the receiver is a reserved built-in type** — `Ty::List`/`Map`/`Set`
+/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`. Two distinct facets:
+
+| receiver | method kind | inference `recv.m(f)` | turbofish `recv.m[U](f)` |
+| --- | --- | --- | --- |
+| user struct `Ty::Struct` | bodied generic `fn m[U](self,…)` | ✅ works | ✅ works |
+| reserved (`List`, `Executor`, …) | **native fn** generic (`native fn map[U]`) | ✅ works (bespoke native-method solver) | ❌ rejected |
+| reserved (`List`, `Executor`, …) | **bodied** generic `fn m[U](self,…): <body>` | ❌ fails (`expected fn()->U, found fn()->int`) | ❌ rejected |
+
+- **Turbofish is rejected for *any* generic method on a reserved receiver — even the shipped
+  `[1,2,3].map[int](…)`.** Root: `method_has_own_type_params` (`src/checker/expr.rs:1889`) only has arms
+  for `Ty::Struct`/`Enum`/`NewType`/`Module`; a reserved receiver hits `_ => false`, so the checker says
+  *"method 'map' takes no type argument(s) (it declares no own type parameters)"*. (Inference still works
+  for `map`, so this is latent — nobody writes `.map[int]` — but it is the same hole.)
+- **Bodied generic methods on reserved receivers fail inference too.** The bodied method's sig IS
+  harvested into the handle's method table WITH its `type_params` (`fn_sig` sets them; harvest at
+  `src/checker/setup.rs:461`), but the reserved-handle method-call path that would instantiate the
+  method's own `[U]` into fresh inference vars never fires for it (it substitutes only the box's element
+  `[T]`, per the `setup.rs:307` re-seed comment) — so `U` stays unbound and unification against
+  `fn() -> int` fails. Native-fn generics (`List.map`) dodge this via a separate solver, which is why
+  `xs.map(f)` infers but a bodied `ex.submit_task[U]` does not.
+
+**Impact / why it surfaced:** blocks the ergonomic `ex.submit_task(f)` dot-form (a bodied generic method
+on `Ty::Executor`) — see `std.concurrency.task`, which therefore ships `submit_task(ex, f)` as a **free
+generic fn** (works — free-fn call sites DO instantiate method `[U]`). A user-struct wrapper
+(`struct Pool{ex}`) also works. So there is a clean workaround; this is an ergonomics gap, not a
+blocker.
+
+**Fix sketch (delicate — generic-inference seam, hand-do + boundary tests, do NOT auto-task):** give
+`method_has_own_type_params` reserved-receiver arms (look up `self.structs.get(bare_name)` like the
+`Ty::Struct` arm — the concurrency/container method tables are re-seeded there under bare names), AND
+route the reserved-handle method-call arm through the same method-own-`[U]` instantiation the
+`Ty::Struct` method arm uses. Keep two-engine parity (it is a pure check-time change).
+
+**Separate but adjacent — non-generic bodied-method DISPATCH is only wired on 4 handles.** A *plain*
+(non-generic) bodied method on `Shared`/`RwShared`/`Atomic`/`Executor`/`List`/`Map`/`Set` **type-checks
+but runtime-faults `no method`**: `try_native_bodied_method` is called only from the `Reader`/`Writer`/
+`Socket`/`Listener` arms of `do_method_call` (`src/vm/call.rs`), not the others — a check-OK/run-fault
+divergence (the recurring `checker-superset-of-compiler` class). Wiring the missing arms is a trivial
+mirror of the `Writer` arm; deliberately skip the hot shared `list`/`map`/`set` `core_method` arm
+(extra per-call table probe on `list.push` in loops = M19 perf risk, and no bodied methods exist there).
+
 ## NEXT-SESSION BACKLOG — sendability completeness (deferred from 2026-07-21)
 
 Three items to make the airlock sendability model Go-consistent (Go sends interfaces + closures over
