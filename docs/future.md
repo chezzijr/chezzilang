@@ -256,6 +256,70 @@ built-in test runner, LSP.
 
 ---
 
+## 3b. Test system — planned improvements (M20 shipped; these are follow-ups)
+
+M20 shipped: `assert`, free `test fn`, struct **suites** with lifecycle hooks
+(`before_all`/`after_all`/`before_each`/`after_each`) + a typed shared fixture, and the `chezzi test`
+runner (`src/test_runner.rs`). The native suite lives in **`tests/chz/`** (`spec/`/`stdlib/`/`suites/`),
+run M:N-by-default (like `chezzi run`, `--serial` opt-out), with a `cargo test` dual-engine gate
+`test_runner::chz_suite_passes_both_engines` asserting serial==M:N. These are the ranked follow-ups.
+
+Current semantics (baseline): `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the
+message is any `str` **expression**, not just a literal — variable/interpolation/concat all work,
+checker-enforced `str`). **A runtime panic currently also renders FAIL**, indistinguishable from an
+assertion. File-level compile/type errors render ERROR (whole file, before any test runs).
+
+1. **FAIL vs ERROR split (highest value, cheapest).** A `test fn`/method is **void**, so `assert` is
+   the *only* intended failure signal → any other runtime fault (OOB, div-zero, overflow, missing key,
+   native fault) is by definition **unexpected** and should render **ERROR**, not FAIL. This is exactly
+   pytest's FAILED-vs-ERROR distinction ("wrong assumption" vs "code crashed"). **Seam:** `RuntimeError`
+   (`src/vm/mod.rs:37`) is `{ message, span }` with no kind — add a discriminator set ONLY in the
+   `Op::Assert` arm (`src/vm/exec.rs`, the `"assertion failed"` constructor), then `invoke_test` /
+   `run_suite` route assert-fault→FAIL, else→ERROR; summary becomes `P passed, F failed, E errored`,
+   exit non-zero if `F+E>0`. ~a dozen lines + report formatting. Can merge test-level ERROR with the
+   existing file-level ERROR bucket (pytest does).
+
+2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`
+   aborts at the first bad case with no per-case verdict. A subtest construct that reports each case
+   PASS/FAIL (Go `t.Run`, Rust `rstest`, pytest `parametrize`) is the single highest-value ergonomic
+   add and fits the Go lineage. Design open: a `subtest "name":` block, or a `cases`-driven helper.
+
+3. **skip / xfail.** Conditionally skip a test (Go `t.Skip`, pytest `skip`/`xfail`, Jest `.only/.skip`)
+   — WIP + platform-gated tests. Cheap; needs a skip signal the runner counts separately (`S skipped`).
+
+**Runner ergonomics + CLI options & output format** (independent of the semantics above; `cmd_test` is
+`src/main.rs:541`, currently accepts only `[path]` + `--serial`/`--parallel`):
+
+4. **Per-test timeout.** A `test fn` with an infinite loop hangs the runner (and `cargo test`) forever
+   — no guard today (Rust's own `#[test]` shares this limit). Add `--timeout=<ms>` (0 = off): run each
+   test with a deadline, report a timed-out test as its own bucket (`T timed out`, counts as failure).
+   Interacts with the engine — the M:N default already runs each file's test loop on an `on_vm_stack`
+   thread, so a watchdog/join-with-timeout is the natural seam.
+5. **Name filter.** `chezzi test -k <substr>` / `--filter <pat>` to run a subset by test name (free
+   `fn_name`, suite `Suite::method`), like `cargo test <filter>` / pytest `-k` / `go test -run`. Filter
+   after discovery, before invoke.
+6. **stdout capture option.** The runner discards each test's stdout (`take_out`). Add `--show-output`
+   (or capture-and-show-on-failure, pytest's default): surface a failing test's printed output for
+   debugging. Keep default = discard (assert-on-value is the intended path).
+7. **Better options + output format.**
+   - Verbosity: `-q` (dots `.`/`F`/`E` + summary only) vs default per-line vs `-v` (timing per test).
+   - `--errors=json` machine output, mirroring `chezzi check --errors=json` — for editor/CI integration
+     (per-test name/file/line/status/duration + totals).
+   - Color (auto/`--color=never`) on PASS/FAIL/ERROR, isatty-gated like the rest of the CLI.
+   - Per-test + total **timing** in the summary (Go/pytest both show durations).
+   - `--fail-fast` (stop at first failure) for tight iteration loops.
+   - Ordering is deterministic declaration order today; document it in the report/help.
+
+**Migration note (corrects an earlier claim):** fault-path tests **are** portable in-language via
+`recover:` — `r := recover: <faulting expr>` yields `Err(e)` and `e.message()` gives the fault text, so
+`assert e.message().contains(...)` tests a fault without Rust (proven on both engines). The runner keeps
+its *own* fault tests in Rust only because IT needs the fault `span` for `file:line`. So the "stays in
+Rust" set for the `tests/chz/` migration is just: gc-stress rooting (`run_capture_stress`), checker
+`rejects/ok` (compile-time), parser/lexer/bytecode internals, and concurrency timing — **not**
+fault-path. Fault-path is a future migration cluster.
+
+---
+
 ## 4. Optimizations (ranked effort → payoff)
 
 > **Live numbers:** `docs/benchmarks.md` tracks Chezzi vs CPython (reproducible via
