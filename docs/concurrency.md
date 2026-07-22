@@ -508,7 +508,9 @@ once). Delivery is handled at `recv` time, in the receiver's own engine — so a
 level can be `recv`'d inside a `--parallel` child. On `--parallel` the receiver parks and a background
 job (on the netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false
 deadlock; the cooperative `--serial` VM inline-sleeps to the deadline (single-threaded, like its
-`sleep_ms`). Observable output is identical across both engines.
+`sleep_ms`). Observable output is identical across both engines for a *lone* timer `recv` — but a
+`timer` arm inside a `wait:` with a **runnable sibling** diverges (serial inline-sleeps instead of
+yielding): `docs/gaps.md` **N10**, a pre-freeze known-limit (M:N is correct; the serial oracle is wrong).
 
 > **v1 limitation:** a `timer.recv()` reached *inside a native callback* (a `Shared.update` closure, a
 > list-HOF, an `Executor` task) under `--parallel` pins that worker for the timeout rather than demoting a
@@ -548,7 +550,9 @@ wait:
 
 **Selection is deterministic SOURCE ORDER** (first ready arm wins, recv OR send), **not** Go's uniform-random
 `select` fairness. This is Chezzi's one principled divergence from Go here, and it is *required*: it is what
-makes the serial `--serial` oracle and the M:N (`--parallel`) engine byte-identical (`chezzi run --check-parity`).
+makes the serial `--serial` oracle and the M:N (`--parallel`) engine byte-identical (`chezzi run --check-parity`)
+— with **one** known exception, a live `timer` arm racing a runnable sibling (`docs/gaps.md` **N10**), a
+pre-freeze known-limit deferred to the post-freeze serial removal (`docs/future.md` §2b).
 All arm channel handles and send values are evaluated **once**, top to bottom, on entry (Go's rule). `else`
 runs only if **no** arm is ready — so a `wait` containing an unbounded or closed send-arm never blocks (that arm
 is always ready). See `examples/wait_send.chz`.
@@ -604,8 +608,10 @@ the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
 
 > **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
 > differently per engine. The cooperative `--serial` VM is single-threaded, so it **inline-sleeps** to the
-> soonest deadline then takes the timer arm — nothing can `send` during the sleep, so the source-order
-> "first ready wins" rule is preserved. The M:N engine (`--parallel`) must **not** inline-sleep: that would
+> soonest deadline then takes the timer arm. **Known-limit (`docs/gaps.md` N10):** the inline-sleep fires
+> *before* the cooperative park, so if a **runnable sibling** could satisfy a non-timer arm, serial strands it
+> and takes the timer where M:N takes the sibling's `send` — a serial ≠ M:N divergence (M:N is correct). Fix
+> deferred to the post-freeze serial removal (`docs/future.md` §2b). The M:N engine (`--parallel`) must **not** inline-sleep: that would
 > pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
 > `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel (guarded by an
 > arm-once `ChannelCore.timer_armed` CAS so a re-park can't re-arm) and falls through to the normal
@@ -633,7 +639,10 @@ the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
 - *Cooperative `--serial` VM* (sequential): poll arms once in source order; first ready wins; else if `else`,
   run it; else if any arm is timer-backed, inline-sleep to the soonest deadline and take that arm; else
-  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the M:N engine holds.
+  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the M:N engine holds
+  **except** when a timer arm races a runnable sibling (`docs/gaps.md` N10): the inline-sleep runs before the
+  cooperative park, so serial takes the timer where M:N takes the sibling — a pre-freeze known-limit (M:N
+  correct). Proper fix = park first, inline-sleep the timer only when the quiesce path would idle-deadlock.
 - *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
   `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register all N arm
   channels in `demoted_chans`, poll all N queues source-order under the core lock on a bounded

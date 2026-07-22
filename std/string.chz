@@ -60,11 +60,12 @@ fn index_of(s: str, sub: str) -> int:
     return find(s, sub, 0)
 
 # Number of non-overlapping occurrences of `sub` in `s` (`count("aaa", "aa") == 1`). The empty
-# substring counts as 0 (no progress would be made enumerating it).
+# substring matches at every gap (before, between, and after each codepoint): `count(s, "") == len(s)+1`,
+# matching Python `str.count` and Go `strings.Count` (and consistent with `index_of(s, "") == 0`).
 fn count(s: str, sub: str) -> int:
     m := sub.len()
     if m == 0:
-        return 0
+        return s.len() + 1
     n := 0
     i := 0
     while i + m <= s.len():

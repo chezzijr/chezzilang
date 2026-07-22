@@ -214,6 +214,34 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-22 (bug-hunt: 2 findings — 1 fixed, 1 pre-freeze known-limit + serial-removal plan)
+
+Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/wait/Executor, checker⊋compiler, stdlib) on
+both engines. **airlock**, **cancel/defer/recover**, and **checker⊋compiler** came back **clean** (21 / 18 /
+40 probes; consistent with 6+ prior waves). Two findings survived re-verification on the real binary:
+
+- **`string.count(s, "")` returns 0; Python & Go return `len(s)+1` — FIXED.** `std/string.chz` guarded
+  `if m == 0: return 0` — drift from **both** ancestors (`"abc".count("") == 4` in Python and Go) and
+  inconsistent with its own sibling `index_of("abc","") == 0` (Python-correct) in the same module. Fixed to
+  `return s.len() + 1` (`s.len()` is codepoint length, matching Python). Both engines agreed on the wrong
+  value → the parity oracle was structurally blind (shared wrongness); caught by the CPython/Go comparison.
+  Regression: `string_count_empty_substring_matches_python` (`src/vm/parity_tests.rs`, `parity_entry`).
+
+- **`wait:` timer arm makes `--serial` inline-sleep instead of yielding → serial ≠ M:N — PRE-FREEZE
+  KNOWN-LIMIT (N10).** See [N10](#n10-a-wait-timer-arm-makes---serial-inline-sleep-instead-of-yielding-to-a-runnable-sibling--serial--mn--pre-freeze-known-limit-found-2026-07-22-fix-deferred-to-the-post-freeze-serial-removal).
+  The shipping M:N engine is correct; the serial oracle diverges. Fix deferred because the serial engine is
+  **slated for post-freeze removal** (below).
+
+**Post-freeze serial-removal + oracle-layer plan recorded** (`docs/future.md` §2b). Rationale: `--serial`
+(a) *can't truly test concurrency* (single-threaded, can't preempt — N8/N9/N10), and (b) *keeping it
+byte-identical to M:N is accruing debt* (per-engine split branches that exist only to keep serial matching
+M:N). Post-freeze it is removed and its oracle job re-covered by a layer: **CPython differential** (sequential
+shared wrongness, already built) + **Go paired-programs** (channel/`select` semantic wrongness, deterministic-
+outcome only — Go can't oracle the airlock/nursery) + **seeded/deterministic-interleaving M:N** (races — the
+real replacement for serial's race-finding; an external lang's scheduler is also nondeterministic so it can't
+do this) + **hand-written known-answer** (airlock semantics). Together they cover more than serial==M:N did,
+without the byte-identity tax. The JIT freeze is the cut point (post-JIT, serial byte-identity is impossible).
+
 ## Session log — 2026-07-20 (bug-hunt: 4 findings — 2 checker fixes + 1 doc fix, 1 held)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/nursery, checker⊋compiler, stdlib) on
@@ -1632,6 +1660,52 @@ line **set**. It is a real serial ≠ M:N divergence and the parity oracle canno
 has this shape. Fixing N8 (serial preemption) would largely close it: once serial yields at back-edges, the
 cancelled task dies at a back-edge on both engines. **The cancellation-points work made M:N side of this
 DETERMINISTIC (always 1, never 0) — it did not create the gap.**
+
+### N10. A `wait:` timer arm makes `--serial` inline-sleep instead of yielding to a runnable sibling — serial ≠ M:N — PRE-FREEZE KNOWN-LIMIT (found 2026-07-22; fix deferred to the post-freeze serial removal)
+Found 2026-07-22 by the bug-hunt (channel/wait domain). A `wait:` with a live `timer(ms)` arm **and** a
+runnable sibling that can satisfy a non-timer arm diverges between engines. Deterministic (the sibling
+sends with zero delay, the timer is 5 s → the recv must always win, per Go `select`), so it is a **wrong
+result**, not a timing race:
+
+```chezzi
+import std.time
+fn main():
+    data := Channel[int]()
+    parallel:
+        spawn:
+            wait:
+                v := data.recv(): print("recv {v}")
+                _ := timer(5000).recv(): print("timeout")
+        spawn:
+            data.send(42)
+main()
+```
+
+| engine | result |
+|---|---|
+| M:N (default) | `recv 42` in ~3 ms — the ready sibling send beats the 5 s timer (correct, Go model) |
+| `--serial` | **`timeout`** after inline-sleeping the full **5.004 s** — the timer arm is taken, the send is stranded |
+
+`chezzi run --check-parity` reports `parity DIVERGENCE (serial != M:N)`.
+
+**Root cause** — `src/vm/netio.rs` `op_wait_poll`, the cooperative serial branch (~line 1798). The live-timer
+**inline-sleep** block sits *before* the cooperative multi-channel park block, so a `wait:` with a timer arm
+inline-sleeps even when `scheduler_stack` has a runnable sibling — it never yields. The M:N path already got
+the fix (the **WAIT-1** comment ~line 1735: arm one background `timer::submit_at(deadline, send_wake)` and
+fall through to snapshot-park, so a real send lands first and the timer is just another bucket); the serial
+path was never given the equivalent. **Distinct from N8** — the sibling here is a cooperatively-schedulable
+blocking `send`, not a CPU-bound busy-loop, so there is no preemption barrier; it is cleanly fixable (park on
+the channel arms first, make the cooperative quiesce path deadline-aware so it inline-sleeps the timer only
+when it would otherwise idle-deadlock).
+
+**DECISION (2026-07-22): pre-freeze known-limit; fix deferred to the post-freeze serial removal.** The
+shipping **M:N engine is correct** — user-facing impact is zero. Fixing it is a real cooperative-scheduler
+change right before the JIT freeze, and the serial engine is slated for **removal** post-freeze anyway (the
+oracle-layer plan in `docs/future.md` §2b). So the byte-identity tax that motivated a fix is going away.
+Falsified doc claims corrected in the same commit: `docs/concurrency.md` "Observable output is identical
+across both engines" (the `timer` note) and the two "serial == M:N byte-identical" `wait:` claims — each now
+points here. Excluded from the bug-hunt harness like N8/N9 (a `wait:`-with-timer-and-runnable-sibling shape is
+a known serial≠M:N divergence — don't re-file).
 
 ### N5. A **genuine** deadlock tears tasks down without running their `defer`s — open
 Found while fixing N4, and **independent** of it. `flag_deadlock` (`src/vm/mod.rs`) drops each parked

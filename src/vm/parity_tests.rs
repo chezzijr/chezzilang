@@ -5901,6 +5901,18 @@ fn test_lazy_islice_consumes_exactly_stop() {
     assert_eq!(out, "[0, 1, 2]\n[3, 4]\n");
 }
 
+// std.string.count with an EMPTY substring matches Python/Go (`len(s)+1`), not 0 (the old guard drifted
+// from both ancestors + from its own sibling `index_of(s,"")==0`). Both engines agreed on the wrong value
+// before the fix, so the parity oracle was blind — this pins the corrected value on both engines.
+#[test]
+fn string_count_empty_substring_matches_python() {
+    let out = parity_entry(
+        "import std.string\nfn main():\n  print(string.count(\"abc\", \"\"))\n  print(string.count(\"hello\", \"\"))\n  print(string.count(\"\", \"\"))\n  print(string.count(\"abc\", \"b\"))\nmain()\n",
+    );
+    // Python: "abc".count("")==4, "hello".count("")==6, "".count("")==1, "abc".count("b")==1.
+    assert_eq!(out, "4\n6\n1\n1\n");
+}
+
 #[test]
 fn test_lazy_repeat() {
     let out = parity_entry(
@@ -11227,22 +11239,30 @@ fn atomic_int_from_import_runs_parity() {
 fn atomic_int_wide_value_returns_parity() {
     // load a wide stored value
     assert_eq!(
-        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.load())\nmain()\n"),
+        parity_entry(
+            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.load())\nmain()\n"
+        ),
         "4611686018427387904\n",
     );
     // exchange returns the wide OLD value
     assert_eq!(
-        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.exchange(0))\n    print(a.load())\nmain()\n"),
+        parity_entry(
+            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.exchange(0))\n    print(a.load())\nmain()\n"
+        ),
         "4611686018427387904\n0\n",
     );
     // add carries the counter across the inline boundary (no i64 overflow → must return boxed)
     assert_eq!(
-        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387903)\n    print(a.add(1))\nmain()\n"),
+        parity_entry(
+            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387903)\n    print(a.add(1))\nmain()\n"
+        ),
         "4611686018427387904\n",
     );
     // sub carries below the negative inline boundary
     assert_eq!(
-        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(-4611686018427387904)\n    print(a.sub(1))\nmain()\n"),
+        parity_entry(
+            "import std.concurrency\nfn main():\n    a := AtomicInt(-4611686018427387904)\n    print(a.sub(1))\nmain()\n"
+        ),
         "-4611686018427387905\n",
     );
 }

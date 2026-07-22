@@ -52,6 +52,49 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 ---
 
+## 2b. Post-freeze: retire the serial engine + rebuild the oracle layer (planned — NOT before the JIT freeze)
+
+> **Decision (2026-07-22).** The cooperative `--serial` engine is **not the model Chezzi ships** — the
+> real runtime is M:N (and, post-freeze, a JIT'd M:N). `--serial` exists today only as the byte-identical
+> **parity oracle**. Post-freeze it will be **removed**, and its oracle job re-covered by a layered set of
+> better-targeted oracles. This is deliberately deferred **past** the JIT freeze; nothing changes pre-freeze
+> except documenting the plan and the one pre-freeze limit it exposes (`docs/gaps.md` **N10**).
+
+**Why remove it (two independent reasons):**
+1. **It can't truly test concurrency.** The serial engine is single-threaded and cooperative — it cannot
+   preempt a running fiber (`docs/gaps.md` **N8**), so a whole class of concurrent programs either hangs
+   (CPU-bound sibling) or takes a different schedule than M:N and diverges (**N9**, **N10**). As a
+   concurrency oracle it only ever compared *one* cooperative schedule against *one* M:N schedule — a weak
+   differential that misses interleaving-dependent races entirely.
+2. **Keeping it byte-identical to M:N is accumulating technical debt.** Byte-identity forces the M:N engine
+   to bend to what a single cooperative thread can reproduce. The code has already had to **split the two
+   engines** at multiple sites (`op_wait_poll` timer-arm handling, the module-global snapshot path, the
+   Executor drain) with per-engine branches whose *only* purpose is to keep serial matching M:N. Post-JIT,
+   a JIT'd M:N can't be byte-identical to a tree-walking cooperative loop at all, so this debt only grows.
+
+**The replacement oracle layer** (each covers a class serial did, better and without the byte-identity tax):
+
+| Bug class | Replacement oracle |
+|---|---|
+| Sequential shared wrongness (both engines agree, both wrong) | **CPython differential** — `src/difftest/` (already built) |
+| Channel/select semantic wrongness (Chezzi's model vs the reference) | **Go paired-programs differential** — new; restricted to programs with a *deterministic outcome* despite nondeterministic scheduling (sort output lines where only order varies). Go's channels/`select`/close/backpressure map ~1:1 to `Channel[T]`/`wait:`. Catches *shared* wrongness serial couldn't (identical bytecode both engines). Sweet spot only — Go has **no** equivalent for the airlock or structured-nursery semantics. |
+| Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. Stronger than serial==M:N (one schedule pair). |
+| Airlock / structured-concurrency semantics (no external equivalent) | Hand-written **known-answer** tests |
+
+**Net:** CPython (sequential) + Go (channel/select semantics) + seeded-M:N (races) + known-answer (airlock)
+together cover **more** than serial==M:N did, and none of them constrain the M:N engine's design. The
+freeze is the natural cut point: post-JIT, serial byte-identity is impossible anyway.
+
+**Migration mechanics (when it happens):** delete the `--serial`/`parallel=false` cooperative scheduler path
+and the `run --check-parity` two-engine assertion; convert the `parity_entry`/`run_capture` parity tests to
+single-engine (M:N) golden tests or move their intent into the layer above; drop the per-engine split
+branches whose sole job was byte-identity (the `if self.mn.is_some()` forks in `op_wait_poll`, the serial
+module-global snapshot in `join_nursery`, the serial Executor inline drain). The `--threads=1` M:N mode
+(kernel-preempted, safe single-thread) already covers every legitimate user need `--serial` was ever
+mistaken for.
+
+---
+
 ## 3. Missing features (ranked by leverage for scripting) → **mostly shipped (M12–M18)**
 
 > Comprehensions, slicing, the iterator protocol, concat/merge, hex/bin/oct literals, optional
