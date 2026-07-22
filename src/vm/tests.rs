@@ -604,82 +604,12 @@ fn run_err(src: &str) -> String {
 
 // ---- gaps.md §2 wave-1: List value/ergonomics methods ----
 
-/// `first`/`last` return `Option[T]` (None on empty); `reversed()` returns a NEW list and must NOT
-/// mutate the receiver (distinct from in-place `reverse`).
-#[test]
-fn list_first_last_reversed_parity() {
-    let src = "xs := [3, 1, 2]\n\
-               match xs.first():\n    Some(v): print(\"first {v}\")\n    None: print(\"none\")\n\
-               match xs.last():\n    Some(v): print(\"last {v}\")\n    None: print(\"none\")\n\
-               rev := xs.reversed()\n\
-               print(rev)\n\
-               print(xs)\n\
-               empty: List[int] = []\n\
-               match empty.first():\n    Some(v): print(\"first {v}\")\n    None: print(\"efirst\")\n\
-               match empty.last():\n    Some(v): print(\"last {v}\")\n    None: print(\"elast\")\n";
-    assert_mc_parity(
-        src,
-        "first 3\nlast 2\n[2, 1, 3]\n[3, 1, 2]\nefirst\nelast\n",
-    );
-}
-
-/// `insert` Python-clamps (i>len appends, negatives Python-relative, never faults); `remove_at`
-/// returns the removed element (negatives Python-relative).
-#[test]
-fn list_insert_remove_at_parity() {
-    let src = "xs := [1, 2, 3]\n\
-               xs.insert(0, 9)\n\
-               print(xs)\n\
-               xs.insert(2, 8)\n\
-               print(xs)\n\
-               xs.insert(100, 7)\n\
-               print(xs)\n\
-               xs.insert(-1, 5)\n\
-               print(xs)\n\
-               r := xs.remove_at(0)\n\
-               print(\"removed {r}\")\n\
-               print(xs)\n\
-               last := xs.remove_at(-1)\n\
-               print(\"removed {last}\")\n\
-               print(xs)\n";
-    assert_mc_parity(
-        src,
-        "[9, 1, 2, 3]\n[9, 1, 8, 2, 3]\n[9, 1, 8, 2, 3, 7]\n[9, 1, 8, 2, 3, 5, 7]\nremoved 9\n[1, 8, 2, 3, 5, 7]\nremoved 7\n[1, 8, 2, 3, 5]\n",
-    );
-}
-
 /// `remove_at` on a true out-of-range index faults byte-identically on both engines.
 #[test]
 fn remove_at_oob_faults_both_engines() {
     let src = "xs := [1, 2, 3]\nprint(\"before\")\nxs.remove_at(9)\n";
     assert_fault_parity(src, "before\n");
     assert_eq!(run_err(src), "index 9 out of bounds (len 3)");
-}
-
-/// `min`/`max` over int/float(incl NaN, no fault)/str and a Comparable struct list; first-seen
-/// tie-break for equal minima.
-#[test]
-fn list_min_max_parity() {
-    let src = "print([3, 1, 2].min())\n\
-               print([3, 1, 2].max())\n\
-               print([1.5, 0.5, 2.5].min())\n\
-               print([1.5, 0.5, 2.5].max())\n\
-               print([\"pear\", \"apple\", \"kiwi\"].min())\n\
-               print([\"pear\", \"apple\", \"kiwi\"].max())\n";
-    assert_mc_parity(src, "1\n3\n0.5\n2.5\napple\npear\n");
-}
-
-/// `min`/`max` over a list of Comparable structs (re-enters the VM per compare → GC-safe rooting),
-/// with a first-seen tie-break check.
-#[test]
-fn list_min_max_struct_parity() {
-    let src = "struct P:\n    k: int\n    tag: str\n    fn compare(self, o: P) -> int:\n        return self.k - o.k\n\
-               xs := [P(2, \"a\"), P(1, \"b\"), P(1, \"c\"), P(3, \"d\")]\n\
-               lo := xs.min()\n\
-               print(lo.tag)\n\
-               hi := xs.max()\n\
-               print(hi.tag)\n";
-    assert_mc_parity(src, "b\nd\n");
 }
 
 /// `min`/`max` on an empty list faults byte-identically on both engines.
@@ -734,49 +664,6 @@ fn min_max_shrinking_comparator_no_panic() {
 
 // ---- gaps.md §2 wave-2: List iter-ergonomics (unique/dedup/chunk/windows/take_while/drop_while/count/position) ----
 
-/// `unique()` removes ALL duplicates (first-occurrence order preserved, Python `dict.fromkeys`);
-/// `dedup()` collapses only CONSECUTIVE runs (non-adjacent dupes survive, Rust `Vec::dedup`). Both
-/// return a NEW list and never mutate the receiver.
-#[test]
-fn list_unique_dedup_parity() {
-    let src = "print([3, 1, 3, 2, 1].unique())\n\
-               print([1, 1, 2, 2, 2, 1, 3, 3].dedup())\n\
-               empty: List[int] = []\n\
-               print(empty.unique())\n\
-               print([5].unique())\n\
-               print([2, 2, 2].unique())\n\
-               print(empty.dedup())\n\
-               xs := [3, 1, 3, 2, 1]\n\
-               u := xs.unique()\n\
-               print(xs)\n\
-               print([1.5, 1.5, 2.5].dedup())\n";
-    assert_mc_parity(
-        src,
-        "[3, 1, 2]\n[1, 2, 1, 3]\n[]\n[5]\n[2]\n[]\n[3, 1, 3, 2, 1]\n[1.5, 2.5]\n",
-    );
-}
-
-/// `chunk(n)` — consecutive fixed-size chunks (final short if not divisible); `windows(n)` — sliding
-/// windows; `n > len` yields an EMPTY list for windows; both keep first-occurrence element order.
-#[test]
-fn list_chunk_windows_parity() {
-    let src = "print([1, 2, 3, 4, 5].chunk(2))\n\
-               print([1, 2, 3].chunk(1))\n\
-               print([1, 2, 3].chunk(3))\n\
-               print([1, 2].chunk(5))\n\
-               empty: List[int] = []\n\
-               print(empty.chunk(2))\n\
-               print([1, 2, 3, 4].windows(2))\n\
-               print([1, 2, 3].windows(3))\n\
-               print([1, 2].windows(5))\n\
-               print([1, 2, 3].windows(1))\n\
-               print(empty.windows(2))\n";
-    assert_mc_parity(
-        src,
-        "[[1, 2], [3, 4], [5]]\n[[1], [2], [3]]\n[[1, 2, 3]]\n[[1, 2]]\n[]\n[[1, 2], [2, 3], [3, 4]]\n[[1, 2, 3]]\n[]\n[[1], [2], [3]]\n[]\n",
-    );
-}
-
 /// `chunk`/`windows` with `n <= 0` fault byte-identically on both engines with a clear message.
 #[test]
 fn list_chunk_windows_bad_n_faults() {
@@ -786,37 +673,6 @@ fn list_chunk_windows_bad_n_faults() {
     let w = "xs := [1, 2]\nprint(\"before\")\nxs.windows(-1)\n";
     assert_fault_parity(w, "before\n");
     assert_eq!(run_err(w), "window size must be positive, got -1");
-}
-
-/// `take_while` — prefix while pred holds; `drop_while` — suffix after that prefix. Empty-prefix and
-/// full-prefix boundaries, plus the empty list.
-#[test]
-fn list_take_drop_while_parity() {
-    let src = "print([1, 2, 3, 4, 1].take_while(fn(x: int) -> bool: x < 3))\n\
-               print([1, 2, 3, 4, 1].drop_while(fn(x: int) -> bool: x < 3))\n\
-               print([1, 2].take_while(fn(x: int) -> bool: true))\n\
-               print([5, 1].take_while(fn(x: int) -> bool: x < 3))\n\
-               print([1, 2].drop_while(fn(x: int) -> bool: true))\n\
-               print([5, 1].drop_while(fn(x: int) -> bool: x < 3))\n\
-               empty: List[int] = []\n\
-               print(empty.take_while(fn(x: int) -> bool: true))\n\
-               print(empty.drop_while(fn(x: int) -> bool: true))\n";
-    assert_mc_parity(src, "[1, 2]\n[3, 4, 1]\n[1, 2]\n[]\n[]\n[5, 1]\n[]\n[]\n");
-}
-
-/// `count(pred)` — number of matching elements; `position(pred)` — index of the FIRST match as
-/// `Option[int]` (first-hit-wins, `None` if no match).
-#[test]
-fn list_count_position_parity() {
-    let src = "print([1, 2, 3, 2, 1].count(fn(x: int) -> bool: x == 2))\n\
-               print([1, 2, 3].count(fn(x: int) -> bool: false))\n\
-               empty: List[int] = []\n\
-               print(empty.count(fn(x: int) -> bool: true))\n\
-               fn showpos(o: Option[int]) -> int:\n    match o:\n        Some(i): return i\n        None: return -1\n\
-               print(showpos([1, 2, 3, 2].position(fn(x: int) -> bool: x == 2)))\n\
-               print(showpos([1, 3].position(fn(x: int) -> bool: x == 2)))\n\
-               print(showpos([2, 2].position(fn(x: int) -> bool: x == 2)))\n";
-    assert_mc_parity(src, "2\n0\n0\n1\n-1\n0\n");
 }
 
 /// The 4 predicate methods scan a SNAPSHOT: a predicate that SHRINKS the receiver mid-scan must not
@@ -1792,30 +1648,6 @@ fn list_comprehension_maps_and_filters() {
 #[test]
 fn list_comprehension_over_range() {
     assert_eq!(run("print([x * x for x in 0..5])\n"), "[0, 1, 4, 9, 16]\n");
-}
-
-#[test]
-fn set_comprehension_dedupes() {
-    assert_eq!(
-        run("print({x % 3 for x in [0, 1, 2, 3, 4, 5]})\n"),
-        "{0, 1, 2}\n"
-    );
-}
-
-#[test]
-fn map_comprehension_builds_entries() {
-    assert_eq!(
-        run("print({x: x * x for x in [1, 2, 3]})\n"),
-        "{1: 1, 2: 4, 3: 9}\n"
-    );
-}
-
-#[test]
-fn map_comprehension_over_map_keys_and_values() {
-    assert_eq!(
-        run("m := {\"a\": 1, \"b\": 2}\nprint({k: v * 10 for k, v in m})\n"),
-        "{a: 10, b: 20}\n"
-    );
 }
 
 #[test]
@@ -13197,17 +13029,6 @@ match r:
         out.contains("caught: maximum structural depth"),
         "expected recovered error, got {out:?}"
     );
-}
-
-#[test]
-fn map_equality_is_order_independent() {
-    assert_eq!(run("print({1: 10, 2: 20} == {2: 20, 1: 10})\n"), "true\n");
-}
-
-#[test]
-fn map_equality_distinguishes_values() {
-    assert_eq!(run("print({1: 10} == {1: 99})\n"), "false\n");
-    assert_eq!(run("print({1: 10} == {1: 10, 2: 20})\n"), "false\n");
 }
 
 #[test]

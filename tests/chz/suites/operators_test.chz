@@ -1,4 +1,4 @@
-# examples/operators_test.chz — operator overloading via the numeric protocols, dogfooded with
+# tests/chz/suites/operators_test.chz — operator overloading via the numeric protocols, dogfooded with
 # `assert` (the print-and-golden twin is examples/operators.chz).
 
 struct Vec2:

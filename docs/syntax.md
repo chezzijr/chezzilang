@@ -2239,6 +2239,13 @@ constructing the suite instance once. (The runner is VM-only; only the `assert` 
 engines.) Known limit: an assert that faults inside *imported* (non-test) code reports the test file's
 path, not the library file's.
 
+The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
+module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
+demos). Because `chezzi test` runs a single engine, the serial==M:N parity of ported behavioral tests
+is guarded by the `cargo test` gate `test_runner::chz_suite_passes_both_engines`, which runs the whole
+`tests/chz/` suite on both engines and asserts identical verdicts. Fault-path behavior (a runtime error
+*message*) has no in-language `assert` equivalent, so those tests stay in Rust.
+
 ## 9b. Program entry — there is no automatic `main`
 
 Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry

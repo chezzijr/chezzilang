@@ -1,0 +1,118 @@
+# tests/chz/spec/map_set_test.chz — Map / Set behavior spec, dogfooded with `assert`.
+#
+# Ported from src/vm/parity_tests.rs (`parity_map_*` / `parity_set_struct_algebra`) and
+# src/vm/tests.rs (map/set comprehensions + equality). Run: `cargo run -- test tests/chz/`.
+# Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+#
+# Fault-path (missing-key read / compound-assign / missing-hash) and gc-stress rooting stay in Rust.
+
+# ---- literal, display, insertion order, dup-key-last-wins ----
+
+test fn literal_and_display():
+    assert str({"a": 1, "b": 2}) == "{{a: 1, b: 2}}", "insertion-ordered display ({{ }} = literal braces)"
+    assert str({}) == "{{}}"
+    assert {"a": 1, "a": 9} == {"a": 9}, "duplicate key -> last wins"
+
+# ---- index read / insert / update / compound-assign ----
+
+test fn index_ops():
+    m := {"a": 1, "b": 2}
+    assert m["b"] == 2
+    m["c"] = 3
+    m["a"] = 9
+    assert m == {"a": 9, "b": 2, "c": 3}
+    m["a"] += 5
+    assert m["a"] == 14
+
+# ---- methods: len / has / get / keys / values ----
+
+test fn methods():
+    m := {"a": 1, "b": 2}
+    assert m.len() == 2
+    assert m.has("a") == true
+    assert m.has("z") == false
+    match m.get("a"):
+        Some(v): assert v == 1
+        None: assert false, "present key"
+    match m.get("z"):
+        Some(_): assert false, "absent key must be None"
+        None: assert true
+    assert m.keys() == ["a", "b"]
+    assert m.values() == [1, 2]
+
+# ---- remove ----
+
+test fn remove():
+    m := {"a": 1, "b": 2}
+    match m.remove("a"):
+        Some(v): assert v == 1
+        None: assert false, "present key returns the value"
+    assert m == {"b": 2}
+    match m.remove("z"):
+        Some(_): assert false, "missing key -> None"
+        None: assert true
+    assert m == {"b": 2}, "removing a missing key leaves the map unchanged"
+
+# ---- key iteration order + int/bool keys ----
+
+test fn keys_iteration():
+    m := {"a": 1, "b": 2, "c": 3}
+    out := []
+    for k in m.keys():
+        out.push(k)
+    assert out == ["a", "b", "c"], "insertion order"
+
+test fn int_and_bool_keys():
+    assert {1: "x", 2: "y"}[2] == "y"
+    assert {true: 1, false: 0}[false] == 0
+
+# ---- equality is order-independent, value-sensitive ----
+
+test fn equality():
+    assert ({1: 10, 2: 20} == {2: 20, 1: 10}) == true, "order-independent"
+    assert ({1: 10} == {1: 99}) == false, "value-sensitive"
+    assert ({1: 10} == {1: 10, 2: 20}) == false, "size-sensitive"
+
+# ---- comprehensions ----
+
+test fn comprehensions():
+    assert {x: x * x for x in [1, 2, 3]} == {1: 1, 2: 4, 3: 9}
+    m := {"a": 1, "b": 2}
+    assert {k: v * 10 for k, v in m} == {"a": 10, "b": 20}
+    assert {x % 3 for x in [0, 1, 2, 3, 4, 5]} == {0, 1, 2}, "set comprehension dedupes"
+
+# ---- Hashable struct keys + set algebra ----
+
+struct P:
+    x: int
+    y: int = 0
+    fn hash(self) -> int:
+        return self.x * 31 + self.y
+
+test fn struct_key_map():
+    m: Map[P, str] = {}
+    m[P(1, 2)] = "a"
+    m[P(3, 4)] = "b"
+    m[P(1, 2)] = "z"                    # structurally-equal key updates in place
+    assert m.len() == 2
+    assert m[P(3, 4)] == "b"
+    assert m.has(P(1, 2)) == true
+    assert m.has(P(9, 9)) == false
+    match m.get(P(3, 4)):
+        Some(v): assert v == "b"
+        None: assert false, "present"
+    match m.remove(P(1, 2)):
+        Some(v): assert v == "z", "last write wins"
+        None: assert false, "present"
+    assert m.len() == 1
+
+test fn struct_set_algebra():
+    a: Set[P] = Set([P(1), P(2), P(2), P(3)])   # P(2) deduped by hash
+    b: Set[P] = Set([P(2), P(3), P(4)])
+    assert a.len() == 3
+    assert a.union(b).len() == 4
+    assert a.intersection(b).len() == 2
+    assert a.difference(b).len() == 1
+    assert a.has(P(2)) == true
+    a.remove(P(2))
+    assert a.has(P(2)) == false

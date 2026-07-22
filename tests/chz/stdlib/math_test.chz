@@ -1,0 +1,64 @@
+# tests/chz/stdlib/math_test.chz — std.math number/integer surface.
+#
+# Ported from src/vm/parity_tests.rs (`math_number_fns_parity`). Values match Python `math`.
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+import std.math
+
+test fn gcd_lcm_sign_trunc():
+    assert math.gcd(-12, 8) == 4
+    assert math.gcd(0, 0) == 0
+    assert math.lcm(4, 6) == 12
+    assert math.lcm(0, 5) == 0
+    assert math.sign(-5) == -1
+    assert math.sign(0) == 0
+    assert math.sign(3) == 1
+    assert math.trunc(-2.7) == -2, "trunc toward zero"
+
+test fn float_fns_and_constants():
+    assert math.hypot(3.0, 4.0) == 5.0
+    assert math.cbrt(27.0) == 3.0
+    assert math.inf > 1e308, "inf exceeds any finite"
+    assert (math.nan != math.nan) == true, "NaN is not equal to itself"
+
+test fn factorial():
+    match math.factorial(0):
+        Ok(v): assert v == 1
+        Err(_): assert false, "0! = 1"
+    match math.factorial(20):
+        Ok(v): assert v == 2432902008176640000
+        Err(_): assert false, "20! fits in i64"
+    match math.factorial(21):
+        Ok(_): assert false, "21! overflows i64"
+        Err(_): assert true
+    match math.factorial(-1):
+        Ok(_): assert false, "factorial of negative is an error"
+        Err(_): assert true
+
+test fn comb_perm():
+    match math.comb(5, 2):
+        Ok(v): assert v == 10
+        Err(_): assert false, "C(5,2)"
+    match math.comb(5, 6):
+        Ok(v): assert v == 0, "k > n -> 0"
+        Err(_): assert false, "C(5,6) = 0, not an error"
+    match math.comb(200, 100):
+        Ok(_): assert false, "C(200,100) overflows i64"
+        Err(_): assert true
+    match math.perm(5, 2):
+        Ok(v): assert v == 20
+        Err(_): assert false, "P(5,2)"
+
+test fn parse_int_base():
+    match math.parse_int_base("ff", 16):
+        Ok(v): assert v == 255
+        Err(_): assert false, "hex ff"
+    match math.parse_int_base("0b101", 0):
+        Ok(v): assert v == 5, "base 0 auto-detects the 0b prefix"
+        Err(_): assert false, "0b101"
+    match math.parse_int_base("zz", 16):
+        Ok(_): assert false, "zz is not base-16"
+        Err(_): assert true
+    match math.parse_int_base("-9223372036854775808", 10):
+        Ok(v): assert v == -9223372036854775808, "i64::MIN parses"
+        Err(_): assert false, "i64::MIN"

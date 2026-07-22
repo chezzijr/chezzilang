@@ -1,0 +1,171 @@
+# tests/chz/spec/list_test.chz — List behavior spec, dogfooded with `assert`.
+#
+# Ported from the Rust string-goldens in src/vm/tests.rs (`list_*_parity`) and
+# src/vm/parity_tests.rs (`parity_list_*`): those printed a value and matched stdout; here we
+# assert the value directly. Run: `cargo run -- test tests/chz/`. The serial==M:N parity these
+# carried in Rust is preserved by the dual-engine gate (`test_runner::chz_suite_passes_both_engines`),
+# which runs this whole suite on both engines and asserts identical verdicts.
+#
+# Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
+# Rust — `assert` cannot catch a runtime fault's message, so they have no in-language equivalent.
+
+# ---- first / last / reversed (non-mutating) ----
+
+test fn first_last_reversed():
+    xs := [3, 1, 2]
+    match xs.first():
+        Some(v): assert v == 3
+        None: assert false, "first of non-empty"
+    match xs.last():
+        Some(v): assert v == 2
+        None: assert false, "last of non-empty"
+    assert xs.reversed() == [2, 1, 3]
+    assert xs == [3, 1, 2], "reversed() does not mutate"
+
+test fn first_last_empty_none():
+    empty: List[int] = []
+    match empty.first():
+        Some(_): assert false, "empty first must be None"
+        None: assert true
+    match empty.last():
+        Some(_): assert false, "empty last must be None"
+        None: assert true
+
+# ---- insert / remove_at (Python-clamp / Python-relative) ----
+
+test fn insert_remove_at():
+    xs := [1, 2, 3]
+    xs.insert(0, 9)
+    assert xs == [9, 1, 2, 3]
+    xs.insert(2, 8)
+    assert xs == [9, 1, 8, 2, 3]
+    xs.insert(100, 7)
+    assert xs == [9, 1, 8, 2, 3, 7], "i>len appends"
+    xs.insert(-1, 5)
+    assert xs == [9, 1, 8, 2, 3, 5, 7], "negative is Python-relative"
+    assert xs.remove_at(0) == 9
+    assert xs == [1, 8, 2, 3, 5, 7]
+    assert xs.remove_at(-1) == 7, "negative index removes from the end"
+    assert xs == [1, 8, 2, 3, 5]
+
+# ---- min / max ----
+
+test fn min_max_scalar():
+    assert [3, 1, 2].min() == 1
+    assert [3, 1, 2].max() == 3
+    assert [1.5, 0.5, 2.5].min() == 0.5
+    assert [1.5, 0.5, 2.5].max() == 2.5
+    assert ["pear", "apple", "kiwi"].min() == "apple"
+    assert ["pear", "apple", "kiwi"].max() == "pear"
+
+struct P:
+    k: int
+    tag: str
+    fn compare(self, o: P) -> int:
+        return self.k - o.k
+
+test fn min_max_comparable_struct():
+    # first-seen tie-break for equal minima (P(1,"b") before P(1,"c"))
+    xs := [P(2, "a"), P(1, "b"), P(1, "c"), P(3, "d")]
+    assert xs.min().tag == "b"
+    assert xs.max().tag == "d"
+
+# ---- unique / dedup ----
+
+test fn unique_dedup():
+    assert [3, 1, 3, 2, 1].unique() == [3, 1, 2]
+    assert [1, 1, 2, 2, 2, 1, 3, 3].dedup() == [1, 2, 1, 3]
+    empty: List[int] = []
+    assert empty.unique() == []
+    assert [2, 2, 2].unique() == [2]
+    assert [1.5, 1.5, 2.5].dedup() == [1.5, 2.5]
+    xs := [3, 1, 3, 2, 1]
+    u := xs.unique()
+    assert xs == [3, 1, 3, 2, 1], "unique() does not mutate"
+
+# ---- chunk / windows ----
+
+test fn chunk_windows():
+    assert [1, 2, 3, 4, 5].chunk(2) == [[1, 2], [3, 4], [5]]
+    assert [1, 2, 3].chunk(3) == [[1, 2, 3]]
+    assert [1, 2].chunk(5) == [[1, 2]], "chunk > len yields one short chunk"
+    assert [1, 2, 3, 4].windows(2) == [[1, 2], [2, 3], [3, 4]]
+    assert [1, 2].windows(5) == [], "window > len yields empty"
+
+# ---- take_while / drop_while ----
+
+test fn take_drop_while():
+    lt3 := fn(x: int) -> bool: x < 3
+    assert [1, 2, 3, 4, 1].take_while(lt3) == [1, 2]
+    assert [1, 2, 3, 4, 1].drop_while(lt3) == [3, 4, 1]
+    assert [5, 1].take_while(lt3) == [], "empty prefix"
+    assert [5, 1].drop_while(lt3) == [5, 1]
+
+# ---- count / position ----
+
+test fn count_position():
+    is2 := fn(x: int) -> bool: x == 2
+    assert [1, 2, 3, 2, 1].count(is2) == 2
+    assert [1, 2, 3].count(fn(x: int) -> bool: false) == 0
+    match [1, 2, 3, 2].position(is2):
+        Some(i): assert i == 1, "position is first-hit-wins"
+        None: assert false, "should find a match"
+    match [1, 3].position(is2):
+        Some(_): assert false, "no match must be None"
+        None: assert true
+
+# ---- pop / contains / index_of / sum / reverse ----
+
+test fn pop():
+    xs := [1, 2, 3]
+    match xs.pop():
+        Some(v): assert v == 3
+        None: assert false, "pop non-empty"
+    assert xs.len() == 2
+    ys := [1]
+    _ := ys.pop()
+    match ys.pop():
+        Some(_): assert false, "pop empty must be None"
+        None: assert true
+
+test fn contains_index_of_sum():
+    assert [1, 2, 3].contains(2) == true
+    assert [1, 2, 3].contains(9) == false
+    assert [10, 20, 30].index_of(20) == 1
+    assert [1, 2].index_of(9) == -1, "not found is -1"
+    assert [1, 2, 3, 4].sum() == 10
+
+test fn reverse_mutates():
+    xs := [3, 1, 2]
+    xs.reverse()
+    assert xs == [2, 1, 3], "reverse() mutates in place (unlike reversed())"
+
+# ---- sort / sort_by ----
+
+test fn sort():
+    xi := [3, 1, 2]
+    xi.sort()
+    assert xi == [1, 2, 3]
+    xs := ["banana", "apple", "cherry"]
+    xs.sort()
+    assert xs == ["apple", "banana", "cherry"]
+    xf := [3.5, 1.1, 2.2]
+    xf.sort()
+    assert xf == [1.1, 2.2, 3.5]
+
+test fn sort_by():
+    xs := ["ccc", "a", "dd", "b"]
+    xs.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())
+    assert xs == ["a", "b", "dd", "ccc"], "stable sort by length"
+    ns := [[3, 0], [1, 0], [2, 0]]
+    ns.sort_by(fn(a: List[int], b: List[int]) -> int: a[0] - b[0])
+    assert ns == [[1, 0], [2, 0], [3, 0]]
+
+# ---- map / filter / fold ----
+
+test fn map_filter_fold():
+    assert [1, 2, 3].map(fn(x: int) -> int: x * 2) == [2, 4, 6]
+    assert [1, 2, 3].map(fn(x: int) -> str: "n{x}") == ["n1", "n2", "n3"]
+    assert [1, 2, 3, 4].filter(fn(x: int) -> bool: x % 2 == 0) == [2, 4]
+    assert ["a", "b", "c"].fold("", fn(a: str, x: str) -> str: a + x) == "abc"
+    assert [1, 2, 3, 4].fold(0, fn(a: int, x: int) -> int: a + x) == 10

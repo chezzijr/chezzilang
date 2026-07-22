@@ -1,7 +1,7 @@
-# examples/suite_test.chz — a test SUITE: a struct with `test fn` methods, lifecycle hooks, and a
+# tests/chz/suites/suite_test.chz — a test SUITE: a struct with `test fn` methods, lifecycle hooks, and a
 # shared, typed fixture (a `Counter` built once for the suite). Lifecycle order:
 #   construct once -> before_all -> [before_each -> test -> after_each]* -> after_all
-# after_each runs even when a test fails (like `defer`). Run with: `chezzi test examples/`.
+# after_each runs even when a test fails (like `defer`). Run with: `chezzi test tests/chz/`.
 
 struct Counter:
     n: int = 0

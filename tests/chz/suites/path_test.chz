@@ -1,5 +1,5 @@
-# examples/path_test.chz — TDD table for std.path (unix '/' path-STRING ops).
-# Edge cases mirror Python os.path / Go path.Clean. Run: `cargo run -- test examples/path_test.chz`.
+# tests/chz/suites/path_test.chz — TDD table for std.path (unix '/' path-STRING ops).
+# Edge cases mirror Python os.path / Go path.Clean. Run: `cargo run -- test tests/chz/suites/path_test.chz`.
 
 import std.path
 

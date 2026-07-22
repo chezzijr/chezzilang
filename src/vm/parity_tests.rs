@@ -23,39 +23,6 @@ fn assert_parity(src: &str) {
     );
 }
 
-/// Native-prelude phase 2a — the scalar-conversion CTORS (int/float/str/bytes/bytearray) are now
-/// sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) instead of hard-coded arms. This
-/// is a pure metadata refactor: the runtime `do_builtin` dispatch is unchanged, so every conversion
-/// must produce byte-identical output on BOTH engines (VM == interp), including the base-16 int
-/// parse, float rendering, str-of-scalar, and the byte-buffer ctors.
-#[test]
-fn scalar_ctor_conversions_parity() {
-    let src = r#"
-fn main():
-    print(int("5"))
-    print(int("-42"))
-    print(int(3.9))
-    print(float("1.5"))
-    print(float(2))
-    print(str(123))
-    print(str(4.5))
-    print(str(true))
-    b := bytes([104, 105])
-    print(b.len())
-    print(b[0])
-    print(b[1])
-    ba := bytearray([65, 66])
-    print(ba.len())
-    print(ba[0])
-    ba.push(67)
-    print(ba.len())
-    print(ba[2])
-
-main()
-"#;
-    assert_parity(src);
-}
-
 /// Native-prelude phase 2b — the GENERIC / reserved-type container CTORS (range/List/Map/Set) are
 /// now sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) for their `CallBuiltin`
 /// DISPATCH, exactly as 2a did for the scalar ctors. Their generic type-identity resolution is
@@ -1225,102 +1192,6 @@ fn assert_parity_out(src: &str, expect: &str) {
 }
 
 // ----- Phase 0 scalar fills: bool(x) truthiness cast + Result-returning parse variants -----
-
-#[test]
-fn bool_ctor_parity() {
-    // `bool(x)` truthiness: int 0->false else true; float 0.0/-0.0->false, NaN->true, else true;
-    // bool->identity; str ""->false else true (non-empty, NOT a parse — " " is true).
-    let src = r#"
-fn main():
-    print(bool(0))
-    print(bool(5))
-    print(bool(0.0))
-    nz := 0.0
-    print(bool(-nz))
-    nan := 0.0 / 0.0
-    print(bool(nan))
-    print(bool(3.14))
-    print(bool(true))
-    print(bool(false))
-    print(bool(""))
-    print(bool("x"))
-    print(bool(" "))
-
-main()
-"#;
-    assert_parity_out(
-        src,
-        "false\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\n",
-    );
-}
-
-#[test]
-fn math_number_fns_parity() {
-    // std.math number/integer surface (gap §5): gcd/lcm/sign/trunc/hypot/cbrt/factorial/comb/perm/
-    // parse_int_base + inf/nan constants. Both engines must agree; values match Python `math`.
-    let src = r#"
-import std.math
-
-fn main():
-    print(math.gcd(-12, 8))
-    print(math.gcd(0, 0))
-    print(math.lcm(4, 6))
-    print(math.lcm(0, 5))
-    print(math.sign(-5))
-    print(math.sign(0))
-    print(math.sign(3))
-    print(math.trunc(-2.7))
-    print(math.hypot(3.0, 4.0) == 5.0)
-    print(math.cbrt(27.0) == 3.0)
-    print(math.inf > 1e308)
-    print(math.nan != math.nan)
-    match math.factorial(0):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.factorial(20):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.factorial(21):
-        Ok(v): print("ok")
-        Err(e): print("f21 err")
-    match math.factorial(-1):
-        Ok(v): print("ok")
-        Err(e): print("fneg err")
-    match math.comb(5, 2):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.comb(5, 6):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.comb(200, 100):
-        Ok(v): print("ok")
-        Err(e): print("comb overflow err")
-    match math.perm(5, 2):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.parse_int_base("ff", 16):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.parse_int_base("0b101", 0):
-        Ok(v): print(v)
-        Err(e): print("err")
-    match math.parse_int_base("zz", 16):
-        Ok(v): print("ok")
-        Err(e): print("zz err")
-    match math.parse_int_base("-9223372036854775808", 10):
-        Ok(v): print(v)
-        Err(e): print("err")
-
-main()
-"#;
-    // `import std.math` needs the graph path (native module resolution), so use `parity_entry`
-    // (runs serial + M:N, asserts they agree) rather than the standalone `assert_parity_out`.
-    let out = parity_entry(src);
-    assert_eq!(
-        out,
-        "4\n0\n12\n0\n-1\n0\n1\n-2\ntrue\ntrue\ntrue\ntrue\n1\n2432902008176640000\nf21 err\nfneg err\n10\n0\ncomb overflow err\n20\n255\n5\nzz err\n-9223372036854775808\n",
-    );
-}
 
 #[test]
 fn parse_int_parity() {
@@ -4757,48 +4628,6 @@ fn parity_hof_param() {
     assert_eq!(vm_outcome(src).unwrap(), "5\n");
 }
 
-#[test]
-fn parity_list_pop_some() {
-    let src = "xs := [1,2,3]\nx := xs.pop()\nmatch x:\n    Some(v): print(\"got {v}\")\n    None: print(\"empty\")\nprint(xs.len())\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "got 3\n2\n");
-}
-
-#[test]
-fn parity_list_pop_empty_none() {
-    let src = "xs := [1]\na := xs.pop()\nb := xs.pop()\nmatch b:\n    Some(v): print(\"v\")\n    None: print(\"none\")\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "none\n");
-}
-
-#[test]
-fn parity_list_reverse() {
-    let src = "xs := [3,1,2]\nxs.reverse()\nprint(xs[0])\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "2\n");
-}
-
-#[test]
-fn parity_list_contains() {
-    let src = "print([1,2,3].contains(2))\nprint([1,2,3].contains(9))\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "true\nfalse\n");
-}
-
-#[test]
-fn parity_list_index_of() {
-    let src = "print([10,20,30].index_of(20))\nprint([1,2].index_of(9))\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "1\n-1\n");
-}
-
-#[test]
-fn parity_list_sum() {
-    let src = "print([1,2,3,4].sum())\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "10\n");
-}
-
 /// Integer `sum()` must use checked arithmetic and raise the SAME recoverable
 /// "integer overflow in Add" runtime error as `+`, not silently wrap. Runs both engines.
 #[test]
@@ -4820,40 +4649,12 @@ fn parity_list_sum_mixed_float() {
     assert_parity(src);
 }
 
-#[test]
-fn parity_list_sort_int() {
-    let src = "xs := [3,1,2]\nxs.sort()\nprint(xs[0])\nprint(xs[2])\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "1\n3\n");
-}
-
-#[test]
-fn parity_list_sort_str() {
-    let src = "xs := [\"banana\",\"apple\",\"cherry\"]\nxs.sort()\nfor s in xs:\n    print(s)\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "apple\nbanana\ncherry\n");
-}
-
-#[test]
-fn parity_list_sort_float() {
-    let src = "xs := [3.5, 1.1, 2.2]\nxs.sort()\nprint(xs[0])\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "1.1\n");
-}
-
 // ===== higher-order list methods: map / filter / fold =====
 //
 // These call a closure per element. On the VM each closure runs nested frames that can GC at
 // instruction boundaries, so the source/result lists (and fold's accumulator) must stay rooted.
 // Several tests use HEAP elements (strings / nested lists) and run under `gc_stress` so that a
 // collection actually happens mid-iteration — if rooting is wrong they crash with a dangling ref.
-
-#[test]
-fn parity_list_map_int() {
-    let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> int: x * 2)\nprint(ys)\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "[2, 4, 6]\n");
-}
 
 #[test]
 fn parity_list_map_to_str_gc_stress() {
@@ -4898,13 +4699,6 @@ fn parity_list_filter_gc_stress() {
 }
 
 #[test]
-fn parity_list_filter_int() {
-    let src = "xs := [1,2,3,4]\nys := xs.filter(fn(x: int) -> bool: x % 2 == 0)\nprint(ys.len())\nprint(ys[0])\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "2\n2\n");
-}
-
-#[test]
 fn parity_list_fold_str_acc_gc_stress() {
     // Fold building a string accumulator (heap) — each step allocates a new acc string, so the
     // rooted accumulator slot must survive the next element's closure call.
@@ -4945,13 +4739,6 @@ fn parity_list_sort_by_nested_list_gc_stress() {
         "1\n3\n",
         "VM gc_stress diverged (rooting bug?)"
     );
-}
-
-#[test]
-fn parity_list_fold_sum() {
-    let src = "print([1,2,3,4].fold(0, fn(a: int, x: int) -> int: a + x))\n";
-    assert_parity(src);
-    assert_eq!(vm_outcome(src).unwrap(), "10\n");
 }
 
 #[test]
@@ -6739,19 +6526,6 @@ fn multi_file_identical_under_gc_stress() {
 // ----- map / dictionary parity (gap #5) -----
 
 #[test]
-fn parity_map_literal_print() {
-    // Deterministic insertion order; duplicate key -> last wins. Display is `{k: v, …}`.
-    assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m)\n", "{a: 1, b: 2}\n");
-    assert_parity_out("e := {}\nprint(e)\n", "{}\n");
-    assert_parity_out("m := {\"a\": 1, \"a\": 9}\nprint(m)\n", "{a: 9}\n");
-}
-
-#[test]
-fn parity_map_index_read() {
-    assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m[\"b\"])\n", "2\n");
-}
-
-#[test]
 fn parity_map_missing_key_read_errors() {
     // Both engines must error identically on a missing key.
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
@@ -6761,19 +6535,6 @@ fn parity_map_missing_key_read_errors() {
         "{:?}",
         vm_outcome(src)
     );
-}
-
-#[test]
-fn parity_map_index_insert_and_update() {
-    assert_parity_out(
-        "m := {\"a\": 1}\nm[\"b\"] = 2\nm[\"a\"] = 9\nprint(m)\n",
-        "{a: 9, b: 2}\n",
-    );
-}
-
-#[test]
-fn parity_map_compound_assign() {
-    assert_parity_out("m := {\"a\": 1}\nm[\"a\"] += 5\nprint(m[\"a\"])\n", "6\n");
 }
 
 #[test]
@@ -6788,102 +6549,7 @@ fn parity_map_compound_assign_missing_key_errors() {
     );
 }
 
-#[test]
-fn parity_map_methods() {
-    assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.len())\n", "2\n");
-    assert_parity_out(
-        "m := {\"a\": 1}\nprint(m.has(\"a\"))\nprint(m.has(\"z\"))\n",
-        "true\nfalse\n",
-    );
-    assert_parity_out(
-        "m := {\"a\": 1}\nmatch m.get(\"a\"):\n    Some(v): print(v)\n    None: print(\"absent\")\n",
-        "1\n",
-    );
-    assert_parity_out(
-        "m := {\"a\": 1}\nmatch m.get(\"z\"):\n    Some(v): print(v)\n    None: print(\"absent\")\n",
-        "absent\n",
-    );
-    assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.keys())\n", "[a, b]\n");
-    assert_parity_out("m := {\"a\": 1, \"b\": 2}\nprint(m.values())\n", "[1, 2]\n");
-}
-
-#[test]
-fn parity_map_remove() {
-    assert_parity_out(
-        "m := {\"a\": 1, \"b\": 2}\nmatch m.remove(\"a\"):\n    Some(v): print(v)\n    None: print(\"absent\")\nprint(m)\n",
-        "1\n{b: 2}\n",
-    );
-    // remove of a missing key -> None, map unchanged.
-    assert_parity_out(
-        "m := {\"a\": 1}\nmatch m.remove(\"z\"):\n    Some(v): print(v)\n    None: print(\"absent\")\nprint(m)\n",
-        "absent\n{a: 1}\n",
-    );
-}
-
-#[test]
-fn parity_map_keys_iteration() {
-    assert_parity_out(
-        "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m.keys():\n    print(k)\n",
-        "a\nb\nc\n",
-    );
-}
-
-#[test]
-fn parity_map_int_and_bool_keys() {
-    assert_parity_out("m := {1: \"x\", 2: \"y\"}\nprint(m[2])\n", "y\n");
-    assert_parity_out("m := {true: 1, false: 0}\nprint(m[false])\n", "0\n");
-}
-
 // ----- Hashable struct keys (hash-table map/set) -----
-
-/// A struct with `hash(self) -> int` as a map key: insert/update/get/has/remove + insertion-order
-/// iteration must be byte-identical across both engines.
-#[test]
-fn parity_map_struct_key() {
-    let src = "\
-struct P:
-    x: int
-    y: int
-    fn hash(self) -> int:
-        return self.x * 31 + self.y
-fn main():
-    m: Map[P, str] = {}
-    m[P(1, 2)] = \"a\"
-    m[P(3, 4)] = \"b\"
-    m[P(1, 2)] = \"z\"
-    for k in m:
-        print(k)
-    print(m[P(3, 4)])
-    print(m.has(P(1, 2)))
-    print(m.has(P(9, 9)))
-    print(m.get(P(3, 4)))
-    print(m.remove(P(1, 2)))
-    print(m.len())
-main()";
-    assert_parity(src);
-}
-
-/// Set of structs: dedup of structurally-equal keys via custom hash + union/intersection/difference.
-#[test]
-fn parity_set_struct_algebra() {
-    let src = "\
-struct P:
-    x: int
-    fn hash(self) -> int:
-        return self.x
-fn main():
-    a: Set[P] = Set([P(1), P(2), P(2), P(3)])
-    b: Set[P] = Set([P(2), P(3), P(4)])
-    print(a.len())
-    print(a.union(b).len())
-    print(a.intersection(b).len())
-    print(a.difference(b).len())
-    print(a.has(P(2)))
-    a.remove(P(2))
-    print(a.has(P(2)))
-main()";
-    assert_parity(src);
-}
 
 /// A struct used as a map key but MISSING `hash()` is a checker error — but `run_capture` bypasses
 /// the checker, so the runtime must error consistently (not panic) on both engines.

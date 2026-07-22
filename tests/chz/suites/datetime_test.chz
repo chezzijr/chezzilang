@@ -1,6 +1,6 @@
-# examples/datetime_test.chz — TDD table for std.datetime (pure-Chezzi civil-calendar, UTC-only).
+# tests/chz/suites/datetime_test.chz — TDD table for std.datetime (pure-Chezzi civil-calendar, UTC-only).
 # Published vectors. WEEKDAY ORIGIN is Sunday=0..Saturday=6 (contractual; matches native std.time:
-# epoch 0 == 1970-01-01 is Thursday == weekday 4). Run: `cargo run -- test examples/datetime_test.chz`.
+# epoch 0 == 1970-01-01 is Thursday == weekday 4). Run: `cargo run -- test tests/chz/suites/datetime_test.chz`.
 
 import std.datetime
 

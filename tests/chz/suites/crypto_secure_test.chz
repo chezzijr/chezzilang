@@ -1,8 +1,8 @@
-# examples/crypto_secure_test.chz — std.crypto CSPRNG (secure_bytes / token_hex).
+# tests/chz/suites/crypto_secure_test.chz — std.crypto CSPRNG (secure_bytes / token_hex).
 # Output is INTENTIONALLY non-deterministic (drawn from OS entropy), so there is NO byte-exact golden
 # and NO both-engine parity entry — serial and M:N each draw DIFFERENT bytes. We assert PROPERTIES
 # only: length, uniqueness, hex alphabet, empty-on-0, and the fail-closed fault on a negative n.
-# Run: `cargo run -- test examples/crypto_secure_test.chz` (serial) / `--parallel` (M:N) — both pass.
+# Run: `cargo run -- test tests/chz/suites/crypto_secure_test.chz` (serial) / `--parallel` (M:N) — both pass.
 
 import std.crypto
 

@@ -32,7 +32,7 @@ struct Outcome {
 /// Run every `test fn` discovered under `root` (a single `*_test.chz` file or a directory walked
 /// recursively). Returns the rendered report + overall pass/fail. Never panics on a test fault — the
 /// VM stays reusable, so one failing test does not abort the rest.
-pub fn run_tests(root: &Path) -> TestReport {
+pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
@@ -57,7 +57,7 @@ pub fn run_tests(root: &Path) -> TestReport {
     let mut file_errors = 0usize;
 
     for file in &files {
-        match run_file(file) {
+        match run_file(file, parallel) {
             Ok(mut file_outcomes) => outcomes.append(&mut file_outcomes),
             Err(msg) => {
                 report.push_str(&format!("ERROR {}\n  {msg}\n", file.display()));
@@ -99,9 +99,12 @@ pub fn run_tests(root: &Path) -> TestReport {
     }
 }
 
-/// Compile + run one `*_test.chz` file, returning a per-test outcome list (or a compile-error
-/// message for the whole file).
-fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
+/// Compile + run one `*_test.chz` file on the selected engine (`parallel`: `false` = cooperative
+/// serial VM, `true` = M:N OS-thread VM), returning a per-test outcome list (or a compile-error
+/// message for the whole file). Compilation is engine-independent and stays on the caller's thread;
+/// only the VM run dispatches, and the M:N run is spawned on a [`crate::vm::on_vm_stack`] thread
+/// (the OS-thread scheduler needs the large VM stack).
+fn run_file(file: &Path, parallel: bool) -> Result<Vec<Outcome>, String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
@@ -113,8 +116,26 @@ fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
     }
     let program = crate::compiler::compile_graph(&graph).map_err(|e| e.message)?;
     let program: Arc<Program> = Arc::new(program);
+    let file_label = file.display().to_string();
 
+    if parallel {
+        crate::vm::on_vm_stack(move || invoke_all(program, file_label, true))
+    } else {
+        invoke_all(program, file_label, false)
+    }
+}
+
+/// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
+/// an init-error message for the whole file). Engine-agnostic: `parallel` selects serial vs M:N via
+/// [`Vm::set_parallel`] before the module top-levels run. Ownership (not `&Arc`) so the M:N variant
+/// can move it onto its own stack thread.
+fn invoke_all(
+    program: Arc<Program>,
+    file_label: String,
+    parallel: bool,
+) -> Result<Vec<Outcome>, String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
+    vm.set_parallel(parallel);
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
         return Err(format!(
@@ -123,7 +144,6 @@ fn run_file(file: &Path) -> Result<Vec<Outcome>, String> {
         ));
     }
 
-    let file_label = file.display().to_string();
     let mut outcomes: Vec<Outcome> = Vec::new();
 
     // Free tests, in declaration order.
@@ -307,7 +327,7 @@ mod tests {
             "math_test.chz",
             "test fn one():\n    assert 1 + 1 == 2\ntest fn two():\n    assert \"a\" + \"b\" == \"ab\"\n",
         );
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(
             report.passed,
             "all tests should pass; report:\n{}",
@@ -330,7 +350,7 @@ mod tests {
             "fail_test.chz",
             "test fn boom():\n    x := 1\n    assert x == 2, \"x must be two\"\n",
         );
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(
             !report.passed,
             "the run must fail; report:\n{}",
@@ -359,7 +379,7 @@ mod tests {
         d.write("a_test.chz", "test fn a():\n    assert true\n");
         d.write("b_test.chz", "test fn b():\n    assert true\n");
         d.write("not_a_test.chz", "print(\"ignored\")\n"); // no `_test.chz` suffix
-        let report = run_tests(&d.0);
+        let report = run_tests(&d.0, false);
         assert!(report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("PASS a"), "report:\n{}", report.text);
         assert!(report.text.contains("PASS b"), "report:\n{}", report.text);
@@ -376,7 +396,7 @@ mod tests {
         // A type error (assert on a non-bool) fails the whole file before any test runs. It must be
         // reported ONCE as ERROR, not as a phantom `FAIL …:0`, and must not inflate the test count.
         let f = d.write("broken_test.chz", "test fn t():\n    assert 1\n");
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(report.text.contains("ERROR"), "report:\n{}", report.text);
         assert!(
@@ -405,7 +425,7 @@ mod tests {
             "empty_test.chz",
             "fn helper():\n    print(\"not a test\")\n",
         );
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(
             !report.passed,
             "zero discovered tests must fail; report:\n{}",
@@ -422,7 +442,7 @@ mod tests {
     fn non_test_file_path_errors() {
         let d = TmpDir::new();
         let f = d.write("plain.chz", "print(\"hi\")\n");
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(!report.passed);
         assert!(
             report.text.contains("not a *_test.chz file"),
@@ -457,7 +477,7 @@ struct Suite:
         assert self.log == [\"before_all\", \"before_each\", \"after_each\", \"before_each\"], \"second ordering\"
 ";
         let f = d.write("suite_test.chz", src);
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(
             report.passed,
             "suite ordering should hold; report:\n{}",
@@ -475,34 +495,57 @@ struct Suite:
         );
     }
 
+    /// Collect the per-test verdicts of a report as `(name, passed?)` pairs, in report order — the
+    /// engine-independent signal the dual-engine gate compares. Parses the rendered lines (the
+    /// `Outcome` list isn't public) — `PASS <name> (...)` / `FAIL <name> (...) ...`.
+    fn verdicts(text: &str) -> Vec<(String, bool)> {
+        text.lines()
+            .filter_map(|l| {
+                let (pass, rest) = if let Some(r) = l.strip_prefix("PASS ") {
+                    (true, r)
+                } else if let Some(r) = l.strip_prefix("FAIL ") {
+                    (false, r)
+                } else {
+                    return None;
+                };
+                let name = rest.split(" (").next().unwrap_or(rest).to_string();
+                Some((name, pass))
+            })
+            .collect()
+    }
+
     #[test]
-    fn d1_dogfood_example_tests_pass() {
-        // The committed `examples/*_test.chz` files (membership/operators/match_or + the suite, plus
-        // the per-stdlib-module suites) must all pass under the runner — the dogfood guard. The
-        // `std.*` module test files exercise each public function of their module (Heap/Deque/Counter,
-        // datetime, path, the concurrent collections), so a regression in a std function no golden
-        // example happens to call is now caught by `cargo test`, not just by `chezzi test`.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        for name in [
-            "membership_test.chz",
-            "operators_test.chz",
-            "match_or_test.chz",
-            "suite_test.chz",
-            "collections_test.chz",
-            "concurrent_collection_test.chz",
-            "crypto_secure_test.chz",
-            "datetime_test.chz",
-            "duration_test.chz",
-            "path_test.chz",
-        ] {
-            let f = root.join(name);
-            let report = run_tests(&f);
-            assert!(
-                report.passed,
-                "{name} should pass; report:\n{}",
-                report.text
-            );
-        }
+    fn chz_suite_passes_both_engines() {
+        // The dedicated native suite (`tests/chz/`) is the dogfood guard AND the serial==M:N parity
+        // gate for ported behavioral tests: `chezzi test` itself runs a single engine, so the parity
+        // dimension these tests carried in `vm/parity_tests.rs` is preserved HERE by running the whole
+        // suite on BOTH the cooperative serial VM and the M:N OS-thread VM and asserting identical
+        // per-test verdicts. A test that passes serial but fails M:N (or vice versa) is a parity bug
+        // caught by `cargo test`, not just by `chezzi test`.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
+
+        let serial = run_tests(&root, false);
+        assert!(
+            serial.passed,
+            "tests/chz must pass on the serial VM; report:\n{}",
+            serial.text
+        );
+
+        let parallel = run_tests(&root, true);
+        assert!(
+            parallel.passed,
+            "tests/chz must pass on the M:N VM; report:\n{}",
+            parallel.text
+        );
+
+        // Same tests, same verdicts, same order — the parity assertion.
+        assert_eq!(
+            verdicts(&serial.text),
+            verdicts(&parallel.text),
+            "serial vs M:N verdict mismatch — a parity bug.\nserial:\n{}\nM:N:\n{}",
+            serial.text,
+            parallel.text
+        );
     }
 
     #[test]
@@ -524,7 +567,7 @@ struct Suite:
         assert self.log == [\"ae\"], \"after_each must run on failure\"
 ";
         let f = d.write("ae_test.chz", src);
-        let report = run_tests(&f);
+        let report = run_tests(&f, false);
         assert!(!report.passed, "first must fail; report:\n{}", report.text);
         assert!(
             report.text.contains("FAIL Suite::first"),

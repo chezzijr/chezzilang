@@ -571,6 +571,13 @@ impl Vm {
         Vm::new(program)
     }
 
+    /// `chezzi test` — select the engine before `init_for_tests`: `false` = cooperative serial VM,
+    /// `true` = M:N OS-thread VM (must run on a [`crate::vm::on_vm_stack`] thread). The dual-engine
+    /// gate runs the same suite both ways and asserts identical per-test outcomes (serial == M:N).
+    pub fn set_parallel(&mut self, on: bool) {
+        self.parallel = on;
+    }
+
     /// `chezzi test` — take + clear whatever a test printed to stdout, resetting the buffer so the
     /// next test starts clean (the runner currently discards it; the report is Rust-formatted).
     pub fn take_out(&mut self) -> String {

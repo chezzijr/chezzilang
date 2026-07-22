@@ -1,0 +1,41 @@
+# `tests/chz/` — native Chezzi test suite
+
+Behavior tests written **in Chezzi**, using the language's own `test fn` + `assert` (M20). This is
+the dedicated home for dogfooded behavior specs — kept separate from `examples/` (which holds
+print-and-golden demo programs, `*.chz` + `*.expected`).
+
+## Layout
+
+- `spec/` — language behavior (list/str/map/set/control-flow/…), ported from the Rust string-goldens
+  in `src/vm/tests.rs` and `src/vm/parity_tests.rs`.
+- `stdlib/` — stdlib module behavior (math/encoding/crypto/…), ported from `src/native/*`.
+- `suites/` — `struct`-based test suites with lifecycle hooks + shared fixtures.
+
+## Run
+
+```sh
+cargo run -- test tests/chz/            # run the whole suite (serial VM), PASS/FAIL + summary
+cargo run -- test tests/chz/spec/list_test.chz   # one file
+```
+
+## The parity gate (why this replaces Rust `parity_*` tests)
+
+`chezzi test` runs a **single** engine. The Rust tests these are ported from also asserted
+**serial VM == M:N VM** (byte-identical). That dimension is preserved by the `cargo test` gate
+`test_runner::chz_suite_passes_both_engines`, which runs this entire suite on **both** engines and
+asserts identical per-test verdicts. So `cargo test` — not just `chezzi test` — is the authoritative
+gate; a test that passes on one engine but fails on the other is a parity bug caught there.
+
+## What stays in Rust (not portable)
+
+`assert` cannot catch a runtime fault's *message*, so fault-path tests (empty `min()`, OOB indexing,
+overflow, bad chunk size) stay in Rust. So do compile-time checker tests (`rejects`/`ok`),
+parser/lexer (AST/token shapes), compiler/GC internals, and concurrency timing/scheduler parity.
+Only plain value/collection comparisons port here.
+
+## Adding tests
+
+Mirror an existing file. Free tests: `test fn name(): assert <expr>[, "msg"]`. Suites: a `struct`
+with `test fn name(self)` methods + optional `before_all`/`after_all`/`before_each`/`after_each`
+hooks — see `suites/suite_test.chz`. Keep every assertion a deterministic value comparison so it
+holds identically on both engines.

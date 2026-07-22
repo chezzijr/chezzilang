@@ -173,6 +173,24 @@ const Q_GENERIC: u8 = 2;
 /// release, and the depth-guard test (`self_referential_stringable_hits_depth_limit`) runs in debug.
 const VM_STACK_BYTES: usize = 384 * 1024 * 1024;
 
+/// Run `f` on a fresh thread with the VM's large [`VM_STACK_BYTES`] stack, returning its result.
+/// The M:N engine's cooperative recursion (and any deep user recursion) needs this stack, so the
+/// several `run_*_parallel` helpers spawn it inline. Exposed so the `chezzi test` runner's
+/// dual-engine mode can run an M:N test pass on the same footing without duplicating the spawn
+/// boilerplate. Panics in `f` propagate (the join re-panics), matching the run helpers.
+pub(crate) fn on_vm_stack<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(f)
+        .expect("failed to spawn VM-stack thread")
+        .join()
+        .expect("VM-stack thread panicked")
+}
+
 /// Configured worker count for the M:N OS-thread engine. `0` = auto (size to
 /// [`std::thread::available_parallelism`]). Set once at startup from `--threads=N` /
 /// `CHEZZI_THREADS` (see `main::cmd_run`), BEFORE any `parallel:` join runs — the process-wide pool

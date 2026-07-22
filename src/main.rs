@@ -554,7 +554,9 @@ fn cmd_test(args: &[String]) -> ExitCode {
         }
     }
     let root = path.unwrap_or_else(|| ".".to_string());
-    let report = test_runner::run_tests(std::path::Path::new(&root));
+    // CLI runs the cooperative serial VM (parallel=false), matching the shipping single-engine
+    // behavior; the dual-engine serial==M:N check lives in the `cargo test` gate.
+    let report = test_runner::run_tests(std::path::Path::new(&root), false);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS

@@ -1,5 +1,5 @@
-# examples/membership_test.chz — the `in` operator, dogfooded as real `test fn`s with `assert`
-# (the print-and-golden twin lives in examples/membership.chz). Run with: `chezzi test examples/`.
+# tests/chz/suites/membership_test.chz — the `in` operator, dogfooded as real `test fn`s with `assert`
+# (the print-and-golden twin lives in examples/membership.chz). Run with: `chezzi test tests/chz/`.
 
 test fn list_membership():
     xs := [1, 2, 3, 4, 5]

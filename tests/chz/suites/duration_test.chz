@@ -1,5 +1,5 @@
-# examples/duration_test.chz — TDD table for std.duration (pure-Chezzi Go-like time spans).
-# Load-bearing surface = to_string <-> parse round-trip. Run: `cargo run -- test examples/duration_test.chz`.
+# tests/chz/suites/duration_test.chz — TDD table for std.duration (pure-Chezzi Go-like time spans).
+# Load-bearing surface = to_string <-> parse round-trip. Run: `cargo run -- test tests/chz/suites/duration_test.chz`.
 
 import std.duration
 import std.time

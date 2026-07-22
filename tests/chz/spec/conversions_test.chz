@@ -1,0 +1,51 @@
+# tests/chz/spec/conversions_test.chz — scalar constructor / conversion semantics.
+#
+# Ported from src/vm/parity_tests.rs (`scalar_ctor_conversions_parity`, `bool_ctor_parity`).
+# Run: `cargo run -- test tests/chz/`. Serial==M:N guarded by the dual-engine gate.
+
+test fn int_ctor():
+    assert int("5") == 5
+    assert int("-42") == -42
+    assert int(3.9) == 3, "float -> int truncates toward zero"
+
+test fn float_ctor():
+    assert float("1.5") == 1.5
+    assert float(2) == 2.0
+
+test fn str_ctor():
+    assert str(123) == "123"
+    assert str(4.5) == "4.5"
+    assert str(true) == "true"
+
+test fn bytes_ctor():
+    b := bytes([104, 105])
+    assert b.len() == 2
+    assert b[0] == 104
+    assert b[1] == 105
+
+test fn bytearray_ctor_and_push():
+    ba := bytearray([65, 66])
+    assert ba.len() == 2
+    assert ba[0] == 65
+    ba.push(67)
+    assert ba.len() == 3
+    assert ba[2] == 67
+
+test fn bool_ctor():
+    # int: 0 -> false, else true
+    assert bool(0) == false
+    assert bool(5) == true
+    # float: 0.0 / -0.0 -> false; NaN -> true; else true
+    assert bool(0.0) == false
+    nz := 0.0
+    assert bool(-nz) == false, "negative zero is falsy"
+    nan := 0.0 / 0.0
+    assert bool(nan) == true, "NaN is truthy (not a zero test)"
+    assert bool(3.14) == true
+    # bool: identity
+    assert bool(true) == true
+    assert bool(false) == false
+    # str: "" -> false, any non-empty -> true (NOT a parse; " " is true)
+    assert bool("") == false
+    assert bool("x") == true
+    assert bool(" ") == true, "whitespace is non-empty, so truthy"

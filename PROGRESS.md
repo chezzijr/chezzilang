@@ -4,6 +4,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ TESTING (2026-07-23) — dedicated native test suite `tests/chz/` + dual-engine parity gate.**
+> New home for Chezzi-language behavior tests, separate from `examples/` (print-and-golden demos):
+> `tests/chz/{spec,stdlib,suites}/` with a `README.md`. The 10 existing `examples/*_test.chz` MOVED to
+> `tests/chz/suites/` (golden-twin refs in their headers preserved). **The linchpin:** `chezzi test`
+> runs a SINGLE engine, so porting Rust `parity_*` tests would drop the serial==M:N dimension. Fixed by
+> teaching the runner a `parallel` flag (`test_runner::run_tests(path, parallel)` → new `invoke_all`;
+> M:N runs on `crate::vm::on_vm_stack` + `Vm::set_parallel`) and a `cargo test` gate
+> `chz_suite_passes_both_engines` that runs the whole `tests/chz/` suite on BOTH engines and asserts
+> identical per-test verdicts (verdicts parsed from the report). Verified real: breaking one `.chz`
+> assert fails the gate with `file:line`. **Ported clusters (4):** `spec/list_test.chz` (15),
+> `spec/map_set_test.chz` (10), `spec/conversions_test.chz` (6), `stdlib/math_test.chz` (5) — from
+> `vm/tests.rs` (`list_*_parity`, map/set comprehensions + equality) and `parity_tests.rs`
+> (`parity_list_*`, `parity_map_*`, `parity_set_struct_algebra`, `scalar_ctor_conversions_parity`,
+> `bool_ctor_parity`, `math_number_fns_parity`). **38 fully-covered Rust test fns DELETED** (~370 net
+> Rust lines removed; the ~108-line harness is a one-time cost, so each further cluster is pure
+> reduction). KEPT in Rust (no in-language equivalent): fault-path (`assert` can't catch a fault
+> message), GC-stress (`run_capture_stress` rooting), unannotated-closure inference
+> (`list_hof_3engine_parity`), missing-hash runtime-bypass. Follow-up: iterate remaining clusters (str
+> methods, tuples, encoding/crypto → `tests/chz/stdlib/`). Drive-by: unstuck a pre-existing
+> stale golden `examples/str_more.expected` (`count("")`=len+1 from the prior commit, golden never
+> updated). Docs: `docs/syntax.md §9c`, `tests/chz/README.md`.
+
 > **✅ CONCURRENCY (2026-07-22, `auto-task/atomic-int`) — `AtomicInt`, a monomorphic LOCK-FREE int atomic.**
 > Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/future.md
 > §4` (a lock-free fast path on the GENERIC `Atomic[T]` was UNSOUND — VM is type-blind at construction, so

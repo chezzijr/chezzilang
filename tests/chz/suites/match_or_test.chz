@@ -1,4 +1,4 @@
-# examples/match_or_test.chz — or-patterns in `match`, dogfooded with `assert` (the print-and-golden
+# tests/chz/suites/match_or_test.chz — or-patterns in `match`, dogfooded with `assert` (the print-and-golden
 # twin is examples/match_or.chz).
 
 fn size(n: int) -> str:
