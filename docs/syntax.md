@@ -2235,16 +2235,17 @@ the current directory; a single `*_test.chz` file runs that file, a directory is
 Each test runs in isolation (one failure doesn't abort the rest); the report is
 `PASS/FAIL name (file:line) msg` plus a summary, and the exit code is non-zero if anything failed. A
 suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
-constructing the suite instance once. (The runner is VM-only; only the `assert` primitive runs on both
-engines.) Known limit: an assert that faults inside *imported* (non-test) code reports the test file's
-path, not the library file's.
+constructing the suite instance once. Tests run on the **M:N OS-thread engine by default** (like
+`chezzi run`); `--serial` selects the cooperative single-thread VM (they are mutually exclusive). Known
+limit: an assert that faults inside *imported* (non-test) code reports the test file's path, not the
+library file's.
 
 The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
 module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
-demos). Because `chezzi test` runs a single engine, the serial==M:N parity of ported behavioral tests
-is guarded by the `cargo test` gate `test_runner::chz_suite_passes_both_engines`, which runs the whole
-`tests/chz/` suite on both engines and asserts identical verdicts. Fault-path behavior (a runtime error
-*message*) has no in-language `assert` equivalent, so those tests stay in Rust.
+demos). Because a single `chezzi test` invocation runs one engine, the serial==M:N parity of ported
+behavioral tests is guarded by the `cargo test` gate `test_runner::chz_suite_passes_both_engines`, which
+runs the whole `tests/chz/` suite on both engines and asserts identical verdicts. Fault-path behavior (a
+runtime error *message*) has no in-language `assert` equivalent, so those tests stay in Rust.
 
 ## 9b. Program entry — there is no automatic `main`
 

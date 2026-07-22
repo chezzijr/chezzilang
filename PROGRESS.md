@@ -13,7 +13,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > M:N runs on `crate::vm::on_vm_stack` + `Vm::set_parallel`) and a `cargo test` gate
 > `chz_suite_passes_both_engines` that runs the whole `tests/chz/` suite on BOTH engines and asserts
 > identical per-test verdicts (verdicts parsed from the report). Verified real: breaking one `.chz`
-> assert fails the gate with `file:line`. **Ported clusters (4):** `spec/list_test.chz` (15),
+> assert fails the gate with `file:line`. **`chezzi test` CLI defaults to the M:N engine** (matches
+> `chezzi run`, forward-compatible with the post-freeze serial removal); `--serial` opts into the
+> cooperative VM (`--serial`/`--parallel` mutually exclusive, `--parallel` a no-op alias). **Ported clusters (4):** `spec/list_test.chz` (15),
 > `spec/map_set_test.chz` (10), `spec/conversions_test.chz` (6), `stdlib/math_test.chz` (5) — from
 > `vm/tests.rs` (`list_*_parity`, map/set comprehensions + equality) and `parity_tests.rs`
 > (`parity_list_*`, `parity_map_*`, `parity_set_struct_algebra`, `scalar_ctor_conversions_parity`,

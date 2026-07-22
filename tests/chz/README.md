@@ -14,13 +14,14 @@ print-and-golden demo programs, `*.chz` + `*.expected`).
 ## Run
 
 ```sh
-cargo run -- test tests/chz/            # run the whole suite (serial VM), PASS/FAIL + summary
+cargo run -- test tests/chz/            # run the whole suite (M:N engine, default), PASS/FAIL + summary
+cargo run -- test --serial tests/chz/   # cooperative single-thread VM instead
 cargo run -- test tests/chz/spec/list_test.chz   # one file
 ```
 
 ## The parity gate (why this replaces Rust `parity_*` tests)
 
-`chezzi test` runs a **single** engine. The Rust tests these are ported from also asserted
+A single `chezzi test` invocation runs **one** engine (M:N by default, `--serial` to switch). The Rust tests these are ported from also asserted
 **serial VM == M:N VM** (byte-identical). That dimension is preserved by the `cargo test` gate
 `test_runner::chz_suite_passes_both_engines`, which runs this entire suite on **both** engines and
 asserts identical per-test verdicts. So `cargo test` — not just `chezzi test` — is the authoritative

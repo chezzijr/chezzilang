@@ -540,8 +540,12 @@ fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path
 /// `PASS/FAIL name (file:line) msg` per test, a summary, and a non-zero exit if anything failed.
 fn cmd_test(args: &[String]) -> ExitCode {
     let mut path: Option<String> = None;
+    let mut saw_serial = false;
+    let mut saw_parallel = false;
     for arg in args {
         match arg.as_str() {
+            "--serial" => saw_serial = true,
+            "--parallel" => saw_parallel = true, // no-op alias: M:N is already the default
             other if other.starts_with("--") => {
                 eprintln!("chezzi test: unknown flag '{other}'");
                 return ExitCode::FAILURE;
@@ -553,10 +557,15 @@ fn cmd_test(args: &[String]) -> ExitCode {
             }
         }
     }
+    if saw_serial && saw_parallel {
+        eprintln!("chezzi test: --serial and --parallel are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
     let root = path.unwrap_or_else(|| ".".to_string());
-    // CLI runs the cooperative serial VM (parallel=false), matching the shipping single-engine
-    // behavior; the dual-engine serial==M:N check lives in the `cargo test` gate.
-    let report = test_runner::run_tests(std::path::Path::new(&root), false);
+    // Default engine is the M:N OS-thread VM — matching `chezzi run`, and forward-compatible with the
+    // post-JIT-freeze removal of the cooperative serial engine. `--serial` opts into it while it lives;
+    // the dual-engine serial==M:N check itself lives in the `cargo test` gate.
+    let report = test_runner::run_tests(std::path::Path::new(&root), !saw_serial);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS
