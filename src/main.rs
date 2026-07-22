@@ -399,14 +399,13 @@ fn run_check_parity(
     let cfg2 = native::HostConfig::from_process(prog_args);
     let (o1, e1, r1, _) = vm::run_file_with_entry(p, cfg1, false, entry_fn, root.clone());
     let (o2, e2, r2, _) = vm::run_file_with_entry(p, cfg2, true, entry_fn, root);
-    // Render both legs' faults through the same formatter so identical faults compare equal and read
-    // exactly like a normal run's error.
-    let err1 = r1
-        .err()
-        .map(|e| vm::format_trace(&e.message, e.span, &e.trace));
-    let err2 = r2
-        .err()
-        .map(|e| vm::format_trace(&e.message, e.span, &e.trace));
+    // Compare terminal faults EXACTLY as the in-tree parity oracle does — `RunError`'s `Display`
+    // (`to_string()` = "runtime error ({span}): {message}"), NOT the full stack trace. The trace frames
+    // (`at <fn> (called at <site>)`) can legitimately differ between engines when M:N picks a different
+    // first-fault winner among tasks that fault identically, and the oracle holds such a program equal;
+    // diffing the trace here would false-report divergence. Mirror `assert_file_parity` (parity_tests.rs).
+    let err1 = r1.err().map(|e| e.to_string());
+    let err2 = r2.err().map(|e| e.to_string());
 
     if o1 == o2 && e1 == e2 && err1 == err2 {
         print!("{o1}");
