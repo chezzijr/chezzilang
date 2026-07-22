@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// Result of resolving a bodied/native method on one of the reserved native handles
+/// (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`). The shared
+/// `resolve_native_handle_method` helper folds the byte-identical lookup + hover + generic branch;
+/// each arm keeps ITS residual (numeric gate, submit capture-floor, `read` R-recovery) inline.
+enum NativeHandleMethod {
+    /// A harvested method carrying its OWN `[U]` params — already routed through the generic
+    /// solver; the returned `Ty` is the arm's result.
+    Generic(Ty),
+    /// A non-generic sig; the caller runs its own residual (`check_args_range` + any special case).
+    Concrete(FnSig),
+    /// Lookup miss; the caller runs `infer_all(args)` + "no method" error.
+    Miss,
+}
+
 impl Checker {
     pub(super) fn infer_call(
         &mut self,
@@ -1985,6 +1999,86 @@ impl Checker {
         }
     }
 
+    /// Shared dispatch prefix for the reserved native-handle method arms: lookup the harvested sig
+    /// (`native_handle_method`), record the editor hover, and — if the sig carries its OWN `[U]` type
+    /// params — PREPEND the concrete receiver and route through the generic solver (mirrors the `List`
+    /// arm). Extracting this makes it structurally impossible for a handle arm to forget the generic
+    /// branch (the forgettable hazard); each arm keeps its residual special case inline (Atomic numeric
+    /// gate, Executor `submit` capture-floor, RwShared `read` R-recovery) by matching on the result.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_native_handle_method(
+        &mut self,
+        key: &str,
+        method: &str,
+        targs: &[Ty],
+        name_span: Span,
+        obj_ty: &Ty,
+        type_args: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) -> NativeHandleMethod {
+        let Some(sig) = self.native_handle_method(key, method, targs) else {
+            return NativeHandleMethod::Miss;
+        };
+        self.record_method_hover(name_span, &sig);
+        // A harvested method carrying its OWN `[U]` params needs the generic solver (the harvest
+        // STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
+        if !sig.type_params.is_empty() {
+            let mut params = Vec::with_capacity(sig.params.len() + 1);
+            params.push(obj_ty.clone());
+            params.extend(sig.params.iter().cloned());
+            return NativeHandleMethod::Generic(self.infer_generic_method(
+                method,
+                &params,
+                &sig.ret,
+                &sig.type_params,
+                obj_ty,
+                type_args,
+                args,
+                span,
+            ));
+        }
+        NativeHandleMethod::Concrete(sig)
+    }
+
+    /// The plain reserved-handle arm shared by `Socket`/`Listener`/`Writer`/`Reader`: no element type
+    /// to substitute (`&[]`) and no per-arm residual — a Concrete sig is just `check_args_range` +
+    /// `sig.ret`. Routed through `resolve_native_handle_method` so a future bodied/generic method on
+    /// any of these handles auto-infers instead of silently missing dispatch.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_fixed_native_handle_method(
+        &mut self,
+        key: &str,
+        method: &str,
+        name_span: Span,
+        obj_ty: &Ty,
+        type_args: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        match self.resolve_native_handle_method(
+            key,
+            method,
+            &[],
+            name_span,
+            obj_ty,
+            type_args,
+            args,
+            span,
+        ) {
+            NativeHandleMethod::Generic(t) => t,
+            NativeHandleMethod::Concrete(sig) => {
+                self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                sig.ret
+            }
+            NativeHandleMethod::Miss => {
+                self.infer_all(args);
+                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                Ty::Unknown
+            }
+        }
+    }
+
     /// Type-check an instance method call `obj.method(args)`. `type_args` are the explicit
     /// member-level turbofish (`obj.method[A, B](x, y)`) — non-empty only when the parser stole a
     /// type list after the `.method`; they seed a generic method's own `[U]` params. A method-level
@@ -2559,33 +2653,27 @@ impl Checker {
                 // `Shared` method table (re-seeded by `seed_stdlib_structs`); the box's element type is
                 // substituted for the sig's `Ty::Param("T")` here.
                 let elem = (**elem).clone();
-                if let Some(sig) =
-                    self.native_handle_method("Shared", method, std::slice::from_ref(&elem))
-                {
-                    self.record_method_hover(name_span, &sig);
-                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
-                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
-                    if !sig.type_params.is_empty() {
-                        let mut params = Vec::with_capacity(sig.params.len() + 1);
-                        params.push(obj_ty.clone());
-                        params.extend(sig.params.iter().cloned());
-                        return self.infer_generic_method(
-                            method,
-                            &params,
-                            &sig.ret,
-                            &sig.type_params,
-                            &obj_ty,
-                            type_args,
-                            args,
-                            span,
-                        );
+                match self.resolve_native_handle_method(
+                    "Shared",
+                    method,
+                    std::slice::from_ref(&elem),
+                    name_span,
+                    &obj_ty,
+                    type_args,
+                    args,
+                    span,
+                ) {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        sig.ret
                     }
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        Ty::Unknown
+                    }
                 }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
             }
             Ty::RwShared(elem) => {
                 // `get()->T`, `set(T)->nil`, `write(fn(T)->T)->nil` mirror `Shared`. `read` is the
@@ -2593,49 +2681,44 @@ impl Checker {
                 // The harvested table (via `attach_native_module_metadata`) types `read`'s param as
                 // `fn(T)->Unknown` (any closure return is accepted) and ret `Unknown`; here we recover R
                 // from the supplied closure so the call site sees the real return type (not `Unknown`).
+                // `read`'s sig ret is the placeholder `Unknown` (the real R is recovered below) —
+                // hover (inside the helper) shows the declared `fn(fn(T) -> ?) -> ?` shape, the sig
+                // of record.
                 let elem = (**elem).clone();
-                if let Some(sig) =
-                    self.native_handle_method("RwShared", method, std::slice::from_ref(&elem))
-                {
-                    // `read`'s sig ret is the placeholder `Unknown` (the real R is recovered below) —
-                    // hover shows the declared `fn(fn(T) -> ?) -> ?` shape, which is the sig of record.
-                    self.record_method_hover(name_span, &sig);
-                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
-                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
-                    if !sig.type_params.is_empty() {
-                        let mut params = Vec::with_capacity(sig.params.len() + 1);
-                        params.push(obj_ty.clone());
-                        params.extend(sig.params.iter().cloned());
-                        return self.infer_generic_method(
-                            method,
-                            &params,
-                            &sig.ret,
-                            &sig.type_params,
-                            &obj_ty,
-                            type_args,
-                            args,
-                            span,
-                        );
-                    }
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    if method == "read" {
-                        // R = the closure argument's actual return type (else `Unknown` on arity
-                        // error). `check_args` already inferred the closure (emitting any body
-                        // errors); this is a RECOVERY-ONLY re-inference, so snapshot + truncate to
-                        // avoid double-reporting those same body errors.
-                        let mark = self.errors.len();
-                        let recovered = args.first().map(|arg| self.infer_value(arg));
-                        self.errors.truncate(mark);
-                        if let Some(Ty::Func { ret, .. }) = recovered {
-                            return *ret;
+                match self.resolve_native_handle_method(
+                    "RwShared",
+                    method,
+                    std::slice::from_ref(&elem),
+                    name_span,
+                    &obj_ty,
+                    type_args,
+                    args,
+                    span,
+                ) {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        if method == "read" {
+                            // R = the closure argument's actual return type (else `Unknown` on arity
+                            // error). `check_args` already inferred the closure (emitting any body
+                            // errors); this is a RECOVERY-ONLY re-inference, so snapshot + truncate to
+                            // avoid double-reporting those same body errors.
+                            let mark = self.errors.len();
+                            let recovered = args.first().map(|arg| self.infer_value(arg));
+                            self.errors.truncate(mark);
+                            if let Some(Ty::Func { ret, .. }) = recovered {
+                                return *ret;
+                            }
+                            return Ty::Unknown;
                         }
-                        return Ty::Unknown;
+                        sig.ret
                     }
-                    return sig.ret;
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        Ty::Unknown
+                    }
                 }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
             }
             Ty::Atomic(elem) => {
                 // `load()->T`, `store(T)`, `exchange(T)->T`, `cas(T,T)->bool`; `add(T)->T`/`sub(T)->T`
@@ -2644,127 +2727,98 @@ impl Checker {
                 // so it stays a residual here — for a non-numeric element those two are gated out so the
                 // call reports "no method 'add'" (matching the retired `atomic_method_sig`).
                 let elem = (**elem).clone();
+                // The numeric gate on `add`/`sub` is a DISPATCH-TIME constraint a plain sig cannot
+                // express — it must stay BEFORE the lookup so a non-numeric element short-circuits to
+                // the "no method" path (matching the retired `atomic_method_sig`).
                 let numeric_gated = matches!(method, "add" | "sub") && !elem.is_numeric();
-                if !numeric_gated
-                    && let Some(sig) =
-                        self.native_handle_method("Atomic", method, std::slice::from_ref(&elem))
-                {
-                    self.record_method_hover(name_span, &sig);
-                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
-                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
-                    if !sig.type_params.is_empty() {
-                        let mut params = Vec::with_capacity(sig.params.len() + 1);
-                        params.push(obj_ty.clone());
-                        params.extend(sig.params.iter().cloned());
-                        return self.infer_generic_method(
-                            method,
-                            &params,
-                            &sig.ret,
-                            &sig.type_params,
-                            &obj_ty,
-                            type_args,
-                            args,
-                            span,
-                        );
+                let resolved = if numeric_gated {
+                    NativeHandleMethod::Miss
+                } else {
+                    self.resolve_native_handle_method(
+                        "Atomic",
+                        method,
+                        std::slice::from_ref(&elem),
+                        name_span,
+                        &obj_ty,
+                        type_args,
+                        args,
+                        span,
+                    )
+                };
+                match resolved {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        sig.ret
                     }
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        Ty::Unknown
+                    }
                 }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
             }
             Ty::Executor => {
                 // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
                 // Non-generic — no element type to substitute (`&[]`). `submit`'s param is typed
                 // `fn() -> ?` by `attach_native_module_metadata` so any-return closures are accepted.
-                if let Some(sig) = self.native_handle_method("Executor", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    // A bodied generic method (`submit_result[T]`) carrying its OWN `[U]` params needs
-                    // the generic solver — infer T from the closure return. The harvest STRIPS `self`,
-                    // so PREPEND the concrete receiver (mirrors the `List` arm). `submit` itself is
-                    // non-generic and keeps the capture-floor path below; the inner `self.submit(...)`
-                    // that `submit_result`'s body emits re-enters this arm on that non-generic path.
-                    if !sig.type_params.is_empty() {
-                        let mut params = Vec::with_capacity(sig.params.len() + 1);
-                        params.push(obj_ty.clone());
-                        params.extend(sig.params.iter().cloned());
-                        return self.infer_generic_method(
-                            method,
-                            &params,
-                            &sig.ret,
-                            &sig.type_params,
-                            &obj_ty,
-                            type_args,
-                            args,
-                            span,
-                        );
+                // A bodied generic method (`submit_result[T]`) routes through the helper's generic
+                // solver (infer T from the closure return). `submit` itself is non-generic and keeps
+                // the capture-floor path in the Concrete arm; the inner `self.submit(...)` that
+                // `submit_result`'s body emits re-enters this arm on that non-generic path.
+                match self.resolve_native_handle_method(
+                    "Executor",
+                    method,
+                    &[],
+                    name_span,
+                    &obj_ty,
+                    type_args,
+                    args,
+                    span,
+                ) {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so
+                        // its captures cross the airlock exactly like a `spawn` task's. Push a capture
+                        // floor at the current scope depth around the argument check; the submitted
+                        // closure opens its own scope at that depth, so its params/locals are
+                        // task-local while any outer binding it reads is flagged by the `infer_ident`
+                        // read gate (mirrors `spawn:`).
+                        if method == "submit" {
+                            self.capture_floors.push(self.scopes.len());
+                            self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                            self.capture_floors.pop();
+                        } else {
+                            self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        }
+                        sig.ret
                     }
-                    // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so its
-                    // captures cross the airlock exactly like a `spawn` task's. Push a capture floor at
-                    // the current scope depth around the argument check; the submitted closure opens
-                    // its own scope at that depth, so its params/locals are task-local while any outer
-                    // binding it reads is flagged by the `infer_ident` read gate (mirrors `spawn:`).
-                    if method == "submit" {
-                        self.capture_floors.push(self.scopes.len());
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                        self.capture_floors.pop();
-                    } else {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        Ty::Unknown
                     }
-                    return sig.ret;
                 }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
             }
             // D6 — `Socket` / `Listener` (std.net): a small fixed method set. The runtime parks the
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return
             // their `Result`.
-            Ty::Socket => {
-                if let Some(sig) = self.native_handle_method("Socket", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
-            }
-            Ty::Listener => {
-                if let Some(sig) = self.native_handle_method("Listener", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
-            }
+            Ty::Socket => self.infer_fixed_native_handle_method(
+                "Socket", method, name_span, &obj_ty, type_args, args, span,
+            ),
+            Ty::Listener => self.infer_fixed_native_handle_method(
+                "Listener", method, name_span, &obj_ty, type_args, args, span,
+            ),
             // R2 — `Writer` (std.io): a small fixed write-only method set (`write`/`write_bytes`/
             // `flush`/`close`). Method table harvested from `std/io.chz`, looked up here like Socket.
-            Ty::Writer => {
-                if let Some(sig) = self.native_handle_method("Writer", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
-            }
+            Ty::Writer => self.infer_fixed_native_handle_method(
+                "Writer", method, name_span, &obj_ty, type_args, args, span,
+            ),
             // R2b — `Reader` (std.io): a small fixed read-only method set (`read_line`/`read_bytes`/
-            // `close`). Method table harvested from `std/io.chz`, looked up here like Writer.
-            Ty::Reader => {
-                if let Some(sig) = self.native_handle_method("Reader", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
-                Ty::Unknown
-            }
+            // `close`, plus the bodied `lines`). Method table harvested from `std/io.chz`.
+            Ty::Reader => self.infer_fixed_native_handle_method(
+                "Reader", method, name_span, &obj_ty, type_args, args, span,
+            ),
             // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
             // where `a: T` and `T: Comparable`).
             Ty::Param(pname) => {

@@ -912,3 +912,20 @@ metric is dominated by the unchanged 88 B `Obj` slot; the real footprint win is 
 stacks (`Vec<Value>` halved), which don't show in `live_bytes` but surface as the speedups above. Float
 boxing adds a heap slot per non-inline float — no measured regression on this (int-heavy) bench set, so
 float-constant interning (plan Task 5) is **deferred** until a float-heavy workload shows the cost.
+
+## Unified native-handle dispatch prefix — behavior-preserving refactor (2026-07-22)
+
+Deduped the check-OK/run-fault-prone dispatch prefix on two seams: the VM `do_method_call`'s eight
+per-handle `if matches!(Obj::X)` arms collapse into ONE `match self.heap.get(h)` yielding a
+`Some("<key>")`, and the checker's reserved-handle method arms share `resolve_native_handle_method`.
+Purely structural — zero semantic change, no stdlib change; every existing test + two-engine parity
+stays green. Not a perf lever, but the VM fold **removes the eight `if matches!` probes that used to sit
+on the hot list/map/set/struct method path** (a `None` from the one match now falls straight to
+`core_method`), so if anything the method-heavy benches trend slightly better.
+
+**Direct before/after, same machine + session** (hyperfine mean, Chezzi ms; per-arm to folded):
+`loop` 1006 to **1010** (+0.4%) · `list` 404 to **403** (-0.2%) · `struct` 429 to **417** (-2.8%) ·
+`poly_method` 1287 to **1334** (+3.6%, within its +/-66 ms band) · `map` 139 to **141** (+1.4%). All
+within the +/-2-6 % run-to-run noise on this machine — **flat**, as expected for a cold-arm refactor.
+The concurrency/io handle arms (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
+`Reader`) are not exercised by any bench, so no fib/loop/primes movement was possible.

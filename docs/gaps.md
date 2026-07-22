@@ -33,7 +33,11 @@ A *generic* method call (`recv.m[U](...)` or inference of `U`) works on a **user
   `try_native_bodied_method` is now called from the `Shared`/`RwShared`/`Atomic`/`Executor` arms of
   `do_method_call` (`src/vm/call.rs`), mirroring the `Writer`/`Reader` arms (try-bodied BEFORE native; a
   miss falls through byte-identically). Closes the check-OK/run-fault gap for bodied methods on those
-  handles.
+  handles. **(2026-07-22 hardening, `auto-task/unify-native-dispatch-prefix`)** the eight per-handle
+  arms were then folded into ONE `match self.heap.get(h)` key-map in `do_method_call`, and the checker's
+  reserved-handle arms into `resolve_native_handle_method` — so bodied dispatch can no longer be
+  forgotten on a NEW handle (adding it to the one match auto-enables it). Behavior-preserving; the fold
+  also drops the eight `if matches!` probes off the hot list/map/struct method path.
 
 **Shipped proof:** `Executor.submit_result[T](self, f: fn() -> T) -> Channel[T]` (`std/concurrency.chz`)
 — the FIRST bodied generic method on a native struct, exercising 1a/1b/2 end-to-end. `submit_task`

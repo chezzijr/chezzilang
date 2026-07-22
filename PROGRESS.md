@@ -4,6 +4,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ REFACTOR (2026-07-22, `auto-task/unify-native-dispatch-prefix`) — UNIFIED native-handle dispatch
+> prefix (checker + VM), behavior-preserving.** Kills the check-OK/run-fault bug class STRUCTURALLY (the
+> one just hit where `try_native_bodied_method` was missing on the `Shared`/`RwShared`/`Atomic`/`Executor`
+> VM arms → type-checked then runtime-faulted). *VM (`src/vm/call.rs`, `do_method_call`):* the eight
+> per-handle `if matches!(Obj::X) { try_native_bodied_method("X", …); x_method(…) }` arms
+> (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`) collapse into ONE
+> `match self.heap.get(h) → Some("<key>")` — a handle runs the bodied-method probe ONCE then dispatches
+> its native op body (tails byte-identical: Socket/Listener `poll_park`, Writer `stream_halt`); a `None`
+> falls straight to the hot collection arms. Adding a handle to that one match auto-enables bodied
+> dispatch — no arm can be forgotten. Bonus: this REMOVES the eight `if matches!` probes that used to sit
+> on the hot list/map/struct method path (net fewer branches; benches flat, `docs/benchmarks.md`).
+> *Checker (`src/checker/expr.rs`, `infer_method_call`):* the shared lookup + hover + generic-branch
+> (`native_handle_method` → `record_method_hover` → prepend-receiver `infer_generic_method`) extracted
+> into `resolve_native_handle_method` (returns `Generic(Ty)`/`Concrete(FnSig)`/`Miss`); each arm keeps
+> its residual special case INLINE — Atomic numeric gate (BEFORE lookup), Executor `submit` capture-floor,
+> RwShared `read` R-recovery; the four fixed net/io handles share `infer_fixed_native_handle_method`, now
+> structurally routed through the generic branch (a proven no-op today, forward-compatible for a future
+> bodied generic method). EXCLUDES List/Map/Set entirely (hot `core_method` arm untouched — M19). No
+> stdlib/behavior change: proven by the two existing bodied methods flowing through the unified prefix
+> (`Executor.submit_result[T]` generic + `Reader.lines` non-generic, both engines) plus every existing
+> special-case/parity/golden test staying green. Tests: unchanged (behavior-preserving); full `--lib`
+> (3688) + all targets + conformance green, clippy clean. Docs: this note, `docs/benchmarks.md`.
+
 > **✅ CONCURRENCY (2026-07-22, `auto-task/bounded-channel-pmap`) — BOUNDED `Channel[T](cap)` +
 > `pmap`/`pmap_limited` stdlib helpers.** *(1) Bounded channel:* `Channel[T]()` stays unbounded (`send`
 > never blocks — byte-identical to before); `Channel[T](cap)` (`cap > 0`; `cap <= 0` is a runtime fault
