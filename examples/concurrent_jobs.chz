@@ -1,0 +1,421 @@
+# playground/concurrent_jobs.chz — a meaningful, self-verifying concurrency stress test.
+#
+# This is a REAL program that computes real answers, then checks every concurrently-produced result
+# against an independently-computed SEQUENTIAL golden. So it is two tests at once:
+#   1. Correctness — a wrong aggregate fails a `check` and the run ends "... N FAILURES".
+#   2. Parity      — the whole thing is deterministic by construction, so `--serial` and the default
+#                    M:N engine MUST print byte-for-byte identical output. Any diff is a real
+#                    airlock/scheduler bug.
+#
+# It deliberately touches EVERY concurrency primitive Chezzi offers:
+#   Channel (send/recv/try_send/try_recv/close/len/cap/for-drain, unbounded + bounded-cap backpressure) ·
+#   wait: (recv / = / _ / else / timer / cancel-done arms) · parallel: nursery · spawn expr + spawn:
+#   block · Executor (submit/submit_result/shutdown) ·
+#   Shared · RwShared · Atomic · std.concurrency.collection (ConcurrentMap/ConcurrentCounter) ·
+#   std.cancel (manual/timeout/derive/done/cancelled/reason/cancel) · std.time.timer · defer cleanup ·
+#   and the airlock: recursive-closure + protocol-existential + mid-`recover:` generator crossing.
+#
+# Determinism discipline (why serial == M:N): all concurrent accumulation is commutative or lock-RMW
+# (order-independent); no RNG / no wall-clock in any asserted value; `timer` is only used where it
+# provably always times out (a channel nobody feeds); cancellation fires only AFTER the work is drained;
+# Atomic cas/exchange are single-threaded; every worker loop has a recv/wait back-edge (never CPU-spins).
+#
+# Run:  chezzi run --serial playground/concurrent_jobs.chz   (parity oracle)
+#       chezzi run          playground/concurrent_jobs.chz   (M:N — must match byte-for-byte)
+
+import std.concurrency
+import std.concurrency.collection
+import std.cancel
+import std.time
+
+# ---- self-test harness: module-global pass/total counters + a check() that prints PASS/FAIL ----
+_pass := Atomic(0)
+_total := Atomic(0)
+
+fn check(name: str, got: int, want: int):
+    _total.add(1)
+    if got == want:
+        _pass.add(1)
+        print("  PASS {name:<26} = {got}")
+    else:
+        print("  FAIL {name:<26} got={got} want={want}")
+
+fn b2i(b: bool) -> int:
+    if b:
+        return 1
+    return 0
+
+# ---- pure dataset formula (no RNG → deterministic) ----
+fn value(i: int) -> int:
+    return (i * 37 + 11) % 100
+
+fn set_max(m: Map[str, int], k: str, v: int) -> Map[str, int]:
+    if k in m:
+        if v > m[k]:
+            m[k] = v
+    else:
+        m[k] = v
+    return m
+
+# =====================================================================================================
+# Phase 1 — parallel MapReduce over the dataset, aggregating into ALL the shared-state primitives.
+# =====================================================================================================
+# A worker pulls (category, value) records off `jobs`, folds them into every sink, and acks on `report`.
+# It shuts down when the collector cancels `tok` (which only happens AFTER all records are drained, so
+# no queued job is ever lost to the cancel). `defer` bumps a cleanup counter — proof the teardown ran.
+fn worker(jobs: Channel[(str, int)], report: Channel[int], tok: cancel.Token,
+          processed: Atomic[int], sum_total: Shared[int],
+          per_cat: collection.ConcurrentCounter[str], max_per_cat: RwShared[Map[str, int]],
+          cleaned: Atomic[int]):
+    defer cleaned.add(1)
+    while true:
+        wait:
+            r := jobs.recv():
+                cat := r.0
+                val := r.1
+                processed.add(1)                             # Atomic.add  (commutative)
+                sum_total.update(fn(v): v + val)             # Shared.update RMW (commutative)
+                per_cat.increment(cat)                       # ConcurrentCounter RMW
+                max_per_cat.write(fn(m): set_max(m, cat, val))  # RwShared.write (exclusive, race-free max)
+                report.send(1)
+            _ := tok.done().recv():                          # cancel-done arm → clean exit
+                return
+
+# =====================================================================================================
+# Phase 2 — Executor: fold the dataset into a checksum on a DETACHED pool. Results come back over a
+# Channel (there are no futures). Each shard is order-independent; we sum the partials.
+# =====================================================================================================
+fn shard_fold(lo: int, hi: int, out: Channel[int]):
+    acc := 0
+    for i in range(lo, hi):
+        acc = acc + value(i) * (i + 1)
+    out.send(acc)
+
+# =====================================================================================================
+# Phase 3 — airlock stress, verified: polymorphic Jobs carrying recursive closures cross a Channel[Job],
+# and live generators (incl. one paused mid-`recover:`) cross a Channel[Iterator[int]].
+# =====================================================================================================
+protocol Job:
+    fn run(self) -> int
+    fn label(self) -> str
+
+# A job whose payload is a RECURSIVE CLOSURE captured by-value (recursive-local-fn-sendable path,
+# nested protocol > struct > closure across the airlock).
+struct ApplyJob:
+    seed: int
+    op: fn(int) -> int
+    tag: str
+    fn run(self) -> int: self.op(self.seed)
+    fn label(self) -> str: self.tag
+
+# A job that sums a captured list — plain sendable data.
+struct SumJob:
+    xs: List[int]
+    fn run(self) -> int: self.xs.sum()
+    fn label(self) -> str: "sum/{self.xs.len()}"
+
+fn fib_fn() -> fn(int) -> int:
+    fn fib(k: int) -> int:
+        if k < 2:
+            return k
+        return fib(k - 1) + fib(k - 2)
+    return fib
+
+fn fact_fn() -> fn(int) -> int:
+    fn fact(k: int) -> int:
+        if k <= 1:
+            return 1
+        return k * fact(k - 1)
+    return fact
+
+fn worker_jobs(jobs: Channel[Job], results: Channel[(str, int)], tok: cancel.Token):
+    while true:
+        wait:
+            j := jobs.recv():
+                results.send((j.label(), j.run()))
+            _ := tok.done().recv():
+                return
+
+fn squares(n: int) -> Iterator[int]:
+    for i in 1..n:
+        yield i * i
+
+# a generator suspended mid-`recover:`: the 2nd pull faults (1/0), recover catches, so it yields 20.
+fn guarded() -> Iterator[int]:
+    r := recover:
+        yield 10
+        boom := 1 / 0
+        yield boom
+    yield 20
+
+fn drain_gens(gens: Channel[Iterator[int]], out: Channel[int], count: int):
+    got := 0
+    while got < count:
+        g := gens.recv()
+        s := 0
+        for v in g:
+            s = s + v
+        out.send(s)
+        got = got + 1
+
+# =====================================================================================================
+
+fn main():
+    print("== Phase 1: parallel MapReduce (Channel/wait/parallel/spawn/Shared/RwShared/Atomic/collections/cancel/defer) ==")
+    n := 40
+    cats := ["fib", "fact", "sum", "sq"]
+
+    processed := Atomic(0)
+    cleaned := Atomic(0)
+    sum_total := Shared(0)
+    per_cat := collection.ConcurrentCounter(RwShared({}))
+    max_per_cat := RwShared[Map[str, int]]({})
+    tok := cancel.manual()
+
+    jobs: Channel[(str, int)] = Channel[(str, int)]()
+    report := Channel[int]()
+
+    parallel:
+        # producer: fan the whole dataset out, then close the queue
+        spawn:
+            for i in range(0, n):
+                jobs.send((cats[i % 4], value(i)))
+            jobs.close()
+        # a small worker pool (spawn <expr> form)
+        spawn worker(jobs, report, tok, processed, sum_total, per_cat, max_per_cat, cleaned)
+        spawn worker(jobs, report, tok, processed, sum_total, per_cat, max_per_cat, cleaned)
+        spawn worker(jobs, report, tok, processed, sum_total, per_cat, max_per_cat, cleaned)
+        # collector (spawn: block form): after every record is acked, cancel to release idle workers
+        spawn:
+            k := 0
+            while k < n:
+                _ := report.recv()
+                k = k + 1
+            tok.cancel()
+
+    # sequential golden over the SAME dataset
+    seq_sum := 0
+    seq_count: Map[str, int] = {}
+    seq_max: Map[str, int] = {}
+    for i in range(0, n):
+        c := cats[i % 4]
+        v := value(i)
+        seq_sum = seq_sum + v
+        if c in seq_count:
+            seq_count[c] = seq_count[c] + 1
+        else:
+            seq_count[c] = 1
+        seq_max = set_max(seq_max, c, v)
+
+    check("p1.processed", processed.load(), n)
+    check("p1.sum_total", sum_total.get(), seq_sum)
+    check("p1.workers_cleaned", cleaned.load(), 3)
+    for c in cats:
+        check("p1.count." + c, per_cat.count(c), seq_count[c])
+    for c in cats:
+        mx := max_per_cat.read(fn(m): m[c])
+        check("p1.max." + c, mx, seq_max[c])
+    # Shared.set/get and RwShared.get/set surface (single-threaded, deterministic)
+    sum_total.set(0)
+    check("p1.shared_set", sum_total.get(), 0)
+    max_per_cat.set({"reset": 1})
+    check("p1.rwshared_set", max_per_cat.get().len(), 1)
+
+    print("== Phase 2: Executor checksum (submit / shutdown / collect-via-Channel) ==")
+    ex := Executor()
+    out := Channel[int]()
+    shards := 4
+    per := n / shards
+    for s in range(0, shards):
+        lo := s * per
+        hi := lo + per
+        ex.submit(fn(): shard_fold(lo, hi, out))
+    ex.shutdown()                          # drains the queue FIFO; partials land on `out`
+    checksum := 0
+    for _ in range(0, shards):
+        checksum = checksum + out.recv()
+    seq_checksum := 0
+    for i in range(0, n):
+        seq_checksum = seq_checksum + value(i) * (i + 1)
+    check("p2.checksum", checksum, seq_checksum)
+    # submit_result: bodied generic method on Executor — hands back a Channel[T] carrying f()'s result
+    # (deterministic value; the work runs on the pool and the result lands on drain).
+    ex2 := Executor()
+    rc := ex2.submit_result(fn() -> int: value(7) * 8)
+    ex2.shutdown()
+    check("p2.submit_result", rc.recv(), value(7) * 8)
+
+    print("== Phase 3a: polymorphic Jobs w/ recursive closures crossing Channel[Job] ==")
+    jobs3: Channel[Job] = Channel[Job]()
+    results3: Channel[(str, int)] = Channel[(str, int)]()
+    report3: Channel[(str, int)] = Channel[(str, int)]()
+    tok3 := cancel.manual()
+    batch: List[Job] = [
+        ApplyJob(10, fib_fn(), "fib/10"),
+        ApplyJob(6, fact_fn(), "fact/6"),
+        ApplyJob(15, fib_fn(), "fib/15"),
+        SumJob([1, 2, 3, 4, 5]),
+        SumJob([10, 20, 30]),
+        ApplyJob(5, fn(x: int) -> int: x * x, "sq/5"),
+    ]
+    nj := batch.len()
+    parallel:
+        spawn:
+            for j in batch:
+                jobs3.send(j)
+            jobs3.close()
+        spawn worker_jobs(jobs3, results3, tok3)
+        spawn worker_jobs(jobs3, results3, tok3)
+        spawn worker_jobs(jobs3, results3, tok3)
+        spawn:
+            k := 0
+            while k < nj:
+                report3.send(results3.recv())
+                k = k + 1
+            tok3.cancel()
+
+    got: Map[str, int] = {}
+    di := 0
+    while di < nj:
+        p := report3.recv()
+        got[p.0] = p.1
+        di = di + 1
+    check("p3.fib/10", got["fib/10"], 55)
+    check("p3.fact/6", got["fact/6"], 720)
+    check("p3.fib/15", got["fib/15"], 610)
+    check("p3.sum/5", got["sum/5"], 15)
+    check("p3.sum/3", got["sum/3"], 60)
+    check("p3.sq/5", got["sq/5"], 25)
+
+    print("== Phase 3b: live generators (incl. one paused mid-recover:) crossing Channel[Iterator[int]] ==")
+    gens: Channel[Iterator[int]] = Channel[Iterator[int]]()
+    gout := Channel[int]()
+    g_mid := guarded()
+    first := g_mid.next()                  # pull once → suspends mid-`recover:`
+    parallel:
+        spawn drain_gens(gens, gout, 3)
+        spawn:
+            gens.send(squares(5))          # 1+4+9+16 = 30
+            gens.send(g_mid)               # resumes past the caught 1/0 → yields 20
+            gens.send(squares(8))          # 1+4+..+49 = 140
+    gsums: List[int] = []
+    gi := 0
+    while gi < 3:
+        gsums.push(gout.recv())
+        gi = gi + 1
+    gsums.sort()
+    check("p3.gen_sum_min", gsums[0], 20)
+    check("p3.gen_sum_mid", gsums[1], 30)
+    check("p3.gen_sum_max", gsums[2], 140)
+    fv := 0
+    match first:
+        Some(x): fv = x
+        None: fv = -1
+    check("p3.gen_first_pull", fv, 10)
+
+    print("== Phase 4: deterministic wait: / Channel / Atomic / cancel surface sweep ==")
+    # wait: else-arm (nothing ready)
+    w := 0
+    e1 := Channel[int]()
+    wait:
+        x := e1.recv():
+            w = x
+        else:
+            w = -1
+    check("p4.wait_else", w, -1)
+    # wait: timer-arm that provably times out (never fed)
+    never := Channel[int]()
+    wt := 0
+    wait:
+        x := never.recv():
+            wt = x
+        _ := timer(50).recv():
+            wt = 7
+    check("p4.wait_timer", wt, 7)
+    # wait: = assign-to-outer arm + closed-arm skipped
+    nums := Channel[int]()
+    nums.send(9)
+    dc := Channel[int]()
+    dc.close()
+    wa := 0
+    wait:
+        d := dc.recv():
+            wa = -1
+        wa = nums.recv():
+            pass
+    check("p4.wait_assign_closedskip", wa, 9)
+    # Channel try_send / try_recv / len / for-drain after close
+    ch := Channel[int]()
+    ok1 := ch.try_send(1)
+    ch.try_send(2)
+    ch.try_send(3)
+    l := ch.len()
+    ch.close()
+    ok2 := ch.try_send(9)
+    drained := 0
+    for v in ch:
+        drained = drained + v
+    trv := 0
+    match ch.try_recv():
+        Some(x): trv = 1
+        None: trv = 0
+    check("p4.try_send_open", b2i(ok1), 1)
+    check("p4.try_send_closed", b2i(ok2), 0)
+    check("p4.channel_len", l, 3)
+    check("p4.for_drain", drained, 6)
+    check("p4.try_recv_none", trv, 0)
+    # bounded Channel[T](cap): cap() + try_send backpressure on a FULL channel. Single-threaded, so the
+    # full-vs-not decision is deterministic (under multi-sender contention it would not be) → serial==M:N.
+    bc := Channel[int](2)
+    bs1 := bc.try_send(1)                  # 1 queued
+    bc.try_send(2)                         # 2 queued → at capacity
+    bs3 := bc.try_send(3)                  # full (cap 2) → rejected
+    _ := bc.recv()                         # free a slot
+    bs4 := bc.try_send(4)                  # fits again
+    check("p4.bounded_cap", bc.cap(), 2)
+    check("p4.unbounded_cap", Channel[int]().cap(), 0)
+    check("p4.bounded_send_ok", b2i(bs1), 1)
+    check("p4.bounded_full_reject", b2i(bs3), 0)
+    check("p4.bounded_after_recv", b2i(bs4), 1)
+    # Atomic single-threaded full surface: store/exchange/add/sub/cas/load
+    at := Atomic(0)
+    at.store(5)
+    check("p4.atomic_exchange_old", at.exchange(10), 5)
+    check("p4.atomic_add", at.add(3), 13)
+    check("p4.atomic_sub", at.sub(1), 12)
+    check("p4.atomic_cas_ok", b2i(at.cas(12, 20)), 1)
+    check("p4.atomic_cas_bad", b2i(at.cas(12, 99)), 0)
+    check("p4.atomic_load", at.load(), 20)
+    # std.cancel: derive tree (transitive) + timeout(0) reason + done() winning an empty wait
+    root := cancel.manual()
+    child := root.derive()
+    check("p4.cancel_tree_before", b2i(child.cancelled()), 0)
+    root.cancel()
+    check("p4.cancel_tree_after", b2i(child.cancelled()), 1)
+    texp := cancel.timeout(0)
+    rstr := "none"
+    match texp.reason():
+        Some(rr): rstr = rr
+        None: rstr = "none"
+    check("p4.timeout_cancelled", b2i(texp.cancelled()), 1)
+    check("p4.timeout_reason", b2i(rstr == "timeout"), 1)
+    tc := cancel.manual()
+    tc.cancel()
+    ec := Channel[str]()
+    wc := 0
+    wait:
+        v := ec.recv():
+            wc = -1
+        _ := tc.done().recv():
+            wc = 5
+    check("p4.cancel_done_wins", wc, 5)
+
+    # ---- verdict ----
+    passed := _pass.load()
+    total := _total.load()
+    if passed == total:
+        print("concurrency self-test: ALL PASS ({total} checks)")
+    else:
+        print("concurrency self-test: {total - passed} FAILURES / {total} checks")
+
+main()

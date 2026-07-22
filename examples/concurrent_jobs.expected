@@ -1,0 +1,55 @@
+== Phase 1: parallel MapReduce (Channel/wait/parallel/spawn/Shared/RwShared/Atomic/collections/cancel/defer) ==
+  PASS p1.processed               = 40
+  PASS p1.sum_total               = 2000
+  PASS p1.workers_cleaned         = 3
+  PASS p1.count.fib               = 10
+  PASS p1.count.fact              = 10
+  PASS p1.count.sum               = 10
+  PASS p1.count.sq                = 10
+  PASS p1.max.fib                 = 99
+  PASS p1.max.fact                = 96
+  PASS p1.max.sum                 = 85
+  PASS p1.max.sq                  = 70
+  PASS p1.shared_set              = 0
+  PASS p1.rwshared_set            = 1
+== Phase 2: Executor checksum (submit / shutdown / collect-via-Channel) ==
+  PASS p2.checksum                = 41160
+  PASS p2.submit_result           = 560
+== Phase 3a: polymorphic Jobs w/ recursive closures crossing Channel[Job] ==
+  PASS p3.fib/10                  = 55
+  PASS p3.fact/6                  = 720
+  PASS p3.fib/15                  = 610
+  PASS p3.sum/5                   = 15
+  PASS p3.sum/3                   = 60
+  PASS p3.sq/5                    = 25
+== Phase 3b: live generators (incl. one paused mid-recover:) crossing Channel[Iterator[int]] ==
+  PASS p3.gen_sum_min             = 20
+  PASS p3.gen_sum_mid             = 30
+  PASS p3.gen_sum_max             = 140
+  PASS p3.gen_first_pull          = 10
+== Phase 4: deterministic wait: / Channel / Atomic / cancel surface sweep ==
+  PASS p4.wait_else               = -1
+  PASS p4.wait_timer              = 7
+  PASS p4.wait_assign_closedskip  = 9
+  PASS p4.try_send_open           = 1
+  PASS p4.try_send_closed         = 0
+  PASS p4.channel_len             = 3
+  PASS p4.for_drain               = 6
+  PASS p4.try_recv_none           = 0
+  PASS p4.bounded_cap             = 2
+  PASS p4.unbounded_cap           = 0
+  PASS p4.bounded_send_ok         = 1
+  PASS p4.bounded_full_reject     = 0
+  PASS p4.bounded_after_recv      = 1
+  PASS p4.atomic_exchange_old     = 5
+  PASS p4.atomic_add              = 13
+  PASS p4.atomic_sub              = 12
+  PASS p4.atomic_cas_ok           = 1
+  PASS p4.atomic_cas_bad          = 0
+  PASS p4.atomic_load             = 20
+  PASS p4.cancel_tree_before      = 0
+  PASS p4.cancel_tree_after       = 1
+  PASS p4.timeout_cancelled       = 1
+  PASS p4.timeout_reason          = 1
+  PASS p4.cancel_done_wins        = 5
+concurrency self-test: ALL PASS (49 checks)

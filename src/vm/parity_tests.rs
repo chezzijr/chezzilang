@@ -5032,6 +5032,25 @@ fn golden_hello_via_run_file() {
     assert_eq!(out, expected);
 }
 
+/// `examples/concurrent_jobs.chz` — the self-verifying concurrency stress test that deliberately
+/// touches EVERY concurrency primitive (Channel incl. bounded-cap/try_send backpressure, wait:,
+/// parallel: nursery, spawn, Executor incl. submit_result, Shared/RwShared/Atomic, concurrent
+/// collections, cancel, timer, and the airlock). It is deterministic by construction, so it is two
+/// tests at once: the 49 self-checks must all PASS (golden), and serial-VM must byte-match M:N.
+#[test]
+fn golden_concurrent_jobs_both_engines() {
+    let path = fixture("examples/concurrent_jobs.chz");
+    let expected = std::fs::read_to_string(fixture("examples/concurrent_jobs.expected")).unwrap();
+    let (out, _err, res, _) = run_file(&path);
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(out, expected);
+    assert!(
+        out.contains("ALL PASS (49 checks)"),
+        "self-test must fully pass:\n{out}"
+    );
+    assert_file_parity("examples/concurrent_jobs.chz");
+}
+
 /// M6 golden: core-type methods + pipe run end-to-end on the VM and byte-match the interp.
 #[test]
 fn golden_methods_via_run_file() {
