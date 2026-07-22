@@ -465,13 +465,17 @@ pub enum Op {
     NewExecutor,
 }
 
-/// Static layout for an [`Op::WaitPoll`]: the arm count `n` (== channel handles on the stack), each
-/// arm's body target ip (the bind/assign/discard prologue), and the optional `else` block target.
+/// Static layout for an [`Op::WaitPoll`]: the arm count `n`, each arm's body target ip (the
+/// bind/assign/discard prologue for recv, or the bare body for send), the optional `else` block
+/// target, and `is_send` per arm. A recv arm leaves ONE handle on the stack (the channel); a SEND arm
+/// leaves TWO (channel THEN value), so the poll walks a per-arm slot cursor (`is_send` → width 2).
 #[derive(Debug, Clone)]
 pub struct WaitMeta {
     pub n: usize,
     pub arm_targets: Vec<usize>,
     pub else_target: Option<usize>,
+    /// `true` for a send arm (2 stack slots: chan, value), `false` for a recv arm (1 slot: chan).
+    pub is_send: Vec<bool>,
 }
 
 /// A compiled function (or the synthetic module-toplevel) — its code, parallel spans, arity, and

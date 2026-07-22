@@ -606,7 +606,10 @@ pub struct Vm {
     /// fiber under every key so any sibling `send` re-runs the `WaitPoll` and re-polls. Mutually
     /// exclusive with `suspend` (a fiber parks via one or the other, never both). A VM-global like
     /// `suspend` (one fiber runs at a time).
-    wait_suspend: Option<Vec<GcRef>>,
+    /// Each entry is `(arm-channel handle, is_send)` so the park-gap re-check applies the right
+    /// readiness predicate per arm: a recv arm wakes when its channel has a value / is closed; a SEND
+    /// arm wakes when its bounded channel has a free slot (a receiver popped) / is closed.
+    wait_suspend: Option<Vec<(GcRef, bool)>>,
     /// Bounded-channel backpressure — the send-side analogue of `suspend`: set by a blocking `send`
     /// on a FULL `Channel[T](cap)` running inside an active scheduler. Records the channel handle the
     /// running fiber is waiting for SPACE on. Routed by the worker loop to [`MnSched::park_send`] (M:N)
@@ -2208,21 +2211,31 @@ impl MnSched {
     /// a clone of the token in every arm's bucket; `parked_n += 1` (one fiber, not N tokens). Lock
     /// order core-OUTER / channel-`q`-INNER matches `park`, so no ABBA; no `cv` notify on the park path
     /// (parking creates no runnable work — an all-parked deadlock is caught by the next `take_runnable`).
-    fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>)>, mut fiber: Fiber) {
+    fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>, bool)>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
-        // Gap re-check for EVERY arm (mirrors `park`'s 1-key re-check): a concurrent `send`/`close`/
-        // cancel to any arm must requeue, not park. Cross-nursery flat scheduler — read the parking
-        // fiber's SCOPE cancel (not the sched's global `cancel`).
+        // Gap re-check for EVERY arm (mirrors `park`'s 1-key re-check): a concurrent `send`/`recv`/
+        // `close`/cancel to any arm must requeue, not park. Cross-nursery flat scheduler — read the
+        // parking fiber's SCOPE cancel (not the sched's global `cancel`). Readiness is KIND-AWARE: a
+        // recv arm is ready with a queued value / on close; a SEND arm is ready with a FREE slot (a
+        // bounded channel below capacity, or unbounded — always) / on close. Using the recv predicate
+        // for a full send arm would (wrongly) call it "ready" and spin requeue→re-poll→still-full→re-park.
         let mut ready_now = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
         if !ready_now {
-            for (_, core) in &arms {
+            for (_, core, is_send) in &arms {
                 let ready = {
                     let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    !g.queue.is_empty() || g.closed
+                    if g.closed {
+                        true
+                    } else if *is_send {
+                        core.cap.is_none_or(|cap| g.queue.len() < cap)
+                    } else {
+                        !g.queue.is_empty()
+                    }
                 };
                 // A tripped `done_latch` (a concurrent `trip()`) makes this arm ready, same as a queued
                 // value or a close — re-check it in the gap or a `wait: tok.done()` strands forever.
+                // (Timers/latches are recv-only channels, so this never applies to a send arm.)
                 if ready || core.done_latch.load(Ordering::Relaxed) {
                     ready_now = true;
                     break;
@@ -2237,7 +2250,7 @@ impl MnSched {
             return;
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
-        let keys: Vec<usize> = arms.iter().map(|(k, _)| *k).collect();
+        let keys: Vec<usize> = arms.iter().map(|(k, _, _)| *k).collect();
         let wp = Arc::new(WaitPark {
             fiber: Mutex::new(Some(fiber)),
             keys: keys.clone(),
@@ -3070,10 +3083,11 @@ enum Disp {
     /// `Park`). Carries `(key, core)` captured WHILE the fiber heap was live; the worker loop hands it
     /// to [`MnSched::park_send`], whose gap re-check waits for SPACE (not a message).
     SendPark(usize, Arc<ChannelCore>),
-    /// §6d — the fiber blocked on a multi-channel `wait` (every arm empty/live). Carries `(key, core)`
-    /// for each live arm, captured WHILE the fiber heap was live (like `Park`); the worker loop hands
-    /// it to [`MnSched::park_wait`], which files ONE shared `WaitPark` token in every arm bucket.
-    WaitPark(Vec<(usize, Arc<ChannelCore>)>),
+    /// §6d — the fiber blocked on a multi-channel `wait` (every arm empty/live). Carries
+    /// `(key, core, is_send)` for each live arm, captured WHILE the fiber heap was live (like `Park`);
+    /// the worker loop hands it to [`MnSched::park_wait`], which files ONE shared `WaitPark` token in
+    /// every arm bucket. `is_send` selects the per-arm gap-recheck readiness predicate.
+    WaitPark(Vec<(usize, Arc<ChannelCore>, bool)>),
     /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of the global queue.
     Yield,
     /// D5 — the fiber hit a blocking native call; the worker hands the call (and the fiber) to the

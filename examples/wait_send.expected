@@ -1,0 +1,9 @@
+A recv 10
+B sent
+C idle
+outbox=2
+D 0
+D 1
+D 2
+D 3
+D 4

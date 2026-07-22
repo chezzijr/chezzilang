@@ -845,26 +845,31 @@ impl Checker {
     /// rule (parser-enforced). Each arm body is its own lexical sub-scope (like a `match` arm).
     pub(super) fn check_wait(&mut self, arms: &[WaitArm], else_block: Option<&Block>) {
         for arm in arms {
-            let elem = match self.infer(&arm.chan) {
-                Ty::Channel(e) => *e,
-                Ty::Unknown => Ty::Unknown,
-                other => {
-                    self.error(
-                        arm.chan.span,
-                        format!("a wait arm must recv from a Channel, found {other}"),
-                    );
-                    Ty::Unknown
-                }
-            };
             self.push_scope();
-            match &arm.target {
-                WaitTarget::Bind(name) => self.declare(name, elem),
-                // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
-                // (assignability, type match, read-only/loop-var gates).
-                WaitTarget::Assign(target) => {
-                    self.check_assign(target, AssignOp::Eq, elem, arm.span)
+            match &arm.kind {
+                WaitArmKind::Recv { target, chan } => {
+                    let elem = match self.infer(chan) {
+                        Ty::Channel(e) => *e,
+                        Ty::Unknown => Ty::Unknown,
+                        other => {
+                            self.error(
+                                chan.span,
+                                format!("a wait arm must recv from a Channel, found {other}"),
+                            );
+                            Ty::Unknown
+                        }
+                    };
+                    match target {
+                        WaitTarget::Bind(name) => self.declare(name, elem),
+                        // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
+                        // (assignability, type match, read-only/loop-var gates).
+                        WaitTarget::Assign(target) => {
+                            self.check_assign(target, AssignOp::Eq, elem, arm.span)
+                        }
+                        WaitTarget::Discard => {}
+                    }
                 }
-                WaitTarget::Discard => {}
+                WaitArmKind::Send { call } => self.check_wait_send(call),
             }
             for stmt in &arm.body {
                 self.check_stmt(stmt);
@@ -873,6 +878,31 @@ impl Checker {
         }
         if let Some(b) = else_block {
             self.check_block(b);
+        }
+    }
+
+    /// A send-`wait:` arm must be exactly `chan.send(value)` with `chan: Channel[T]` and `value: T`.
+    /// Anything else (`try_send`, a non-`send` call, a bare non-call expr) is rejected with the list
+    /// of legal arm forms — the parser is lenient, so this is the sole gate on send-arm shape. When
+    /// the shape IS `chan.send(value)`, inferring the call reuses the ordinary channel-`send` checks
+    /// (element-type match + sendability) so a send arm and a plain `ch.send(v)` type-check identically.
+    fn check_wait_send(&mut self, call: &Expr) {
+        let is_send_call = matches!(
+            &call.kind,
+            ExprKind::Call { callee, args, named, .. }
+                if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "send")
+                    && args.len() == 1
+                    && named.is_empty()
+        );
+        // Always infer (surfaces the channel/arg type errors and any nested-expr errors).
+        self.infer(call);
+        if !is_send_call {
+            self.error(
+                call.span,
+                "a wait arm must be a recv (`x := ch.recv()`), a send (`ch.send(v)`), a timer, \
+                 or `else`"
+                    .to_string(),
+            );
         }
     }
 

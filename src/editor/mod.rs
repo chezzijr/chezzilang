@@ -427,7 +427,7 @@ fn overlay_block(
 }
 
 fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(usize, usize), u32>) {
-    use crate::ast::{DeferTarget, SpawnTarget, StmtKind, WaitTarget};
+    use crate::ast::{DeferTarget, SpawnTarget, StmtKind, WaitArmKind, WaitTarget};
     match &stmt.kind {
         StmtKind::Let { ty, value, .. } => {
             if let Some(t) = ty {
@@ -529,10 +529,15 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
         StmtKind::Spawn(SpawnTarget::Block(b)) => overlay_block(b, map),
         StmtKind::Wait { arms, else_block } => {
             for a in arms {
-                if let WaitTarget::Assign(e) = &a.target {
-                    overlay_expr(e, map);
+                match &a.kind {
+                    WaitArmKind::Recv { target, chan } => {
+                        if let WaitTarget::Assign(e) = target {
+                            overlay_expr(e, map);
+                        }
+                        overlay_expr(chan, map);
+                    }
+                    WaitArmKind::Send { call } => overlay_expr(call, map),
                 }
-                overlay_expr(&a.chan, map);
                 overlay_block(&a.body, map);
             }
             if let Some(b) = else_block {

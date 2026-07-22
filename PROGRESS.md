@@ -4,6 +4,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CONCURRENCY (2026-07-22, `auto-task/wait-send-arms`) — `wait:` SEND-arms (Go-`select` symmetry).**
+> A `wait:` arm can now be a bare `ch.send(v):` (no `:=`/`=`), the send-side twin of `x := ch.recv():`.
+> Ready when the channel can accept the value — **bounded-with-space** / **unbounded** (always) / **closed**
+> (selected + faults `"send on a closed channel"`, NOT skipped like a closed recv-arm; Go's panic-on-send-
+> to-closed). **Selection stays deterministic SOURCE ORDER** (first ready arm wins, recv OR send) — the one
+> principled divergence from Go's random fairness, and what keeps serial == M:N byte-identical. All arm
+> handles + send values are evaluated once, top-to-bottom, on entry (Go's rule). *AST reshape:*
+> `WaitArm{target,chan,body}` → `WaitArm{kind: WaitArmKind::{Recv{target,chan}|Send{call}}, body}` (Option C —
+> the checker owns send-shape validation; the parser is lenient, any bare `<expr> <block>` → `Send{call}`).
+> *Checker:* a bare arm must be exactly `chan.send(value)` (`chan: Channel[T]`, `value: T`) — else the
+> legal-forms error; a valid shape reuses the ordinary `ch.send(v)` type-check. *Compiler/VM:* a send-arm
+> leaves TWO operand slots (chan, value) vs a recv-arm's one; `WaitMeta.is_send` drives a per-arm slot cursor
+> in `op_wait_poll`; `take_wait_send_arm` commits (no value pushed). *Scheduler (the delicate bit):* the M:N
+> `park_wait` gap re-check is now **kind-aware** — a send-arm is ready with a FREE slot (`queue.len()<cap` or
+> unbounded) / on close, a recv-arm with a queued value / on close; the **wake side is unchanged** (a receiver
+> freeing a slot already calls `wake_senders`→`recv_wake`, which wakes the filed `WaitPark` token). A full
+> bounded send-arm reached inside a native callback (`--parallel`) **faults** (v1 limit, mirrors the existing
+> in-callback full-`send` demote fault; upgrade path noted). *Tests:* `examples/wait_send.chz` +
+> `golden_wait_send_both_engines`, `wait_send_arm_park_wake_stress_parallel` (40 M:N trials),
+> `wait_send_arm_closed_channel_faults_both_engines`, `wait_unbounded_send_arm_always_ready_both_engines`,
+> `wait_send_source_order_first_ready_wins_both_engines`; checker `wait_send_arm_*` / `wait_bare_*`; parser
+> `parses_wait_bare_send_arm`. Docs: this note, `docs/grammar.bnf` (new `<waitArm>` bare-expr form),
+> `docs/concurrency.md §6d`, `docs/syntax.md`. `cargo test` / `conformance` / `clippy` green.
+
 > **✅ REFACTOR (2026-07-22, `auto-task/unify-native-dispatch-prefix`) — UNIFIED native-handle dispatch
 > prefix (checker + VM), behavior-preserving.** Kills the check-OK/run-fault bug class STRUCTURALLY (the
 > one just hit where `try_native_bodied_method` was missing on the `Shared`/`RwShared`/`Atomic`/`Executor`
@@ -43,9 +67,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > UNCHANGED and a full-send with no consumer (top level / native callback) faults with one shared
 > `FULL_SEND_DEADLOCK` string (identical text both engines → parity). Parity holds by the blocking-`recv`
 > argument: backpressure changes *which* task runs *when*, never the value sequence a consumer sees.
-> **Deferred (noted, not built):** send-arms in `wait:` (a bounded send *can* block, so a send-arm is
-> meaningful — needs a grammar+checker change), and a demote-in-place bounded send inside a native
-> callback (`ponytail:` upgrade path; v1 faults). *(2) `pmap`/`pmap_limited`:* pure-Chezzi scoped
+> **Deferred (noted, not built):** ~~send-arms in `wait:`~~ **LANDED 2026-07-22** (see the wait-send-arms
+> entry above), and a demote-in-place bounded send inside a native callback (`ponytail:` upgrade path; v1
+> faults — still deferred, and now also the send-arm-in-callback fault). *(2) `pmap`/`pmap_limited`:* pure-Chezzi scoped
 > parallel-map helpers in `std/concurrency/pmap.chz` (results in **submission order** via sort-by-index,
 > never completion order; `pmap_limited` caps in-flight tasks with a channel-as-semaphore token bucket).
 > Tests: `src/vm/tests.rs` `bounded_channel_*` (cap/try_send-full/zero-cap-fault/full-send-deadlock/

@@ -2419,6 +2419,130 @@ fn bounded_channel_fanout_golden_both_engines() {
     assert_eq!(out, run_capture_parallel(src).expect("M:N run"));
 }
 
+// ===== §6d `wait:` SEND-arms (Go-`select` symmetry) =====
+
+/// The combined send-arm golden (`examples/wait_send.chz`): Phase A mixes recv + send + `else` at the
+/// top level (source-order winner, deterministic single fiber); Phase B blocks a bounded send-arm in a
+/// nursery until the consumer's `recv` frees the cap-1 slot (the M:N park + receiver-wake path). Single
+/// producer/consumer + consumer-only output ⇒ byte-identical serial vs M:N.
+#[test]
+fn golden_wait_send_both_engines() {
+    let src = include_str!("../../examples/wait_send.chz");
+    let expected = include_str!("../../examples/wait_send.expected");
+    let out = run(src);
+    assert_eq!(
+        out, expected,
+        "serial output drifted from wait_send.expected"
+    );
+    assert_eq!(
+        out,
+        run_capture_parallel(src).expect("M:N run"),
+        "serial/M:N divergence on wait_send"
+    );
+}
+
+/// Stress the send-arm park + receiver-wake (the delicate M:N scheduler change): a bounded cap-1
+/// send-arm producer that parks on every full slot, drained by a single consumer, run many trials on
+/// the M:N engine. A lost wakeup (parked producer never re-scheduled after a `recv` frees a slot)
+/// would hang or truncate the output — so every trial must reproduce the full ordered sequence.
+#[test]
+fn wait_send_arm_park_wake_stress_parallel() {
+    let src = "fn main():\n\
+               \x20   c := Channel[int](1)\n\
+               \x20   parallel:\n\
+               \x20       spawn:\n\
+               \x20           for i in range(0, 12):\n\
+               \x20               wait:\n\
+               \x20                   c.send(i): pass\n\
+               \x20           c.close()\n\
+               \x20       spawn:\n\
+               \x20           for x in c:\n\
+               \x20               print(x)\n\
+               main()\n";
+    let expected: String = (0..12).map(|i| format!("{i}\n")).collect();
+    assert_eq!(run(src), expected); // serial oracle
+    for trial in 0..40 {
+        assert_eq!(
+            run_capture_parallel(src).expect("M:N run"),
+            expected,
+            "M:N send-arm park/wake diverged on trial {trial}"
+        );
+    }
+}
+
+/// A send-arm on a CLOSED channel is SELECTED (ready) and FAULTS `send on a closed channel` — NOT
+/// skipped like a closed recv arm — even with an `else` present (a closed send arm is always ready, so
+/// `else` never runs). Byte-identical fault on both engines.
+#[test]
+fn wait_send_arm_closed_channel_faults_both_engines() {
+    let src = "fn main():\n\
+               \x20   c := Channel[int](1)\n\
+               \x20   c.close()\n\
+               \x20   wait:\n\
+               \x20       c.send(1): print(\"sent\")\n\
+               \x20       else: print(\"idle\")\n\
+               main()\n";
+    let e = run_err(src);
+    assert!(
+        e.contains("send on a closed channel"),
+        "closed send arm must fault, got: {e}"
+    );
+    let ep = run_capture_parallel(src)
+        .expect_err("M:N should fault")
+        .message;
+    assert_eq!(e, ep, "serial and M:N closed-send fault text must match");
+}
+
+/// An UNBOUNDED send-arm is always ready → placed first it wins immediately and `else` never runs.
+#[test]
+fn wait_unbounded_send_arm_always_ready_both_engines() {
+    let src = "fn main():\n\
+               \x20   u := Channel[int]()\n\
+               \x20   wait:\n\
+               \x20       u.send(1): print(\"sent\")\n\
+               \x20       else: print(\"idle\")\n\
+               \x20   print(\"q={u.recv()}\")\n\
+               main()\n";
+    assert_eq!(run(src), "sent\nq=1\n");
+    assert_eq!(run_capture_parallel(src).expect("M:N run"), "sent\nq=1\n");
+}
+
+/// Deterministic source-order tie-break: with BOTH an (earlier) ready recv-arm and a (later) ready
+/// send-arm, the earlier recv-arm wins every run; flip the order and the earlier send-arm wins. Never
+/// Go-random. Identical on both engines.
+#[test]
+fn wait_send_source_order_first_ready_wins_both_engines() {
+    // recv-arm first, both ready → recv wins (the send never fires: `s` stays empty).
+    let recv_first = "fn main():\n\
+               \x20   r := Channel[int]()\n\
+               \x20   s := Channel[int]()\n\
+               \x20   r.send(7)\n\
+               \x20   wait:\n\
+               \x20       v := r.recv(): print(\"recv {v}\")\n\
+               \x20       s.send(1): print(\"sent\")\n\
+               \x20   print(\"slen={s.len()}\")\n\
+               main()\n";
+    assert_eq!(run(recv_first), "recv 7\nslen=0\n");
+    assert_eq!(
+        run_capture_parallel(recv_first).expect("M:N run"),
+        "recv 7\nslen=0\n"
+    );
+    // send-arm first + ready (unbounded), recv-arm empty → send wins.
+    let send_first = "fn main():\n\
+               \x20   s := Channel[int]()\n\
+               \x20   r := Channel[int]()\n\
+               \x20   wait:\n\
+               \x20       s.send(9): print(\"sent\")\n\
+               \x20       v := r.recv(): print(\"recv {v}\")\n\
+               \x20   print(\"q={s.recv()}\")\n\
+               main()\n";
+    assert_eq!(run(send_first), "sent\nq=9\n");
+    assert_eq!(
+        run_capture_parallel(send_first).expect("M:N run"),
+        "sent\nq=9\n"
+    );
+}
+
 /// Bugs 1/3 — `try_send` on a bounded channel must be ATOMIC (check-space + enqueue under the same
 /// lock the blocking `send` uses), or two concurrent M:N `try_send`s both see space and both push,
 /// over-filling past `cap`. The invariant `len <= cap` must hold on every engine. Many trials of
@@ -3215,9 +3339,9 @@ fn mn_wait_park_first_waker_claims_and_sweeps() {
     let (k1, k2, k3) = (core_key(&c1), core_key(&c2), core_key(&c3));
     sched.park_wait(
         vec![
-            (k1, Arc::clone(&c1)),
-            (k2, Arc::clone(&c2)),
-            (k3, Arc::clone(&c3)),
+            (k1, Arc::clone(&c1), false),
+            (k2, Arc::clone(&c2), false),
+            (k3, Arc::clone(&c3), false),
         ],
         f0,
     );
@@ -3279,8 +3403,8 @@ fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
     let (timer_key, data_key) = (core_key(&timer_core), core_key(&data_core));
     sched.park_wait(
         vec![
-            (timer_key, Arc::clone(&timer_core)),
-            (data_key, Arc::clone(&data_core)),
+            (timer_key, Arc::clone(&timer_core), false),
+            (data_key, Arc::clone(&data_core), false),
         ],
         f0,
     );
@@ -3329,7 +3453,10 @@ fn mn_wait_park_close_wake_claims_and_sweeps() {
     let c1 = empty_core();
     let c2 = empty_core();
     let (k1, k2) = (core_key(&c1), core_key(&c2));
-    sched.park_wait(vec![(k1, Arc::clone(&c1)), (k2, Arc::clone(&c2))], f0);
+    sched.park_wait(
+        vec![(k1, Arc::clone(&c1), false), (k2, Arc::clone(&c2), false)],
+        f0,
+    );
     assert_eq!(sched.lock().parked_n, 1);
     sched.close_wake(k1, &c1);
     {
@@ -3355,8 +3482,8 @@ fn mn_wait_park_lone_fiber_is_deadlock() {
     let c2 = empty_core();
     sched.park_wait(
         vec![
-            (core_key(&c1), Arc::clone(&c1)),
-            (core_key(&c2), Arc::clone(&c2)),
+            (core_key(&c1), Arc::clone(&c1), false),
+            (core_key(&c2), Arc::clone(&c2), false),
         ],
         f0,
     );

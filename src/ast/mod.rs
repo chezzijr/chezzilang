@@ -351,14 +351,26 @@ pub enum SpawnTarget {
     Block(Block),
 }
 
-/// One arm of a `wait:` — `<target> (:= | =) <chan>.recv() : <body>`. The RHS is required (parser-
-/// enforced) to be a bare `.recv()` on `chan`; `chan` is the channel expression, evaluated once.
+/// One arm of a `wait:` — either a recv-arm `<target> (:= | =) <chan>.recv(): <body>` or a send-arm
+/// `<chan>.send(v): <body>`. The parser is lenient (a bare non-`:=`/`=` expr becomes a `Send{call}`);
+/// the CHECKER validates that a send-arm's `call` is exactly `chan.send(value)` with matching types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaitArm {
-    pub target: WaitTarget,
-    pub chan: Expr,
+    pub kind: WaitArmKind,
     pub body: Block,
     pub span: Span,
+}
+
+/// The two `wait:` arm shapes. A recv-arm blocks until its channel has a value (bound per `target`);
+/// a send-arm blocks until its channel can accept `v` (bounded-with-space / unbounded / closed →
+/// faults), then runs its body binding nothing. Both are gated on readiness and selected in
+/// deterministic source order (§6d).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaitArmKind {
+    /// `x := ch.recv():` / `y = ch.recv():` / `_ := ch.recv():` — `chan` is evaluated once.
+    Recv { target: WaitTarget, chan: Expr },
+    /// `ch.send(v):` — `call` is the raw `ch.send(v)` Call expr; the checker decomposes + validates it.
+    Send { call: Expr },
 }
 
 /// Where a `wait` arm delivers the received value: a fresh arm-scoped binding (`v :=`), an existing
@@ -1169,7 +1181,10 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
         StmtKind::Match { scrutinee, .. } => go(scrutinee),
         StmtKind::Defer(DeferTarget::Call(e)) => go(e),
         StmtKind::Spawn(SpawnTarget::Call(e)) => go(e),
-        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| expr_recover_blocks(&a.chan, out)),
+        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| match &a.kind {
+            WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
+            WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+        }),
         _ => {}
     }
 }

@@ -1499,9 +1499,9 @@ impl Vm {
                 // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
                 // captures the single recv key; `park_wait` re-checks every arm under the sched lock.
                 let handles = self.wait_suspend.take().unwrap();
-                let arms: Vec<(usize, Arc<ChannelCore>)> = handles
+                let arms: Vec<(usize, Arc<ChannelCore>, bool)> = handles
                     .iter()
-                    .map(|&h| (self.channel_core_ptr(h), self.channel_core(h)))
+                    .map(|&(h, is_send)| (self.channel_core_ptr(h), self.channel_core(h), is_send))
                     .collect();
                 Disp::WaitPark(arms)
             } else if res.is_ok() && self.yield_now {
@@ -1988,8 +1988,11 @@ impl Vm {
             Ok(()) => {
                 child.state = if let Some(handles) = self.wait_suspend.take() {
                     // `wait` blocking park: file this child under EVERY live arm-channel key, so a
-                    // `send` to any of them re-runs the `WaitPoll` (which re-polls source order).
-                    for h in handles {
+                    // sibling that frees the gap re-runs the `WaitPoll` (which re-polls source order).
+                    // Kind-agnostic here — a recv waiter wakes on a `send`, a send waiter on a `recv`
+                    // (both drain `blocked_on[key]` via `wake_on_send`/`wake_senders`); the re-poll
+                    // sorts out which arm is actually ready.
+                    for (h, _is_send) in handles {
                         let key = self.channel_core_ptr(h);
                         self.scheduler_stack
                             .last_mut()

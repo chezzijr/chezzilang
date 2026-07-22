@@ -1616,14 +1616,47 @@ impl Vm {
             return Err(self.err("cancelled".to_string(), span));
         }
         let n = meta.n;
-        let base = self.stack.len() - n;
+        // Per-arm stack width: a recv arm holds ONE slot (the channel handle), a SEND arm holds TWO
+        // (channel THEN value). Walk a running `off` cursor from `base` so send arms are read correctly.
+        let slot_width = |is_send: bool| if is_send { 2 } else { 1 };
+        let total: usize = meta.is_send.iter().map(|&s| slot_width(s)).sum();
+        let base = self.stack.len() - total;
         let mut soonest: Option<(usize, std::time::Instant)> = None;
         let mut all_closed = true;
+        let mut off = 0usize;
         for i in 0..n {
-            let Some(h) = self.stack[base + i].as_obj() else {
+            let slot = base + off;
+            let Some(h) = self.stack[slot].as_obj() else {
                 unreachable!("wait arm operand is not a channel handle");
             };
+            off += slot_width(meta.is_send[i]);
             let core = self.channel_core(h);
+            if meta.is_send[i] {
+                // SEND arm — ready when the channel can accept the value (bounded-with-space /
+                // unbounded / closed). A closed channel is READY-and-FAULTS (Go's panic-on-send-to-
+                // closed; the exact bare-`send` message), SELECTED not skipped — first-ready wins in
+                // source order, so reaching it means no earlier arm was ready. A FULL bounded channel
+                // is NOT ready (park until a receiver frees a slot). Value is serialized + enqueued
+                // atomically here (source order, once selected), never on a not-ready poll.
+                if core.q.lock().unwrap().closed {
+                    return Err(self.err("send on a closed channel".to_string(), span));
+                }
+                let val = self.stack[slot + 1];
+                let w = self.to_wire_at(val, span)?;
+                let sent = match core.cap {
+                    None => {
+                        self.channel_send_wire(h, w);
+                        true
+                    }
+                    Some(cap) => self.enqueue_bounded(h, &core, cap, w),
+                };
+                if sent {
+                    self.take_wait_send_arm(base, meta.arm_targets[i]);
+                    return Ok(());
+                }
+                all_closed = false; // full bounded send — live (wakes when a receiver frees a slot)
+                continue;
+            }
             let (popped, closed) = {
                 let mut g = core.q.lock().unwrap();
                 (g.queue.pop_front(), g.closed)
@@ -1665,15 +1698,22 @@ impl Vm {
         if all_closed {
             return Err(self.err("wait: all channels closed".to_string(), span));
         }
-        // Block on all live arms. The N arm handles are on the stack (they root the channels + re-supply
+        // Block on all live arms. The arm operands are on the stack (they root the channels + re-supply
         // the poll on resume). A live timer arm (`soonest`) is just another arm bucket on the M:N paths.
-        let keys: Vec<GcRef> = (0..n)
-            .map(|i| {
-                self.stack[base + i]
+        // `keys[i]` = (channel handle, is_send) so the park-gap re-check applies the right readiness
+        // predicate per arm (recv wakes on a sender; send wakes on a receiver freeing a slot).
+        let keys: Vec<(GcRef, bool)> = {
+            let mut v = Vec::with_capacity(n);
+            let mut off = 0usize;
+            for &is_send in &meta.is_send {
+                let h = self.stack[base + off]
                     .as_obj()
-                    .expect("wait arm operand is not a channel handle")
-            })
-            .collect();
+                    .expect("wait arm operand is not a channel handle");
+                v.push((h, is_send));
+                off += slot_width(is_send);
+            }
+            v
+        };
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
         // `wait_suspend`; the worker loop captures each arm's (key, core) WHILE the fiber heap is live
         // (`Disp::WaitPark`) and `MnSched::park_wait` files ONE shared token in every arm bucket. A
@@ -1692,8 +1732,8 @@ impl Vm {
                 // A fiber about to be cancelled must not arm a stray timer — the top-of-fn
                 // cancellation checkpoint already returned in that case (on BOTH engines).
                 let sched = self.mn.clone().unwrap();
-                let key = self.channel_core_ptr(keys[i]);
-                let core_job = self.channel_core(keys[i]);
+                let key = self.channel_core_ptr(keys[i].0);
+                let core_job = self.channel_core(keys[i].0);
                 let sched_job = Arc::clone(&sched);
                 // Arm ONCE per timer channel: a re-park of this same wait (woken with no consumable
                 // value — e.g. a sibling `close` on another arm) re-runs WaitPoll and re-enters this
@@ -1729,12 +1769,21 @@ impl Vm {
         // loop takes the timer arm once `now >= deadline` (so a real send still beats the timer), and
         // clamps its backoff to the deadline. Lower throughput but sound — the documented v1 limit (§6d).
         if self.mn.is_some() {
+            // v1 limit: a SEND arm reaching the demote path (a full bounded send inside a native
+            // callback) is unsupported — `demote_wait_block` POPS arm queues (recv semantics) and
+            // would wrongly steal a send-arm channel's queued message as a received value. Fault like
+            // the existing in-callback full-send demote (`chan_send_step`, netio.rs:1383).
+            // ponytail: upgrade path = a demote-in-place send block (mirror `demote_recv_block`),
+            //           the same follow-up the recv-side demote already carries.
+            if keys.iter().any(|&(_, is_send)| is_send) {
+                return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+            }
             let arms: Vec<(usize, Arc<ChannelCore>)> = keys
                 .iter()
-                .map(|&h| (self.channel_core_ptr(h), self.channel_core(h)))
+                .map(|&(h, _)| (self.channel_core_ptr(h), self.channel_core(h)))
                 .collect();
             let (arm_index, w) = self.demote_wait_block(arms, soonest, span)?;
-            self.wake_senders(keys[arm_index]); // demoted `wait:` freed a slot — wake a bounded sender
+            self.wake_senders(keys[arm_index].0); // demoted `wait:` freed a slot — wake a bounded sender
             let v = self.from_wire(w);
             self.take_wait_arm(base, v, meta.arm_targets[arm_index]);
             return Ok(());
@@ -1774,6 +1823,14 @@ impl Vm {
     pub(super) fn take_wait_arm(&mut self, base: usize, value: Value, target: usize) {
         self.stack.truncate(base);
         self.push(value);
+        self.frames.last_mut().unwrap().ip = target;
+    }
+
+    /// Commit a chosen SEND `wait` arm: drop all arm operands (`stack[base..]`, including this arm's
+    /// value, already enqueued by the poll) and jump to the arm body — which binds NOTHING, so unlike
+    /// [`Vm::take_wait_arm`] this pushes no value.
+    pub(super) fn take_wait_send_arm(&mut self, base: usize, target: usize) {
+        self.stack.truncate(base);
         self.frames.last_mut().unwrap().ip = target;
     }
 

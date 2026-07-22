@@ -2633,13 +2633,15 @@ fn fetch_all(urls: List[str]):
   a STATIC method — the extensible type-conversion protocol, Rust `From`) is DECLARED + reserved +
   bound-parseable (`[T: Convert[str]]`) as of slice 1 only — structural WITNESSING (a concrete type
   satisfying it) and `T.convert(..)` construction through a bound are not wired yet (slices 2/3).
-- **`wait:` (select)** — race several channel `recv`s; the first ready arm wins (source-order priority).
-  `wait:` then arms `v := ch.recv():` (or `result = ch.recv():` / `_ := ch.recv():`), an optional
-  non-blocking `else:` (must be last), and `timer` arms for timeouts. Recv-only (sends never block on
-  unbounded channels); a closed+empty arm is skipped; all-closed + no `else` faults. **Shipped on both
-  engines** — the serial `--serial` VM and the default M:N VM (the M:N multi-channel blocking
-  park, including `timer` arms, has landed). See
-  [`concurrency.md §6d`](concurrency.md) and `examples/wait_select.chz`.
+- **`wait:` (select)** — race several channel `recv`s AND `send`s; the first ready arm wins (deterministic
+  source-order priority, not Go's random fairness). `wait:` then arms: recv `v := ch.recv():` (or
+  `result = ch.recv():` / `_ := ch.recv():`), **send** `ch.send(v):` (a bare `.send()`, binds nothing —
+  ready when the channel can accept the value: bounded-with-space / unbounded / closed→faults), an optional
+  non-blocking `else:` (must be last), and `timer` arms for timeouts. A closed+empty *recv*-arm is skipped;
+  a closed *send*-arm faults `"send on a closed channel"`; all-closed + no ready send + no `else` faults.
+  **Shipped on both engines** — the serial `--serial` VM and the default M:N VM (the multi-channel blocking
+  park, including a bounded send-arm that parks until a receiver frees a slot, has landed). See
+  [`concurrency.md §6d`](concurrency.md), `examples/wait_select.chz`, and `examples/wait_send.chz`.
 - **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
   build a `Token` you thread down a call tree (sendable). Poll `tok.cancelled() -> bool` in CPU loops,
   race `tok.done() -> Channel[bool]` in a `wait:` for IO loops, `tok.cancel()` from anywhere; also

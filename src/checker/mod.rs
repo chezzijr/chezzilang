@@ -11,7 +11,7 @@ mod ty;
 use crate::ast::{
     AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
     Import, LitPattern, MethodSig, NativeDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
-    Type, TypeParam, UnaryOp, WaitArm, WaitTarget,
+    Type, TypeParam, UnaryOp, WaitArm, WaitArmKind, WaitTarget,
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};

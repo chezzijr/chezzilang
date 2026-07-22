@@ -488,52 +488,80 @@ deadlock; the cooperative `--serial` VM inline-sleeps to the deadline (single-th
 > the serial `--serial` cooperative scheduler (sequential poll/inline-sleep) and the **M:N
 > (`--parallel`) blocking park** (landed 2026-06-13, the M:N park notes below). A blocking `wait` under
 > `--parallel` now parks one fiber on N channels (woken by the first sender, swept out of the other
-> buckets) instead of faulting. See `examples/wait_select.chz` (byte-identical across serial `--serial` / default M:N).
+> buckets) instead of faulting. **SEND-arms** (`ch.send(v):`, deterministic source-order selection, a
+> bounded send-arm parks until a receiver frees a slot) landed 2026-07-22 — see `examples/wait_send.chz`.
+> Both examples are byte-identical across serial `--serial` / default M:N.
 
-`wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, bind its value,
-and run that arm. `wait` is currently *recv*-oriented — there are no send-arms. (On an unbounded channel
-a `send` is always instantly ready, so a send-arm would be pointless; a **bounded** `send` *can* block,
-so a send-arm would be meaningful there — but that needs a separate grammar + checker change and is not
-yet implemented. Poll a bounded channel's readiness with `try_send` for now.)
-Combined with `timer`, `wait` subsumes a bounded-wait `recv` (`ch.recv_timeout(500)` ≡ a `wait` over `ch`
-and `timer(500)`), which is why no separate `recv_timeout` exists.
+`wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, run that arm.
+Both directions are supported — **recv-arms** (`x := ch.recv():`, bind the received value) and **send-arms**
+(`ch.send(v):`, no `:=`/`=`, run the body once the send goes through). A send-arm is ready when the channel
+can accept the value: a **bounded** channel with a free slot, an **unbounded** channel (always), or a
+**closed** channel — a send-arm on a closed channel is *selected and faults* `"send on a closed channel"`
+(Go's panic-on-send-to-closed), never skipped. Combined with `timer`, `wait` subsumes a bounded-wait `recv`
+(`ch.recv_timeout(500)` ≡ a `wait` over `ch` and `timer(500)`), which is why no separate `recv_timeout` exists.
 
 ```chezzi
 wait:
-    v := orders.recv():        handle(v)        # arm-local binding `v: T` (the channel's element type)
+    v := orders.recv():        handle(v)        # recv-arm: arm-local binding `v: T` (the element type)
     result = cancels.recv():   result = "x"     # `=` assigns an existing outer lvalue instead
+    outbox.send(next):         sent += 1        # SEND-arm: fires once `outbox` can accept `next`; binds nothing
     _ := timer(500).recv():    on_timeout()      # `_` discards; a timer arm is just a recv
     else:                      poll_miss()       # optional, non-blocking; if no arm is ready, run this
 ```
 
-**Surface & grammar.** A new compound statement (sibling to `match`/`parallel`):
-`wait : NEWLINE INDENT <arm>+ DEDENT`. Each recv-arm is `<target> ( ":=" | "=" ) <chanExpr> ".recv()" ":"
-<block>`, where:
-- the RHS **must** be a `.recv()` on an expression of type `Channel[T]` — a non-`.recv()` RHS (e.g.
-  `v := fn():`) is a compile error (`wait` has nothing to block on without a channel). The `<chanExpr>`
-  itself can be any expression (`ch`, `chans[i]`, `get_chan()`, `timer(500)`), evaluated **once**.
-- the target is `:=` (a fresh arm-scoped binding, like a `match` arm pattern), `=` (assign an existing
-  outer lvalue — arm bodies are lexical sub-scopes, not closures, so outer mutation is normal), or `_`
-  (discard).
-- `else:` is optional, at most one, and must be **last**.
+**Selection is deterministic SOURCE ORDER** (first ready arm wins, recv OR send), **not** Go's uniform-random
+`select` fairness. This is Chezzi's one principled divergence from Go here, and it is *required*: it is what
+makes the serial `--serial` oracle and the M:N (`--parallel`) engine byte-identical (`chezzi run --check-parity`).
+All arm channel handles and send values are evaluated **once**, top to bottom, on entry (Go's rule). `else`
+runs only if **no** arm is ready — so a `wait` containing an unbounded or closed send-arm never blocks (that arm
+is always ready). See `examples/wait_send.chz`.
 
-**Type-check.** Each arm's `chanExpr: Channel[T]` → the target binds/assigns `T`. `wait` is **not**
-exhaustive (it's a runtime race, not a type match); ≥1 recv-arm is required.
+**Surface & grammar.** A new compound statement (sibling to `match`/`parallel`):
+`wait : NEWLINE INDENT <arm>+ DEDENT`. An arm is one of:
+- a **recv-arm** `<target> ( ":=" | "=" ) <chanExpr> ".recv()" ":" <block>` — the RHS **must** be a `.recv()`
+  on an expression of type `Channel[T]` (a non-`.recv()` RHS like `v := fn():` is a compile error). The
+  `<chanExpr>` can be any expression (`ch`, `chans[i]`, `get_chan()`, `timer(500)`), evaluated **once**. The
+  target is `:=` (a fresh arm-scoped binding), `=` (assign an existing outer lvalue — arm bodies are lexical
+  sub-scopes, not closures, so outer mutation is normal), or `_` (discard).
+- a **send-arm** — a *bare* `<chanExpr> ".send(" <value> ")" ":" <block>` (no `:=`/`=`). The grammar accepts
+  any bare `<expr> <block>`; the **checker** enforces the exact `chan.send(value)` shape with `chan: Channel[T]`,
+  `value: T` (a bare arm that isn't a `.send()` — e.g. `try_send`, an arbitrary call — is rejected with the
+  legal-forms error). A send-arm binds nothing.
+- `else:` — optional, at most one, and must be **last**.
+
+**Type-check.** A recv-arm's `chanExpr: Channel[T]` → the target binds/assigns `T`; a send-arm's `chan: Channel[T]`
+→ its `value` must be assignable to `T` (same check as a plain `ch.send(v)`). `wait` is **not** exhaustive
+(it's a runtime race, not a type match); ≥1 arm is required.
 
 **Runtime semantics.**
-1. Evaluate each arm's channel expression once, in source order.
-2. Poll arms in **source order** (deterministic priority, not Go's random fairness — documentable, can
-   randomize later): the first channel with a queued value wins → pop, bind, run its block.
-3. A **closed + empty** channel's arm is **skipped** (option B). If *every* arm's channel is closed+empty
-   and there's no `else`, the `wait` faults `"wait: all channels closed"`.
+1. Evaluate each arm's channel handle (and, for a send-arm, its value) once, in source order.
+2. Poll arms in **source order** (deterministic priority, not Go's random fairness — required for
+   serial == M:N parity): the first **ready** arm wins. A recv-arm is ready with a queued value → pop, bind,
+   run its block. A send-arm is ready when the channel can accept the value (bounded-with-space / unbounded /
+   closed) → enqueue (or, if closed, *fault* `"send on a closed channel"`), run its block, bind nothing.
+3. A **closed + empty** channel's *recv*-arm is **skipped** (option B); a closed *send*-arm is instead
+   *selected and faults* (asymmetric — Go's panic-on-send-to-closed). If *every* recv-arm is closed+empty,
+   there's no ready send-arm, and there's no `else`, the `wait` faults `"wait: all channels closed"`.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park the fiber on *all*
-   live arm channels and re-poll on the first wake.
+   live arm channels and re-poll on the first wake. A recv-arm wakes on a **sender**; a bounded send-arm wakes
+   on a **receiver** freeing a slot (reusing the bounded-`send` `wake_senders` / `recv_wake` path).
 
-**Implementation notes.** *(Done on both engines. A new `Op::WaitPoll` holds the N arm channel
-handles on the operand stack, polls source order, and jumps to the chosen arm's body / `else`, handles a
-live `timer` arm (see below), faults all-closed, or parks. The cooperative multi-channel park
-files the fiber under every key (`run_child` reads `wait_suspend`) and sweeps the index out of the other
-buckets on resume; the M:N park (below) does the same with an `Arc<WaitPark>` token.)*
+**Implementation notes.** *(Done on both engines. A new `Op::WaitPoll` holds the arm operands on the
+operand stack — one slot per recv-arm (the channel), TWO per send-arm (channel THEN value, walked via a
+per-arm slot cursor keyed on `WaitMeta.is_send`) — polls source order, and jumps to the chosen arm's body /
+`else`, handles a live `timer` arm (see below), faults all-closed / send-to-closed, or parks. The cooperative
+multi-channel park files the fiber under every arm key (`run_child` reads `wait_suspend`, a
+`Vec<(handle, is_send)>`) and sweeps the index out of the other buckets on resume; the M:N park (below) does
+the same with an `Arc<WaitPark>` token. The park-gap re-check is **kind-aware**: a recv-arm is ready with a
+queued value / on close, a send-arm with a **free slot** (`queue.len() < cap`, or unbounded) / on close — using
+the recv predicate for a full send-arm would spin requeue→re-poll→re-park.)*
+
+> **v1 limitation — send-arm inside a native callback (`--parallel`).** A **full bounded** send-arm reached
+> *inside a native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) on the M:N engine
+> can't snapshot-park, and the in-callback demote path pops arm queues (recv semantics) — so a `wait` with any
+> send-arm on that path **faults** (the same full-send-in-callback fault `chan_send_step` already raises),
+> rather than blocking. Same class as the existing in-callback full-`send` / `timer.recv()` v1 limits; the
+> upgrade path is a demote-in-place send block.
 
 > **Timer arm under `--parallel` — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled
 > differently per engine. The cooperative `--serial` VM is single-threaded, so it **inline-sleeps** to the

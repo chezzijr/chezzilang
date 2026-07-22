@@ -352,15 +352,19 @@
 <parallelStmt> ::= "PARALLEL" <block>
 <spawnStmt>    ::= "SPAWN" <expr> "NEWLINE" | "SPAWN" <block>
 
-# Concurrency (C6d): `wait:` — Chezzi's `select`, racing channel `recv`s. Each recv-arm is
-# `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; the optional `else:` arm is the non-blocking
-# fallback. The grammar accepts any `<expr>` on both sides of `:=`/`=` — the "RHS must be a bare
-# `.recv()`", "`:=` LHS must be a name / `=` LHS must be an lvalue", "`else` is last", and "≥1 recv-arm"
-# rules are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
+# Concurrency (C6d): `wait:` — Chezzi's `select`, racing channel `recv`s AND `send`s. A recv-arm is
+# `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; a SEND-arm is a bare `<chanExpr> ".send(" v ")"
+# <block>` (no `:=`/`=`); the optional `else:` arm is the non-blocking fallback. The grammar accepts any
+# bare `<expr> <block>` for a send-arm — the "send RHS must be `chan.send(value)`" rule (and the recv
+# rules "RHS is a bare `.recv()`", "`:=` LHS is a name / `=` LHS is an lvalue", "`else` is last",
+# "≥1 arm") are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
+# Selection is deterministic SOURCE ORDER (first ready arm wins) — Chezzi's one principled divergence
+# from Go's random `select` fairness, required for serial == M:N parity.
 <waitStmt> ::= "WAIT" "COLON" "NEWLINE" "INDENT" <waitArms> "DEDENT"
 <waitArms> ::= <waitArm> | <waitArm> <waitArms>
 <waitArm>  ::= <expr> "WALRUS" <expr> <block>
              | <expr> "ASSIGN" <expr> <block>
+             | <expr> <block>
              | "ELSE" <block>
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"

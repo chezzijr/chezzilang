@@ -385,6 +385,9 @@ fn parser_rules_match_fns() {
         // `dottedPath` grammar; it only also returns the last-segment span for the import bound-name
         // hover) — a structural helper with no distinct grammar rule.
         "parse_dotted_path_spanned",
+        // `parse_recv_chan` parses the RHS of a recv `wait:` arm (the bare `chan.recv()`) — a
+        // structural helper of `parse_wait`, part of the `<waitArm>` rule, no distinct rule of its own.
+        "parse_recv_chan",
     ]
     .into_iter()
     .collect();

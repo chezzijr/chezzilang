@@ -14,7 +14,7 @@
 use crate::ast::{
     AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
     LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
-    UnaryOp, WaitArm, WaitTarget,
+    UnaryOp, WaitArm, WaitArmKind, WaitTarget,
 };
 use crate::interpolation::{Chunk, parse_interpolation};
 use crate::native::cffi::CType;
@@ -513,6 +513,20 @@ fn type_apply_head_name(kind: &ExprKind) -> Option<&str> {
         },
         _ => None,
     }
+}
+
+/// Decompose a validated send-arm call `chan.send(value)` into `(&chan, &value)`. The CHECKER has
+/// already rejected any other shape (`wait_send_arm_shape`), so a compiled program is guaranteed to
+/// match — an unexpected shape here is a checker/compiler drift bug, not user error.
+fn send_arm_parts(call: &Expr) -> (&Expr, &Expr) {
+    if let ExprKind::Call { callee, args, .. } = &call.kind
+        && let ExprKind::Field { obj, name, .. } = &callee.kind
+        && name == "send"
+        && args.len() == 1
+    {
+        return (obj, &args[0]);
+    }
+    unreachable!("send-arm call shape must be validated by the checker before compile");
 }
 
 fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
@@ -1698,6 +1712,7 @@ impl Compiler {
     /// on the stack, then a single `Op::WaitPoll` that polls them and jumps to the chosen arm's body
     /// (or `else`), or parks. Each arm body is a lexical sub-scope (like a `match` arm): the selected
     /// value arrives on the stack top and the prologue binds (`:=`) / assigns (`=`) / drops (`_`) it.
+    /// A SEND arm (`ch.send(v):`) instead leaves `[chan, value]` and binds nothing.
     fn compile_wait(
         &mut self,
         fc: &mut FnComp,
@@ -1705,9 +1720,24 @@ impl Compiler {
         else_block: Option<&[Stmt]>,
         span: Span,
     ) -> Result<(), CompileError> {
-        // Evaluate each arm's channel expression once, source order (handles left on the stack).
+        // Evaluate each arm's operands once, source order (left on the stack for the poll to re-read
+        // on every re-park). A recv arm pushes ONE handle (the channel); a send arm pushes TWO (the
+        // channel THEN the value) — the exact top-to-bottom eval order Go's `select` requires, and
+        // identical bytecode on both engines ⇒ byte-identical side-effect order.
+        let mut is_send = Vec::with_capacity(arms.len());
         for arm in arms {
-            self.compile_expr(fc, &arm.chan)?;
+            match &arm.kind {
+                WaitArmKind::Recv { chan, .. } => {
+                    self.compile_expr(fc, chan)?;
+                    is_send.push(false);
+                }
+                WaitArmKind::Send { call } => {
+                    let (obj, value) = send_arm_parts(call);
+                    self.compile_expr(fc, obj)?;
+                    self.compile_expr(fc, value)?;
+                    is_send.push(true);
+                }
+            }
         }
         // Placeholder; back-patched with the arm/else targets once the bodies are laid out.
         let poll_at = fc.emit_jump(
@@ -1715,6 +1745,7 @@ impl Compiler {
                 n: arms.len(),
                 arm_targets: Vec::new(),
                 else_target: None,
+                is_send: is_send.clone(),
             })),
             span,
         );
@@ -1723,13 +1754,17 @@ impl Compiler {
         for arm in arms {
             arm_targets.push(fc.here());
             fc.begin_scope();
-            // The selected value is on the stack top — deliver it per the arm's target.
-            match &arm.target {
-                WaitTarget::Bind(name) => {
-                    fc.emit_decl_named(name.clone(), arm.span);
-                }
-                WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
-                WaitTarget::Assign(target) => self.emit_wait_assign(fc, target, arm.span)?,
+            match &arm.kind {
+                // The selected value is on the stack top — deliver it per the arm's target.
+                WaitArmKind::Recv { target, .. } => match target {
+                    WaitTarget::Bind(name) => {
+                        fc.emit_decl_named(name.clone(), arm.span);
+                    }
+                    WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
+                    WaitTarget::Assign(target) => self.emit_wait_assign(fc, target, arm.span)?,
+                },
+                // A send arm binds nothing — `take_wait_send_arm` pushes no value, so no prologue.
+                WaitArmKind::Send { .. } => {}
             }
             self.compile_defer_scoped_arm(fc, &arm.body)?;
             fc.end_scope();
@@ -1753,6 +1788,7 @@ impl Compiler {
                 n: arms.len(),
                 arm_targets,
                 else_target,
+                is_send,
             })),
         );
         Ok(())
@@ -4985,13 +5021,18 @@ fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
             }
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
-                    collect_frame_binds_expr(&arm.chan, out);
-                    match &arm.target {
-                        WaitTarget::Bind(n) => {
-                            out.insert(n.clone());
+                    match &arm.kind {
+                        WaitArmKind::Recv { target, chan } => {
+                            collect_frame_binds_expr(chan, out);
+                            match target {
+                                WaitTarget::Bind(n) => {
+                                    out.insert(n.clone());
+                                }
+                                WaitTarget::Assign(e) => collect_frame_binds_expr(e, out),
+                                WaitTarget::Discard => {}
+                            }
                         }
-                        WaitTarget::Assign(e) => collect_frame_binds_expr(e, out),
-                        WaitTarget::Discard => {}
+                        WaitArmKind::Send { call } => collect_frame_binds_expr(call, out),
                     }
                     collect_frame_binds(&arm.body, out);
                 }
@@ -5077,9 +5118,14 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
             StmtKind::Parallel { body } => find_boundary_free_block(body, out),
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
-                    find_boundary_free_expr(&arm.chan, out);
-                    if let WaitTarget::Assign(e) = &arm.target {
-                        find_boundary_free_expr(e, out);
+                    match &arm.kind {
+                        WaitArmKind::Recv { target, chan } => {
+                            find_boundary_free_expr(chan, out);
+                            if let WaitTarget::Assign(e) = target {
+                                find_boundary_free_expr(e, out);
+                            }
+                        }
+                        WaitArmKind::Send { call } => find_boundary_free_expr(call, out),
                     }
                     find_boundary_free_block(&arm.body, out);
                 }
@@ -5336,14 +5382,19 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
             }
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
-                    free_names_expr(&arm.chan, &b, out);
                     let mut b2 = b.clone();
-                    match &arm.target {
-                        WaitTarget::Bind(n) => {
-                            b2.insert(n.clone());
+                    match &arm.kind {
+                        WaitArmKind::Recv { target, chan } => {
+                            free_names_expr(chan, &b, out);
+                            match target {
+                                WaitTarget::Bind(n) => {
+                                    b2.insert(n.clone());
+                                }
+                                WaitTarget::Assign(e) => free_names_expr(e, &b, out),
+                                WaitTarget::Discard => {}
+                            }
                         }
-                        WaitTarget::Assign(e) => free_names_expr(e, &b, out),
-                        WaitTarget::Discard => {}
+                        WaitArmKind::Send { call } => free_names_expr(call, &b, out),
                     }
                     free_names_block(&arm.body, &b2, out);
                 }

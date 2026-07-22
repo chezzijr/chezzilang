@@ -1882,8 +1882,11 @@ impl Parser {
             let arm_span = self.cur_span();
             let lhs = self.parse_expr()?;
             let lhs_span = lhs.span;
-            let target = if self.eat(&Token::Walrus) {
-                match lhs.kind {
+            // A `:=`/`=` after the lhs ⇒ a RECV arm (`x := ch.recv():` / `y = ch.recv():`). No such
+            // operator ⇒ the lhs is a bare SEND-arm candidate (`ch.send(v):`); the parser stays lenient
+            // (any bare expr is accepted) and the CHECKER validates it is exactly `chan.send(value)`.
+            let kind = if self.eat(&Token::Walrus) {
+                let target = match lhs.kind {
                     ExprKind::Ident(n) if n == "_" => WaitTarget::Discard,
                     ExprKind::Ident(n) => WaitTarget::Bind(n),
                     _ => {
@@ -1892,9 +1895,13 @@ impl Parser {
                             span: lhs_span,
                         });
                     }
+                };
+                WaitArmKind::Recv {
+                    target,
+                    chan: self.parse_recv_chan()?,
                 }
             } else if self.eat(&Token::Assign) {
-                if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
+                let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
                     WaitTarget::Discard
                 } else if matches!(
                     lhs.kind,
@@ -1906,45 +1913,18 @@ impl Parser {
                         message: "invalid wait-arm assignment target".to_string(),
                         span: lhs_span,
                     });
+                };
+                WaitArmKind::Recv {
+                    target,
+                    chan: self.parse_recv_chan()?,
                 }
             } else {
-                return Err(
-                    self.err("a wait arm needs `:=` or `=` before the channel `recv`".to_string())
-                );
-            };
-            // The RHS must be a bare `<chan>.recv()` — the thing a wait arm blocks on.
-            let rhs = self.parse_expr()?;
-            let rhs_span = rhs.span;
-            let chan = match rhs.kind {
-                ExprKind::Call {
-                    callee,
-                    args,
-                    named,
-                    ..
-                } if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") => {
-                    if !args.is_empty() || !named.is_empty() {
-                        return Err(ParseError {
-                            message: "`recv` in a wait arm takes no arguments".to_string(),
-                            span: rhs_span,
-                        });
-                    }
-                    match callee.kind {
-                        ExprKind::Field { obj, .. } => *obj,
-                        _ => unreachable!("guarded by the matches! above"),
-                    }
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "a wait arm must `recv` from a channel (`v := ch.recv():`)"
-                            .to_string(),
-                        span: rhs_span,
-                    });
-                }
+                // Bare expr, no `:=`/`=` — a send arm. Validated by the checker (`chan.send(value)`).
+                WaitArmKind::Send { call: lhs }
             };
             let body = self.parse_block()?;
             arms.push(WaitArm {
-                target,
-                chan,
+                kind,
                 body,
                 span: arm_span,
             });
@@ -1955,6 +1935,35 @@ impl Parser {
             return Err(self.err("`wait` needs at least one `recv` arm".to_string()));
         }
         Ok(StmtKind::Wait { arms, else_block })
+    }
+
+    /// The RHS of a recv `wait:` arm: a bare `<chan>.recv()` (no args). Returns the channel expr.
+    fn parse_recv_chan(&mut self) -> PResult<Expr> {
+        let rhs = self.parse_expr()?;
+        let rhs_span = rhs.span;
+        match rhs.kind {
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") => {
+                if !args.is_empty() || !named.is_empty() {
+                    return Err(ParseError {
+                        message: "`recv` in a wait arm takes no arguments".to_string(),
+                        span: rhs_span,
+                    });
+                }
+                match callee.kind {
+                    ExprKind::Field { obj, .. } => Ok(*obj),
+                    _ => unreachable!("guarded by the matches! above"),
+                }
+            }
+            _ => Err(ParseError {
+                message: "a wait arm must `recv` from a channel (`v := ch.recv():`)".to_string(),
+                span: rhs_span,
+            }),
+        }
     }
 
     fn parse_import(&mut self) -> PResult<Import> {
@@ -4116,13 +4125,41 @@ mod tests {
         match only(src) {
             StmtKind::Wait { arms, else_block } => {
                 assert_eq!(arms.len(), 3);
-                assert!(matches!(arms[0].target, WaitTarget::Bind(ref n) if n == "v"));
-                assert!(matches!(&arms[0].chan.kind, ExprKind::Ident(n) if n == "orders"));
-                assert!(matches!(arms[1].target, WaitTarget::Assign(_)));
-                assert!(matches!(arms[2].target, WaitTarget::Discard));
+                let recv = |a: &WaitArm| match &a.kind {
+                    WaitArmKind::Recv { target, chan } => (target.clone(), chan.clone()),
+                    other => panic!("expected recv arm, got {other:?}"),
+                };
+                let (t0, c0) = recv(&arms[0]);
+                assert!(matches!(t0, WaitTarget::Bind(ref n) if n == "v"));
+                assert!(matches!(&c0.kind, ExprKind::Ident(n) if n == "orders"));
+                let (t1, _) = recv(&arms[1]);
+                assert!(matches!(t1, WaitTarget::Assign(_)));
+                let (t2, c2) = recv(&arms[2]);
+                assert!(matches!(t2, WaitTarget::Discard));
                 // a timer arm's channel expr is the `timer(500)` call, evaluated once.
-                assert!(matches!(&arms[2].chan.kind, ExprKind::Call { .. }));
+                assert!(matches!(&c2.kind, ExprKind::Call { .. }));
                 assert!(else_block.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_wait_bare_send_arm() {
+        // A bare `ch.send(v):` arm (no `:=`/`=`) parses to a lenient `Send{call}` — the checker
+        // validates the `.send()` shape, not the parser.
+        let src = "wait:\n    v := ch.recv(): use(v)\n    out.send(7): done()\n";
+        match only(src) {
+            StmtKind::Wait { arms, else_block } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(arms[0].kind, WaitArmKind::Recv { .. }));
+                match &arms[1].kind {
+                    WaitArmKind::Send { call } => {
+                        assert!(matches!(&call.kind, ExprKind::Call { .. }));
+                    }
+                    other => panic!("expected send arm, got {other:?}"),
+                }
+                assert!(else_block.is_none());
             }
             other => panic!("{other:?}"),
         }

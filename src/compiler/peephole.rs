@@ -353,10 +353,12 @@ mod tests {
     /// arm-body parity bug: VM 65 vs interp 66). `[CI2, CI3, Add, WaitPoll{arms:[5,7]}, body@5..]` —
     /// the fold removes 2 ops so the arm bodies move 5→3 and 7→5.
     fn waitpoll(arm_targets: Vec<usize>, else_target: Option<usize>) -> Op {
+        let n = arm_targets.len();
         Op::WaitPoll(Box::new(crate::vm::op::WaitMeta {
-            n: 1,
+            n,
             arm_targets,
             else_target,
+            is_send: vec![false; n],
         }))
     }
 
