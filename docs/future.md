@@ -452,6 +452,39 @@ keep two-engine parity → measure (`benches/run.chz`) → record the delta in `
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
 touching the value model or the GC.
 
+### AtomicInt — lock-free primitive int atomic (backlog, reframed 2026-07-22; ready to build next session)
+
+`Atomic[T]` is generic over ANY sendable T (`store`/`exchange`/`cas` hold arbitrary values; `add`/`sub`
+numeric only). A lock-free fast path that picks `AtomicI64` backing from the **runtime** init value is
+UNSOUND — `x: Any = 5; a := Atomic(x); a.store("hello")` type-checks (`str` <: `Any`) then faults on an
+int-only cell, where the old Mutex cell held the string fine. (Tried + REJECTED 2026-07-22 after 2
+remediation rounds, branch discarded — the `checker-superset-of-compiler` class: the VM is **type-blind**
+at construction, so it can't see the static element type is wider than the runtime int.)
+
+**The fix is a NEW dedicated type, not a patch to `Atomic[T]`.** Add **`AtomicInt`** — statically,
+monomorphically int (no `[T]`, nothing to widen), so it can ALWAYS be a lock-free
+`std::sync::atomic::AtomicI64`: no runtime type-sniffing, no wider-T hole, the `Atomic[Any]` trap can't
+be written. This is the mainstream design — Rust `AtomicI64`, Java `AtomicInteger`, Go `atomic.Int64`,
+each distinct from the generic reference cell (`AtomicReference<T>` / `atomic.Value`). `Atomic[T]` stays
+exactly as-is (Mutex, general) — **zero regression, purely additive**.
+
+Sketch (additive-native-type pattern, ~3 touchpoints — see the `native-types-first-class-additive-pattern`
+memory / `regex.Match` as the template): new `Obj::AtomicInt(AtomicI64)` + ctor `AtomicInt(0)`; checker
+registers `AtomicInt` as a reserved `std.concurrency` type with int-only `load/store/add/sub/cas/exchange`
+and gates the bare name behind `import std.concurrency`; runtime method dispatch on the new Obj.
+**CRITICAL:** `add`/`sub` MUST keep the i64-overflow FAULT via a `compare_exchange` CHECKED CAS-loop —
+NOT raw `fetch_add`/`fetch_sub` (they wrap silently = behavior regression). `SeqCst` ordering everywhere
+(matches the sequential consistency the Mutex gave → serial==M:N byte-identical). Tests on BOTH engines:
+overflow still faults; a high-contention `parallel:` counter (N tasks × M `add(1)` == N*M); serial==M:N
+and `--check-parity` green. Perf: the discarded generic attempt measured **1.85× under contention**
+(uncontended ~flat); NOT on the M19 `fib`/`loop`/`primes` benches → gate on a **contention microbench**,
+record in `docs/benchmarks.md`, and if no measurable win SAY SO.
+
+Status: sound + contained + idiomatic (no longer the "typed `NewAtomic` milestone" the discarded attempt
+implied — a monomorphic type removes the cause instead of threading static types). The ONLY open question
+is whether it earns its keep now (win is contention-only; M19 deprioritized atomic perf). Path when
+picked up: brainstorm → spec → auto-task (this time on solid ground).
+
 ### Post-M19 next levers (ranked — diagnosed 2026-06-12; **status updated 2026-06-13**)
 
 > **Status (2026-06-13):** Tier 1 is DONE — #1 method-IC (Phase 6) and #2 inline-hot-ops (Phase 7)
