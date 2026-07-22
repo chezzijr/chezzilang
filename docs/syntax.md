@@ -2582,8 +2582,8 @@ fn fetch_all(urls: List[str]):
   / `s.update(fn(x): ...)`, synchronized and **sendable**. For an in-task mutable value to close over
   or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
   ladder is `value` (copied) → a mutable `struct`/collection (in-task) → `Shared[T]` (cross-task).
-  `Shared`/`RwShared`/`Atomic`/`Executor` require `import std.concurrency` (whole-module licenses all
-  four; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
+  `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor` require `import std.concurrency` (whole-module
+  licenses all; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
   **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global; `timer` now
   requires `import std.time` (it stays a reserved name too — see below).
   These import-gated native types are **also reachable by the qualified / aliased module-member path**,
@@ -2607,6 +2607,11 @@ fn fetch_all(urls: List[str]):
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
   like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
   arbitrary-transform updates.
+- **`AtomicInt`** — the monomorphic **lock-free** int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
+  Go `atomic.Int64` style). `Atomic[T]`'s int-only sibling with no `[T]`, so it is a genuine lock-free
+  `AtomicI64` (not a `Mutex`). Same method surface, all int-typed, `add`/`sub` always available (int is
+  always numeric) and overflow-checked. Constructed `AtomicInt(v)` (one int arg). ~2.7× faster than
+  Mutex-backed `Atomic` on a contended int counter — reach for it for a hot cross-task counter/flag.
 - **`timer(ms) -> Channel[bool]`** (`import std.time`) — a one-shot timeout channel: `timer(500).recv()`
   blocks ~500ms then yields `true` (level-triggered — ready on any recv at/after the deadline). The
   composable timeout primitive; it races against real channels inside a `wait:` — there is **no separate
@@ -2656,7 +2661,7 @@ fn fetch_all(urls: List[str]):
   per-task copy** (writes in the task stay local, on both engines; a module global is deep-copied at the
   spawn boundary just like a captured local, so reassigning or in-place-mutating either inside a task is
   fine and simply invisible to the parent). Sendable types
-  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`Shared`/`RwShared`/a `std.cancel`
+  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`AtomicInt`/`Shared`/`RwShared`/a `std.cancel`
   `Token`/closures/**protocol existentials** — Task 2, Go `chan interface` parity) cross the airlock;
   a native handle (or a witness carrying an FFI/native handle) does not. To share mutable state across tasks use a
   `Shared`/`Atomic`/`Channel` (they cross by shared handle, so a task-side write IS visible to the parent).
@@ -3004,7 +3009,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), or any of your `struct`/enum-variant names — those
 resolve to a special op before a plain call, so the extern would be silently shadowed; the checker
 rejects the collision (*'…' is a builtin/reserved name*).
 

@@ -4,6 +4,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CONCURRENCY (2026-07-22, `auto-task/atomic-int`) — `AtomicInt`, a monomorphic LOCK-FREE int atomic.**
+> Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/future.md
+> §4` (a lock-free fast path on the GENERIC `Atomic[T]` was UNSOUND — VM is type-blind at construction, so
+> `Atomic[Any]` holding an int then `.store("hi")` faults; a monomorphic type removes the cause). Shipped
+> mirroring the four reserved `std.concurrency` names at every checker/VM site as a UNIT type (no `[T]`):
+> `Ty::AtomicInt` + `Obj::AtomicInt(Arc<AtomicIntCore{v: AtomicI64}>)` + `Op::NewAtomicInt` +
+> `WireValue::AtomicInt`; `native struct AtomicInt` (no `[T]`, concrete int sigs) in `std/concurrency.chz`
+> harvests the method table. Methods `load/store/exchange/cas/add/sub` all int, `add`/`sub` ALWAYS valid
+> (int is always numeric — no residual gate). **The one piece of real logic:** `add`/`sub` use a CHECKED
+> `compare_exchange` CAS-loop (NOT raw `fetch_add`/`fetch_sub`, which wrap silently) — keeps the
+> i64-overflow fault byte-identical to `Atomic` (`"integer overflow in Add/Sub"`); `SeqCst` on every op →
+> serial == M:N byte-identical. Import-gated + reserved like `Atomic` (bind_import skip closes the
+> reserved-name hole). **Perf: ~2.7× faster than Mutex-backed `Atomic` on an 8-way contended int counter**
+> (16M adds, 1.73s vs 4.73s; uncontended a wash) — `docs/benchmarks.md §AtomicInt`. Tests (both engines):
+> `atomic_int_{roundtrip,add_overflow,sub_overflow,contention,from_import_runs}_parity` +
+> `atomic_int_bare_unlicensed_errors` + harvest-drift/reserved-name loops + `examples/atomic_int.chz`.
+> Docs: `future.md` (LANDED), `stdlib.md`, `concurrency.md §6b`, `syntax.md`, `benchmarks.md`.
+
 > **✅ CONCURRENCY (2026-07-22, `auto-task/wait-send-arms`) — `wait:` SEND-arms (Go-`select` symmetry).**
 > A `wait:` arm can now be a bare `ch.send(v):` (no `:=`/`=`), the send-side twin of `x := ch.recv():`.
 > Ready when the channel can accept the value — **bounded-with-space** / **unbounded** (always) / **closed**

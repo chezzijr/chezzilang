@@ -370,7 +370,7 @@ impl Checker {
             {
                 if matches!(
                     name.as_str(),
-                    "Shared" | "RwShared" | "Atomic" | "Executor" | "timer"
+                    "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "timer"
                 ) {
                     return self
                         .infer_named_call(name, args, &targs, *name_span, span, None, expected)
@@ -1784,6 +1784,23 @@ impl Checker {
                     Some(Ty::Unknown)
                 }
             }
+            "AtomicInt" => {
+                // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
+                // must be an int. NOT a global builtin: requires `import std.concurrency` (the name
+                // STAYS reserved). The arg is checked even on the unlicensed path so a nested error
+                // surfaces.
+                self.check_args("AtomicInt", &[Ty::Int], args, span);
+                if self.concurrency_licensed("AtomicInt") {
+                    Some(Ty::AtomicInt)
+                } else {
+                    self.error(
+                        span,
+                        "unknown type 'AtomicInt' (import it from std.concurrency: `import std.concurrency`)"
+                            .to_string(),
+                    );
+                    Some(Ty::Unknown)
+                }
+            }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
             "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
@@ -1936,6 +1953,7 @@ impl Checker {
             | Ty::Shared(_)
             | Ty::RwShared(_)
             | Ty::Atomic(_)
+            | Ty::AtomicInt
             | Ty::Executor
             | Ty::Socket
             | Ty::Listener
@@ -1948,6 +1966,7 @@ impl Checker {
                     Ty::Shared(_) => "Shared",
                     Ty::RwShared(_) => "RwShared",
                     Ty::Atomic(_) => "Atomic",
+                    Ty::AtomicInt => "AtomicInt",
                     Ty::Executor => "Executor",
                     Ty::Socket => "Socket",
                     Ty::Listener => "Listener",
@@ -2746,6 +2765,33 @@ impl Checker {
                     )
                 };
                 match resolved {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        sig.ret
+                    }
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        Ty::Unknown
+                    }
+                }
+            }
+            Ty::AtomicInt => {
+                // `load()->int`, `store(int)`, `exchange(int)->int`, `cas(int,int)->bool`,
+                // `add(int)->int`, `sub(int)->int`. Monomorphic int — NO element type (`&[]`) and NO
+                // numeric gate (int is ALWAYS numeric — the whole reason for monomorphizing). Sigs are
+                // harvested from `std/concurrency.chz` as concrete int sigs (no generic solving).
+                match self.resolve_native_handle_method(
+                    "AtomicInt",
+                    method,
+                    &[],
+                    name_span,
+                    &obj_ty,
+                    type_args,
+                    args,
+                    span,
+                ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
                         self.check_args_range(method, &sig.params, sig.min_params, args, span);

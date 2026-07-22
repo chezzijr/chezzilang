@@ -7275,6 +7275,10 @@ fn concurrency_sig_from_file_not_native_module_sig() {
             "Atomic",
             &["load", "store", "exchange", "cas", "add", "sub"],
         ),
+        (
+            "AtomicInt",
+            &["load", "store", "exchange", "cas", "add", "sub"],
+        ),
         ("Executor", &["submit", "shutdown", "shutdown_now"]),
     ];
     for (tname, methods) in expected {
@@ -10133,12 +10137,46 @@ fn concurrency_partial_import_collection_does_not_license() {
 fn concurrency_names_still_reserved() {
     // CRITICAL FIX 1 — the four stay RESERVED names: a user cannot declare a struct over them even
     // after the import gate landed. This is a SEPARATE gate from the import requirement; both apply.
-    for name in ["Shared", "RwShared", "Atomic", "Executor"] {
+    for name in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
         rejects(
             &format!("struct {name}:\n    n: int\nfn main():\n    print(1)\nmain()\n"),
             "reserved",
         );
     }
+}
+
+#[test]
+fn atomic_int_bare_unlicensed_errors() {
+    // AtomicInt is import-gated: a bare `AtomicInt(0)` WITHOUT `import std.concurrency` must emit the
+    // std.concurrency import hint (the reserved-name hole check's static half). Both the ctor call and
+    // a bare type annotation must gate.
+    let errs = check_entry("fn main():\n    a := AtomicInt(0)\n    print(a.load())\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'AtomicInt'")
+                && e.message.contains("import std.concurrency")),
+        "bare AtomicInt ctor (no import) must emit the std.concurrency import hint, got: {errs:?}"
+    );
+    let errs = check_entry("fn f(a: AtomicInt):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'AtomicInt'")
+                && e.message.contains("import std.concurrency")),
+        "bare AtomicInt annotation (no import) must emit the std.concurrency import hint, got: {errs:?}"
+    );
+    // Licensed: `import std.concurrency` makes it resolve cleanly.
+    let errs = check_entry(
+        "import std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(1)\n    print(a.load())\nmain()\n",
+    );
+    assert!(
+        errs.is_empty(),
+        "licensed AtomicInt must check clean, got: {errs:?}"
+    );
+    // A non-int arg is rejected.
+    let errs = check_entry(
+        "import std.concurrency\nfn main():\n    a := AtomicInt(3.5)\n    print(a.load())\nmain()\n",
+    );
+    assert!(!errs.is_empty(), "AtomicInt(3.5) must be a type error");
 }
 
 // ----- namespace name-leak: builtin TYPE names reserved at declaration -----
@@ -15581,6 +15619,11 @@ fn builtin_method_slices_all_resolve() {
     chk_harvested(&harvested(&conc, "Shared"), SHARED_METHODS, "Shared");
     chk_harvested(&harvested(&conc, "RwShared"), RWSHARED_METHODS, "RwShared");
     chk_harvested(&harvested(&conc, "Atomic"), ATOMIC_METHODS, "Atomic");
+    chk_harvested(
+        &harvested(&conc, "AtomicInt"),
+        ATOMIC_INT_METHODS,
+        "AtomicInt",
+    );
     chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
     chk(BYTES_METHODS, "BYTES_METHODS", &bytes_method_sig);
     chk(

@@ -722,6 +722,7 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Param(_)
+            | Ty::AtomicInt
             | Ty::Executor
             | Ty::Socket
             | Ty::Listener
@@ -807,6 +808,7 @@ impl Checker {
             "Shared" => Some(Ty::shared(one())),
             "RwShared" => Some(Ty::rwshared(one())),
             "Atomic" => Some(Ty::atomic(one())),
+            "AtomicInt" => Some(Ty::AtomicInt),
             "Executor" => Some(Ty::Executor),
             "Socket" => Some(Ty::Socket),
             "Listener" => Some(Ty::Listener),
@@ -993,6 +995,20 @@ impl Checker {
                             self.error(
                             span,
                             "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
+                                .to_string(),
+                        );
+                            Ty::Unknown
+                        }
+                    }
+                    // The monomorphic lock-free int atomic, non-generic (a bare `AtomicInt` annotation).
+                    // Like `Executor`, NOT a global builtin: resolves only after `import std.concurrency`.
+                    "AtomicInt" => {
+                        if self.concurrency_licensed("AtomicInt") {
+                            Ty::AtomicInt
+                        } else {
+                            self.error(
+                            span,
+                            "unknown type 'AtomicInt' (import it from std.concurrency: `import std.concurrency`)"
                                 .to_string(),
                         );
                             Ty::Unknown

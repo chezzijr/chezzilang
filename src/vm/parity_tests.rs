@@ -11180,6 +11180,45 @@ fn atomic_incremented_in_task_visible_to_parent_parity() {
 }
 
 /// Task 1 — direct in-block mutation forms (previously REJECTED by the frozen-module-global gates, now
+/// AtomicInt — monomorphic lock-free int atomic. Basic load/store/exchange/cas roundtrip, both engines.
+#[test]
+fn atomic_int_roundtrip_parity() {
+    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(5)\n    a.store(10)\n    print(a.load())\n    print(a.exchange(20))\n    print(a.cas(20, 99))\n    print(a.load())\nmain()\n";
+    assert_eq!(parity_entry(src), "10\n10\ntrue\n99\n");
+}
+
+/// AtomicInt.add MUST keep the i64-overflow FAULT (checked CAS-loop, NOT raw fetch_add that wraps).
+#[test]
+fn atomic_int_add_overflow_parity() {
+    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(9223372036854775807)\n    print(a.add(1))\nmain()\n";
+    let msg = parity_entry_fault(src);
+    assert!(msg.contains("integer overflow in Add"), "{msg}");
+}
+
+/// AtomicInt.sub MUST keep the i64-overflow FAULT symmetrically (i64::MIN - 1).
+#[test]
+fn atomic_int_sub_overflow_parity() {
+    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(-9223372036854775808)\n    print(a.sub(1))\nmain()\n";
+    let msg = parity_entry_fault(src);
+    assert!(msg.contains("integer overflow in Sub"), "{msg}");
+}
+
+/// High-contention: 8 tasks × 10000 `add(1)` on one shared AtomicInt == 80000 exactly (lock-free
+/// correctness — a broken non-atomic RMW would lose updates under M:N).
+#[test]
+fn atomic_int_contention_parity() {
+    let src = "import std.concurrency\na := AtomicInt(0)\nfn main():\n    parallel:\n        for _ in 0..8:\n            spawn:\n                for _ in 0..10000:\n                    a.add(1)\n    print(a.load())\nmain()\n";
+    assert_eq!(parity_entry(src), "80000\n");
+}
+
+/// Reserved-name hole guard: `import AtomicInt from std.concurrency` must RUN (bind_import skip),
+/// not check-pass-then-runtime-trap. Both engines.
+#[test]
+fn atomic_int_from_import_runs_parity() {
+    let src = "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(3)\n    print(a.load())\nmain()\n";
+    assert_eq!(parity_entry(src), "3\n");
+}
+
 /// deleted): list `.push`, map index-assign, struct field-assign, set `.add`, bytearray `.extend`, and a
 /// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent → serial == M:N.
 #[test]

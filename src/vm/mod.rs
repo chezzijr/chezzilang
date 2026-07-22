@@ -16,8 +16,8 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, Backing, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
-    SharedCore, SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecutorCore, ListenerCore, ReaderCore,
+    RwSharedCore, SharedCore, SocketCore, WriterCore,
 };
 use heap::{Heap, MapData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};

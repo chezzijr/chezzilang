@@ -308,8 +308,8 @@ M:N **as long as you await in a fixed (submission) order**. There is deliberatel
 
 ## 6. `Shared[T]` — the cross-task mutable box
 
-> **`import std.concurrency`.** `Shared`, `RwShared`, `Atomic`, and `Executor` are **not** global
-> builtins — a module must `import std.concurrency` (whole-module licenses all four) or
+> **`import std.concurrency`.** `Shared`, `RwShared`, `Atomic`, `AtomicInt`, and `Executor` are **not**
+> global builtins — a module must `import std.concurrency` (whole-module licenses all of them) or
 > `import Shared from std.concurrency` (per-name) before using them; bare use is an
 > `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
 > stay **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global;
@@ -393,6 +393,43 @@ plain float arithmetic. `cas` compares with the same structural equality as `==`
 lock-op-unlock, so the read-modify-write is atomic across threads with no separate update lock. `Atomic`
 vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is clearer than
 `update(closure)`; reach for `Shared` when the update is an arbitrary transformation.
+
+### `AtomicInt` — the monomorphic **lock-free** int atomic
+
+`AtomicInt` is `Atomic[T]`'s monomorphic-int sibling. Because it is statically `int` (no `[T]`, nothing to
+widen), it is backed by a genuine lock-free `std::sync::atomic::AtomicI64` — no `Mutex`, no runtime
+type-sniffing — exactly like Rust's `AtomicI64`, Java's `AtomicInteger`, or Go's `atomic.Int64` (each also
+distinct from the generic reference cell). Same import gate and reserved name as `Atomic`; constructed
+`AtomicInt(v)` with one int arg. The method surface is identical to `Atomic`'s but all int-typed, and
+`add`/`sub` are **always** available (int is always numeric — no residual numeric gate):
+
+```chezzi
+import std.concurrency
+a := AtomicInt(0)
+fn main():
+    parallel:
+        for _ in 0..8:
+            spawn:
+                for _ in 0..100000:
+                    a.add(1)
+    print(a.load())            # 800000 — lock-free, no lost update
+main()
+```
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `load`     | `load(self) -> int` | read out |
+| `store`    | `store(self, v: int) -> nil` | overwrite |
+| `exchange` | `exchange(self, v: int) -> int` | swap; returns the **old** value |
+| `cas`      | `cas(self, expected: int, new: int) -> bool` | compare-and-swap; swaps iff the box equals `expected` |
+| `add`      | `add(self, x: int) -> int` | returns the **new** value; overflow **faults** |
+| `sub`      | `sub(self, x: int) -> int` | returns the **new** value; overflow **faults** |
+
+Every op uses `SeqCst` ordering (the same sequential consistency `Atomic`'s Mutex gave, so the serial and
+M:N engines stay byte-identical). `add`/`sub` keep the i64-overflow fault via a checked `compare_exchange`
+CAS-loop (not a silently-wrapping `fetch_add`). Reach for `AtomicInt` over `Atomic(0)` for a hot int
+counter/flag under contention — it measured **~2.7× faster** than the Mutex-backed `Atomic` on an 8-way
+counter (see [`benchmarks.md`](benchmarks.md)); uncontended it is a wash.
 
 ---
 
@@ -856,8 +893,8 @@ both **reassigning** it AND **mutating it in place** (`.push`/`m[k]=v`/`s.field=
 aggregate) inside a task is a **compile error** (see below).
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
-  sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, a **`Shared[T]`** handle,
-  a **`RwShared[T]`** handle,
+  sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, an **`AtomicInt`** handle,
+  a **`Shared[T]`** handle, a **`RwShared[T]`** handle,
   a **`std.cancel` `Token`** (a struct over the above, so it flows down the call tree), a
   **`.iter()` snapshot cursor** — a frozen data snapshot + read position, so it crosses by deep copy
   exactly like a `list` (the cursor and a generator share the `Iterator[T]` existential, but a cursor

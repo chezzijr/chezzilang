@@ -521,6 +521,7 @@ impl Checker {
                 "bytes" => Ty::Bytes,
                 "bytearray" => Ty::ByteArray,
                 "nil" => Ty::Nil,
+                "AtomicInt" => Ty::AtomicInt,
                 "Executor" => Ty::Executor,
                 "Socket" => Ty::Socket,
                 "Listener" => Ty::Listener,
@@ -1370,6 +1371,8 @@ impl Checker {
             // An `Atomic[T]` handle crosses for the same reason as `Shared` — one box, many tasks;
             // the element type is not a constraint (only the handle crosses).
             Ty::Atomic(_) => true,
+            // An `AtomicInt` handle crosses like `Atomic` — one lock-free box, many tasks.
+            Ty::AtomicInt => true,
             // An `Executor` handle crosses the airlock like a `Channel`/`Shared` handle (the queue
             // lives outside every heap; tasks reach the one work queue).
             Ty::Executor => true,

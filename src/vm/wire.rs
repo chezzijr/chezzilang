@@ -10,8 +10,8 @@
 //! shared `Arc` core).
 
 use super::core::{
-    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
+    SharedCore, SocketCore, WriterCore,
 };
 use super::op::ProtoId;
 use super::value::GcRef;
@@ -156,6 +156,8 @@ pub enum WireValue {
     RwShared(Arc<RwSharedCore>),
     /// An `Atomic` handle crossing the airlock as its shared [`AtomicCore`]. See [`Channel`]/[`Shared`].
     Atomic(Arc<AtomicCore>),
+    /// An `AtomicInt` handle crossing the airlock as its shared [`AtomicIntCore`]. See [`Atomic`].
+    AtomicInt(Arc<AtomicIntCore>),
     /// An `Executor` handle crossing the airlock as its shared [`ExecutorCore`] (B3.1). See [`Channel`].
     Executor(Arc<ExecutorCore>),
     /// A `Socket` handle crossing the airlock as its shared [`SocketCore`] (D6) — an `Arc`'d fd, so a

@@ -163,6 +163,7 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "Shared"
         || name == "RwShared"
         || name == "Atomic"
+        || name == "AtomicInt"
         || name == "Executor"
         // `timer` is a runtime ctor/builtin name (not a real type), but it STAYS reserved here so a
         // user `struct timer` / `enum timer` / `type timer` is rejected at declaration rather than
@@ -247,6 +248,7 @@ const RESERVED_CALLABLE: &[&str] = &[
     "Shared",
     "RwShared",
     "Atomic",
+    "AtomicInt",
     "timer",
     "Executor",
 ];
@@ -1021,7 +1023,7 @@ impl Checker {
                 // cache) because that step mutates `RwShared.read`/`Executor.submit`'s closure-param sigs
                 // — caching before would seed the pre-port (unannotated) tables.
                 if name == "std.concurrency" {
-                    for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
+                    for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
                         if let Some(info) = sig.struct_defs.get(tn) {
                             c.concurrency_seeds.insert(tn.to_string(), info.clone());
                         }
@@ -2761,6 +2763,7 @@ const CHANNEL_METHODS: &[&str] = &[
 const SHARED_METHODS: &[&str] = &["get", "set", "update"];
 const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
 const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
+const ATOMIC_INT_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
 const SOCKET_METHODS: &[&str] = &["read", "write", "read_bytes", "write_bytes", "close"];
 const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
 const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
@@ -2916,6 +2919,7 @@ fn builtin_container_sig(name: &str) -> Option<FnSig> {
         "Shared" => (vec![Ty::Unknown], Ty::shared(Ty::Unknown)),
         "RwShared" => (vec![Ty::Unknown], Ty::rwshared(Ty::Unknown)),
         "Atomic" => (vec![Ty::Unknown], Ty::atomic(Ty::Unknown)),
+        "AtomicInt" => (vec![Ty::Int], Ty::AtomicInt),
         // `timer(ms) -> Channel[bool]` (one-shot timeout channel).
         "timer" => (vec![Ty::Int], Ty::channel(Ty::Bool)),
         // `Executor()` — zero-arg work queue.
@@ -2976,6 +2980,10 @@ fn builtin_type_doc(name: &str) -> Option<String> {
         "Atomic" => (
             "cross-task atomic cell — Atomic(v) (import std.concurrency; add/sub need numeric T)",
             Some(ATOMIC_METHODS),
+        ),
+        "AtomicInt" => (
+            "monomorphic lock-free int atomic — AtomicInt(v) (import std.concurrency)",
+            Some(ATOMIC_INT_METHODS),
         ),
         "Executor" => (
             "task pool — Executor() (import std.concurrency)",

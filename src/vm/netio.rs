@@ -54,6 +54,27 @@ impl Vm {
         }
     }
 
+    pub(super) fn atomic_int_core(&self, h: GcRef) -> Arc<AtomicIntCore> {
+        match self.heap.get(h) {
+            Obj::AtomicInt(core) => Arc::clone(core),
+            _ => unreachable!("atomic_int_core on non-atomic-int"),
+        }
+    }
+
+    /// `AtomicInt(v)` — pop the int init, wrap it in a fresh lock-free `Arc<AtomicIntCore>`. The checker
+    /// guarantees the single arg is an int; a boxed BigInt is narrowed via `int_of`. `#[inline(never)]`
+    /// so its locals stay out of `step`'s (recursion-path) stack frame.
+    #[inline(never)]
+    pub(super) fn new_atomic_int(&mut self, _span: Span) -> Result<Value, RuntimeError> {
+        let init = self.pop();
+        let n = self.int_of(init);
+        Ok(Value::obj(self.heap.alloc(Obj::AtomicInt(Arc::new(
+            AtomicIntCore {
+                v: std::sync::atomic::AtomicI64::new(n),
+            },
+        )))))
+    }
+
     /// `Atomic(v)` — pop the init, box its wire form behind a fresh `Arc<AtomicCore>`. `#[inline(never)]`
     /// so its locals stay out of `step`'s (recursion-path) stack frame.
     #[inline(never)]
@@ -2052,6 +2073,71 @@ impl Vm {
                 Ok(self.from_wire(new))
             }
             _ => Err(self.err(format!("type Atomic has no method '{method}'"), span)),
+        }
+    }
+
+    /// `AtomicInt` methods: `load`, `store`, `exchange`, `cas(expected, new) -> bool`, `add`/`sub`
+    /// (returns the NEW value). Backed by a raw lock-free `AtomicI64` — every op uses `SeqCst` ordering
+    /// (matches the sequential consistency `Atomic`'s Mutex gave, so serial == M:N is byte-identical).
+    /// `add`/`sub` KEEP the i64-overflow fault via a CHECKED `compare_exchange` CAS-loop (NOT raw
+    /// `fetch_add`/`fetch_sub`, which wrap silently) — error string byte-identical to `atomic_method`'s.
+    pub(super) fn atomic_int_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        match method {
+            "load" => {
+                self.arity_err("load", args, 0, span)?;
+                Ok(Value::int(self.atomic_int_core(h).v.load(SeqCst)))
+            }
+            "store" => {
+                self.arity_err("store", args, 1, span)?;
+                let n = self.int_of(args[0]);
+                self.atomic_int_core(h).v.store(n, SeqCst);
+                Ok(Value::nil())
+            }
+            "exchange" => {
+                self.arity_err("exchange", args, 1, span)?;
+                let n = self.int_of(args[0]);
+                Ok(Value::int(self.atomic_int_core(h).v.swap(n, SeqCst)))
+            }
+            "cas" => {
+                self.arity_err("cas", args, 2, span)?;
+                let expected = self.int_of(args[0]);
+                let new = self.int_of(args[1]);
+                let swapped = self
+                    .atomic_int_core(h)
+                    .v
+                    .compare_exchange(expected, new, SeqCst, SeqCst)
+                    .is_ok();
+                Ok(Value::bool(swapped))
+            }
+            "add" | "sub" => {
+                self.arity_err(method, args, 1, span)?;
+                let delta = self.int_of(args[0]);
+                let core = self.atomic_int_core(h);
+                let label = if method == "add" { "Add" } else { "Sub" };
+                // Checked compare_exchange CAS-loop: raw fetch_add/fetch_sub wrap silently (behavior
+                // regression vs Atomic's Mutex + checked_add). Retry on a racing writer.
+                loop {
+                    let cur = core.v.load(SeqCst);
+                    let r = if method == "add" {
+                        cur.checked_add(delta)
+                    } else {
+                        cur.checked_sub(delta)
+                    };
+                    let new =
+                        r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?;
+                    if core.v.compare_exchange(cur, new, SeqCst, SeqCst).is_ok() {
+                        return Ok(Value::int(new));
+                    }
+                }
+            }
+            _ => Err(self.err(format!("type AtomicInt has no method '{method}'"), span)),
         }
     }
 

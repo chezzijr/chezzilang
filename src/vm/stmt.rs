@@ -1898,6 +1898,7 @@ impl Vm {
                 Obj::Shared(_) => "Shared",
                 Obj::RwShared(_) => "RwShared",
                 Obj::Atomic(_) => "Atomic",
+                Obj::AtomicInt(_) => "AtomicInt",
                 Obj::Executor(_) => "Executor",
                 Obj::Socket(_) => "Socket",
                 Obj::Listener(_) => "Listener",
@@ -2060,6 +2061,10 @@ impl Vm {
                     "Atomic({})",
                     self.display_wire(&core.v.lock().unwrap())
                 )),
+                Obj::AtomicInt(core) => Ok(format!(
+                    "AtomicInt({})",
+                    core.v.load(std::sync::atomic::Ordering::SeqCst)
+                )),
                 Obj::Executor(core) => Ok(format!(
                     "Executor(pending={})",
                     core.inner.lock().unwrap().queue.len()
@@ -2210,6 +2215,12 @@ impl Vm {
             }
             WireValue::Atomic(core) => {
                 format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))
+            }
+            WireValue::AtomicInt(core) => {
+                format!(
+                    "AtomicInt({})",
+                    core.v.load(std::sync::atomic::Ordering::SeqCst)
+                )
             }
             WireValue::Executor(core) => format!(
                 "Executor(pending={})",
@@ -2596,6 +2607,7 @@ impl Vm {
             | Obj::Shared(_)
             | Obj::RwShared(_)
             | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_)

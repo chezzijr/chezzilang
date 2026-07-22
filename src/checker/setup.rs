@@ -1220,7 +1220,7 @@ impl Checker {
                 // TYPE names (the ergonomic default). Keyed on the EXACT len-2 path, so the real file
                 // submodule `import std.concurrency.collection` (len-3) does NOT license them.
                 if path.as_slice() == ["std".to_string(), "concurrency".to_string()] {
-                    for tn in ["Shared", "RwShared", "Atomic", "Executor"] {
+                    for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
                         self.imported_concurrency.insert(tn.to_string());
                     }
                 }
@@ -1396,7 +1396,7 @@ impl Checker {
                             }
                         } else if matches!(
                             member.as_str(),
-                            "Shared" | "RwShared" | "Atomic" | "Executor"
+                            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
                         ) {
                             // A selective `import Shared from std.concurrency` licenses just the named
                             // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like

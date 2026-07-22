@@ -457,6 +457,8 @@ pub enum Op {
     NewRwShared,
     /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
     NewAtomic,
+    /// `AtomicInt(v)` — stack `[init]`; pop the int, push a fresh lock-free `Obj::AtomicInt(AtomicI64)`.
+    NewAtomicInt,
     /// `timer(ms)` — stack `[ms]`; pop it, push a fresh `Channel[bool]` whose deadline is `now + ms`.
     /// Delivery happens at `recv` time (in the receiver's own scheduler), NOT here — see
     /// `chan_recv_step`'s timer branch.

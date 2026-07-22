@@ -683,7 +683,7 @@ impl Vm {
                     if self.module_name(target_obj) == "std.concurrency"
                         && matches!(
                             member.as_str(),
-                            "Shared" | "RwShared" | "Atomic" | "Executor"
+                            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
                         )
                     {
                         continue;
@@ -2148,6 +2148,10 @@ impl Vm {
             // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
             Op::NewAtomic => {
                 let v = self.new_atomic(span)?;
+                self.push(v);
+            }
+            Op::NewAtomicInt => {
+                let v = self.new_atomic_int(span)?;
                 self.push(v);
             }
             Op::NewTimer => {

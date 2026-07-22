@@ -929,3 +929,22 @@ on the hot list/map/set/struct method path** (a `None` from the one match now fa
 within the +/-2-6 % run-to-run noise on this machine — **flat**, as expected for a cold-arm refactor.
 The concurrency/io handle arms (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
 `Reader`) are not exercised by any bench, so no fib/loop/primes movement was possible.
+
+## AtomicInt — lock-free int atomic vs Mutex-backed Atomic (2026-07-22)
+
+Bespoke **contention** microbench (NOT in `benches/run.chz`, which is Chezzi-vs-CPython peers only —
+this compares two Chezzi constructs). A `parallel:` nursery, **8 tasks × 2,000,000 `add(1)`** on one
+shared box (16M increments total), default M:N engine, `cargo run --release`. Median of 5 (includes
+constant process/startup overhead, so the pure-RMW ratio is if anything slightly higher):
+
+| Construct | backing | median | runs (s) |
+|-----------|---------|--------|----------|
+| `AtomicInt` | lock-free `AtomicI64` (checked CAS-loop) | **1.73 s** | 1.44 / 1.71 / 1.73 / 1.76 / 2.00 |
+| `Atomic(0)` | `Mutex<WireValue>` | 4.73 s | 4.72 / 4.73 / 4.73 / 4.74 / 4.82 |
+
+**`AtomicInt` is ~2.73× faster under 8-way contention** — the lock-free `compare_exchange` retry beats
+the Mutex's lock/unlock + wire-value round-trip on every increment. This **exceeds** the 1.85× the
+discarded generic `AtomicI64`-fast-path attempt measured (it was capped by the type-blind runtime
+sniffing it had to do). **Uncontended** (single task) the two are within run-to-run noise — the win is
+purely a contention story, exactly as predicted. No M19 bench (`fib`/`loop`/`primes`) is affected;
+AtomicInt is a new stdlib construct, not a VM-wide lever.

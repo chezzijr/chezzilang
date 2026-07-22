@@ -452,7 +452,7 @@ keep two-engine parity → measure (`benches/run.chz`) → record the delta in `
 peephole/const-fold. They attacked dispatch count and name lookup — the two actual costs — without
 touching the value model or the GC.
 
-### AtomicInt — lock-free primitive int atomic (backlog, reframed 2026-07-22; ready to build next session)
+### AtomicInt — lock-free primitive int atomic (LANDED 2026-07-22)
 
 `Atomic[T]` is generic over ANY sendable T (`store`/`exchange`/`cas` hold arbitrary values; `add`/`sub`
 numeric only). A lock-free fast path that picks `AtomicI64` backing from the **runtime** init value is
@@ -480,10 +480,15 @@ and `--check-parity` green. Perf: the discarded generic attempt measured **1.85�
 (uncontended ~flat); NOT on the M19 `fib`/`loop`/`primes` benches → gate on a **contention microbench**,
 record in `docs/benchmarks.md`, and if no measurable win SAY SO.
 
-Status: sound + contained + idiomatic (no longer the "typed `NewAtomic` milestone" the discarded attempt
-implied — a monomorphic type removes the cause instead of threading static types). The ONLY open question
-is whether it earns its keep now (win is contention-only; M19 deprioritized atomic perf). Path when
-picked up: brainstorm → spec → auto-task (this time on solid ground).
+**LANDED 2026-07-22** (additive, `Atomic[T]` untouched). Shipped exactly per the sketch: unit `Ty::AtomicInt`
++ `Obj::AtomicInt(Arc<AtomicIntCore{v: AtomicI64}>)` + `Op::NewAtomicInt`, mirroring the four reserved
+`std.concurrency` names at every checker/VM site; `native struct AtomicInt` (no `[T]`) in
+`std/concurrency.chz` harvests the concrete int method table. `add`/`sub` use a checked `compare_exchange`
+CAS-loop (keeps the i64-overflow fault, byte-identical `"integer overflow in Add/Sub"`), `SeqCst` on every
+op. **Perf: the contention win materialised — ~2.7× faster than Mutex-backed `Atomic` on an 8-way int
+counter** (16M adds: 1.73s vs 4.73s median; uncontended a wash), recorded in `docs/benchmarks.md §AtomicInt`.
+Tests (both engines): roundtrip, add/sub overflow fault, 8×10000 contention counter == 80000, `import
+AtomicInt from std.concurrency` runs (reserved-name hole closed), bare-unlicensed = checker error.
 
 ### Post-M19 next levers (ranked — diagnosed 2026-06-12; **status updated 2026-06-13**)
 

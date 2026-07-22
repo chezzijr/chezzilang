@@ -133,6 +133,11 @@ pub enum Ty {
     /// (`load`/`store`/`exchange`/`cas`, plus `add`/`sub` on numeric `T`) instead of `Shared`'s
     /// `get`/`set`/`update`. Constructed value-first as `Atomic(v)` (`T` = `typeof v`).
     Atomic(Box<Ty>),
+    /// `AtomicInt` — the monomorphic, lock-free int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
+    /// Go `atomic.Int64` style). UNLIKE `Atomic[T]` it is NOT generic — statically int, nothing to
+    /// widen — so it is always a lock-free `AtomicI64`. Sendable handle (one box, many tasks). Methods:
+    /// `load`/`store`/`exchange`/`cas` plus `add`/`sub` (always valid — int is always numeric).
+    AtomicInt,
     /// `RwShared[T]` — the cross-task read-write box. Like `Shared[T]` (one box, many tasks; the
     /// handle is sendable, the value is copied in/out under a lock), but the lock is a `RwLock`:
     /// `read(fn(T) -> R) -> R` acquires a SHARED read guard (many concurrent readers) and `write`/
@@ -268,7 +273,8 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (NewType(a, aa), NewType(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
-        (Executor, Executor)
+        (AtomicInt, AtomicInt)
+        | (Executor, Executor)
         | (Socket, Socket)
         | (Listener, Listener)
         | (Writer, Writer)
@@ -352,6 +358,7 @@ impl fmt::Display for Ty {
             Ty::Shared(t) => write!(f, "Shared[{t}]"),
             Ty::RwShared(t) => write!(f, "RwShared[{t}]"),
             Ty::Atomic(t) => write!(f, "Atomic[{t}]"),
+            Ty::AtomicInt => write!(f, "AtomicInt"),
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),
             Ty::Listener => write!(f, "Listener"),

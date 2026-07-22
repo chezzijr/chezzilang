@@ -126,6 +126,17 @@ pub struct AtomicCore {
     pub v: Mutex<WireValue>,
 }
 
+/// `AtomicInt` core: the monomorphic, LOCK-FREE int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
+/// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<WireValue>` holding an arbitrary sendable
+/// value), the value is statically int, so it can be a raw `std::sync::atomic::AtomicI64` — no lock, no
+/// runtime type-sniffing, no wider-T hole. `SeqCst` on every op preserves the sequential consistency the
+/// Mutex gave, so serial == M:N stays byte-identical. `add`/`sub` use a CHECKED compare_exchange CAS-loop
+/// (not raw `fetch_add`/`fetch_sub`, which wrap silently) to KEEP the i64-overflow fault.
+#[derive(Debug, Default)]
+pub struct AtomicIntCore {
+    pub v: std::sync::atomic::AtomicI64,
+}
+
 /// D6 — a monotonic, process-wide poll key. The netpoller (`super::poller`) keys an fd registration
 /// by an arbitrary `usize` we choose, NOT the raw fd: a closed-then-reopened fd reuses its integer,
 /// which would alias a stale registration (an ABA hazard); a fresh key per socket avoids that. It is
@@ -342,6 +353,8 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         WireValue::Atomic(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
         }),
+        // `AtomicInt` holds a plain i64 — no heap refs to trace (identity-only wire visit).
+        WireValue::AtomicInt(_) => {}
         WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
             core.inner
                 .lock()

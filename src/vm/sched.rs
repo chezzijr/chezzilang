@@ -2252,6 +2252,7 @@ impl Vm {
                 Obj::Shared(core) => WireValue::Shared(Arc::clone(core)),
                 Obj::RwShared(core) => WireValue::RwShared(Arc::clone(core)),
                 Obj::Atomic(core) => WireValue::Atomic(Arc::clone(core)),
+                Obj::AtomicInt(core) => WireValue::AtomicInt(Arc::clone(core)),
                 Obj::Executor(core) => WireValue::Executor(Arc::clone(core)),
                 // D6: a socket/listener handle crosses as its shared `Arc` core (a spawned fiber
                 // reaches the same fd) — same shape as `Channel`/`Shared`/`Executor`.
@@ -2647,6 +2648,7 @@ impl Vm {
             WireValue::Shared(core) => Value::obj(self.heap.alloc(Obj::Shared(core))),
             WireValue::RwShared(core) => Value::obj(self.heap.alloc(Obj::RwShared(core))),
             WireValue::Atomic(core) => Value::obj(self.heap.alloc(Obj::Atomic(core))),
+            WireValue::AtomicInt(core) => Value::obj(self.heap.alloc(Obj::AtomicInt(core))),
             WireValue::Executor(core) => Value::obj(self.heap.alloc(Obj::Executor(core))),
             // D6: rebuild a fresh heap handle onto the SAME shared socket/listener core (`Arc` cloned
             // in `to_wire`) — two fibers reach one fd.
@@ -3649,6 +3651,7 @@ impl Vm {
             | Obj::Shared(_)
             | Obj::RwShared(_)
             | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_)

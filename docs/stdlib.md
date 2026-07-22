@@ -166,8 +166,8 @@ CPython's `bytes(ba)`) — that is how a built-up buffer reaches the binary APIs
 
 These types come from the language/runtime; see [`concurrency.md`](concurrency.md) for the full model.
 
-> **`import std.concurrency` required for `Shared` / `RwShared` / `Atomic` / `Executor`.** These four
-> are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all four) or
+> **`import std.concurrency` required for `Shared` / `RwShared` / `Atomic` / `AtomicInt` / `Executor`.** These
+> are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all of them) or
 > `import Shared from std.concurrency` (per-name) before it can use them; bare use otherwise is an
 > `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
 > stay **reserved names** (a user `struct Shared`/`struct Executor` is rejected). `Channel` stays global
@@ -222,6 +222,16 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
 `add(x: T) -> T` · `sub(x: T) -> T` (return the **new** value).
+
+### `AtomicInt` — monomorphic **lock-free** int atomic
+`load() -> int` · `store(x: int) -> nil` · `exchange(x: int) -> int` · `cas(expected: int, new: int) -> bool` ·
+`add(x: int) -> int` · `sub(x: int) -> int` (return the **new** value; overflow **faults**, like `+`/`-`).
+The monomorphic-int sibling of `Atomic[T]` — no `[T]`, so it is backed by a genuine lock-free
+`std::sync::atomic::AtomicI64` (Rust `AtomicI64` / Java `AtomicInteger` / Go `atomic.Int64` style) instead
+of a `Mutex`. Reach for it over `Atomic(0)` for a hot int counter/flag under contention (measured ~2.7×
+faster than the Mutex-backed `Atomic` on an 8-way counter; see [`benchmarks.md`](benchmarks.md)). Same
+import gate + reserved name as `Atomic`. Constructed `AtomicInt(v)` (one int arg; `AtomicInt(3.5)` is a
+type error).
 
 ### `Executor` — task pool
 `submit(task: fn() -> _) -> nil` (detached, fire-and-forget) · `shutdown() -> nil` (drain) ·

@@ -42,6 +42,19 @@ native struct Atomic[T]:
     native fn add(self, v: T) -> T
     native fn sub(self, v: T) -> T
 
+# `AtomicInt` — the monomorphic, LOCK-FREE int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
+# Go `atomic.Int64` style). Distinct from the generic reference cell `Atomic[T]` (Mutex-backed): no
+# `[T]`, nothing to widen, so it is ALWAYS a lock-free `std::sync::atomic::AtomicI64`. `add`/`sub` are
+# ALWAYS valid (int is always numeric — no residual numeric gate) and keep the i64-overflow FAULT via a
+# checked compare_exchange CAS-loop (NOT raw fetch_add, which wraps silently).
+native struct AtomicInt:
+    native fn load(self) -> int
+    native fn store(self, v: int) -> nil
+    native fn exchange(self, v: int) -> int
+    native fn cas(self, expected: int, new: int) -> bool
+    native fn add(self, v: int) -> int
+    native fn sub(self, v: int) -> int
+
 native struct Executor:
     native fn submit(self, f) -> nil
     native fn shutdown(self) -> nil

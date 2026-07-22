@@ -6,8 +6,8 @@
 
 use super::chzstr::ChzStr;
 use super::core::{
-    AtomicCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
+    SharedCore, SocketCore, WriterCore,
 };
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
@@ -285,6 +285,9 @@ pub enum Obj {
     /// `Atomic[T]` — a *handle* to the cross-task atomic box [`AtomicCore`]. Same handle/core split as
     /// [`Shared`](Obj::Shared); the core holds one boxed wire value behind a `Mutex`.
     Atomic(Arc<AtomicCore>),
+    /// `AtomicInt` — a *handle* to the monomorphic LOCK-FREE int atomic [`AtomicIntCore`]. Same
+    /// handle/core split as [`Atomic`](Obj::Atomic), but the core is a raw `AtomicI64` (no lock).
+    AtomicInt(Arc<AtomicIntCore>),
     /// `Executor` (C5 escape hatch) — a *handle* to the shared work queue [`ExecutorCore`] (B3.1).
     /// The queued task closures live in the core as wire values (`Handle(closure)` at B3.1); `shut`
     /// lives in the shared core so aliasing handles agree on shutdown state. See
@@ -490,6 +493,8 @@ impl Heap {
                 let mut seen = vec![Arc::as_ptr(core) as usize];
                 crate::vm::core::collect_core_gcrefs(&core.v.lock().unwrap(), &mut out, &mut seen);
             }
+            // `AtomicInt` holds a plain i64 — no heap refs to trace.
+            Obj::AtomicInt(_) => {}
             Obj::Executor(core) => {
                 let mut seen = vec![Arc::as_ptr(core) as usize];
                 for w in core.inner.lock().unwrap().queue.iter() {

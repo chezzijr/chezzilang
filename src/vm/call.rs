@@ -1063,6 +1063,7 @@ impl Vm {
             Obj::Shared(_) => Some("Shared"),
             Obj::RwShared(_) => Some("RwShared"),
             Obj::Atomic(_) => Some("Atomic"),
+            Obj::AtomicInt(_) => Some("AtomicInt"),
             Obj::Executor(_) => Some("Executor"),
             Obj::Socket(_) => Some("Socket"),
             Obj::Listener(_) => Some("Listener"),
@@ -1079,6 +1080,7 @@ impl Vm {
                 "Shared" => self.shared_method(h, method, &args, span)?,
                 "RwShared" => self.rwshared_method(h, method, &args, span)?,
                 "Atomic" => self.atomic_method(h, method, &args, span)?,
+                "AtomicInt" => self.atomic_int_method(h, method, &args, span)?,
                 "Executor" => self.executor_method(h, method, &args, span)?,
                 // D6: `Socket` / `Listener` ops operate on the fd in the `Arc`'d core and may park the
                 // fiber on the netpoller (a would-block `read`/`write`/`accept`); gate the result-push

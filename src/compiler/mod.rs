@@ -4384,6 +4384,7 @@ impl Compiler {
                     ("std.concurrency", "Shared") => Some(Op::NewShared),
                     ("std.concurrency", "RwShared") => Some(Op::NewRwShared),
                     ("std.concurrency", "Atomic") => Some(Op::NewAtomic),
+                    ("std.concurrency", "AtomicInt") => Some(Op::NewAtomicInt),
                     ("std.concurrency", "Executor") => Some(Op::NewExecutor),
                     ("std.time", "timer") => Some(Op::NewTimer),
                     _ => None,
@@ -4548,6 +4549,14 @@ impl Compiler {
                     self.compile_expr(fc, a)?;
                 }
                 fc.emit(Op::NewAtomic, span);
+                return Ok(());
+            }
+            // `AtomicInt(v)` → a fresh lock-free int atomic (checker validated 1 int arg).
+            if name == "AtomicInt" {
+                for a in args {
+                    self.compile_expr(fc, a)?;
+                }
+                fc.emit(Op::NewAtomicInt, span);
                 return Ok(());
             }
             // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
