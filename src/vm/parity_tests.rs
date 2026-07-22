@@ -11219,6 +11219,34 @@ fn atomic_int_from_import_runs_parity() {
     assert_eq!(parity_entry(src), "3\n");
 }
 
+/// Wide-int returns: a value outside ±2^62 (a legal Chezzi int, boxed as Obj::BigInt) must round-trip
+/// through load/exchange/add — the value-producing arms MUST box via make_int, not Value::int (inline-
+/// only: debug-asserts + release-truncates for |n| >= 2^62). 2^62 = 4611686018427387904; INT_MAX_INLINE
+/// = 2^62-1. Mirrors Mutex-backed Atomic, which is correct via from_wire→make_int.
+#[test]
+fn atomic_int_wide_value_returns_parity() {
+    // load a wide stored value
+    assert_eq!(
+        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.load())\nmain()\n"),
+        "4611686018427387904\n",
+    );
+    // exchange returns the wide OLD value
+    assert_eq!(
+        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.exchange(0))\n    print(a.load())\nmain()\n"),
+        "4611686018427387904\n0\n",
+    );
+    // add carries the counter across the inline boundary (no i64 overflow → must return boxed)
+    assert_eq!(
+        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387903)\n    print(a.add(1))\nmain()\n"),
+        "4611686018427387904\n",
+    );
+    // sub carries below the negative inline boundary
+    assert_eq!(
+        parity_entry("import std.concurrency\nfn main():\n    a := AtomicInt(-4611686018427387904)\n    print(a.sub(1))\nmain()\n"),
+        "-4611686018427387905\n",
+    );
+}
+
 /// deleted): list `.push`, map index-assign, struct field-assign, set `.add`, bytearray `.extend`, and a
 /// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent → serial == M:N.
 #[test]

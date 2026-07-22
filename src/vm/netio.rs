@@ -2092,7 +2092,8 @@ impl Vm {
         match method {
             "load" => {
                 self.arity_err("load", args, 0, span)?;
-                Ok(Value::int(self.atomic_int_core(h).v.load(SeqCst)))
+                let cur = self.atomic_int_core(h).v.load(SeqCst);
+                Ok(self.make_int(cur))
             }
             "store" => {
                 self.arity_err("store", args, 1, span)?;
@@ -2103,7 +2104,8 @@ impl Vm {
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
                 let n = self.int_of(args[0]);
-                Ok(Value::int(self.atomic_int_core(h).v.swap(n, SeqCst)))
+                let old = self.atomic_int_core(h).v.swap(n, SeqCst);
+                Ok(self.make_int(old))
             }
             "cas" => {
                 self.arity_err("cas", args, 2, span)?;
@@ -2133,7 +2135,7 @@ impl Vm {
                     let new =
                         r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?;
                     if core.v.compare_exchange(cur, new, SeqCst, SeqCst).is_ok() {
-                        return Ok(Value::int(new));
+                        return Ok(self.make_int(new));
                     }
                 }
             }
