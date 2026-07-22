@@ -13,50 +13,42 @@ work already done.
 
 ## Checker / type system
 
-### Generic methods on RESERVED built-in receiver types — turbofish rejected + bodied-method inference fails (found 2026-07-22)
+### Generic methods on RESERVED built-in receiver types — turbofish + bodied-method inference (found 2026-07-22, **1a/1b/2 RESOLVED 2026-07-22**)
 
 A *generic* method call (`recv.m[U](...)` or inference of `U`) works on a **user struct** receiver
-(`Ty::Struct`) but is **broken when the receiver is a reserved built-in type** — `Ty::List`/`Map`/`Set`
-/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`. Two distinct facets:
+(`Ty::Struct`) but was **broken when the receiver is a reserved built-in type** — `Ty::List`/`Map`/`Set`
+/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`. Three facets, all fixed:
 
-| receiver | method kind | inference `recv.m(f)` | turbofish `recv.m[U](f)` |
-| --- | --- | --- | --- |
-| user struct `Ty::Struct` | bodied generic `fn m[U](self,…)` | ✅ works | ✅ works |
-| reserved (`List`, `Executor`, …) | **native fn** generic (`native fn map[U]`) | ✅ works (bespoke native-method solver) | ❌ rejected |
-| reserved (`List`, `Executor`, …) | **bodied** generic `fn m[U](self,…): <body>` | ❌ fails (`expected fn()->U, found fn()->int`) | ❌ rejected |
+- **FIX 1a — turbofish on reserved receivers (RESOLVED).** `method_has_own_type_params`
+  (`src/checker/expr.rs`) gained reserved-receiver arms (look up `self.structs.get(bare)` like the
+  `Ty::Struct` arm — the container/concurrency method tables are re-seeded there under bare names), so
+  the member turbofish `[1,2,3].map[int](…)` and any bodied generic method are no longer rejected
+  *"method 'map' takes no type argument(s)"*. Non-generic methods (`filter`) still correctly reject.
+- **FIX 1b — bodied generic method inference on the 4 concurrency handles (RESOLVED).** The
+  `Ty::Shared`/`RwShared`/`Atomic`/`Executor` arms now route a harvested method whose sig carries
+  `type_params` through `infer_generic_method` (prepend the concrete receiver, since the harvest strips
+  `self`) — verbatim mirror of the `Ty::List` arm. So a bodied `fn m[U](self,f:fn()->U)->U` opens `[U]`
+  and infers `U` from the closure, instead of failing *"expected fn()->U, found fn()->int"*.
+- **FIX 2 — bodied-method runtime dispatch on the 4 concurrency handles (RESOLVED).**
+  `try_native_bodied_method` is now called from the `Shared`/`RwShared`/`Atomic`/`Executor` arms of
+  `do_method_call` (`src/vm/call.rs`), mirroring the `Writer`/`Reader` arms (try-bodied BEFORE native; a
+  miss falls through byte-identically). Closes the check-OK/run-fault gap for bodied methods on those
+  handles.
 
-- **Turbofish is rejected for *any* generic method on a reserved receiver — even the shipped
-  `[1,2,3].map[int](…)`.** Root: `method_has_own_type_params` (`src/checker/expr.rs:1889`) only has arms
-  for `Ty::Struct`/`Enum`/`NewType`/`Module`; a reserved receiver hits `_ => false`, so the checker says
-  *"method 'map' takes no type argument(s) (it declares no own type parameters)"*. (Inference still works
-  for `map`, so this is latent — nobody writes `.map[int]` — but it is the same hole.)
-- **Bodied generic methods on reserved receivers fail inference too.** The bodied method's sig IS
-  harvested into the handle's method table WITH its `type_params` (`fn_sig` sets them; harvest at
-  `src/checker/setup.rs:461`), but the reserved-handle method-call path that would instantiate the
-  method's own `[U]` into fresh inference vars never fires for it (it substitutes only the box's element
-  `[T]`, per the `setup.rs:307` re-seed comment) — so `U` stays unbound and unification against
-  `fn() -> int` fails. Native-fn generics (`List.map`) dodge this via a separate solver, which is why
-  `xs.map(f)` infers but a bodied `ex.submit_task[U]` does not.
+**Shipped proof:** `Executor.submit_result[T](self, f: fn() -> T) -> Channel[T]` (`std/concurrency.chz`)
+— the FIRST bodied generic method on a native struct, exercising 1a/1b/2 end-to-end. `submit_task`
+(`std/concurrency/task.chz`) now builds over it. Tested both engines
+(`vm::tests::executor_submit_result_both_engines`, checker tests
+`reserved_receiver_generic_method_turbofish_ok` / `executor_bodied_generic_method_infers_from_closure`).
 
-**Impact / why it surfaced:** blocks the ergonomic `ex.submit_task(f)` dot-form (a bodied generic method
-on `Ty::Executor`) — see `std.concurrency.task`, which therefore ships `submit_task(ex, f)` as a **free
-generic fn** (works — free-fn call sites DO instantiate method `[U]`). A user-struct wrapper
-(`struct Pool{ex}`) also works. So there is a clean workaround; this is an ergonomics gap, not a
-blocker.
-
-**Fix sketch (delicate — generic-inference seam, hand-do + boundary tests, do NOT auto-task):** give
-`method_has_own_type_params` reserved-receiver arms (look up `self.structs.get(bare_name)` like the
-`Ty::Struct` arm — the concurrency/container method tables are re-seeded there under bare names), AND
-route the reserved-handle method-call arm through the same method-own-`[U]` instantiation the
-`Ty::Struct` method arm uses. Keep two-engine parity (it is a pure check-time change).
-
-**Separate but adjacent — non-generic bodied-method DISPATCH is only wired on 4 handles.** A *plain*
-(non-generic) bodied method on `Shared`/`RwShared`/`Atomic`/`Executor`/`List`/`Map`/`Set` **type-checks
-but runtime-faults `no method`**: `try_native_bodied_method` is called only from the `Reader`/`Writer`/
-`Socket`/`Listener` arms of `do_method_call` (`src/vm/call.rs`), not the others — a check-OK/run-fault
-divergence (the recurring `checker-superset-of-compiler` class). Wiring the missing arms is a trivial
-mirror of the `Writer` arm; deliberately skip the hot shared `list`/`map`/`set` `core_method` arm
-(extra per-call table probe on `list.push` in loops = M19 perf risk, and no bodied methods exist there).
+**Residual (deliberately NOT done):**
+- **list/map/set bodied methods stay unharvested by design.** FIX 1b/2 cover only the 4 concurrency
+  handles; the hot `list`/`map`/`set` `core_method` arm (`src/vm/call.rs`) is deliberately left untouched
+  (an extra per-call table probe on `list.push` in loops = M19 perf risk, and no bodied methods exist
+  there). List/Map/Set still reject bodied methods at check, so no check-OK/run-fault divergence.
+- **`ex.submit_task(f)` dot-form** (a bodied generic method returning a *user* `Task[T]`) still needs the
+  deferred Task-placement/harvest change (Option A — move `Task` so `Executor` can name it as a return
+  type without an import cycle). `submit_task(ex, f)` free-fn form remains the shipped API.
 
 ## NEXT-SESSION BACKLOG — sendability completeness (deferred from 2026-07-21)
 

@@ -11480,3 +11480,12 @@ fn generic_wrapper_struct_channel_run_parity() {
                print(b.ch.recv())\n";
     assert_parity_out(src, "7\n");
 }
+
+/// FIX 1a — member-level turbofish on a RESERVED built-in receiver whose harvested method declares
+/// its own `[U]` (`List.map`) is accepted, not rejected "takes no type argument(s)". Runs on both
+/// engines and prints the mapped list.
+#[test]
+fn reserved_receiver_method_turbofish_run_parity() {
+    let src = "print([1, 2, 3].map[int](fn(x): x * 2))\n";
+    assert_parity_out(src, "[2, 4, 6]\n");
+}

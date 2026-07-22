@@ -51,6 +51,6 @@ struct Task[T]:
 # when `ex` drains (`shutdown()` or exit); `task.get()` then yields `f()`'s value. Await the handles in
 # a fixed (e.g. submission) order to stay byte-identical across engines.
 fn submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]:
-    ch := Channel[T](1)                 # cap-1: one result, and a full-send can never over-fill it
-    ex.submit(fn(): ch.send(f()))       # the wrapper sends f()'s result into the private slot
-    return Task(ch=ch, cached=None)
+    # `Executor.submit_result` IS this primitive: submit `f` and hand back a cap-1 `Channel[T]` that
+    # carries its one result. `Task` just adds memoization/`done()` over that channel.
+    return Task(ch=ex.submit_result(f), cached=None)

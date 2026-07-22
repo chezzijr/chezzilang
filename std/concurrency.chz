@@ -46,3 +46,9 @@ native struct Executor:
     native fn submit(self, f) -> nil
     native fn shutdown(self) -> nil
     native fn shutdown_now(self) -> nil
+    # A BODIED generic method (the first on a native struct): submit `f` and hand back a cap-1
+    # `Channel[T]` that carries its result. The primitive `submit_task`/`Task[T]` wraps.
+    fn submit_result[T](self, f: fn() -> T) -> Channel[T]:
+        ch := Channel[T](1)
+        self.submit(fn(): ch.send(f()))
+        return ch

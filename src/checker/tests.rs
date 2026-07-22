@@ -18453,3 +18453,39 @@ fn ref_surface_removed_fails_to_compile() {
         assert!(!msg.is_empty(), "expected a compile error for: {src:?}");
     }
 }
+
+// ===== FIX 1a — member-level turbofish on a RESERVED built-in receiver whose harvested method
+// declares its OWN `[U]` params (`List.map`) is ACCEPTED, not rejected "takes no type argument(s)".
+// Before the fix `method_has_own_type_params` fell to `_ => false` for reserved receivers, so the
+// turbofish gate rejected even a shipped generic method. =====
+#[test]
+fn reserved_receiver_generic_method_turbofish_ok() {
+    ok("print([1, 2, 3].map[int](fn(x): x * 2))\n");
+}
+
+/// FIX 1a boundary — a NON-generic reserved-receiver method still rejects a turbofish (`List.filter`
+/// declares no own `[U]`). The fix must not blanket-accept turbofish on all reserved methods.
+#[test]
+fn reserved_receiver_nongeneric_method_turbofish_rejected() {
+    rejects(
+        "print([1, 2, 3].filter[int](fn(x): x > 1))\n",
+        "takes no type argument(s)",
+    );
+}
+
+// ===== FIX 1b — a BODIED generic method on a concurrency handle (`Executor.submit_result[T]`) opens
+// its own `[T]` and infers T from the closure return, instead of failing "expected fn()->T, found
+// fn()->int". Before the fix the `Ty::Executor` arm only `native_handle_method`+`check_args_range`,
+// so a harvested sig carrying `[T]` never routed through `infer_generic_method`. =====
+#[test]
+fn executor_bodied_generic_method_infers_from_closure() {
+    entry_ok(
+        "import std.concurrency\n\
+         fn main():\n\
+         \x20   ex := Executor()\n\
+         \x20   ch := ex.submit_result(fn() -> int: 5)\n\
+         \x20   ex.shutdown()\n\
+         \x20   print(ch.recv())\n\
+         main()\n",
+    );
+}

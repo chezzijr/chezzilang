@@ -29,11 +29,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fan-out golden, all serial==M:N) + `pmap_*`; checker `channel_bounded_capacity_*`. Docs: this note,
 > `docs/concurrency.md` §5/§6d, `docs/stdlib.md`, `docs/spec.md`.
 
+> **✅ CHECKER + VM (2026-07-22, `auto-task/generic-native-methods`) — generic methods on RESERVED
+> built-in receivers, 3 mirror-edits.** `docs/gaps.md` "Generic methods on RESERVED built-in receiver
+> types" **1a/1b/2 RESOLVED**: (1a) `method_has_own_type_params` (`src/checker/expr.rs`) gained
+> reserved-receiver arms (bare-table lookup like `Ty::Struct`), so member turbofish `[1,2,3].map[int](…)`
+> and any bodied generic method are no longer rejected "takes no type argument(s)"; (1b) the
+> `Ty::Shared`/`RwShared`/`Atomic`/`Executor` arms now route a harvested method carrying `type_params`
+> through `infer_generic_method` (prepend the concrete receiver — verbatim mirror of the `Ty::List` arm),
+> so a bodied `fn m[U](self,f:fn()->U)->U` opens `[U]` and infers from the closure; (2)
+> `try_native_bodied_method` is now wired into those 4 arms of `do_method_call` (`src/vm/call.rs`),
+> mirroring `Writer`/`Reader` — closes the check-OK/run-fault gap. **Shipped proof:**
+> `Executor.submit_result[T](f: fn() -> T) -> Channel[T]` (`std/concurrency.chz`) — the FIRST bodied
+> generic method on a native struct; `submit_task` (`std/concurrency/task.chz`) now builds over it
+> (semantically identical). Tests: `vm::tests::executor_submit_result_both_engines`, checker
+> `reserved_receiver_generic_method_turbofish_ok` / `reserved_receiver_nongeneric_method_turbofish_rejected`
+> / `executor_bodied_generic_method_infers_from_closure`; the two existing `task_*` tests stay green. Docs:
+> this note, `docs/gaps.md`, `docs/stdlib.md`, `docs/concurrency.md`. **Residual (by design):** list/map/set
+> bodied methods stay unharvested (hot `core_method` arm untouched — M19 perf); `ex.submit_task(f)` dot-form
+> still needs the deferred Task-placement change (Option A).
+
 > **✅ CONCURRENCY (2026-07-22) — `std.concurrency.task`: result handles for `Executor` work.** Bare
 > `Executor.submit(f)` is fire-and-forget (returns nothing); `submit_task[T](ex, f) -> Task[T]` returns a
 > future-style handle. **Pure Chezzi** (`std/concurrency/task.chz`) over the cap-1 bounded `Channel[T]`
-> just landed — a one-shot result slot: `submit_task` wraps the closure to `ch.send(f())`, hands back a
-> `Task{ch, cached}`. `Task.get() -> T` blocks then **memoizes** (idempotent — a 2nd call returns the
+> just landed — a one-shot result slot: `submit_task` builds over `Executor.submit_result` (which wraps
+> the closure to `ch.send(f())`, added 2026-07-22), hands back a `Task{ch, cached}`. `Task.get() -> T` blocks then **memoizes** (idempotent — a 2nd call returns the
 > cache, never a 2nd `recv` on the drained slot); `Task.done() -> bool` polls `ch.len() > 0` (non-block).
 > **Parity:** a task's value is deterministic (`f()`), only its timing varies — so `.get()` is serial==M:N
 > byte-identical *iff awaited in a fixed (submission) order*; deliberately **no `join_next()`**

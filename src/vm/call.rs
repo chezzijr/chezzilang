@@ -1049,22 +1049,37 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // A BODIED Chezzi generic method on a concurrency handle (`Executor.submit_result`, compiled to
+        // bytecode) dispatches FIRST; a miss (`Ok(false)`) falls through to the name-keyed native ops
+        // (`get`/`set`/`cas`/`submit`/…) byte-identically. Mirrors the `Writer`/`Reader` arms.
         if matches!(self.heap.get(h), Obj::Shared(_)) {
+            if self.try_native_bodied_method("Shared", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.shared_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
         if matches!(self.heap.get(h), Obj::RwShared(_)) {
+            if self.try_native_bodied_method("RwShared", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.rwshared_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
         if matches!(self.heap.get(h), Obj::Atomic(_)) {
+            if self.try_native_bodied_method("Atomic", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.atomic_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());
         }
         if matches!(self.heap.get(h), Obj::Executor(_)) {
+            if self.try_native_bodied_method("Executor", method, recv, &args, argc, ic, span)? {
+                return Ok(());
+            }
             let result = self.executor_method(h, method, &args, span)?;
             self.push(result);
             return Ok(());

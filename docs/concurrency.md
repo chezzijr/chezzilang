@@ -289,11 +289,13 @@ into each task by value. See `docs/stdlib.md` for signatures.
 
 ### 5b. `std.concurrency.task` — result handles for `Executor` work
 
-Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. `std.concurrency.task` adds a
-future-style handle (pure Chezzi over a cap-1 `Channel[T]` as a one-shot result slot):
+Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
+`Executor.submit_result[T](f: fn() -> T) -> Channel[T]`: submit `f` and get a cap-1 `Channel[T]` you
+`.recv()` for its result after the pool drains. `std.concurrency.task` wraps that channel in a
+future-style handle (memoization + readiness poll):
 
-- `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle. The work runs when `ex`
-  drains (`shutdown()` or exit).
+- `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
+  `ex.submit_result(f)`). The work runs when `ex` drains (`shutdown()` or exit).
 - `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
 - `Task.done() -> bool` — non-blocking readiness poll.
 

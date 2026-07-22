@@ -1912,6 +1912,39 @@ impl Checker {
                 .and_then(|id| self.module_sigs.get(id))
                 .and_then(|s| s.functions.get(method))
                 .is_some_and(|sig| !sig.type_params.is_empty()),
+            // Reserved built-in receiver types: their harvested methods live in the re-seeded bare
+            // `structs` tables (setup.rs phases 4c/5a), same as a user struct. Without these arms a
+            // shipped generic method (`[1,2,3].map[int](...)`, `ex.submit_result[T](...)`) was told it
+            // "declares no own type parameters" and its member turbofish was an arity error.
+            Ty::List(_)
+            | Ty::Map(_, _)
+            | Ty::Set(_)
+            | Ty::Shared(_)
+            | Ty::RwShared(_)
+            | Ty::Atomic(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader => {
+                let bare = match recv_ty {
+                    Ty::List(_) => "List",
+                    Ty::Map(_, _) => "Map",
+                    Ty::Set(_) => "Set",
+                    Ty::Shared(_) => "Shared",
+                    Ty::RwShared(_) => "RwShared",
+                    Ty::Atomic(_) => "Atomic",
+                    Ty::Executor => "Executor",
+                    Ty::Socket => "Socket",
+                    Ty::Listener => "Listener",
+                    Ty::Writer => "Writer",
+                    _ => "Reader",
+                };
+                self.structs
+                    .get(bare)
+                    .and_then(|info| info.methods.get(method))
+                    .is_some_and(|sig| !sig.type_params.is_empty())
+            }
             _ => false,
         }
     }
@@ -2530,6 +2563,23 @@ impl Checker {
                     self.native_handle_method("Shared", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
+                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
+                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
+                    if !sig.type_params.is_empty() {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(obj_ty.clone());
+                        params.extend(sig.params.iter().cloned());
+                        return self.infer_generic_method(
+                            method,
+                            &params,
+                            &sig.ret,
+                            &sig.type_params,
+                            &obj_ty,
+                            type_args,
+                            args,
+                            span,
+                        );
+                    }
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
@@ -2550,6 +2600,23 @@ impl Checker {
                     // `read`'s sig ret is the placeholder `Unknown` (the real R is recovered below) —
                     // hover shows the declared `fn(fn(T) -> ?) -> ?` shape, which is the sig of record.
                     self.record_method_hover(name_span, &sig);
+                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
+                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
+                    if !sig.type_params.is_empty() {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(obj_ty.clone());
+                        params.extend(sig.params.iter().cloned());
+                        return self.infer_generic_method(
+                            method,
+                            &params,
+                            &sig.ret,
+                            &sig.type_params,
+                            &obj_ty,
+                            type_args,
+                            args,
+                            span,
+                        );
+                    }
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     if method == "read" {
                         // R = the closure argument's actual return type (else `Unknown` on arity
@@ -2583,6 +2650,23 @@ impl Checker {
                         self.native_handle_method("Atomic", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
+                    // A harvested method carrying its OWN `[U]` params needs the generic solver (the
+                    // harvest STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
+                    if !sig.type_params.is_empty() {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(obj_ty.clone());
+                        params.extend(sig.params.iter().cloned());
+                        return self.infer_generic_method(
+                            method,
+                            &params,
+                            &sig.ret,
+                            &sig.type_params,
+                            &obj_ty,
+                            type_args,
+                            args,
+                            span,
+                        );
+                    }
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
                 }
@@ -2596,6 +2680,26 @@ impl Checker {
                 // `fn() -> ?` by `attach_native_module_metadata` so any-return closures are accepted.
                 if let Some(sig) = self.native_handle_method("Executor", method, &[]) {
                     self.record_method_hover(name_span, &sig);
+                    // A bodied generic method (`submit_result[T]`) carrying its OWN `[U]` params needs
+                    // the generic solver — infer T from the closure return. The harvest STRIPS `self`,
+                    // so PREPEND the concrete receiver (mirrors the `List` arm). `submit` itself is
+                    // non-generic and keeps the capture-floor path below; the inner `self.submit(...)`
+                    // that `submit_result`'s body emits re-enters this arm on that non-generic path.
+                    if !sig.type_params.is_empty() {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(obj_ty.clone());
+                        params.extend(sig.params.iter().cloned());
+                        return self.infer_generic_method(
+                            method,
+                            &params,
+                            &sig.ret,
+                            &sig.type_params,
+                            &obj_ty,
+                            type_args,
+                            args,
+                            span,
+                        );
+                    }
                     // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so its
                     // captures cross the airlock exactly like a `spawn` task's. Push a capture floor at
                     // the current scope depth around the argument check; the submitted closure opens

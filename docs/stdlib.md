@@ -224,7 +224,11 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 `add(x: T) -> T` · `sub(x: T) -> T` (return the **new** value).
 
 ### `Executor` — task pool
-`submit(task: fn() -> _) -> nil` (detached) · `shutdown() -> nil` (drain) · `shutdown_now() -> nil` (abandon pending).
+`submit(task: fn() -> _) -> nil` (detached, fire-and-forget) · `shutdown() -> nil` (drain) ·
+`shutdown_now() -> nil` (abandon pending) ·
+`submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
+its result (`.recv()` it after the pool drains). This is the result-returning primitive
+`std.concurrency.task.submit_task` / `Task[T]` wraps.
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> Result[str]` · `write(s: str, timeout_ms?: int) -> Result[int]` ·
