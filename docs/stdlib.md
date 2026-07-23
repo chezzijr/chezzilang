@@ -48,7 +48,7 @@ Conventions used below:
 | `len` | `() -> int` | Character (codepoint) count. |
 | `upper` / `lower` | `() -> str` | Case-mapped copy. |
 | `trim` | `() -> str` | Strip leading/trailing whitespace. |
-| `split` | `(sep: str) -> List[str]` | Split on `sep`. Yields `separators + 1` pieces, so the empty string splits to a one-element list holding `""` (`"".split(",")` → `[""]`, length 1), matching Python/Go/Rust/JS. |
+| `split` | `(sep: str) -> List[str]` | Split on `sep`. Yields `separators + 1` pieces, so the empty string splits to a one-element list holding `""` (`"".split(",")` → `[""]`, length 1), matching Python/Go/Rust/JS. An empty `sep` raises a recoverable `split: sep must not be empty` fault (Python `ValueError`; matches `std.string.split`). |
 | `chars` | `() -> List[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
 | `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
@@ -59,7 +59,7 @@ Conventions used below:
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
 | `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. |
-| `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → `0`. |
+| `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → codepoint length + 1 (`"abc".count("")` → `4`), matching Python/Go/`std.string.count`. |
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |

@@ -2310,6 +2310,11 @@ impl Vm {
                     "split" => {
                         self.arity_err("split", args, 1, span)?;
                         let sep = str_arg(self, 0)?;
+                        // std.string.split faults on an empty sep (Python model); the native
+                        // method must too — Rust's `split("")` leaks empty edges. Recoverable.
+                        if sep.is_empty() {
+                            return Err(self.err("split: sep must not be empty".to_string(), span));
+                        }
                         let parts: Vec<Value> = s
                             .split(sep.as_str())
                             .map(|p| self.alloc_str(p.to_string()))
@@ -2511,9 +2516,10 @@ impl Vm {
                     "count" => {
                         self.arity_err("count", args, 1, span)?;
                         let sub = str_arg(self, 0)?;
-                        // std.string: empty -> 0; otherwise non-overlapping count.
+                        // std.string / Python / Go: empty -> codepoint-len + 1; otherwise
+                        // non-overlapping count.
                         if sub.is_empty() {
-                            Ok(Value::int(0))
+                            Ok(Value::int(s.chars().count() as i64 + 1))
                         } else {
                             Ok(Value::int(s.matches(sub.as_str()).count() as i64))
                         }

@@ -65,6 +65,25 @@ test fn str_methods():
         Some(_): assert false, "bad int is None"
         None: assert true
 
+test fn str_count_empty_sub():
+    # Python/Go: count("") == codepoint-len + 1 (matches sibling std.string.count).
+    assert "abc".count("") == 4
+    assert "".count("") == 1
+    assert "héllo".count("") == 6
+    # non-empty controls unchanged.
+    assert "aaa".count("aa") == 1
+    assert "abc".count("b") == 1
+
+test fn str_split_empty_sep_faults():
+    # Python raises / std.string.split panics on empty sep — native method must fault too.
+    r := recover: "abc".split("")
+    match r:
+        Ok(_): assert false, "empty sep must fault"
+        Err(e): assert e.message().contains("sep must not be empty")
+    # positive controls: empty receiver stays [""], non-empty split unchanged.
+    assert "a,b,c".split(",") == ["a", "b", "c"]
+    assert "".split(",").len() == 1
+
 test fn str_parse_int_result():
     match "7".parse_int():
         Ok(n): assert n == 7

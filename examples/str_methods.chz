@@ -39,7 +39,7 @@ fn main():
     print("abcabc".index_of("zz"))
     print("abc".index_of(""))
 
-    # count: non-overlapping, none, empty substring (0).
+    # count: non-overlapping, none, empty substring (codepoint len + 1).
     print("aaa".count("aa"))
     print("a.b.c.d".count("."))
     print("abc".count("z"))
