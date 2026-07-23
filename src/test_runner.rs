@@ -52,12 +52,13 @@ struct Outcome {
     verdict: Verdict,
 }
 
-/// Bucket a caught per-test `RuntimeError`. `over_memory` (read from the VM right after the invoke)
-/// takes priority: a `--max-heap` hard-abort is `OverMemory` regardless of what fault emerged from
-/// the unwind (a defer may fault while unwinding — the VM latch still classifies it correctly). Else
+/// Bucket a caught per-test `RuntimeError`. The `is_over_memory` marker takes priority: a `--max-heap`
+/// hard-abort is `OverMemory` regardless of what fault emerged from the unwind (a defer may fault while
+/// unwinding — the abort re-stamps the marker onto whatever propagates, and it crosses the worker→
+/// parent boundary WITH the error, so a spawned task's abort buckets identically on both engines). Else
 /// an `assert` failure → `Fail`, anything else → `Error`.
-fn verdict_from_fault(e: crate::vm::RuntimeError, over_memory: bool) -> Verdict {
-    if over_memory {
+fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
+    if e.is_over_memory {
         Verdict::OverMemory { msg: e.message }
     } else if e.is_assert {
         Verdict::Fail {
@@ -230,7 +231,7 @@ fn invoke_all(
     for (name, proto) in program.tests.iter() {
         let verdict = match vm.invoke_test(*proto) {
             Ok(()) => Verdict::Pass,
-            Err(e) => verdict_from_fault(e, vm.over_memory()),
+            Err(e) => verdict_from_fault(e),
         };
         let _ = vm.take_out(); // discard the test's stdout (kept reusable)
         outcomes.push(Outcome {
@@ -313,7 +314,7 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
         if matches!(verdict, Verdict::Pass)
             && let Err(e) = vm.invoke_suite_method(*proto, instance)
         {
-            verdict = verdict_from_fault(e, vm.over_memory());
+            verdict = verdict_from_fault(e);
         }
         // after_each? — ALWAYS runs (even on failure, like `defer`), so the invocation must NOT be
         // short-circuited. It does not mask the original failure; only if the test passed but
@@ -826,6 +827,58 @@ struct Suite:
             "recover: must NOT catch the over-memory abort; report:\n{}",
             report.text
         );
+    }
+
+    #[test]
+    fn recover_does_not_catch_over_memory_via_native_reentry() {
+        // The hard-abort must bypass `recover:` even when the runaway alloc trips inside a NATIVE
+        // RE-ENTRY (a HOF callback) — a nested `run_until` whose `Err` bubbles to the outer loop. The
+        // outer Err funnel must recognise the over-memory marker and keep bypassing `recover:`, or the
+        // guard is defeated by `r := recover: <list>.map(<runaway closure>)` and the test wrongly PASSES.
+        let d = TmpDir::new();
+        let f = d.write(
+            "recnat_test.chz",
+            "fn grow(x: int) -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 1_000_000);
+            assert!(
+                !report.passed,
+                "(parallel={parallel}) report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("OVER-MEMORY t"),
+                "recover: must NOT catch an over-memory abort raised inside a HOF callback (parallel={parallel}); report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
+    fn over_memory_buckets_across_spawn_on_both_engines() {
+        // A runaway alloc inside a `spawn`ed task must bucket OverMemory on BOTH engines. On M:N the
+        // task runs on a worker VM with its own heap, so the cap must be threaded onto the worker and
+        // the over-memory marker must cross the worker→parent fault boundary — else serial buckets
+        // OverMemory while M:N passes (a parity divergence).
+        let d = TmpDir::new();
+        let f = d.write(
+            "spawnmem_test.chz",
+            "fn runaway() -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 1_000_000);
+            assert!(
+                !report.passed,
+                "(parallel={parallel}) report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("OVER-MEMORY t"),
+                "a spawned task's runaway alloc must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
+                report.text
+            );
+        }
     }
 
     #[test]

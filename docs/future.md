@@ -294,15 +294,21 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    identical and the dual-engine gate `chz_suite_passes_both_engines` (which runs cap-OFF) is untouched.
    Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`; `sweep()` sets
    `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary hard-aborts via
-   `unwind_deferred(base_level, false)` under a `Vm::over_memory` latch; the runner reads the latch to
-   bucket the fault. VM + runner + `main.rs` flag only — no checker/compiler change. **v1 limits
-   (deterministic, documented):** the trip fires only at a **GC boundary**, and GC triggers on
+   `unwind_deferred(base_level, false)` under a `Vm::over_memory` re-fire latch. The abort stamps an
+   **`is_over_memory` marker onto the `RuntimeError`** (mirrors `is_assert`, excluded from `Display` so
+   parity is unaffected) and forces it back on after every unwind, so it travels WITH the error across
+   an enclosing **native-reentry** `run_until` (a HOF callback / operator overload / deferred call) AND a
+   **`spawn`'d worker's** fault crossing back to the parent; the `run_until` Err funnel bypasses
+   `recover:` whenever the marker is set, and `verdict_from_fault` reads `e.is_over_memory` first to
+   bucket it (the VM latch is not read by the runner). `spawn`/`parallel:` tasks are covered on M:N too —
+   `spawn_worker` threads `mem_cap` onto the worker's own heap, so a runaway alloc there trips and buckets
+   identically on both engines. VM + runner + `main.rs` flag only — no checker/compiler change. **v1
+   limits (deterministic, documented):** the trip fires only at a **GC boundary**, and GC triggers on
    `Obj`-count growth — a loop growing a single container of **inline scalars** (e.g. `xs.push(i)` for
    int `i`) allocates no `Obj`s, never sweeps, and so never trips (push a heap value to guard it); the
    check is a high-water on `live_bytes` which **undermeasures** true RSS and can overshoot ~2× `N`
-   before firing (`next_gc = 2*live`); and a `spawn`'d M:N worker allocates on its **own** heap, which
-   the main-heap cap does not see. `chezzi run` never sets the cap (test-runner-scoped). k/m/g suffixes,
-   `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
+   before firing (`next_gc = 2*live`). `chezzi run` never sets the cap (test-runner-scoped). k/m/g
+   suffixes, `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`
    aborts at the first bad case with no per-case verdict. A subtest construct that reports each case

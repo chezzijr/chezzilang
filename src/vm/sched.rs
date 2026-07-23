@@ -2980,6 +2980,12 @@ impl Vm {
     pub(super) fn spawn_worker(&self) -> Vm {
         let mut worker = Vm::new(Arc::clone(&self.program));
         worker.gc_stress = self.gc_stress;
+        // `chezzi test --max-heap` — thread the per-test live-heap cap onto the worker's OWN heap, so a
+        // runaway alloc in a `spawn`/`parallel:` task trips the guard on the M:N engine too (a fresh
+        // `Vm::new` heap defaults to cap-off). Without this the same task buckets `OverMemory` on the
+        // cooperative engine — which shares the one capped heap — but not on M:N: a serial != M:N
+        // divergence. `0` when the cap is off, so the common path is untouched.
+        worker.set_max_heap(self.heap.mem_cap());
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;

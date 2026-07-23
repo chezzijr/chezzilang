@@ -49,6 +49,7 @@ impl Vm {
             message: why,
             span,
             is_assert: false,
+            is_over_memory: false,
         })
     }
 
@@ -140,6 +141,7 @@ impl Vm {
             message,
             span,
             is_assert: false,
+            is_over_memory: false,
         }
     }
 
@@ -607,12 +609,6 @@ impl Vm {
         self.heap.set_mem_cap(cap);
     }
 
-    /// `chezzi test` — whether the LAST invoked test tripped the `--max-heap` cap. Reset at each
-    /// invoke entry point, so the runner reads it immediately after an invoke to bucket the fault.
-    pub fn over_memory(&self) -> bool {
-        self.over_memory
-    }
-
     /// Reset the per-test over-memory latch + heap `over_cap` flag so a tripped test never taints the
     /// next on this reused VM. Called at the top of every test/hook/construction invoke entry point.
     fn reset_over_memory(&mut self) {
@@ -951,11 +947,22 @@ impl Vm {
                 // runs after an actual — infrequent — collect).
                 if self.heap.over_cap() && !self.over_memory {
                     self.over_memory = true;
-                    let rte = self.err(
-                        format!("test exceeded --max-heap ({} bytes)", self.heap.mem_cap()),
-                        Span::default(),
-                    );
-                    let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
+                    let over_rte = self
+                        .err(
+                            format!("test exceeded --max-heap ({} bytes)", self.heap.mem_cap()),
+                            Span::default(),
+                        )
+                        .over_memory();
+                    // FORCE the `is_over_memory` marker onto whatever error emerges (a `defer` may
+                    // fault mid-unwind and replace it), so the marker travels WITH the error through
+                    // every enclosing `run_until` (native re-entry) and the worker→parent fault
+                    // boundary — that is what keeps the abort un-catchable by `recover:` (the Err
+                    // funnel below bypasses `recover:` whenever the marker is set) and correctly
+                    // bucketed `OverMemory` on either engine.
+                    let rte = self
+                        .unwind_deferred(base_level, false)
+                        .map(RuntimeError::over_memory)
+                        .unwrap_or(over_rte);
                     return Err(rte);
                 }
             }
@@ -1105,8 +1112,18 @@ impl Vm {
                 // nursery cancel flag set `self.cancelled` and returned the sentinel) unwinds the
                 // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
                 // cancelled task must not be caught and resumed.
-                if self.cancelled {
+                //
+                // `--max-heap`: an over-memory hard-abort raised in a NESTED `run_until` (a HOF
+                // callback / operator overload / deferred call) bubbles here as an ordinary `?`-error
+                // carrying the `is_over_memory` marker. It gets the SAME bypass-recover unwind as a
+                // cancel — the loop-top check only fires within its own `run_until` level, so without
+                // this sibling arm an outer `recover:` would catch the fault and defeat the guard. Re-
+                // stamp the marker onto whatever emerges (a mid-unwind `defer` fault) so it keeps
+                // travelling up.
+                if self.cancelled || rte.is_over_memory {
+                    let over_mem = rte.is_over_memory;
                     let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
+                    let rte = if over_mem { rte.over_memory() } else { rte };
                     return Err(rte);
                 }
                 // Capture the stack trace of an uncaught fault now, while the frames are still intact
@@ -1494,6 +1511,7 @@ impl Vm {
                     message,
                     span,
                     is_assert: true,
+                    is_over_memory: false,
                 });
             }
             Op::GetLocal(slot) => {

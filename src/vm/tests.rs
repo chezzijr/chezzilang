@@ -2879,6 +2879,7 @@ fn dl_err() -> RuntimeError {
         message: DEADLOCK_MSG.to_string(),
         span: Span { line: 1, col: 1 },
         is_assert: false,
+        is_over_memory: false,
     }
 }
 fn mk_sched(total: usize) -> MnSched {
