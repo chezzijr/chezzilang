@@ -9,9 +9,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `T`-typed `recv()` on any `Channel[int]`/etc. (check-OK type-soundness hole). Fix adds a declarative facet:
 > `where T: <scalar>` is now an EQUALITY bound (int/float/bool/str/bytes/bytearray/nil) — `trip()` carries
 > `where T: bool` in `std/prelude.chz`. Checker-only + additive (`scalar_bound_ty`, `satisfies_args_d`/
-> `check_bounds` arms, Channel arm now `enforce_bounds`). 3681 lib tests + conformance green, clippy clean. 3
-> hunt findings still OPEN (native `str.count("")`, native `str.split("")`, cyclic `Set.has`) — see
-> `docs/gaps.md` session log 2026-07-23 (wave 3).
+> `check_bounds` arms, Channel arm now `enforce_bounds`). 3681 lib tests + conformance green, clippy clean.
+>
+> **✅ BUG-HUNT (2026-07-23, wave 3) — native `str.count("")` / `str.split("")` empty-arg fixes.** Two pure-
+> runtime native-method fixes in `src/vm/call.rs` (shared-wrong, so the serial==M:N oracle is blind — caught by
+> Python/Go comparison). `"abc".count("")` returned `0`, now `4` (codepoint len + 1, matching Python/Go and the
+> already-fixed sibling `std.string.count`; `5a8fba0` missed the native method). `"abc".split("")` leaked Rust's
+> empty-pattern edges (`["","a","b","c",""]`), now raises a recoverable `split: sep must not be empty` fault
+> (matching `std.string.split`). Tests: `str_count_empty_sub` + `str_split_empty_sep_faults` in
+> `reserved_method_tables_test.chz`. Only the cyclic `Set.has` finding still OPEN — see `docs/gaps.md` wave 3.
 >
 > **✅ CHECKER REFACTOR (2026-07-23) — the last 4 bespoke reserved-type method tables are now file-backed.**
 > `channel_method_sig`/`str_method_sig`/`bytes_method_sig`/`bytearray_method_sig` (`src/checker/mod.rs`) are

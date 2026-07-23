@@ -217,7 +217,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings, `Channel.trip()` type-hole FIXED via new scalar `where`-bounds; 3 findings OPEN)
+## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings — `Channel.trip()` type-hole + native `count`/`split` empty-arg FIXED; 1 finding OPEN)
 
 Pre-freeze adversarial hunt, 5 disjoint domains (~248 probes, both engines). **3 domains CLEAN** (airlock 22,
 cancel/defer/recover 37, checker⊋compiler ~40 — the productive class is exhausted). 4 findings survived
@@ -240,12 +240,14 @@ re-verification on the real binary — all **shared-wrong / check-OK type holes*
   Scoped to scalars (avoids generic-struct equality). `bound_provides` unchanged — a scalar bound constrains,
   provides no methods.
 
-- **OPEN — native `"abc".count("")` returns 0** (Python/Go = `len+1`); the free fn `string.count` = 4. Commit
-  `5a8fba0` fixed `std/string.chz` but missed the sibling native method (`src/vm/call.rs:2515`, stale comment
-  `// std.string: empty -> 0`) — the fix-one-caller-not-the-root miss. Fix: return `s.chars().count() as i64 + 1`.
-- **OPEN — native `"abc".split("")`** = `[,a,b,c,]` (leaks Rust's empty-pattern semantics; `call.rs:2310`);
-  matches neither Python (`ValueError`) nor Go (`[a b c]`), and its own sibling `std.string.split` `panic`s on
-  empty separator. Fix: guard empty separator.
+- **FIXED — native `"abc".count("")` returned 0** (Python/Go = `len+1`); the free fn `string.count` = 4. Commit
+  `5a8fba0` fixed `std/string.chz` but missed the sibling native method (`src/vm/call.rs`, stale comment
+  `// std.string: empty -> 0`) — the fix-one-caller-not-the-root miss. Fixed: empty branch now returns
+  `s.chars().count() as i64 + 1` (codepoint len + 1). Test: `str_count_empty_sub` in `reserved_method_tables_test.chz`.
+- **FIXED — native `"abc".split("")`** returned `["","a","b","c",""]` (leaked Rust's empty-pattern semantics; `call.rs`);
+  matched neither Python (`ValueError`) nor Go (`[a b c]`), and its own sibling `std.string.split` `panic`s on
+  empty separator. Fixed: an empty separator now raises a recoverable `split: sep must not be empty` fault (keyed
+  on `sep`, so `"".split(",")` stays `[""]`). Test: `str_split_empty_sep_faults`.
 - **OPEN (Low/niche) — `Set.has`/`Map` on a cyclic struct key silently returns `false`** where `==` on the same
   two cyclic values faults `maximum structural depth (10000) exceeded` — self-inconsistent (Python raises
   RecursionError on both). Needs a custom `hash` + a cyclic struct key.
