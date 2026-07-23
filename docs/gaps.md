@@ -217,6 +217,40 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-24 (design consistency: `List.min()`/`.max()` fault on empty while sibling accessors return `Option` — OPEN, breaking change)
+
+API-consistency drift found while documenting the test system (`[].min()` used as a fault-path
+example). **Not a bug** (no crash — `min()`/`max()` raise a clean recoverable fault, `runtime error:
+min() of empty list`, catchable by `recover:`), but a **magpie-lineage inconsistency** inside one
+coherent method family:
+
+- **The "element that might not exist" accessor family diverges by ancestor.** Verified current behavior:
+
+  | method | empty → | return type |
+  |---|---|---|
+  | `.first()` / `.last()` / `.pop()` | `None` | `Option[T]` |
+  | **`.min()` / `.max()`** | **faults** | **`T`** |
+  | `.sum()` | `0` (identity) | `T` |
+  | `[i]` index | faults (OOB) | `T` |
+
+  `min`/`max` are the SAME category as `first`/`last`/`pop` — "return an element of the collection,
+  which doesn't exist when empty" — yet they're the only ones that fault instead of returning `None`.
+  Sigs: `std/prelude.chz:72-77` (`min`/`max` → `T`; `first`/`last`/`pop` → `Option[T]`).
+- **Magpie check (an unintuitive divergence from the owning ancestor is a bug — [[no-drift-from-popular-languages]]).**
+  Chezzi's `first`/`last`/`pop`-return-`Option` is the **Rust** model (Python has no such methods), so
+  the family already chose Rust. Rust returns `Option` for `.min()`/`.max()` too; Chezzi's fault follows
+  **Python** (`min([])` → `ValueError`) — a *different* ancestor for a sibling in the same family. Mixed
+  lineage inside one family is the drift class. (`.sum()`→`0` is principled — `sum` has an identity
+  element `0`; `min`/`max` have none, which is exactly why the no-value case wants `Option`/`None`, and
+  the family already picked `Option` for no-value.)
+- **Recommendation: `.min()`/`.max()` → `Option[T]`** (`None` on empty), matching `first`/`last`/`pop`
+  and Rust.
+- **Why OPEN/deferred — breaking change, own milestone.** Return type `T` → `Option[T]` touches:
+  `std/prelude.chz` sigs; the VM `min`/`max` arm (`src/vm/call.rs:~1956`, return `None` instead of
+  `self.err("min()/max() of empty list")`); EVERY caller (now `.min().unwrap()` / `match` / `?`); tests;
+  `docs/stdlib.md` + `docs/spec.md`. A checker↔runtime API-consistency fix, not a cleanup — schedule it
+  as its own milestone with failing-then-green tests on both engines and a caller migration.
+
 ## Session log — 2026-07-23 (bug-hunt wave 4: 1 finding — `List[Any]` mixed-numeric literal silently widens int→float — OPEN, deferred pre-freeze)
 
 Adversarial pre-freeze hunt. (5 parallel subagents OOM-killed the box — `exit 137`, the cargo-memory-cap
