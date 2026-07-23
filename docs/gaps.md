@@ -217,7 +217,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 2 fixes MERGED, 1 open finding, 2 dormant fragilities)
+## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 3 fixes + 1 doc fix MERGED, 0 open findings, 2 dormant fragilities remain)
 
 Pre-freeze adversarial hunt (5 disjoint domains, ~200 probes, both engines) + a **completeness/partial-coverage
 sweep** (5 dispatch-table audits — "a fix/feature applied to SOME arms of an N-way set but not all"). All
