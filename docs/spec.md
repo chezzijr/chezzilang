@@ -584,7 +584,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   so accidental mixing with the raw underlying (or a different newtype) is a compile error. Numeric
   (`int`/`float`) underlyings auto-flow same-type operators (the underlying's *native* op,
   unwrap→op→rewrap); a `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 (define a method);
-  equality (`==`/`!=`) works for any underlying. Methods
+  equality (`==`/`!=`) works for any underlying. A **numeric** (`int`/`float`) newtype additionally
+  satisfies `Comparable` by its underlying's *native* order (not a user `compare` method — the same-type
+  `<`/`>` arm auto-flows to the underlying), so `<`/`>` AND `List[newtype].sort()`/`.min()`/`.max()`
+  order by the wrapped scalar; a `str`/`bool` newtype is not `Comparable` in v1. Methods
   + `Stringable`/`Hashable`/`Comparable` work via the newtype's own methods (`str`/`hash`/`compare`
   dispatched at runtime in both engines); the **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`)
   are NOT satisfiable by a newtype method (a newtype's own `add`/`div`/… is never dispatched as an

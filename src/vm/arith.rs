@@ -1582,6 +1582,21 @@ impl Vm {
     }
 
     pub(super) fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {
+        // Numeric-newtype (`Comparable`) unwrap: a `List[newtype=int/float]` reaches `.min()`/`.max()`
+        // through here. Order by the wrapped scalar's NATIVE order — same as bare `<` (see `compare_op`),
+        // never a user `compare` method. Recurse one side per call → converges to scalar operands
+        // (handles both-newtype, defensive one-side, and nested `newtype B = A`). MUST precede the
+        // scalar fast paths below.
+        if let Some(ha) = l.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(ha)
+        {
+            return self.compare(*inner, r);
+        }
+        if let Some(hb) = r.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(hb)
+        {
+            return self.compare(l, *inner);
+        }
         // Both integral (inline or boxed) → exact i64 order; else both numeric → f64 (NaN → None).
         if self.is_integral(l) && self.is_integral(r) {
             return Some(self.int_of(l).cmp(&self.int_of(r)));
@@ -1822,6 +1837,20 @@ impl Vm {
     /// int/float/str lists; str elements are read through the heap. Anything else compares Equal.
     pub(super) fn value_order(&self, a: Value, b: Value) -> std::cmp::Ordering {
         use std::cmp::Ordering::Equal;
+        // Numeric-newtype (`Comparable`) unwrap: a `List[newtype=int/float]` reaches `.sort()` through
+        // here. Order by the wrapped scalar's NATIVE order — same as bare `<` (see `compare_op`), never
+        // a user `compare` method. Recurse one side per call → converges to scalar operands. MUST
+        // precede the scalar fast paths below (without it a NewType falls to `_ => Equal` → silent no-op).
+        if let Some(ha) = a.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(ha)
+        {
+            return self.value_order(*inner, b);
+        }
+        if let Some(hb) = b.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(hb)
+        {
+            return self.value_order(a, *inner);
+        }
         // Homogeneous lists only (checker-enforced): both int (inline/boxed) → exact i64; both float
         // → total_cmp; both str → lexical. A mixed/other pair compares Equal.
         if self.is_integral(a) && self.is_integral(b) {

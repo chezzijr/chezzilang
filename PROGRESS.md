@@ -4,6 +4,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ FIX (2026-07-23, `auto-task/newtype-sort-minmax`) — numeric-newtype `.sort()`/`.min()`/`.max()`
+> now honor `Comparable` at runtime (checker⊋compiler soundness class).** A numeric `newtype`
+> (`= int`/`= float`) satisfies `Comparable`, so `check` accepted `List[newtype].sort()`/`.min()`/`.max()`
+> — but the runtime comparators never unwrapped the `Obj::NewType` box: `Vm::value_order` fell to
+> `_ => Equal` (sort **silently no-op'd**) and `Vm::compare` returned `None` (min/max **faulted** with
+> *"sort_by_key keys are not comparable"*). Both engines agreed on the broken behavior → parity-blind.
+> Fixed with a newtype-unwrap-and-recurse arm at the top of both comparators (`src/vm/arith.rs`) — orders
+> by the underlying's *native* scalar order, matching bare `<` (`compare_op`) and the checker grant.
+> Checker untouched (its grant was correct). Regression: `tests/chz/spec/newtype_test.chz` (int + float
+> sort/min/max + bare `<`/`==` + `sort_by_key` positive controls), gated serial==M:N. A `str`/`bool`
+> newtype is not `Comparable` (checker grants numeric only), so its sort is rejected at `check`. See
+> `docs/gaps.md` session log 2026-07-23.
+>
 > **✅ TESTING (2026-07-23) — dedicated native test suite `tests/chz/` + dual-engine parity gate.**
 > New home for Chezzi-language behavior tests, separate from `examples/` (print-and-golden demos):
 > `tests/chz/{spec,stdlib,suites}/` with a `README.md`. The 10 existing `examples/*_test.chz` MOVED to

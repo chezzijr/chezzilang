@@ -214,6 +214,29 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-23 (checker⊋compiler: numeric-newtype `.sort()`/`.min()`/`.max()` runtime gap — FIXED)
+
+A numeric `newtype` (`newtype UserId = int`, `= float`) satisfies `Comparable` (the checker grants it by
+the underlying's native order), so `check` ACCEPTS `.sort()`/`.min()`/`.max()` on a `List[newtype]`. But the
+runtime comparators never unwrapped the `Obj::NewType` box: `Vm::value_order` (the `.sort()` comparator) fell
+to `_ => Equal` → `.sort()` **silently no-op'd** (wrong result, no fault), and `Vm::compare` (the `.min()`/
+`.max()` path) returned `None` → *"sort_by_key keys are not comparable: newtype vs newtype"* fault. Both
+engines behaved identically → the parity oracle was structurally blind (a checker⊋compiler class: check-OK,
+run-divergent). Bare `<`/`>` already worked (`compare_op` unwraps same-newtype inners).
+
+**FIXED (both `src/vm/arith.rs`):** added a newtype-unwrap arm at the top of both `value_order` and `compare`
+that reads `Obj::NewType.inner` and recurses on the wrapped scalar — one side per call converges to scalar
+operands, so it covers both-newtype (the homogeneous-list case), the defensive one-side case, and nested
+`newtype B = A`. Orders by the underlying's *native* scalar order — exactly matching bare `<` (`compare_op`)
+and the checker's Comparable grant. `value_order`/`compare` are `&self` and structurally cannot re-enter
+`run_proto`, so recursing on the inner scalar (never a user `compare` method) is the only consistent choice.
+Regression: `tests/chz/spec/newtype_test.chz` (sort/min/max on `List[newtype=int]` + `List[newtype=float]` +
+bare `<`/`==` + `sort_by_key` positive controls), gated serial==M:N by `chz_suite_passes_both_engines`.
+
+**Clarification (not a bug):** a `str`/`bool` newtype does **not** satisfy `Comparable` (checker grants it for
+numeric underlyings only), so `List[str-newtype].sort()` is rejected at `check` and never reaches the runtime.
+The str-inner unwrap is present for free (lands in the existing `Obj::Str` arm) but is not source-testable.
+
 ## Session log — 2026-07-22 (bug-hunt: 2 findings — 1 fixed, 1 pre-freeze known-limit + serial-removal plan)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/wait/Executor, checker⊋compiler, stdlib) on

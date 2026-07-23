@@ -1,0 +1,42 @@
+# tests/chz/spec/newtype_test.chz — numeric-newtype Comparable at runtime, dogfooded with `assert`.
+#
+# A numeric `newtype` satisfies `Comparable` (checker grants it for numeric underlyings), so
+# `.sort()`/`.min()`/`.max()` on a `List[newtype]` must order by the wrapped scalar's NATIVE order —
+# same as bare `<`/`>`. Regression guard for the value_order/compare newtype-unwrap fix.
+# Runs on BOTH engines via test_runner::chz_suite_passes_both_engines.
+
+newtype UserId = int
+newtype Score = float
+
+# ---- sort orders a List[newtype=int] by the wrapped scalar ----
+
+test fn sort_int_newtype():
+    xs := [UserId(3), UserId(1), UserId(2), UserId(5), UserId(4)]
+    xs.sort()
+    assert [int(u) for u in xs] == [1, 2, 3, 4, 5]
+
+# ---- min/max return the right element for a List[newtype=int] ----
+
+test fn minmax_int_newtype():
+    xs := [UserId(3), UserId(1), UserId(5), UserId(2)]
+    assert int(xs.min()) == 1
+    assert int(xs.max()) == 5
+
+# ---- sort/min/max on a List[newtype=float] ----
+
+test fn sort_minmax_float_newtype():
+    ys := [Score(2.5), Score(1.0), Score(3.25), Score(0.5)]
+    ys.sort()
+    assert [float(s) for s in ys] == [0.5, 1.0, 2.5, 3.25]
+    assert float(ys.min()) == 0.5
+    assert float(ys.max()) == 3.25
+
+# ---- must-preserve: bare `<`/`==` and explicit-key sort still correct ----
+
+test fn newtype_positive_controls():
+    assert UserId(1) < UserId(2)
+    assert not (UserId(2) < UserId(1))
+    assert UserId(3) == UserId(3)
+    zs := [UserId(3), UserId(1), UserId(2)]
+    zs.sort_by_key(fn(u): int(u))
+    assert [int(u) for u in zs] == [1, 2, 3]
