@@ -1056,7 +1056,7 @@ mod init_tests {
         );
 
         // And run the scaffolded test file through the real `chezzi test` runner: both pass.
-        let report = test_runner::run_tests(&d.0, false);
+        let report = test_runner::run_tests(&d.0, true);
         assert!(
             report.passed,
             "scaffolded tests must pass; report:\n{}",
