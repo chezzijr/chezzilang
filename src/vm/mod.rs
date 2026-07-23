@@ -716,6 +716,13 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// `chezzi test --max-heap` — set true when the running test's live heap tripped the cap
+    /// ([`crate::vm::heap::Heap::over_cap`]). Doubles as the abort's bypass-recover LATCH (like
+    /// `cancelled`): once set, the over-memory unwind is in flight, so the loop-top check must not
+    /// re-fire while defers run. Reset per test by the runner's invoke entry points. The runner reads
+    /// it after an invoke to bucket the fault as `OverMemory` (not FAIL/ERROR). Always false when the
+    /// cap is off (`chezzi run`, and the cap-off default), so parity/behavior are untouched.
+    over_memory: bool,
     /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
     /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
     /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must

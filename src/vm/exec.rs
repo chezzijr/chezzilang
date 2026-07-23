@@ -125,6 +125,7 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
+            over_memory: false,
             deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
@@ -483,6 +484,7 @@ impl Vm {
             self.program.protos[proto].is_test,
             "invoke_test called on a non-test proto"
         );
+        self.reset_over_memory();
         let home = self.entry_home();
         self.run_proto(
             proto,
@@ -552,6 +554,7 @@ impl Vm {
         proto: ProtoId,
         recv: Value,
     ) -> Result<Value, RuntimeError> {
+        self.reset_over_memory();
         let home = self.entry_home();
         self.run_proto(
             proto,
@@ -566,6 +569,7 @@ impl Vm {
 
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
+        self.reset_over_memory();
         let home = self.entry_home();
         self.run_proto(
             new_thunk,
@@ -594,6 +598,26 @@ impl Vm {
     /// gate runs the same suite both ways and asserts identical per-test outcomes (serial == M:N).
     pub fn set_parallel(&mut self, on: bool) {
         self.parallel = on;
+    }
+
+    /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
+    /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
+    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS), so serial == M:N verdicts hold.
+    pub fn set_max_heap(&mut self, cap: usize) {
+        self.heap.set_mem_cap(cap);
+    }
+
+    /// `chezzi test` — whether the LAST invoked test tripped the `--max-heap` cap. Reset at each
+    /// invoke entry point, so the runner reads it immediately after an invoke to bucket the fault.
+    pub fn over_memory(&self) -> bool {
+        self.over_memory
+    }
+
+    /// Reset the per-test over-memory latch + heap `over_cap` flag so a tripped test never taints the
+    /// next on this reused VM. Called at the top of every test/hook/construction invoke entry point.
+    fn reset_over_memory(&mut self) {
+        self.over_memory = false;
+        self.heap.clear_over_cap();
     }
 
     /// `chezzi test` — take + clear whatever a test printed to stdout, resetting the buffer so the
@@ -919,6 +943,21 @@ impl Vm {
             // there are no mid-opcode temporaries off the stack to miss.
             if self.gc_stress || self.heap.should_collect() {
                 self.collect();
+                // `chezzi test --max-heap` — if this test's live heap tripped the cap during the
+                // sweep just run, hard-abort it. Modeled on the `self.cancelled` funnel below: unwind
+                // with `report = false` so `recover:` CANNOT catch it. The `!self.over_memory` latch
+                // stops the check re-firing while the unwind runs the test's defers. Zero cost when
+                // the cap is off (`over_cap()` is false forever when `mem_cap == 0`, and this only
+                // runs after an actual — infrequent — collect).
+                if self.heap.over_cap() && !self.over_memory {
+                    self.over_memory = true;
+                    let rte = self.err(
+                        format!("test exceeded --max-heap ({} bytes)", self.heap.mem_cap()),
+                        Span::default(),
+                    );
+                    let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
+                    return Err(rte);
+                }
             }
             // CANCELLATION POINTS (the every-instruction cancel check that used to sit here is GONE).
             // A cancel is observed only at CHECKPOINTS: loop back-edges (`jump_checked`, below) and

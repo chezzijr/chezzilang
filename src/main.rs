@@ -38,6 +38,8 @@ FLAGS:
     --threads=N      Worker threads for the OS-thread engine (0 = all cores; env: CHEZZI_THREADS)
     --check-parity   Run the program on BOTH engines (serial oracle + M:N) and report whether their
                      output is byte-identical (exit 0 = parity OK; non-zero = divergence report)
+    --max-heap=N     (`test` only) Hard-abort any test whose live heap exceeds N bytes — a runaway-
+                     allocation guard, bucketed OVER-MEMORY (0/omitted = off; `recover:` can't catch it)
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --serial` runs the
@@ -534,10 +536,23 @@ fn cmd_test(args: &[String]) -> ExitCode {
     let mut path: Option<String> = None;
     let mut saw_serial = false;
     let mut saw_parallel = false;
+    let mut max_heap: usize = 0; // 0 = cap OFF (the default)
     for arg in args {
         match arg.as_str() {
             "--serial" => saw_serial = true,
             "--parallel" => saw_parallel = true, // no-op alias: M:N is already the default
+            other if other.starts_with("--max-heap=") => {
+                let raw = &other["--max-heap=".len()..];
+                match raw.parse::<usize>() {
+                    Ok(n) => max_heap = n,
+                    Err(_) => {
+                        eprintln!(
+                            "chezzi test: --max-heap expects a byte count (a non-negative integer), got '{raw}'"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             other if other.starts_with("--") => {
                 eprintln!("chezzi test: unknown flag '{other}'");
                 return ExitCode::FAILURE;
@@ -557,7 +572,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // Default engine is the M:N OS-thread VM — matching `chezzi run`, and forward-compatible with the
     // post-JIT-freeze removal of the cooperative serial engine. `--serial` opts into it while it lives;
     // the dual-engine serial==M:N check itself lives in the `cargo test` gate.
-    let report = test_runner::run_tests(std::path::Path::new(&root), !saw_serial);
+    let report = test_runner::run_tests_capped(std::path::Path::new(&root), !saw_serial, max_heap);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS

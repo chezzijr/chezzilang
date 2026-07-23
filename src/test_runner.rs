@@ -27,8 +27,19 @@ pub struct TestReport {
 /// variants here; the render loop + summary + `passed` flag fan out from a single `match`.
 enum Verdict {
     Pass,
-    Fail { line: usize, msg: String },
-    Error { line: usize, msg: String },
+    Fail {
+        line: usize,
+        msg: String,
+    },
+    Error {
+        line: usize,
+        msg: String,
+    },
+    /// `chezzi test --max-heap` — the test's live heap exceeded the cap and it was hard-aborted. No
+    /// meaningful source line (the abort fires at a GC boundary, not a statement). Counts as failure.
+    OverMemory {
+        msg: String,
+    },
 }
 
 /// One test's result (for the report + summary counts).
@@ -41,9 +52,14 @@ struct Outcome {
     verdict: Verdict,
 }
 
-/// Bucket a caught per-test `RuntimeError`: an `assert` failure → `Fail`, anything else → `Error`.
-fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
-    if e.is_assert {
+/// Bucket a caught per-test `RuntimeError`. `over_memory` (read from the VM right after the invoke)
+/// takes priority: a `--max-heap` hard-abort is `OverMemory` regardless of what fault emerged from
+/// the unwind (a defer may fault while unwinding — the VM latch still classifies it correctly). Else
+/// an `assert` failure → `Fail`, anything else → `Error`.
+fn verdict_from_fault(e: crate::vm::RuntimeError, over_memory: bool) -> Verdict {
+    if over_memory {
+        Verdict::OverMemory { msg: e.message }
+    } else if e.is_assert {
         Verdict::Fail {
             line: e.span.line,
             msg: e.message,
@@ -60,6 +76,14 @@ fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
 /// recursively). Returns the rendered report + overall pass/fail. Never panics on a test fault — the
 /// VM stays reusable, so one failing test does not abort the rest.
 pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
+    run_tests_capped(root, parallel, 0)
+}
+
+/// Like [`run_tests`], plus the opt-in `--max-heap` per-test cap (`max_heap`: byte count, `0` = OFF).
+/// A test whose in-VM live heap exceeds the cap is hard-aborted (bypassing `recover:`) and bucketed
+/// [`Verdict::OverMemory`] (counts as failure). Deterministic-in-VM (not OS RSS), so the serial == M:N
+/// gate holds. With `max_heap == 0` this is byte-identical to the pre-cap runner.
+pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
@@ -84,7 +108,7 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
     let mut file_errors = 0usize;
 
     for file in &files {
-        match run_file(file, parallel) {
+        match run_file(file, parallel, max_heap) {
             Ok(mut file_outcomes) => outcomes.append(&mut file_outcomes),
             Err(msg) => {
                 report.push_str(&format!("ERROR {}\n  {msg}\n", file.display()));
@@ -103,6 +127,9 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
             Verdict::Error { line, msg } => {
                 report.push_str(&format!("ERROR {} ({}:{}) {}\n", o.name, o.file, line, msg))
             }
+            Verdict::OverMemory { msg } => {
+                report.push_str(&format!("OVER-MEMORY {} ({}) {}\n", o.name, o.file, msg))
+            }
         }
     }
     let total = outcomes.len();
@@ -114,10 +141,19 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
         .iter()
         .filter(|o| matches!(o.verdict, Verdict::Error { .. }))
         .count();
-    let passed_count = total - failed - errored;
+    let over_memory = outcomes
+        .iter()
+        .filter(|o| matches!(o.verdict, Verdict::OverMemory { .. }))
+        .count();
+    let passed_count = total - failed - errored - over_memory;
     report.push_str(&format!(
         "\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored"
     ));
+    // Only surface the over-memory clause when there is one, so the common (cap-off) output stays
+    // byte-identical to the pre-cap runner.
+    if over_memory > 0 {
+        report.push_str(&format!(", {over_memory} over-memory"));
+    }
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
     }
@@ -132,7 +168,11 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 
     TestReport {
         text: report,
-        passed: failed == 0 && errored == 0 && file_errors == 0 && !no_tests_discovered,
+        passed: failed == 0
+            && errored == 0
+            && over_memory == 0
+            && file_errors == 0
+            && !no_tests_discovered,
     }
 }
 
@@ -144,7 +184,7 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 /// `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000 before faulting recoverably, which overflows the
 /// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
 /// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
-fn run_file(file: &Path, parallel: bool) -> Result<Vec<Outcome>, String> {
+fn run_file(file: &Path, parallel: bool, max_heap: usize) -> Result<Vec<Outcome>, String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
@@ -158,7 +198,7 @@ fn run_file(file: &Path, parallel: bool) -> Result<Vec<Outcome>, String> {
     let program: Arc<Program> = Arc::new(program);
     let file_label = file.display().to_string();
 
-    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel))
+    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, max_heap))
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
@@ -169,9 +209,13 @@ fn invoke_all(
     program: Arc<Program>,
     file_label: String,
     parallel: bool,
+    max_heap: usize,
 ) -> Result<Vec<Outcome>, String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
     vm.set_parallel(parallel);
+    // `--max-heap` cap (0 = off). Per-test reset of the over-memory latch is VM-side (in each invoke
+    // entry point), so `run_suite` needs no cap threading — the VM is already configured.
+    vm.set_max_heap(max_heap);
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
         return Err(format!(
@@ -186,7 +230,7 @@ fn invoke_all(
     for (name, proto) in program.tests.iter() {
         let verdict = match vm.invoke_test(*proto) {
             Ok(()) => Verdict::Pass,
-            Err(e) => verdict_from_fault(e),
+            Err(e) => verdict_from_fault(e, vm.over_memory()),
         };
         let _ = vm.take_out(); // discard the test's stdout (kept reusable)
         outcomes.push(Outcome {
@@ -269,7 +313,7 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
         if matches!(verdict, Verdict::Pass)
             && let Err(e) = vm.invoke_suite_method(*proto, instance)
         {
-            verdict = verdict_from_fault(e);
+            verdict = verdict_from_fault(e, vm.over_memory());
         }
         // after_each? — ALWAYS runs (even on failure, like `defer`), so the invocation must NOT be
         // short-circuited. It does not mask the original failure; only if the test passed but
@@ -554,6 +598,10 @@ struct Suite:
                     ("PASS", r)
                 } else if let Some(r) = l.strip_prefix("FAIL ") {
                     ("FAIL", r)
+                } else if let Some(r) = l.strip_prefix("OVER-MEMORY ") {
+                    // A `--max-heap` trip must participate too: a test that trips on one engine but
+                    // not the other is a parity bug the gate has to catch, not silently drop.
+                    ("OVER-MEMORY", r)
                 } else {
                     // ERROR must participate too: a test that ERRORs on one engine but FAILs/PASSes
                     // on the other is a parity bug the gate has to catch, not silently drop.
@@ -704,6 +752,78 @@ struct Suite:
         assert!(
             !report.text.contains("FAIL Suite::t"),
             "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn over_memory_bucket_for_runaway_alloc() {
+        // A test that grows an unbounded list under a LOW cap must land in the OverMemory bucket on
+        // BOTH engines (serial == M:N) — the trip is deterministic-in-VM, not OS RSS.
+        let d = TmpDir::new();
+        // Push a fresh heap list each iteration: the cap is checked only at GC boundaries, and GC
+        // fires on `Obj`-count growth — a loop pushing inline ints (no `Obj` alloc) would never
+        // trigger a sweep and so never trip the cap (the documented GC-granularity limit).
+        let f = d.write(
+            "boom_test.chz",
+            "test fn boom():\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 1_000_000);
+            assert!(
+                !report.passed,
+                "over-memory must fail the run (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("OVER-MEMORY boom"),
+                "runaway alloc must render OVER-MEMORY (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("over-memory"),
+                "summary must count the bucket (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            assert!(
+                !report.text.contains("FAIL boom") && !report.text.contains("ERROR boom"),
+                "must be OVER-MEMORY, not FAIL/ERROR (parallel={parallel}); report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
+    fn over_memory_control_passes_under_generous_cap() {
+        // A small alloc under a generous cap passes normally — the cap only trips on runaway growth.
+        let d = TmpDir::new();
+        let f = d.write(
+            "ctl_test.chz",
+            "test fn small():\n    xs := []\n    for i in range(100):\n        xs.push(i)\n    assert xs.len() == 100\n",
+        );
+        let report = run_tests_capped(&f, false, 100_000_000);
+        assert!(report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("PASS small"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn recover_does_not_catch_over_memory() {
+        // The hard-abort unwinds PAST `recover:` — a `r := recover: <runaway>` cannot swallow it, so
+        // the test still lands OverMemory (control never reaches the trailing assert).
+        let d = TmpDir::new();
+        let f = d.write(
+            "rec_test.chz",
+            "fn boom() -> int:\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
+        );
+        let report = run_tests_capped(&f, false, 1_000_000);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("OVER-MEMORY t"),
+            "recover: must NOT catch the over-memory abort; report:\n{}",
             report.text
         );
     }

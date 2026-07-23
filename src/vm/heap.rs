@@ -346,6 +346,13 @@ pub struct Heap {
     /// Peak of `live_bytes()` sampled at each `sweep()` — the memory probe's high-water mark
     /// (reported behind `CHEZZI_HEAP_STATS=1`). The Phase-1 8B-`Value` gate compares this.
     peak_live_bytes: usize,
+    /// `chezzi test --max-heap` — the per-test live-heap cap in bytes (`0` = OFF, the default; the
+    /// `chezzi run` engine never sets it). Checked once per `sweep()` against the `lb` already
+    /// computed for `peak_live_bytes`, so it costs one `!= 0 &&` on the common (cap-off) path.
+    mem_cap: usize,
+    /// Set by `sweep()` when `mem_cap != 0 && live_bytes() > mem_cap`. A one-way latch the VM reads
+    /// at its GC boundary to hard-abort the running test; cleared per test by `clear_over_cap`.
+    over_cap: bool,
 }
 
 impl Default for Heap {
@@ -357,6 +364,8 @@ impl Default for Heap {
             since_gc: 0,
             next_gc: MIN_GC_THRESHOLD,
             peak_live_bytes: 0,
+            mem_cap: 0,
+            over_cap: false,
         }
     }
 }
@@ -529,6 +538,9 @@ impl Heap {
         if lb > self.peak_live_bytes {
             self.peak_live_bytes = lb;
         }
+        // `--max-heap` runaway-alloc guard: reuse the `lb` just computed (no second scan). Off when
+        // `mem_cap == 0`, so `over_cap` stays false forever on the common path.
+        self.over_cap = self.mem_cap != 0 && lb > self.mem_cap;
     }
 
     /// Approximate live heap footprint in bytes: each live slot's `Obj` plus the owned backing
@@ -562,6 +574,28 @@ impl Heap {
     /// The high-water mark of [`live_bytes`](Heap::live_bytes) sampled at each `sweep()`.
     pub fn peak_live_bytes(&self) -> usize {
         self.peak_live_bytes
+    }
+
+    /// `chezzi test --max-heap` — set the per-test live-heap cap in bytes (`0` = OFF). Clears any
+    /// prior `over_cap` latch so a new test starts clean.
+    pub fn set_mem_cap(&mut self, cap: usize) {
+        self.mem_cap = cap;
+        self.over_cap = false;
+    }
+
+    /// The configured `--max-heap` cap in bytes (`0` = OFF) — for the abort message.
+    pub fn mem_cap(&self) -> usize {
+        self.mem_cap
+    }
+
+    /// True once `sweep()` saw `live_bytes()` exceed a non-zero `mem_cap` — the VM's hard-abort signal.
+    pub fn over_cap(&self) -> bool {
+        self.over_cap
+    }
+
+    /// Reset the `over_cap` latch (per-test lifecycle), leaving `mem_cap` intact.
+    pub fn clear_over_cap(&mut self) {
+        self.over_cap = false;
     }
 }
 
@@ -622,5 +656,30 @@ mod iter_obj_tests {
         assert!(h.children(a).is_empty());
         assert!(h.children(b).is_empty());
         assert_eq!(std::mem::size_of::<Obj>(), 88); // cap unchanged
+    }
+
+    /// With no cap set (`mem_cap == 0`), `sweep()` never trips `over_cap` regardless of live size.
+    #[test]
+    fn mem_cap_off_never_trips() {
+        let mut h = Heap::new();
+        let r = h.alloc(Obj::Str("x".into()));
+        h.mark(r); // survive the sweep so live_bytes > 0
+        h.sweep();
+        assert!(!h.over_cap());
+    }
+
+    /// A tiny cap trips `over_cap` once a marked (surviving) object exceeds it at sweep — a single
+    /// `Obj` slot is 88B >> 1, so one live string is over a 1-byte cap.
+    #[test]
+    fn mem_cap_trips_when_live_exceeds() {
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+        let r = h.alloc(Obj::Str("x".into()));
+        h.mark(r);
+        h.sweep();
+        assert!(h.over_cap());
+        // clear_over_cap resets the latch for the next per-test lifecycle.
+        h.clear_over_cap();
+        assert!(!h.over_cap());
     }
 }

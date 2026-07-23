@@ -1685,11 +1685,16 @@ preservation (the AST doesn't carry comments today).
 ### T4. Test tooling is thin (but the base is honest)
 `assert cond, msg`, `test fn`, `*_test.chz` discovery, `PASS/FAIL name (file:line)`, non-zero exit — a
 real runner. **FAIL vs ERROR split SHIPPED (2026-07-24, §3b #1):** an `assert` failure buckets as FAIL,
-any other runtime fault as ERROR (summary `P passed, F failed, E errored`). Missing: **test filtering**
-(`chezzi test` rejects *every* flag, so on a big suite it's all or nothing — a ~20-line change and the
-best ratio in this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff,
-parallel execution, machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b`
-follow-ups (CLI ergonomics + `--max-heap`/`--timeout` resource caps, in progress).
+any other runtime fault as ERROR (summary `P passed, F failed, E errored`). **`--max-heap=<bytes>`
+memory cap SHIPPED (2026-07-24, §3b #1b):** the deterministic-in-VM runaway-allocation guard — a test
+whose in-VM `Heap::live_bytes()` exceeds `N` is hard-aborted (bypassing `recover:`) and bucketed
+`OVER-MEMORY` (counts as failure); `0`/omitted = OFF, so cap-off output + the dual-engine gate are
+byte-identical (checks the same `lb` computed per `sweep()`, not OS RSS, so serial==M:N holds; v1 trips
+only at a GC boundary + on `Obj`-count growth — see §3b #1b). Missing: **test filtering** (`chezzi test`
+rejects unknown flags, so on a big suite it's all or nothing — a ~20-line change and the best ratio in
+this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff, parallel execution,
+machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b` follow-ups (CLI
+ergonomics + `--timeout` resource cap still to come).
 
 **KNOWN-LIMIT — assert inside an FFI callback buckets ERROR, not FAIL (found 2026-07-24, WON'T-FIX).**
 The FAIL/ERROR split reads `RuntimeError.is_assert`, set true only by the `Op::Assert` arm. But when a

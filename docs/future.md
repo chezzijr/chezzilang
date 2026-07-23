@@ -280,7 +280,29 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    every setup/teardown fault (suite construction, `before_all`/`before_each`/`after_each`) is
    `Error`-class regardless of `is_assert`. Summary is now `P passed, F failed, E errored` (+ optional
    `K file error(s)`); `report.passed` requires `F==E==file_errors==0`; exit non-zero if any. The
-   `Verdict` enum is the extension point for the ergonomics wave's `TimedOut`/`OverMemory` buckets.
+   `Verdict` enum is the extension point for the ergonomics wave's `TimedOut`/`OverMemory` buckets —
+   `OverMemory` is now the first of these to land (item 1b below).
+
+1b. **Per-test memory cap (`--max-heap=<bytes>`) — DONE.** A runaway-allocation guard for `chezzi test`,
+   mirroring the (still-planned) per-test timeout but for memory. Opt-in `chezzi test --max-heap=<N>`
+   (plain byte count; `0`/omitted = OFF, the default): when a single test's in-VM live heap exceeds `N`
+   it is **hard-aborted** (bypassing `recover:` — a `for: recover: <alloc>` loop cannot defeat it) and
+   bucketed in a new `Verdict::OverMemory` (rendered `OVER-MEMORY name (file) msg`, counts as failure,
+   exit non-zero; summary appends `, M over-memory` only when `M>0` so cap-off output is byte-identical
+   to before). **Deterministic-in-VM, NOT OS RSS:** the cap is checked against `Heap::live_bytes()` —
+   the same value already computed once per `sweep()` for the peak probe — so serial==M:N verdicts stay
+   identical and the dual-engine gate `chz_suite_passes_both_engines` (which runs cap-OFF) is untouched.
+   Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`; `sweep()` sets
+   `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary hard-aborts via
+   `unwind_deferred(base_level, false)` under a `Vm::over_memory` latch; the runner reads the latch to
+   bucket the fault. VM + runner + `main.rs` flag only — no checker/compiler change. **v1 limits
+   (deterministic, documented):** the trip fires only at a **GC boundary**, and GC triggers on
+   `Obj`-count growth — a loop growing a single container of **inline scalars** (e.g. `xs.push(i)` for
+   int `i`) allocates no `Obj`s, never sweeps, and so never trips (push a heap value to guard it); the
+   check is a high-water on `live_bytes` which **undermeasures** true RSS and can overshoot ~2× `N`
+   before firing (`next_gc = 2*live`); and a `spawn`'d M:N worker allocates on its **own** heap, which
+   the main-heap cap does not see. `chezzi run` never sets the cap (test-runner-scoped). k/m/g suffixes,
+   `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`
    aborts at the first bad case with no per-case verdict. A subtest construct that reports each case
