@@ -126,7 +126,6 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
-            over_memory: false,
             deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
@@ -604,15 +603,18 @@ impl Vm {
 
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
     /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
-    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS), so serial == M:N verdicts hold.
+    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). The trip point is a per-heap
+    /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it — the
+    /// same verdict on both engines. A CONCURRENT test near the boundary can differ (serial shares one
+    /// heap across parent + tasks; M:N isolates each worker heap) — a documented per-heap limit, see
+    /// `docs/future.md §3b`.
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
     }
 
-    /// Reset the per-test over-memory latch + heap `over_cap` flag so a tripped test never taints the
-    /// next on this reused VM. Called at the top of every test/hook/construction invoke entry point.
+    /// Clear the heap `over_cap` latch so a tripped test never taints the next on this reused VM.
+    /// Called at the top of every test/hook/construction invoke entry point.
     fn reset_over_memory(&mut self) {
-        self.over_memory = false;
         self.heap.clear_over_cap();
     }
 
@@ -941,12 +943,14 @@ impl Vm {
                 self.collect();
                 // `chezzi test --max-heap` — if this test's live heap tripped the cap during the
                 // sweep just run, hard-abort it. Modeled on the `self.cancelled` funnel below: unwind
-                // with `report = false` so `recover:` CANNOT catch it. The `!self.over_memory` latch
-                // stops the check re-firing while the unwind runs the test's defers. Zero cost when
-                // the cap is off (`over_cap()` is false forever when `mem_cap == 0`, and this only
-                // runs after an actual — infrequent — collect).
-                if self.heap.over_cap() && !self.over_memory {
-                    self.over_memory = true;
+                // with `report = false` so `recover:` CANNOT catch it. The check is RE-OBSERVED like a
+                // cancel checkpoint — no latch — so a `defer` that itself allocates runaway during the
+                // abort's cleanup unwind is bounded too (its own nested `run_until` re-trips here and
+                // aborts it at its first GC boundary). `should_collect()` resets after each collect, so
+                // a non-allocating defer never re-checks and runs to completion; only an allocating one
+                // re-trips. Zero cost when the cap is off (`over_cap()` is false forever when
+                // `mem_cap == 0`, and this only runs after an actual — infrequent — collect).
+                if self.heap.over_cap() {
                     let over_rte = self
                         .err(
                             format!("test exceeded --max-heap ({} bytes)", self.heap.mem_cap()),

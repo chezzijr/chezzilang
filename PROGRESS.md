@@ -12,34 +12,45 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > summary appends `, M over-memory` only when `M>0` so cap-off output stays byte-identical). `0`/omitted
 > = OFF, the default. **Deterministic-in-VM, NOT OS RSS** (RSS is process-global + non-deterministic →
 > would break the gate): checked against `Heap::live_bytes()`, the same `lb` already computed once per
-> `sweep()`, so serial==M:N verdicts hold and the cap-OFF dual-engine gate is untouched. **Seam 1
+> `sweep()` — a **per-heap** high-water, so the cap-OFF dual-engine gate is untouched. **Seam 1
 > (heap):** `Heap` gains `mem_cap: usize` (0=off) + `over_cap: bool`; `sweep()` sets `over_cap = mem_cap
 > != 0 && lb > mem_cap` (reuses the peak-probe `lb`, no second scan) + `set_mem_cap`/`over_cap`/
-> `clear_over_cap`. **Seam 2 (VM):** a `Vm::over_memory` flag doubles as the bypass-recover unwind LATCH;
-> `run_until`'s post-`collect()` boundary hard-aborts via `unwind_deferred(base_level, false)` (report=
-> false = bypass `recover:`, exactly like the `self.cancelled` funnel); reset per test at
+> `clear_over_cap`. **Seam 2 (VM):** `run_until`'s post-`collect()` boundary hard-aborts via
+> `unwind_deferred(base_level, false)` (report=false = bypass `recover:`, exactly like the
+> `self.cancelled` funnel). The check is **re-observed at every GC boundary like a cancel checkpoint — NO
+> latch** (an earlier `Vm::over_memory` re-fire latch was REMOVED — it disabled the cap for the abort's
+> own cleanup unwind, so a runaway `defer` ran uncapped); a `defer` that itself allocates runaway is now
+> bounded (its nested `run_until` re-trips), while a non-allocating defer runs to completion
+> (`should_collect()` resets after each collect). `over_cap` is cleared per test at
 > `invoke_test`/`invoke_suite_method`/`build_suite_instance`; `set_max_heap` threads the cap. The abort
 > stamps an **`is_over_memory` marker onto the `RuntimeError`** (mirrors `is_assert`, excluded from
 > `Display`) and FORCES it back on after every unwind, so it travels WITH the error across an enclosing
 > native-reentry `run_until` (HOF callback / operator overload / deferred call) AND a `spawn`'d worker's
 > fault crossing back to the parent — the `run_until` Err funnel bypasses `recover:` whenever the marker
-> is set (the `Vm::over_memory` flag is ONLY the loop-top re-fire latch, not read by the runner). `spawn`/
-> `parallel:` tasks are covered on M:N too: `spawn_worker` threads `mem_cap` onto the worker's own heap.
-> **Seam 3 (runner):** `Verdict::OverMemory{msg}`, `verdict_from_fault(e)` checks `e.is_over_memory` FIRST,
-> `run_tests_capped(root, parallel, max_heap)` wrapper (2-arg `run_tests` delegates → the ~14 existing
-> call sites stay byte-identical), `verdicts()` gate parser learned the `OVER-MEMORY ` prefix. **Seam 4
-> (CLI):** `cmd_test` parses `--max-heap=<N>` (plain bytes; bad value → eprintln + FAILURE). VM + runner
-> + `main.rs` only — **NO checker/compiler change.** Tests: 2 heap unit (`mem_cap_off_never_trips`/
-> `mem_cap_trips_when_live_exceeds`) + 5 runner (`over_memory_bucket_for_runaway_alloc` on BOTH engines,
-> `over_memory_control_passes_under_generous_cap`, `recover_does_not_catch_over_memory` + the native-
-> reentry variant `recover_does_not_catch_over_memory_via_native_reentry`, and
-> `over_memory_buckets_across_spawn_on_both_engines` — the hard-abort + parity proofs);
-> `chz_suite_passes_both_engines` green (runs cap-off). **v1 limits (deterministic, documented in
-> §3b #1b):** the trip fires only at a GC boundary + on `Obj`-count growth (a loop growing a container of
-> inline scalars never sweeps → never trips — push a heap value to guard it), and overshoots ~2×N before
-> firing (`next_gc = 2*live`). k/m/g suffixes,
-> `--timeout`, `chezzi run --max-heap` deliberately out of scope. Verified end-to-end on the release
-> binary both ways (OVER-MEMORY + exit 1; bad value + exit 1; cap-off byte-identical PASS).
+> is set. `spawn`/`parallel:` runaway tasks are covered on M:N too: `spawn_worker` threads `mem_cap` onto
+> the worker's own heap. **Seam 3 (runner):** `Verdict::OverMemory{msg}`, `verdict_from_fault(e)` checks
+> `e.is_over_memory` FIRST, `run_tests_capped(root, parallel, max_heap)` wrapper (2-arg `run_tests`
+> delegates → the ~14 existing call sites stay byte-identical), `verdicts()` gate parser learned the
+> `OVER-MEMORY ` prefix. **Seam 4 (CLI):** `cmd_test` parses `--max-heap=<N>` (plain bytes; bad value →
+> eprintln + FAILURE). VM + runner + `main.rs` only — **NO checker/compiler change.** Tests: 2 heap unit
+> (`mem_cap_off_never_trips`/`mem_cap_trips_when_live_exceeds`) + 7 runner
+> (`over_memory_bucket_for_runaway_alloc` on BOTH engines, `over_memory_control_passes_under_generous_cap`,
+> `over_memory_concurrent_under_cap_passes_on_both_engines`, `recover_does_not_catch_over_memory` + the
+> native-reentry variant `recover_does_not_catch_over_memory_via_native_reentry`,
+> `over_memory_buckets_across_spawn_on_both_engines`, and `over_memory_defer_is_still_capped_during_unwind`
+> — the hard-abort + parity + defer-bounding proofs); `chz_suite_passes_both_engines` green (runs cap-off).
+> **Guarantee + v1 limits (deterministic, documented in §3b #1b):** the cap is **per-heap** — any single
+> execution context whose live heap exceeds `N` is aborted, so a real runaway trips on whichever heap runs
+> it (SAME verdict on both engines, incl. a runaway inside a `spawn` task). The one divergent case is a
+> *concurrent* test *near the boundary*: `--serial` shares one heap (measures `parent-baseline + Σ tasks`),
+> M:N isolates each worker (measures a task alone), so allocation split below `N` per-fiber but summing
+> above can bucket `OVER-MEMORY` on serial yet pass on M:N — inherent (a cross-engine aggregate needs
+> non-deterministic global RSS, which would break the gate), the same serial-shared-vs-M:N-isolated tech
+> debt the serial-engine post-freeze removal already tracks. The trip also fires only at a GC boundary + on
+> `Obj`-count growth (a loop growing a container of inline scalars never sweeps → never trips — push a heap
+> value to guard it), and overshoots ~2×N before firing (`next_gc = 2*live`). k/m/g suffixes, `--timeout`,
+> `chezzi run --max-heap` deliberately out of scope. Verified end-to-end on the release binary both ways
+> (OVER-MEMORY + exit 1; bad value + exit 1; cap-off byte-identical PASS).
 >
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` FAIL vs ERROR split (docs/future.md §3b item #1, the
 > foundation wave).** A `test fn`/method is void, so `assert` is the ONLY intended failure signal; every

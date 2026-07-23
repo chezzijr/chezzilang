@@ -350,8 +350,9 @@ pub struct Heap {
     /// `chezzi run` engine never sets it). Checked once per `sweep()` against the `lb` already
     /// computed for `peak_live_bytes`, so it costs one `!= 0 &&` on the common (cap-off) path.
     mem_cap: usize,
-    /// Set by `sweep()` when `mem_cap != 0 && live_bytes() > mem_cap`. A one-way latch the VM reads
-    /// at its GC boundary to hard-abort the running test; cleared per test by `clear_over_cap`.
+    /// Re-evaluated by every `sweep()` to `mem_cap != 0 && live_bytes() > mem_cap` — the VM reads it at
+    /// its GC boundary to hard-abort the running test, re-observed each sweep like a cancel checkpoint
+    /// (so a runaway `defer` during the abort unwind re-trips it); cleared per test by `clear_over_cap`.
     over_cap: bool,
 }
 

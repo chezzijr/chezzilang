@@ -1689,7 +1689,14 @@ any other runtime fault as ERROR (summary `P passed, F failed, E errored`). **`-
 memory cap SHIPPED (2026-07-24, §3b #1b):** the deterministic-in-VM runaway-allocation guard — a test
 whose in-VM `Heap::live_bytes()` exceeds `N` is hard-aborted (bypassing `recover:`) and bucketed
 `OVER-MEMORY` (counts as failure); `0`/omitted = OFF, so cap-off output + the dual-engine gate are
-byte-identical (checks the same `lb` computed per `sweep()`, not OS RSS, so serial==M:N holds; v1 trips
+byte-identical (checks the same `lb` computed per `sweep()`, not OS RSS). The cap is **per-heap**: a real
+runaway trips on whichever heap runs it — SAME verdict on both engines (incl. a runaway inside a `spawn`
+task, since `spawn_worker` threads the cap onto the worker heap). The one divergent case is a *concurrent*
+test *near the boundary*: the cooperative engine shares one heap across parent + all fibers (measures
+`baseline + Σ tasks`), M:N isolates each worker (measures a task alone), so allocation *split* below `N`
+per-fiber but summing above can bucket `OVER-MEMORY` on `--serial` yet pass on M:N — inherent (a
+cross-engine aggregate would need non-deterministic global RSS, which would break the gate), the same
+serial-shared-vs-M:N-isolated tech debt the serial-engine post-freeze removal already tracks (v1 also trips
 only at a GC boundary + on `Obj`-count growth — see §3b #1b). Missing: **test filtering** (`chezzi test`
 rejects unknown flags, so on a big suite it's all or nothing — a ~20-line change and the best ratio in
 this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff, parallel execution,

@@ -290,24 +290,38 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    bucketed in a new `Verdict::OverMemory` (rendered `OVER-MEMORY name (file) msg`, counts as failure,
    exit non-zero; summary appends `, M over-memory` only when `M>0` so cap-off output is byte-identical
    to before). **Deterministic-in-VM, NOT OS RSS:** the cap is checked against `Heap::live_bytes()` —
-   the same value already computed once per `sweep()` for the peak probe — so serial==M:N verdicts stay
-   identical and the dual-engine gate `chz_suite_passes_both_engines` (which runs cap-OFF) is untouched.
-   Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`; `sweep()` sets
-   `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary hard-aborts via
-   `unwind_deferred(base_level, false)` under a `Vm::over_memory` re-fire latch. The abort stamps an
+   the same value already computed once per `sweep()` for the peak probe — a per-heap high-water, so it
+   is deterministic and the dual-engine gate `chz_suite_passes_both_engines` (which runs cap-OFF) is
+   untouched. Mechanism mirrors the cancel bypass-recover unwind: `Heap` gained `mem_cap`/`over_cap`;
+   `sweep()` sets `over_cap = mem_cap != 0 && lb > mem_cap`; `run_until`'s post-collect boundary
+   hard-aborts via `unwind_deferred(base_level, false)`. The check is **re-observed at every GC boundary
+   like a cancel checkpoint — no latch** — so a `defer` that itself allocates runaway during the abort's
+   own cleanup unwind is bounded too (its nested `run_until` re-trips and aborts it; `should_collect()`
+   resets after each collect, so a non-allocating defer runs to completion). The abort stamps an
    **`is_over_memory` marker onto the `RuntimeError`** (mirrors `is_assert`, excluded from `Display` so
    parity is unaffected) and forces it back on after every unwind, so it travels WITH the error across
    an enclosing **native-reentry** `run_until` (a HOF callback / operator overload / deferred call) AND a
    **`spawn`'d worker's** fault crossing back to the parent; the `run_until` Err funnel bypasses
    `recover:` whenever the marker is set, and `verdict_from_fault` reads `e.is_over_memory` first to
-   bucket it (the VM latch is not read by the runner). `spawn`/`parallel:` tasks are covered on M:N too —
-   `spawn_worker` threads `mem_cap` onto the worker's own heap, so a runaway alloc there trips and buckets
-   identically on both engines. VM + runner + `main.rs` flag only — no checker/compiler change. **v1
-   limits (deterministic, documented):** the trip fires only at a **GC boundary**, and GC triggers on
-   `Obj`-count growth — a loop growing a single container of **inline scalars** (e.g. `xs.push(i)` for
-   int `i`) allocates no `Obj`s, never sweeps, and so never trips (push a heap value to guard it); the
-   check is a high-water on `live_bytes` which **undermeasures** true RSS and can overshoot ~2× `N`
-   before firing (`next_gc = 2*live`). `chezzi run` never sets the cap (test-runner-scoped). k/m/g
+   bucket it. `spawn`/`parallel:` tasks are covered on M:N too — `spawn_worker` threads `mem_cap` onto
+   the worker's own heap, so a **runaway** alloc in a task trips and buckets on both engines. VM + runner
+   + `main.rs` flag only — no checker/compiler change. **v1 limits (deterministic, documented):** the
+   trip fires only at a **GC boundary**, and GC triggers on `Obj`-count growth — a loop growing a single
+   container of **inline scalars** (e.g. `xs.push(i)` for int `i`) allocates no `Obj`s, never sweeps, and
+   so never trips (push a heap value to guard it); the check is a high-water on `live_bytes` which
+   **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
+   PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
+   heap on M:N) whose live heap exceeds `N` is aborted — a real runaway trips on whichever heap runs it,
+   the SAME verdict on both engines.** A *concurrent* test near the boundary is the one place the two
+   engines can differ: the cooperative engine shares ONE heap across the parent + every `spawn`/`parallel:`
+   fiber (so its `live_bytes` is `parent-baseline + Σ live tasks`), while M:N isolates each worker on its
+   own fresh heap (measured alone). So a program whose allocation is *split* below `N` per-fiber but sums
+   above it (or a single sub-`N` task plus a non-trivial parent baseline) can bucket `OverMemory` on
+   `--serial` yet pass on M:N. This is inherent: the only cross-engine-identical aggregate would be a
+   global RSS-style measure, which is non-deterministic (rejected — it would break the very gate the cap
+   protects), and the M:N aggregate peak is itself non-deterministic (task interleaving). It is the same
+   serial-shared-vs-M:N-isolated tech debt the [serial-engine post-freeze removal](§2b) already tracks —
+   the cap adds no new obligation there. `chezzi run` never sets the cap (test-runner-scoped). k/m/g
    suffixes, `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`

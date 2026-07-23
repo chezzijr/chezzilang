@@ -45,11 +45,11 @@ use crate::{lexer, parser};
 /// `is_over_memory` marks a `chezzi test --max-heap` hard-abort (the runaway-allocation guard). It is
 /// set at the abort site and FORCED onto whatever error emerges from the unwind, so it travels WITH
 /// the error across every propagation boundary — a nested native-reentry `run_until`, and a spawned
-/// worker's fault crossing back to the parent. That marker (not a per-VM flag) is what makes the
-/// abort un-catchable by `recover:` and correctly bucketed `OverMemory` on either engine: the
-/// `run_until` Err funnel bypasses `recover:` whenever it is set, and `verdict_from_fault` reads it
-/// first. Like `is_assert`, it is excluded from `Display`, so parity (error-string compare) is
-/// unaffected. Always `false` on the common path (`chezzi run`, and `--max-heap` off).
+/// worker's fault crossing back to the parent. That marker (there is no per-VM flag) is what makes the
+/// abort un-catchable by `recover:` and correctly bucketed `OverMemory`: the `run_until` Err funnel
+/// bypasses `recover:` whenever it is set, and `verdict_from_fault` reads it first. Like `is_assert`,
+/// it is excluded from `Display`, so parity (error-string compare) is unaffected. Always `false` on the
+/// common path (`chezzi run`, and `--max-heap` off).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuntimeError {
     pub message: String,
@@ -736,14 +736,6 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
-    /// `chezzi test --max-heap` — the abort's bypass-recover LATCH (like `cancelled`): set true when
-    /// the running test's live heap tripped the cap ([`crate::vm::heap::Heap::over_cap`]); once set the
-    /// over-memory unwind is in flight, so the loop-top check must not re-fire while defers run. This
-    /// flag is ONLY the latch — the runner does NOT read it. Bucketing + the cross-boundary bypass ride
-    /// on the [`RuntimeError::is_over_memory`] marker instead (so a spawned worker's abort — a separate
-    /// VM whose latch the parent can't see — still surfaces correctly). Reset per test by the runner's
-    /// invoke entry points. Always false when the cap is off, so parity/behavior are untouched.
-    over_memory: bool,
     /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
     /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
     /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must

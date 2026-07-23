@@ -55,8 +55,8 @@ struct Outcome {
 /// Bucket a caught per-test `RuntimeError`. The `is_over_memory` marker takes priority: a `--max-heap`
 /// hard-abort is `OverMemory` regardless of what fault emerged from the unwind (a defer may fault while
 /// unwinding — the abort re-stamps the marker onto whatever propagates, and it crosses the worker→
-/// parent boundary WITH the error, so a spawned task's abort buckets identically on both engines). Else
-/// an `assert` failure → `Fail`, anything else → `Error`.
+/// parent boundary WITH the error, so a spawned task's runaway aborts on either engine). Else an
+/// `assert` failure → `Fail`, anything else → `Error`.
 fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
     if e.is_over_memory {
         Verdict::OverMemory { msg: e.message }
@@ -876,6 +876,83 @@ struct Suite:
             assert!(
                 report.text.contains("OVER-MEMORY t"),
                 "a spawned task's runaway alloc must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
+    fn over_memory_concurrent_under_cap_passes_on_both_engines() {
+        // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks each stay well
+        // under a generous cap must PASS on both engines — no false trip. (The near-boundary aggregate
+        // case, where per-fiber allocation sums over the cap, is the documented per-heap divergence and
+        // is deliberately NOT asserted here — see `docs/future.md §3b`.)
+        let d = TmpDir::new();
+        let f = d.write(
+            "concpass_test.chz",
+            "fn work() -> int:\n\
+            \x20   ys := []\n\
+            \x20   for j in range(2000):\n\
+            \x20       ys.push([j])\n\
+            \x20   return ys.len()\n\
+             test fn t():\n\
+            \x20   parallel:\n\
+            \x20       spawn work()\n\
+            \x20       spawn work()\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 100_000_000);
+            assert!(
+                report.passed,
+                "a concurrent test well under a generous cap must pass (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("PASS t"),
+                "(parallel={parallel}) report:\n{}",
+                report.text
+            );
+        }
+    }
+
+    #[test]
+    fn over_memory_defer_is_still_capped_during_unwind() {
+        // A `defer` that itself allocates runaway must ALSO be hard-aborted — the cap stays armed
+        // through the abort's own cleanup unwind. Regression: an over-broad latch disabled the guard
+        // for the whole unwind, so a runaway defer ran completely UNCAPPED (could OOM the process the
+        // guard exists to protect). Observable proof: the defer's post-alloc statement (a push into a
+        // module-global list) must NOT execute — the defer is cut short at its first GC boundary while
+        // the tripped test's data is still rooted (heap still over cap). A follow-up test reads the
+        // sentinel: len stays 1 iff the defer was bounded.
+        let d = TmpDir::new();
+        let f = d.write(
+            "defermem_test.chz",
+            "sentinel := [0]\n\
+             fn leak():\n\
+            \x20   defer:\n\
+            \x20       junk := []\n\
+            \x20       for j in range(200000):\n\
+            \x20           junk.push([j])\n\
+            \x20       sentinel.push(1)\n\
+            \x20   xs := []\n\
+            \x20   for i in range(1000000):\n\
+            \x20       xs.push([i])\n\
+             test fn trip():\n\
+            \x20   leak()\n\
+             test fn defer_was_bounded():\n\
+            \x20   assert sentinel.len() == 1\n",
+        );
+        for parallel in [false, true] {
+            let report = run_tests_capped(&f, parallel, 1_000_000);
+            assert!(
+                report.text.contains("OVER-MEMORY trip"),
+                "the tripping test must bucket OVER-MEMORY (parallel={parallel}); report:\n{}",
+                report.text
+            );
+            assert!(
+                report.text.contains("PASS defer_was_bounded"),
+                "the runaway defer must be cut short by the still-armed cap, so its post-alloc push \
+                 never runs (parallel={parallel}); report:\n{}",
                 report.text
             );
         }
