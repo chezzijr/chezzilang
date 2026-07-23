@@ -374,6 +374,8 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
         // An opaque `ptr` crosses by value (a raw address) — it roots no heap object.
         // A first-class builtin fn crosses by value (its name) — pure code, roots no heap object.
+        // A native fn crosses by value (name + fn ptr) and a Cffi as a shared `Arc` — neither holds a
+        // `GcRef`, so both root no heap object.
         // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
         // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
         // R2b: a `Reader` core holds a BufReader<File> + a key — likewise no `WireValue`s, no `GcRef`s.
@@ -393,6 +395,8 @@ pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<u
         | WireValue::Reader(_)
         | WireValue::Ptr(_)
         | WireValue::Builtin(_)
+        | WireValue::Native { .. }
+        | WireValue::Cffi(_)
         | WireValue::Func { .. }
         | WireValue::Nil => {}
     }

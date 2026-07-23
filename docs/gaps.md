@@ -210,9 +210,34 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 `generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the retired model.
 
 ### NOT on the backlog (settled — not limitations)
-- **Host handles** (Module/Native/Cffi in a value) — fundamental, stays rejected. Correct.
+- **Module handles** (a `Module`'s mutable globals in a value) — fundamental, stays rejected. Correct.
+  Also source-unreachable (`module` is not a nameable type), so it's a defensive-only runtime guard.
+  (Native `Obj::Native` + FFI `Obj::Cffi` fn values are NO LONGER here — they are pure code and now
+  cross the airlock BY VALUE / shared `Arc`, exactly like a builtin fn; see the 2026-07-23 session log.)
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
+
+## Session log — 2026-07-23 (native/FFI fn values now cross the wire-value airlock — FIXED)
+
+**Fix — native (`Obj::Native`) + FFI (`Obj::Cffi`) fn values are now sendable across the WIRE path.**
+A native/FFI fn value passed `chezzi check` (its type is `Ty::Func`, checker-sendable) but FAULTED at
+runtime when crossed via the wire-value path — `Channel.send(f)`, `Shared(f)`/`Atomic`/`RwShared`,
+`Executor.submit`, `spawn use(f)` (fn-arg) — while the SAME value crossed FINE via the snapshot path
+(`f := math.sqrt` captured by a `spawn:` block, `SnapValue::Native`/`Cffi`). Pure internal
+inconsistency, not a fundamental limit: `to_wire_depth` (`src/vm/sched.rs`) lumped the two pure-code
+arms (`Native`, `Cffi`) with `Module` into `WireValue::Handle(h)`, whose raw `GcRef` is meaningless on
+another heap → `has_handle()` → reject. Fix mirrors the existing `Builtin` template + the shipping
+`SnapValue::Native`/`Cffi` arms: two new by-value/by-`Arc` wire variants `WireValue::Native { name, func }`
++ `WireValue::Cffi(Arc<Cffi>)`, a split `to_wire_depth` arm (`Module` stays `Handle`; Native→by-value
+fn ptr, Cffi→shared `Arc`), `from_wire` rebuild arms next to `Builtin`, and `collect_core_gcrefs` +
+`display_wire` arms. `has_handle` needs no arm (they fall to `_ => false`). The `ensure_crossable`
+diagnostic is corrected — only `a module handle cannot cross` now (Module is source-unreachable, so
+it's a defensive-only guard). Verified serial == M:N byte-identical on Repro A (native via Channel /
+Shared / spawn-arg / spawn-block) + Repro B (FFI `extern "libm.so.6"` via spawn-arg / Channel / Shared).
+Tests: `tests/chz/spec/airlock_native_test.chz` (4 native `test fn`, gated both engines by
+`chz_suite_passes_both_engines`) + the 5 flipped `ffi_handle_crosses_*` / `ffi_handle_send_succeeds`
+parity tests (`src/vm/parity_tests.rs`). No checker/compiler/parser touch — the checker was already
+correct; the runtime was the sole wrong gate.
 
 ## Session log — 2026-07-23 (bug-hunt: 1 finding — `std.path.ext` multi-leading-dot — FIXED)
 
@@ -1345,9 +1370,12 @@ stored in a `Shared` therefore crossed silently on `--serial` (and even executed
 reconstructed a garbage cross-heap `GcRef` — serial≠M:N + type confusion. Fixed by routing every
 value-store site through a single `Vm::to_wire_crossable` helper (`= to_wire_at` then
 `ensure_crossable`, `src/vm/sched.rs`), so both engines now reject identically and recoverably at the
-send / store / construction site with the same `module/native/FFI handle cannot cross` message. Legit
+send / store / construction site with the `a module handle cannot cross` message. Legit
 `Channel`/`Shared`/`Executor`/socket handles map to shared-`Arc` wire arms (`has_handle()` == false)
-and still cross unchanged (regressed by `positive_*` parity tests).
+and still cross unchanged (regressed by `positive_*` parity tests). **UPDATE 2026-07-23:** native
+(`Obj::Native`) + FFI (`Obj::Cffi`) fn values were later moved OFF this reject — they are pure code and
+now cross the airlock BY VALUE / shared `Arc` at every site (`WireValue::Native`/`Cffi`), so the sole
+remaining reject is a genuine `Module` handle (see the session log below).
 
 **✅ LANDED (branch `feat/l7-sendable-error`, commits `c1b4ab4` core gate · `997e642` direct-literal
 guard · `2b29ed3` regression/residual tests · `ba2ea7c` recover diagnostic).** Surface shipped:

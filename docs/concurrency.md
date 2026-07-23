@@ -921,8 +921,10 @@ aggregate) inside a task is a **compile error** (see below).
   captures include a **non-sendable local** (a native handle — see below) at a `spawn f()` **callee** or
   `spawn f(g)` **arg** is a **compile error**, matching the `spawn:` block form. A bare **native** handle
   is a different case and stays non-sendable (below). (A protocol existential is **sendable** — Task 2,
-  Go `chan interface` parity — so capturing one is fine; a witness that carries an FFI/native handle is
-  caught at the runtime airlock, not here.)
+  Go `chan interface` parity — so capturing one is fine; a witness that carries a genuinely non-sendable
+  handle (a live host resource, or a module handle) is caught at the runtime airlock, not here. A
+  native/FFI *fn value* — `math.sqrt`, an `extern` fn — is pure code and now crosses by value, so it is
+  NOT caught.)
 - **Self-referential DATA IS sendable (identity-preserving airlock).** A struct/list/map/set/tuple/enum/
   newtype/cursor that points back at itself (`a.next = b; b.next = a`, a list holding itself, a map whose
   value refers to the map) crosses **any** airlock (`spawn:` block, `spawn` arg, `Channel.send`, `Shared`,
@@ -952,9 +954,10 @@ aggregate) inside a task is a **compile error** (see below).
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
   a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
-  checked at each widening site; a witness that genuinely can't serialize (one carrying an FFI/native
-  handle) is rejected at the **runtime airlock** (`ensure_crossable`), recoverably and identically on
-  serial == M:N — not at construction.
+  checked at each widening site; a witness that genuinely can't serialize (one carrying a live host
+  resource, or a module handle) is rejected at the **runtime airlock** (`ensure_crossable`), recoverably
+  and identically on serial == M:N — not at construction. (A native/FFI *fn value* is pure code and now
+  crosses by value / shared `Arc` — `WireValue::Native`/`Cffi` — so it is no longer rejected there.)
 - **Not sendable (checker):** native handles (file/regex/HTTP `Response`/etc.) and a **module
   namespace**. Capturing or passing either across the airlock is a **compile error** at a direct
   spawn/`Channel` site — whether captured directly by a `spawn:` block, or by a closure/nested-fn used

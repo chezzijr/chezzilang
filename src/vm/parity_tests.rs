@@ -262,69 +262,56 @@ fn protocol_value_crosses_channel_three_engine() {
     assert_parity(src);
 }
 
-/// Moved genuine-rejection coverage: an FFI handle (`Cffi`) crossing the airlock is rejected at
-/// RUNTIME on BOTH engines identically. NOTE: the checker no longer catches this — an extern fn's
-/// type is `fn(float)->float` (`Ty::Func`, always sendable), so the runtime airlock is the sole gate
-/// for genuinely-unserializable witnesses now that all protocol existentials are checker-sendable
-/// (Task 2 corollary). This is the replacement for the old checker-level "non-sendable protocol"
-/// rejections, which flipped to accepted because a plain protocol witness is a deep-copyable value.
+/// An FFI fn (`Cffi`) crosses the wire-value airlock BY VALUE (its shared `Arc<Cffi>`, the same the
+/// snapshot path already ships across M:N workers) — a spawn fn-ARG. `cos` reaches the task and
+/// computes `cos(0.0) == 1.0`, byte-identical serial == M:N. (Was runtime-rejected pre-fix: an extern
+/// fn's type is `fn(float)->float` (`Ty::Func`, checker-sendable), so the runtime airlock was the sole
+/// — and wrong — gate; a Cffi is pure code, not a heap-local handle, so it now crosses.)
 #[test]
-fn ffi_handle_cannot_cross_airlock_three_engine() {
-    let fault = parity_entry_fault(
+fn ffi_handle_crosses_airlock_three_engine() {
+    assert_parity_out(
         "extern \"libm.so.6\":\n    fn cos(x: float) -> float\nfn use_fn(g: fn(float) -> float):\n    print(g(0.0))\nf := cos\nparallel:\n    spawn use_fn(f)\n",
-    );
-    assert!(
-        fault.contains("module/native/FFI handle cannot cross"),
-        "expected the airlock handle-reject fault, got: {fault}"
+        "1.0\n",
     );
 }
 
-/// Airlock value-store gap: an FFI handle sent over a `Channel` must be rejected at RUNTIME on BOTH
-/// engines (previously serial silently crossed it, M:N reconstructed a garbage cross-heap GcRef).
-/// The reject fires in `channel_method` "send" regardless of a receiver — no spawn needed.
+/// An FFI fn sent over a `Channel` crosses by value and is callable after `recv` — `sqrt(9.0) == 3.0`,
+/// byte-identical on both engines (previously rejected at the `channel_method` "send" value-store).
 #[test]
-fn ffi_handle_cannot_cross_channel_send() {
-    let fault = parity_entry_fault(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nch.send(sqrt)\n",
-    );
-    assert!(
-        fault.contains("module/native/FFI handle cannot cross"),
-        "expected the airlock handle-reject fault, got: {fault}"
+fn ffi_handle_crosses_channel_send() {
+    assert_parity_out(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nch.send(sqrt)\nprint(ch.recv()(9.0))\n",
+        "3.0\n",
     );
 }
 
-/// Airlock value-store gap: `Shared(ffi_handle)` must be rejected at CONSTRUCTION on both engines.
+/// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by value and is callable after `get` —
+/// `sqrt(16.0) == 4.0` on both engines (previously rejected at the ctor value-store).
 #[test]
-fn ffi_handle_cannot_cross_shared_ctor() {
-    let fault = parity_entry_fault(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(sqrt)\n",
-    );
-    assert!(
-        fault.contains("module/native/FFI handle cannot cross"),
-        "expected the airlock handle-reject fault, got: {fault}"
+fn ffi_handle_crosses_shared_ctor() {
+    assert_parity_out(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(sqrt)\nprint(box.get()(16.0))\n",
+        "4.0\n",
     );
 }
 
-/// Airlock value-store gap: `Shared.set(ffi_handle)` — the STORE path distinct from the ctor — must
-/// reject on both engines (construct with a sendable closure first, then set an FFI handle).
+/// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by value and
+/// is callable after `get` — `sqrt(25.0) == 5.0` on both engines (previously rejected at the store).
 #[test]
-fn ffi_handle_cannot_cross_shared_set() {
-    let fault = parity_entry_fault(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(fn(x: float) -> float: x)\nbox.set(sqrt)\n",
-    );
-    assert!(
-        fault.contains("module/native/FFI handle cannot cross"),
-        "expected the airlock handle-reject fault, got: {fault}"
+fn ffi_handle_crosses_shared_set() {
+    assert_parity_out(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(fn(x: float) -> float: x)\nbox.set(sqrt)\nprint(box.get()(25.0))\n",
+        "5.0\n",
     );
 }
 
-/// The airlock reject is a RECOVERABLE `RuntimeError`, not a hard abort, and byte-identical on both
-/// engines: `recover:` catches it → `r is Err` → `true` on serial and M:N alike.
+/// The FFI-over-`Channel` send now SUCCEEDS (Ok), byte-identical on both engines: `recover:` sees an
+/// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the airlock accepts it.)
 #[test]
-fn ffi_handle_send_is_recoverable() {
+fn ffi_handle_send_succeeds() {
     assert_parity_out(
         "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nr := recover: ch.send(sqrt)\nmatch r:\n    Ok(v): print(\"false\")\n    Err(e): print(\"true\")\n",
-        "true\n",
+        "false\n",
     );
 }
 

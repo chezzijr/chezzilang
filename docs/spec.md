@@ -218,7 +218,7 @@ an **independent deep copy** (its parked frame rebuilt on the receiver), with ea
 recursively wired so a non-sendable slot rejects at the crossing. Because every task already gets its own
 frozen per-task copy of every module global, two tasks reaching the same module-global generator each
 drive their **own** independent copy (and the parent keeps its own), on both engines byte-identically.
-The reject shapes stay: a genuinely non-sendable parked slot (a host `Module`/`Native`/FFI handle, or a
+The reject shapes stay: a genuinely non-sendable parked slot (a `Module` handle, or a
 >depth-cap acyclic nest), a value cycle threaded through the generator, and the three HARD-ARM parked
 shapes (mid-`recover:` is now sendable; pending `defer` and multi-frame are checker-unreachable defensive
 guards) all reject cleanly with a graceful, catchable `... cannot be sent across tasks` error, **never** a
@@ -522,8 +522,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `Channel[int!]`, and `Channel[Drawable]` over any user protocol all type-check — the erased witness
   crosses the airlock by deep value copy, and the concrete witness's own sendability is checked at each
   widening site (a non-sendable witness is rejected there, not laundered). A witness that genuinely
-  can't serialize (one carrying an FFI/native handle) is rejected at the **runtime airlock**, not at
-  construction. See [`docs/syntax.md`](syntax.md) "Return type inference".
+  can't serialize (one carrying a `Module` handle — native/FFI *fn values* now cross by value) is
+  rejected at the **runtime airlock**, not at construction. See [`docs/syntax.md`](syntax.md) "Return type inference".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
