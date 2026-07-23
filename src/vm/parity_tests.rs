@@ -279,6 +279,75 @@ fn ffi_handle_cannot_cross_airlock_three_engine() {
     );
 }
 
+/// Airlock value-store gap: an FFI handle sent over a `Channel` must be rejected at RUNTIME on BOTH
+/// engines (previously serial silently crossed it, M:N reconstructed a garbage cross-heap GcRef).
+/// The reject fires in `channel_method` "send" regardless of a receiver — no spawn needed.
+#[test]
+fn ffi_handle_cannot_cross_channel_send() {
+    let fault = parity_entry_fault(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nch.send(sqrt)\n",
+    );
+    assert!(
+        fault.contains("module/native/FFI handle cannot cross"),
+        "expected the airlock handle-reject fault, got: {fault}"
+    );
+}
+
+/// Airlock value-store gap: `Shared(ffi_handle)` must be rejected at CONSTRUCTION on both engines.
+#[test]
+fn ffi_handle_cannot_cross_shared_ctor() {
+    let fault = parity_entry_fault(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(sqrt)\n",
+    );
+    assert!(
+        fault.contains("module/native/FFI handle cannot cross"),
+        "expected the airlock handle-reject fault, got: {fault}"
+    );
+}
+
+/// Airlock value-store gap: `Shared.set(ffi_handle)` — the STORE path distinct from the ctor — must
+/// reject on both engines (construct with a sendable closure first, then set an FFI handle).
+#[test]
+fn ffi_handle_cannot_cross_shared_set() {
+    let fault = parity_entry_fault(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(fn(x: float) -> float: x)\nbox.set(sqrt)\n",
+    );
+    assert!(
+        fault.contains("module/native/FFI handle cannot cross"),
+        "expected the airlock handle-reject fault, got: {fault}"
+    );
+}
+
+/// The airlock reject is a RECOVERABLE `RuntimeError`, not a hard abort, and byte-identical on both
+/// engines: `recover:` catches it → `r is Err` → `true` on serial and M:N alike.
+#[test]
+fn ffi_handle_send_is_recoverable() {
+    assert_parity_out(
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nr := recover: ch.send(sqrt)\nmatch r:\n    Ok(v): print(\"false\")\n    Err(e): print(\"true\")\n",
+        "true\n",
+    );
+}
+
+/// MUST-PRESERVE: a legit `Shared` handle STILL crosses a `Channel` (maps to `WireValue::Shared`,
+/// `has_handle()` == false) — the guard must not over-reject shared-core handles.
+#[test]
+fn positive_shared_handle_crosses_channel() {
+    assert_parity_out(
+        "import std.concurrency\ns := Shared(42)\nch := Channel[Shared[int]]()\nch.send(s)\nprint(ch.recv().get())\n",
+        "42\n",
+    );
+}
+
+/// MUST-PRESERVE: a nested `Shared[Shared[int]]` still constructs (the inner handle stores into the
+/// outer box) on both engines — the guard must not over-reject a shared-core store.
+#[test]
+fn positive_nested_shared_constructs() {
+    assert_parity_out(
+        "import std.concurrency\nprint(Shared(Shared(1)).get().get())\n",
+        "1\n",
+    );
+}
+
 // ----- named-factory-import member resolution: RUNTIME unaffected (gap #4) -----
 // These runs bypass the checker (compile+run directly), so they pass pre- AND post-fix — they lock
 // that the checker-only member-resolution fix leaves the runtime output byte-identical on both

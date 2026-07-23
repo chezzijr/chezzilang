@@ -2129,8 +2129,9 @@ impl Vm {
             Op::NewShared => {
                 let init = self.pop();
                 // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator) faults gracefully with this Op's span.
-                let init = self.to_wire_at(init, span)?;
+                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
+                // gracefully with this Op's span — the box is a shared cross-thread cell.
+                let init = self.to_wire_crossable(init, span)?;
                 let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore {
                     v: Mutex::new(init),
                     ..Default::default()
@@ -2140,8 +2141,9 @@ impl Vm {
             Op::NewRwShared => {
                 let init = self.pop();
                 // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator) faults gracefully with this Op's span.
-                let init = self.to_wire_at(init, span)?;
+                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
+                // gracefully with this Op's span — the box is a shared cross-thread cell.
+                let init = self.to_wire_crossable(init, span)?;
                 let h = self.heap.alloc(Obj::RwShared(Arc::new(RwSharedCore {
                     v: RwLock::new(init),
                     ..Default::default()

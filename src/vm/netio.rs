@@ -80,8 +80,9 @@ impl Vm {
     #[inline(never)]
     pub(super) fn new_atomic(&mut self, span: Span) -> Result<Value, RuntimeError> {
         let init = self.pop();
-        // A non-sendable init (a frame-holding generator) faults gracefully with the `NewAtomic` span.
-        let init = self.to_wire_at(init, span)?;
+        // A non-sendable init (a frame-holding generator / module/native/FFI handle) faults gracefully
+        // with the `NewAtomic` span — the box is a shared cross-thread cell.
+        let init = self.to_wire_crossable(init, span)?;
         Ok(Value::obj(self.heap.alloc(Obj::Atomic(Arc::new(
             AtomicCore {
                 v: Mutex::new(init),
@@ -1173,8 +1174,9 @@ impl Vm {
             "send" => {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy). A
-                // non-sendable value (a frame-holding generator) faults gracefully with `send`'s span.
-                let w = self.to_wire_at(args[0], span)?;
+                // non-sendable value (a frame-holding generator, or a module/native/FFI handle) faults
+                // gracefully with `send`'s span — the value crosses a heap boundary into the receiver.
+                let w = self.to_wire_crossable(args[0], span)?;
                 // Closed-channel guard: a `send` after `close()` faults (Go-panic analog). A `close`
                 // racing in the window between this check and the enqueue is benign — the value is
                 // still buffered and drained before the close is observed (drain-before-close), exactly
@@ -1196,7 +1198,7 @@ impl Vm {
             // SAME nondeterminism class as `try_recv` returning `None`-vs-`Some` under contention.
             "try_send" => {
                 self.arity_err("try_send", args, 1, span)?;
-                let w = self.to_wire_at(args[0], span)?;
+                let w = self.to_wire_crossable(args[0], span)?;
                 let core = self.channel_core(h);
                 let closed = core.q.lock().unwrap().closed;
                 if closed {
@@ -1663,7 +1665,7 @@ impl Vm {
                     return Err(self.err("send on a closed channel".to_string(), span));
                 }
                 let val = self.stack[slot + 1];
-                let w = self.to_wire_at(val, span)?;
+                let w = self.to_wire_crossable(val, span)?;
                 let sent = match core.cap {
                     None => {
                         self.channel_send_wire(h, w);
@@ -1880,7 +1882,7 @@ impl Vm {
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire_at(args[0], span)?;
+                let w = self.to_wire_crossable(args[0], span)?;
                 *self.shared_core(h).v.lock().unwrap() = w;
                 Ok(Value::nil())
             }
@@ -1908,7 +1910,7 @@ impl Vm {
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                let stored = self.to_wire_at(next, span)?;
+                let stored = self.to_wire_crossable(next, span)?;
                 *core.v.lock().unwrap() = stored;
                 Ok(Value::nil())
             }
@@ -1944,7 +1946,7 @@ impl Vm {
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire_at(args[0], span)?;
+                let w = self.to_wire_crossable(args[0], span)?;
                 *self.rwshared_core(h).v.write().unwrap() = w;
                 Ok(Value::nil())
             }
@@ -1987,7 +1989,7 @@ impl Vm {
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                let stored = self.to_wire_at(next, span)?;
+                let stored = self.to_wire_crossable(next, span)?;
                 *core.v.write().unwrap() = stored;
                 Ok(Value::nil())
             }
@@ -2016,13 +2018,13 @@ impl Vm {
             }
             "store" => {
                 self.arity_err("store", args, 1, span)?;
-                let w = self.to_wire_at(args[0], span)?;
+                let w = self.to_wire_crossable(args[0], span)?;
                 *self.atomic_core(h).v.lock().unwrap() = w;
                 Ok(Value::nil())
             }
             "exchange" => {
                 self.arity_err("exchange", args, 1, span)?;
-                let new_w = self.to_wire_at(args[0], span)?;
+                let new_w = self.to_wire_crossable(args[0], span)?;
                 let core = self.atomic_core(h);
                 let old = {
                     let mut g = core.v.lock().unwrap();
@@ -2040,13 +2042,19 @@ impl Vm {
                 let cur = self.from_wire(g.clone());
                 let swapped = self.values_equal(cur, args[0]);
                 if swapped {
-                    *g = self.to_wire_at(args[1], span)?;
+                    // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
+                    // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`
+                    // not the guard `g`, so it is safe to call under the value lock.
+                    *g = self.to_wire_crossable(args[1], span)?;
                 }
                 Ok(Value::bool(swapped))
             }
             "add" | "sub" => {
                 self.arity_err(method, args, 1, span)?;
-                let delta = self.to_wire_at(args[0], span)?;
+                // Uniformity: route through the guard like every other store site. The checker gates
+                // `add`/`sub` to numeric deltas, so the handle-reject arm is dead-but-harmless here —
+                // it just means a future non-numeric delta path can't forget the guard.
+                let delta = self.to_wire_crossable(args[0], span)?;
                 let core = self.atomic_core(h);
                 let mut g = core.v.lock().unwrap();
                 let new = match (&*g, &delta) {

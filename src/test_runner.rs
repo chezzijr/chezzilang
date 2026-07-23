@@ -503,10 +503,8 @@ struct Suite:
             .filter_map(|l| {
                 let (pass, rest) = if let Some(r) = l.strip_prefix("PASS ") {
                     (true, r)
-                } else if let Some(r) = l.strip_prefix("FAIL ") {
-                    (false, r)
                 } else {
-                    return None;
+                    (false, l.strip_prefix("FAIL ")?)
                 };
                 let name = rest.split(" (").next().unwrap_or(rest).to_string();
                 Some((name, pass))

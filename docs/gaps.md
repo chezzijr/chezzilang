@@ -1269,6 +1269,19 @@ non-`Error` protocol field launders past the gate" concern below is moot — tha
 sendable now (a protocol field crosses by deep value copy); a field holding an FFI/generator handle is
 caught at the runtime airlock. The historical Error-only record is kept below for provenance.
 
+**⚠️ Airlock value-store gap — CLOSED 2026-07-23.** The "caught at the runtime airlock" claim above
+held for the spawn-**arg**/capture/`submit`/worker-return paths (they pair `to_wire_at` with
+`ensure_crossable`) but was **false** for the cross-heap **value-store** paths: `Channel.send`/
+`try_send`/`wait:`-send-arm and every `Shared`/`RwShared`/`Atomic` construct/set/update/store/CAS
+called bare `to_wire_at` with NO handle reject. An FFI/native/module handle sent over a channel or
+stored in a `Shared` therefore crossed silently on `--serial` (and even executed) while M:N
+reconstructed a garbage cross-heap `GcRef` — serial≠M:N + type confusion. Fixed by routing every
+value-store site through a single `Vm::to_wire_crossable` helper (`= to_wire_at` then
+`ensure_crossable`, `src/vm/sched.rs`), so both engines now reject identically and recoverably at the
+send / store / construction site with the same `module/native/FFI handle cannot cross` message. Legit
+`Channel`/`Shared`/`Executor`/socket handles map to shared-`Arc` wire arms (`has_handle()` == false)
+and still cross unchanged (regressed by `positive_*` parity tests).
+
 **✅ LANDED (branch `feat/l7-sendable-error`, commits `c1b4ab4` core gate · `997e642` direct-literal
 guard · `2b29ed3` regression/residual tests · `ba2ea7c` recover diagnostic).** Surface shipped:
 **`Error`-only, sendable-bounded by default** (not all protocols — that over-rejects in-task
