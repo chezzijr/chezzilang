@@ -217,6 +217,33 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-23 (bug-hunt wave 4: 1 finding — `List[Any]` mixed-numeric literal silently widens int→float — OPEN, deferred pre-freeze)
+
+Adversarial pre-freeze hunt. (5 parallel subagents OOM-killed the box — `exit 137`, the cargo-memory-cap
+gotcha — so 4 domains were cut off mid-hunt with only their probed sub-areas reported consistent; NOT a clean
+sweep. One domain surfaced a lead, re-verified on the real binary.) One finding, **check-OK-then-wrong-value,
+parity-blind** (both engines agree on the wrong value; not serial≠M:N):
+
+- **`List[Any] = [1, 3.0]` silently stores `1.0` for the int — OPEN, DEFERRED past freeze.** `check` passes
+  (element type resolves to `Any`, int `1` accepted as int); at runtime `str(xs[0]) == "1.0"` and
+  `print(xs) == [1.0, 3.0]` on BOTH engines — Python keeps int `1` (`[1, 3.0]`). **Root cause
+  (checker⊋compiler, type-blind compiler):** `src/compiler/mod.rs` `ExprKind::List` arm widens untyped int
+  constants via the standalone `literal_numeric_mix` peephole whenever ≥1 float const sibling exists,
+  *regardless of the checker-resolved element type*. The compiler only gets `float_elem_hint == Some(Elem)`
+  for an explicit `List[float]`; an annotated `List[Any]` and an inferred-`List[float]` both arrive as
+  `None`, so the peephole can't tell "keep heterogeneous" from "join to float" and widens both.
+  **Blast radius is narrow:** only the TOP-LEVEL single `List[Any]` annotation leaks — the nested
+  (`List[List[Any]]`) and `Map[str,Any]` paths make the checker infer the literal's *joined* type
+  (`List[float]`/`Map[str,float]`) and cleanly REJECT the assignment. Control: `List[Any] = [1, 2]` (no float
+  sibling) keeps int. No crash, no fault, no parity divergence — one wrong value under the `Any` escape hatch.
+  **Why deferred:** the fix (checker sets `float_elem_hint` whenever it *resolves* element type to float —
+  annotated OR inferred-join — and the compiler drops the standalone peephole, widening only on the hint)
+  touches checker→compiler hint plumbing on the inferred-list path and must preserve inferred-`List[float]`
+  widening while suppressing the `Any` case; a regression-prone hint change right before the JIT freeze is a
+  bad value÷risk trade for a niche `Any`-escape-hatch shape. Revisit post-freeze if anyone hits it.
+  (This RE-FRAMES the wave-3 "safe-direction observation" below — the asymmetry was noted, but the silent
+  int→float *corruption* is new: the prior note only saw that `List[Any]=[1,3.0]` is *accepted*.)
+
 ## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings — `Channel.trip()` type-hole + native `count`/`split` empty-arg FIXED; 1 finding OPEN)
 
 Pre-freeze adversarial hunt, 5 disjoint domains (~248 probes, both engines). **3 domains CLEAN** (airlock 22,
@@ -265,6 +292,7 @@ re-verification on the real binary — all **shared-wrong / check-OK type holes*
 Safe-direction observations (NOT bugs — noted for a future look): protocol-embedded methods aren't callable
 through the interface value (`p: Person` can't call embedded `name()`) despite spec.md:973 "flattened at bound
 sites"; `List[Any]=[1,3.0]` accepted but `Map[str,Any]={"a":1,"b":3.0}` rejected (asymmetry vs spec's joint wording).
+**[UPDATE — wave 4, above]** the `List[Any]=[1,3.0]` half is NOT safe: it silently corrupts the int to `1.0`.
 
 ## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 3 fixes + 1 doc fix MERGED, 0 open findings, 2 dormant fragilities remain)
 
