@@ -4,6 +4,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test` FAIL vs ERROR split (docs/future.md §3b item #1, the
+> foundation wave).** A `test fn`/method is void, so `assert` is the ONLY intended failure signal; every
+> other runtime fault (OOB, div-by-zero, missing key, native fault, a crashed setup hook) is unexpected
+> and now renders **ERROR**, not FAIL — pytest's FAILED-vs-ERROR distinction. **Seam 1 (VM):**
+> `RuntimeError` (`src/vm/mod.rs`) gains `pub is_assert: bool` (default `false` via `#[derive(Default)]`;
+> `Display` unchanged → parity strings byte-identical, verified no whole-struct `==` compares it), set
+> `true` ONLY by the `Op::Assert` arm (`src/vm/exec.rs`). **Seam 2 (runner):** `Outcome.failure:
+> Option<(usize,String)>` → an extensible `Verdict` enum `{ Pass, Fail{line,msg}, Error{line,msg} }`
+> (`src/test_runner.rs`); a test-body fault routes assert→`Fail` else→`Error` (via `verdict_from_fault`),
+> every setup/teardown fault (construction, `before_all`/`before_each`/`after_each`) is `Error`-class
+> regardless of `is_assert`. Summary is now `P passed, F failed, E errored` (+ optional `K file
+> error(s)`); `report.passed` requires `F==E==file_errors==0`; exit non-zero if any. The `verdicts()`
+> dual-engine gate parser learned the `ERROR ` prefix so an errored test participates in serial==M:N.
+> The `Verdict` enum is the extension point for the ergonomics wave's `TimedOut`/`OverMemory` buckets.
+> Tests: 4 new runner `#[cfg(test)]` (error-bucket / fail-bucket / passing / hook-is-error); existing 9
+> runner tests + `chz_suite_passes_both_engines` green; verified end-to-end on both engines (one FAIL +
+> one ERROR + one PASS, identical, exit 1). **NO checker/compiler change.**
+>
 > **✅ CLEANUP (2026-07-23) — code-review dedup + doc-freshness (behavior-preserving, −202 LOC).** A 5-domain
 > review (no correctness bugs) drove two batches: (A) rewrote ~69 src + ~50 docs/examples comments referencing
 > the **removed** tree-walk interpreter to the real serial-VM vs M:N-VM parity story, plus doc-freshness fixes

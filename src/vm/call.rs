@@ -210,6 +210,7 @@ impl Vm {
                         let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
                             message: e.message,
                             span,
+                            is_assert: false,
                         })?;
                         Ok(self.lower_native(ret))
                     }
@@ -326,6 +327,7 @@ impl Vm {
         let ret = func(&mut host).map_err(|e| RuntimeError {
             message: e.message,
             span,
+            is_assert: false,
         })?;
         // A streamed `io.print` whose stdout died set `pending_exit` ([`Vm::emit_out`]) — turn it into
         // the same hard-halt sentinel `std.os.exit` returns, so the VM ends the run cleanly. (`os.exit`

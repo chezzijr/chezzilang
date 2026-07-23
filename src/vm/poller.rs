@@ -509,6 +509,7 @@ mod tests {
         super::super::RuntimeError {
             message: "deadlock".into(),
             span: Span { line: 1, col: 1 },
+            is_assert: false,
         }
     }
 

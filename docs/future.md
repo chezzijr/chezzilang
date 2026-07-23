@@ -264,20 +264,23 @@ runner (`src/test_runner.rs`). The native suite lives in **`tests/chz/`** (`spec
 run M:N-by-default (like `chezzi run`, `--serial` opt-out), with a `cargo test` dual-engine gate
 `test_runner::chz_suite_passes_both_engines` asserting serial==M:N. These are the ranked follow-ups.
 
-Current semantics (baseline): `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the
-message is any `str` **expression**, not just a literal — variable/interpolation/concat all work,
-checker-enforced `str`). **A runtime panic currently also renders FAIL**, indistinguishable from an
-assertion. File-level compile/type errors render ERROR (whole file, before any test runs).
+Current semantics: `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the message is
+any `str` **expression**, not just a literal — variable/interpolation/concat all work, checker-enforced
+`str`). **Any other runtime fault renders ERROR** (see item #1 below). File-level compile/type errors
+render ERROR too (whole file, before any test runs), counted separately as `file error(s)`.
 
-1. **FAIL vs ERROR split (highest value, cheapest).** A `test fn`/method is **void**, so `assert` is
-   the *only* intended failure signal → any other runtime fault (OOB, div-zero, overflow, missing key,
-   native fault) is by definition **unexpected** and should render **ERROR**, not FAIL. This is exactly
-   pytest's FAILED-vs-ERROR distinction ("wrong assumption" vs "code crashed"). **Seam:** `RuntimeError`
-   (`src/vm/mod.rs:37`) is `{ message, span }` with no kind — add a discriminator set ONLY in the
-   `Op::Assert` arm (`src/vm/exec.rs`, the `"assertion failed"` constructor), then `invoke_test` /
-   `run_suite` route assert-fault→FAIL, else→ERROR; summary becomes `P passed, F failed, E errored`,
-   exit non-zero if `F+E>0`. ~a dozen lines + report formatting. Can merge test-level ERROR with the
-   existing file-level ERROR bucket (pytest does).
+1. **FAIL vs ERROR split — DONE.** A `test fn`/method is **void**, so `assert` is the *only* intended
+   failure signal → any other runtime fault (OOB, div-zero, overflow, missing key, native fault) is by
+   definition **unexpected** and renders **ERROR**, not FAIL — pytest's FAILED-vs-ERROR distinction
+   ("wrong assumption" vs "code crashed"). **Landed:** `RuntimeError` (`src/vm/mod.rs`) carries a
+   `pub is_assert: bool` discriminator (default `false`; `Display` unchanged, so parity strings are
+   byte-identical), set `true` ONLY by the `Op::Assert` arm (`src/vm/exec.rs`). The runner's per-test
+   `Outcome` now holds an extensible `Verdict` enum `{ Pass, Fail{line,msg}, Error{line,msg} }`
+   (`src/test_runner.rs`): a free-test / test-method body fault routes assert→`Fail`, else→`Error`, and
+   every setup/teardown fault (suite construction, `before_all`/`before_each`/`after_each`) is
+   `Error`-class regardless of `is_assert`. Summary is now `P passed, F failed, E errored` (+ optional
+   `K file error(s)`); `report.passed` requires `F==E==file_errors==0`; exit non-zero if any. The
+   `Verdict` enum is the extension point for the ergonomics wave's `TimedOut`/`OverMemory` buckets.
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`
    aborts at the first bad case with no per-case verdict. A subtest construct that reports each case

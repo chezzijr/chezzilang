@@ -45,7 +45,11 @@ impl Vm {
         if !self.host.stream {
             return None;
         }
-        stream::out_dead_reason().map(|why| RuntimeError { message: why, span })
+        stream::out_dead_reason().map(|why| RuntimeError {
+            message: why,
+            span,
+            is_assert: false,
+        })
     }
 
     /// The stderr sink — same contract as [`Vm::emit_out`], on a SEPARATE writer + lock (so a task's
@@ -131,7 +135,11 @@ impl Vm {
     }
 
     pub(super) fn err(&self, message: String, span: Span) -> RuntimeError {
-        RuntimeError { message, span }
+        RuntimeError {
+            message,
+            span,
+            is_assert: false,
+        }
     }
 
     /// The shared recoverable fault raised by every structural walker when recursion exceeds
@@ -1441,7 +1449,13 @@ impl Vm {
                 } else {
                     "assertion failed".to_string()
                 };
-                return Err(self.err(message, span));
+                // The ONE site that flags an assert failure — the `test fn` runner buckets this as
+                // FAIL, every other (`is_assert: false`) fault as ERROR.
+                return Err(RuntimeError {
+                    message,
+                    span,
+                    is_assert: true,
+                });
             }
             Op::GetLocal(slot) => {
                 let v = self.stack[self.base() + slot];

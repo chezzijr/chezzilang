@@ -34,10 +34,18 @@ use crate::{lexer, parser};
 
 /// A runtime error, with the source span it occurred at. Mirrors `interp::RuntimeError` (same
 /// `Display`) so the two engines' failures compare equal in parity tests.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `is_assert` distinguishes an `assert` failure (the ONE intended failure signal of a `test fn`)
+/// from any other runtime fault (OOB, div-by-zero, missing key, native fault, …). It is set `true`
+/// only by the `Op::Assert` arm; every other constructor leaves it `false` (the `Default`). The
+/// `chezzi test` runner reads it to bucket a fault as FAIL vs ERROR. It is deliberately NOT part of
+/// `Display` (which stays message+span only, byte-identical across engines) and the same fault
+/// yields the same flag on both schedulers, so parity is unaffected.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuntimeError {
     pub message: String,
     pub span: Span,
+    pub is_assert: bool,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -2780,6 +2788,7 @@ impl MnSched {
                 Ok(Err(e)) => Err(RuntimeError {
                     message: e.message,
                     span,
+                    is_assert: false,
                 }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };
@@ -2928,6 +2937,7 @@ fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span) -> Runtime
     RuntimeError {
         message: format!("internal error: a parallel task panicked: {msg}"),
         span,
+        is_assert: false,
     }
 }
 
@@ -3662,6 +3672,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                 Err(RuntimeError {
                     message: e.to_string(),
                     span: Span { line: 1, col: 1 },
+                    is_assert: false,
                 }),
             );
         }
@@ -3674,6 +3685,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                 Err(RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 }),
             );
         }
@@ -3686,6 +3698,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                 Err(RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 }),
             );
         }
@@ -3733,15 +3746,18 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
             let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
                 message: e.to_string(),
                 span: Span { line: 1, col: 1 },
+                is_assert: false,
             })?;
             let module = parser::parse(tokens).map_err(|e| RuntimeError {
                 message: e.message,
                 span: e.span,
+                is_assert: false,
             })?;
             let program =
                 crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.parallel = true;
@@ -3772,6 +3788,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                         Err(RuntimeError {
                             message: e.to_string(),
                             span: Span { line: 1, col: 1 },
+                            is_assert: false,
                         }),
                     );
                 }
@@ -3784,6 +3801,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                     );
                 }
@@ -3796,6 +3814,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                     );
                 }
@@ -3835,6 +3854,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                         Err(RuntimeError {
                             message: e.to_string(),
                             span: Span { line: 1, col: 1 },
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -3847,6 +3867,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -3859,6 +3880,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -3890,15 +3912,18 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
             let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
                 message: e.to_string(),
                 span: Span { line: 1, col: 1 },
+                is_assert: false,
             })?;
             let module = parser::parse(tokens).map_err(|e| RuntimeError {
                 message: e.message,
                 span: e.span,
+                is_assert: false,
             })?;
             let program =
                 crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.run()
@@ -3935,6 +3960,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                         Err(RuntimeError {
                             message: e.to_string(),
                             span: Span { line: 1, col: 1 },
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -3947,6 +3973,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -3959,6 +3986,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                         Err(RuntimeError {
                             message: e.message,
                             span: e.span,
+                            is_assert: false,
                         }),
                         0,
                     );
@@ -4076,6 +4104,7 @@ fn run_file_inner(
                 Err(RunError::plain(RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 })),
                 None,
             );
@@ -4090,6 +4119,7 @@ fn run_file_inner(
                 Err(RunError::plain(RuntimeError {
                     message: e.message,
                     span: e.span,
+                    is_assert: false,
                 })),
                 None,
             );

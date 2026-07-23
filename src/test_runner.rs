@@ -19,14 +19,41 @@ pub struct TestReport {
     pub passed: bool,
 }
 
+/// One test's verdict. `assert` is the ONE intended failure signal of a (void) `test fn`, so an
+/// `assert` fault is a `Fail`; any OTHER runtime fault (OOB, div-by-zero, missing key, native fault,
+/// a crashed setup hook) is an unexpected `Error` — the pytest FAILED-vs-ERROR distinction.
+///
+/// Extension point for the ergonomics wave: new buckets (`TimedOut`, `OverMemory`, …) become new
+/// variants here; the render loop + summary + `passed` flag fan out from a single `match`.
+enum Verdict {
+    Pass,
+    Fail { line: usize, msg: String },
+    Error { line: usize, msg: String },
+}
+
 /// One test's result (for the report + summary counts).
 struct Outcome {
     /// The test's name (`fn_name` for a free test, `Suite::method` for a suite test).
     name: String,
     /// The `*_test.chz` file the test came from (the `file` half of `file:line`).
     file: String,
-    /// `None` ⇒ pass; `Some((line, message))` ⇒ fail at that source line.
-    failure: Option<(usize, String)>,
+    /// Pass / Fail (assert) / Error (any other fault).
+    verdict: Verdict,
+}
+
+/// Bucket a caught per-test `RuntimeError`: an `assert` failure → `Fail`, anything else → `Error`.
+fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
+    if e.is_assert {
+        Verdict::Fail {
+            line: e.span.line,
+            msg: e.message,
+        }
+    } else {
+        Verdict::Error {
+            line: e.span.line,
+            msg: e.message,
+        }
+    }
 }
 
 /// Run every `test fn` discovered under `root` (a single `*_test.chz` file or a directory walked
@@ -68,18 +95,28 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 
     // Per-test lines, then a summary.
     for o in &outcomes {
-        match &o.failure {
-            None => report.push_str(&format!("PASS {} ({})\n", o.name, o.file)),
-            Some((line, msg)) => {
+        match &o.verdict {
+            Verdict::Pass => report.push_str(&format!("PASS {} ({})\n", o.name, o.file)),
+            Verdict::Fail { line, msg } => {
                 report.push_str(&format!("FAIL {} ({}:{}) {}\n", o.name, o.file, line, msg))
+            }
+            Verdict::Error { line, msg } => {
+                report.push_str(&format!("ERROR {} ({}:{}) {}\n", o.name, o.file, line, msg))
             }
         }
     }
     let total = outcomes.len();
-    let failed = outcomes.iter().filter(|o| o.failure.is_some()).count();
-    let passed_count = total - failed;
+    let failed = outcomes
+        .iter()
+        .filter(|o| matches!(o.verdict, Verdict::Fail { .. }))
+        .count();
+    let errored = outcomes
+        .iter()
+        .filter(|o| matches!(o.verdict, Verdict::Error { .. }))
+        .count();
+    let passed_count = total - failed - errored;
     report.push_str(&format!(
-        "\n{total} test(s): {passed_count} passed, {failed} failed"
+        "\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored"
     ));
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
@@ -95,7 +132,7 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 
     TestReport {
         text: report,
-        passed: failed == 0 && file_errors == 0 && !no_tests_discovered,
+        passed: failed == 0 && errored == 0 && file_errors == 0 && !no_tests_discovered,
     }
 }
 
@@ -147,15 +184,15 @@ fn invoke_all(
 
     // Free tests, in declaration order.
     for (name, proto) in program.tests.iter() {
-        let failure = vm
-            .invoke_test(*proto)
-            .err()
-            .map(|e| (e.span.line, e.message));
+        let verdict = match vm.invoke_test(*proto) {
+            Ok(()) => Verdict::Pass,
+            Err(e) => verdict_from_fault(e),
+        };
         let _ = vm.take_out(); // discard the test's stdout (kept reusable)
         outcomes.push(Outcome {
             name: name.clone(),
             file: file_label.clone(),
-            failure,
+            verdict,
         });
     }
 
@@ -174,7 +211,8 @@ fn invoke_all(
 fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mut Vec<Outcome>) {
     let hook = |name: &str| suite.hooks.get(name).copied();
 
-    // Construct the instance. A failure here fails every test in the suite (nothing can run).
+    // Construct the instance. A failure here fails every test in the suite (nothing can run). A
+    // crashed constructor is setup failure → ERROR-class (the test never ran), whatever the fault.
     let instance = match vm.build_suite_instance(suite.new_thunk) {
         Ok(v) => v,
         Err(e) => {
@@ -182,10 +220,10 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
                 out.push(Outcome {
                     name: format!("{}::{}", suite.name, tname),
                     file: file.to_string(),
-                    failure: Some((
-                        e.span.line,
-                        format!("suite construction failed: {}", e.message),
-                    )),
+                    verdict: Verdict::Error {
+                        line: e.span.line,
+                        msg: format!("suite construction failed: {}", e.message),
+                    },
                 });
             }
             return;
@@ -193,6 +231,7 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
     };
 
     // before_all? — a failure fails the whole suite (no test method runs); after_all still runs.
+    // A hook fault is setup failure → ERROR-class.
     if let Some(p) = hook("before_all")
         && let Err(e) = vm.invoke_suite_method(p, instance)
     {
@@ -200,7 +239,10 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
             out.push(Outcome {
                 name: format!("{}::{}", suite.name, tname),
                 file: file.to_string(),
-                failure: Some((e.span.line, format!("before_all failed: {}", e.message))),
+                verdict: Verdict::Error {
+                    line: e.span.line,
+                    msg: format!("before_all failed: {}", e.message),
+                },
             });
         }
         if let Some(ap) = hook("after_all") {
@@ -211,35 +253,43 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
     }
 
     for (tname, proto) in suite.tests.iter() {
-        // before_each? — a failure is the test's failure (the method is skipped); after_each still runs.
-        let mut failure: Option<(usize, String)> = None;
+        let mut verdict = Verdict::Pass;
+        // before_each? — a failure is the test's failure (the method is skipped); after_each still
+        // runs. A hook crash is setup failure → ERROR-class.
         if let Some(p) = hook("before_each")
             && let Err(e) = vm.invoke_suite_method(p, instance)
         {
-            failure = Some((e.span.line, format!("before_each failed: {}", e.message)));
+            verdict = Verdict::Error {
+                line: e.span.line,
+                msg: format!("before_each failed: {}", e.message),
+            };
         }
-        // The test method itself (only if before_each passed).
-        if failure.is_none()
+        // The test method itself (only if before_each passed). This is the ONE place an `assert`
+        // fault reads as FAIL; any other fault in the body is ERROR (via `verdict_from_fault`).
+        if matches!(verdict, Verdict::Pass)
             && let Err(e) = vm.invoke_suite_method(*proto, instance)
         {
-            failure = Some((e.span.line, e.message));
+            verdict = verdict_from_fault(e);
         }
         // after_each? — ALWAYS runs (even on failure, like `defer`), so the invocation must NOT be
-        // short-circuited by `failure`. It does not mask the original failure; only if the test
-        // passed but after_each itself faults does that become the test's failure.
+        // short-circuited. It does not mask the original failure; only if the test passed but
+        // after_each itself faults does that become the test's (ERROR-class) failure.
         if let Some(p) = hook("after_each") {
             let ae = vm.invoke_suite_method(p, instance);
-            if failure.is_none()
+            if matches!(verdict, Verdict::Pass)
                 && let Err(e) = ae
             {
-                failure = Some((e.span.line, format!("after_each failed: {}", e.message)));
+                verdict = Verdict::Error {
+                    line: e.span.line,
+                    msg: format!("after_each failed: {}", e.message),
+                };
             }
         }
         let _ = vm.take_out();
         out.push(Outcome {
             name: format!("{}::{}", suite.name, tname),
             file: file.to_string(),
-            failure,
+            verdict,
         });
     }
 
@@ -497,16 +547,20 @@ struct Suite:
     /// Collect the per-test verdicts of a report as `(name, passed?)` pairs, in report order — the
     /// engine-independent signal the dual-engine gate compares. Parses the rendered lines (the
     /// `Outcome` list isn't public) — `PASS <name> (...)` / `FAIL <name> (...) ...`.
-    fn verdicts(text: &str) -> Vec<(String, bool)> {
+    fn verdicts(text: &str) -> Vec<(String, &'static str)> {
         text.lines()
             .filter_map(|l| {
-                let (pass, rest) = if let Some(r) = l.strip_prefix("PASS ") {
-                    (true, r)
+                let (tag, rest) = if let Some(r) = l.strip_prefix("PASS ") {
+                    ("PASS", r)
+                } else if let Some(r) = l.strip_prefix("FAIL ") {
+                    ("FAIL", r)
                 } else {
-                    (false, l.strip_prefix("FAIL ")?)
+                    // ERROR must participate too: a test that ERRORs on one engine but FAILs/PASSes
+                    // on the other is a parity bug the gate has to catch, not silently drop.
+                    ("ERROR", l.strip_prefix("ERROR ")?)
                 };
                 let name = rest.split(" (").next().unwrap_or(rest).to_string();
-                Some((name, pass))
+                Some((name, tag))
             })
             .collect()
     }
@@ -542,6 +596,115 @@ struct Suite:
             "serial vs M:N verdict mismatch — a parity bug.\nserial:\n{}\nM:N:\n{}",
             serial.text,
             parallel.text
+        );
+    }
+
+    #[test]
+    fn error_bucket_for_non_assert_fault() {
+        // A test whose body faults on something OTHER than `assert` (here an out-of-bounds index) is
+        // an unexpected fault → the ERROR bucket, not FAIL. Indexing is dynamic, so it faults at
+        // runtime rather than being caught by the checker.
+        let d = TmpDir::new();
+        let f = d.write(
+            "boom_test.chz",
+            "test fn boom():\n    xs := [1]\n    y := xs[5]\n    print(y)\n",
+        );
+        let report = run_tests(&f, false);
+        assert!(
+            !report.passed,
+            "an errored test fails the run; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("ERROR boom"),
+            "non-assert fault must render ERROR; report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("FAIL boom"),
+            "must NOT be a FAIL; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("1 errored"),
+            "summary must count the ERROR bucket; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn fail_bucket_for_assert_false() {
+        // A plain `assert false` is the intended failure signal → FAIL, never ERROR.
+        let d = TmpDir::new();
+        let f = d.write(
+            "af_test.chz",
+            "test fn boom():\n    assert false, \"nope\"\n",
+        );
+        let report = run_tests(&f, false);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("FAIL boom"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("ERROR boom"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("1 failed, 0 errored"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn passing_test_is_pass_and_report_passed() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "ok_test.chz",
+            "test fn one():\n    assert true\ntest fn two():\n    assert true\n",
+        );
+        let report = run_tests(&f, false);
+        assert!(report.passed, "report:\n{}", report.text);
+        assert!(
+            report
+                .text
+                .contains("2 test(s): 2 passed, 0 failed, 0 errored"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn hook_fault_is_error_not_fail() {
+        // A fault in a setup hook (here `before_each`) means the fixture crashed — that is ERROR-class
+        // (the test itself never got to run its assertions), regardless of whether the hook used
+        // `assert` or faulted some other way.
+        let d = TmpDir::new();
+        let src = "\
+struct Suite:
+    fn before_each(self):
+        xs := [1]
+        y := xs[5]
+        print(y)
+
+    test fn t(self):
+        assert true
+";
+        let f = d.write("hook_test.chz", src);
+        let report = run_tests(&f, false);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("ERROR Suite::t"),
+            "hook fault is ERROR-class; report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("FAIL Suite::t"),
+            "report:\n{}",
+            report.text
         );
     }
 
