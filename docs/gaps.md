@@ -1684,9 +1684,22 @@ preservation (the AST doesn't carry comments today).
 
 ### T4. Test tooling is thin (but the base is honest)
 `assert cond, msg`, `test fn`, `*_test.chz` discovery, `PASS/FAIL name (file:line)`, non-zero exit — a
-real runner. Missing: **test filtering** (`chezzi test` rejects *every* flag, so on a big suite it's all
-or nothing — a ~20-line change and the best ratio in this file), fixtures/setup-teardown, coverage,
-benchmarks, `assert_eq` with a diff, parallel execution, machine-readable output (`go test -json`).
+real runner. **FAIL vs ERROR split SHIPPED (2026-07-24, §3b #1):** an `assert` failure buckets as FAIL,
+any other runtime fault as ERROR (summary `P passed, F failed, E errored`). Missing: **test filtering**
+(`chezzi test` rejects *every* flag, so on a big suite it's all or nothing — a ~20-line change and the
+best ratio in this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff,
+parallel execution, machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b`
+follow-ups (CLI ergonomics + `--max-heap`/`--timeout` resource caps, in progress).
+
+**KNOWN-LIMIT — assert inside an FFI callback buckets ERROR, not FAIL (found 2026-07-24, WON'T-FIX).**
+The FAIL/ERROR split reads `RuntimeError.is_assert`, set true only by the `Op::Assert` arm. But when a
+Chezzi closure fires as a *scalar-only C callback* (`invoke_callback`, `src/vm/mod.rs`), an inner
+`assert false` is laundered through `HostError` — which carries only `message` — and re-raised
+`is_assert:false` at the native-return boundary (`src/vm/call.rs:210/326`), so the runner tags it ERROR.
+Deterministic (both engines agree — not a parity bug), and the test still FAILS with a non-zero exit; only
+the bucket *label* is wrong, on an exotic path. The clean fix (thread `is_assert` through `HostError` +
+its ~10 construction sites) grows a boundary type for one cosmetic label — poor trade, so documented not
+fixed. Revisit only if FFI-callback tests become common.
 
 ### T5. No debugger, no profiler, no doc generator
 - **Debugger:** nothing (no breakpoints, no DAP, no stepping). What exists is post-mortem: a fault
