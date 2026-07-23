@@ -235,18 +235,17 @@ CODE is right, the doc lied; corrected to point at `s.encode()`.
   `order_key`). **FIXED + MERGED** (753882d — its own session-log entry below).
 - **Native/Cffi wire-path airlock** — the snap path shipped them but the wire path rejected them.
   **FIXED + MERGED** (f6e5ec3 — its own entry below). (This whole bug was the seed of the wave.)
-- **Aliased native-struct import escapes reserved-type redeclare protection — OPEN (medium, checker
-  over-accept, NO runtime trap).** `import Match as M from std.regex` + `struct Match:` is ACCEPTED, while the
-  UN-aliased `import Match from std.regex` + `struct Match` is correctly REJECTED ("type 'Match' is reserved
-  (builtin)"). Root: `bind_import` From-import nominal-struct arm (`src/checker/setup.rs:~1481-1495`) records
-  the reservation under the BIND name (`M`), not the member name (`Match`), and has no rename-reject (unlike
-  the opaque-handle arms). Produces the self-contradictory diagnostic "cannot assign Match to variable of type
-  Match" (native `M` vs user `Match` coexist as distinct types). **Verified NOT a runtime trap** — the checker
-  keeps native/user `Match` distinct by origin (different `tid`s), rejects cross-use, and no native fn CONSUMES
-  a `Match` (regex fns take `(str,str)`), so no smuggling path. The audit's "seed-overwrite → find()-return
-  type-confusion → trap" theory was DISPROVEN on the real binary. Fix (not applied): reject renaming a
-  Builtin-origin native struct on import (mirror the opaque-handle arms), or key the reservation on the member
-  name. Deferred — it's a checker change (the area auto-task historically over-reaches on).
+- **Aliased native-struct import escapes reserved-type redeclare protection — RESOLVED-as-reframed
+  (message fix).** The aliased case (`import Match as M from std.regex` + `struct Match:`) was never the bug:
+  `M` is the imported name, `Match` is free, so accepting `struct Match` is CORRECT. The real defect was the
+  UN-aliased case reporting the WRONG message — `import Match from std.regex` + `struct Match` said "type
+  'Match' is reserved (builtin)" when these first-class Rust-bridged module-exported types are NOT reserved
+  (a bare unimported `struct Match` is legal). It is an ordinary import-name collision, so it now reads "type
+  'Match' is already defined" — aligned with the enum/newtype/typealias sibling arms, which already said so
+  (they collide via `struct_names`). Fix: the struct hoist-guard (`src/checker/setup.rs:~2337`) moved
+  `imported_builtin_types.contains(name)` out of the reserved branch and into the `already_defined` branch.
+  Still a hard reject (no accept-then-trap); only the message text changed. Genuine global reserved types
+  (`int`/`Channel`/…) keep "reserved (builtin)".
 
 **Two DORMANT structural fragilities (no live trigger — not bugs, worth a cheap guard before freeze):**
 - **Channel is the one native handle OFF the unified method-dispatch path** (`call.rs:989` / checker

@@ -2328,28 +2328,36 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
-                    // struct (Match/Response/ProcResult, …) is reserved against a same-named user
-                    // `struct` decl — declaring it would overwrite the native seed yet the runtime
-                    // still constructs/returns the native shape, so the check-clean program would trap
-                    // at runtime on a field mismatch. (A bare unimported `struct Match` stays legal —
-                    // the name isn't in the set without the import event.)
+                    // Genuine GLOBAL reserved types (`int`/`Channel`/`Result`/…), reserved protocols,
+                    // and FFI width types are one-way-ratchet names — a `struct` decl of one is a
+                    // `reserved (builtin)` violation.
                     if is_reserved_type(name)
                         || is_reserved_protocol(name)
                         || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
-                        || self.imported_builtin_types.contains(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
+                    // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
+                    // struct (Match/Response/ProcResult, …) is a first-class Rust-bridged
+                    // module-exported type — NOT reserved (a bare unimported `struct Match` is legal;
+                    // the name isn't in the set without the import event). Importing it, then declaring
+                    // a same-named `struct`, is an ordinary import-name collision — the same "already
+                    // defined" error the enum/newtype/typealias siblings emit (they collide via
+                    // `struct_names`). It stays a hard reject (declaring it would overwrite the native
+                    // seed yet the runtime still constructs/returns the native shape → runtime field
+                    // trap); only the message is corrected from "reserved" to "already defined".
+                    //
                     // A pre-seeded synthetic stdlib struct (`Match`/`Response`/`ProcResult`, always
                     // present in `self.structs` under its bare key tagged `StructOrigin::Builtin` for
                     // import-free field access) is NOT a real prior definition — a user `struct
                     // Response` shadows it (the hoist insert below overwrites the seed with the user's
-                    // `User`-origin layout). Only a genuine User-origin entry is "already defined".
-                    let already_defined = self
-                        .structs
-                        .get(&self.bare_key(name))
-                        .is_some_and(|i| i.origin != StructOrigin::Builtin);
+                    // `User`-origin layout). Only a genuine User-origin entry, OR an active
+                    // import-license on this name, is "already defined".
+                    let already_defined = self.imported_builtin_types.contains(name)
+                        || self
+                            .structs
+                            .get(&self.bare_key(name))
+                            .is_some_and(|i| i.origin != StructOrigin::Builtin);
                     if already_defined {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }

@@ -582,7 +582,7 @@ and `std.process` respectively), **not** reserved program-global names. Field ac
 and as `regex.Match(...)`; or `import Match from std.regex`). The names are therefore free for user
 types — a user `struct Response` without `import std.request` is their own type. But importing the type
 **and** declaring a same-named `struct` in the same module is a collision, rejected at check (`type
-'Response' is reserved (builtin)`) — never accept-then-trap.
+'Response' is already defined`) — never accept-then-trap.
 `get(url, timeout_ms?: int) -> Result[Response]` · `get_bytes(url, timeout_ms?: int) -> Result[bytes]` ·
 `post(url, body, timeout_ms?: int) -> Result[Response]` ·
 `put(url, body)` · `patch(url, body)` · `delete(url)` · `head(url)` ·

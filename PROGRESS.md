@@ -4,6 +4,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CHECKER DIAGNOSTIC (2026-07-23) — imported native-struct redeclare now says "already defined".**
+> `import Match from std.regex` + `struct Match` reported "type 'Match' is reserved (builtin)" — wrong:
+> `Match`/`Response`/`ProcResult`/`FileInfo`/`Ref` are first-class Rust-bridged module-exported types,
+> NOT reserved (a bare unimported `struct Match` is legal). It is an ordinary import-name collision, so
+> it now reads "type 'Match' is already defined" — aligned with the enum/newtype/typealias sibling arms
+> (which already said so via `struct_names`). Fix: struct hoist-guard (`src/checker/setup.rs:~2337`)
+> moved `imported_builtin_types.contains(name)` out of the reserved branch into `already_defined`. Still
+> a hard reject (no accept-then-trap); message-only. Genuine global reserved types (`int`/`Channel`/…)
+> keep "reserved (builtin)". Tests: updated `import_plus_same_name_struct_decl_rejected` + 3 regressions.
+> Docs: `docs/gaps.md` (note RESOLVED-as-reframed), `docs/stdlib.md`.
+
 > **✅ AIRLOCK (2026-07-23) — value-store paths now handle-gated (serial==M:N).** An FFI/native/module
 > handle crossing `Channel.send`/`try_send`/`wait:`-send or stored into a `Shared`/`RwShared`/`Atomic`
 > (construct/set/update/store/exchange/CAS) was UNGUARDED — bare `to_wire_at`, no `ensure_crossable`. On

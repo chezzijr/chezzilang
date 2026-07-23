@@ -7075,11 +7075,13 @@ fn user_struct_match_without_import_ok() {
     );
 }
 
-// SOUNDNESS HOLE: `import X from M` + a same-named user `struct X` (for the four native
-// struct-modeled types Ref/Match/Response/ProcResult, and every other import-gated std struct)
-// must be a CLEAN check-time `reserved (builtin)` error — NEVER accept-then-trap at runtime. The
-// import licenses the bare name as a Builtin-origin layout; a user `struct X` would overwrite the
-// seed and carry the user layout while the runtime returns/constructs the native shape → field trap.
+// COLLISION: `import X from M` + a same-named user `struct X` (for the four native struct-modeled
+// types Ref/Match/Response/ProcResult, and every other import-gated std struct) must be a CLEAN
+// check-time `already defined` error — NEVER accept-then-trap at runtime. The import licenses the
+// bare name as a Builtin-origin layout; a user `struct X` would overwrite the seed and carry the
+// user layout while the runtime returns/constructs the native shape → field trap. These types are
+// NOT reserved (a bare unimported `struct Match` is legal) — the import is an ordinary name
+// collision, exactly like the enum/newtype/typealias siblings already report.
 #[test]
 fn import_plus_same_name_struct_decl_rejected() {
     // from-import form, the struct-modeled natives
@@ -7099,15 +7101,16 @@ fn import_plus_same_name_struct_decl_rejected() {
     ] {
         let errs = check_entry(src);
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("reserved (builtin)") && e.message.contains(name)),
-            "expected `{name}` reserved-builtin error, got: {errs:?}"
+            errs.iter().any(|e| e.message.contains("already defined")
+                && e.message.contains(name)
+                && !e.message.contains("reserved")),
+            "expected `{name}` already-defined error, got: {errs:?}"
         );
     }
     // whole-module form
     entry_rejects(
         "import std.regex\nstruct Match:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "reserved (builtin)",
+        "already defined",
     );
 }
 
@@ -7126,6 +7129,39 @@ fn import_does_not_over_reject_distinct_struct_name() {
 fn bare_struct_procresult_without_import_ok() {
     entry_ok(
         "struct ProcResult:\n    x: int\nfn main():\n    r := ProcResult(5)\n    print(str(r.x))\nmain()\n",
+    );
+}
+
+// BOUNDARY: `import Match as M` binds only `M` (not `Match`) into `imported_builtin_types`, so a
+// same-named `struct Match` is a FREE name, not a collision — must stay accepted.
+#[test]
+fn import_alias_native_struct_same_name_ok() {
+    entry_ok(
+        "import Match as M from std.regex\nstruct Match:\n    v: int\nfn main():\n    print(str(Match(1).v))\nmain()\n",
+    );
+}
+
+// PARITY TARGET: the enum sibling arm already reports `already defined` for the same import
+// collision (it collides via `struct_names`) — pin it so the struct arm keeps matching it.
+#[test]
+fn import_plus_same_name_enum_still_already_defined() {
+    entry_rejects(
+        "import Match from std.regex\nenum Match:\n    A\nfn main():\n    print(1)\nmain()\n",
+        "already defined",
+    );
+}
+
+// REGRESSION: genuine GLOBAL reserved types stay `reserved (builtin)` — the collision-message fix
+// for imported natives must not touch the true-reserved path.
+#[test]
+fn struct_reserved_global_still_reserved() {
+    entry_rejects(
+        "struct int:\n    x: int\nfn main():\n    print(1)\nmain()\n",
+        "reserved (builtin)",
+    );
+    entry_rejects(
+        "struct Channel:\n    x: int\nfn main():\n    print(1)\nmain()\n",
+        "reserved (builtin)",
     );
 }
 
