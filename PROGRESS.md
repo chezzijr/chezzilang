@@ -4,6 +4,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ AIRLOCK (2026-07-23) — value-store paths now handle-gated (serial==M:N).** An FFI/native/module
+> handle crossing `Channel.send`/`try_send`/`wait:`-send or stored into a `Shared`/`RwShared`/`Atomic`
+> (construct/set/update/store/exchange/CAS) was UNGUARDED — bare `to_wire_at`, no `ensure_crossable`. On
+> `--serial` the handle crossed silently (and even executed); on M:N `from_wire` rebuilt a garbage
+> cross-heap `GcRef` → serial≠M:N + type confusion. Root-cause fix: one `Vm::to_wire_crossable` helper
+> (`= to_wire_at` then `ensure_crossable`, `src/vm/sched.rs`) swapped in at every value-store site
+> (`src/vm/netio.rs`, `src/vm/exec.rs`) so a NEW store path physically can't forget the guard. Both
+> engines now reject identically + recoverably (`recover:` catches it) at the send/store/construction
+> site with the existing `module/native/FFI handle cannot cross` message. Legit `Channel`/`Shared`/
+> `Executor`/socket handles (shared-`Arc` wire arms, `has_handle()`==false) still cross unchanged —
+> regressed by `positive_*` parity tests. VM-only; checker/compiler untouched. Tests: 4 fault + 2
+> positive in `vm/parity_tests.rs`. Docs: `docs/gaps.md` L7 (the "caught at the runtime airlock" claim
+> was false for value-store paths — now noted CLOSED).
+
 > **✅ TESTING (2026-07-23) — dedicated native test suite `tests/chz/` + dual-engine parity gate.**
 > New home for Chezzi-language behavior tests, separate from `examples/` (print-and-golden demos):
 > `tests/chz/{spec,stdlib,suites}/` with a `README.md`. The 10 existing `examples/*_test.chz` MOVED to

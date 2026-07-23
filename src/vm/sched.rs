@@ -2127,6 +2127,24 @@ impl Vm {
         self.to_wire(v).map_err(|e| self.err(e.message, span))
     }
 
+    /// `to_wire_at` PLUS the [`ensure_crossable`](Vm::ensure_crossable) handle-reject backstop — the
+    /// serialize step used at every cross-heap VALUE-STORE site (`Channel.send`/`try_send`,
+    /// `Shared`/`RwShared`/`Atomic` construct/set/update/store/CAS/…). The spawn-arg / capture /
+    /// `submit` paths pair `to_wire_at` with `ensure_crossable` by hand; the value-store paths route
+    /// through this single helper so a NEW store path physically can't forget the guard (a module /
+    /// native / FFI handle silently crossing a channel was serial≠M:N + cross-heap corruption). Legit
+    /// `Channel`/`Shared`/`Executor`/socket handles map to shared-`Arc` wire arms (`has_handle()` ==
+    /// false), so they still cross unchanged.
+    pub(super) fn to_wire_crossable(
+        &self,
+        v: Value,
+        span: Span,
+    ) -> Result<WireValue, RuntimeError> {
+        let w = self.to_wire_at(v, span)?;
+        self.ensure_crossable(&w, span)?;
+        Ok(w)
+    }
+
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
     /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
     /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
