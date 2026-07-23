@@ -2040,7 +2040,10 @@ impl Vm {
                 // lock can stay held while they run.
                 let mut g = core.v.lock().unwrap();
                 let cur = self.from_wire(g.clone());
-                let swapped = self.values_equal(cur, args[0]);
+                // Propagate a cyclic-operand depth fault (`?`) instead of swallowing it — consistent
+                // with `==` and every container membership site. The `?` runs BEFORE the store, so a
+                // fault leaves the box unchanged (the lock guard `g` drops on the early return).
+                let swapped = self.values_equal_guarded(cur, args[0], 0, span)?;
                 if swapped {
                     // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
                     // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`

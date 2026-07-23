@@ -17,7 +17,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > already-fixed sibling `std.string.count`; `5a8fba0` missed the native method). `"abc".split("")` leaked Rust's
 > empty-pattern edges (`["","a","b","c",""]`), now raises a recoverable `split: sep must not be empty` fault
 > (matching `std.string.split`). Tests: `str_count_empty_sub` + `str_split_empty_sep_faults` in
-> `reserved_method_tables_test.chz`. Only the cyclic `Set.has` finding still OPEN — see `docs/gaps.md` wave 3.
+> `reserved_method_tables_test.chz`.
+>
+> **✅ FIXED (2026-07-23) — cyclic-key equality inconsistency (bug-hunt wave-3 finding #4).** Container
+> membership / key-equality (`Set.has`/`add`, `Map` get/insert/remove, `in`, set algebra `\| & - ^`,
+> `List.contains`/`index_of`/`unique`/`dedup`, Atomic `cas`) SWALLOWED the recoverable `"maximum structural
+> depth (10000) exceeded"` fault that `==` correctly raises on a genuinely cyclic key — silently returning a
+> wrong `false` instead. Root cause: the `Vm::values_equal` wrapper (`arith.rs`) `unwrap_or(false)`'d the
+> guarded worker's depth `Err`. Fix (pure runtime, ~25 sites): three `#[inline]` `?`-propagating helpers
+> `seq_slot`/`set_slot`/`map_slot` + inline `?`-loops replace the swallowing `.any`/`.find`/`.position`
+> closures; `set_op` grew a `span`+`Result`; the wrapper is now `#[cfg(test)]`-only. Cyclic keys now fault
+> RECOVERABLY (byte-identical to `==` / Python `RecursionError`) on both engines; non-cyclic behavior is
+> unchanged. Also: `chezzi test`'s SERIAL pass now runs on `on_vm_stack` (was inline on the 8 MB main thread
+> → a 10000-deep walk `SIGABRT`ed only there; M:N already had the 384 MB VM stack). Tests:
+> `cyclic_key_faults_everywhere` + `noncyclic_controls` in `tests/chz/spec/map_set_test.chz`.
 >
 > **✅ CHECKER REFACTOR (2026-07-23) — the last 4 bespoke reserved-type method tables are now file-backed.**
 > `channel_method_sig`/`str_method_sig`/`bytes_method_sig`/`bytearray_method_sig` (`src/checker/mod.rs`) are

@@ -248,9 +248,19 @@ re-verification on the real binary — all **shared-wrong / check-OK type holes*
   matched neither Python (`ValueError`) nor Go (`[a b c]`), and its own sibling `std.string.split` `panic`s on
   empty separator. Fixed: an empty separator now raises a recoverable `split: sep must not be empty` fault (keyed
   on `sep`, so `"".split(",")` stays `[""]`). Test: `str_split_empty_sep_faults`.
-- **OPEN (Low/niche) — `Set.has`/`Map` on a cyclic struct key silently returns `false`** where `==` on the same
+- **FIXED — `Set.has`/`Map`/`in`/`List` on a cyclic struct key silently returned `false`** where `==` on the same
   two cyclic values faults `maximum structural depth (10000) exceeded` — self-inconsistent (Python raises
-  RecursionError on both). Needs a custom `hash` + a cyclic struct key.
+  RecursionError on both). Root cause: the `Vm::values_equal` wrapper (`arith.rs`) did
+  `values_equal_guarded(l,r,0,span).unwrap_or(false)`, swallowing the recoverable depth `Err` into a wrong
+  `false` at every container membership / key-equality site (~25). Fix: three `?`-propagating helpers
+  (`seq_slot`/`set_slot`/`map_slot`) + inline `?`-loops replace the swallowing closures at every site
+  (`arith`/`exec`/`stmt`/`call`, plus the `set_op` operator forms `\| & - ^` — signature grew a `span` +
+  `Result` — and the `netio` Atomic `cas` compare); the wrapper is now `#[cfg(test)]`-only. A cyclic key
+  now faults RECOVERABLY (byte-identical to `==`, Python RecursionError parity) on both engines. Also fixed
+  a latent test-infra landmine: `chezzi test`'s SERIAL pass ran inline on the 8 MB main thread (M:N ran on
+  the 384 MB VM stack) — a 10000-deep structural walk `SIGABRT`ed only there; both engine passes now run on
+  `on_vm_stack` (matching `chezzi run`). Tests: `cyclic_key_faults_everywhere` + `noncyclic_controls` in
+  `tests/chz/spec/map_set_test.chz` (bug-hunt wave-3 finding #4).
 
 Safe-direction observations (NOT bugs — noted for a future look): protocol-embedded methods aren't callable
 through the interface value (`p: Person` can't call embedded `name()`) despite spec.md:973 "flattened at bound

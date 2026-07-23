@@ -145,6 +145,12 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
 > (concat) and `*` (repeat); see [`syntax.md` §4](syntax.md).
 
+> **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`has`, `get`, `remove`,
+> `add`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*
+> `==`, so a key holding a genuine reference cycle raises the same recoverable *"maximum structural
+> depth (10000) exceeded"* fault that `a == b` does — never a silent wrong `false`. This matches
+> Python's `RecursionError` (both `a == b` and `a in s` raise). Catch it with `recover:`.
+
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |
 |------|--------|-----------|-------|

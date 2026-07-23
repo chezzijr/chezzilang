@@ -2222,15 +2222,18 @@ impl Vm {
     /// target map does NOT alias the source map's stored key object — otherwise mutating one map's
     /// key (e.g. via `keys()`) would silently corrupt the other. `snapshot_key` is pure alloc (no
     /// GC), so `h` stays valid across it.
-    pub(super) fn map_upsert_in_heap(&mut self, h: GcRef, hk: u64, key: Value, val: Value) {
+    pub(super) fn map_upsert_in_heap(
+        &mut self,
+        h: GcRef,
+        hk: u64,
+        key: Value,
+        val: Value,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let Obj::Map(m) = self.heap.get(h) else {
             unreachable!()
         };
-        let pos = m
-            .candidates(hk)
-            .iter()
-            .copied()
-            .find(|&p| self.values_equal(m.entries[p].1, key));
+        let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
         match pos {
             Some(i) => {
                 let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -2246,6 +2249,7 @@ impl Vm {
                 m.push(hk, key, val);
             }
         }
+        Ok(())
     }
 
     /// An `int` method-argument, with a uniform type error matching the interp.
@@ -2663,15 +2667,13 @@ impl Vm {
                         self.arity_err("contains", args, 1, span)?;
                         let target = args[0];
                         let elems = items.clone();
-                        Ok(Value::bool(
-                            elems.iter().any(|v| self.values_equal(*v, target)),
-                        ))
+                        Ok(Value::bool(self.seq_slot(&elems, target, span)?.is_some()))
                     }
                     "index_of" => {
                         self.arity_err("index_of", args, 1, span)?;
                         let target = args[0];
                         let elems = items.clone();
-                        let idx = elems.iter().position(|v| self.values_equal(*v, target));
+                        let idx = self.seq_slot(&elems, target, span)?;
                         Ok(Value::int(idx.map(|i| i as i64).unwrap_or(-1)))
                     }
                     "concat" => {
@@ -2800,7 +2802,11 @@ impl Vm {
                             // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element iff it
                             // differs from the previously-kept one.
                             for v in items {
-                                if out.last().is_none_or(|&p| !self.values_equal(p, v)) {
+                                let keep = match out.last() {
+                                    Some(&p) => !self.values_equal_guarded(p, v, 0, span)?,
+                                    None => true,
+                                };
+                                if keep {
                                     out.push(v);
                                 }
                             }
@@ -2808,7 +2814,7 @@ impl Vm {
                             // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
                             // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
                             for v in items {
-                                if !out.iter().any(|&k| self.values_equal(k, v)) {
+                                if self.seq_slot(&out, v, span)?.is_none() {
                                     out.push(v);
                                 }
                             }
@@ -2875,10 +2881,9 @@ impl Vm {
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    let found = m
-                        .candidates(hk)
-                        .iter()
-                        .any(|&p| self.values_equal(m.entries[p].1, key));
+                    let found = self
+                        .map_slot(&m.entries, m.candidates(hk), key, span)?
+                        .is_some();
                     Ok(Value::bool(found))
                 }
                 "get" => {
@@ -2888,11 +2893,8 @@ impl Vm {
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    let found = m
-                        .candidates(hk)
-                        .iter()
-                        .copied()
-                        .find(|&p| self.values_equal(m.entries[p].1, key))
+                    let found = self
+                        .map_slot(&m.entries, m.candidates(hk), key, span)?
                         .map(|p| m.entries[p].2);
                     match found {
                         Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
@@ -2916,11 +2918,7 @@ impl Vm {
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    let pos = m
-                        .candidates(hk)
-                        .iter()
-                        .copied()
-                        .find(|&p| self.values_equal(m.entries[p].1, key));
+                    let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
                     match pos {
                         Some(i) => {
                             let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -2965,11 +2963,7 @@ impl Vm {
                             out.push(hk, key, val);
                         }
                         for (hk, key, val) in incoming {
-                            let pos = out
-                                .candidates(hk)
-                                .iter()
-                                .copied()
-                                .find(|&p| self.values_equal(out.entries[p].1, key));
+                            let pos = self.map_slot(&out.entries, out.candidates(hk), key, span)?;
                             match pos {
                                 Some(i) => out.entries[i].2 = val,
                                 None => {
@@ -2982,7 +2976,7 @@ impl Vm {
                         Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
                     } else {
                         for (hk, key, val) in incoming {
-                            self.map_upsert_in_heap(h, hk, key, val);
+                            self.map_upsert_in_heap(h, hk, key, val, span)?;
                         }
                         Ok(Value::nil())
                     }
@@ -3002,9 +2996,8 @@ impl Vm {
                         unreachable!()
                     };
                     Ok(Value::bool(
-                        s.candidates(hx)
-                            .iter()
-                            .any(|&p| self.values_equal(s.entries[p].1, x)),
+                        self.set_slot(&s.entries, s.candidates(hx), x, span)?
+                            .is_some(),
                     ))
                 }
                 "add" => {
@@ -3014,10 +3007,9 @@ impl Vm {
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    let present = s
-                        .candidates(hx)
-                        .iter()
-                        .any(|&p| self.values_equal(s.entries[p].1, x));
+                    let present = self
+                        .set_slot(&s.entries, s.candidates(hx), x, span)?
+                        .is_some();
                     if !present {
                         // Snapshot a struct/enum/newtype element on insert (Go value-key model) so a
                         // later mutation of the caller's live value can't corrupt the set. Pure alloc
@@ -3037,11 +3029,7 @@ impl Vm {
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    let pos = s
-                        .candidates(hx)
-                        .iter()
-                        .copied()
-                        .find(|&p| self.values_equal(s.entries[p].1, x));
+                    let pos = self.set_slot(&s.entries, s.candidates(hx), x, span)?;
                     match pos {
                         Some(i) => {
                             let Obj::Set(s) = self.heap.get_mut(h) else {
@@ -3064,31 +3052,34 @@ impl Vm {
                     };
                     let other = self.set_arg(args[0], method, span)?;
                     let mut out = SetData::default();
-                    let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| {
-                        if !set
-                            .candidates(he)
-                            .iter()
-                            .any(|&p| vm.values_equal(set.entries[p].1, e))
+                    let add = |vm: &Vm,
+                               set: &mut SetData,
+                               he: u64,
+                               e: Value|
+                     -> Result<(), RuntimeError> {
+                        if vm
+                            .set_slot(&set.entries, set.candidates(he), e, span)?
+                            .is_none()
                         {
                             set.push(he, e);
                         }
+                        Ok(())
                     };
                     match method {
                         "union" => {
                             for (he, e) in mine.iter().chain(other.entries.iter()) {
-                                add(self, &mut out, *he, *e);
+                                add(self, &mut out, *he, *e)?;
                             }
                         }
                         // intersection keeps mine's elements present in other; difference drops them.
                         m => {
                             let keep_when_present = m == "intersection";
                             for (he, e) in &mine {
-                                let in_other = other
-                                    .candidates(*he)
-                                    .iter()
-                                    .any(|&p| self.values_equal(other.entries[p].1, *e));
+                                let in_other = self
+                                    .set_slot(&other.entries, other.candidates(*he), *e, span)?
+                                    .is_some();
                                 if in_other == keep_when_present {
-                                    add(self, &mut out, *he, *e);
+                                    add(self, &mut out, *he, *e)?;
                                 }
                             }
                         }
