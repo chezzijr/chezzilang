@@ -598,7 +598,7 @@ impl Vm {
     }
 
     /// Coerce a parsed `Json` value into a concrete value of the descriptor's type. `path` is a
-    /// JSON-pointer-ish breadcrumb for error messages. Mirrors the interpreter's `coerce_json`.
+    /// JSON-pointer-ish breadcrumb for error messages. Mirrors the serial-VM oracle's `coerce_json`.
     pub(super) fn coerce_json(
         &mut self,
         jv: Value,
@@ -1492,7 +1492,7 @@ impl Vm {
     /// SNAPSHOT semantics: iteration walks a copy of the receiver's elements taken at call time, so
     /// a callback that MUTATES the receiver (e.g. `xs.pop()`/`xs.push(..)`) does NOT perturb the
     /// iteration sequence — it always visits exactly the elements present when the HOF was invoked.
-    /// This (a) matches the interpreter (the parity oracle clones `elems` before dispatch — see
+    /// This (a) matches the serial-VM parity oracle (the parity oracle clones `elems` before dispatch — see
     /// `src/interp/mod.rs` `eval_method_call`, the `map`/`filter`/`fold`/`sort_by` arm), (b) matches
     /// comprehensions/for-loops (`Op::ListClone`) and `list_sort_by`/`sort_by_key` (which snapshot),
     /// (c) matches Python `map`/`filter`, and (d) is OOB-safe: indexing the original live list while
@@ -1514,7 +1514,7 @@ impl Vm {
         // an inline temporary (`make().map(..)`) is otherwise unrooted and the callback's GC could
         // collect it before we snapshot.
         self.push(Value::obj(src_h));
-        // Take a SNAPSHOT now (matching the interpreter): iterate the receiver's elements as of call
+        // Take a SNAPSHOT now (matching the serial-VM parity oracle): iterate the receiver's elements as of call
         // time so a callback that shrinks/grows the receiver mid-iteration neither perturbs the
         // sequence nor indexes past the live (now-shorter) Vec. The snapshot is heap-allocated and
         // rooted on the operand stack so its elements survive the callback's collections.
@@ -1760,7 +1760,7 @@ impl Vm {
         // temporary (`make().sort_by(...)`) is otherwise unrooted and the comparator's GC could
         // collect it before the write-back.
         self.push(Value::obj(src_h));
-        // Sort a SNAPSHOT taken now (matching the interpreter): a comparator that mutates the source
+        // Sort a SNAPSHOT taken now (matching the serial-VM parity oracle): a comparator that mutates the source
         // list mid-sort must not perturb the ordering, and its mutations are discarded by the final
         // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
         // its elements survive the comparator's collections.
@@ -3373,5 +3373,5 @@ impl Vm {
         })
     }
 
-    // ----- concurrency C4: sequential, run-to-completion executor (mirrors the interpreter) -----
+    // ----- concurrency C4: sequential, run-to-completion executor (mirrors the serial-VM parity oracle) -----
 }

@@ -130,14 +130,16 @@ generic structs + enums, `Result`/`Option` + `?`, generics + structural protocol
 exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
 `recover:`, `Iterator[T]`, slicing/indexing protocols). **Concurrency** has landed through
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real
-OS-thread engine via `--parallel`, netpoller + `std.net`). ~1500 tests green.
+OS-thread engine via `--parallel`, netpoller + `std.net`). ~3681 tests green.
 
 ## Current focus
 
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
 
-Right now: **M19 — Perf track (in progress).** This milestone is performance-focused, so while perf
-work is in flight the bar is **behavior-preserving + two-engine parity** on every change —
+Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase (Go-concurrency,
+checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
+in-progress alongside it. Both share the same bar: **behavior-preserving + two-engine parity** on
+every change —
 a VM speedup that diverges between the serial and M:N engines (or changes observable output) is a bug, not a win.
 (The language is still evolving — new features can land; they just go through their own milestone,
 not silently inside a perf change.)

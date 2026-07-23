@@ -2,11 +2,11 @@
 //! Chezzi value, so `std.math`/`std.io`/`std.os` can reach things pure Chezzi cannot (file I/O,
 //! the OS, `f64` intrinsics).
 //!
-//! This module deliberately knows **nothing** about either engine's value representation. A native
-//! binding is written once against the [`Host`] trait and runs unchanged on both the tree-walk
-//! interpreter (Rc-based `Value`) and the bytecode VM (`Copy` `Value` + GC handles). Each engine
+//! This module deliberately knows **nothing** about the VM's value representation. A native
+//! binding is written once against the [`Host`] trait and runs unchanged on the bytecode VM
+//! (`Copy` `Value` + GC handles). The VM
 //! implements [`Host`] over its own argument stack and lowers the returned [`NativeRet`] into its
-//! own value type *after* the call returns — so native code never touches an `Rc` or a `GcRef`, and
+//! own value type *after* the call returns — so native code never touches a `GcRef`, and
 //! the VM's "allocate only at instruction boundaries" GC invariant holds by construction.
 //!
 //! This is the CPython-built-in-C-module model (compiled-in bindings), **not** dynamic `cdylib`/

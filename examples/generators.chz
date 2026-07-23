@@ -1,6 +1,6 @@
 # Experimental generators (VM-only). A function or method declaring `-> Iterator[T]` that uses
 # `yield` is a generator: calling it returns a suspendable iterator, not a value. Run with the VM
-# (`chezzi run`); the frozen interpreter rejects `yield`.
+# (`chezzi run`) — generators hold live VM frame state.
 
 # Free-function generator.
 fn count_up(n: int) -> Iterator[int]:

@@ -1,11 +1,11 @@
 # Built-in type conversions — str<->bytes (UTF-8) methods + List()/Set()/Map() constructors.
-# Three-engine parity (VM, --serial, --interp): exercises encode/decode round-trip incl. a
+# Two-engine parity (M:N `run` vs `--serial`): exercises encode/decode round-trip incl. a
 # multi-byte char, an invalid-UTF-8 decode under recover:, List() over every for-iterable shape
 # (list/set/str/bytes/bytearray/range/user-iterator), Set() dedup over several iterables, and
 # Map() from a list of 2-tuples (with a last-wins duplicate key). No new syntax — all are
 # existing call/method productions. UTF-8 only (no encoding-name argument).
 
-# A finite user iterator (NOT a generator) so all three engines agree.
+# A finite user iterator (NOT a generator) so both engines agree.
 struct Counter:
     n: int
     limit: int

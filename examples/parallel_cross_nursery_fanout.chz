@@ -4,7 +4,7 @@
 # sends a). This exercises the deadlock-predicate race the single-task case A could not: with >1 inner
 # task, helper workers exist, so the early-enlist of O MUST happen before any worker can run an inner
 # fiber to a park — else the global deadlock predicate fires before O is enlisted. Still M:N-only
-# (faults deadlock on cooperative `run`/`--interp` — the cooperative flatten is a later commit).
+# (faults deadlock on the cooperative `--serial` engine — the cooperative flatten is a later commit).
 fn inner(a: Channel[int], b: Channel[int], c: Channel[int]):
     spawn:
         a.send(1)

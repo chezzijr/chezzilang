@@ -160,7 +160,7 @@ pub enum StmtKind {
     /// `return` with an optional value.
     Return(Option<Expr>),
     /// `yield <expr>` — produce a value from a generator function and suspend until the next
-    /// `.next()` resumes the body. Experimental, VM-only (the interpreter does not support it).
+    /// `.next()` resumes the body. Generators hold live VM frame state (VM-only by construction).
     Yield(Expr),
     /// `defer <call>` (form 1) or `defer:` block (form 2) — register cleanup to run when the
     /// enclosing block/frame exits (normal return, `?` short-circuit, `break`/`continue`, or panic),
@@ -400,7 +400,7 @@ pub enum AssignOp {
 
 impl AssignOp {
     /// The binary operator a compound-assignment desugars to (`x += v` ⇒ `x = x + v`). `Eq` has no
-    /// underlying binary op. Shared by the compiler and the interpreter so both lower identically.
+    /// underlying binary op. Shared by the compiler and checker so both lower identically.
     pub fn to_binop(self) -> Option<BinaryOp> {
         Some(match self {
             AssignOp::Eq => return None,
@@ -759,10 +759,10 @@ impl PartialEq for Type {
 }
 
 /// True iff `ty` is the primitive `float` (bare `Type::Named("float")`). Used by the compiler and the
-/// interpreter to drive one-way int→float coercion at value-definition boundaries (`let x: float = 3`,
+/// checker to drive one-way int→float coercion at value-definition boundaries (`let x: float = 3`,
 /// float params, float returns, float struct fields). A generic param typed `T`, a `Qualified`/`Generic`
 /// type, or any non-`float` `Named` is NOT float — so no coercion fires there (matching the
-/// no-generic-widening carve-out). Shared so both engines coerce from the IDENTICAL annotation.
+/// no-generic-widening carve-out). Shared so checker and compiler coerce from the IDENTICAL annotation.
 pub fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Named { name, .. } if name == "float")
 }

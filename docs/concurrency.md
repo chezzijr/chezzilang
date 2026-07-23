@@ -1140,6 +1140,11 @@ fn main():
 
 ## 9. Implementation roadmap (C1–C5)
 
+> **Historical design-log.** The `**Interp** src/interp/*` bullets below record the *original* plan,
+> which targeted the since-**removed** tree-walk interpreter. That engine no longer exists — the
+> bytecode VM is the sole engine and parity is now serial-VM (`parallel=false`) vs M:N-VM
+> (`parallel=true`). Read the `src/interp/*` references as planning history, not current paths.
+
 > **B3's detailed execution plan lives in [`concurrency-b3.md`](concurrency-b3.md)** — a phased,
 > multi-session breakdown (B3.0…B3.6) with the validated shared-nothing architecture, decisions, risk
 > register, and per-phase TDD focus. Items deliberately *not* in B3–B5 are in
@@ -1336,7 +1341,7 @@ SIBLINGS in ONE nursery (the doc case C pattern).
   their scope — `submit` detached work, reap with `defer ex.shutdown()` (graceful) or `shutdown_now()`
   (cancel); program exit drains. Keeps `parallel:` pure and all background work visibly owned —
   see [§8](#8-daemon--background-tasks).
-### Tier-D — M:N scheduler + async I/O (post-B3 frontier, not yet scheduled)
+### Tier-D — M:N scheduler + async I/O (shipped — D1/D2/D5; design-log below)
 
 B3 *originally* gave **CPU-bound** multicore (`--parallel`: a bounded OS-thread pool, one worker `Vm`
 per task, blocking `recv` parking the whole thread on a condvar). **Tier-D D1/D2 have since superseded

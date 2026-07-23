@@ -1,10 +1,10 @@
 //! Call-argument desugaring: normalize **named arguments** (`f(x=1)`) and **default arguments**
 //! (`fn f(x: int, y: int = 10)`) into a plain positional `args` list.
 //!
-//! This pass runs inside [`crate::resolver::build_graph`], so the checker and **both** engines
-//! (tree-walk interpreter + bytecode VM) consume the already-normalized AST — they only ever see
-//! `Call.named` empty and a fully positional `Call.args`. That keeps the two engines in lockstep by
-//! construction: there is no per-engine call-binding logic for defaults/named args.
+//! This pass runs inside [`crate::resolver::build_graph`], so the checker and the VM
+//! consume the already-normalized AST — they only ever see
+//! `Call.named` empty and a fully positional `Call.args`. That keeps the front-end and VM in lockstep by
+//! construction: there is no per-phase call-binding logic for defaults/named args.
 //!
 //! Scope: free functions (own module + `from`-imported + module-qualified `alias.f(...)`) and struct
 //! constructors. Enum-variant constructors are excluded (payloads are unnamed) and methods are

@@ -1,8 +1,8 @@
 //! Shared Python-style slice + negative-index resolution.
 //!
-//! Both engines (the bytecode VM and the frozen tree-walk interpreter) call into this one module so
+//! Both VM schedulers (serial + M:N) call into this one module so
 //! their slice/index semantics — including every clamp boundary and the `slice step cannot be zero`
-//! fault — stay byte-identical (the two engines are parity-tested on stdout/stderr). Derived from
+//! fault — stay byte-identical (the two schedulers are parity-tested on stdout/stderr). Derived from
 //! CPython's `PySlice_GetIndicesEx` (`slice.indices`).
 
 /// Normalize a possibly-negative *plain* index `n` against length `len`, Python-style: a negative

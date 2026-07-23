@@ -1,7 +1,7 @@
 //! Dynamic C-ABI FFI (v1): the runtime machinery behind an `extern "lib":` block. A [`Cffi`]
 //! wraps a `dlopen`'d shared library, a resolved symbol address, and the C signature (as
 //! [`CType`]s), and exposes `call(&mut dyn Host)` — reusing the engine-neutral [`Host`]/[`NativeRet`]
-//! seam (`src/native/mod.rs`) so the VM and the frozen interpreter produce identical output.
+//! seam (`src/native/mod.rs`) so both VM schedulers (serial + M:N) produce identical output.
 //!
 //! v1 marshals scalars: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
 //! (↔ C `_Bool`, 1 byte 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
@@ -1931,7 +1931,7 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     #[test]
     fn callback_two_engine_parity() {
         // End-to-end: a real `.chz` program passing a Chezzi closure as a callback to a C fn, run
-        // through BOTH the interpreter (frozen oracle) and the VM. `apply(10, n => n*n) == 10*10 + 1`.
+        // through BOTH the serial and M:N VM engines. `apply(10, n => n*n) == 10*10 + 1`.
         let so = build_callback_so();
         let src = format!(
             "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
@@ -1989,7 +1989,7 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     fn ffi_deref_load_two_engine_parity() {
         // End-to-end: a C fn returns a `ptr` to a struct { int32 a@0; int64 b@8; double c@16 }; the
         // Chezzi side reads each field via the ffi load builtins and prints them. Run through BOTH the
-        // VM and the interpreter (frozen oracle) and assert identical, expected output. This is the
+        // serial and M:N VM engines and assert identical, expected output. This is the
         // end-to-end golden for the deref builtins (callbacks set the precedent: no examples/ file,
         // only the in-crate parity test — an examples/ golden would need `cc` at golden-test time).
         let so = build_callback_so();
@@ -2066,7 +2066,7 @@ print(ffi.load_int32_at(p, 0))\n",
 
     /// C-buffer alloc layer end-to-end: `ffi.alloc` a buffer of N int64 slots, fill it from a Chezzi
     /// list via `store_int64_at`, read them back via `load_int64_at`, `ffi.free`. Run through BOTH the
-    /// VM and the interpreter (frozen oracle) and assert identical, expected output. No `.so` needed
+    /// serial and M:N VM engines and assert identical, expected output. No `.so` needed
     /// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens.
     #[test]
     #[cfg(target_os = "linux")]

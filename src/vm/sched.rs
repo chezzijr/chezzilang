@@ -36,7 +36,7 @@ impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
     /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. Mirrors
-    /// the interpreter's `exec_spawn`.
+    /// the serial-VM oracle's `exec_spawn`.
     pub(super) fn do_spawn(
         &mut self,
         method: Option<String>,
@@ -97,7 +97,7 @@ impl Vm {
 
     /// `spawn:` block — snapshot the captured bindings from the current frame (like `MakeClosure`),
     /// deep-copy each captured value across the airlock, build a zero-arg closure over the synthetic
-    /// block proto, and register it as a `Call` task. Mirrors the interpreter's `Task::Block`
+    /// block proto, and register it as a `Call` task. Mirrors the serial-VM oracle's `Task::Block`
     /// (captured locals deep-copied; home globals by handle).
     pub(super) fn do_spawn_block(
         &mut self,
@@ -145,7 +145,7 @@ impl Vm {
     /// the running sched — it runs concurrently with the rest of the body. The `task_index` is the
     /// scope's monotonic `next_index` (spawn order), so Decision-F output stays deterministic.
     /// Otherwise (lazy/top-level) push the `PendingCall` for the join to drain. The checker guarantees
-    /// a `parallel:` is open, but we guard for parity with the interpreter's runtime error.
+    /// a `parallel:` is open, but we guard for parity with the serial-VM oracle's runtime error.
     pub(super) fn register_task(
         &mut self,
         task: PendingCall,
@@ -182,7 +182,7 @@ impl Vm {
     /// `return` / `break` / `continue`) or when a fault unwinds past it. Pop every nursery entry ABOVE
     /// `from_len` (the level the escaping construct should restore to); for each lazy nursery that
     /// holds unstarted [`PendingCall`]s, write ONE report line to stdout (`out`, the stream the parity
-    /// harnesses read) — emitting PER-NURSERY, innermost-first, byte-identical to the interpreter,
+    /// harnesses read) — emitting PER-NURSERY, innermost-first, byte-identical to the serial-VM oracle,
     /// whose `exec_parallel` / `leave_implicit_nursery` report once per frame/block as it unwinds (two
     /// stacked nurseries → two lines, not one combined `2 pending`). The tasks are then DROPPED: they
     /// never started, so there is no fiber to cancel and no buffered output to flush. This preserves
@@ -2591,7 +2591,7 @@ impl Vm {
                 // A cursor crosses by value as a DEEP COPY (like `List`): wire each snapshot item and
                 // carry `pos`. It is plain data (a `Vec` + index), so — unlike a generator — it is
                 // genuinely sendable, and `from_wire` rebuilds an independent cursor on the other side.
-                // This matches the interpreter, whose `deep_clone` already deep-copies a cursor across
+                // This matches the serial-VM parity oracle, whose `deep_clone` already deep-copies a cursor across
                 // the airlock; gating it here (the old behavior) diverged VM from interp. Recursing
                 // through items means a cursor over a non-sendable element faults recoverably, like a
                 // `list` of that element would.

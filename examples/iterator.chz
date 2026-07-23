@@ -1,6 +1,6 @@
 # Iterable user structs: a `for` drives any struct with `next(self) -> Option[T]`,
 # calling next() lazily each step until it yields None. No new syntax — just a wider
-# iterand type. Both engines (tree-walk interp + bytecode VM) must agree.
+# iterand type. Both VM engines (serial + M:N) must agree.
 
 # A finite iterator: yields 0, 1, 2, 3, 4.
 struct Counter:

@@ -426,7 +426,7 @@ impl Vm {
 
     /// `obj[start:end:step]` — Python-style slice copy of a list/str, or a struct's `slice`. Each
     /// component arrives as `Nil` (omitted → `None`) or `Int`; the shared `slice::slice_indices`
-    /// resolver owns all the clamp/step/reverse math (byte-identical with the interpreter).
+    /// resolver owns all the clamp/step/reverse math (byte-identical with the serial-VM oracle).
     pub(super) fn get_slice(&mut self, span: Span) -> Result<(), RuntimeError> {
         let step = self.pop();
         let end = self.pop();
@@ -987,7 +987,7 @@ impl Vm {
     /// `print(args…, sep=, end=)`. Stack layout on entry: `[args… , sep, end]`. Pops `end` then
     /// `sep` (both `str`, copied out so they're no longer GC roots), stringifies the `argc` user
     /// args (kept rooted on the stack across `stringify`, which can run user code + GC), joins with
-    /// `sep` and appends `end`. Byte-identical join/append semantics to the interpreter.
+    /// `sep` and appends `end`. Byte-identical join/append semantics to the serial-VM oracle.
     pub(super) fn do_print_sep(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let end = self.pop();
         let sep = self.pop();
@@ -2582,7 +2582,7 @@ impl Vm {
                 let _ = write!(out, "<extern fn {}>", c.name());
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
-            // (matches the interpreter's `stringify` catch-all falling back to `Display`).
+            // (matches the serial-VM parity oracle's `stringify` catch-all falling back to `Display`).
             Obj::Channel(_)
             | Obj::Shared(_)
             | Obj::RwShared(_)

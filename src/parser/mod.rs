@@ -82,7 +82,7 @@ pub fn parse_with_docs(
 
 /// Parse a token stream containing exactly one expression into an `Expr`.
 ///
-/// Used by the M3 interpreter to evaluate the inner `{…}` fragments of an interpolated string
+/// Used to parse the inner `{…}` fragments of an interpolated string
 /// by reusing the real lexer + Pratt parser. Tolerates surrounding `Newline`s; anything other
 /// than a single expression followed by `Eof` is a `ParseError`.
 pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {

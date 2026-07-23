@@ -4,7 +4,7 @@
 # worker spins, polling tok.cancelled() each iteration; the canceller sleeps briefly then cancels.
 #   - default OS-thread engine: both run concurrently → the worker observes the cancel and aborts
 #     early (partial count).
-#   - --serial / --interp (single-threaded oracles): tasks run sequentially at the nursery join in
+#   - --serial (single-threaded oracle): tasks run sequentially at the nursery join in
 #     spawn order → the worker runs to completion BEFORE the canceller ever gets the thread.
 # A self-polling *timeout* would instead stop on every engine (the deadline is read inline); the
 # divergence here is specific to a manual cancel of a non-yielding CPU sibling. Covered by a Rust test.

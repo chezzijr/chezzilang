@@ -1,8 +1,8 @@
 # Phase 3a golden — the eight universe builtins now DECLARED in std/prelude.chz as `native fn`/`native
 # ctor` decls (ord/chr/panic/int/float/str/bytes/bytearray), plus synthetic `print`. Their signatures
 # moved out of the Rust PRELUDE table into the always-linked .chz prelude, but dispatch stays
-# name-keyed, so every result is byte-identical across the interpreter, the cooperative VM, and the
-# M:N OS-thread engine. This is the three-engine parity guard for the migration.
+# name-keyed, so every result is byte-identical across the serial (cooperative) and M:N OS-thread
+# VM engines. This is the two-engine parity guard for the migration.
 
 fn main():
     # native ctor int — string + float conversions (1-arg sig, sourced from std/prelude.chz)

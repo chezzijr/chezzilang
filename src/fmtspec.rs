@@ -3,7 +3,7 @@
 //! ONE source of truth used by BOTH engines (`compiler`/`vm` and `interp`): each engine does
 //! only (a) the `:`-split of the interpolation inner text ([`split_spec`]) and (b) classifying its
 //! own runtime `Value` into the neutral [`FmtArg`]. Spec parsing ([`parse`]) and rendering
-//! ([`apply`]) live here so the VM and the interpreter cannot diverge.
+//! ([`apply`]) live here so there is a single source of truth for both VM schedulers.
 //!
 //! Supported mini-language (a coherent subset of Python's): `[[fill]align][sign][0][width][.precision][type]`
 //!  - align: `<` left, `>` right, `^` center; an optional `fill` char may precede the align.
@@ -14,8 +14,8 @@
 //!  - precision: `.N` — float decimals; on a string it TRUNCATES to N chars (Python parity).
 //!  - type: one of `d f x X b o e %` (numeric); a string takes only fill/align/width/precision.
 //!
-//! Errors are returned as `String`; each engine maps them to its own error type with the same
-//! message, so the VM and interpreter surface byte-identical diagnostics.
+//! Errors are returned as `String`; the caller maps them to its own error type with the same
+//! message, so both VM schedulers surface byte-identical diagnostics.
 
 /// Hard cap on field width / precision, applied at parse time before any allocation. A spec
 /// requesting more is rejected. This is the real fix for the prior OOM (unbounded `repeat`).

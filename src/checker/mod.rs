@@ -4,7 +4,7 @@
 //! Design: pragmatic local inference (see `ty.rs`). Explicit function signatures give us call
 //! types for free; locals are inferred from their initializers. [`Ty::Unknown`] suppresses
 //! cascades. Two passes: pass 1 hoists every top-level declaration (so forward references work,
-//! matching the interpreter's hoist); pass 2 walks bodies and accumulates errors.
+//! matching the serial-VM parity oracle's hoist); pass 2 walks bodies and accumulates errors.
 
 mod ty;
 
@@ -880,7 +880,7 @@ impl Checker {
         let c = self;
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
-        // derivation the compiler + interpreter use), so all three engines agree on every key (parity) and
+        // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
         // every user type is unique by construction (a cross-module name clash is just two distinct keys).
         {
             let mkeys = crate::resolver::module_keys(graph);

@@ -1,13 +1,7 @@
 //! Lexer (a.k.a. scanner): turns source text into a flat stream of `Token`s.
 //!
-//! This is YOUR implementation task (M1). The types, struct, and a couple of worked-example
-//! helpers are provided so you can focus on the real learning: the scanning state machine and,
-//! the tricky part, indentation → INDENT/DEDENT tokens.
-//!
-//! Fill in every `todo!(...)`. Follow the `// HINT:` and `// LEARN:` comments.
-//! Run `cargo test` to check yourself against the guiding tests at the bottom.
-//!
-//! See PROGRESS.md for the ordered sub-steps (1a … 1k).
+//! Two parts: the scanning state machine, and the tricky one — indentation →
+//! INDENT/DEDENT tokens (the offside rule), suppressed inside bracket depth.
 
 use std::{collections::VecDeque, fmt};
 
@@ -998,7 +992,7 @@ impl Lexer {
         }
     }
 
-    // ----- YOUR helpers (the real M1 learning) -----
+    // ----- scanning helpers -----
 
     /// (1e) Scan an identifier or keyword. The first char is already consumed; `start` is its
     /// index in `self.chars`.
@@ -1448,24 +1442,14 @@ impl Lexer {
         char::from_u32(cp).ok_or_else(|| self.error("invalid unicode code point"))
     }
 
-    // ----- you'll likely add private helpers below as you go -----
-    // e.g. fn number(&mut self) -> Result<Token, LexError>
-    //      fn string(&mut self) -> Result<Token, LexError>
-    //      fn identifier(&mut self) -> Token
-    //      fn handle_line_start(&mut self) -> ...   // measures indent, pushes/pops self.indents
-    //
-    // HINT (1h) — the indentation algorithm, the trickiest part of M1:
-    //   Keep an indent stack, starting `vec![0]`.
-    //   At the START of each logical (non-blank, non-comment-only) line:
-    //     1. Count leading spaces → `width`. (Pick spaces-only for v1; reject tabs with a LexError.)
-    //     2. If width > top of stack: push width, emit ONE `Indent`.
-    //     3. If width < top: pop while top > width, emitting ONE `Dedent` per pop.
-    //          If after popping the top != width → indentation error ("inconsistent dedent").
-    //     4. If width == top: emit nothing.
-    //   Blank lines and comment-only lines produce NO Newline and NO indent change — skip them.
-    //   At EOF: emit a `Dedent` for every indent level still on the stack above 0, then `Eof`.
-    //   Because one source position can require emitting several Dedents, a common trick is a
-    //   small queue/counter field that `next_token` drains before scanning more source.
+    // Indentation (offside rule) — implemented in `scan_indentation`:
+    //   Indent stack starts `vec![0]`. At the start of each logical (non-blank, non-comment-only)
+    //   line: width = leading spaces (tabs rejected); width > top → push + one `Indent`; width < top
+    //   → pop while top > width, one `Dedent` per pop (top != width after → "inconsistent dedent");
+    //   width == top → nothing. Blank/comment-only lines emit no `Newline` and no indent change.
+    //   At EOF: one `Dedent` per remaining level above 0, then `Eof`. One position can require
+    //   several `Dedent`s, so a small queue field is drained before scanning more source.
+    //   Indentation is suppressed inside bracket depth (`([{`).
 }
 
 /// Convenience free function: `lexer::tokenize(src)`.

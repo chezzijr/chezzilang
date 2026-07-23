@@ -3,9 +3,8 @@
 # producer sends, and the consumer then RESUMES exactly where it parked and receives. This is the
 # canonical mid-flight producer/consumer that the sequential executor could not express.
 #
-# NOTE: VM-only. Under the tree-walking interpreter (`--interp`) this still faults `deadlock` — the
-# interpreter has no suspendable execution yet (B1 for the interp is a later milestone). The output
-# below is the VM's.
+# NOTE: needs suspendable execution (a blocking `recv` that parks mid-flight), so both VM
+# schedulers — serial (`--serial`) and M:N (`--parallel`) — produce the output below.
 
 fn consumer(ch: Channel[int]):
     print("consumer: waiting")

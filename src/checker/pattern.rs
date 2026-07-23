@@ -2342,7 +2342,7 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Eq | NotEq => Ty::Bool, // equality is permissive (matches the interpreter)
+            Eq | NotEq => Ty::Bool, // equality is permissive (matches the serial-VM parity oracle)
             // `x in xs` — membership, type-directed on the RHS container. List/Set test element
             // membership, Map tests KEY membership (Python-style), Str tests substring. Always
             // yields `bool`. A user struct/enum with a `contains(self, item) -> bool` method (the

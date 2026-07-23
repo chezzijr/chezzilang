@@ -1,7 +1,8 @@
-//! Bytecode stack VM (M5) — the Phase-2 execution path. Runs the [`Program`] produced by the
-//! compiler, reproducing the tree-walk interpreter's semantics byte-for-byte (golden/parity tests
-//! cross-check the two engines). M5a: handle-addressed values, no collector yet (the mark-sweep
-//! GC lands in M5b).
+//! Bytecode stack VM (M5) — the sole execution engine. Runs the [`Program`] produced by the
+//! compiler. Parity tests cross-check the two schedulers of this same `Vm` — the serial
+//! (`parallel=false`) cooperative oracle and the M:N (`parallel=true`) engine — byte-for-byte
+//! (the tree-walk interpreter that was the original parity oracle has been removed). M5a:
+//! handle-addressed values, no collector yet (the mark-sweep GC lands in M5b).
 
 mod blocking_pool;
 pub mod chzstr;
@@ -144,7 +145,7 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
     s
 }
 
-/// Maximum user-function call depth — mirrors the interpreter, so infinite recursion is a clean
+/// Maximum user-function call depth — mirrors the serial-VM parity oracle, so infinite recursion is a clean
 /// runtime error rather than a host stack overflow.
 const MAX_CALL_DEPTH: usize = 10_000;
 
@@ -230,7 +231,7 @@ struct CallFrame {
     /// The closure object backing this frame, if it is a closure call (for `GetCaptured`).
     closure: Option<GcRef>,
     /// Whether this frame counts toward the call-depth limit (user calls do; module toplevels
-    /// don't, matching the interpreter).
+    /// don't, matching the serial-VM parity oracle).
     counted: bool,
     /// Module toplevel frame — an `Err`/`None` unhandled here (a `?` or a bare expression
     /// statement) is a top-level unhandled error that exits the program.
@@ -285,8 +286,9 @@ enum GenState {
 
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
 /// synchronously by `.next()`: each call resumes [`Vm::generator_next`] until the next `Op::Yield`
-/// (returns `Some(v)`) or the body ends (`None`, state → `Done`). VM-only (the interpreter rejects
-/// `yield`).
+/// (returns `Some(v)`) or the body ends (`None`, state → `Done`). Generators hold live VM frame
+/// state, so they never cross the airlock by value (`yield` was never part of the removed
+/// interpreter's surface).
 #[derive(Clone)]
 pub(crate) struct GeneratorCore {
     proto: ProtoId,
@@ -392,8 +394,8 @@ impl Deferred {
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier (C4). The callee/receiver and
 /// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
-/// arg-evaluation timing); the body runs at the `parallel:` dedent. Mirrors the interpreter's
-/// `Task` enum — a `spawn:` block is lowered to a zero-arg closure, so it rides the `Call` variant.
+/// arg-evaluation timing); the body runs at the `parallel:` dedent. A `spawn:` block is lowered to
+/// a zero-arg closure, so it rides the `Call` variant.
 /// The held values are GC roots while the task is pending (see [`Vm::collect`]).
 /// `Clone` is shallow (a `Value`/`GcRef` copy — both originals and clones stay rooted), used by
 /// `early_enlist_outer` to prepare workers from a copy so a non-crossable task faults BEFORE the
@@ -571,8 +573,8 @@ pub struct Vm {
     /// The stack trace of the uncaught fault that propagates, captured before frames unwind. The
     /// **deepest** fault wins (`fault_trace_depth` = frame count at capture): the original fault site
     /// captures first; a `defer`red call that itself faults runs while its owning frame is still on
-    /// the stack (so it is deeper) and supersedes — matching Go's defer-supersedes semantics and the
-    /// interpreter. Reset whenever a `recover:` boundary catches a fault. Read by the driver.
+    /// the stack (so it is deeper) and supersedes — matching Go's defer-supersedes semantics. Reset
+    /// whenever a `recover:` boundary catches a fault. Read by the driver.
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
@@ -608,8 +610,7 @@ pub struct Vm {
     eager_scheds: Vec<Option<EagerScope>>,
     /// Every `Executor` created during the run (`Op::NewExecutor`), in creation order. These handles
     /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
-    /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down — the VM
-    /// parity counterpart of the interpreter's `Rc` registry.
+    /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down.
     executors: Vec<GcRef>,
     /// Concurrency B1/B2: set by a blocking `recv` (empty channel) running inside an active nursery
     /// scheduler. It records the channel handle the running fiber is waiting on; `run_until` and the

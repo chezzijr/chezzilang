@@ -1,7 +1,6 @@
-//! Runtime constants and helpers shared verbatim by BOTH execution engines (the tree-walk
-//! interpreter in `crate::interp` and the bytecode VM in `crate::vm`). Anything that must be
-//! byte-identical across the cooperative VM, the `--parallel` VM, and the interpreter — the parity
-//! oracle — lives here so there is a single source of truth.
+//! Runtime constants and helpers shared verbatim by the VM (`crate::vm`). Anything that must be
+//! byte-identical across the cooperative serial VM and the `--parallel` M:N VM — the parity
+//! oracle being the serial scheduler — lives here so there is a single source of truth.
 
 /// The one-line observable report emitted when a `parallel:` body escapes early (`?` / `return` /
 /// `break`) before its join, cancelling the `n` already-`spawn`ed-but-not-yet-started tasks.

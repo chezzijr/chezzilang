@@ -2,7 +2,7 @@
 # first, bind its value, and run that arm (source-order priority, not Go's random fairness).
 #
 # This example uses only NON-blocking arms — a value already queued, a fired `timer`, or `else:` —
-# so the VM, the tree-walking interpreter, and the `--parallel` engine all produce identical output.
+# so the M:N (`--parallel`) and serial (`--serial`) engines both produce identical output.
 # (A `wait` that truly blocks until a sibling produces is a VM/cooperative capability; see the
 # `vm_wait_blocks_then_wakes_on_second_channel` test.)
 

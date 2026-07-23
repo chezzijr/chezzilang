@@ -101,7 +101,7 @@ pub enum Op {
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
     /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only — byte-identical to
-    /// the interpreter, which likewise evaluates `msg` solely when the assertion fails.
+    /// the serial-VM parity oracle, which likewise evaluates `msg` solely when the assertion fails.
     Assert {
         has_msg: bool,
     },
@@ -130,7 +130,7 @@ pub enum Op {
     /// from `Proto::capture_names[slot]`.
     GetCaptured(u32),
 
-    // ----- arithmetic / logic (dispatch on runtime types, mirroring the interpreter) -----
+    // ----- arithmetic / logic (dispatch on runtime types, mirroring the serial-VM parity oracle) -----
     Add,
     Sub,
     Mul,
@@ -349,7 +349,7 @@ pub enum Op {
     BuildStr(usize),
 
     // ----- iteration helpers -----
-    /// Pop an iterable; push a *clone* of its list contents (matches the interpreter snapshotting
+    /// Pop an iterable; push a *clone* of its list contents (matches the serial-VM parity oracle snapshotting
     /// `items.borrow().clone()`), erroring if not a list.
     ListClone,
     /// Pop a list; push its length as an int.

@@ -1,5 +1,5 @@
 // vm::exec — split out of vm/mod.rs. `super::*` == the `vm` module.
-// VM interpreter core: construction, frames, generators, run/run_until/step dispatch.
+// VM core: construction, frames, generators, run/run_until/step dispatch.
 
 use super::*;
 
@@ -1107,7 +1107,7 @@ impl Vm {
                             .defer_markers
                             .truncate(h.markers_len);
                         // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
-                        // never ran) — mirrors the interpreter always reclaiming its nursery list.
+                        // never ran) — the nursery list is always reclaimed on unwind.
                         // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
                         // cancels-and-reports its unstarted tasks IDENTICALLY to an uncaught `?`.
                         self.drain_escaped_nursery(h.nursery_len);
@@ -1420,8 +1420,8 @@ impl Vm {
             Op::Assert { has_msg } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
-                // `msg` (if present) was evaluated lazily just before us — matching the interpreter,
-                // which only evaluates `msg` when the assertion fails.
+                // `msg` (if present) was evaluated lazily just before us — `msg` is only
+                // evaluated when the assertion fails.
                 let message = if *has_msg {
                     let m = self.pop();
                     match self.val_str(m) {

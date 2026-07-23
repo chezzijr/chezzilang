@@ -533,7 +533,7 @@ impl Vm {
     /// `union`/`intersection`/`difference` set methods (vm:7918) using the cached per-element
     /// hashes (no re-hashing, no user re-entry). `^` (symmetric-difference) has no method form:
     /// it is the union of (mine ∉ other) THEN (other ∉ mine), in that canonical insertion order so
-    /// the result's print order is deterministic and parity-equal with the interpreter.
+    /// the result's print order is deterministic and parity-equal with the serial-VM oracle.
     pub(super) fn set_op(
         &mut self,
         op: SetOp,
@@ -789,7 +789,7 @@ impl Vm {
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
-    /// (Rust would otherwise panic), with a message identical to the interpreter's.
+    /// (Rust would otherwise panic), with a message identical to the serial-VM oracle's.
     pub(super) fn bitwise(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
@@ -1181,7 +1181,7 @@ impl Vm {
         // A ZERO-FIELD struct with no `hash` method hashes to a constant (0): it has no state, so
         // there is nothing to hash. `==`'s type-tag guard keeps distinct empty-struct types unequal
         // despite the shared hash. Mirrors the checker's zero-field `Hashable` intrinsic and the
-        // interpreter's identical constant (two-engine parity).
+        // serial-VM oracle's identical constant (two-engine parity).
         if def.fields.is_empty() && !def.methods.contains_key("hash") {
             return Ok(0);
         }

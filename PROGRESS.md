@@ -1518,6 +1518,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ## Current focus
 
+**Live phase (2026-07-23):** pre-JIT/pre-freeze **bug-hunt + drift-fix hunt** — Go-concurrency,
+checker↔runtime, and IO drift; live ledger in `docs/gaps.md`. **M19 — Perf track** is paused
+in-progress alongside it (see "Next perf batch" below). The Type-Conversion track below is a
+**completed/paused** milestone, kept for reference, not the current focus.
+
+### Paused track — Type Conversion (2026-07-07)
+
 **🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS.** **STATUS (2026-07-07): Phase 0 ✅ +
 Phase 1 slices 1–2 ✅ SHIPPED; slice 3 (`T.convert`) ⛔ deferred (Option A clear-error landed); Phase 2
 (multi-source) ⛔ deferred — both revisit-later, see below.** What works now: scalar fills (`bool(x)`,

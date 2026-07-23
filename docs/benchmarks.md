@@ -138,7 +138,9 @@ impossible here — the compiler is type-erased, so the field's struct type is u
 hence a runtime IC. Sound + thread-safe: the cell holds an index (no `GcRef`), so it is invisible to
 GC / snapshots / `swap_ctx`; cooperative fibers run sequentially and `--parallel` workers each own a
 `Vm`; every access self-verifies, so a stale/cross-type cell can never return a wrong field. The
-frozen interp is tree-walk (never sees the opcode) ⇒ parity is automatic. 1541 tests green.
+parity is checked serial-VM (`parallel=false`) vs M:N-VM (`parallel=true`) — both are the same
+`Vm`, only the scheduler differs. (Historical note: this landed when a frozen tree-walk interpreter,
+since removed, was the oracle.)
 
 New **`struct`** bench (8-field accumulator, eight reads + four writes/iter, 1M iters) — the
 field-access-bound case the IC targets — measured IC-on vs IC-off (`-N --warmup 5 -r 20`):
@@ -571,9 +573,9 @@ the same `HashIndex::insert`, so the One→Many upgrade is identical on rebuild 
 
 **The lever moved its predicted target.** Killing 200k tiny allocs + the per-lookup indirection is
 the bulk of the win: the probe is now `slice::from_ref` over an inline `usize` (no heap deref) plus the
-unchanged `values_equal` confirm. The two-engine parity bar is preserved by construction — the frozen
-interpreter (`src/interp/value.rs`) keeps its `Vec<usize>` index, and both engines confirm every hash
-hit with the same `values_equal` probe, so output is byte-identical.
+unchanged `values_equal` confirm. The two-engine parity bar is preserved by construction — the serial
+(`parallel=false`) and M:N (`parallel=true`) engines are the same `Vm` and confirm every hash hit with
+the same `values_equal` probe, so output is byte-identical.
 
 **Behavior-preserving:** new `dense_index_collision_upgrade_parity` guard (two distinct constant-`hash()`
 struct keys land in one bucket, both read back distinctly via the `Many` upgrade) plus the borrowed

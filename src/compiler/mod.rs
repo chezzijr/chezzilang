@@ -2,11 +2,11 @@
 //! of function prototypes for the stack VM. The compiler is the *only* place that knows about slots
 //! — locals resolve to operand-stack slots, and (M19 Phase 2b) module globals resolve to stable
 //! per-module global slots here; the rest (struct/variant names, builtins) is resolved by name,
-//! matching the tree-walk interpreter's resolution order so the VM reproduces its semantics exactly.
+//! in a fixed lookup order the VM reproduces exactly.
 //!
 //! Two passes:
 //!   1. **Hoist** — register every module's struct / enum declarations into the program-global
-//!      type tables (with the interpreter's "type already defined" collision), plus the built-in
+//!      type tables (with the "type already defined" collision rule), plus the built-in
 //!      `Ok`/`Err`/`Some`/`None` variants.
 //!   2. **Compile** — for each module emit a `<toplevel>` proto (top-level `fn`s hoisted first so
 //!      forward references resolve) and one proto per `fn` / method / closure.
@@ -1553,7 +1553,7 @@ impl Compiler {
                 self.compile_expr(fc, expr)?;
                 // `PopExprStmt` (not `Pop`): an unhandled `Err`/`None` from a top-level expression
                 // statement exits the program (the runtime checks the frame). Use `expr.span` (not
-                // `stmt.span`) so the error location matches the interpreter exactly.
+                // `stmt.span`) so the error location matches the serial-VM parity oracle exactly.
                 fc.emit(Op::PopExprStmt, expr.span);
                 Ok(())
             }
@@ -1676,11 +1676,11 @@ impl Compiler {
             // `pass` — a no-op statement; emits no bytecode.
             StmtKind::Pass => Ok(()),
             StmtKind::Assert { cond, msg } => {
-                // Lazy message evaluation, byte-identical to the interpreter (which evaluates `msg`
+                // Lazy message evaluation, byte-identical to the serial-VM oracle (which evaluates `msg`
                 // only on failure): compile `cond`, and only on the false path compile `msg` then
                 // `Op::Assert` (which always faults). A passing assert never touches `msg`, so a
                 // side-effecting/faulting message expression behaves identically across both engines.
-                // `Op::Assert` carries `stmt.span` so the fault location matches the interpreter.
+                // `Op::Assert` carries `stmt.span` so the fault location matches the serial-VM parity oracle.
                 self.compile_expr(fc, cond)?;
                 let to_fail = fc.emit_jump(Op::JumpIfFalse(0), stmt.span);
                 let to_end = fc.emit_jump(Op::Jump(0), stmt.span);
@@ -1699,7 +1699,7 @@ impl Compiler {
                 vars, iter, body, ..
             } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
-            // Concurrency C4 — sequential, run-to-completion executor (mirrors the interpreter).
+            // Concurrency C4 — sequential, run-to-completion executor (mirrors the serial-VM parity oracle).
             StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
             StmtKind::Spawn(target) => self.compile_spawn(fc, target, stmt.span),
             StmtKind::Wait { arms, else_block } => {
@@ -2163,7 +2163,7 @@ impl Compiler {
         }
     }
 
-    /// Load a name's value (local → captured → global), mirroring the interpreter's lookup order.
+    /// Load a name's value (local → captured → global), mirroring the serial-VM parity oracle's lookup order.
     fn emit_load(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
             // A boxed owner-side local dereferences its cell (`emit_get_named`).
@@ -2466,7 +2466,7 @@ impl Compiler {
             // `for a, b, … in xs` over a `List[(A, B, …)]`. The compiler is type-erased, so we branch
             // at RUNTIME on `IsMap` (mirroring the single-var `IsStruct` split):
             //   - map: snapshot keys + values up front and index them in lockstep (so a body that
-            //     mutates the map mid-loop can't perturb the bindings; matches the interpreter);
+            //     mutates the map mid-loop can't perturb the bindings; matches the serial-VM parity oracle);
             //   - list of tuples: index the list, then destructure each element tuple into the N
             //     loop vars via `GetField(j)` (the destructure-`:=` pattern, generalized to N).
             self.compile_expr(fc, iter)?;
@@ -3928,7 +3928,7 @@ impl Compiler {
 
     fn compile_ident(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         // A bare nullary *built-in* variant used as a value (`None`) — resolved before any env
-        // lookup, exactly like the interpreter. User variants are qualified (handled in the `Field`
+        // lookup, exactly like the serial-VM oracle. User variants are qualified (handled in the `Field`
         // arm), so only built-ins resolve bare here.
         if let Some(def) = self
             .variant_pair(None, name)
@@ -4513,7 +4513,7 @@ impl Compiler {
                 }
             }
         }
-        // Bare-ident callees resolve by name in the interpreter's order:
+        // Bare-ident callees resolve by name in this order:
         // print → builtin → struct ctor → variant ctor → value.
         if let ExprKind::Ident(name) = &callee.kind {
             // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
@@ -4591,7 +4591,7 @@ impl Compiler {
                         } else {
                             // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
                             // its default str), then a dedicated op joins+terminates. Eval order
-                            // matches the interpreter: positional args, then sep, then end.
+                            // matches the serial-VM parity oracle: positional args, then sep, then end.
                             let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
                             let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
                             match sep {

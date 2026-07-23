@@ -2276,7 +2276,7 @@ impl Vm {
             return Ok(());
         }
         // Snapshot the handles: a drained task may create new executors; reap only those alive at
-        // exit (parity with the interpreter's `Vec<Rc>` snapshot).
+        // exit (parity with the serial-VM oracle's `Vec<Rc>` snapshot).
         let execs = self.executors.clone();
         for h in execs {
             let shut = self.executor_core(h).inner.lock().unwrap().shut;

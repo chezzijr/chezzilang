@@ -1,7 +1,7 @@
 //! Module resolver (M4.5): turns an entry `.chz` file into a parsed, ordered dependency graph.
 //!
-//! Pure filesystem + dotted-path logic — it does **not** type-check or run. Both the checker and
-//! the interpreter consume the same [`ModuleGraph`] so they agree on what gets loaded and in what
+//! Pure filesystem + dotted-path logic — it does **not** type-check or run. The checker, compiler,
+//! and VM consume the same [`ModuleGraph`] so they agree on what gets loaded and in what
 //! order.
 //!
 //! Resolution rules (see `docs/spec.md` §"Imports & module resolution"):
@@ -116,7 +116,7 @@ pub struct ModuleGraph {
 
 /// ROOT REDESIGN — the canonical, per-module identity prefix used to qualify EVERY user
 /// struct/enum/variant/type-alias runtime key (`<module-key>::<Name>`). The single source of truth
-/// for all three engines (compiler, checker, interpreter), so they derive byte-identical keys.
+/// for the checker, compiler, and VM, so they derive byte-identical keys.
 ///
 /// Each module's key starts from its [`LoadedModule::label`] (the dotted path for an imported
 /// module, the file stem for the entry — so the entry gets a real, non-empty key and a key is never

@@ -194,7 +194,7 @@ impl NetPoller {
         });
         let t = Arc::clone(&inner);
         // The poll thread only locks the registry + calls `complete_offload` (which re-enqueues a
-        // fiber on its scheduler); it never runs interpreter code, so the default stack is ample.
+        // fiber on its scheduler); it never runs VM bytecode, so the default stack is ample.
         std::thread::Builder::new()
             .name("chezzi-netpoller".into())
             .spawn(move || poll_loop(&t))
@@ -415,7 +415,7 @@ fn poll_loop(inner: &Inner) {
 /// (delete-before-drop; the fd is still open — its fiber hasn't resumed to close it), THEN re-inject
 /// with the lock released (`complete_offload` takes the sched lock — keep the registry lock leaf-level,
 /// matching `drain_sched`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
-/// on its next schedule-in) — the poll thread never runs interpreter code, only mutates this flag.
+/// on its next schedule-in) — the poll thread never runs VM bytecode, only mutates this flag.
 fn fire_due_socket_timeouts(inner: &Inner) {
     let now = Instant::now();
     let timed_out: Vec<Parked> = {
