@@ -128,7 +128,7 @@ native struct Channel[T]:
     # `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on every
     # `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
     # `std.cancel`'s `done()`). Idempotent; takes no args.
-    native fn trip(self) -> nil
+    native fn trip(self) -> nil where T: bool
     native fn len(self) -> int
     # `cap()` reports the channel's capacity: the bound passed to `Channel[T](cap)`, or `0` for an
     # unbounded `Channel[T]()`.

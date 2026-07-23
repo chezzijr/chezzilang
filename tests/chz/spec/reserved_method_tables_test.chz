@@ -45,10 +45,10 @@ test fn channel_close_drain():
 # ---- Channel: trip (permanent ready latch) ----
 
 test fn channel_trip():
-    ch := Channel[int]()
+    ch := Channel[bool]()   # trip() is `where T: bool` — the level-trigger latch only delivers `true`
     ch.trip()
     match ch.try_recv():
-        Some(_): assert true
+        Some(v): assert v, "a tripped channel delivers true"
         None: assert false, "a tripped channel reports ready forever"
 
 # ---- str: representative methods (len / upper / split / replace / to_int / parse_int / message) ----

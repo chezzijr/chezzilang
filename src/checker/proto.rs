@@ -858,6 +858,24 @@ impl Checker {
         self.satisfies_args_d(ty, protocol, args, 0)
     }
 
+    /// A `where T: <scalar>` bound names a concrete scalar type rather than a protocol, making it an
+    /// EQUALITY constraint (`T` must be exactly this type) instead of structural satisfaction. Scoped
+    /// to scalars — the concrete-equality case the surface needs (`Channel[T].trip()`'s `where T: bool`)
+    /// without opening generic-struct equality. Returns the scalar `Ty`, or `None` if `name` is not a
+    /// scalar type (so the caller falls back to the protocol path / an `unknown protocol` error).
+    pub(super) fn scalar_bound_ty(name: &str) -> Option<Ty> {
+        Some(match name {
+            "int" => Ty::Int,
+            "float" => Ty::Float,
+            "bool" => Ty::Bool,
+            "str" => Ty::Str,
+            "bytes" => Ty::Bytes,
+            "bytearray" => Ty::ByteArray,
+            "nil" => Ty::Nil,
+            _ => return None,
+        })
+    }
+
     /// Depth-bounded core of [`satisfies_args`]. `depth` guards the embed-flattening recursion (M22):
     /// cycles are rejected at declare time, but a malformed cyclic program still runs the rest of the
     /// checker, so a hard cap (mirroring `resolve_ty_ro_d`) breaks the recursion with a plain failure
@@ -870,6 +888,16 @@ impl Checker {
         depth: usize,
     ) -> Result<(), String> {
         let Some(pinfo) = self.protocols.get(protocol) else {
+            // A `where T: <scalar>` EQUALITY bound: the name is a concrete scalar type, not a
+            // protocol, so it constrains `ty` to be EXACTLY that type (e.g. `trip()`'s `where T: bool`).
+            if let Some(expected) = Self::scalar_bound_ty(protocol) {
+                return match ty {
+                    // Don't cascade off an unresolved operand (mirrors the `Ty::Unknown` arm below).
+                    Ty::Unknown => Ok(()),
+                    _ if *ty == expected => Ok(()),
+                    _ => Err(format!("expected {expected}, found {ty}")),
+                };
+            }
             return Err(format!("unknown protocol '{protocol}'"));
         };
         if let Ty::Unknown = ty {

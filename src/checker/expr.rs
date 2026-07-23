@@ -2673,6 +2673,15 @@ impl Checker {
                 {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
+                    // `trip()`'s `where T: bool` (harvested onto `where_bounds`) is enforced here with
+                    // the `T -> elem` substitution — `trip` is level-trigger-latch-only and always
+                    // delivers `bool true`, so it's sound only on `Channel[bool]`. No-op for every
+                    // other Channel method (empty `where_bounds`). Mirrors the `Ty::List` arm.
+                    self.enforce_bounds(
+                        &sig.where_bounds,
+                        &HashMap::from([("T".to_string(), elem.clone())]),
+                        span,
+                    );
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -3581,6 +3590,14 @@ impl Checker {
         let mut seen_iterator = false;
         for b in bounds {
             let Some(arity) = self.protocols.get(&b.name).map(|p| p.type_params.len()) else {
+                // A `where T: <scalar>` equality bound (int/float/bool/str/…) — not a protocol, but a
+                // valid constraint pinning `T` to exactly that scalar type. It takes no type args.
+                if Self::scalar_bound_ty(&b.name).is_some() {
+                    if !b.args.is_empty() {
+                        self.error(span, format!("type '{}' takes no type arguments", b.name));
+                    }
+                    continue;
+                }
                 self.error(
                     span,
                     format!("unknown protocol '{}' in bound on '{param}'", b.name),

@@ -159,6 +159,9 @@
 # A `where T: Bound, U: Add + Mul, …` clause: a comma-separated list of `IDENT (: bound (+ bound)*)`
 # entries (each the shape of one <typeParam>), reusing <boundList>. Attaches after a fn/native-fn
 # signature; the checker merges each entry's bounds into the matching declared type parameter.
+# A bound name is normally a protocol; a SCALAR TYPE name (`int`/`float`/`bool`/`str`/`bytes`/
+# `bytearray`/`nil`) is instead an EQUALITY constraint — `T` must be exactly that scalar (it takes no
+# type args). Used by `Channel[T].trip()`'s `where T: bool`.
 <whereClause> ::= "WHERE" <whereList>
 <whereList>   ::= <typeParam> | <typeParam> "COMMA" <whereList>
 # A `test` modifier before `fn` marks a test (`chezzi test` discovers it). A free `test fn` is an

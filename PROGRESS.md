@@ -4,6 +4,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ BUG-HUNT + FEATURE (2026-07-23, wave 3) — `Channel.trip()` type-hole FIXED via new scalar `where`-bounds.**
+> `trip()` was typed `-> T` on every `Channel[T]` but always delivers `bool true` → a `bool` leaked through a
+> `T`-typed `recv()` on any `Channel[int]`/etc. (check-OK type-soundness hole). Fix adds a declarative facet:
+> `where T: <scalar>` is now an EQUALITY bound (int/float/bool/str/bytes/bytearray/nil) — `trip()` carries
+> `where T: bool` in `std/prelude.chz`. Checker-only + additive (`scalar_bound_ty`, `satisfies_args_d`/
+> `check_bounds` arms, Channel arm now `enforce_bounds`). 3681 lib tests + conformance green, clippy clean. 3
+> hunt findings still OPEN (native `str.count("")`, native `str.split("")`, cyclic `Set.has`) — see
+> `docs/gaps.md` session log 2026-07-23 (wave 3).
+>
 > **✅ CHECKER REFACTOR (2026-07-23) — the last 4 bespoke reserved-type method tables are now file-backed.**
 > `channel_method_sig`/`str_method_sig`/`bytes_method_sig`/`bytearray_method_sig` (`src/checker/mod.rs`) are
 > RETIRED: each is now a body-less `native struct Channel[T]`/`str`/`bytes`/`bytearray` in `std/prelude.chz`,

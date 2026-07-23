@@ -194,8 +194,9 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 frees a slot (Go's buffered channel; a full `send` with no possible consumer is a deadlock fault, not an
 over-fill). Methods: `send(x: T) -> nil` · `try_send(x: T) -> bool` (`false` = closed **or** full — never
 blocks) · `recv() -> T` · `try_recv() -> Option[T]` · `close() -> nil` ·
-`trip() -> nil` (permanent level-trigger latch) · `len() -> int` · `cap() -> int` (the bound, or `0` for
-unbounded). Iterate received values with `for v in ch:` (ends when closed and drained). Backpressure only
+`trip() -> nil` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
+it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` · `cap() -> int`
+(the bound, or `0` for unbounded). Iterate received values with `for v in ch:` (ends when closed and drained). Backpressure only
 changes *which* task runs *when*, never the value sequence a consumer sees — bounded channels are
 byte-identical serial vs M:N.
 

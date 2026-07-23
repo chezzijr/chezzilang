@@ -217,6 +217,43 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-23 (bug-hunt wave 3: 4 findings, `Channel.trip()` type-hole FIXED via new scalar `where`-bounds; 3 findings OPEN)
+
+Pre-freeze adversarial hunt, 5 disjoint domains (~248 probes, both engines). **3 domains CLEAN** (airlock 22,
+cancel/defer/recover 37, checker⊋compiler ~40 — the productive class is exhausted). 4 findings survived
+re-verification on the real binary — all **shared-wrong / check-OK type holes** the parity oracle is blind to
+(none is serial≠M:N):
+
+- **`Channel[T].trip()` typed `T` but always delivers `bool true` — check-OK type-soundness hole — FIXED.**
+  `trip()` (the level-trigger latch behind `std.cancel`'s `done()`) was exposed on `Channel[T]` for all `T`,
+  but recv/try_recv/wait unconditionally deliver `Bool(true)` (`vm/netio.rs`). On any `T != bool`, `check`
+  passed then a `bool` leaked out of `recv()` where the type promised `T` (`Channel[int]().trip(); recv()`
+  printed `true`; `recv()+1` faulted `cannot apply Add to bool and int`). **Fix — a new declarative language
+  facet:** `where T: <scalar>` is now an **EQUALITY bound** (not a protocol) — the bound name may be a scalar
+  type (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`nil`), constraining `T` to be exactly that type.
+  `trip()` gets `where T: bool` in `std/prelude.chz`, so the restriction lives in the `.chz` sig, not a Rust
+  special-case. Implementation (checker-only, additive): `Checker::scalar_bound_ty` (proto.rs), a scalar-
+  equality arm in `satisfies_args_d` + `check_bounds`, and the Channel method arm now calls `enforce_bounds`
+  on the harvested `where_bounds` with `T→elem` (mirrors the `Ty::List` arm — Channel was the one container
+  arm not wired for it). Tests: `checker::tests::{scalar_where_bound_is_equality_constraint,
+  channel_trip_gated_to_bool}` + updated `channel_trip` in `reserved_method_tables_test.chz` (now `Channel[bool]`).
+  Scoped to scalars (avoids generic-struct equality). `bound_provides` unchanged — a scalar bound constrains,
+  provides no methods.
+
+- **OPEN — native `"abc".count("")` returns 0** (Python/Go = `len+1`); the free fn `string.count` = 4. Commit
+  `5a8fba0` fixed `std/string.chz` but missed the sibling native method (`src/vm/call.rs:2515`, stale comment
+  `// std.string: empty -> 0`) — the fix-one-caller-not-the-root miss. Fix: return `s.chars().count() as i64 + 1`.
+- **OPEN — native `"abc".split("")`** = `[,a,b,c,]` (leaks Rust's empty-pattern semantics; `call.rs:2310`);
+  matches neither Python (`ValueError`) nor Go (`[a b c]`), and its own sibling `std.string.split` `panic`s on
+  empty separator. Fix: guard empty separator.
+- **OPEN (Low/niche) — `Set.has`/`Map` on a cyclic struct key silently returns `false`** where `==` on the same
+  two cyclic values faults `maximum structural depth (10000) exceeded` — self-inconsistent (Python raises
+  RecursionError on both). Needs a custom `hash` + a cyclic struct key.
+
+Safe-direction observations (NOT bugs — noted for a future look): protocol-embedded methods aren't callable
+through the interface value (`p: Person` can't call embedded `name()`) despite spec.md:973 "flattened at bound
+sites"; `List[Any]=[1,3.0]` accepted but `Map[str,Any]={"a":1,"b":3.0}` rejected (asymmetry vs spec's joint wording).
+
 ## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 3 fixes + 1 doc fix MERGED, 0 open findings, 2 dormant fragilities remain)
 
 Pre-freeze adversarial hunt (5 disjoint domains, ~200 probes, both engines) + a **completeness/partial-coverage

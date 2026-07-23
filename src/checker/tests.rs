@@ -560,6 +560,34 @@ fn unknown_protocol_bound_rejected() {
 }
 
 #[test]
+fn scalar_where_bound_is_equality_constraint() {
+    // `where T: <scalar>` is an EQUALITY bound, not a protocol — `T` must be exactly that scalar.
+    ok("fn f[T: bool](a: T) -> T:\n    return a\nfn main():\n    print(f(true))\n");
+    ok("fn f[T: str](a: T) -> T:\n    return a\nfn main():\n    print(f(\"hi\"))\n");
+    rejects(
+        "fn f[T: bool](a: T) -> T:\n    return a\nfn main():\n    print(f(5))\n",
+        "expected bool, found int",
+    );
+    // A scalar bound takes no type args.
+    rejects(
+        "fn f[T: bool[int]](a: T) -> T:\n    return a\n",
+        "takes no type arguments",
+    );
+}
+
+#[test]
+fn channel_trip_gated_to_bool() {
+    // `trip()` is `where T: bool` (its level-trigger latch only ever delivers `bool true`), so it is
+    // sound only on `Channel[bool]` — the hole where `Channel[int].trip(); .recv()` leaked a `bool`
+    // through an `int`-typed value is now a compile error.
+    ok("fn main():\n    c := Channel[bool]()\n    c.trip()\n    print(c.recv())\n");
+    rejects(
+        "fn main():\n    c := Channel[int]()\n    c.trip()\n    print(c.recv())\n",
+        "expected bool, found int",
+    );
+}
+
+#[test]
 fn redeclaring_comparable_rejected() {
     rejects(
         "protocol Comparable:\n    fn compare(self, other: Self) -> int\n",
