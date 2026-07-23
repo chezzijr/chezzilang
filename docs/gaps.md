@@ -217,6 +217,54 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-23 (bug-hunt wave 2 + completeness sweep: 2 fixes MERGED, 1 open finding, 2 dormant fragilities)
+
+Pre-freeze adversarial hunt (5 disjoint domains, ~200 probes, both engines) + a **completeness/partial-coverage
+sweep** (5 dispatch-table audits — "a fix/feature applied to SOME arms of an N-way set but not all"). All
+findings verified on the real binary before filing.
+
+**Bug-hunt (5 domains): all CLEAN** — airlock/capture (20), cancel/defer/recover (56), channel/nursery/
+Shared/Atomic/Executor (34), checker⊋compiler (~35 int→float seams), stdlib+features (~50). Consistent with
+6+ prior waves. One doc defect fixed: **`bytes(s)`** was documented (`docs/stdlib.md`) as UTF-8-encoding a
+`str`, but `bytes()` rejects a `str` at check (Python's `bytes(str)` also errors without an encoding) — the
+CODE is right, the doc lied; corrected to point at `s.encode()`.
+
+**Completeness sweep (5 audits) — found the partial-coverage class in 3 spots:**
+- **`order_key` missed the newtype-unwrap** → check-OK-then-run-fault on `List[newtype=float]`+NaN `.min()`/
+  `.max()`/`min_by`/`max_by`/`sort_by_key`. Sibling of ff4d929 (which fixed `value_order`+`compare` but not
+  `order_key`). **FIXED + MERGED** (753882d — its own session-log entry below).
+- **Native/Cffi wire-path airlock** — the snap path shipped them but the wire path rejected them.
+  **FIXED + MERGED** (f6e5ec3 — its own entry below). (This whole bug was the seed of the wave.)
+- **Aliased native-struct import escapes reserved-type redeclare protection — OPEN (medium, checker
+  over-accept, NO runtime trap).** `import Match as M from std.regex` + `struct Match:` is ACCEPTED, while the
+  UN-aliased `import Match from std.regex` + `struct Match` is correctly REJECTED ("type 'Match' is reserved
+  (builtin)"). Root: `bind_import` From-import nominal-struct arm (`src/checker/setup.rs:~1481-1495`) records
+  the reservation under the BIND name (`M`), not the member name (`Match`), and has no rename-reject (unlike
+  the opaque-handle arms). Produces the self-contradictory diagnostic "cannot assign Match to variable of type
+  Match" (native `M` vs user `Match` coexist as distinct types). **Verified NOT a runtime trap** — the checker
+  keeps native/user `Match` distinct by origin (different `tid`s), rejects cross-use, and no native fn CONSUMES
+  a `Match` (regex fns take `(str,str)`), so no smuggling path. The audit's "seed-overwrite → find()-return
+  type-confusion → trap" theory was DISPROVEN on the real binary. Fix (not applied): reject renaming a
+  Builtin-origin native struct on import (mirror the opaque-handle arms), or key the reservation on the member
+  name. Deferred — it's a checker change (the area auto-task historically over-reaches on).
+
+**Two DORMANT structural fragilities (no live trigger — not bugs, worth a cheap guard before freeze):**
+- **Channel is the one native handle OFF the unified method-dispatch path** (`call.rs:989` / checker
+  `channel_method_sig`), so it isn't protected by the "add-a-handle-arm auto-enables bodied dispatch" guarantee
+  the other 9 handles get. Self-consistent today (Channel has no bodied/generic methods); a future one would
+  need a manual VM edit the structural guard won't force.
+- **A non-handle native struct can harvest a bodied method the VM can't dispatch.** The compiler harvest
+  (`compiler/mod.rs:~1086`) is generic over ALL native structs, but `try_native_bodied_method` is only reached
+  from the 9-handle `handle_key` match — so adding a bodied `fn` to `Match`/`ProcResult`/`FileInfo`/`Response`
+  would compile a proto into `native_methods[...]` the runtime never consults → check-OK/run-fault. None
+  declare a bodied `fn` today. Cheap guard: assert every harvested `native_methods` key is reachable in the VM
+  `handle_key` match, or restrict the harvest to reserved handle names.
+
+**Audits that came back fully CLEAN:** airlock crossing-site guard coverage (single `to_wire_crossable`
+chokepoint, no unguarded store); `stream_halt` dead-pipe re-raise + native Map-ordering (both "every X must
+also do Y" contracts honored); method-dispatch handle×capability matrix (all 10 handles symmetric); the rest
+of the NewType-unwrap surface (==, ordering, arith, hash, Display, casts, airlock, GC all newtype-transparent).
+
 ## Session log — 2026-07-23 (native/FFI fn values now cross the wire-value airlock — FIXED)
 
 **Fix — native (`Obj::Native`) + FFI (`Obj::Cffi`) fn values are now sendable across the WIRE path.**

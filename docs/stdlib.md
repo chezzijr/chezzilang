@@ -35,7 +35,7 @@ Conventions used below:
 | `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` is refined from the expected type / first use, like `Set()` — but a *never*-pinned empty is a static error: annotate it) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
 | `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` is refined from the expected type / first use — a *never*-pinned empty errors, annotate it). Map literal: `{k: v, ...}`. |
 | `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; a *never*-pinned bare `Set()` errors, annotate it) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
-| `bytes(s)` | `bytes` | UTF-8 encode a `str` (same as `s.encode()`). Literal: `b"..."`. |
+| `bytes(x)` | `bytes` | Convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 
 ---
@@ -695,7 +695,7 @@ for i in range(data.len()):
 
 ### `std.encoding`
 Reversible text codecs. Every function takes a `str` and operates on its **UTF-8 bytes** (like
-`bytes(s)` / `s.encode()`); encoders return `str` (infallible), decoders return `Result[str]`
+`s.encode()`); encoders return `str` (infallible), decoders return `Result[str]`
 (malformed input — or decoded bytes that aren't valid UTF-8 — is a recoverable `Err`, never a panic).
 *All members are pure CPU str transforms (no I/O); they run inline on every engine.*
 - base64 (RFC 4648): `base64_encode(s) -> str` / `base64_decode(s) -> Result[str]` (std `+/` alphabet,
