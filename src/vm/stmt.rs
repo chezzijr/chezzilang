@@ -1902,10 +1902,7 @@ impl Vm {
     /// [`MAX_STRUCTURAL_DEPTH`] — guarding cyclic data from overflowing the host stack.
     pub(super) fn display_guarded(&self, v: Value, depth: usize) -> Result<String, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err(
-                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
-                Span { line: 1, col: 1 },
-            ));
+            return Err(self.depth_exceeded_err(Span { line: 1, col: 1 }));
         }
         match v.view() {
             ValueView::Int(n) => Ok(n.to_string()),
@@ -2354,10 +2351,7 @@ impl Vm {
         // `RuntimeError` (a `str` method re-stringifies at the *same* depth, so a non-recursive
         // protocol hook doesn't burn the budget).
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err(
-                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
-                span,
-            ));
+            return Err(self.depth_exceeded_err(span));
         }
         if let Some(n) = self.int_val(v) {
             let _ = write!(out, "{n}");

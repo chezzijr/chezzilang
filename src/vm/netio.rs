@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// Generate a `pub(super) fn <name>(&self, GcRef) -> Arc<CoreType>` that clones out the shared
+/// `Arc` behind a handle of the given `Obj` variant (refcount bump). See [`Vm::channel_core`] for
+/// the rationale (the `Arc` is held only for the calling method, so it does not borrow the heap);
+/// `channel_core`/`socket_core` stay hand-written to carry that doc.
+macro_rules! core_accessor {
+    ($name:ident, $variant:ident, $core:ty) => {
+        pub(super) fn $name(&self, h: GcRef) -> Arc<$core> {
+            match self.heap.get(h) {
+                Obj::$variant(core) => Arc::clone(core),
+                _ => unreachable!(concat!(stringify!($name), " on non-", stringify!($variant))),
+            }
+        }
+    };
+}
+
 /// The shared fault for a `send` on a FULL bounded channel that cannot park (top level with no
 /// nursery, or inside a native callback). ONE const so every non-parkable full-send path — on BOTH
 /// engines — emits byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
@@ -33,33 +48,10 @@ impl Vm {
         }
     }
 
-    pub(super) fn shared_core(&self, h: GcRef) -> Arc<SharedCore> {
-        match self.heap.get(h) {
-            Obj::Shared(core) => Arc::clone(core),
-            _ => unreachable!("shared_core on non-shared"),
-        }
-    }
-
-    pub(super) fn rwshared_core(&self, h: GcRef) -> Arc<RwSharedCore> {
-        match self.heap.get(h) {
-            Obj::RwShared(core) => Arc::clone(core),
-            _ => unreachable!("rwshared_core on non-rwshared"),
-        }
-    }
-
-    pub(super) fn atomic_core(&self, h: GcRef) -> Arc<AtomicCore> {
-        match self.heap.get(h) {
-            Obj::Atomic(core) => Arc::clone(core),
-            _ => unreachable!("atomic_core on non-atomic"),
-        }
-    }
-
-    pub(super) fn atomic_int_core(&self, h: GcRef) -> Arc<AtomicIntCore> {
-        match self.heap.get(h) {
-            Obj::AtomicInt(core) => Arc::clone(core),
-            _ => unreachable!("atomic_int_core on non-atomic-int"),
-        }
-    }
+    core_accessor!(shared_core, Shared, SharedCore);
+    core_accessor!(rwshared_core, RwShared, RwSharedCore);
+    core_accessor!(atomic_core, Atomic, AtomicCore);
+    core_accessor!(atomic_int_core, AtomicInt, AtomicIntCore);
 
     /// `AtomicInt(v)` — pop the int init, wrap it in a fresh lock-free `Arc<AtomicIntCore>`. The checker
     /// guarantees the single arg is an int; a boxed BigInt is narrowed via `int_of`. `#[inline(never)]`
@@ -119,12 +111,7 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Channel(core))))
     }
 
-    pub(super) fn executor_core(&self, h: GcRef) -> Arc<ExecutorCore> {
-        match self.heap.get(h) {
-            Obj::Executor(core) => Arc::clone(core),
-            _ => unreachable!("executor_core on non-executor"),
-        }
-    }
+    core_accessor!(executor_core, Executor, ExecutorCore);
 
     /// D6 — clone out the shared `Arc<SocketCore>`/`Arc<ListenerCore>` behind a handle (refcount bump),
     /// mirroring [`channel_core`](Vm::channel_core). The `Arc` is held only for the calling method, so
@@ -136,12 +123,7 @@ impl Vm {
         }
     }
 
-    pub(super) fn listener_core(&self, h: GcRef) -> Arc<ListenerCore> {
-        match self.heap.get(h) {
-            Obj::Listener(core) => Arc::clone(core),
-            _ => unreachable!("listener_core on non-listener"),
-        }
-    }
+    core_accessor!(listener_core, Listener, ListenerCore);
 
     /// D6 — build a `Result::Ok(v)` / `Result::Err(msg)` for a socket op (mirrors `lower_native`'s
     /// `Ok`/`Err` arms — the surface contract is `read/write/accept -> Result`).

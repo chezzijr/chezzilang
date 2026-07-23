@@ -2764,7 +2764,8 @@ const CHANNEL_METHODS: &[&str] = &[
 const SHARED_METHODS: &[&str] = &["get", "set", "update"];
 const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
 const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
-const ATOMIC_INT_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
+// `AtomicInt` exposes the same method surface as `Atomic`.
+const ATOMIC_INT_METHODS: &[&str] = ATOMIC_METHODS;
 const SOCKET_METHODS: &[&str] = &["read", "write", "read_bytes", "write_bytes", "close"];
 const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
 const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];

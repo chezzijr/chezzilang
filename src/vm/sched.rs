@@ -2183,10 +2183,7 @@ impl Vm {
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err(
-                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
-                Span { line: 0, col: 0 },
-            ));
+            return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
         }
         Ok(match v.view() {
             ValueView::Int(n) => WireValue::Int(n),
@@ -3543,10 +3540,7 @@ impl Vm {
     /// the shared budget keeps `to_snap` and `to_wire` in lockstep.
     fn to_snap_depth(&self, v: Value, depth: usize) -> Result<SnapValue, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err(
-                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
-                Span { line: 0, col: 0 },
-            ));
+            return Err(self.depth_exceeded_err(Span { line: 0, col: 0 }));
         }
         let h = match v.as_obj() {
             Some(h) => h,

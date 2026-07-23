@@ -134,6 +134,16 @@ impl Vm {
         RuntimeError { message, span }
     }
 
+    /// The shared recoverable fault raised by every structural walker when recursion exceeds
+    /// [`MAX_STRUCTURAL_DEPTH`] (cyclic data). Single source of truth for the message so it stays in
+    /// sync with the constant; callers pass their own span.
+    pub(super) fn depth_exceeded_err(&self, span: Span) -> RuntimeError {
+        self.err(
+            format!("maximum structural depth ({MAX_STRUCTURAL_DEPTH}) exceeded (cyclic data structure?)"),
+            span,
+        )
+    }
+
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
     /// No-op on the cooperative engine / top-level VM (`cancel` is `None`).
     pub(super) fn trip_cancel(&self) {

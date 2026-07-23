@@ -170,10 +170,10 @@ fn hex_encode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// Encode bytes to lowercase hex.
 fn hex_encode_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((b & 0xF) as u32, 16).unwrap());
+        let _ = write!(out, "{b:02x}");
     }
     out
 }
@@ -208,22 +208,13 @@ fn is_unreserved(b: u8) -> bool {
 /// becomes `%XX` (uppercase hex). The single shared percent-encoder reused by `url_encode` and
 /// `query_encode` (no duplicated escaper).
 fn percent_encode(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if is_unreserved(b) {
             out.push(b as char);
         } else {
-            out.push('%');
-            out.push(
-                char::from_digit((b >> 4) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
-            out.push(
-                char::from_digit((b & 0xF) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
@@ -292,7 +283,7 @@ fn url_decode(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "url_decode", 1)?;
     let s = h.arg_str(0)?;
     match percent_decode(s.as_bytes(), false) {
-        Ok(bytes) => bytes_to_result_url(bytes),
+        Ok(bytes) => Ok(bytes_to_result(bytes, "url")),
         Err(m) => Ok(NativeRet::Err(m)),
     }
 }
@@ -393,11 +384,6 @@ fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         str_pair("query", query),
         str_pair("fragment", fragment),
     ]))
-}
-
-/// url_decode lowering (same UTF-8 validation, distinct codec label).
-fn bytes_to_result_url(bytes: Vec<u8>) -> Result<NativeRet, HostError> {
-    Ok(bytes_to_result(bytes, "url"))
 }
 
 /// Callable members. `(name, fn)`.

@@ -55,9 +55,9 @@ fn with_state<R>(f: impl FnOnce(&mut u64) -> R) -> R {
 
 /// Format 16 bytes as the canonical `8-4-4-4-12` lowercase-hex UUID string.
 fn format_uuid(b: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
     let hex = |out: &mut String, byte: u8| {
-        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((byte & 0xF) as u32, 16).unwrap());
+        let _ = write!(out, "{byte:02x}");
     };
     let mut s = String::with_capacity(36);
     for (i, &byte) in b.iter().enumerate() {

@@ -1708,10 +1708,7 @@ impl Vm {
         span: Span,
     ) -> Result<bool, RuntimeError> {
         if depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.err(
-                "maximum structural depth (10000) exceeded (cyclic data structure?)".to_string(),
-                span,
-            ));
+            return Err(self.depth_exceeded_err(span));
         }
         // Exact i64 equality when BOTH operands are integral (inline `Int` OR boxed `BigInt`) —
         // Python parity. MUST precede the numeric arm below, which compares via `as_f64` — lossy for

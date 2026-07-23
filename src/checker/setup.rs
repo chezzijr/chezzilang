@@ -1680,7 +1680,7 @@ impl Checker {
                     if let Some(body) = self.aliases.get(name) {
                         // Resolve the alias body in THIS (the defining) module's scope so an
                         // importer carries the right underlying type (incl. an FFI width license).
-                        let resolved = self.resolve_type_ro_pub(body);
+                        let resolved = self.resolve_ty_ro(body);
                         // Also resolve the body to a WIDTH-BEARING CType in this defining scope, so a
                         // cross-module `type Len = int32` exports `int32` (not `Ty::Int`). This is the
                         // channel the real width travels through a `from`-import / `module.Alias` hop.
@@ -1713,12 +1713,6 @@ impl Checker {
             }
         }
         sig
-    }
-
-    /// `resolve_ty_ro` wrapped for use inside `capture_sig` (which holds `&self`). Resolves an alias
-    /// body to a `Ty` in the current (defining) module's scope without emitting errors.
-    pub(super) fn resolve_type_ro_pub(&self, t: &Type) -> Ty {
-        self.resolve_ty_ro(t)
     }
 
     // ===== scopes =====

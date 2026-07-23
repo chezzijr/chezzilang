@@ -26,66 +26,36 @@ fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-fn floor(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "floor", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.floor()))
+/// A plain 1-arg `float -> float` intrinsic: `expect_args` then the same-named `f64` method.
+/// Out-of-domain inputs (e.g. `asin(2.0)`, `ln(-1.0)`, `sqrt(-1.0)`) return NaN, never a fault,
+/// keeping the signatures plain `float`. Same f64 op on both engines → free parity.
+macro_rules! unary_float {
+    ($name:ident) => {
+        fn $name(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            expect_args(h, stringify!($name), 1)?;
+            Ok(NativeRet::Float(h.arg_float(0)?.$name()))
+        }
+    };
 }
 
-fn ceil(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "ceil", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.ceil()))
-}
-
-fn round(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "round", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.round()))
-}
+unary_float!(floor);
+unary_float!(ceil);
+unary_float!(round);
 
 fn pow(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "pow", 2)?;
     Ok(NativeRet::Float(h.arg_float(0)?.powf(h.arg_float(1)?)))
 }
 
-fn sqrt(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "sqrt", 1)?;
-    // Total IEEE-754: sqrt of a negative is NaN, never a fault (matches ln/asin's domain handling).
-    Ok(NativeRet::Float(h.arg_float(0)?.sqrt()))
-}
+unary_float!(sqrt);
 
-// Trig / exp / log intrinsics (additive, M19-safe). Each is a plain `float -> float` (or
-// `(float, float) -> float`) pass-through mirroring `sqrt`'s shape, minus the domain check:
-// out-of-domain inputs (e.g. `asin(2.0)`, `ln(-1.0)`) return NaN rather than erroring, keeping
-// the signatures plain `float` and the design minimal. Same f64 op on both engines → free parity.
-
-fn sin(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "sin", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.sin()))
-}
-
-fn cos(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "cos", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.cos()))
-}
-
-fn tan(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "tan", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.tan()))
-}
-
-fn asin(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "asin", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.asin()))
-}
-
-fn acos(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "acos", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.acos()))
-}
-
-fn atan(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "atan", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.atan()))
-}
+// Trig / exp / log intrinsics (additive, M19-safe) — plain `float -> float` via `unary_float!`.
+unary_float!(sin);
+unary_float!(cos);
+unary_float!(tan);
+unary_float!(asin);
+unary_float!(acos);
+unary_float!(atan);
 
 fn atan2(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "atan2", 2)?;
@@ -94,25 +64,10 @@ fn atan2(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Float(y.atan2(x)))
 }
 
-fn exp(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "exp", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.exp()))
-}
-
-fn ln(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "ln", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.ln()))
-}
-
-fn log2(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "log2", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.log2()))
-}
-
-fn log10(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "log10", 1)?;
-    Ok(NativeRet::Float(h.arg_float(0)?.log10()))
-}
+unary_float!(exp);
+unary_float!(ln);
+unary_float!(log2);
+unary_float!(log10);
 
 fn log(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "log", 2)?;

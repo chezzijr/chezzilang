@@ -78,12 +78,8 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("chezzi: cannot read '{path}': {e}");
-            return ExitCode::FAILURE;
-        }
+    let Some(source) = read_source(path) else {
+        return ExitCode::FAILURE;
     };
 
     match lexer::tokenize(&source) {
@@ -107,12 +103,8 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("chezzi: cannot read '{path}': {e}");
-            return ExitCode::FAILURE;
-        }
+    let Some(source) = read_source(path) else {
+        return ExitCode::FAILURE;
     };
 
     let tokens = match lexer::tokenize(&source) {

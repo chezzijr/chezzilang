@@ -906,6 +906,37 @@ impl Checker {
         }
     }
 
+    /// Arity + protocol-bound check shared by the generic struct/enum/newtype arms of
+    /// [`resolve_type`]. `tps` is the declared type-param list (`None` if the name isn't found, e.g.
+    /// a non-generic type used with args). Errors are emitted, not returned. The protocol arm is NOT
+    /// routed here — it has no bounds loop, a different arity message, and a static-method reject.
+    fn check_type_arity_and_bounds(
+        &mut self,
+        n: &str,
+        tps: Option<Vec<TypeParam>>,
+        resolved: &[Ty],
+        span: Span,
+    ) {
+        let Some(tps) = tps else { return };
+        if tps.len() != resolved.len() {
+            self.error(
+                span,
+                format!(
+                    "type '{n}' expects {} type argument(s), got {}",
+                    tps.len(),
+                    resolved.len()
+                ),
+            );
+        }
+        for (tp, arg) in tps.iter().zip(resolved) {
+            for bound in &tp.bounds {
+                if let Err(msg) = self.satisfies(arg, &bound.name) {
+                    self.error(span, msg);
+                }
+            }
+        }
+    }
+
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named {
@@ -1362,26 +1393,7 @@ impl Checker {
                         // Clone the param list out so the borrow on `self.structs` is dropped before
                         // the `satisfies`/`error` calls below.
                         let tps = self.structs.get(&key).map(|i| i.type_params.clone());
-                        if let Some(tps) = tps {
-                            if tps.len() != resolved.len() {
-                                self.error(
-                                    span,
-                                    format!(
-                                        "type '{n}' expects {} type argument(s), got {}",
-                                        tps.len(),
-                                        resolved.len()
-                                    ),
-                                );
-                            }
-                            // Enforce each type parameter's protocol bounds against its argument.
-                            for (tp, arg) in tps.iter().zip(&resolved) {
-                                for bound in &tp.bounds {
-                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                        self.error(span, msg);
-                                    }
-                                }
-                            }
-                        }
+                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
                         Ty::Struct(key, resolved)
                     }
                     // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
@@ -1390,25 +1402,7 @@ impl Checker {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let tps = self.enum_type_params.get(&key).cloned();
-                        if let Some(tps) = tps {
-                            if tps.len() != resolved.len() {
-                                self.error(
-                                    span,
-                                    format!(
-                                        "type '{n}' expects {} type argument(s), got {}",
-                                        tps.len(),
-                                        resolved.len()
-                                    ),
-                                );
-                            }
-                            for (tp, arg) in tps.iter().zip(&resolved) {
-                                for bound in &tp.bounds {
-                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                        self.error(span, msg);
-                                    }
-                                }
-                            }
-                        }
+                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
                         Ty::Enum(key, resolved)
                     }
                     // A parameterized protocol used as a value type (`Container[int]`): resolve the
@@ -1449,25 +1443,7 @@ impl Checker {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let tps = self.newtype_type_params.get(&key).cloned();
-                        if let Some(tps) = tps {
-                            if tps.len() != resolved.len() {
-                                self.error(
-                                    span,
-                                    format!(
-                                        "type '{n}' expects {} type argument(s), got {}",
-                                        tps.len(),
-                                        resolved.len()
-                                    ),
-                                );
-                            }
-                            for (tp, arg) in tps.iter().zip(&resolved) {
-                                for bound in &tp.bounds {
-                                    if let Err(msg) = self.satisfies(arg, &bound.name) {
-                                        self.error(span, msg);
-                                    }
-                                }
-                            }
-                        }
+                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
                         Ty::NewType(key, resolved)
                     }
                     _ => {

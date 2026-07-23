@@ -711,8 +711,7 @@ impl Compiler {
                 obj: mobj, name, ..
             } = &obj.kind
             && let ExprKind::Ident(mname) = &mobj.kind
-            && fc.resolve_local(mname).is_none()
-            && !fc.captures(mname)
+            && fc.is_unbound(mname)
             && let Some(&tidx) = self.imported_modules.get(mname)
             && self
                 .module_types
@@ -1916,9 +1915,7 @@ impl Compiler {
                 };
                 if let ExprKind::Field { obj, name, .. } = &callee.kind {
                     self.compile_expr(fc, obj)?;
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     fc.emit(Op::SpawnMethod(name.clone(), args.len()), call.span);
                 } else if !named.is_empty()
                     && let Some(perm) = self
@@ -1946,9 +1943,7 @@ impl Compiler {
                     fc.emit(Op::SpawnCall(perm.len()), call.span);
                 } else {
                     self.compile_expr(fc, callee)?;
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     fc.emit(Op::SpawnCall(args.len()), call.span);
                 }
                 Ok(())
@@ -3456,8 +3451,7 @@ impl Compiler {
                     ..
                 } = &obj.kind
                     && let ExprKind::Ident(mname) = &inner.kind
-                    && fc.resolve_local(mname).is_none()
-                    && !fc.captures(mname)
+                    && fc.is_unbound(mname)
                     && let Some(&tidx) = self.imported_modules.get(mname)
                     && self
                         .module_types
@@ -3485,8 +3479,7 @@ impl Compiler {
                 // the variant. The type args are runtime-erased — identical bytecode to the bare
                 // `Enum.Variant` value form. Both carriers converge via `type_apply_head_name`.
                 if let Some(tname) = type_apply_head_name(&obj.kind)
-                    && fc.resolve_local(tname).is_none()
-                    && !fc.captures(tname)
+                    && fc.is_unbound(tname)
                     && let ekey = self.enum_bare_key(tname)
                     && self
                         .program
@@ -3509,8 +3502,7 @@ impl Compiler {
                 // A real binding (local/captured) named like the enum wins, matching the checker.
                 // The enum resolves to its bare-visible runtime key (`enum_bare_key`).
                 if let ExprKind::Ident(ename) = &obj.kind
-                    && fc.resolve_local(ename).is_none()
-                    && !fc.captures(ename)
+                    && fc.is_unbound(ename)
                     && let ekey = self.enum_bare_key(ename)
                     && self
                         .program
@@ -3549,8 +3541,7 @@ impl Compiler {
                 // index still compiles below.
                 if let ExprKind::Ident(name) = &obj.kind
                     && self.fn_names.contains(name)
-                    && fc.resolve_local(name).is_none()
-                    && !fc.captures(name)
+                    && fc.is_unbound(name)
                 {
                     self.compile_expr(fc, obj)?;
                     return Ok(());
@@ -3959,8 +3950,7 @@ impl Compiler {
         // runtime MUST match, or a shadowed name type-checks as the binding but prints `<builtin fn …>`.
         // Emit `LoadBuiltin` ONLY when no local/capture/global binding owns the name.
         if crate::checker::is_firstclass_builtin_fn(name)
-            && fc.resolve_local(name).is_none()
-            && !fc.captures(name)
+            && fc.is_unbound(name)
             && !self.globals.contains_key(name)
         {
             fc.emit(Op::LoadBuiltin(name.to_string()), span);
@@ -4027,9 +4017,7 @@ impl Compiler {
         };
         if let ExprKind::Field { obj, name, .. } = &callee.kind {
             self.compile_expr(fc, obj)?;
-            for a in args {
-                self.compile_expr(fc, a)?;
-            }
+            self.compile_args(fc, args)?;
             fc.emit(Op::DeferMethod(name.clone(), args.len()), call.span);
             return Ok(());
         }
@@ -4061,9 +4049,7 @@ impl Compiler {
             return Ok(());
         }
         self.compile_expr(fc, callee)?;
-        for a in args {
-            self.compile_expr(fc, a)?;
-        }
+        self.compile_args(fc, args)?;
         fc.emit(Op::DeferCall(args.len()), call.span);
         Ok(())
     }
@@ -4114,6 +4100,39 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a positional argument list onto the stack (no float-field coercion — that is the
+    /// struct-ctor-only job of [`compile_ctor_args`]). Replaces the flat `for a in args { compile_expr }`
+    /// loop repeated at every non-struct call/variant/static/defer emit site.
+    fn compile_args(&mut self, fc: &mut FnComp, args: &[Expr]) -> Result<(), CompileError> {
+        for a in args {
+            self.compile_expr(fc, a)?;
+        }
+        Ok(())
+    }
+
+    /// Push `args` and emit `Op::CallStatic` for a `Type.method(args)` static call. The six call
+    /// sites differ only in how they derive `type_key` (bare / qualified / turbofish); this collapses
+    /// the identical push-then-emit tail.
+    fn emit_call_static(
+        &mut self,
+        fc: &mut FnComp,
+        type_key: String,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        self.compile_args(fc, args)?;
+        fc.emit(
+            Op::CallStatic {
+                type_key,
+                method: name.to_string(),
+                argc: args.len(),
+            },
+            span,
+        );
+        Ok(())
+    }
+
     fn compile_call(
         &mut self,
         fc: &mut FnComp,
@@ -4127,8 +4146,7 @@ impl Compiler {
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind
-                && fc.resolve_local(mname).is_none()
-                && !fc.captures(mname)
+                && fc.is_unbound(mname)
                 && let Some(&tidx) = self.imported_modules.get(mname)
                 && self
                     .module_types
@@ -4144,9 +4162,7 @@ impl Compiler {
                 // `module.NewType(args)` → qualified newtype constructor; emit `Op::NewType` keyed
                 // by the target module's runtime key (mirrors the bare newtype ctor below).
                 if self.program.newtype_home.contains_key(&key) {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     fc.emit(Op::NewType(key), span);
                     return Ok(());
                 }
@@ -4159,8 +4175,7 @@ impl Compiler {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner.kind
-                && fc.resolve_local(mname).is_none()
-                && !fc.captures(mname)
+                && fc.is_unbound(mname)
                 && let Some(&tidx) = self.imported_modules.get(mname)
                 && self
                     .module_types
@@ -4173,9 +4188,7 @@ impl Compiler {
                     .variants
                     .contains_key(&(ekey.clone(), name.clone()))
                 {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
@@ -4199,8 +4212,7 @@ impl Compiler {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner.kind
-                && fc.resolve_local(mname).is_none()
-                && !fc.captures(mname)
+                && fc.is_unbound(mname)
                 && let Some(&tidx) = self.imported_modules.get(mname)
                 && self
                     .module_types
@@ -4209,34 +4221,21 @@ impl Compiler {
                 && let key = self.type_key(tidx, tname)
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
-                fc.emit(
-                    Op::CallStatic {
-                        type_key: key,
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
+                self.emit_call_static(fc, key, name, args, span)?;
                 return Ok(());
             }
             // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
             // below. Gated like the value form: an unbound enum name dotted with one of its variants.
             // The enum name resolves to its bare-visible runtime key (`enum_bare_key`).
             if let ExprKind::Ident(ename) = &obj.kind
-                && fc.resolve_local(ename).is_none()
-                && !fc.captures(ename)
+                && fc.is_unbound(ename)
                 && let ekey = self.enum_bare_key(ename)
                 && self
                     .program
                     .variants
                     .contains_key(&(ekey.clone(), name.clone()))
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 let variant_id = self.variant_id_of_key(&ekey, name);
                 fc.emit(
                     Op::NewEnum {
@@ -4253,22 +4252,11 @@ impl Compiler {
             // validated the shape; emit `Op::CallStatic` (NO receiver pushed) keyed by the type's
             // runtime key. The enum-variant branch ran first, so a variant always wins.
             if let ExprKind::Ident(tname) = &obj.kind
-                && fc.resolve_local(tname).is_none()
-                && !fc.captures(tname)
+                && fc.is_unbound(tname)
                 && let Some(key) = self.bare_types.get(tname).cloned()
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
-                fc.emit(
-                    Op::CallStatic {
-                        type_key: key,
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
+                self.emit_call_static(fc, key, name, args, span)?;
                 return Ok(());
             }
             // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor
@@ -4278,17 +4266,14 @@ impl Compiler {
             // and multi-arg `TypeApply{name}`. VARIANT-FIRST (a same-named static is barred at decl
             // time), mirroring the checker.
             if let Some(tname) = type_apply_head_name(&obj.kind)
-                && fc.resolve_local(tname).is_none()
-                && !fc.captures(tname)
+                && fc.is_unbound(tname)
                 && let ekey = self.enum_bare_key(tname)
                 && self
                     .program
                     .variants
                     .contains_key(&(ekey.clone(), name.clone()))
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 let variant_id = self.variant_id_of_key(&ekey, name);
                 fc.emit(
                     Op::NewEnum {
@@ -4305,22 +4290,11 @@ impl Compiler {
             // `Field{obj: TypeApply{name}, name}`. The type args are RUNTIME-erased (they only drive
             // the checker's types) so we ignore them and emit `Op::CallStatic` by the bare key.
             if let Some(tname) = type_apply_head_name(&obj.kind)
-                && fc.resolve_local(tname).is_none()
-                && !fc.captures(tname)
+                && fc.is_unbound(tname)
                 && let Some(key) = self.bare_types.get(tname).cloned()
                 && self.static_methods.contains(&static_key(&key, name))
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
-                fc.emit(
-                    Op::CallStatic {
-                        type_key: key,
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
+                self.emit_call_static(fc, key, name, args, span)?;
                 return Ok(());
             }
             // `module.Type[T…].Variant(args)` / `.staticmethod(args)` → QUALIFIED declaration-site
@@ -4335,9 +4309,7 @@ impl Compiler {
                     .variants
                     .contains_key(&(key.clone(), name.clone()))
                 {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     let variant_id = self.variant_id_of_key(&key, name);
                     fc.emit(
                         Op::NewEnum {
@@ -4350,17 +4322,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if self.static_methods.contains(&static_key(&key, name)) {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
-                    fc.emit(
-                        Op::CallStatic {
-                            type_key: key,
-                            method: name.clone(),
-                            argc: args.len(),
-                        },
-                        span,
-                    );
+                    self.emit_call_static(fc, key, name, args, span)?;
                     return Ok(());
                 }
             }
@@ -4375,8 +4337,7 @@ impl Compiler {
             // type-only handles (net.Socket/Listener, ffi widths/ptr) have no ctor — the checker
             // already rejected `net.Socket(...)`, so they never reach here.
             if let ExprKind::Ident(mname) = &obj.kind
-                && fc.resolve_local(mname).is_none()
-                && !fc.captures(mname)
+                && fc.is_unbound(mname)
                 && let Some(&tidx) = self.imported_modules.get(mname)
                 && let Some(nat) = self.program.modules.get(tidx).and_then(|m| m.native)
             {
@@ -4390,17 +4351,13 @@ impl Compiler {
                     _ => None,
                 };
                 if let Some(op) = op {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     fc.emit(op, span);
                     return Ok(());
                 }
             }
             self.compile_expr(fc, obj)?;
-            for a in args {
-                self.compile_expr(fc, a)?;
-            }
+            self.compile_args(fc, args)?;
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
@@ -4437,9 +4394,7 @@ impl Compiler {
                     .variants
                     .contains_key(&(key.clone(), name.clone()))
                 {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     let variant_id = self.variant_id_of_key(&key, name);
                     fc.emit(
                         Op::NewEnum {
@@ -4452,17 +4407,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if self.static_methods.contains(&static_key(&key, name)) {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
-                    fc.emit(
-                        Op::CallStatic {
-                            type_key: key,
-                            method: name.clone(),
-                            argc: args.len(),
-                        },
-                        span,
-                    );
+                    self.emit_call_static(fc, key, name, args, span)?;
                     return Ok(());
                 }
             }
@@ -4471,8 +4416,7 @@ impl Compiler {
                 _ => None,
             });
             if let Some(tname) = tname
-                && fc.resolve_local(tname).is_none()
-                && !fc.captures(tname)
+                && fc.is_unbound(tname)
             {
                 // VARIANT-FIRST (a same-named static is barred at decl time), mirroring the checker.
                 let ekey = self.enum_bare_key(tname);
@@ -4481,9 +4425,7 @@ impl Compiler {
                     .variants
                     .contains_key(&(ekey.clone(), name.clone()))
                 {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
+                    self.compile_args(fc, args)?;
                     let variant_id = self.variant_id_of_key(&ekey, name);
                     fc.emit(
                         Op::NewEnum {
@@ -4498,17 +4440,7 @@ impl Compiler {
                 if let Some(key) = self.bare_types.get(tname).cloned()
                     && self.static_methods.contains(&static_key(&key, name))
                 {
-                    for a in args {
-                        self.compile_expr(fc, a)?;
-                    }
-                    fc.emit(
-                        Op::CallStatic {
-                            type_key: key,
-                            method: name.clone(),
-                            argc: args.len(),
-                        },
-                        span,
-                    );
+                    self.emit_call_static(fc, key, name, args, span)?;
                     return Ok(());
                 }
             }
@@ -4529,41 +4461,31 @@ impl Compiler {
                 return Ok(());
             }
             if name == "Shared" {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewShared, span);
                 return Ok(());
             }
             // `RwShared(v)` → a fresh read-write box over the deep-copied init value (checker: 1 arg).
             if name == "RwShared" {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewRwShared, span);
                 return Ok(());
             }
             // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
             if name == "Atomic" {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewAtomic, span);
                 return Ok(());
             }
             // `AtomicInt(v)` → a fresh lock-free int atomic (checker validated 1 int arg).
             if name == "AtomicInt" {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewAtomicInt, span);
                 return Ok(());
             }
             // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
             if name == "timer" {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewTimer, span);
                 return Ok(());
             }
@@ -4580,9 +4502,7 @@ impl Compiler {
             // `is_builtin` arms; type-args are type-erased before the compiler, so `List[int]()`
             // resolves to `Ident("List")` → the SAME `CallBuiltin`.
             if let Some(p) = crate::checker::prelude_fn(name) {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 match p.intrinsic {
                     crate::checker::Intrinsic::Print => {
                         if named.is_empty() {
@@ -4619,9 +4539,7 @@ impl Compiler {
             // `CallBuiltin` and returned. Kept as a belt-and-suspenders fall-through (minimal diff) — if
             // a future builtin lands in `is_builtin` without a table row it still lowers correctly.
             if is_builtin(name) {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
                 return Ok(());
             }
@@ -4630,9 +4548,7 @@ impl Compiler {
             if let Some(nt_key) = self.bare_types.get(name).cloned()
                 && self.program.newtype_home.contains_key(&nt_key)
             {
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewType(nt_key), span);
                 return Ok(());
             }
@@ -4655,9 +4571,7 @@ impl Compiler {
                 .and_then(|k| self.program.variants.get(&k))
             {
                 let variant_id = def.variant_id;
-                for a in args {
-                    self.compile_expr(fc, a)?;
-                }
+                self.compile_args(fc, args)?;
                 fc.emit(
                     Op::NewEnum {
                         variant: name.clone(),
@@ -4699,9 +4613,7 @@ impl Compiler {
             return Ok(());
         }
         self.compile_expr(fc, callee)?;
-        for a in args {
-            self.compile_expr(fc, a)?;
-        }
+        self.compile_args(fc, args)?;
         fc.emit(Op::Call(args.len()), span);
         Ok(())
     }
@@ -6068,6 +5980,12 @@ impl FnComp {
 
     fn captures(&self, name: &str) -> bool {
         self.captured_names.iter().any(|n| n == name)
+    }
+
+    /// A free/global name in this frame: neither a local nor a captured binding. The guard used to
+    /// decide whether a bare identifier resolves to a module/type/variant/builtin rather than a value.
+    fn is_unbound(&self, name: &str) -> bool {
+        self.resolve_local(name).is_none() && !self.captures(name)
     }
 
     /// All bindings visible in this frame, to snapshot into a closure being created here. Locals
