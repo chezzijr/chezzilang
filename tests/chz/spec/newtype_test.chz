@@ -5,6 +5,8 @@
 # same as bare `<`/`>`. Regression guard for the value_order/compare newtype-unwrap fix.
 # Runs on BOTH engines via test_runner::chz_suite_passes_both_engines.
 
+import std.math
+
 newtype UserId = int
 newtype Score = float
 
@@ -40,3 +42,18 @@ test fn newtype_positive_controls():
     zs := [UserId(3), UserId(1), UserId(2)]
     zs.sort_by_key(fn(u): int(u))
     assert [int(u) for u in zs] == [1, 2, 3]
+
+# ---- newtype=float NaN key at min/max: must match plain List[float] (order_key unwrap) ----
+
+test fn minmax_nan_float_newtype():
+    xs := [Score(1.0), Score(math.nan), Score(2.0)]
+    assert float(xs.min()) == 1.0      # NaN sorts high via total_cmp, min is the 1.0 element
+    assert math.is_nan(float(xs.max()))  # max is the NaN element
+
+# ---- sort_by_key / min_by / max_by over a newtype=float NaN key: no fault, matches underlying ----
+
+test fn by_key_nan_float_newtype():
+    ws := [Score(3.0), Score(math.nan), Score(1.0)]
+    ws.sort_by_key(fn(s): s)
+    assert float(ws.min_by(fn(s): s)) == 1.0
+    assert math.is_nan(float(ws.max_by(fn(s): s)))

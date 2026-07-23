@@ -2148,6 +2148,24 @@ impl Vm {
         {
             return self.struct_compare(a, b, span);
         }
+        // Numeric-newtype (`Comparable`) unwrap — mirrors `value_order` (arith.rs) so `sort_by_key`/
+        // `.min()`/`.max()`/`.min_by`/`.max_by` on a `List[newtype=int/float]` order by the wrapped
+        // scalar's NATIVE order (never a user `compare`). MUST precede the `is_float` fast-path: a
+        // wrapper is `Obj`-tagged so `is_float()`/`is_numeric()` miss it, and a NaN newtype-float key
+        // would fault. Copy `*inner` to a local first to release the immutable `heap.get` borrow
+        // before the `&mut self` recursion (the sole shape difference from `&self` `value_order`).
+        if let Some(ha) = a.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(ha)
+        {
+            let inner = *inner;
+            return self.order_key(inner, b, span);
+        }
+        if let Some(hb) = b.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(hb)
+        {
+            let inner = *inner;
+            return self.order_key(a, inner, span);
+        }
         // Float keys order by `total_cmp` for the WHOLE comparison (not just the NaN case), exactly
         // mirroring `sort()`'s `value_order` Float arm — so `sort_by_key` and `sort()` agree on every
         // float pair, including `-0.0`/`+0.0` (which `partial_cmp` ranks Equal but `total_cmp` orders

@@ -30,6 +30,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sort/min/max + bare `<`/`==` + `sort_by_key` positive controls), gated serial==M:N. A `str`/`bool`
 > newtype is not `Comparable` (checker grants numeric only), so its sort is rejected at `check`. See
 > `docs/gaps.md` session log 2026-07-23.
+>
+> **↳ Follow-up (2026-07-23, `auto-task/order-key-newtype`) — `Vm::order_key` was the MISSED sibling.**
+> The above fix covered `.sort()` (`value_order`) but the `.min()`/`.max()`/`.min_by`/`.max_by`/`.sort_by_key`
+> path actually routes through a *separate* comparator, `Vm::order_key` (`src/vm/call.rs`), which was still
+> un-unwrapped — so a `List[newtype=float]` key holding a `math.nan` faulted *"sort_by_key keys are not
+> comparable"* at `.min()`. Mirrored the same newtype-unwrap-and-recurse arms into `order_key`; also closes a
+> benign `-0.0`/`+0.0` `min`-vs-`sort` inconsistency (`order_key` now uses `total_cmp` like `sort()`). Checker/
+> `value_order`/`compare` untouched. Regression: `minmax_nan_float_newtype` + `by_key_nan_float_newtype`.
 
 > **✅ TESTING (2026-07-23) — dedicated native test suite `tests/chz/` + dual-engine parity gate.**
 > New home for Chezzi-language behavior tests, separate from `examples/` (print-and-golden demos):

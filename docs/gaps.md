@@ -268,6 +268,19 @@ bare `<`/`==` + `sort_by_key` positive controls), gated serial==M:N by `chz_suit
 numeric underlyings only), so `List[str-newtype].sort()` is rejected at `check` and never reaches the runtime.
 The str-inner unwrap is present for free (lands in the existing `Obj::Str` arm) but is not source-testable.
 
+**Follow-up (same day) — `Vm::order_key` was MISSED (partial coverage):** the `.min()`/`.max()`/`.min_by`/
+`.max_by`/`.sort_by_key` path routes through `Vm::order_key` (`src/vm/call.rs`), a *separate* comparator from
+`value_order`/`compare` — and it was **not** unwrapped by the fix above (the "covers `.min()`/`.max()`" claim
+was mis-attributed; only `.sort()` via `value_order` was actually covered). So a `List[newtype=float]` key
+containing a `math.nan` still faulted *"sort_by_key keys are not comparable: newtype vs newtype"* at `.min()`
+(a wrapper is `Obj`-tagged, so `order_key`'s `is_float`/`is_numeric` NaN net both miss it → fault arm). **FIXED:**
+mirrored the `value_order` newtype-unwrap arms at the top of `order_key` (after the `Struct`/`Struct` arm,
+before the `is_float` fast-path; copies `*inner` to a local first to release the `heap.get` borrow before the
+`&mut self` recursion). This also closes a benign `-0.0`/`+0.0` inconsistency the two paths had (`sort()` used
+`total_cmp`, `min/max` used `partial_cmp`) — `order_key` now routes newtype floats through `total_cmp`, matching
+`sort()`. Regression: `minmax_nan_float_newtype` + `by_key_nan_float_newtype` in `newtype_test.chz`, gated both
+engines. No checker/`value_order`/`compare` change — `order_key` was the sole gap.
+
 ## Session log — 2026-07-22 (bug-hunt: 2 findings — 1 fixed, 1 pre-freeze known-limit + serial-removal plan)
 
 Five-domain adversarial bug-hunt (airlock, cancel/defer, channel/wait/Executor, checker⊋compiler, stdlib) on
