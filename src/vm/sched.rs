@@ -2261,9 +2261,19 @@ impl Vm {
                     proto: *proto,
                     home: self.home_index(*home),
                 },
-                // A module's mutable globals can't cross an OS-thread heap boundary; native/cffi share
-                // the parent address space (so the handle stays valid, same shared heap / address space).
-                Obj::Module { .. } | Obj::Native { .. } | Obj::Cffi(_) => WireValue::Handle(h),
+                // A module's mutable globals genuinely can't cross an OS-thread heap boundary — its
+                // `GcRef` is meaningless on the receiver heap — so it stays a by-reference `Handle`
+                // (the worker airlock rejects it; source-unreachable, defensive only).
+                Obj::Module { .. } => WireValue::Handle(h),
+                // A native fn is pure code (fn ptr + name, no `GcRef`) and a Cffi is a shared `Arc` —
+                // both cross BY VALUE like `Builtin`, exactly as the SNAPSHOT path
+                // (`SnapValue::Native`/`Cffi`) already ships them across M:N workers. `has_handle`
+                // leaves both `false`, so the worker airlock accepts them.
+                Obj::Native { name, func } => WireValue::Native {
+                    name: name.clone(),
+                    func: *func,
+                },
+                Obj::Cffi(c) => WireValue::Cffi(Arc::clone(c)),
                 // B3.1: the shared cores cross as the `Arc` itself (clone = refcount bump), so a
                 // `from_wire` in any heap reaches the same mailbox/box/queue.
                 Obj::Channel(core) => WireValue::Channel(Arc::clone(core)),
@@ -2682,6 +2692,14 @@ impl Vm {
             WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
             // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
             WireValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name))),
+            // Re-alloc a fresh `Obj::Native` from the name + fn pointer carried by value (pure code) —
+            // same as the `SnapValue::Native` rebuild.
+            WireValue::Native { name, func } => {
+                Value::obj(self.heap.alloc(Obj::Native { name, func }))
+            }
+            // Re-alloc a fresh `Obj::Cffi` sharing the SAME `Arc<Cffi>` (no re-dlopen) — same as the
+            // `SnapValue::Cffi` rebuild.
+            WireValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(c))),
             // TIE THE KNOT (see the `Cell`/`Closure` arms): alloc an empty placeholder container
             // FIRST, register its `id` in `rebuild` BEFORE recursing children, so a nested
             // `Backref(id)` (a self-referential list/struct/map) resolves to this exact handle; then
@@ -3354,14 +3372,15 @@ impl Vm {
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
     /// heap-local `GcRef` that cannot cross into another heap as-is. As of B3.3 plain data, `str`/bytes,
-    /// closures/functions, and the `Channel`/`Shared`/`Executor`/socket handles all cross by value (or
-    /// as a shared `Arc` core), so the only remaining non-crossable value is a module / native / FFI
-    /// handle — a module's mutable globals can't be shared across an OS-thread heap boundary.
+    /// closures/functions, native/FFI fns, and the `Channel`/`Shared`/`Executor`/socket handles all
+    /// cross by value (or as a shared `Arc` core), so the only remaining non-crossable value is a
+    /// module handle — a module's mutable globals can't be shared across an OS-thread heap boundary.
+    /// (Source-unreachable: `module` is not a nameable type, so this is a defensive-only guard.)
     pub(super) fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
         if w.has_handle() {
             return Err(self.err(
-                "spawn: this task value can't cross a worker boundary — plain data, closures/functions, \
-                 and Channel/Shared/Executor handles are sendable, but a module/native/FFI handle cannot cross"
+                "this task value can't cross a worker boundary — plain data, closures/functions, \
+                 native/FFI fns, and Channel/Shared/Executor handles are sendable, but a module handle cannot cross"
                     .to_string(),
                 span,
             ));

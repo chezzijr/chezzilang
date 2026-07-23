@@ -23,7 +23,9 @@ use std::sync::Arc;
 /// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) own their contents
 /// recursively; `Str` crosses **by value** (owned bytes — [`WireValue::Str`]). Callables cross **by
 /// value** too — a closure as [`WireValue::Closure`] (proto + wired captures + home index), a bare fn as
-/// [`WireValue::Func`]. Only `Module`/`Native`/`Cffi` stay by-reference as [`WireValue::Handle`]. The
+/// [`WireValue::Func`], a native fn as [`WireValue::Native`] (name + fn ptr), an FFI fn as
+/// [`WireValue::Cffi`] (shared `Arc<Cffi>`). Only a `Module` (mutable globals) stays by-reference as
+/// [`WireValue::Handle`]. The
 /// `Channel`/`Shared`/`Executor` handles cross as their shared `Arc<…Core>` (B3.1). `Map`/`Set` carry
 /// their cached `u64` hashes so reconstruction never re-hashes (byte-identical iteration order +
 /// index — see [`super::heap::MapData`]).
@@ -140,11 +142,13 @@ pub enum WireValue {
     /// the walk, so `has_handle` leaves it `false`.
     Backref(u32),
     /// A by-reference object carried across the airlock as its existing heap handle (single-thread /
-    /// same heap). As of B3.3 this wraps only the objects that genuinely CANNOT cross an OS-thread
-    /// heap boundary: `Module` (mutable globals), `Native`, and `Cffi` (both share the parent address
-    /// space). Closures/funcs now cross by value ([`Closure`](WireValue::Closure)/[`Func`](WireValue::Func)),
-    /// and `Str`/`bytes`/… have always crossed by value. `has_handle` flags this arm, so the worker
-    /// airlock rejects a `Module`/`Native`/`Cffi` handle that would try to cross into another heap.
+    /// same heap). As of B3.3 this wraps only the object that genuinely CANNOT cross an OS-thread heap
+    /// boundary: a `Module` (mutable globals — a `GcRef` meaningless on another heap). Closures/funcs
+    /// now cross by value ([`Closure`](WireValue::Closure)/[`Func`](WireValue::Func)), native/FFI fns
+    /// cross by value/`Arc` ([`Native`](WireValue::Native)/[`Cffi`](WireValue::Cffi)), and
+    /// `Str`/`bytes`/… have always crossed by value. `has_handle` flags this arm, so the worker
+    /// airlock rejects a `Module` handle that would try to cross into another heap. (Source-unreachable:
+    /// `module` is not a nameable type, so this is a defensive-only guard.)
     Handle(GcRef),
     /// A `Channel` handle crossing the airlock as its shared [`ChannelCore`] (B3.1). `from_wire`
     /// allocates a *fresh* heap handle wrapping this same `Arc`, so two tasks reach one mailbox — the
@@ -191,6 +195,23 @@ pub enum WireValue {
     /// OS-thread boundary — cross-safe (`has_handle` leaves it `false` via the `_` arm), so a builtin
     /// captured into a spawned task works on the serial AND the M:N engine alike.
     Builtin(Box<str>),
+    /// A native fn (`Obj::Native`, e.g. `math.sqrt`) carried across the airlock **by value** — it is
+    /// pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid in any
+    /// worker of this process) plus its name, no `GcRef` and no captured heap state. Like
+    /// [`Builtin`](WireValue::Builtin), it genuinely crosses an OS-thread boundary; `from_wire` re-allocs
+    /// a fresh `Obj::Native` with the same name/pointer. Cross-safe (`has_handle` leaves it `false` via
+    /// the `_` arm) — the same value the SNAPSHOT path already ships across M:N workers
+    /// ([`SnapValue::Native`](super::sched)).
+    Native {
+        name: Box<str>,
+        func: crate::native::NativeFn,
+    },
+    /// An FFI fn (`Obj::Cffi`, `extern "lib":`) carried across the airlock as its shared
+    /// `Arc<Cffi>` — the `dlopen`'d library + resolved symbol behind an `Arc`, so a worker sharing this
+    /// process's address space reaches the same code with no re-`dlopen`. Like [`Native`](WireValue::Native)
+    /// it holds no `GcRef`, so it is cross-safe (`has_handle` leaves it `false`) — the same `Arc` the
+    /// SNAPSHOT path already shares across M:N workers ([`SnapValue::Cffi`](super::sched)).
+    Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
     /// B3.6 / B3.3 — a closure carried across the airlock **by value**: its `proto` (which lives in the
     /// shared `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and
     /// its `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire
@@ -285,14 +306,15 @@ impl WireValue {
     /// B3.2 — does this value graph carry a by-reference [`Handle`](WireValue::Handle), i.e. a
     /// heap-local `GcRef`? Such a value cannot cross into another heap as-is — the slot index is
     /// meaningless there — so the worker airlock ([`Vm::run_task_isolated`](super::Vm)) rejects it
-    /// with a clean fault. As of B3.3 `Str`, closures ([`Closure`](WireValue::Closure)) and bare funcs
-    /// ([`Func`](WireValue::Func)) all cross by value (none is a `Handle`), so the only flagged leaf is
-    /// [`Handle`](WireValue::Handle) itself — which now wraps only `Module`/`Native`/`Cffi` (a module's
-    /// mutable globals genuinely can't cross; native/cffi share the parent address space). `Func`
-    /// carries no captures and no `GcRef`, so it is always `false` (via the `_` arm); a `Closure`
-    /// recurses through its captures (one could embed a residual `Module`/`Native` handle). The
-    /// shared-core arms (`Channel`/`Shared`/`Executor`) are cross-safe — they carry an `Arc`, not a
-    /// `GcRef` — so they are *not* flagged.
+    /// with a clean fault. As of B3.3 `Str`, closures ([`Closure`](WireValue::Closure)), bare funcs
+    /// ([`Func`](WireValue::Func)) and native/FFI fns ([`Native`](WireValue::Native)/[`Cffi`](WireValue::Cffi))
+    /// all cross by value or as a shared `Arc` (none is a `Handle`), so the only flagged leaf is
+    /// [`Handle`](WireValue::Handle) itself — which now wraps only `Module` (a module's mutable globals
+    /// genuinely can't cross). `Func`/`Native` carry no `GcRef`, so they are always `false` (via the
+    /// `_` arm); a `Cffi` is a shared `Arc`, also `false`; a `Closure` recurses through its captures
+    /// (one could embed a residual `Module` handle). The shared-core arms
+    /// (`Channel`/`Shared`/`Executor`) are cross-safe — they carry an `Arc`, not a `GcRef` — so they
+    /// are *not* flagged.
     pub fn has_handle(&self) -> bool {
         match self {
             WireValue::Handle(_) => true,
@@ -324,8 +346,9 @@ impl WireValue {
             WireValue::Backref(_) => false,
             // F3 path C: a generator crosses by value, but a parked slot (a `Pending` arg or a
             // `Suspended` operand-stack slot) or its backing closure could itself embed a `Handle` —
-            // recurse so a `Module`/`Native` handle parked in a slot is still flagged (the M:N worker
-            // airlock rejects it) and the invariant stays honest.
+            // recurse so a `Module` handle parked in a slot is still flagged (the M:N worker airlock
+            // rejects it) and the invariant stays honest. (A parked native/FFI fn is no longer flagged
+            // — it crosses by value now — which is correct/desired.)
             WireValue::Generator { closure, state, .. } => {
                 closure.as_ref().is_some_and(|c| c.has_handle())
                     || match state {

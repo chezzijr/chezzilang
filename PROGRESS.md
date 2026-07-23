@@ -12,11 +12,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`= to_wire_at` then `ensure_crossable`, `src/vm/sched.rs`) swapped in at every value-store site
 > (`src/vm/netio.rs`, `src/vm/exec.rs`) so a NEW store path physically can't forget the guard. Both
 > engines now reject identically + recoverably (`recover:` catches it) at the send/store/construction
-> site with the existing `module/native/FFI handle cannot cross` message. Legit `Channel`/`Shared`/
+> site with the `a module handle cannot cross` message. Legit `Channel`/`Shared`/
 > `Executor`/socket handles (shared-`Arc` wire arms, `has_handle()`==false) still cross unchanged —
 > regressed by `positive_*` parity tests. VM-only; checker/compiler untouched. Tests: 4 fault + 2
 > positive in `vm/parity_tests.rs`. Docs: `docs/gaps.md` L7 (the "caught at the runtime airlock" claim
-> was false for value-store paths — now noted CLOSED).
+> was false for value-store paths — now noted CLOSED). (**Update 2026-07-23:** the 4 FFI-fault tests
+> were later FLIPPED to positive — native/FFI fn VALUES now cross by value; see next entry.)
+
+> **✅ FIX (2026-07-23, `auto-task/native-ffi-wire-airlock`) — native (`Obj::Native`, e.g. `math.sqrt`)
+> + FFI (`Obj::Cffi`, `extern "lib":`) fn VALUES now cross the wire-value airlock BY VALUE.** They passed
+> `chezzi check` (type `Ty::Func`, checker-sendable) but FAULTED at runtime on the wire path
+> (`Channel.send`/`Shared`/`Atomic`/`RwShared`/`Executor.submit`/`spawn use(f)`) while the SAME value
+> crossed FINE via the snapshot path (a `spawn:` block capturing it) — a pure internal inconsistency.
+> Root cause: `to_wire_depth` (`src/vm/sched.rs`) lumped the two pure-code arms (`Native`, `Cffi`) with
+> `Module` into `WireValue::Handle(h)` (a raw `GcRef` meaningless on another heap → `has_handle()` →
+> reject). Fix mirrors the shipping `Builtin` + `SnapValue::Native`/`Cffi` template: new by-value/by-`Arc`
+> `WireValue::Native { name, func }` + `WireValue::Cffi(Arc<Cffi>)` arms, a split `to_wire_depth` arm
+> (`Module` stays `Handle`; Native→fn-ptr by value, Cffi→shared `Arc`), `from_wire` rebuild arms next to
+> `Builtin`, and `collect_core_gcrefs`/`display_wire` arms. `ensure_crossable` diagnostic corrected to
+> `a module handle cannot cross` (Module is source-unreachable → defensive-only). Serial == M:N
+> byte-identical (native + FFI via Channel/Shared/spawn-arg/spawn-block). VM-only; checker/compiler/parser
+> untouched (the checker was already correct). Tests: `tests/chz/spec/airlock_native_test.chz` (4 native)
+> + 5 flipped `ffi_handle_crosses_*`/`ffi_handle_send_succeeds` parity tests. Docs: `docs/gaps.md`
+> session log + settled-note split.
 
 > **✅ FIX (2026-07-23, `auto-task/newtype-sort-minmax`) — numeric-newtype `.sort()`/`.min()`/`.max()`
 > now honor `Comparable` at runtime (checker⊋compiler soundness class).** A numeric `newtype`
@@ -2925,8 +2943,10 @@ bare `fn` **by value** on BOTH engines identically: `WireValue::Closure { proto,
 (captures wired recursively in slot order, home as a `module_objs` index) and a NEW distinct
 `WireValue::Func { proto, home }`. Kept separate on purpose — a bare fn renders `<fn NAME>`, a closure
 `<closure>`, so collapsing Func into an empty-capture Closure would diverge the M:N snapshot-rebuild
-render from the serial engine's live `Obj::Func`. Only `Module`/`Native`/`Cffi` still cross as
-`WireValue::Handle` (a module's mutable globals can't cross; native/cffi share the address space).
+render from the serial engine's live `Obj::Func`. Only a `Module` still crosses as `WireValue::Handle`
+(its mutable globals can't cross an OS-thread heap boundary). (**Update 2026-07-23:** native `Obj::Native`
++ FFI `Obj::Cffi` fn VALUES also cross by value now — new `WireValue::Native`/`Cffi` arms — so they are
+no longer `Handle`; see the native/FFI-airlock entry below.)
 - **Effect:** a `spawn f()` callee whose captured environment contains a NESTED closure/`fn` (or is
   itself a bare fn) now RUNS instead of faulting at the airlock ("can't cross a worker boundary"). The
   captured plain data is deep-copied/isolated per task, matching every other sendable.

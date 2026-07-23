@@ -2280,6 +2280,9 @@ impl Vm {
             }
             // A wired first-class builtin fn renders like its heap counterpart (`<builtin fn name>`).
             WireValue::Builtin(name) => format!("<builtin fn {name}>"),
+            // A wired native/FFI fn renders like its heap counterpart (`Obj::Native`/`Obj::Cffi`).
+            WireValue::Native { name, .. } => format!("<native fn {name}>"),
+            WireValue::Cffi(c) => format!("<extern fn {}>", c.name()),
             // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
             WireValue::Closure { .. } => "<closure>".to_string(),
             // B3.3: a wired bare fn renders like its heap counterpart (`Obj::Func` → "<fn NAME>"),

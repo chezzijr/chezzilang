@@ -1,0 +1,37 @@
+# Airlock sendability for NATIVE (`Obj::Native`) function values. A native fn (`math.sqrt`) is pure
+# code (a fn pointer + name) with no heap-local GcRef, so it must cross the wire-value airlock BY
+# VALUE — via Channel.send / Shared / a spawn fn-arg — exactly as it already crossed the SNAPSHOT path
+# (a `spawn:` block capturing it). Previously the wire path lumped Native with Module and rejected it.
+# Gated serial==M:N by chz_suite_passes_both_engines.
+import std.math
+import std.concurrency
+
+# Channel.send/recv a native fn, then call it in the parent.
+test fn native_crosses_channel():
+    ch := Channel[fn(float) -> float](1)
+    ch.send(math.sqrt)
+    f := ch.recv()
+    assert f(25.0) == 5.0
+
+# Store a native fn in a Shared box (the ctor value-store airlock), read it back, call it.
+test fn native_crosses_shared():
+    box := Shared(math.sqrt)
+    assert box.get()(9.0) == 3.0
+
+# A native fn passed as a spawn fn-ARG crosses the wire path; the task writes the result into a Shared.
+test fn native_crosses_spawn_arg():
+    out := Shared(0.0)
+    fn compute(g: fn(float) -> float):
+        out.set(g(16.0))
+    parallel:
+        spawn compute(math.sqrt)
+    assert out.get() == 4.0
+
+# A native captured by a `spawn:` BLOCK crosses too — same rebuilt `Obj::Native` on the other side.
+test fn native_crosses_spawn_block():
+    out := Shared(0.0)
+    sq := math.sqrt
+    parallel:
+        spawn:
+            out.set(sq(49.0))
+    assert out.get() == 7.0
