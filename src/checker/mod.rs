@@ -1124,11 +1124,12 @@ impl Checker {
             c.keyword_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
             let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
-            // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set` native-struct
-            // METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table only) into
-            // `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/`s.add(...)`
-            // resolve via the normal method path (the retired bespoke `list_method_sig`/`map_method_sig`/
-            // `set_method_sig` arms' replacement). Harvested here (NOT from `sig.struct_defs` — the prelude
+            // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
+            // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table
+            // only) into `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/
+            // `s.add(...)`/`ch.send(...)` resolve via the normal method path (the retired bespoke
+            // `list_method_sig`/`map_method_sig`/`set_method_sig`/`channel_method_sig` arms' replacement).
+            // Harvested here (NOT from `sig.struct_defs` — the prelude
             // is a normal AST module whose `check_module` no-ops native structs) by resolving the decls
             // over `lm.ast` while still in the prelude's stdlib module context (type params + `Hashable`
             // in scope). The prelude is order[0] (always-linked, no deps), so this is populated before
@@ -1136,7 +1137,7 @@ impl Checker {
             // to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via `resolve_type`'s reserved arms; the
             // ctors/literals stay compiler-wired.
             if c.container_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
-                for tn in ["List", "Map", "Set"] {
+                for tn in ["List", "Map", "Set", "Channel"] {
                     if let Some(info) = c.harvest_native_struct_table(&lm.ast, tn) {
                         c.container_seeds.insert(tn.to_string(), info);
                     }
@@ -2822,32 +2823,13 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
 // `infer_generic_method`. The `sum` numeric-element gate is the sole surviving residual (a plain
 // `sum(self) -> T` would wrongly accept a non-numeric list); `sort` is file-backed via `where T: Comparable`.
 
-/// Built-in method signatures on `Channel[T]` (C2). `elem` is the channel's element type.
-fn channel_method_sig(method: &str, elem: &Ty) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "send" => (vec![elem.clone()], Ty::Nil),
-        // `try_send` is the non-blocking partner of `send` (mirrors `try_recv` vs `recv`): returns
-        // `false` when the send can't proceed — the channel is CLOSED, or a BOUNDED channel is FULL —
-        // and `true` once the value is queued. (An unbounded channel is never full, so its only
-        // `false` there is closed.)
-        "try_send" => (vec![elem.clone()], Ty::Bool),
-        "recv" => (vec![], elem.clone()),
-        "try_recv" => (vec![], Ty::option(elem.clone())),
-        // `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then
-        // faults, and `for v in ch:` ends cleanly once drained.
-        "close" => (vec![], Ty::Nil),
-        // `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on
-        // every `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
-        // `std.cancel`'s `done()`). Idempotent; takes no args.
-        "trip" => (vec![], Ty::Nil),
-        "len" => (vec![], Ty::Int),
-        // `cap()` reports the channel's capacity: the bound passed to `Channel[T](cap)`, or `0` for an
-        // unbounded `Channel[T]()`.
-        "cap" => (vec![], Ty::Int),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
+// The bespoke `channel_method_sig` arm is RETIRED (phase 5a-containers): every one of its FLAT sigs
+// (`send`/`try_send`/`recv`/`try_recv`/`close`/`trip`/`len`/`cap`) is now declared as a body-less
+// `native fn` method inside a `native struct Channel[T]` in `std/prelude.chz`, harvested into the
+// reserved type's method table (re-seeded by `seed_stdlib_structs`) and looked up via
+// `native_handle_method` with the channel's element type substituted for the sig's `Ty::Param("T")`.
+// The `Channel[T](cap)` ctor stays compiler-wired and runtime dispatch stays Rust-inline
+// (`vm/netio.rs channel_method`); only the checker sig moved to the file-backed mirror.
 
 // The bespoke `shared_method_sig` / `rwshared_method_sig` / `atomic_method_sig` / `executor_method_sig`
 // arms are RETIRED (phase 4c-concurrency): every one of their sigs is now declared as a body-less

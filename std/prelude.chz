@@ -106,6 +106,34 @@ native struct Set[T: Hashable]:
     native fn intersection(self, other: Set[T]) -> Set[T]
     native fn difference(self, other: Set[T]) -> Set[T]
 
+# `Channel[T]` — the reserved concurrency primitive. Identity stays the reserved `Ty::Channel(T)`
+# (`resolve_type` reserved arm; the `Channel[T](cap)` ctor stays compiler-wired), and runtime dispatch
+# stays Rust-inline (`vm/netio.rs channel_method`). Only the METHOD-TABLE sigs are file-backed here —
+# harvested into the reserved type's method table (re-seeded by `seed_stdlib_structs`), looked up via
+# `native_handle_method` with the channel's element type substituted for `Ty::Param("T")` — the
+# file-backed replacement for the retired bespoke `channel_method_sig` arm.
+native struct Channel[T]:
+    # `send(v)` moves `v` across the airlock (well-typed `send` is always sendable — the element type is
+    # sendable-checked at the channel's construction).
+    native fn send(self, v: T) -> nil
+    # `try_send` is the non-blocking partner of `send` (mirrors `try_recv` vs `recv`): returns `false`
+    # when the send can't proceed — the channel is CLOSED, or a BOUNDED channel is FULL — and `true`
+    # once the value is queued. (An unbounded channel is never full, so its only `false` there is closed.)
+    native fn try_send(self, v: T) -> bool
+    native fn recv(self) -> T
+    native fn try_recv(self) -> Option[T]
+    # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then faults,
+    # and `for v in ch:` ends cleanly once drained.
+    native fn close(self) -> nil
+    # `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on every
+    # `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
+    # `std.cancel`'s `done()`). Idempotent; takes no args.
+    native fn trip(self) -> nil
+    native fn len(self) -> int
+    # `cap()` reports the channel's capacity: the bound passed to `Channel[T](cap)`, or `0` for an
+    # unbounded `Channel[T]()`.
+    native fn cap(self) -> int
+
 # The two builtin generic ENUMS' variant SHAPE (phase 5b-native-enum). `Option`/`Result` are the most
 # deeply-wired builtin types — the `?` operator, top-level error propagation, exhaustive `match`, and
 # native construction (`Ok`/`Err`/`Some`/`None` from `NativeRet`) are all RESERVED and stay RUST-WIRED:

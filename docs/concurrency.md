@@ -1177,9 +1177,10 @@ Ships join semantics with side-effecting tasks (e.g. `print`). No channels yet.
 Ships the canonical worker/fan-out example.
 - **Checker types** `src/checker/ty.rs`: `Ty::Channel(Box<Ty>)` + helper + `compatible()`; map
   `Type::Generic("Channel", [T])` → `Ty::Channel`.
-- **Checker methods** `src/checker/mod.rs` (`infer_method_call`): `Ty::Channel` arm +
-  `channel_method_sig` (`send(T)->nil`, `recv()->T`, `len()->int`); `Channel()` constructor (builtin
-  free fn, mirror `Set()`).
+- **Checker methods** `src/checker/expr.rs` (`infer_method_call`): `Ty::Channel` arm resolving via
+  `native_handle_method("Channel", …)` against the file-backed `native struct Channel[T]` method table in
+  `std/prelude.chz` (`send(T)->nil`, `recv()->T`, `len()->int`, … — the retired bespoke
+  `channel_method_sig`'s replacement); `Channel()` constructor (builtin free fn, mirror `Set()`).
 - **Sendability:** a `sendable(&Ty)` predicate gating `spawn` captures + `Channel.send`; read-only
   captured bindings (reassign of a captured name inside a task = error).
 - **Interp** `src/interp/value.rs`: `Value::Channel(Rc<RefCell<VecDeque<Value>>>)` + `type_name` /

@@ -1,0 +1,52 @@
+# tests/chz/spec/reserved_method_tables_test.chz — behavior spec for the reserved-type METHOD tables
+# whose checker sigs are now file-backed in std/prelude.chz (channel/str/bytes/bytearray), replacing the
+# retired bespoke Rust `*_method_sig` fns. These are REGRESSION guards: the migration is checker-only
+# (sigs byte-match the retired arms, runtime dispatch untouched), so every assertion below must hold
+# exactly as before. Serial==M:N is guarded by `test_runner::chz_suite_passes_both_engines`.
+#
+# The Channel tests stay single-task + unbounded so `recv`/for-drain never block the serial oracle.
+
+# ---- Channel: send / recv / len / cap ----
+
+test fn channel_send_recv_len_cap():
+    ch := Channel[int]()
+    assert ch.cap() == 0, "unbounded channel cap is 0"
+    ch.send(1)
+    ch.send(2)
+    assert ch.len() == 2
+    assert ch.recv() == 1
+    assert ch.recv() == 2
+    assert ch.len() == 0
+
+# ---- Channel: try_send / try_recv ----
+
+test fn channel_try_send_try_recv():
+    ch := Channel[int]()
+    assert ch.try_send(10) == true, "unbounded try_send always succeeds"
+    match ch.try_recv():
+        Some(v): assert v == 10
+        None: assert false, "queued value must be Some"
+    match ch.try_recv():
+        Some(_): assert false, "empty channel try_recv is None"
+        None: assert true
+
+# ---- Channel: close + for-drain ----
+
+test fn channel_close_drain():
+    ch := Channel[int]()
+    ch.send(1)
+    ch.send(2)
+    ch.close()
+    total := 0
+    for v in ch:
+        total = total + v
+    assert total == 3, "for-drain after close yields every queued value"
+
+# ---- Channel: trip (permanent ready latch) ----
+
+test fn channel_trip():
+    ch := Channel[int]()
+    ch.trip()
+    match ch.try_recv():
+        Some(_): assert true
+        None: assert false, "a tripped channel reports ready forever"

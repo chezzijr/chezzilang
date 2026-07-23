@@ -6227,8 +6227,9 @@ fn prelude_container_checker() -> Checker {
     assert!(
         c.container_seeds.contains_key("List")
             && c.container_seeds.contains_key("Map")
-            && c.container_seeds.contains_key("Set"),
-        "prelude List/Map/Set container seeds must be harvested"
+            && c.container_seeds.contains_key("Set")
+            && c.container_seeds.contains_key("Channel"),
+        "prelude List/Map/Set/Channel container seeds must be harvested"
     );
     // container_seeds is populated; re-seed it into self.structs for the method-table lookup.
     c.seed_stdlib_structs();
@@ -15624,9 +15625,7 @@ fn builtin_method_slices_all_resolve() {
     chk_container("List", LIST_METHODS);
     chk_container("Map", MAP_METHODS);
     chk_container("Set", SET_METHODS);
-    chk(CHANNEL_METHODS, "CHANNEL_METHODS", &|m| {
-        channel_method_sig(m, &Ty::Int)
-    });
+    chk_container("Channel", CHANNEL_METHODS);
     // Phase 4c-net / 4c-concurrency — Socket/Listener (net) and Shared/RwShared/Atomic/Executor
     // (concurrency) method sigs are now HARVESTED from std/net.chz / std/concurrency.chz into each
     // type's method table (the bespoke socket_/listener_/shared_/rwshared_/atomic_/executor_method_sig

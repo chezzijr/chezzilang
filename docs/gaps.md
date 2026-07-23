@@ -248,10 +248,13 @@ CODE is right, the doc lied; corrected to point at `s.encode()`.
   (`int`/`Channel`/…) keep "reserved (builtin)".
 
 **Two DORMANT structural fragilities (no live trigger — not bugs, worth a cheap guard before freeze):**
-- **Channel is the one native handle OFF the unified method-dispatch path** (`call.rs:989` / checker
-  `channel_method_sig`), so it isn't protected by the "add-a-handle-arm auto-enables bodied dispatch" guarantee
-  the other 9 handles get. Self-consistent today (Channel has no bodied/generic methods); a future one would
-  need a manual VM edit the structural guard won't force.
+- **Channel is the one native handle OFF the unified VM method-dispatch path** (`call.rs:989` `handle_key`
+  match). The CHECKER-sig half of this gap is now CLOSED: `channel_method_sig` is retired and Channel's sigs
+  are file-backed as a `native struct Channel[T]` in `std/prelude.chz` (harvested + resolved via
+  `native_handle_method`, exactly like List/Map/Set/Shared/Socket). Only the VM-dispatch half remains — Channel
+  still isn't in the unified `handle_key` match, so it isn't protected by the "add-a-handle-arm auto-enables
+  bodied dispatch" guarantee the other 9 handles get. Self-consistent today (Channel has no bodied/generic
+  methods); a future one would need a manual VM edit the structural guard won't force.
 - **A non-handle native struct can harvest a bodied method the VM can't dispatch.** The compiler harvest
   (`compiler/mod.rs:~1086`) is generic over ALL native structs, but `try_native_bodied_method` is only reached
   from the 9-handle `handle_key` match — so adding a bodied `fn` to `Match`/`ProcResult`/`FileInfo`/`Response`
