@@ -50,3 +50,56 @@ test fn channel_trip():
     match ch.try_recv():
         Some(_): assert true
         None: assert false, "a tripped channel reports ready forever"
+
+# ---- str: representative methods (len / upper / split / replace / to_int / parse_int / message) ----
+
+test fn str_methods():
+    assert "hello".len() == 5
+    assert "hi".upper() == "HI"
+    assert "a,b,c".split(",") == ["a", "b", "c"]
+    assert "foobar".replace("o", "0") == "f00bar"
+    match "42".to_int():
+        Some(n): assert n == 42
+        None: assert false, "valid int parses"
+    match "nope".to_int():
+        Some(_): assert false, "bad int is None"
+        None: assert true
+
+test fn str_parse_int_result():
+    match "7".parse_int():
+        Ok(n): assert n == 7
+        Err(_): assert false, "valid parse is Ok"
+    match "x".parse_int():
+        Ok(_): assert false, "bad parse is Err"
+        Err(msg): assert msg.len() > 0, "error carries a str message"
+
+test fn str_message_is_error():
+    # `str` conforms to Error: message() returns the string itself.
+    assert "boom".message() == "boom"
+
+# ---- bytes: decode / len ----
+
+test fn bytes_methods():
+    b := "hi".encode()
+    assert b.len() == 2
+    assert b.decode() == "hi", "encode/decode round-trip"
+
+# ---- bytearray: push / pop / decode / extend (all three arg shapes) ----
+
+test fn bytearray_push_pop():
+    ba := bytearray()
+    ba.push(104)
+    ba.push(105)
+    assert ba.len() == 2
+    assert ba.decode() == "hi"
+    match ba.pop():
+        Some(n): assert n == 105
+        None: assert false, "non-empty pop is Some"
+
+test fn bytearray_extend_shapes():
+    # extend accepts bytes, bytearray, or List[int] — the special-case branch preserved in the checker.
+    ba := bytearray()
+    ba.extend("ab".encode())          # bytes
+    ba.extend(bytearray("cd".encode()))  # bytearray
+    ba.extend([101, 102])             # List[int]
+    assert ba.decode() == "abcdef"

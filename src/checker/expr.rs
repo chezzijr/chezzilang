@@ -2515,7 +2515,9 @@ impl Checker {
             }
             // Core-type methods (M6): built-in methods on `str` and `list[T]`.
             Ty::Str => {
-                if let Some(sig) = str_method_sig(method) {
+                // The sigs are harvested from `std/prelude.chz`'s `native struct str` (re-seeded by
+                // `seed_stdlib_structs`); `str` is non-generic so no type args are substituted.
+                if let Some(sig) = self.native_handle_method("str", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -2588,7 +2590,9 @@ impl Checker {
             }
             // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
             Ty::Bytes => {
-                if let Some(sig) = bytes_method_sig(method) {
+                // The sigs are harvested from `std/prelude.chz`'s `native struct bytes` (re-seeded by
+                // `seed_stdlib_structs`); `bytes` is non-generic so no type args are substituted.
+                if let Some(sig) = self.native_handle_method("bytes", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -2615,7 +2619,11 @@ impl Checker {
                     }
                     return Ty::Nil;
                 }
-                if let Some(sig) = bytearray_method_sig(method) {
+                // Every other method's sig is harvested from `std/prelude.chz`'s `native struct
+                // bytearray` (re-seeded by `seed_stdlib_structs`); `bytearray` is non-generic so no type
+                // args are substituted. `extend` is handled above (its arg may be any of three
+                // byte-sequence shapes, not a flat FnSig).
+                if let Some(sig) = self.native_handle_method("bytearray", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;

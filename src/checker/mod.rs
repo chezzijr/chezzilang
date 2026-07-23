@@ -1137,7 +1137,7 @@ impl Checker {
             // to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via `resolve_type`'s reserved arms; the
             // ctors/literals stay compiler-wired.
             if c.container_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
-                for tn in ["List", "Map", "Set", "Channel"] {
+                for tn in ["List", "Map", "Set", "Channel", "str", "bytes", "bytearray"] {
                     if let Some(info) = c.harvest_native_struct_table(&lm.ast, tn) {
                         c.container_seeds.insert(tn.to_string(), info);
                     }
@@ -2773,43 +2773,15 @@ const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
 
-fn str_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "len" => (vec![], Ty::Int),
-        "upper" | "lower" | "trim" => (vec![], Ty::Str),
-        // `str` conforms to `Error`: `message()` returns the string itself.
-        "message" => (vec![], Ty::Str),
-        "split" => (vec![Ty::Str], Ty::list(Ty::Str)),
-        "chars" => (vec![], Ty::list(Ty::Str)),
-        "join" => (vec![Ty::list(Ty::Str)], Ty::Str),
-        "starts_with" | "contains" | "ends_with" => (vec![Ty::Str], Ty::Bool),
-        // `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out).
-        // No encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).
-        "encode" => (vec![], Ty::Bytes),
-        // gap #1 (minimal subset): receiver methods forwarding to the `std.string` free fns, so
-        // `s.ends_with(x)` works just like `s.starts_with(x)` (no import needed). Native in both
-        // engines; byte-identical to the std.string codepoint-loop oracle for valid inputs (repeat
-        // raises a recoverable capacity-overflow fault instead of aborting on a huge count).
-        "replace" => (vec![Ty::Str, Ty::Str], Ty::Str),
-        "repeat" => (vec![Ty::Int], Ty::Str),
-        "reverse" => (vec![], Ty::Str),
-        "pad_left" => (vec![Ty::Int, Ty::Str], Ty::Str),
-        "index_of" | "count" => (vec![Ty::Str], Ty::Int),
-        "strip_prefix" | "strip_suffix" => (vec![Ty::Str], Ty::Str),
-        "split_lines" => (vec![], Ty::list(Ty::Str)),
-        // `strip` is a trim alias.
-        "strip" => (vec![], Ty::Str),
-        // gap #7: safe numeric parse — Option-returning (None on bad input) instead of raising.
-        "to_int" => (vec![], Ty::option(Ty::Int)),
-        "to_float" => (vec![], Ty::option(Ty::Float)),
-        // Result-returning parse siblings: `Ok(n)` or `Err(msg)` carrying a human-readable
-        // parse-error string (explicit `str` error type, not the default `Error` existential).
-        "parse_int" => (vec![], Ty::result_e(Ty::Int, Ty::Str)),
-        "parse_float" => (vec![], Ty::result_e(Ty::Float, Ty::Str)),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
+// The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase
+// 5a-containers): every one of their FLAT sigs is now declared as a body-less `native fn` method inside a
+// `native struct str` / `bytes` / `bytearray` in `std/prelude.chz`, harvested into that reserved scalar's
+// method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with NO type
+// args (the scalars are non-generic — the identity path returns the stored sig verbatim). The
+// `str(x)`/`bytes(x)`/`bytearray(x)` CTORS stay the `native ctor` decls, and runtime dispatch stays
+// Rust-inline (`vm/mod.rs core_method` / `bytes_method`). The `bytearray.extend` special-case (its arg may
+// be any of bytes|bytearray|List[int], not a flat `FnSig`) stays an explicit branch in `infer_method_call`
+// BEFORE the table lookup.
 
 // The bespoke `list_method_sig` / `map_method_sig` / `set_method_sig` arms are RETIRED (phase
 // 5a-containers): every one of their FLAT sigs is now declared as a body-less `native fn` method inside a
@@ -2838,34 +2810,6 @@ fn str_method_sig(method: &str) -> Option<FnSig> {
 // box's element type substituted for `Ty::Param("T")`. The two constraints a plain sig cannot express
 // stay as thin residuals: `RwShared.read`'s closure return R is recovered in the `Ty::RwShared` arm,
 // and `Atomic.add`/`sub`'s numeric-`T` gate is a `!elem.is_numeric()` check in the `Ty::Atomic` arm.
-
-/// Built-in method signatures on `bytearray` (the mutable byte buffer). Mirrors the VM's
-/// `core_method` ByteArray arm and the interp's `eval_bytearray_method` — keep all three in lockstep.
-/// `push(int)` appends one byte (0–255 validated at runtime); `pop() -> Option[int]` removes the last.
-/// `extend` is NOT here — it takes any byte-sequence shape and is handled in `infer_method_call`.
-fn bytearray_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "len" => (vec![], Ty::Int),
-        "push" => (vec![Ty::Int], Ty::Nil),
-        "pop" => (vec![], Ty::option(Ty::Int)),
-        // `decode()` -> `str`: UTF-8 decode the current buffer (recoverable fault on invalid UTF-8).
-        "decode" => (vec![], Ty::Str),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
-
-/// Built-in method signatures on `bytes` (the immutable byte sequence). Mirrors the VM's
-/// `bytes_method` and the interp's bytes-method arm — keep all three in lockstep. `decode()`
-/// (UTF-8 → str, recoverable fault on invalid UTF-8) and `len()` (byte count).
-fn bytes_method_sig(method: &str) -> Option<FnSig> {
-    let (params, ret) = match method {
-        "decode" => (vec![], Ty::Str),
-        "len" => (vec![], Ty::Int),
-        _ => return None,
-    };
-    Some(FnSig::plain(params, ret))
-}
 
 /// A DISPLAY/PLACEHOLDER signature for the STILL-SYNTHETIC free / constructor builtins (editor hover,
 /// v1): the GENERIC / reserved-type container & runtime ctors

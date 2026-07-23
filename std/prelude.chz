@@ -134,6 +134,67 @@ native struct Channel[T]:
     # unbounded `Channel[T]()`.
     native fn cap(self) -> int
 
+# The reserved scalar METHOD tables (`str`/`bytes`/`bytearray`). Identity stays the reserved
+# `Ty::Str`/`Ty::Bytes`/`Ty::ByteArray` (`resolve_type`) and the `str(x)`/`bytes(x)`/`bytearray(x)`
+# CTORS stay the `native ctor` decls above; runtime dispatch stays Rust-inline (`vm/mod.rs core_method` /
+# `bytes_method`). Only the METHOD-TABLE sigs are file-backed here — harvested into each scalar's method
+# table (re-seeded by `seed_stdlib_structs`), looked up via `native_handle_method` with no type args (the
+# scalars are non-generic) — the file-backed replacement for the retired bespoke `str_method_sig` /
+# `bytes_method_sig` / `bytearray_method_sig` arms.
+native struct str:
+    native fn len(self) -> int
+    native fn upper(self) -> str
+    native fn lower(self) -> str
+    native fn trim(self) -> str
+    # `str` conforms to `Error`: `message()` returns the string itself.
+    native fn message(self) -> str
+    native fn split(self, sep: str) -> List[str]
+    native fn chars(self) -> List[str]
+    native fn join(self, parts: List[str]) -> str
+    native fn starts_with(self, prefix: str) -> bool
+    native fn contains(self, needle: str) -> bool
+    native fn ends_with(self, suffix: str) -> bool
+    # `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out). No
+    # encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).
+    native fn encode(self) -> bytes
+    # Receiver methods forwarding to the `std.string` free fns (no import needed); byte-identical to the
+    # std.string codepoint-loop oracle for valid inputs (`repeat` raises a recoverable capacity-overflow
+    # fault instead of aborting on a huge count).
+    native fn replace(self, old: str, new: str) -> str
+    native fn repeat(self, n: int) -> str
+    native fn reverse(self) -> str
+    native fn pad_left(self, width: int, fill: str) -> str
+    native fn index_of(self, needle: str) -> int
+    native fn count(self, needle: str) -> int
+    native fn strip_prefix(self, prefix: str) -> str
+    native fn strip_suffix(self, suffix: str) -> str
+    native fn split_lines(self) -> List[str]
+    # `strip` is a trim alias.
+    native fn strip(self) -> str
+    # Safe numeric parse — Option-returning (None on bad input) instead of raising.
+    native fn to_int(self) -> Option[int]
+    native fn to_float(self) -> Option[float]
+    # Result-returning parse siblings: `Ok(n)` or `Err(msg)` carrying a human-readable parse-error
+    # string (explicit `str` error type, not the default `Error` existential).
+    native fn parse_int(self) -> Result[int, str]
+    native fn parse_float(self) -> Result[float, str]
+
+# `bytes` (immutable byte sequence): `decode() -> str` (UTF-8, recoverable fault on invalid UTF-8) and
+# `len()` (byte count). `extend` is NOT a bytes method (bytes is immutable).
+native struct bytes:
+    native fn decode(self) -> str
+    native fn len(self) -> int
+
+# `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
+# `pop() -> Option[int]` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
+# UTF-8). `extend` is NOT here — it takes any byte-sequence shape (bytes|bytearray|List[int]) and stays
+# an explicit branch in `infer_method_call` (not a flat FnSig).
+native struct bytearray:
+    native fn len(self) -> int
+    native fn push(self, b: int) -> nil
+    native fn pop(self) -> Option[int]
+    native fn decode(self) -> str
+
 # The two builtin generic ENUMS' variant SHAPE (phase 5b-native-enum). `Option`/`Result` are the most
 # deeply-wired builtin types — the `?` operator, top-level error propagation, exhaustive `match`, and
 # native construction (`Ok`/`Err`/`Some`/`None` from `NativeRet`) are all RESERVED and stay RUST-WIRED:

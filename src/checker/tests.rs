@@ -6228,8 +6228,11 @@ fn prelude_container_checker() -> Checker {
         c.container_seeds.contains_key("List")
             && c.container_seeds.contains_key("Map")
             && c.container_seeds.contains_key("Set")
-            && c.container_seeds.contains_key("Channel"),
-        "prelude List/Map/Set/Channel container seeds must be harvested"
+            && c.container_seeds.contains_key("Channel")
+            && c.container_seeds.contains_key("str")
+            && c.container_seeds.contains_key("bytes")
+            && c.container_seeds.contains_key("bytearray"),
+        "prelude List/Map/Set/Channel/str/bytes/bytearray container seeds must be harvested"
     );
     // container_seeds is populated; re-seed it into self.structs for the method-table lookup.
     c.seed_stdlib_structs();
@@ -15596,18 +15599,10 @@ fn container_method_sigs_byte_match() {
 /// tables, so they are deliberately absent from the slices — see PROGRESS.md.)
 #[test]
 fn builtin_method_slices_all_resolve() {
-    let chk = |slice: &[&str], name: &str, f: &dyn Fn(&str) -> Option<FnSig>| {
-        for m in slice {
-            assert!(
-                f(m).is_some(),
-                "{name} slice lists '{m}' but its *_method_sig has no such method (drift)"
-            );
-        }
-    };
-    chk(STR_METHODS, "STR_METHODS", &str_method_sig);
-    // Phase 5a-containers — List/Map/Set method sigs are now HARVESTED from std/prelude.chz into each
-    // reserved type's method table (the bespoke list_/map_/set_method_sig arms are retired). Resolve the
-    // hover slices against those seeded tables.
+    // Phase 5a-containers — List/Map/Set/Channel and the str/bytes/bytearray scalar method sigs are now
+    // HARVESTED from std/prelude.chz into each reserved type's method table (the bespoke
+    // list_/map_/set_/channel_/str_/bytes_/bytearray_method_sig arms are retired). Resolve the hover
+    // slices against those seeded tables.
     let cc = prelude_container_checker();
     let chk_container = |ty: &str, slice: &[&str]| {
         let methods = &cc
@@ -15626,6 +15621,9 @@ fn builtin_method_slices_all_resolve() {
     chk_container("Map", MAP_METHODS);
     chk_container("Set", SET_METHODS);
     chk_container("Channel", CHANNEL_METHODS);
+    chk_container("str", STR_METHODS);
+    chk_container("bytes", BYTES_METHODS);
+    chk_container("bytearray", BYTEARRAY_METHODS);
     // Phase 4c-net / 4c-concurrency — Socket/Listener (net) and Shared/RwShared/Atomic/Executor
     // (concurrency) method sigs are now HARVESTED from std/net.chz / std/concurrency.chz into each
     // type's method table (the bespoke socket_/listener_/shared_/rwshared_/atomic_/executor_method_sig
@@ -15660,12 +15658,6 @@ fn builtin_method_slices_all_resolve() {
         "AtomicInt",
     );
     chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
-    chk(BYTES_METHODS, "BYTES_METHODS", &bytes_method_sig);
-    chk(
-        BYTEARRAY_METHODS,
-        "BYTEARRAY_METHODS",
-        &bytearray_method_sig,
-    );
 }
 
 /// Drift guard (editor hover, Tier C): every `(module, fn)` named in an authored module-fn doc slice

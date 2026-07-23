@@ -3096,8 +3096,9 @@ impl Vm {
     }
 
     /// Built-in methods on a `bytearray` receiver (`h` is the heap handle): `len`, `push(int 0..=255)`,
-    /// `pop() -> Option[int]`, `extend(bytes|bytearray|List[int])`. Mirrors the interp's
-    /// `eval_bytearray_method` and the checker's `bytearray_method_sig` — keep all three in lockstep.
+    /// `pop() -> Option[int]`, `extend(bytes|bytearray|List[int])`. Mirrors the checker's file-backed
+    /// `native struct bytearray` method table in `std/prelude.chz` (the retired `bytearray_method_sig`) —
+    /// keep them in lockstep.
     /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
     /// second binding to the same `bytearray` observes the change.
     pub(super) fn bytearray_method(
@@ -3174,8 +3175,9 @@ impl Vm {
         }
     }
 
-    /// `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the interp's
-    /// bytes-method arm and the checker's `bytes_method_sig` — keep all three in lockstep.
+    /// `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the checker's
+    /// file-backed `native struct bytes` method table in `std/prelude.chz` (the retired `bytes_method_sig`)
+    /// — keep them in lockstep.
     pub(super) fn bytes_method(
         &mut self,
         h: GcRef,

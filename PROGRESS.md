@@ -4,15 +4,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
-> **✅ CHECKER REFACTOR (2026-07-23) — `channel_method_sig` retired; Channel sigs now file-backed.**
-> The bespoke `channel_method_sig` (`src/checker/mod.rs`) is RETIRED: Channel's 8 method sigs
-> (`send`/`try_send`/`recv`/`try_recv`/`close`/`trip`/`len`/`cap`) are now a body-less `native struct
-> Channel[T]` in `std/prelude.chz`, harvested into the reserved type's method table (`container_seeds` →
-> `seed_stdlib_structs`) and resolved via `native_handle_method` — the exact List/Map/Set/Shared/Socket
-> pattern. Checker-only, sigs BYTE-MATCH the retired arm; runtime dispatch UNTOUCHED (`vm/netio.rs
-> channel_method`). Tests: `tests/chz/spec/reserved_method_tables_test.chz` (both engines) + extended
-> `prelude_container_checker`/`builtin_method_slices_all_resolve`. Docs: `docs/gaps.md` item 1 (mirror-gap
-> half closed; VM `handle_key` half still out of scope), `docs/concurrency.md`. (Next: str/bytes/bytearray.)
+> **✅ CHECKER REFACTOR (2026-07-23) — the last 4 bespoke reserved-type method tables are now file-backed.**
+> `channel_method_sig`/`str_method_sig`/`bytes_method_sig`/`bytearray_method_sig` (`src/checker/mod.rs`) are
+> RETIRED: each is now a body-less `native struct Channel[T]`/`str`/`bytes`/`bytearray` in `std/prelude.chz`,
+> harvested into the reserved type's method table (`container_seeds` → `seed_stdlib_structs`) and resolved via
+> `native_handle_method` (scalars pass no type args → the identity path returns the stored sig verbatim) — the
+> exact List/Map/Set/Shared/Socket/Writer pattern. Checker-only, sigs BYTE-MATCH the retired arms (incl.
+> `str.message` for the Error protocol, `to_int`→`Option[int]`, `parse_int`→`Result[int, str]`,
+> `split`→`List[str]`). Runtime dispatch UNTOUCHED (`vm/netio.rs channel_method` / `vm/mod.rs core_method` /
+> `bytes_method`). The `bytearray.extend` special-case (accepts bytes|bytearray|List[int]) stays an explicit
+> branch BEFORE the table lookup. `unique_member_owner`'s `str`/`bytes` pin now reads the seeded tables
+> (`src/checker/pattern.rs`). Every reserved-type method sig is now file-backed — no bespoke `*_method_sig`
+> fn remains. Tests: `tests/chz/spec/reserved_method_tables_test.chz` (10 tests, both engines) + extended
+> `prelude_container_checker`/`builtin_method_slices_all_resolve`. Docs: `docs/gaps.md` item 1 (mirror-gap half
+> closed; VM `handle_key` half still out of scope), `docs/concurrency.md`.
 
 > **✅ CHECKER DIAGNOSTIC (2026-07-23) — imported native-struct redeclare now says "already defined".**
 > `import Match from std.regex` + `struct Match` reported "type 'Match' is reserved (builtin)" — wrong:

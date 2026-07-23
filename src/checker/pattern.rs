@@ -3396,10 +3396,22 @@ impl Checker {
                 owners.push(Ty::Struct(key.clone(), vec![Ty::Unknown; n]));
             }
         }
-        if str_method_sig(member).is_some() {
+        // `str`/`bytes` method sets are now the file-backed `native struct` tables seeded into
+        // `self.structs` (the retired `str_method_sig`/`bytes_method_sig` replacement); the loop above
+        // skips them (Builtin origin), so check them explicitly here to preserve the `x.upper()` → `str`
+        // pin case.
+        if self
+            .structs
+            .get("str")
+            .is_some_and(|info| info.methods.contains_key(member))
+        {
             owners.push(Ty::Str);
         }
-        if bytes_method_sig(member).is_some() {
+        if self
+            .structs
+            .get("bytes")
+            .is_some_and(|info| info.methods.contains_key(member))
+        {
             owners.push(Ty::Bytes);
         }
         if owners.len() == 1 {
