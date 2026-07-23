@@ -102,8 +102,11 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 /// Compile + run one `*_test.chz` file on the selected engine (`parallel`: `false` = cooperative
 /// serial VM, `true` = M:N OS-thread VM), returning a per-test outcome list (or a compile-error
 /// message for the whole file). Compilation is engine-independent and stays on the caller's thread;
-/// only the VM run dispatches, and the M:N run is spawned on a [`crate::vm::on_vm_stack`] thread
-/// (the OS-thread scheduler needs the large VM stack).
+/// BOTH engine runs then dispatch on a [`crate::vm::on_vm_stack`] thread — the M:N scheduler needs
+/// the large VM stack, and the SERIAL VM needs it too for deep structural recursion (a cyclic-key
+/// `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000 before faulting recoverably, which overflows the
+/// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
+/// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
 fn run_file(file: &Path, parallel: bool) -> Result<Vec<Outcome>, String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
@@ -118,11 +121,7 @@ fn run_file(file: &Path, parallel: bool) -> Result<Vec<Outcome>, String> {
     let program: Arc<Program> = Arc::new(program);
     let file_label = file.display().to_string();
 
-    if parallel {
-        crate::vm::on_vm_stack(move || invoke_all(program, file_label, true))
-    } else {
-        invoke_all(program, file_label, false)
-    }
+    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel))
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or

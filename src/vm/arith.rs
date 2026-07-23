@@ -440,7 +440,7 @@ impl Vm {
                         && matches!(self.heap.get(ha), Obj::Set(_))
                         && matches!(self.heap.get(hb), Obj::Set(_)) =>
                 {
-                    self.set_op(SetOp::Difference, ha, hb)
+                    self.set_op(SetOp::Difference, ha, hb, span)?
                 }
                 // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative, Python-style). `n <= 0` →
                 // empty; guard capacity against the Vec overflow abort, like `str.repeat` (vm:7514).
@@ -534,7 +534,13 @@ impl Vm {
     /// hashes (no re-hashing, no user re-entry). `^` (symmetric-difference) has no method form:
     /// it is the union of (mine ∉ other) THEN (other ∉ mine), in that canonical insertion order so
     /// the result's print order is deterministic and parity-equal with the interpreter.
-    pub(super) fn set_op(&mut self, op: SetOp, ha: GcRef, hb: GcRef) -> Value {
+    pub(super) fn set_op(
+        &mut self,
+        op: SetOp,
+        ha: GcRef,
+        hb: GcRef,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
         let mine = match self.heap.get(ha) {
             Obj::Set(s) => s.entries.clone(),
             _ => unreachable!(),
@@ -544,53 +550,60 @@ impl Vm {
             _ => unreachable!(),
         };
         let mut out = SetData::default();
-        let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| {
-            if !set
-                .candidates(he)
-                .iter()
-                .any(|&p| vm.values_equal(set.entries[p].1, e))
+        // Dedup-insert: propagate a cyclic-key depth fault (`?`) instead of swallowing it — the
+        // membership `==` here is the same one `s.add`/`|` are DEFINED by, so it must fault alike.
+        let add = |vm: &Vm, set: &mut SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
+            if vm
+                .set_slot(&set.entries, set.candidates(he), e, span)?
+                .is_none()
             {
                 set.push(he, e);
             }
+            Ok(())
         };
-        let in_set = |vm: &Vm, set: &[(u64, Value)], he: u64, e: Value| {
-            set.iter()
-                .any(|&(h2, e2)| h2 == he && vm.values_equal(e2, e))
-        };
+        let in_set =
+            |vm: &Vm, set: &[(u64, Value)], he: u64, e: Value| -> Result<bool, RuntimeError> {
+                for &(h2, e2) in set {
+                    if h2 == he && vm.values_equal_guarded(e2, e, 0, span)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
         match op {
             SetOp::Union => {
                 for (he, e) in mine.iter().chain(other.iter()) {
-                    add(self, &mut out, *he, *e);
+                    add(self, &mut out, *he, *e)?;
                 }
             }
             SetOp::Intersection => {
                 for (he, e) in &mine {
-                    if in_set(self, &other, *he, *e) {
-                        add(self, &mut out, *he, *e);
+                    if in_set(self, &other, *he, *e)? {
+                        add(self, &mut out, *he, *e)?;
                     }
                 }
             }
             SetOp::Difference => {
                 for (he, e) in &mine {
-                    if !in_set(self, &other, *he, *e) {
-                        add(self, &mut out, *he, *e);
+                    if !in_set(self, &other, *he, *e)? {
+                        add(self, &mut out, *he, *e)?;
                     }
                 }
             }
             SetOp::SymmetricDifference => {
                 for (he, e) in &mine {
-                    if !in_set(self, &other, *he, *e) {
-                        add(self, &mut out, *he, *e);
+                    if !in_set(self, &other, *he, *e)? {
+                        add(self, &mut out, *he, *e)?;
                     }
                 }
                 for (he, e) in &other {
-                    if !in_set(self, &mine, *he, *e) {
-                        add(self, &mut out, *he, *e);
+                    if !in_set(self, &mine, *he, *e)? {
+                        add(self, &mut out, *he, *e)?;
                     }
                 }
             }
         }
-        Value::obj(self.heap.alloc(Obj::Set(out)))
+        Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
     }
 
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
@@ -832,7 +845,7 @@ impl Vm {
                         Op::BitAnd => SetOp::Intersection,
                         _ => SetOp::SymmetricDifference,
                     };
-                    self.set_op(set_op, ha, hb)
+                    self.set_op(set_op, ha, hb, span)?
                 }
                 _ => {
                     return Err(self.err(
@@ -894,25 +907,23 @@ impl Vm {
             ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::List(items) => {
                     let elems = items.clone();
-                    elems.iter().any(|v| self.values_equal(*v, needle))
+                    self.seq_slot(&elems, needle, span)?.is_some()
                 }
                 Obj::Set(_) => {
                     let hx = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                     let Obj::Set(s) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    s.candidates(hx)
-                        .iter()
-                        .any(|&p| self.values_equal(s.entries[p].1, needle))
+                    self.set_slot(&s.entries, s.candidates(hx), needle, span)?
+                        .is_some()
                 }
                 Obj::Map(_) => {
                     let hk = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    m.candidates(hk)
-                        .iter()
-                        .any(|&p| self.values_equal(m.entries[p].1, needle))
+                    self.map_slot(&m.entries, m.candidates(hk), needle, span)?
+                        .is_some()
                 }
                 Obj::Str(_) => {
                     let Some(nh) = needle.as_obj() else {
@@ -1621,13 +1632,70 @@ impl Vm {
         }
     }
 
-    /// Structural equality mirroring `interp::values_equal`. Thin `bool` wrapper over the
-    /// depth-guarded worker (kept so the ~39 existing call sites — many in hot hash-probe paths
-    /// bound by `values_equal(a,b) ⇒ hash(a)==hash(b)` — are untouched). A depth-exceeded fault
-    /// (cyclic data) degrades to "not equal" here; the language `==`/`!=` ops surface it instead.
+    /// Test-only `bool` convenience over the depth-guarded worker. A depth-exceeded fault (cyclic
+    /// data) degrades to "not equal" — acceptable in unit tests, but NOT for production container
+    /// membership / key-equality, which must SURFACE the fault the same way `==`/`!=` do (see the
+    /// `*_slot` helpers below). Kept `#[cfg(test)]` so no production caller swallows the fault.
+    #[cfg(test)]
     pub(super) fn values_equal(&self, l: Value, r: Value) -> bool {
         self.values_equal_guarded(l, r, 0, Span { line: 1, col: 1 })
             .unwrap_or(false)
+    }
+
+    /// First index in `hay` structurally-equal to `needle`, or `None`. Depth-fault propagating
+    /// (`?`), so a cyclic operand raises the same recoverable "maximum structural depth" fault as
+    /// `==` instead of silently comparing unequal. Allocation-free flat scan.
+    #[inline]
+    pub(super) fn seq_slot(
+        &self,
+        hay: &[Value],
+        needle: Value,
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        for (i, v) in hay.iter().enumerate() {
+            if self.values_equal_guarded(*v, needle, 0, span)? {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// First candidate position in a Set's `entries` whose element structurally equals `key`, or
+    /// `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the element.
+    /// Depth-fault propagating (see [`Self::seq_slot`]).
+    #[inline]
+    pub(super) fn set_slot(
+        &self,
+        entries: &[(u64, Value)],
+        cands: &[usize],
+        key: Value,
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        for &p in cands {
+            if self.values_equal_guarded(entries[p].1, key, 0, span)? {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
+
+    /// First candidate position in a Map's `entries` whose key structurally equals `key`, or `None`.
+    /// `cands` are `candidates(hash(key))` positions; `entries[p].1` is the stored key.
+    /// Depth-fault propagating (see [`Self::seq_slot`]).
+    #[inline]
+    pub(super) fn map_slot(
+        &self,
+        entries: &[(u64, Value, Value)],
+        cands: &[usize],
+        key: Value,
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        for &p in cands {
+            if self.values_equal_guarded(entries[p].1, key, 0, span)? {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
     }
 
     /// Depth-guarded structural equality. Returns `Err` (recoverable) once recursion exceeds

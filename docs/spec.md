@@ -560,7 +560,11 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   without that import, is the user's own type). The native seam grew `NativeRet::Struct`/`Map` so a
   native fn can return a structured value.
 - **Shipped since (M10):** generic enums; the `Stringable` protocol (custom `str(x)`); the `Hashable`
-  protocol — any `Hashable` type is now a valid map/set key.
+  protocol — any `Hashable` type is now a valid map/set key. A key holding a genuine **reference
+  cycle** faults *recoverably* on membership/key-equality (`Set.has`/`add`, `Map` get/insert/remove,
+  `in`, set algebra, `List.contains`/`index_of`/`unique`/`dedup`) with `"maximum structural depth
+  (10000) exceeded"` — the SAME fault `==` raises (container key-equality is defined by `==`), matching
+  Python's `RecursionError`; catch it with `recover:`.
 - **Shipped:** the scalar types `int`/`float`/`bool`/`str` now **intrinsically satisfy `Stringable`**
   (a `[T: Stringable]` generic accepts them, and the erased body's `v.str()` dispatches to the scalar
   render), closing the last inconsistency where every other scalar-friendly builtin protocol

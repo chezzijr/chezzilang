@@ -116,3 +116,100 @@ test fn struct_set_algebra():
     assert a.has(P(2)) == true
     a.remove(P(2))
     assert a.has(P(2)) == false
+
+# ---- cyclic-key equality faults recoverably (matches `==` / Python RecursionError) ----
+# A struct with a custom `hash` used as a Set/Map key that holds a genuine reference cycle:
+# container membership / key-equality is DEFINED by `==`, so it must fault the SAME way `==`
+# does (structural-depth cap) instead of silently swallowing the fault into a wrong `false`.
+
+struct Cyc:
+    x: int
+    next: List[Cyc] = []
+    fn hash(self) -> int:
+        return self.x
+
+fn assert_depth_fault[T](r: Result[T, Error], where_: str):
+    match r:
+        Ok(_): assert false, where_ + " must fault on a cyclic key"
+        Err(e): assert e.message().contains("maximum structural depth"), where_ + ": " + e.message()
+
+test fn cyclic_key_faults_everywhere():
+    # two DISTINCT self-cyclic keys with the same hash (x=1) -> a candidate collision that
+    # forces a structural `==` that never terminates -> the depth cap fires (recoverable).
+    a1 := Cyc(1)
+    a1.next.push(a1)
+    a2 := Cyc(1)
+    a2.next.push(a2)
+    # sanity: `==` itself faults (the behavior we are matching)
+    r := recover: a1 == a2
+    assert_depth_fault(r, "==")
+    # Set.has / `in` / Set([...]) collide-construct / add
+    s := Set([a1])
+    r := recover: s.has(a2)
+    assert_depth_fault(r, "Set.has")
+    r := recover: (a2 in s)
+    assert_depth_fault(r, "in Set")
+    r := recover: Set([a1, a2])
+    assert_depth_fault(r, "Set([...]) construct")
+    r := recover: s.add(a2)
+    assert_depth_fault(r, "Set.add")
+    # set algebra (operator + method forms must both fault)
+    r := recover: (Set([a1]) | Set([a2]))
+    assert_depth_fault(r, "Set |")
+    r := recover: Set([a1]).union(Set([a2]))
+    assert_depth_fault(r, "Set.union")
+    r := recover: Set([a1]).difference(Set([a2]))
+    assert_depth_fault(r, "Set.difference")
+    # Map: collide-construct / get / insert / `in` / remove
+    m: Map[Cyc, int] = {}
+    m[a1] = 1
+    r := recover: m[a2]
+    assert_depth_fault(r, "Map get")
+    r := recover: m.has(a2)
+    assert_depth_fault(r, "Map.has")
+    r := recover: (a2 in m)
+    assert_depth_fault(r, "in Map")
+    n: Map[Cyc, int] = {}
+    n[a1] = 1
+    r := recover: n.remove(a2)
+    assert_depth_fault(r, "Map.remove")
+    p: Map[Cyc, int] = {}
+    p[a1] = 1
+    r := recover: assign_map(p, a2)
+    assert_depth_fault(r, "Map insert")
+    # List membership / index
+    r := recover: [a1].contains(a2)
+    assert_depth_fault(r, "List.contains")
+    r := recover: [a1].index_of(a2)
+    assert_depth_fault(r, "List.index_of")
+
+fn assign_map(m: Map[Cyc, int], k: Cyc):
+    m[k] = 2
+
+# ---- positive controls: non-cyclic keys stay byte-identical (no new fault) ----
+
+test fn noncyclic_controls():
+    # plain scalars
+    assert Set([1, 2, 3]).has(2) == true
+    assert Set([1, 2, 3]).has(9) == false
+    assert {"a": 1}["a"] == 1
+    assert [1, 2, 3].contains(2) == true
+    assert [1, 2, 3].index_of(2) == 1
+    # non-cyclic Cyc keys (empty `next`) still work across Set/Map ops
+    k1 := Cyc(1)
+    k2 := Cyc(2)
+    s: Set[Cyc] = Set([k1, k2])
+    assert s.has(Cyc(1)) == true
+    assert s.has(Cyc(9)) == false
+    s.add(Cyc(3))
+    assert s.len() == 3
+    s.remove(Cyc(1))
+    assert s.has(Cyc(1)) == false
+    m: Map[Cyc, int] = {}
+    m[Cyc(1)] = 10
+    m[Cyc(1)] = 20
+    assert m.has(Cyc(1)) == true
+    assert m[Cyc(1)] == 20
+    match m.remove(Cyc(1)):
+        Some(v): assert v == 20
+        None: assert false, "present"

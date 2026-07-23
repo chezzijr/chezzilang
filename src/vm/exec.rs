@@ -1697,12 +1697,7 @@ impl Vm {
                 let mut map = MapData::default();
                 for (j, &hk) in hashes.iter().enumerate() {
                     let (k, v) = (self.stack[at + 2 * j], self.stack[at + 2 * j + 1]);
-                    match map
-                        .candidates(hk)
-                        .iter()
-                        .copied()
-                        .find(|&p| self.values_equal(map.entries[p].1, k))
-                    {
+                    match self.map_slot(&map.entries, map.candidates(hk), k, span)? {
                         Some(p) => map.entries[p].2 = v,
                         None => map.push(hk, k, v),
                     }
@@ -1727,11 +1722,9 @@ impl Vm {
                 let mut set = SetData::default();
                 for (j, &he) in hashes.iter().enumerate() {
                     let e = self.stack[at + j];
-                    if !set
-                        .candidates(he)
-                        .iter()
-                        .copied()
-                        .any(|p| self.values_equal(set.entries[p].1, e))
+                    if self
+                        .set_slot(&set.entries, set.candidates(he), e, span)?
+                        .is_none()
                     {
                         set.push(he, e);
                     }

@@ -618,12 +618,7 @@ impl Vm {
                     let Obj::Map(m) = self.heap.get(h) else {
                         unreachable!()
                     };
-                    return match m
-                        .candidates(hk)
-                        .iter()
-                        .copied()
-                        .find(|&p| self.values_equal(m.entries[p].1, key))
-                    {
+                    return match self.map_slot(&m.entries, m.candidates(hk), key, span)? {
                         Some(p) => {
                             let v = m.entries[p].2;
                             self.push(v);
@@ -701,12 +696,7 @@ impl Vm {
                 let Obj::Map(m) = self.heap.get(h) else {
                     unreachable!()
                 };
-                match m
-                    .candidates(hk)
-                    .iter()
-                    .copied()
-                    .find(|&p| self.values_equal(m.entries[p].1, key))
-                {
+                match self.map_slot(&m.entries, m.candidates(hk), key, span)? {
                     Some(p) => {
                         let v = m.entries[p].2;
                         self.push(v);
@@ -810,11 +800,7 @@ impl Vm {
             let Obj::Map(m) = self.heap.get(h) else {
                 unreachable!()
             };
-            let pos = m
-                .candidates(hk)
-                .iter()
-                .copied()
-                .find(|&p| self.values_equal(m.entries[p].1, key));
+            let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
             let Obj::Map(m) = self.heap.get_mut(h) else {
                 unreachable!()
             };
@@ -831,11 +817,7 @@ impl Vm {
             let Obj::Map(m) = self.heap.get(h) else {
                 unreachable!()
             };
-            let pos = m
-                .candidates(hk)
-                .iter()
-                .copied()
-                .find(|&p| self.values_equal(m.entries[p].1, key));
+            let pos = self.map_slot(&m.entries, m.candidates(hk), key, span)?;
             // On INSERT only, snapshot a struct/enum/newtype key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
@@ -1361,10 +1343,9 @@ impl Vm {
                     };
                     b[i]
                 };
-                if !set
-                    .candidates(he)
-                    .iter()
-                    .any(|&p| self.values_equal(set.entries[p].1, v))
+                if self
+                    .set_slot(&set.entries, set.candidates(he), v, span)?
+                    .is_none()
                 {
                     set.push(he, v);
                 }
@@ -1469,11 +1450,7 @@ impl Vm {
                 self.push(k);
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
-                let pos = map
-                    .candidates(hk)
-                    .iter()
-                    .copied()
-                    .find(|&p| self.values_equal(map.entries[p].1, k));
+                let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
                 match pos {
                     Some(p) => map.entries[p].2 = v,
                     None => map.push(hk, k, v),
