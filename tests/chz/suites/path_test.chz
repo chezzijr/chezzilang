@@ -54,18 +54,26 @@ test fn t_ext():
     assert path.ext(".bashrc") == ""
     assert path.ext("a.") == "."
     assert path.ext("dir.d/file") == ""
+    # multiple leading dots are all part of the (dot-only) name — no extension (Python splitext)
+    assert path.ext("..gitignore") == ""
+    assert path.ext("..") == ""
+    assert path.ext("...") == ""
+    assert path.ext("..a.txt") == ".txt"
 
 test fn t_stem():
     assert path.stem("a/b.tar.gz") == "b.tar"
     assert path.stem(".bashrc") == ".bashrc"
     assert path.stem("a.txt") == "a"
     assert path.stem("a/b") == "b"
+    assert path.stem("..gitignore") == "..gitignore"
 
 test fn t_with_ext():
     assert path.with_ext("a/b.txt", ".md") == "a/b.md"
     assert path.with_ext("a/b", ".md") == "a/b.md"
     assert path.with_ext("a/b.txt", "") == "a/b"
     assert path.with_ext("a/b.txt", "md") == "a/b.md"
+    # the filename must not be dropped for a dot-only-prefixed name
+    assert path.with_ext("..gitignore", "bak") == "..gitignore.bak"
 
 test fn t_normalize():
     assert path.normalize("") == "."

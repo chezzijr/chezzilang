@@ -66,7 +66,7 @@ fn split(p: str) -> (str, str):
 # (Python os.path.splitext). A leading-dot-only hidden file has NO extension (the dot must not be
 # the first char of the basename). Only the basename is inspected, never the dirname.
 #   ext("a/b.tar.gz") -> ".gz" · ext("a.txt") -> ".txt" · ext("README") -> "" ·
-#   ext(".bashrc") -> "" · ext("a.") -> "." · ext("dir.d/file") -> ""
+#   ext(".bashrc") -> "" · ext("a.") -> "." · ext("dir.d/file") -> "" · ext("..gitignore") -> ""
 fn ext(p: str) -> str:
     b := basename(p)
     dot := -1
@@ -77,7 +77,14 @@ fn ext(p: str) -> str:
         i += 1
     if dot <= 0:             # no dot, or dot is the first char (hidden file) -> no ext
         return ""
-    return b[dot : b.len()]
+    # Python splitext: the last dot separates an extension only if some char before
+    # it is not a dot — a name that is all leading dots (`..gitignore`, `..`) has none.
+    j := 0
+    while j < dot:
+        if b[j] != ".":
+            return b[dot : b.len()]
+        j += 1
+    return ""
 
 # Final component with its extension removed.
 #   stem("a/b.tar.gz") -> "b.tar" · stem(".bashrc") -> ".bashrc" · stem("a.txt") -> "a" ·

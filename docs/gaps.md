@@ -214,6 +214,37 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
+## Session log — 2026-07-23 (bug-hunt: 1 finding — `std.path.ext` multi-leading-dot — FIXED)
+
+Five-domain adversarial bug-hunt (airlock, cancel/defer/recover, channel/wait/Executor, checker⊋compiler,
+stdlib) on both engines. **Four domains CLEAN** (~170 probes total, consistent with 6+ prior waves):
+airlock/capture (30 probes — handles reject identically, data/closures/generators/cycles round-trip),
+cancel/defer/recover (45), channel/wait/nursery/Shared/Atomic/Executor (34), checker⊋compiler (60 — no
+accept-then-break; int-under-float stress-tested ~25 ways, all coerce-or-reject). One finding survived
+re-verification on the real binary:
+
+- **`std.path.ext`/`stem`/`with_ext` mishandle a name with MULTIPLE leading dots — shared-wrong vs Python
+  (parity-blind), silent filename mangling — FIXED.** `ext` (`std/path.chz`) guarded only `dot <= 0` (a
+  single leading dot), so a dot-only-prefixed basename split at its LAST leading dot instead of having no
+  extension: `ext("..gitignore")` → `.gitignore` (Python `os.path.splitext` → `""`), `ext("..")` → `.`
+  (Python `""`), and worst, `with_ext("..gitignore","bak")` → `..bak` — the `gitignore` filename was
+  **silently dropped** (both `stem`/`with_ext` route through `ext`). The module's own doc comment claimed
+  `splitext` parity ("a leading-dot-only hidden file has NO extension"), and `.bashrc`/`a.txt` were already
+  correct → the intent was Python parity, the guard just under-skipped. Fix: after locating the last dot,
+  return `""` unless some char in `0..dot` is a non-`.` (skip ALL leading dots, matching CPython
+  `genericpath.splitext`). Both engines agreed on the wrong value → the parity oracle was structurally
+  blind; caught by the CPython comparison. Regression: `t_ext`/`t_stem`/`t_with_ext`
+  (`tests/chz/suites/path_test.chz`), gated serial==M:N by `chz_suite_passes_both_engines`.
+
+**Two non-findings recorded (clean rejects, NOT soundness bugs — not chased):**
+- **`str * int` string-repeat rejects** (`cannot apply * to str and int`) while `List * int` repeats — a
+  Python-parity gap (Python `"ab"*3=="ababab"`), but a clean reject, not accept-then-break. Missing feature,
+  not a bug — backlog candidate if string-repeat earns a milestone.
+- **Float-sink if/match-expr asymmetry.** `x: float = 1 + 2` widens (→3.0), and the standalone if/match
+  peephole widens int arms when a float *sibling* constant is present, but `y: float = if c: 1 else: 2`
+  (all-int arms under a float context) **rejects** `cannot assign int to float`. Internal inconsistency but a
+  false-*reject* (safe direction), and the spec only promises the sibling-constant peephole — defensible.
+
 ## Session log — 2026-07-23 (checker⊋compiler: numeric-newtype `.sort()`/`.min()`/`.max()` runtime gap — FIXED)
 
 A numeric `newtype` (`newtype UserId = int`, `= float`) satisfies `Comparable` (the checker grants it by
