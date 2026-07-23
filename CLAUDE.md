@@ -24,7 +24,8 @@ Claude implements directly. Ship working, tested code each session.
 ## Workflow per milestone
 
 1. Implement the milestone (types, logic, wiring) in its module.
-2. Add unit tests + a golden check against `examples/*.chz`.
+2. Add tests — **prefer Chezzi** (`tests/chz/`, see the testing-policy convention below); Rust
+   `#[cfg(test)]` only for what `assert` can't express; a golden `examples/*.chz` for print-shape demos.
 3. `cargo test` + run the milestone's `chezzi` subcommand to verify end-to-end.
 4. Update `PROGRESS.md`, commit, move on.
 
@@ -102,6 +103,20 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree
   `target/` dirs (~1.6G each) accumulate and fill the disk. Delete rejected branches too.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
+- **Testing is HYBRID — write the test in Chezzi if you can, fall back to Rust only when you can't.**
+  A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
+  belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
+  `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks). It runs via `chezzi test`
+  (M:N engine by default; `--serial` opts out) and is gated **serial==M:N** by the `cargo test` gate
+  `test_runner::chz_suite_passes_both_engines` (runs the whole suite on both engines, asserts identical
+  verdicts). Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
+  Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `Err` and check `e.message()`
+  (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
+  for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
+  token/AST/bytecode/GC internals, gc-stress rooting (`run_capture_stress`), and concurrency
+  timing/scheduler parity. Golden `examples/*.chz` + `.expected` stay fine for print-shape demos. When
+  you delete a Rust behavioral test after porting, the dual-engine gate must stay green. Full rationale
+  + ranked runner follow-ups: `docs/future.md §3b`; the suite's own guide: `tests/chz/README.md`.
 - **Tree-walk interpreter REMOVED.** The bytecode VM is the sole engine. Two-engine parity is now
   **serial-VM (`parallel=false`) == M:N-VM (`parallel=true`)** — both are the same `Vm`, only the
   scheduler differs. Test helpers: `run_capture`/`run_program`/`run_file` are the serial engine;
