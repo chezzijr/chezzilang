@@ -4,6 +4,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ CLEANUP (2026-07-23) — code-review dedup + doc-freshness (behavior-preserving, −202 LOC).** A 5-domain
+> review (no correctness bugs) drove two batches: (A) rewrote ~69 src + ~50 docs/examples comments referencing
+> the **removed** tree-walk interpreter to the real serial-VM vs M:N-VM parity story, plus doc-freshness fixes
+> (test count 1500→3681, PROGRESS "Current focus", Tier-D heading, benchmarks `src/interp/*` dead paths, lexer
+> tutorial scaffolding); (B) extracted verified-identical helpers — compiler `compile_args` (29 sites) +
+> `emit_call_static` (6) + `is_unbound` (15), checker `check_type_arity_and_bounds` (struct/enum/newtype),
+> native `unary_float!` macro (14 math fns) + stdlib `write!("{:02x}")` hex, VM `core_accessor!` macro (6) +
+> `depth_exceeded_err` (5), and 4 dead-code inlines. 3681 lib + difftest/check_parity/conformance green, clippy clean.
+>
 > **✅ BUG-HUNT + FEATURE (2026-07-23, wave 3) — `Channel.trip()` type-hole FIXED via new scalar `where`-bounds.**
 > `trip()` was typed `-> T` on every `Channel[T]` but always delivers `bool true` → a `bool` leaked through a
 > `T`-typed `recv()` on any `Channel[int]`/etc. (check-OK type-soundness hole). Fix adds a declarative facet:
