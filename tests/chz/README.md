@@ -29,10 +29,19 @@ gate; a test that passes on one engine but fails on the other is a parity bug ca
 
 ## What stays in Rust (not portable)
 
-`assert` cannot catch a runtime fault's *message*, so fault-path tests (empty `min()`, OOB indexing,
-overflow, bad chunk size) stay in Rust. So do compile-time checker tests (`rejects`/`ok`),
-parser/lexer (AST/token shapes), compiler/GC internals, and concurrency timing/scheduler parity.
-Only plain value/collection comparisons port here.
+**Fault paths DO port.** `recover:` catches a fault into a `Result`, so a fault's *message* is
+assertable in Chezzi (empty `min()`, OOB indexing, overflow, bad chunk size):
+
+```chezzi
+r := recover: [].min()
+match r:
+    Ok(_):  assert false, "expected a fault"
+    Err(e): assert e.message().contains("min")
+```
+
+What genuinely can't port: compile-time checker tests (`rejects`/`ok`), parser/lexer (AST/token
+shapes), compiler/bytecode/GC internals, and concurrency timing/scheduler parity. Value/collection
+comparisons and fault-message checks port here; the rest stays in Rust.
 
 ## Adding tests
 

@@ -2244,8 +2244,11 @@ The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behav
 module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
 demos). Because a single `chezzi test` invocation runs one engine, the serial==M:N parity of ported
 behavioral tests is guarded by the `cargo test` gate `test_runner::chz_suite_passes_both_engines`, which
-runs the whole `tests/chz/` suite on both engines and asserts identical verdicts. Fault-path behavior (a
-runtime error *message*) has no in-language `assert` equivalent, so those tests stay in Rust.
+runs the whole `tests/chz/` suite on both engines and asserts identical verdicts. A fault's *message*
+**can** be asserted in-language via `recover:` — `r := recover: <expr>` then
+`match r: Err(e): assert e.message().contains(...)` — so fault-path tests port here too; only
+compile-time checker diagnostics (`rejects`/`ok`) and engine internals (AST/bytecode/GC, scheduler
+timing) stay in Rust.
 
 ## 9b. Program entry — there is no automatic `main`
 
