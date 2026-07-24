@@ -2994,6 +2994,10 @@ impl Vm {
         // `parallel:` task's loop trips the wall-clock cap on the M:N engine too (a fresh `Vm::new`
         // starts with `deadline = None`). `None` when the cap is off, so the common path is untouched.
         worker.set_deadline(self.deadline);
+        // …and the raw `timeout_ms` too — the deadline drives the TRIP, but the abort MESSAGE
+        // interpolates `timeout_ms`, so a worker left at the `Vm::new` default `0` would render a
+        // spawned-task timeout as "(0ms)" (reads as "off"). Mirror `set_max_heap` above.
+        worker.set_timeout(self.timeout_ms);
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;

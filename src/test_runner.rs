@@ -929,6 +929,13 @@ struct Suite:
             "a spawned task's hang must bucket TIMED-OUT; report:\n{}",
             report.text
         );
+        // The worker must inherit the parent's `timeout_ms`, not the `Vm::new` default 0 — the abort
+        // message reads the raw cap, so a spawned-task timeout must render the real "(50ms)", not "(0ms)".
+        assert!(
+            report.text.contains("(50ms)") && !report.text.contains("(0ms)"),
+            "spawned-task timeout message must show the real cap, not 0ms; report:\n{}",
+            report.text
+        );
     }
 
     #[test]
