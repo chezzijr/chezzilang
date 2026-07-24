@@ -145,19 +145,30 @@ impl SetData {
     }
 }
 
+/// A module namespace's payload — boxed behind [`Obj::Module`] so the rare, cold `Module` variant
+/// doesn't set the `Obj` size cap (mirrors [`Obj::Generator`]'s `Box<GeneratorCore>`). Its name +
+/// slot-indexed top-level bindings (`slots[i]` for compile-time slot `i`) + the `index` (name → slot)
+/// that backs `module.member` reads, imports, native population, and errors. See [`Obj::Module`].
+#[derive(Debug, Clone)]
+pub struct ModuleData {
+    pub name: Box<str>,
+    pub slots: Vec<Value>,
+    pub index: HashMap<Box<str>, u32>,
+}
+
 /// A heap object — the reference half of the value space.
 #[derive(Debug, Clone)]
 pub enum Obj {
     Str(ChzStr),
     /// `bytes` — an immutable heap byte sequence (Python `bytes` model). A GC LEAF: it holds only
     /// raw `u8`s (no `GcRef`s), so `children()` returns nothing — it is marked reachable but traces
-    /// no children, exactly like `Str`/`Native`. `Box<[u8]>` is 16B, well within the 88B `Obj` cap.
+    /// no children, exactly like `Str`/`Native`. `Box<[u8]>` is 16B, well within the 64B `Obj` cap.
     Bytes(Box<[u8]>),
     /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` model). Storage is a `Vec<u8>`
     /// mutated IN PLACE through the `GcRef` heap slot (`heap.get_mut`), exactly like [`List`](Obj::List),
     /// so two bindings to the same `bytearray` observe each other's writes. Still a GC LEAF — raw `u8`s,
     /// no `GcRef`s — so `children()` traces nothing (the difference vs `Bytes` is the mutability of the
-    /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 88B `Obj` cap.
+    /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 64B `Obj` cap.
     ByteArray(Vec<u8>),
     /// A heap-boxed `i64` outside the ±2^62 inline-`Value` range (8B-`Value` milestone). A GC LEAF:
     /// holds one raw `i64`, no `GcRef`s, so `children()` traces nothing (like `Bytes`). Immutable, so
@@ -175,7 +186,7 @@ pub enum Obj {
     /// advances; `None` (idempotent) past the end. NON-LEAF (unlike `Bytes`/`ByteArray`): `items` may
     /// hold heap `GcRef`s (a list of structs, a set of strings, …), so `children()` MUST trace them
     /// or the snapshot's elements get collected out from under a live cursor. `Vec<Value>`(24) +
-    /// `usize`(8) = 32B, within the 88B `Obj` cap (`Module` still dominates).
+    /// `usize`(8) = 32B, within the 64B `Obj` cap (`MapData`/`SetData` set the cap).
     Iter {
         items: Vec<Value>,
         pos: usize,
@@ -225,7 +236,7 @@ pub enum Obj {
     /// by-reference-captured local (uniform-capture feature, Task A). Two bindings holding the same
     /// cell handle observe each other's writes (`CellStore`), exactly like `List`/`bytearray` mutate
     /// through the shared slot. NON-LEAF: the inner value may be a heap object, so `children()` traces
-    /// it (like a 1-field `NewType`). `Value` is 16B, well within the 88B `Obj` cap.
+    /// it (like a 1-field `NewType`). `Value` is 16B, well within the 64B `Obj` cap.
     Cell(Value),
     /// A named function (top-level `fn` / method) + the module globals it resolves against.
     Func {
@@ -244,11 +255,9 @@ pub enum Obj {
     /// A module namespace: its name + top-level bindings. M19 Phase 2b — globals are stored
     /// slot-indexed (`slots[i]` for compile-time slot `i`) for hash-free `GetGlobalSlot` reads; the
     /// `index` (name → slot) backs `module.member` field reads, imports, native population, and errors.
-    Module {
-        name: Box<str>,
-        slots: Vec<Value>,
-        index: HashMap<Box<str>, u32>,
-    },
+    /// Boxed ([`ModuleData`]) so this rare/cold variant doesn't set the `Obj` size cap (like
+    /// [`Generator`](Obj::Generator)) — one cold pointer hop off the module-member path.
+    Module(Box<ModuleData>),
     /// A native (Rust) function — a member of a native std module (`std.math` etc., M6c). Holds no
     /// heap references, so it has no GC children.
     Native {
@@ -472,7 +481,7 @@ impl Heap {
                 captured.iter().for_each(&mut push);
                 out.push(*home);
             }
-            Obj::Module { slots, .. } => slots.iter().for_each(&mut push),
+            Obj::Module(m) => m.slots.iter().for_each(&mut push),
             Obj::Native { .. } => {}
             // A GC leaf: holds only a name, no embedded `GcRef`s (like `Native`).
             Obj::Builtin(_) => {}
@@ -562,7 +571,7 @@ impl Heap {
                 Obj::Struct { fields, .. } => fields.capacity() * std::mem::size_of::<Value>(),
                 Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
                 Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
-                Obj::Module { slots, .. } => slots.capacity() * std::mem::size_of::<Value>(),
+                Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
                 // Map/Set: entries + the index cost; approximate by entries backing only.
                 Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
                 Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
@@ -604,10 +613,11 @@ impl Heap {
 mod iter_obj_tests {
     use super::*;
 
-    /// `Obj::Iter` must stay within the 88B cap (Vec 24B + usize 8B = 32B, `Module` still dominates).
+    /// `Obj::Iter` must stay within the 64B cap (Vec 24B + usize 8B = 32B; `MapData`/`SetData` at
+    /// 56B of payload + the 8B enum discriminant set the cap now that `Module`'s payload is boxed).
     #[test]
     fn obj_iter_within_size_cap() {
-        assert_eq!(std::mem::size_of::<Obj>(), 88);
+        assert_eq!(std::mem::size_of::<Obj>(), 64);
     }
 
     /// A cursor is NON-LEAF: `children()` must yield its snapshot's heap refs so a not-yet-consumed
@@ -648,7 +658,7 @@ mod iter_obj_tests {
     }
 
     /// `BigInt`/`FloatBox` are GC LEAVES (`children()` traces nothing, like `Bytes`) and must not
-    /// grow `Obj` past the 88B cap.
+    /// grow `Obj` past the 64B cap.
     #[test]
     fn bigint_and_floatbox_are_leaves() {
         let mut h = Heap::new();
@@ -656,7 +666,7 @@ mod iter_obj_tests {
         let b = h.alloc(Obj::FloatBox(3.5));
         assert!(h.children(a).is_empty());
         assert!(h.children(b).is_empty());
-        assert_eq!(std::mem::size_of::<Obj>(), 88); // cap unchanged
+        assert_eq!(std::mem::size_of::<Obj>(), 64); // cap unchanged
     }
 
     /// With no cap set (`mem_cap == 0`), `sweep()` never trips `over_cap` regardless of live size.
@@ -670,7 +680,7 @@ mod iter_obj_tests {
     }
 
     /// A tiny cap trips `over_cap` once a marked (surviving) object exceeds it at sweep — a single
-    /// `Obj` slot is 88B >> 1, so one live string is over a 1-byte cap.
+    /// `Obj` slot is 64B >> 1, so one live string is over a 1-byte cap.
     #[test]
     fn mem_cap_trips_when_live_exceeds() {
         let mut h = Heap::new();

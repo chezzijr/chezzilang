@@ -1984,11 +1984,11 @@ fn wire_preserves_map_hashes_and_order() {
 #[test]
 fn wire_passes_by_reference_objects_as_same_handle() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let m = vm.heap.alloc(Obj::Module {
+    let m = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
         name: "m".into(),
         slots: Vec::new(),
         index: Default::default(),
-    });
+    })));
     let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
     assert_eq!(
@@ -6371,11 +6371,11 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         ..empty_program()
     };
     let mut vm = Vm::new(Arc::new(program));
-    let home = vm.heap.alloc(Obj::Module {
+    let home = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
         name: "<test>".into(),
         slots: Vec::new(),
         index: Default::default(),
-    });
+    })));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,
         captured: Default::default(),

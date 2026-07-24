@@ -406,16 +406,12 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module {
-                name: mname,
-                slots,
-                index,
-            } => match index.get(name).map(|&i| slots[i as usize]) {
+            Obj::Module(m) => match m.index.get(name).map(|&i| m.slots[i as usize]) {
                 Some(v) => {
                     self.push(v);
                     Ok(())
                 }
-                None => Err(self.err(format!("module '{mname}' has no member '{name}'"), span)),
+                None => Err(self.err(format!("module '{}' has no member '{name}'", m.name), span)),
             },
             _ => Err(self.err(
                 format!("cannot read field '{name}' of {}", self.type_name(obj)),
@@ -1796,7 +1792,7 @@ impl Vm {
     /// otherwise it may observe an empty, not-yet-faulted module and spuriously fail to resolve.
     pub(super) fn module_global(&self, module: GcRef, name: &str) -> Option<Value> {
         match self.heap.get(module) {
-            Obj::Module { slots, index, .. } => index.get(name).map(|&i| slots[i as usize]),
+            Obj::Module(m) => m.index.get(name).map(|&i| m.slots[i as usize]),
             _ => None,
         }
     }
@@ -1806,15 +1802,15 @@ impl Vm {
     /// and a worker faults it fully in (`fault_module`) before reading. So the index is always valid.
     pub(super) fn global_slot(&self, module: GcRef, slot: u32) -> Value {
         match self.heap.get(module) {
-            Obj::Module { slots, .. } => slots[slot as usize],
+            Obj::Module(m) => m.slots[slot as usize],
             _ => Value::nil(),
         }
     }
 
     /// M19 Phase 2b — write a module global by compile-time slot (`DefineGlobalSlot`/`SetGlobalSlot`).
     pub(super) fn set_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
-        if let Obj::Module { slots, .. } = self.heap.get_mut(module) {
-            slots[slot as usize] = value;
+        if let Obj::Module(m) = self.heap.get_mut(module) {
+            m.slots[slot as usize] = value;
         }
     }
 
@@ -1824,12 +1820,12 @@ impl Vm {
     /// fresh slot is appended (native-module population + worker fault replay both build up modules
     /// this way, growing slots in the same order the parent assigned them).
     pub(super) fn module_define(&mut self, module: GcRef, name: &str, value: Value) {
-        if let Obj::Module { slots, index, .. } = self.heap.get_mut(module) {
-            match index.get(name) {
-                Some(&i) => slots[i as usize] = value,
+        if let Obj::Module(m) = self.heap.get_mut(module) {
+            match m.index.get(name) {
+                Some(&i) => m.slots[i as usize] = value,
                 None => {
-                    index.insert(name.into(), slots.len() as u32);
-                    slots.push(value);
+                    m.index.insert(name.into(), m.slots.len() as u32);
+                    m.slots.push(value);
                 }
             }
         }
@@ -1837,7 +1833,7 @@ impl Vm {
 
     pub(super) fn module_name(&self, module: GcRef) -> String {
         match self.heap.get(module) {
-            Obj::Module { name, .. } => name.to_string(),
+            Obj::Module(m) => m.name.to_string(),
             _ => String::new(),
         }
     }
@@ -1866,7 +1862,7 @@ impl Vm {
                 Obj::Enum { .. } => "enum",
                 Obj::NewType { .. } => "newtype",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
-                Obj::Module { .. } => "module",
+                Obj::Module(_) => "module",
                 Obj::Native { .. } => "function",
                 Obj::Builtin(_) => "function",
                 Obj::Cffi(_) => "function",
@@ -2005,7 +2001,7 @@ impl Vm {
                 }
                 Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
-                Obj::Module { name, .. } => Ok(format!("<module {name}>")),
+                Obj::Module(m) => Ok(format!("<module {}>", m.name)),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
                 Obj::Builtin(name) => Ok(format!("<builtin fn {name}>")),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
@@ -2563,8 +2559,8 @@ impl Vm {
                 let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
             }
             Obj::Closure { .. } => out.push_str("<closure>"),
-            Obj::Module { name, .. } => {
-                let _ = write!(out, "<module {name}>");
+            Obj::Module(m) => {
+                let _ = write!(out, "<module {}>", m.name);
             }
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
