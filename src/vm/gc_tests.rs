@@ -440,3 +440,36 @@ main()";
         "4611686018427387905\n4611686018427387906\n"
     );
 }
+
+/// Regression: RwShared[Set]/[Map] `contains`/`has`/`get_key` on a TEMPORARY receiver whose
+/// element/key is a struct with a user `hash`. `hash_value` dispatches that hash (re-enters the VM,
+/// allocates → GC under stress); the receiver handle `h` was popped off the operand stack at
+/// dispatch (`recv = self.pop()`), so unless it is rooted across the hash the collector frees it and
+/// the following `rwshared_core(h)` hits a freed slot (use-after-free / `unreachable!()` panic).
+/// Fixed by hashing via `hash_key_rooted(k, &[Value::obj(h), k], span)` (mirrors arith.rs:913/921).
+/// Chained calls (`make_*().probe(...)`) keep the RwShared reachable ONLY through the popped `recv`.
+#[test]
+fn rwshared_probe_struct_key_rooted_across_hash() {
+    let src = "\
+import std.concurrency
+struct P:
+    x: int
+    fn hash(self) -> int:
+        pad := [self.x, self.x + 1]   # allocate inside hash → GC mid-probe under stress
+        return pad[0] * 31
+
+fn make_set() -> RwShared[Set[P]]:
+    return RwShared(Set([P(1), P(2), P(3)]))
+
+fn make_map() -> RwShared[Map[P, int]]:
+    return RwShared({P(1): 10, P(2): 20})
+
+fn main():
+    print(make_set().contains(P(2)))
+    print(make_map().has(P(1)))
+    match make_map().get_key(P(2)):
+        Some(v): print(v)
+        None: print(\"none\")
+main()";
+    assert_eq!(run_capture_stress(src), "true\ntrue\n20\n");
+}

@@ -2151,7 +2151,12 @@ impl Vm {
             "contains" => {
                 self.arity_err("contains", args, 1, span)?;
                 let needle = args[0];
-                let qh = self.hash_value(needle, span)?;
+                // Root the receiver `h` AND `needle` across the hash: for a struct/enum/newtype
+                // element `hash_value` dispatches the user `hash` (re-enters the VM, may GC), and
+                // `h`/`needle` are off the operand stack (popped at dispatch) so they'd be collectable
+                // mid-hash → the following `rwshared_core(h)` would hit a freed slot. Mirrors the
+                // non-RwShared Set `in` path (arith.rs:913).
+                let qh = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                 let core = self.rwshared_core(h);
                 let n = match &*core.v.read().unwrap() {
                     WireValue::Set { entries, .. } => entries.len(),
@@ -2194,7 +2199,10 @@ impl Vm {
             "has" => {
                 self.arity_err("has", args, 1, span)?;
                 let key = args[0];
-                let qh = self.hash_value(key, span)?;
+                // Root receiver `h` AND `key` across the hash — a struct/enum/newtype key's `hash`
+                // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
+                // non-RwShared Map path (arith.rs:921).
+                let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                 let core = self.rwshared_core(h);
                 let n = match &*core.v.read().unwrap() {
                     WireValue::Map { entries, .. } => entries.len(),
@@ -2233,7 +2241,10 @@ impl Vm {
             "get_key" => {
                 self.arity_err("get_key", args, 1, span)?;
                 let key = args[0];
-                let qh = self.hash_value(key, span)?;
+                // Root receiver `h` AND `key` across the hash — a struct/enum/newtype key's `hash`
+                // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
+                // non-RwShared Map path (arith.rs:921).
+                let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                 let core = self.rwshared_core(h);
                 let n = match &*core.v.read().unwrap() {
                     WireValue::Map { entries, .. } => entries.len(),
