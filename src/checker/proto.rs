@@ -876,6 +876,22 @@ impl Checker {
         })
     }
 
+    /// A `where T: List/Map/Set` bound names a container CONSTRUCTOR rather than a protocol, making it
+    /// a HEAD-CONSTRUCTOR equality constraint (`T`'s head must be exactly this container, its element/
+    /// key/value types free). The constructor-kind generalization of [`scalar_bound_ty`] — closed set
+    /// in ONE place (add a container = add an arm). Returns `true` iff `ty`'s head matches `name`
+    /// (`Ty::Unknown` doesn't cascade — handled by the caller). Tuple is EXCLUDED (heterogeneous).
+    /// This is the surface form of the `RwShared` read-view gate (`expr.rs`); no element binder, so no
+    /// harvest-scoping change. Returns `None` if `name` is not a recognized container.
+    pub(super) fn container_bound_matches(name: &str, ty: &Ty) -> Option<bool> {
+        Some(match name {
+            "List" => matches!(ty, Ty::List(_)),
+            "Map" => matches!(ty, Ty::Map(_, _)),
+            "Set" => matches!(ty, Ty::Set(_)),
+            _ => return None,
+        })
+    }
+
     /// Depth-bounded core of [`satisfies_args`]. `depth` guards the embed-flattening recursion (M22):
     /// cycles are rejected at declare time, but a malformed cyclic program still runs the rest of the
     /// checker, so a hard cap (mirroring `resolve_ty_ro_d`) breaks the recursion with a plain failure
@@ -896,6 +912,14 @@ impl Checker {
                     Ty::Unknown => Ok(()),
                     _ if *ty == expected => Ok(()),
                     _ => Err(format!("expected {expected}, found {ty}")),
+                };
+            }
+            // A `where T: List/Map/Set` constructor-kind bound: `ty`'s HEAD must equal the container.
+            if let Some(ok) = Self::container_bound_matches(protocol, ty) {
+                return match ty {
+                    Ty::Unknown => Ok(()),
+                    _ if ok => Ok(()),
+                    _ => Err(format!("expected {protocol}[...], found {ty}")),
                 };
             }
             return Err(format!("unknown protocol '{protocol}'"));

@@ -301,9 +301,33 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (walks a heap-independent wire form) — proven by
 > `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes_both_engines`, incl. a
 > nested-read-under-concurrent-writer stress case that deadlocked the pre-fix impl) + checker `rejects`/`ok`
-> pair. Follow-up (explicit, NOT built): `Map`/`Set` visitor methods
-> (`fold_entries`/`for_each_entry`/`get_key`/`has`). Docs: `std/concurrency.chz`, `docs/stdlib.md`,
+> pair. Extended to `Map`/`Set` — see the entry above. Docs: `std/concurrency.chz`, `docs/stdlib.md`,
 > `docs/concurrency.md §6f`.
+
+> **✅ CONCURRENCY (2026-07-24, `auto-task/rwshared-map-set-readview`) — zero-copy READ-view extended to
+> `RwShared[Map[K,V]]` + `RwShared[Set[E]]`** (Tuple EXCLUDED — heterogeneous). ADDITIVE; storage model +
+> `get`/`read`/`write`/`set` + `Shared`/`Atomic`/`Executor` untouched. New methods: **Map** `len()`,
+> `get_key(k) -> Option[V]`, `has(k) -> bool`, `for_each_entry(f: fn(K,V) -> _) -> nil`,
+> `fold_entries(init: R, f: fn(R,K,V) -> R) -> R`; **Set** `len()`, `contains(e) -> bool`,
+> `for_each(f: fn(E) -> _) -> nil`, `fold(init: R, f: fn(R,E) -> R) -> R`. **Gating migrated to a
+> constructor-kind `where T: List/Map/Set` bound** (`container_bound_matches` in `src/checker/proto.rs`,
+> the generalization of `scalar_bound_ty`: head-constructor equality, no element binder — so no
+> harvest-scoping change). The checker arm (`src/checker/expr.rs`) now branches on the container HEAD
+> first, then the method within that container's set (names OVERLAP — `len` on all three, `for_each`/`fold`
+> on List+Set), arm-recovering E/K/V by destructuring the concrete `List[?E]`/`Map[?K,?V]`/`Set[?E]`; a
+> wrong head OR a wrong method for the head falls through to a clean "no method" reject (no
+> check-OK-then-run-fault; `RwShared[Map].fold`, `RwShared[int].contains`, `RwShared[Tuple].len` all
+> reject). `fold*`'s R pins from the concrete `init` via `infer_generic_method`. Runtime
+> (`src/vm/netio.rs`): `len`/`for_each`/`fold` arms extended to walk `WireValue::Map`/`Set`; new
+> `get_key`/`has`/`contains` hash the query key ONCE (guard NOT held), then LINEAR probe RE-LOCKING per
+> entry — compare the cached wire hash under the guard, and only on a hash-match clone the entry, DROP the
+> guard, `from_wire`, `values_equal_guarded` (collisions keep scanning; the guard is NEVER held across
+> hash/eq/closure — same deadlock invariant as List). serial == M:N byte-identical (heap-independent wire
+> walk) — proven by the extended `tests/chz/suites/rwshared_readview_test.chz` (both engines via
+> `chz_suite_passes_both_engines`, incl. Map+Set nested-read-under-writer + AB-BA cross-box deadlock
+> regressions) + checker `rejects`/`ok` boundary tests (`container_where_bound_*`, `rwshared_map/set_*`).
+> The `where T: List/Map/Set` bound is now a genuine, tested surface bound (a user generic `fn f[T: List]`
+> accepts a list, rejects an int). Docs: `std/concurrency.chz`, `docs/stdlib.md`, `docs/concurrency.md §6f`.
 
 > **✅ CONCURRENCY (2026-07-22, `auto-task/atomic-int`) — `AtomicInt`, a monomorphic LOCK-FREE int atomic.**
 > Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/future.md

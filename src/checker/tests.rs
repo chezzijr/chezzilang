@@ -576,6 +576,28 @@ fn scalar_where_bound_is_equality_constraint() {
 }
 
 #[test]
+fn container_where_bound_is_head_constructor_constraint() {
+    // `where T: List/Map/Set` is a CONSTRUCTOR-KIND bound — `T`'s head must be exactly that container
+    // (element/key/value types free). The surface form of the RwShared read-view gate.
+    ok("fn f[T: List](a: T) -> T:\n    return a\nfn main():\n    print(f([1, 2, 3]))\n");
+    ok("fn f[T: Map](a: T) -> T:\n    return a\nfn main():\n    print(f({\"a\": 1}))\n");
+    ok("fn f[T: Set](a: T) -> T:\n    return a\nfn main():\n    print(f(Set([1, 2])))\n");
+    rejects(
+        "fn f[T: List](a: T) -> T:\n    return a\nfn main():\n    print(f(5))\n",
+        "expected List[...], found int",
+    );
+    rejects(
+        "fn f[T: Map](a: T) -> T:\n    return a\nfn main():\n    print(f([1, 2]))\n",
+        "expected Map[...], found",
+    );
+    // A container bound takes no type args (no element binder).
+    rejects(
+        "fn f[T: List[int]](a: T) -> T:\n    return a\n",
+        "takes no type arguments",
+    );
+}
+
+#[test]
 fn channel_trip_gated_to_bool() {
     // `trip()` is `where T: bool` (its level-trigger latch only ever delivers `bool true`), so it is
     // sound only on `Channel[bool]` — the hole where `Channel[int].trip(); .recv()` leaked a `bool`
@@ -9530,6 +9552,85 @@ fn rwshared_list_view_methods_reject_on_non_list_element() {
     entry_rejects(
         "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.len())\nmain()\n",
         "type RwShared[int] has no method 'len'",
+    );
+}
+
+#[test]
+fn rwshared_readview_gate_rejects_non_container_and_wrong_method() {
+    // Constructor-kind gate: a scalar/tuple element head is not a recognized container, so every
+    // read-view method cleanly reports "no method" (no check-OK-then-run-fault). A Map/Set-only method
+    // name on the wrong container head also misses.
+    // int element — Set/Map methods miss.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.contains(3))\nmain()\n",
+        "type RwShared[int] has no method 'contains'",
+    );
+    // str element — fold_entries (a Map method) misses.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(\"hi\")\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
+        "has no method 'fold_entries'",
+    );
+    // Tuple element is heterogeneous — EXCLUDED entirely: len/fold both miss.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.len())\nmain()\n",
+        "has no method 'len'",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
+        "has no method 'fold'",
+    );
+    // A List element rejects Map/Set-specific method names (fold_entries/contains) — head branches first.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
+        "has no method 'fold_entries'",
+    );
+    // A Map element rejects the List-only `fold`/`at` names (Map uses fold_entries).
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
+        "has no method 'fold'",
+    );
+}
+
+#[test]
+fn rwshared_map_readview_methods() {
+    // Map read-view: len/get_key/has/for_each_entry/fold_entries. K/V arm-recovered from the concrete
+    // Map[K,V]; fold_entries's R pins from the concrete init.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1, \"b\": 2})\n    print(box.len())\n    print(box.has(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
+    );
+    // get_key returns Option[V] — matchable, V concrete (no unbound Param escapes).
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    match box.get_key(\"a\"):\n        Some(v): print(v + 1)\n        None: print(-1)\nmain()\n",
+    );
+    // Nesting: V = List[int] recovered.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": [1, 2]})\n    match box.get_key(\"a\"):\n        Some(v): print(v.len())\n        None: print(-1)\nmain()\n",
+    );
+    // fold_entries R is not pinned to V — a str accumulator over a Map[str,int] folds to str.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    s := box.fold_entries(\"\", fn(a, k, v): a + k)\n    print(s)\nmain()\n",
+    );
+    // Wrong key type on get_key/has is rejected (K = str; int arg mismatches).
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    print(box.get_key(3))\nmain()\n",
+        "expected",
+    );
+}
+
+#[test]
+fn rwshared_set_readview_methods() {
+    // Set read-view: len/contains/for_each/fold. E arm-recovered from the concrete Set[E].
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+    );
+    // contains with the wrong element type is rejected (E = int; str arg mismatches).
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    print(box.contains(\"x\"))\nmain()\n",
+        "expected",
+    );
+    // Set fold R not pinned to E — str accumulator over Set[int] folds to str.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 

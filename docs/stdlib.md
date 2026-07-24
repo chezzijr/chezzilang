@@ -226,18 +226,26 @@ the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy
 value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
 `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
 
-**Zero-copy read-view (`RwShared[List[E]]` only).** `len() -> int` · `at(i: int) -> E` (bounds-checked,
-negative index like `xs[i]`; OOB = recoverable fault) · `slice(lo: int, hi: int) -> List[E]` ·
-`for_each(f: fn(E) -> _) -> nil` · `fold(init: R, f: fn(R, E) -> R) -> R` (R inferred from `init`). These
-walk the stored value **element-at-a-time** and materialize ONE element at a time, so a worker can
-scan/reduce a shared large list in **O(1) memory** — instead of `get`/`read`, which `from_wire`-copy the
-WHOLE inner list into the caller's heap on every access. Reach for `fold`/`for_each` to **reduce in
-place** when fanning a big shared list out to many workers. `for_each`/`fold` RE-ACQUIRE the shared read
-guard **per element** and drop it before running the callback (never held across user code), so a nested
-read OR write of the same box — and a GC pass inside the callback — are deadlock-free. Trade-off: the
-walk is **not one atomic snapshot** (a concurrent/in-callback `set`/`write` to the same box may be seen
-mid-walk; use `read`/`get` for a stable snapshot). Reduce into a **different** box (an `AtomicInt`/local)
-— the real use case. On a non-list element these methods cleanly report "no method" (checker-gated).
+**Zero-copy read-view (container element).** Gated by a constructor-kind `where T: List/Map/Set` bound
+to the element's HEAD constructor (Tuple **excluded** — heterogeneous):
+- `RwShared[List[E]]`: `len() -> int` · `at(i: int) -> E` (bounds-checked, negative index like `xs[i]`;
+  OOB = recoverable fault) · `slice(lo: int, hi: int) -> List[E]` · `for_each(f: fn(E) -> _) -> nil` ·
+  `fold(init: R, f: fn(R, E) -> R) -> R`.
+- `RwShared[Map[K,V]]`: `len() -> int` · `get_key(k: K) -> Option[V]` · `has(k: K) -> bool` ·
+  `for_each_entry(f: fn(K, V) -> _) -> nil` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
+- `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> nil` ·
+  `fold(init: R, f: fn(R, E) -> R) -> R`.
+
+(`fold*`'s R is inferred from `init`.) These walk the stored value **entry-at-a-time** and materialize
+ONE entry at a time, so a worker can scan/reduce a shared large container in **O(1) memory** — instead of
+`get`/`read`, which `from_wire`-copy the WHOLE inner into the caller's heap on every access. Reach for
+`fold*`/`for_each*` to **reduce in place** when fanning a big shared container out to many workers. Every
+walk RE-ACQUIRES the shared read guard **per entry** and drops it before running the callback (and before
+any `has`/`get_key`/`contains` hash+eq probe — never held across user code), so a nested read OR write of
+the same box — and a GC pass inside the callback — are deadlock-free. Trade-off: the walk is **not one
+atomic snapshot** (a concurrent/in-callback `set`/`write` to the same box may be seen mid-walk; use
+`read`/`get` for a stable snapshot). Reduce into a **different** box (an `AtomicInt`/local) — the real use
+case. On a non-container element (or a Tuple) these methods cleanly report "no method" (checker-gated).
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·

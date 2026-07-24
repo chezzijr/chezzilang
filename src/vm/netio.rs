@@ -1975,9 +1975,12 @@ impl Vm {
                 *core.v.write().unwrap() = stored;
                 Ok(Value::nil())
             }
-            // Zero-copy READ-view methods on `RwShared[List[E]]` (checker-gated to a list element).
-            // They walk the stored heap-independent `WireValue::List` Vec and `from_wire` ONE element per
-            // step — O(1) memory, never materializing the whole inner (what `get`/`read` do). serial ==
+            // Zero-copy READ-view methods on a CONTAINER element of `RwShared[T]` — `List[E]`
+            // (len/at/slice/for_each/fold), `Map[K,V]` (len/get_key/has/for_each_entry/fold_entries),
+            // `Set[E]` (len/contains/for_each/fold). Checker-gated to the recognized container head.
+            // They walk the stored heap-independent `WireValue::List`/`Map`/`Set` Vec and `from_wire`
+            // ONE entry per step — O(1) memory, never materializing the whole inner (what `get`/`read`
+            // do). serial ==
             // M:N is natural: the walk reads a heap-independent wire form, so both engines see identical
             // elements. The read-only `len`/`at`/`slice` take the shared guard only for the brief clone
             // (no user code under it). `for_each`/`fold` RE-ACQUIRE the shared guard PER ELEMENT, clone
@@ -1992,7 +1995,13 @@ impl Vm {
                 let g = core.v.read().unwrap();
                 let n = match &*g {
                     WireValue::List { items, .. } => items.len() as i64,
-                    _ => return Err(self.err("RwShared.len requires a list element".into(), span)),
+                    WireValue::Map { entries, .. } => entries.len() as i64,
+                    WireValue::Set { entries, .. } => entries.len() as i64,
+                    _ => {
+                        return Err(
+                            self.err("RwShared.len requires a container element".into(), span)
+                        );
+                    }
                 };
                 Ok(self.make_int(n))
             }
@@ -2049,6 +2058,7 @@ impl Vm {
                 self.pop();
                 Ok(Value::obj(res_h))
             }
+            // `for_each(f: fn(E) -> _)` on a `List[E]` OR `Set[E]` — a per-element side-effect scan.
             "for_each" => {
                 self.arity_err("for_each", args, 1, span)?;
                 let f = args[0];
@@ -2056,10 +2066,12 @@ impl Vm {
                 // Snapshot the length under a brief guard (dropped immediately).
                 let n = match &*core.v.read().unwrap() {
                     WireValue::List { items, .. } => items.len(),
+                    WireValue::Set { entries, .. } => entries.len(),
                     _ => {
-                        return Err(
-                            self.err("RwShared.for_each requires a list element".into(), span)
-                        );
+                        return Err(self.err(
+                            "RwShared.for_each requires a list or set element".into(),
+                            span,
+                        ));
                     }
                 };
                 self.push(Value::obj(h)); // root the receiver across nested GC
@@ -2073,7 +2085,13 @@ impl Vm {
                             }
                             items[i].clone()
                         }
-                        _ => break, // replaced by a non-list under a concurrent set — stop
+                        WireValue::Set { entries, .. } => {
+                            if i >= entries.len() {
+                                break;
+                            }
+                            entries[i].1.clone()
+                        }
+                        _ => break, // replaced by a non-container under a concurrent set — stop
                     };
                     let elem = self.from_wire(ew);
                     self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
@@ -2081,6 +2099,7 @@ impl Vm {
                 self.pop();
                 Ok(Value::nil())
             }
+            // `fold(init, f: fn(R, E) -> R) -> R` on a `List[E]` OR `Set[E]`.
             "fold" => {
                 self.arity_err("fold", args, 2, span)?;
                 let init = args[0];
@@ -2088,7 +2107,12 @@ impl Vm {
                 let core = self.rwshared_core(h);
                 let n = match &*core.v.read().unwrap() {
                     WireValue::List { items, .. } => items.len(),
-                    _ => return Err(self.err("RwShared.fold requires a list element".into(), span)),
+                    WireValue::Set { entries, .. } => entries.len(),
+                    _ => {
+                        return Err(
+                            self.err("RwShared.fold requires a list or set element".into(), span)
+                        );
+                    }
                 };
                 self.push(Value::obj(h)); // root the receiver
                 self.push(init); // root the accumulator; its slot sits below every nested frame's base
@@ -2102,11 +2126,226 @@ impl Vm {
                             }
                             items[i].clone()
                         }
+                        WireValue::Set { entries, .. } => {
+                            if i >= entries.len() {
+                                break;
+                            }
+                            entries[i].1.clone()
+                        }
                         _ => break,
                     };
                     let elem = self.from_wire(ew);
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
+                    self.stack[acc_slot] = new;
+                }
+                let acc = self.pop(); // unroot accumulator
+                self.pop(); // unroot receiver
+                Ok(acc)
+            }
+            // Set[E] membership: hash the query element ONCE (guard NOT held — `hash_value` may
+            // dispatch a user `hash`/GC), then LINEAR probe: per element re-lock, compare the cached
+            // wire hash under the guard, and only on a hash-match clone the element wire, DROP the
+            // guard, `from_wire`, and `values_equal_guarded` (collisions keep scanning). The guard is
+            // NEVER held across hash/eq (same deadlock invariant as `for_each`/`fold`).
+            "contains" => {
+                self.arity_err("contains", args, 1, span)?;
+                let needle = args[0];
+                let qh = self.hash_value(needle, span)?;
+                let core = self.rwshared_core(h);
+                let n = match &*core.v.read().unwrap() {
+                    WireValue::Set { entries, .. } => entries.len(),
+                    _ => {
+                        return Err(
+                            self.err("RwShared.contains requires a set element".into(), span)
+                        );
+                    }
+                };
+                self.push(Value::obj(h)); // root the receiver
+                self.push(needle); // root the query element across from_wire/eq (may GC)
+                let mut found = false;
+                for i in 0..n {
+                    let ew = {
+                        let g = core.v.read().unwrap();
+                        let entries = match &*g {
+                            WireValue::Set { entries, .. } => entries,
+                            _ => break,
+                        };
+                        if i >= entries.len() {
+                            break;
+                        }
+                        if entries[i].0 != qh {
+                            continue; // hash miss — keep scanning
+                        }
+                        entries[i].1.clone() // clone the element wire; guard drops at block end
+                    };
+                    let e = self.from_wire(ew);
+                    if self.values_equal_guarded(e, needle, 0, span)? {
+                        found = true;
+                        break;
+                    }
+                }
+                self.pop();
+                self.pop();
+                Ok(Value::bool(found))
+            }
+            // Map[K,V].has(k) -> bool — same hash-once + per-probe re-lock discipline as `contains`,
+            // comparing the KEY (entry.1 is the key wire, entry.2 the value wire).
+            "has" => {
+                self.arity_err("has", args, 1, span)?;
+                let key = args[0];
+                let qh = self.hash_value(key, span)?;
+                let core = self.rwshared_core(h);
+                let n = match &*core.v.read().unwrap() {
+                    WireValue::Map { entries, .. } => entries.len(),
+                    _ => return Err(self.err("RwShared.has requires a map element".into(), span)),
+                };
+                self.push(Value::obj(h));
+                self.push(key);
+                let mut found = false;
+                for i in 0..n {
+                    let kw = {
+                        let g = core.v.read().unwrap();
+                        let entries = match &*g {
+                            WireValue::Map { entries, .. } => entries,
+                            _ => break,
+                        };
+                        if i >= entries.len() {
+                            break;
+                        }
+                        if entries[i].0 != qh {
+                            continue;
+                        }
+                        entries[i].1.clone()
+                    };
+                    let k = self.from_wire(kw);
+                    if self.values_equal_guarded(k, key, 0, span)? {
+                        found = true;
+                        break;
+                    }
+                }
+                self.pop();
+                self.pop();
+                Ok(Value::bool(found))
+            }
+            // Map[K,V].get_key(k) -> Option[V] — probe as `has`, but on an eq-match `from_wire` the
+            // VALUE wire and return `Some(v)`; `None` on a full miss.
+            "get_key" => {
+                self.arity_err("get_key", args, 1, span)?;
+                let key = args[0];
+                let qh = self.hash_value(key, span)?;
+                let core = self.rwshared_core(h);
+                let n = match &*core.v.read().unwrap() {
+                    WireValue::Map { entries, .. } => entries.len(),
+                    _ => {
+                        return Err(
+                            self.err("RwShared.get_key requires a map element".into(), span)
+                        );
+                    }
+                };
+                self.push(Value::obj(h));
+                self.push(key);
+                let mut result: Option<Value> = None;
+                for i in 0..n {
+                    // Clone BOTH key and value wire on a hash-match (one lock acquire), DROP the guard,
+                    // then eq the reconstructed key — if it matches, the value is already in hand.
+                    let kv = {
+                        let g = core.v.read().unwrap();
+                        let entries = match &*g {
+                            WireValue::Map { entries, .. } => entries,
+                            _ => break,
+                        };
+                        if i >= entries.len() {
+                            break;
+                        }
+                        if entries[i].0 != qh {
+                            continue;
+                        }
+                        (entries[i].1.clone(), entries[i].2.clone())
+                    };
+                    let k = self.from_wire(kv.0);
+                    if self.values_equal_guarded(k, key, 0, span)? {
+                        let v = self.from_wire(kv.1);
+                        result = Some(v);
+                        break;
+                    }
+                }
+                self.pop();
+                self.pop();
+                Ok(match result {
+                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                    None => self.alloc_enum("Option", "None", vec![]),
+                })
+            }
+            // Map[K,V].for_each_entry(f: fn(K, V) -> _) — per-entry side-effect scan (2-arg closure).
+            "for_each_entry" => {
+                self.arity_err("for_each_entry", args, 1, span)?;
+                let f = args[0];
+                let core = self.rwshared_core(h);
+                let n = match &*core.v.read().unwrap() {
+                    WireValue::Map { entries, .. } => entries.len(),
+                    _ => {
+                        return Err(self.err(
+                            "RwShared.for_each_entry requires a map element".into(),
+                            span,
+                        ));
+                    }
+                };
+                self.push(Value::obj(h));
+                for i in 0..n {
+                    let kv = match &*core.v.read().unwrap() {
+                        WireValue::Map { entries, .. } => {
+                            if i >= entries.len() {
+                                break;
+                            }
+                            (entries[i].1.clone(), entries[i].2.clone())
+                        }
+                        _ => break,
+                    };
+                    let k = self.from_wire(kv.0);
+                    // Root the reconstructed key while building the value (both alloc; `alloc` never
+                    // collects, but rooting matches the receiver-rooting precedent and is future-proof).
+                    self.push(k);
+                    let v = self.from_wire(kv.1);
+                    let k = self.pop();
+                    self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
+                }
+                self.pop();
+                Ok(Value::nil())
+            }
+            // Map[K,V].fold_entries(init, f: fn(R, K, V) -> R) -> R — per-entry reduce (3-arg closure).
+            "fold_entries" => {
+                self.arity_err("fold_entries", args, 2, span)?;
+                let init = args[0];
+                let f = args[1];
+                let core = self.rwshared_core(h);
+                let n = match &*core.v.read().unwrap() {
+                    WireValue::Map { entries, .. } => entries.len(),
+                    _ => {
+                        return Err(
+                            self.err("RwShared.fold_entries requires a map element".into(), span)
+                        );
+                    }
+                };
+                self.push(Value::obj(h)); // root the receiver
+                self.push(init); // root the accumulator
+                let acc_slot = self.stack.len() - 1;
+                for i in 0..n {
+                    let kv = match &*core.v.read().unwrap() {
+                        WireValue::Map { entries, .. } => {
+                            if i >= entries.len() {
+                                break;
+                            }
+                            (entries[i].1.clone(), entries[i].2.clone())
+                        }
+                        _ => break,
+                    };
+                    let k = self.from_wire(kv.0);
+                    self.push(k); // root key while reconstructing value
+                    let v = self.from_wire(kv.1);
+                    let k = self.pop();
+                    let acc = self.stack[acc_slot];
+                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
                     self.stack[acc_slot] = new;
                 }
                 let acc = self.pop(); // unroot accumulator

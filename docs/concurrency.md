@@ -477,24 +477,30 @@ simpler).
 
 `get`/`read` copy the **whole** value out of the lock into the caller's heap. Fanning a 1M-element list
 out to 8 workers, each calling `get()`/`read()`, materializes the entire list eight times — most of the
-memory in the program is redundant copies. For a `RwShared[List[E]]`, use the **zero-copy read-view**
-instead: `len`/`at`/`slice`/`for_each`/`fold` walk the stored list **element-at-a-time** and materialize
-one element per step, so each worker scans/reduces in **O(1) memory**.
+memory in the program is redundant copies. When the box element is a **container**, use the **zero-copy
+read-view** instead — gated by a constructor-kind `where T: List/Map/Set` bound to the element's HEAD
+(Tuple **excluded**): a `RwShared[List[E]]` gains `len`/`at`/`slice`/`for_each`/`fold`, a
+`RwShared[Map[K,V]]` gains `len`/`get_key`/`has`/`for_each_entry`/`fold_entries`, and a `RwShared[Set[E]]`
+gains `len`/`contains`/`for_each`/`fold`. They walk the stored container **entry-at-a-time** and
+materialize one entry per step, so each worker scans/reduces in **O(1) memory**.
 
 ```chezzi
-# Each spawned worker reduces its own view of the SAME shared list — no per-worker copy of the inner.
+# Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
 fn sum_shard(box: RwShared[List[int]]) -> int:
-    return box.fold(0, fn(a, x): a + x)     # O(1) memory; reads one element at a time
+    return box.fold(0, fn(a, x): a + x)             # O(1) memory; reads one element at a time
+
+fn sum_values(box: RwShared[Map[str, int]]) -> int:
+    return box.fold_entries(0, fn(a, k, v): a + v)  # per-entry reduce over a shared map
 ```
 
-`for_each`/`fold` RE-ACQUIRE the shared read guard **per element** and drop it before running the
-callback (the guard is never held across user code), so a nested read OR write of the same box — and a
-GC pass triggered inside the callback — are all deadlock-free (a guard held for the whole walk would
-deadlock against the write-preferring `RwLock`). Trade-off: the walk is **not one atomic snapshot** — a
-concurrent (or in-callback) `set`/`write` to the same box may be observed mid-walk; use `read`/`get` if
-you need a consistent snapshot. Reduce into a **different** box — an `AtomicInt` counter or a local
-accumulator — which is the fan-out pattern anyway. On a non-list element these methods are a checker "no
-method" error (they exist only for `RwShared[List[E]]`).
+Every walk RE-ACQUIRES the shared read guard **per entry** and drops it before running the callback (and
+before any `has`/`get_key`/`contains` hash+eq probe — the guard is never held across user code), so a
+nested read OR write of the same box — and a GC pass triggered inside the callback — are all
+deadlock-free (a guard held for the whole walk would deadlock against the write-preferring `RwLock`).
+Trade-off: the walk is **not one atomic snapshot** — a concurrent (or in-callback) `set`/`write` to the
+same box may be observed mid-walk; use `read`/`get` if you need a consistent snapshot. Reduce into a
+**different** box — an `AtomicInt` counter or a local accumulator — which is the fan-out pattern anyway.
+On a non-container element (or a Tuple) these methods are a checker "no method" error.
 
 **Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations

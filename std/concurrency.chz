@@ -28,20 +28,27 @@ native struct Shared[T]:
     native fn set(self, v: T) -> nil
     native fn update(self, f: fn(T) -> T) -> nil
 
-# `RwShared[List[E]]` ALSO gains five ZERO-COPY read-view methods (checker arm-resolved, NOT harvested
-# here — E is not nameable in the `RwShared[T]` surface): `len(self) -> int`, `at(self, i: int) -> E`
-# (bounds-checked, negative index like `xs[i]`; OOB = recoverable fault), `slice(self, lo, hi) -> List[E]`,
-# `for_each(self, f: fn(E) -> _) -> nil`, and `fold(self, init: R, f: fn(R, E) -> R) -> R` (R inferred
-# from `init`). They walk the stored heap-independent wire list and materialize ONE element at a time,
-# so a worker can scan/reduce a shared large list in O(1) memory instead of `get`/`read` copying the
-# WHOLE inner into the caller's heap. `for_each`/`fold` RE-ACQUIRE the shared read guard PER ELEMENT and
-# DROP it before running the closure (never held across user code) — so a nested read OR write of the
-# same box, and a GC pass inside the closure, are all deadlock-free (unlike a guard held for the whole
-# walk against a write-preferring RwLock). The trade-off: the walk is NOT one atomic snapshot — a
-# concurrent (or in-closure) `set`/`write` to the same box may be observed mid-walk (elements are read
-# fresh each step); use `read`/`get` if you need a stable snapshot. Reduce into a DIFFERENT box (an
-# `AtomicInt`/local accumulator), the real fan-out use case. Gated to a list element: on a non-list `T`
-# they cleanly report "no method".
+# A `RwShared[T]` whose element `T` is a CONTAINER ALSO gains ZERO-COPY read-view methods (checker
+# arm-resolved, NOT harvested here — E/K/V are not nameable in the `RwShared[T]` surface). Gated by a
+# constructor-kind `where T: List/Map/Set` bound to the container HEAD (Tuple EXCLUDED — heterogeneous):
+#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> E` (bounds-checked, negative index
+#     like `xs[i]`; OOB = recoverable fault), `slice(self, lo, hi) -> List[E]`,
+#     `for_each(self, f: fn(E) -> _) -> nil`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
+#   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> Option[V]`, `has(self, k: K) -> bool`,
+#     `for_each_entry(self, f: fn(K, V) -> _) -> nil`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`.
+#   `RwShared[Set[E]]`: `len(self) -> int`, `contains(self, e: E) -> bool`,
+#     `for_each(self, f: fn(E) -> _) -> nil`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
+# (`fold*`'s R is inferred from `init`.) They walk the stored heap-independent wire container and
+# materialize ONE entry at a time, so a worker can scan/reduce a shared large container in O(1) memory
+# instead of `get`/`read` copying the WHOLE inner into the caller's heap. Every walk RE-ACQUIRES the
+# shared read guard PER ENTRY and DROPS it before running the closure (and before any `has`/`get_key`/
+# `contains` hash+eq probe) — never held across user code — so a nested read OR write of the same box,
+# and a GC pass inside the closure, are all deadlock-free (unlike a guard held for the whole walk
+# against a write-preferring RwLock). The trade-off: the walk is NOT one atomic snapshot — a concurrent
+# (or in-closure) `set`/`write` to the same box may be observed mid-walk (entries are read fresh each
+# step); use `read`/`get` if you need a stable snapshot. Reduce into a DIFFERENT box (an `AtomicInt`/
+# local accumulator), the real fan-out use case. On a non-container `T` (or a Tuple) they cleanly report
+# "no method".
 native struct RwShared[T]:
     native fn get(self) -> T
     native fn set(self, v: T) -> nil

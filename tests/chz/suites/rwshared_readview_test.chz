@@ -85,3 +85,141 @@ test fn read_view_cross_box_no_deadlock():
                 b.for_each(fn(x): a.set(List(range(1, 31))))
             done.add(1)
     assert done.load() == 2
+
+# ---- Map[K,V] read-view: len / get_key / has / for_each_entry / fold_entries ----
+
+# len / has (hit + miss) / get_key (Some + None).
+test fn map_read_view_len_has_get():
+    box := RwShared({"a": 1, "b": 2, "c": 3})
+    assert box.len() == 3
+    assert box.has("a")
+    assert box.has("c")
+    assert not box.has("z")
+    match box.get_key("b"):
+        Some(v): assert v == 2
+        None: assert false, "expected Some(2)"
+    match box.get_key("z"):
+        Some(v): assert false, "expected None, got " + str(v)
+        None: assert true
+
+# fold_entries: sum the values. R inferred from the int init.
+test fn map_read_view_fold_entries_sum():
+    box := RwShared({"a": 1, "b": 2, "c": 3, "d": 4})
+    s := box.fold_entries(0, fn(a, k, v): a + v)
+    assert s == 10
+
+# fold_entries with a str accumulator over keys — proves R is not pinned to V.
+test fn map_read_view_fold_entries_str():
+    box := RwShared({"x": 10})
+    s := box.fold_entries("", fn(a, k, v): a + k)
+    assert s == "x"
+
+# for_each_entry: accumulate values into an AtomicInt (its own box, no reentrancy).
+test fn map_read_view_for_each_entry():
+    box := RwShared({"a": 5, "b": 7, "c": 11})
+    n := AtomicInt(0)
+    box.for_each_entry(fn(k, v): n.add(v))
+    assert n.load() == 23
+
+# The fan-out use case: reduce the shared map from inside a spawned task under parallel:.
+test fn map_read_view_fold_entries_under_parallel():
+    box := RwShared({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
+    out := AtomicInt(0)
+    parallel:
+        spawn:
+            out.store(box.fold_entries(0, fn(a, k, v): a + v))
+    assert out.load() == 15
+
+# ---- Set[E] read-view: len / contains / for_each / fold ----
+
+test fn set_read_view_len_contains():
+    box := RwShared(Set([1, 2, 3, 4]))
+    assert box.len() == 4
+    assert box.contains(3)
+    assert not box.contains(99)
+
+test fn set_read_view_fold():
+    box := RwShared(Set([1, 2, 3, 4, 5]))
+    s := box.fold(0, fn(a, x): a + x)
+    assert s == 15
+
+test fn set_read_view_for_each():
+    box := RwShared(Set([2, 4, 6]))
+    n := AtomicInt(0)
+    box.for_each(fn(x): n.add(x))
+    assert n.load() == 12
+
+# contains from inside a spawned task under parallel:.
+test fn set_read_view_contains_under_parallel():
+    box := RwShared(Set([10, 20, 30]))
+    hit := AtomicInt(0)
+    parallel:
+        spawn:
+            if box.contains(20):
+                hit.add(1)
+    assert hit.load() == 1
+
+# ---- deadlock regressions (Map + Set), mirroring the List ones above ----
+# Pre-fix (guard held across the walk / across hash+eq) reliably hangs on M:N; serial serialises spawns
+# so it never deadlocks -> parity divergence. Per-entry/per-probe re-lock makes them complete fast.
+
+test fn map_read_view_nested_read_under_writer():
+    box := RwShared({"a": 1, "b": 2, "c": 3})
+    done := AtomicInt(0)
+    parallel:
+        spawn:                                            # walker: nested read of the SAME box
+            for _round in range(0, 20):
+                box.for_each_entry(fn(k, v): box.len())   # closure re-reads the same box
+                s := box.fold_entries(0, fn(a, k, v): a + box.len())
+                assert s == 9                             # 3 entries * len 3
+            done.add(1)
+        spawn:                                            # writer: hammer the same box's write lock
+            for _round in range(0, 2000):
+                box.set({"a": 1, "b": 2, "c": 3})
+    assert done.load() == 1
+
+test fn map_read_view_get_key_nested_under_writer():
+    box := RwShared({"a": 1, "b": 2, "c": 3})
+    done := AtomicInt(0)
+    parallel:
+        spawn:                                            # walker does a nested get_key/has of same box
+            for _round in range(0, 50):
+                match box.get_key("b"):
+                    Some(v): assert box.has("a")
+                    None: assert true                     # may miss under a concurrent set
+            done.add(1)
+        spawn:
+            for _round in range(0, 2000):
+                box.set({"a": 1, "b": 2, "c": 3})
+    assert done.load() == 1
+
+test fn set_read_view_nested_read_under_writer():
+    box := RwShared(Set([1, 2, 3, 4, 5]))
+    done := AtomicInt(0)
+    parallel:
+        spawn:
+            for _round in range(0, 20):
+                box.for_each(fn(x): box.len())
+                s := box.fold(0, fn(a, x): a + box.len())
+                assert s == 25                            # 5 elements * len 5
+            done.add(1)
+        spawn:
+            for _round in range(0, 2000):
+                box.set(Set([1, 2, 3, 4, 5]))
+    assert done.load() == 1
+
+# AB-BA cross-box: W1 walks map A calling B.set; W2 walks set B calling A.set.
+test fn map_set_read_view_cross_box_no_deadlock():
+    a := RwShared({"a": 1, "b": 2, "c": 3})
+    b := RwShared(Set([1, 2, 3]))
+    done := AtomicInt(0)
+    parallel:
+        spawn:
+            for _round in range(0, 30):
+                a.for_each_entry(fn(k, v): b.set(Set([1, 2, 3])))
+            done.add(1)
+        spawn:
+            for _round in range(0, 30):
+                b.for_each(fn(x): a.set({"a": 1, "b": 2, "c": 3}))
+            done.add(1)
+    assert done.load() == 2
