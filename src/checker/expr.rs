@@ -2733,10 +2733,10 @@ impl Checker {
                 // NOT nameable in `RwShared[T]`'s harvested `std/concurrency.chz` surface, so these sigs
                 // are ARM-ONLY (hand-built here with E resolved from `T = List[E]`), gated to a list
                 // element: a non-list `T` (`RwShared[int]`) falls to a clean "no method" reject (no
-                // check-OK-then-run-fault). NOTE: the read guard is HELD across the `for_each`/`fold`
-                // closure (that is what makes it zero-copy), so a closure that WRITES the SAME box
-                // deadlocks — the documented same-box reentrancy edge, exactly like `read`/`write`/
-                // `update` (a DIFFERENT box, e.g. an `AtomicInt` accumulator, is fine).
+                // check-OK-then-run-fault). NOTE (runtime): `for_each`/`fold` re-acquire the read guard
+                // PER ELEMENT and drop it before the closure (never held across user code), so a nested
+                // read/write of the same box is deadlock-free — reduce into a DIFFERENT box (an
+                // `AtomicInt`/local accumulator) anyway; see `rwshared_method` in `src/vm/netio.rs`.
                 if matches!(method, "len" | "at" | "slice" | "for_each" | "fold") {
                     let Ty::List(e) = &elem else {
                         self.infer_all(args);

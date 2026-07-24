@@ -47,3 +47,41 @@ test fn read_view_fold_under_parallel():
         spawn:
             out.store(box.fold(0, fn(a, x): a + x))
     assert out.load() == 500500
+
+# Regression: a callback that does a NESTED READ of the SAME box, while a sibling worker HAMMERS that
+# box's write lock. The pre-fix impl held ONE read guard across the whole for_each/fold walk; the
+# write-preferring std RwLock then blocks the recursive read behind the queued writer -> M:N deadlock
+# (serial completes -> parity divergence + hang). Per-element re-lock (guard dropped before the
+# callback) makes the nested read fine. Reliably deadlocked the old code; completes fast now.
+test fn read_view_nested_read_under_writer():
+    box := RwShared(List(range(1, 51)))
+    done := AtomicInt(0)
+    parallel:
+        spawn:                                   # walker: nested read of the SAME box inside the walk
+            for _round in range(0, 20):
+                box.for_each(fn(x): box.len())   # closure re-reads the same box (return discarded)
+                s := box.fold(0, fn(a, x): a + box.at(0))
+                assert s == 50
+            done.add(1)
+        spawn:                                   # writer: hammer the same box's write lock concurrently
+            for _round in range(0, 2000):
+                box.set(List(range(1, 51)))
+    assert done.load() == 1
+
+# Regression: AB-BA cross-box walk. W1 walks A calling B.set; W2 walks B calling A.set. The pre-fix
+# impl held A's read guard across B.set (blocked on B.write) while W2 held B's read guard across A.set
+# -> mutual M:N deadlock; serial serialises the spawns so it never deadlocks (parity divergence).
+test fn read_view_cross_box_no_deadlock():
+    a := RwShared(List(range(1, 31)))
+    b := RwShared(List(range(1, 31)))
+    done := AtomicInt(0)
+    parallel:
+        spawn:
+            for _round in range(0, 30):
+                a.for_each(fn(x): b.set(List(range(1, 31))))
+            done.add(1)
+        spawn:
+            for _round in range(0, 30):
+                b.for_each(fn(x): a.set(List(range(1, 31))))
+            done.add(1)
+    assert done.load() == 2

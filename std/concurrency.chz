@@ -32,12 +32,16 @@ native struct Shared[T]:
 # here — E is not nameable in the `RwShared[T]` surface): `len(self) -> int`, `at(self, i: int) -> E`
 # (bounds-checked, negative index like `xs[i]`; OOB = recoverable fault), `slice(self, lo, hi) -> List[E]`,
 # `for_each(self, f: fn(E) -> _) -> nil`, and `fold(self, init: R, f: fn(R, E) -> R) -> R` (R inferred
-# from `init`). They walk the stored heap-independent wire list UNDER the read guard and materialize ONE
-# element at a time, so a worker can scan/reduce a shared large list in O(1) memory instead of `get`/
-# `read` copying the WHOLE inner into the caller's heap. `for_each`/`fold` HOLD the read guard for the
-# whole walk (the zero-copy point) — a closure that WRITES the SAME box mid-walk DEADLOCKS, the same
-# documented same-box reentrancy edge as `read`/`write`; a DIFFERENT box (an `AtomicInt`/local
-# accumulator) is fine. Gated to a list element: on a non-list `T` they cleanly report "no method".
+# from `init`). They walk the stored heap-independent wire list and materialize ONE element at a time,
+# so a worker can scan/reduce a shared large list in O(1) memory instead of `get`/`read` copying the
+# WHOLE inner into the caller's heap. `for_each`/`fold` RE-ACQUIRE the shared read guard PER ELEMENT and
+# DROP it before running the closure (never held across user code) — so a nested read OR write of the
+# same box, and a GC pass inside the closure, are all deadlock-free (unlike a guard held for the whole
+# walk against a write-preferring RwLock). The trade-off: the walk is NOT one atomic snapshot — a
+# concurrent (or in-closure) `set`/`write` to the same box may be observed mid-walk (elements are read
+# fresh each step); use `read`/`get` if you need a stable snapshot. Reduce into a DIFFERENT box (an
+# `AtomicInt`/local accumulator), the real fan-out use case. Gated to a list element: on a non-list `T`
+# they cleanly report "no method".
 native struct RwShared[T]:
     native fn get(self) -> T
     native fn set(self, v: T) -> nil

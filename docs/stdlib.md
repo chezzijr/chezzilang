@@ -229,13 +229,15 @@ value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) 
 **Zero-copy read-view (`RwShared[List[E]]` only).** `len() -> int` · `at(i: int) -> E` (bounds-checked,
 negative index like `xs[i]`; OOB = recoverable fault) · `slice(lo: int, hi: int) -> List[E]` ·
 `for_each(f: fn(E) -> _) -> nil` · `fold(init: R, f: fn(R, E) -> R) -> R` (R inferred from `init`). These
-walk the stored value **element-at-a-time under the read guard** and materialize ONE element at a time,
-so a worker can scan/reduce a shared large list in **O(1) memory** — instead of `get`/`read`, which
-`from_wire`-copy the WHOLE inner list into the caller's heap on every access. Reach for `fold`/`for_each`
-to **reduce in place** when fanning a big shared list out to many workers. `for_each`/`fold` HOLD the read
-guard for the whole walk (the zero-copy point), so a closure that WRITES the **same** box mid-walk
-deadlocks (same reentrancy limit as `write`); reduce into a **different** box (an `AtomicInt`/local) — the
-real use case. On a non-list element these methods cleanly report "no method" (checker-gated).
+walk the stored value **element-at-a-time** and materialize ONE element at a time, so a worker can
+scan/reduce a shared large list in **O(1) memory** — instead of `get`/`read`, which `from_wire`-copy the
+WHOLE inner list into the caller's heap on every access. Reach for `fold`/`for_each` to **reduce in
+place** when fanning a big shared list out to many workers. `for_each`/`fold` RE-ACQUIRE the shared read
+guard **per element** and drop it before running the callback (never held across user code), so a nested
+read OR write of the same box — and a GC pass inside the callback — are deadlock-free. Trade-off: the
+walk is **not one atomic snapshot** (a concurrent/in-callback `set`/`write` to the same box may be seen
+mid-walk; use `read`/`get` for a stable snapshot). Reduce into a **different** box (an `AtomicInt`/local)
+— the real use case. On a non-list element these methods cleanly report "no method" (checker-gated).
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·

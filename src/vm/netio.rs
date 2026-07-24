@@ -1976,11 +1976,16 @@ impl Vm {
                 Ok(Value::nil())
             }
             // Zero-copy READ-view methods on `RwShared[List[E]]` (checker-gated to a list element).
-            // They walk the stored heap-independent `WireValue::List` Vec UNDER the read guard and
-            // `from_wire` ONE element per step — O(1) memory, never materializing the whole inner (what
-            // `get`/`read` do). The guard `g` borrows the cloned `core` Arc (not `self`), so it can be
-            // held across `from_wire`/`invoke_value` (the `cas` precedent). serial == M:N is natural:
-            // the walk reads a heap-independent wire form, so both engines see byte-identical elements.
+            // They walk the stored heap-independent `WireValue::List` Vec and `from_wire` ONE element per
+            // step — O(1) memory, never materializing the whole inner (what `get`/`read` do). serial ==
+            // M:N is natural: the walk reads a heap-independent wire form, so both engines see identical
+            // elements. The read-only `len`/`at`/`slice` take the shared guard only for the brief clone
+            // (no user code under it). `for_each`/`fold` RE-ACQUIRE the shared guard PER ELEMENT, clone
+            // one wire element, DROP the guard, then run the closure — mirroring `read`'s
+            // clone-out-then-drop, per element. The guard is NEVER held across the user closure (or the
+            // GC's mark of `Obj::RwShared`, which re-locks `core.v`), so a nested read/write of the SAME
+            // box, an AB-BA cross-box walk, and a GC pass triggered inside the closure can't deadlock —
+            // the write-preferring `std::sync::RwLock` never sees a recursive read behind a queued writer.
             "len" => {
                 self.arity_err("len", args, 0, span)?;
                 let core = self.rwshared_core(h);
@@ -2048,11 +2053,8 @@ impl Vm {
                 self.arity_err("for_each", args, 1, span)?;
                 let f = args[0];
                 let core = self.rwshared_core(h);
-                // HOLD the shared read guard for the WHOLE walk — this is the zero-copy point (do NOT
-                // clone the value out like `read` does). A closure that WRITES the same box mid-walk
-                // deadlocks (the documented same-box reentrancy edge); a DIFFERENT box is fine.
-                let g = core.v.read().unwrap();
-                let n = match &*g {
+                // Snapshot the length under a brief guard (dropped immediately).
+                let n = match &*core.v.read().unwrap() {
                     WireValue::List { items, .. } => items.len(),
                     _ => {
                         return Err(
@@ -2062,9 +2064,16 @@ impl Vm {
                 };
                 self.push(Value::obj(h)); // root the receiver across nested GC
                 for i in 0..n {
-                    let ew = match &*g {
-                        WireValue::List { items, .. } => items[i].clone(),
-                        _ => unreachable!(),
+                    // RE-ACQUIRE the shared guard, clone ONE element, DROP it before the closure —
+                    // never hold `core.v` across `invoke_value`/GC (see the arm's header comment).
+                    let ew = match &*core.v.read().unwrap() {
+                        WireValue::List { items, .. } => {
+                            if i >= items.len() {
+                                break; // the list shrank under a concurrent write — stop
+                            }
+                            items[i].clone()
+                        }
+                        _ => break, // replaced by a non-list under a concurrent set — stop
                     };
                     let elem = self.from_wire(ew);
                     self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
@@ -2077,8 +2086,7 @@ impl Vm {
                 let init = args[0];
                 let f = args[1];
                 let core = self.rwshared_core(h);
-                let g = core.v.read().unwrap(); // held for the whole reduce (zero-copy)
-                let n = match &*g {
+                let n = match &*core.v.read().unwrap() {
                     WireValue::List { items, .. } => items.len(),
                     _ => return Err(self.err("RwShared.fold requires a list element".into(), span)),
                 };
@@ -2086,9 +2094,15 @@ impl Vm {
                 self.push(init); // root the accumulator; its slot sits below every nested frame's base
                 let acc_slot = self.stack.len() - 1;
                 for i in 0..n {
-                    let ew = match &*g {
-                        WireValue::List { items, .. } => items[i].clone(),
-                        _ => unreachable!(),
+                    // RE-ACQUIRE per element + DROP before the closure (see the arm's header comment).
+                    let ew = match &*core.v.read().unwrap() {
+                        WireValue::List { items, .. } => {
+                            if i >= items.len() {
+                                break;
+                            }
+                            items[i].clone()
+                        }
+                        _ => break,
                     };
                     let elem = self.from_wire(ew);
                     let acc = self.stack[acc_slot];

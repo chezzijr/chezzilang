@@ -287,13 +287,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `WireValue::List` Vec UNDER the read guard and `from_wire`s ONE element at a time → O(1) memory for a
 > reduce. Checker: arm-only sigs at the `Ty::RwShared(elem)` arm (`src/checker/expr.rs`), gated to
 > `elem = List(E)` — a non-list `T` (`RwShared[int].fold`) is a clean "no method" reject (no
-> check-OK-then-run-fault). Runtime: five arms on `rwshared_method` (`src/vm/netio.rs`) holding
-> `core.v.read()` across the `for_each`/`fold` walk (the zero-copy point), mirroring the list-HOF
-> accumulator rooting. **Guard-lifetime edge (documented like `read`/`write`):** a closure that WRITES the
-> SAME box mid-walk deadlocks; a DIFFERENT box (an `AtomicInt`/local accumulator — the real fan-out use
-> case) is fine. serial == M:N byte-identical (walks a heap-independent wire form) — proven by
-> `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes_both_engines`) +
-> checker `rejects`/`ok` pair. Follow-up (explicit, NOT built): `Map`/`Set` visitor methods
+> check-OK-then-run-fault). Runtime: five arms on `rwshared_method` (`src/vm/netio.rs`) mirroring the
+> list-HOF accumulator rooting. **Guard-lifetime (fixed after adversarial review — the guard is NEVER held
+> across user code):** `for_each`/`fold` RE-ACQUIRE the shared `core.v.read()` guard PER ELEMENT, clone one
+> wire element, and DROP the guard before running the callback (mirroring `read`'s clone-out-then-drop, per
+> element). The original impl held one read guard across the whole walk — which deadlocked on M:N against
+> the write-preferring `std::sync::RwLock` in three ways a concurrent writer could trigger (a callback's
+> nested read of the SAME box; an AB-BA cross-box walk; the GC's mark of `Obj::RwShared`, which re-locks
+> `core.v`). Per-element re-lock removes all three: still O(1) memory (one element materialized per step),
+> deadlock-free (nested read AND write of the same box now work), at the cost of the walk NOT being one
+> atomic snapshot (a concurrent/in-callback `set` may be seen mid-walk — use `read`/`get` for a stable
+> snapshot; index re-checked each step so a shrinking list can't panic). serial == M:N byte-identical
+> (walks a heap-independent wire form) — proven by
+> `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes_both_engines`, incl. a
+> nested-read-under-concurrent-writer stress case that deadlocked the pre-fix impl) + checker `rejects`/`ok`
+> pair. Follow-up (explicit, NOT built): `Map`/`Set` visitor methods
 > (`fold_entries`/`for_each_entry`/`get_key`/`has`). Docs: `std/concurrency.chz`, `docs/stdlib.md`,
 > `docs/concurrency.md §6f`.
 

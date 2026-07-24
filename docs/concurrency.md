@@ -478,19 +478,23 @@ simpler).
 `get`/`read` copy the **whole** value out of the lock into the caller's heap. Fanning a 1M-element list
 out to 8 workers, each calling `get()`/`read()`, materializes the entire list eight times — most of the
 memory in the program is redundant copies. For a `RwShared[List[E]]`, use the **zero-copy read-view**
-instead: `len`/`at`/`slice`/`for_each`/`fold` walk the stored list **element-at-a-time under the read
-guard** and materialize one element per step, so each worker scans/reduces in **O(1) memory**.
+instead: `len`/`at`/`slice`/`for_each`/`fold` walk the stored list **element-at-a-time** and materialize
+one element per step, so each worker scans/reduces in **O(1) memory**.
 
 ```chezzi
 # Each spawned worker reduces its own view of the SAME shared list — no per-worker copy of the inner.
 fn sum_shard(box: RwShared[List[int]]) -> int:
-    return box.fold(0, fn(a, x): a + x)     # O(1) memory; reads one element at a time under the guard
+    return box.fold(0, fn(a, x): a + x)     # O(1) memory; reads one element at a time
 ```
 
-`for_each`/`fold` HOLD the read guard across the whole walk (that is what makes it zero-copy), so the
-same reentrancy limit applies: a callback that WRITES the **same** box mid-walk deadlocks. Reduce into a
-**different** box — an `AtomicInt` counter or a local accumulator — which is the fan-out pattern anyway.
-On a non-list element these methods are a checker "no method" error (they exist only for `RwShared[List[E]]`).
+`for_each`/`fold` RE-ACQUIRE the shared read guard **per element** and drop it before running the
+callback (the guard is never held across user code), so a nested read OR write of the same box — and a
+GC pass triggered inside the callback — are all deadlock-free (a guard held for the whole walk would
+deadlock against the write-preferring `RwLock`). Trade-off: the walk is **not one atomic snapshot** — a
+concurrent (or in-callback) `set`/`write` to the same box may be observed mid-walk; use `read`/`get` if
+you need a consistent snapshot. Reduce into a **different** box — an `AtomicInt` counter or a local
+accumulator — which is the fan-out pattern anyway. On a non-list element these methods are a checker "no
+method" error (they exist only for `RwShared[List[E]]`).
 
 **Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
