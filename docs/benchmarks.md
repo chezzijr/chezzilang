@@ -34,14 +34,15 @@ Chezzi is near Go parity. The real gap shows with **many separate boxed objects*
 | many_list  (2M `[i,i]`)     |  163.1 |     266.5 | 1.6×  |     224 MB |
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
-(2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own 96B GC `Slot`
-(biggest `Obj` variant `Module` = 88B → every slot padded to 96B, `heap.rs`) PLUS a separate
-malloc for its `fields: Vec<Value>` buffer. So 2M structs = ~192MB of `Slot` array + 2M field
-buffers + the outer 16MB list ≈ 224MB live → 327MB RSS. `many_list` is only 1.6× because Go
-also heap-allocates each inner slice — the gap shrinks wherever Go can't inline either.
+(2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
+(after boxing `Module`, `size_of::<Obj>()` is **64B** — capped by `MapData`/`SetData`, `heap.rs`)
+PLUS a separate malloc for its `fields: Vec<Value>` buffer. So 2M structs = the `Slot` array + 2M
+field buffers + the outer 16MB list. `many_list` is only 1.6× because Go also heap-allocates each
+inner slice — the gap shrinks wherever Go can't inline either.
 
 Levers, ranked for this gap:
-- **box `Module`** → `Slot` 96→64B, 33% off every object (327→~250MB). Cheap; doesn't close 4.9×.
+- **box `Module`** ✅ DONE → `size_of::<Obj>()` 88→64B (`Slot` shrinks correspondingly), off every
+  heap object. Cheap; doesn't close the 4.9×. (RSS delta measured post-merge.)
 - **inline small `fields`** (SmallVec / inline ≤2-3 Values in `Obj::Struct`) → kills the 2M
   per-struct second malloc. Halves alloc count on struct-heavy code.
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep

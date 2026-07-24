@@ -514,7 +514,7 @@ impl Vm {
         let home = self.entry_home();
         // Read the binding by name from the entry module's slot table (mirrors `module_define`).
         let callee = match self.heap.get(home) {
-            Obj::Module { slots, index, .. } => index.get(fn_name).map(|&i| slots[i as usize]),
+            Obj::Module(m) => m.index.get(fn_name).map(|&i| m.slots[i as usize]),
             _ => None,
         };
         let callee = callee.ok_or_else(|| {
@@ -675,11 +675,11 @@ impl Vm {
             .enumerate()
             .map(|(i, n)| (n.as_str().into(), i as u32))
             .collect();
-        let mod_obj = self.heap.alloc(Obj::Module {
+        let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData {
             name: m.label.clone().into_boxed_str(),
             slots: vec![Value::nil(); m.global_slots.len()],
             index,
-        });
+        })));
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
 

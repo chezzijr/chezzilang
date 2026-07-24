@@ -2261,7 +2261,7 @@ impl Vm {
                 // A module's mutable globals genuinely can't cross an OS-thread heap boundary — its
                 // `GcRef` is meaningless on the receiver heap — so it stays a by-reference `Handle`
                 // (the worker airlock rejects it; source-unreachable, defensive only).
-                Obj::Module { .. } => WireValue::Handle(h),
+                Obj::Module(_) => WireValue::Handle(h),
                 // A native fn is pure code (fn ptr + name, no `GcRef`) and a Cffi is a shared `Arc` —
                 // both cross BY VALUE like `Builtin`, exactly as the SNAPSHOT path
                 // (`SnapValue::Native`/`Cffi`) already ships them across M:N workers. `has_handle`
@@ -3444,11 +3444,11 @@ impl Vm {
     /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
     /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
     pub(super) fn fresh_worker_home(&mut self) -> GcRef {
-        self.heap.alloc(Obj::Module {
+        self.heap.alloc(Obj::Module(Box::new(ModuleData {
             name: "<worker>".into(),
             slots: Vec::new(),
             index: Default::default(),
-        })
+        })))
     }
 
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
@@ -3508,9 +3508,7 @@ impl Vm {
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
             // parent and worker agree on slot↔name regardless of any hash ordering.
             let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
-                Obj::Module { name, slots, index } => {
-                    (name.clone(), module_slot_pairs(slots, index))
-                }
+                Obj::Module(m) => (m.name.clone(), module_slot_pairs(&m.slots, &m.index)),
                 _ => ("<worker>".into(), Vec::new()),
             };
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
@@ -3607,11 +3605,12 @@ impl Vm {
                 SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }
             }
             // An import alias bound to another module obj.
-            Obj::Module { name, slots, index } => match self.home_index(h) {
+            Obj::Module(m) => match self.home_index(h) {
                 Some(idx) => SnapValue::ModuleAlias(idx),
                 // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline,
                 // in slot order so replay rebuilds matching slots.
                 None => {
+                    let ModuleData { name, slots, index } = *m;
                     let mut globals = Vec::new();
                     for (k, mv) in module_slot_pairs(&slots, &index) {
                         globals.push((k, self.to_snap_depth(mv, depth + 1)?));
@@ -3762,11 +3761,11 @@ impl Vm {
             "install_snapshot expects a fresh worker"
         );
         for m in &snap.modules {
-            let wm = self.heap.alloc(Obj::Module {
+            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
                 name: m.name.clone(),
                 slots: Vec::new(),
                 index: std::collections::HashMap::new(),
-            });
+            })));
             self.module_objs.push(wm);
         }
         self.module_faulted = vec![false; snap.modules.len()];
@@ -3841,11 +3840,11 @@ impl Vm {
             }
             SnapValue::ModuleAlias(idx) => Value::obj(self.module_objs[*idx]),
             SnapValue::ModuleInline { name, globals } => {
-                let wm = self.heap.alloc(Obj::Module {
+                let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
                     name: name.clone(),
                     slots: Vec::new(),
                     index: std::collections::HashMap::new(),
-                });
+                })));
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv);
                     self.module_define(wm, k, val);

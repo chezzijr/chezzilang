@@ -615,9 +615,11 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
    scans the whole `slots` Vec even on a sparse heap. A packed mark **bitvec** (1 bit/obj, 64/word) makes
    the sweep a dense sequential bitscan. Only worth it if GC becomes hot (generational/incremental
    territory — already #8, low-ROI).
-5. **Shrink `Obj` below 88 B.** `size_of::<Obj>()==88` (guard, `chzstr.rs:205`), forced by the largest
-   variants (Module ~80 B). Boxing the rare big ones densifies the heap — **but SSO deliberately sized
-   strings to fill 88 B inline**, so shrinking un-inlines them. Net is a trade-off → measure first.
+5. **Shrink `Obj` below 64 B.** ✅ DONE for `Module`: boxed to `Box<ModuleData>`, so
+   `size_of::<Obj>()` dropped 88→**64 B** (guard, `chzstr.rs:205` / `heap.rs`); `MapData`/`SetData`
+   (56 B payload + 8 B discriminant) now cap it. To go below 64 B you'd have to box `MapData`/`SetData`
+   too — **but SSO deliberately sized strings to fill the inline `Obj`**, so shrinking un-inlines them.
+   Net is a trade-off → measure first.
 
 **Hot-loop access (mostly already addressed or parity-blocked — cross-ref):**
 

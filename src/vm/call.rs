@@ -1180,12 +1180,16 @@ impl Vm {
         self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
-            Obj::Module { name, slots, index } => {
-                let member = index
+            Obj::Module(m) => {
+                let member = m
+                    .index
                     .get(method)
-                    .map(|&i| slots[i as usize])
+                    .map(|&i| m.slots[i as usize])
                     .ok_or_else(|| {
-                        self.err(format!("module '{name}' has no member '{method}'"), span)
+                        self.err(
+                            format!("module '{}' has no member '{method}'", m.name),
+                            span,
+                        )
                     })?;
                 self.stack.push(member);
                 self.stack.extend(args);

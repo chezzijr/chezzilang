@@ -5674,6 +5674,16 @@ conformance` green.
   **−20% (1.25×)** on an enum construct+match-dispatch micro (`benches/chz/enum.chz`); standard suite
   neutral. `Obj::Enum` shrank 56→32 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:
   numeric variant id → constant/jump-table dispatch for the future Cranelift codegen + match-on-enum.
+- **Memory layout #4 — box `Obj::Module`.** The fat `Module { name, slots, index }` variant (88 B —
+  `Box<str>`16 + `Vec`24 + `HashMap`48) was the sole thing capping `size_of::<Obj>()` at 88 B, forcing
+  every heap `Slot` to 96 B even though modules are rare + cold (a handful per program). Boxed its
+  payload behind `Obj::Module(Box<ModuleData>)` (mirrors the already-boxed `Obj::Generator(Box<…>)`),
+  so `Module` is now 8 B and **`size_of::<Obj>()` drops 88→64 B** — capped now by `MapData`/`SetData`
+  (56 B payload + 8 B discriminant). ~one cold pointer hop off the module-member path; every heap object
+  shrinks. Mechanical VM-only change (checker never names `Obj`); GC `children()` still traces
+  `m.slots`, `live_bytes` still counts `m.slots.capacity()*size_of::<Value>()`. Behavior-preserving +
+  serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines`); guard-pinned at 64 B
+  (`heap.rs` + `chzstr.rs`). RSS delta measured post-merge.
 
 **Remaining / blocked levers:**
 

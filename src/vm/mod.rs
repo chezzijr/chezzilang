@@ -20,7 +20,7 @@ use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecutorCore, ListenerCore, ReaderCore,
     RwSharedCore, SharedCore, SocketCore, WriterCore,
 };
-use heap::{Heap, MapData, Obj, SetData};
+use heap::{Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
