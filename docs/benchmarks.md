@@ -27,11 +27,15 @@ Machine: i5-11400H, x86_64, Linux; Go 1.26.5, rustc 1.97.0 (release).
 The single-big-object benches above are GENTLE — each keeps one heap object alive, so
 Chezzi is near Go parity. The real gap shows with **many separate boxed objects**:
 
-| bench                       |  Go MB | Chezzi MB | ratio | live_bytes |
-|-----------------------------|-------:|----------:|------:|-----------:|
-| many_struct (2M `P{x,y}`)   |   67.4 |     327.6 | 4.9×  |     224 MB |
-| many_map   (1M int→struct)  |   66.9 |     242.9 | 3.6×  |     129 MB |
-| many_list  (2M `[i,i]`)     |  163.1 |     266.5 | 1.6×  |     224 MB |
+| bench                       |  Go MB | Chezzi base | after #1 (box Module) | ratio now |
+|-----------------------------|-------:|------------:|----------------------:|----------:|
+| many_struct (2M `P{x,y}`)   |   67.4 |       327.6 |    281.9 (−14%)       |     4.2×  |
+| many_map   (1M int→struct)  |   66.9 |       242.9 |    222.1 (−9%)        |     3.3×  |
+| many_list  (2M `[i,i]`)     |  163.1 |       266.5 |    220.7 (−17%)       |     1.4×  |
+
+(`Chezzi base` = pre-fix; `after #1` = merged HEAD `0100153`, `Obj` 88→64B. The 27% slot-size cut
+lands as 9–17% off total RSS — slots are only part of RSS; field buffers + outer `Vec` + GC
+headroom are untouched by #1.)
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
 (2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
@@ -41,8 +45,8 @@ field buffers + the outer 16MB list. `many_list` is only 1.6× because Go also h
 inner slice — the gap shrinks wherever Go can't inline either.
 
 Levers, ranked for this gap:
-- **box `Module`** ✅ DONE → `size_of::<Obj>()` 88→64B (`Slot` shrinks correspondingly), off every
-  heap object. Cheap; doesn't close the 4.9×. (RSS delta measured post-merge.)
+- **box `Module`** ✅ DONE (`0100153`) → `size_of::<Obj>()` 88→64B; measured −14%/−9%/−17% RSS on
+  many_struct/map/list. Cheap; doesn't close the 4.2× (structural, not slot size).
 - **inline small `fields`** (SmallVec / inline ≤2-3 Values in `Obj::Struct`) → kills the 2M
   per-struct second malloc. Halves alloc count on struct-heavy code.
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
