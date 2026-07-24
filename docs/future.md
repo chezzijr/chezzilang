@@ -365,20 +365,29 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    v1 — a true watchdog thread that can interrupt a blocked native is the natural next seam. Ms
    granularity; the abort lands at the next back-edge after the deadline (sub-ms overshoot for a tight
    loop). k/m/g suffixes and `chezzi run --timeout` are out of scope.
-5. **Name filter.** `chezzi test -k <substr>` / `--filter <pat>` to run a subset by test name (free
-   `fn_name`, suite `Suite::method`), like `cargo test <filter>` / pytest `-k` / `go test -run`. Filter
-   after discovery, before invoke.
-6. **stdout capture option.** The runner discards each test's stdout (`take_out`). Add `--show-output`
-   (or capture-and-show-on-failure, pytest's default): surface a failing test's printed output for
-   debugging. Keep default = discard (assert-on-value is the intended path).
-7. **Better options + output format.**
-   - Verbosity: `-q` (dots `.`/`F`/`E` + summary only) vs default per-line vs `-v` (timing per test).
-   - `--errors=json` machine output, mirroring `chezzi check --errors=json` — for editor/CI integration
-     (per-test name/file/line/status/duration + totals).
-   - Color (auto/`--color=never`) on PASS/FAIL/ERROR, isatty-gated like the rest of the CLI.
-   - Per-test + total **timing** in the summary (Go/pytest both show durations).
-   - `--fail-fast` (stop at first failure) for tight iteration loops.
-   - Ordering is deterministic declaration order today; document it in the report/help.
+5. **Name filter. SHIPPED (2026-07-24).** `chezzi test -k <substr>` / `--filter <pat>` runs only tests
+   whose displayed name (free `fn_name`, suite `Suite::method`) contains the substring, like
+   `cargo test <filter>` / pytest `-k` / `go test -run`. Filtered after discovery, at the invoke site
+   (filtered tests genuinely don't run). The summary notes `(K filtered out)`; a zero-match run is a
+   clear `— no tests matched '<pat>'` failure (not a silent "0 tests"). Substring, not regex (v1).
+6. **stdout capture option. SHIPPED (2026-07-24).** `--show-output` surfaces a FAILING test's captured
+   stdout, indented under its `FAIL`/`ERROR`/etc. line (pytest show-on-failure). Default still discards
+   (assert-on-value is the intended path); a passing test's stdout is never shown. Kept in the `Outcome`
+   only when the flag is on (bounded to the run).
+7. **Better options + output format. SHIPPED (2026-07-24).**
+   - Verbosity: `-q`/`--quiet` (dots `.`/`F`/`E`/`M`/`T` + summary only) vs default per-line vs
+     `-v`/`--verbose` (per-line + per-test `(Nms)` timing + a total). `-q`/`-v` are mutually exclusive.
+   - `--errors=json` machine output, mirroring `chezzi check --errors=json` (same flag; suppresses the
+     human lines). Shape necessarily diverges (it carries totals): `{"tests":[{name,file,line?,status,
+     duration_ms}…],"totals":{total,passed,failed,errored,over_memory,timed_out,filtered_out,file_errors}}`.
+   - Color (`--color=auto|always|never`, default auto = isatty on stdout) on the verdict tag. Resolved
+     to a bool in `cmd_test`; the runner never probes the tty, so the captured (non-tty) test harness +
+     the byte-identity gate never see ANSI.
+   - Per-test + total **timing** — `-v`/json ONLY, NEVER in default/quiet output (non-deterministic → it
+     would break the byte-identical `chz_suite_passes_both_engines` gate).
+   - `--fail-fast` (stop at the first non-pass verdict) for tight iteration loops.
+   - Ordering is deterministic (sorted files → free tests → suites, all declaration order); documented in
+     `chezzi test`'s USAGE + the `run_tests_opts` doc-comment. **Default (no-flag) output is unchanged.**
 
 **Migration note (corrects an earlier claim):** fault-path tests **are** portable in-language via
 `recover:` — `r := recover: <faulting expr>` yields `Err(e)` and `e.message()` gives the fault text, so

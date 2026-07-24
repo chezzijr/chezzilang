@@ -4,6 +4,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
+> #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,
+> pure `cmd_test` (flag parse) + `test_runner.rs` (formatting/filtering/timing). **Central refactor:** a
+> `RunOpts { max_heap, timeout_ms, filter, fail_fast, show_output, json, verbosity, color }` struct + a
+> `Verbosity { Normal, Quiet, Verbose }` enum; the new core is `run_tests_opts(root, parallel, opts)` and
+> the three legacy positional fns (`run_tests`/`run_tests_capped`/`run_tests_timed`) are now thin shims
+> over it (`RunOpts::default()` = every feature OFF). **The load-bearing invariant: `RunOpts::default()`
+> reproduces the pre-batch output BYTE-FOR-BYTE** — every clause is gated on its field being non-default,
+> so the no-flag render path is unchanged and the `chz_suite_passes_both_engines` byte-identity gate stays
+> green. **Flags:** `-k`/`--filter <substr>` (run a subset by displayed name, filtered at the invoke site
+> so they don't run; `(K filtered out)` summary clause; zero-match = `— no tests matched '<pat>'` failure);
+> `--fail-fast` (stop at first non-pass, deterministic order: sorted files → free tests → suites, all
+> declaration order); `--show-output` (surface a FAILING test's captured stdout indented under its line;
+> default discards; pass never shown); `--errors=json` (machine output mirroring `check`/`run`'s flag —
+> `{tests:[{name,file,line?,status,duration_ms}],totals:{…}}`, suppresses human lines); `-q`/`-v`
+> verbosity (`-q` dots `.`/`F`/`E`/`M`/`T`, `-v` per-line + per-test `(Nms)` + total; mutually exclusive);
+> `--color=auto|always|never` (auto = isatty on stdout, resolved in `cmd_test` so the runner never emits
+> ANSI under the captured harness). **Timing is `-v`/json ONLY — never in default/quiet** (non-deterministic
+> → would break the byte-identity gate). +9 runner unit tests (filter/zero-match/fail-fast/show-output/
+> json/verbose-timing/quiet-dots/color); all 33 runner tests + the full suite green. Docs: `docs/future.md
+> §3b #5/#6/#7` marked SHIPPED, `docs/gaps.md T4/T6` gaps struck, USAGE updated per flag.
+
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test --timeout=<ms>` per-test wall-clock cap (docs/future.md
 > §3b item #4; the wall-clock sibling of `--max-heap`).** Opt-in per-test timeout: a `test fn` running
 > longer than `N` ms is **hard-aborted** (un-recoverable — `recover:` CANNOT swallow it) and bucketed in

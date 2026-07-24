@@ -1708,11 +1708,16 @@ short-circuits before any `Instant::now()`; the read is throttled 1/1024 back-ed
 only** (`--timeout` errors with `--serial`): a wall-clock trip is non-deterministic → no serial==M:N parity.
 **v1 limit (watchdog follow-up):** a test blocked in a native call (blocking syscall, `Channel.recv` with
 no traffic) or spinning in loop-free infinite recursion (hits the stack guard) is NOT caught — a true
-watchdog thread is the next seam. Missing: **test filtering** (`chezzi test`
-rejects unknown flags, so on a big suite it's all or nothing — a ~20-line change and the best ratio in
-this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff, parallel execution,
-machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b` follow-ups (CLI
-ergonomics).
+watchdog thread is the next seam. **Selection + output ergonomics SHIPPED (2026-07-24, §3b #5/#6/#7):**
+`-k`/`--filter <substr>` (run a subset by name; `(K filtered out)` in the summary; zero-match = clear
+failure), `--fail-fast` (stop at first non-pass, deterministic order), `--show-output` (surface a
+FAILING test's stdout, default discard), `--errors=json` (machine output mirroring `check`/`run`:
+`{tests:[{name,file,line?,status,duration_ms}],totals}`, suppresses human lines), `-q`/`-v` verbosity
+(dots vs per-line vs per-line+timing), `--color=auto|always|never` (isatty-gated tag color), and per-
+test/total timing (`-v`/json ONLY — never in default/quiet, so the byte-identity gate is untouched).
+All opt-in; **default (no-flag) output is byte-identical to before**. Still missing:
+fixtures/setup-teardown beyond suite hooks, coverage, benchmarks, `assert_eq` with a diff, parallel
+execution across files — tracked as `docs/future.md §3b` follow-ups (CLI ergonomics).
 
 **KNOWN-LIMIT — assert inside an FFI callback buckets ERROR, not FAIL (found 2026-07-24, WON'T-FIX).**
 The FAIL/ERROR split reads `RuntimeError.is_assert`, set true only by the `Op::Assert` arm. But when a
@@ -1739,8 +1744,9 @@ fixed. Revisit only if FFI-callback tests become common.
   lands (`go doc` / pkg.go.dev is a big part of why Go's ecosystem is navigable).
 
 ### T6. CI-friendliness — **not** a gap
-`--errors=json` works for `check` and `run`; exit codes are correct and deliberate (type error → 1,
-fault → 1, `os.exit(n)` honored, stdout write failure → 1). Missing only machine-readable *test* output.
+`--errors=json` works for `check`, `run`, AND `test` (test-runner machine output SHIPPED 2026-07-24,
+§3b #7 — per-test `{name,file,line?,status,duration_ms}` + totals); exit codes are correct and
+deliberate (type error → 1, fault → 1, `os.exit(n)` honored, stdout write failure → 1). No gap.
 
 ## Type-system / construction (adjacent, tracked in `docs/future.md §15`)
 - **Definable conversion constructors already exist** as named **static factory methods** (`fn

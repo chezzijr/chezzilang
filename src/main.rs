@@ -43,6 +43,18 @@ FLAGS:
     --timeout=N      (`test`, M:N engine only) Hard-abort any test running longer than N ms — a
                      wall-clock guard, bucketed TIMED-OUT (0/omitted = off; not with --serial)
 
+`chezzi test` SELECTION + OUTPUT (all opt-in; default output is unchanged):
+    -k, --filter S   Run only tests whose name (`fn` or `Suite::method`) contains substring S; the
+                     summary notes how many were filtered out. Zero matches = clear failure.
+    --fail-fast      Stop at the first non-pass verdict (deterministic order: sorted files, then each
+                     file's free tests, then each suite's methods, all in declaration order).
+    --show-output    Surface a FAILING test's captured stdout, indented under its line (default: discard).
+    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,duration_ms}],totals})
+                     for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
+    -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).
+    -v, --verbose    Per-test lines + per-test timing (`(Nms)`) + a total (`-q`/`-v` are exclusive).
+    --color=MODE     auto (default; on iff stdout is a tty) | always | never — colors the verdict tag.
+
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --serial` runs the
       default parallel VM and hands `--serial` to the program. Use `chezzi run --serial prog.chz`.
@@ -535,19 +547,47 @@ fn entrypoint_file(entrypoint: &str, root: &std::path::Path) -> Result<std::path
 /// cwd; a single `*_test.chz` file runs that file; a directory is walked recursively). Reports
 /// `PASS/FAIL name (file:line) msg` per test, a summary, and a non-zero exit if anything failed.
 fn cmd_test(args: &[String]) -> ExitCode {
+    use chezzi::test_runner::{RunOpts, Verbosity};
     let mut path: Option<String> = None;
     let mut saw_serial = false;
     let mut saw_parallel = false;
-    let mut max_heap: usize = 0; // 0 = cap OFF (the default)
-    let mut timeout_ms: u64 = 0; // 0 = cap OFF (the default)
-    for arg in args {
-        match arg.as_str() {
+    let mut opts = RunOpts::default();
+    let mut saw_quiet = false;
+    let mut saw_verbose = false;
+    // `auto` (default) resolves to isatty; `always`/`never` force it. Kept as an enum'd string so the
+    // resolution happens once, after the loop, against the real stdout.
+    let mut color_mode = "auto";
+    // Index-based so `-k`/`--filter` can consume the following argument (two-token form).
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
             "--serial" => saw_serial = true,
             "--parallel" => saw_parallel = true, // no-op alias: M:N is already the default
+            "--fail-fast" => opts.fail_fast = true,
+            "--show-output" => opts.show_output = true,
+            "--errors=json" => opts.json = true,
+            "-q" | "--quiet" => saw_quiet = true,
+            "-v" | "--verbose" => saw_verbose = true,
+            "-k" | "--filter" => {
+                let Some(pat) = args.get(i + 1) else {
+                    eprintln!("chezzi test: {arg} expects a substring argument");
+                    return ExitCode::FAILURE;
+                };
+                opts.filter = Some(pat.clone());
+                i += 1; // consume the pattern
+            }
+            other if other.starts_with("--color=") => match &other["--color=".len()..] {
+                m @ ("auto" | "always" | "never") => color_mode = m,
+                bad => {
+                    eprintln!("chezzi test: --color expects auto|always|never, got '{bad}'");
+                    return ExitCode::FAILURE;
+                }
+            },
             other if other.starts_with("--max-heap=") => {
                 let raw = &other["--max-heap=".len()..];
                 match raw.parse::<usize>() {
-                    Ok(n) => max_heap = n,
+                    Ok(n) => opts.max_heap = n,
                     Err(_) => {
                         eprintln!(
                             "chezzi test: --max-heap expects a byte count (a non-negative integer), got '{raw}'"
@@ -559,7 +599,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
             other if other.starts_with("--timeout=") => {
                 let raw = &other["--timeout=".len()..];
                 match raw.parse::<u64>() {
-                    Ok(n) => timeout_ms = n,
+                    Ok(n) => opts.timeout_ms = n,
                     Err(_) => {
                         eprintln!(
                             "chezzi test: --timeout expects a millisecond count (a non-negative integer), got '{raw}'"
@@ -578,16 +618,39 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        i += 1;
     }
     if saw_serial && saw_parallel {
         eprintln!("chezzi test: --serial and --parallel are mutually exclusive");
         return ExitCode::FAILURE;
     }
+    if saw_quiet && saw_verbose {
+        eprintln!("chezzi test: -q and -v are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
+    opts.verbosity = if saw_quiet {
+        Verbosity::Quiet
+    } else if saw_verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
+    };
+    // Resolve color: `always` forces on, `never` off, `auto` = stdout is a tty. The runner itself never
+    // probes the tty (it is a pure String producer the harness string-matches), so this is the ONE seam.
+    opts.color = match color_mode {
+        "always" => true,
+        "never" => false,
+        _ => std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    };
+    // JSON is machine output: never colorize it.
+    if opts.json {
+        opts.color = false;
+    }
     // `--max-heap` is the M:N engine ONLY. The cooperative `--serial` engine shares ONE heap across
     // the parent + every `spawn`/`parallel:` fiber, so a concurrent test's per-heap trip point differs
     // from M:N's isolated-per-worker heaps — rather than ship that serial≠M:N divergence, restrict the
     // flag to the default engine. (`--serial` is the parity oracle, slated for post-freeze removal.)
-    if max_heap != 0 && saw_serial {
+    if opts.max_heap != 0 && saw_serial {
         eprintln!(
             "chezzi test: --max-heap requires the M:N engine and cannot be combined with --serial"
         );
@@ -595,7 +658,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     }
     // `--timeout` is the M:N engine ONLY: a wall-clock trip is non-deterministic, so it cannot be
     // parity-tested serial==M:N. Restrict it to the default engine rather than ship that divergence.
-    if timeout_ms != 0 && saw_serial {
+    if opts.timeout_ms != 0 && saw_serial {
         eprintln!(
             "chezzi test: --timeout requires the M:N engine and cannot be combined with --serial"
         );
@@ -605,12 +668,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // Default engine is the M:N OS-thread VM — matching `chezzi run`, and forward-compatible with the
     // post-JIT-freeze removal of the cooperative serial engine. `--serial` opts into it while it lives;
     // the dual-engine serial==M:N check itself lives in the `cargo test` gate.
-    let report = test_runner::run_tests_timed(
-        std::path::Path::new(&root),
-        !saw_serial,
-        max_heap,
-        timeout_ms,
-    );
+    let report = test_runner::run_tests_opts(std::path::Path::new(&root), !saw_serial, opts);
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS

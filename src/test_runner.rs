@@ -12,11 +12,50 @@ use crate::vm::Vm;
 use crate::vm::op::Program;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The outcome of a `chezzi test` run: the rendered report and whether everything passed.
 pub struct TestReport {
     pub text: String,
     pub passed: bool,
+}
+
+/// Report verbosity for the CLI ergonomics wave. `Normal` is the DEFAULT and its output is
+/// byte-identical to the pre-wave runner (the load-bearing invariant the dual-engine gate compares).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Verbosity {
+    /// One `PASS/FAIL/ERROR name (file[:line])` line per test, then the summary (today's output).
+    #[default]
+    Normal,
+    /// One char per test (`.`/`F`/`E`/`M`/`T`) then the summary line — no per-test lines.
+    Quiet,
+    /// `Normal` plus per-test wall-clock timing (`… (Nms)`) and a total-duration summary line.
+    Verbose,
+}
+
+/// Opt-in knobs for a `chezzi test` run. `Default` = every feature OFF, `Verbosity::Normal`,
+/// `color` off — the exact pre-wave behavior, so the render path a default run takes is unchanged
+/// and the `chz_suite_passes_both_engines` byte-identity gate stays green. Each new flag is gated on
+/// its field being non-default (mirroring the off-by-default `--max-heap`/`--timeout` summary clauses).
+#[derive(Clone, Default)]
+pub struct RunOpts {
+    /// `--max-heap` per-test live-heap cap in bytes (`0` = OFF).
+    pub max_heap: usize,
+    /// `--timeout` per-test wall-clock cap in ms (`0` = OFF).
+    pub timeout_ms: u64,
+    /// `-k`/`--filter` substring: run only tests whose displayed name contains it (`None` = all).
+    pub filter: Option<String>,
+    /// `--fail-fast`: stop after the first non-pass verdict (in deterministic declaration order).
+    pub fail_fast: bool,
+    /// `--show-output`: surface a failing test's captured stdout, indented under its line.
+    pub show_output: bool,
+    /// `--errors=json`: emit ONLY a JSON document (per-test results + totals), no human lines.
+    pub json: bool,
+    /// `-q`/`-v` verbosity.
+    pub verbosity: Verbosity,
+    /// Colorize the verdict tag (resolved to a bool in `cmd_test` via `IsTerminal`; the runner never
+    /// probes the tty itself so a captured (non-tty) test harness never sees ANSI unless forced).
+    pub color: bool,
 }
 
 /// One test's verdict. `assert` is the ONE intended failure signal of a (void) `test fn`, so an
@@ -56,6 +95,61 @@ struct Outcome {
     file: String,
     /// Pass / Fail (assert) / Error (any other fault).
     verdict: Verdict,
+    /// Wall-clock time the invoke took (always measured — negligible; surfaced only under `-v`/json).
+    duration: Duration,
+    /// The test's captured stdout — kept ONLY when `--show-output` is on (else empty, discarded).
+    captured_out: String,
+}
+
+/// The JSON status token for a verdict (mirrors `--errors=json` on `check`/`run` for CI consumers).
+fn verdict_status(v: &Verdict) -> &'static str {
+    match v {
+        Verdict::Pass => "pass",
+        Verdict::Fail { .. } => "fail",
+        Verdict::Error { .. } => "error",
+        Verdict::OverMemory { .. } => "over_memory",
+        Verdict::TimedOut { .. } => "timed_out",
+    }
+}
+
+/// The source line for a verdict, if it has a meaningful one (Fail/Error only).
+fn verdict_line(v: &Verdict) -> Option<usize> {
+    match v {
+        Verdict::Fail { line, .. } | Verdict::Error { line, .. } => Some(*line),
+        _ => None,
+    }
+}
+
+/// Wrap `s` in an ANSI color when `color` is on, else return it untouched. `code`: 32 green, 31 red,
+/// 33 yellow. Only ever called with `color == true` from a resolved-tty CLI, so a captured test
+/// harness (color defaults false) never emits an escape.
+fn paint(s: &str, code: u8, color: bool) -> String {
+    if color {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Encode a string as a JSON string literal (minimal, zero-dep). Dup of `main.rs::json_string` — that
+/// one lives in the bin crate, unreachable from this lib module; the escaper is ~12 lines, not worth a
+/// shared crate seam.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Bucket a caught per-test `RuntimeError`. The `is_over_memory` marker takes priority: a `--max-heap`
@@ -88,28 +182,49 @@ fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
 /// recursively). Returns the rendered report + overall pass/fail. Never panics on a test fault — the
 /// VM stays reusable, so one failing test does not abort the rest.
 pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
-    run_tests_capped(root, parallel, 0)
+    run_tests_opts(root, parallel, RunOpts::default())
 }
 
 /// Like [`run_tests`], plus the opt-in `--max-heap` per-test cap (`max_heap`: byte count, `0` = OFF).
-/// A test whose in-VM live heap exceeds the cap is hard-aborted (bypassing `recover:`) and bucketed
-/// [`Verdict::OverMemory`] (counts as failure). Deterministic-in-VM (not OS RSS), so the serial == M:N
-/// gate holds. With `max_heap == 0` this is byte-identical to the pre-cap runner.
 pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestReport {
-    run_tests_timed(root, parallel, max_heap, 0)
+    run_tests_opts(
+        root,
+        parallel,
+        RunOpts {
+            max_heap,
+            ..Default::default()
+        },
+    )
 }
 
 /// Like [`run_tests_capped`], plus the opt-in `--timeout` per-test wall-clock cap (`timeout_ms`: ms,
-/// `0` = OFF). A test running longer than `timeout_ms` is hard-aborted at a loop back-edge (bypassing
-/// `recover:`) and bucketed [`Verdict::TimedOut`] (counts as failure). M:N-engine-only (a wall-clock
-/// trip is non-deterministic → the CLI rejects it with `--serial`). With `timeout_ms == 0` this is
-/// byte-identical to the un-timed runner.
+/// `0` = OFF).
 pub fn run_tests_timed(
     root: &Path,
     parallel: bool,
     max_heap: usize,
     timeout_ms: u64,
 ) -> TestReport {
+    run_tests_opts(
+        root,
+        parallel,
+        RunOpts {
+            max_heap,
+            timeout_ms,
+            ..Default::default()
+        },
+    )
+}
+
+/// The core runner. `parallel` selects the engine (serial oracle vs M:N); `opts` carries every opt-in
+/// ergonomics knob. **`RunOpts::default()` reproduces the pre-wave output byte-for-byte** — every new
+/// clause is gated on its field being non-default, so the render path a no-flag run takes is unchanged
+/// and the `chz_suite_passes_both_engines` byte-identity gate stays green.
+///
+/// **Determinism / ordering:** files run in sorted path order; within a file, free tests run in
+/// declaration order, then each suite's methods in declaration order. `--fail-fast` stops at the first
+/// non-pass in exactly that order (later tests simply don't run).
+pub fn run_tests_opts(root: &Path, parallel: bool, opts: RunOpts) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
@@ -127,40 +242,36 @@ pub fn run_tests_timed(
     }
 
     let mut outcomes: Vec<Outcome> = Vec::new();
-    let mut report = String::new();
-    // A compile/type/resolve error fails a whole file before any test runs. Tracked separately from
-    // per-test outcomes so it is reported ONCE (as `ERROR`) and does not inflate the test counts with
-    // a phantom `FAIL …:0`.
-    let mut file_errors = 0usize;
+    // A compile/type/resolve error fails a whole file before any test runs. Collected (not rendered
+    // inline) so the JSON path can suppress the human `ERROR <file>` lines.
+    let mut file_error_msgs: Vec<(String, String)> = Vec::new();
+    // Tests skipped by `--filter` (threaded up from the invoke sites — discovery of names happens
+    // inside the compiled program, not before).
+    let mut filtered_out = 0usize;
 
     for file in &files {
-        match run_file(file, parallel, max_heap, timeout_ms) {
-            Ok(mut file_outcomes) => outcomes.append(&mut file_outcomes),
+        match run_file(file, parallel, &opts) {
+            Ok((mut file_outcomes, skipped)) => {
+                filtered_out += skipped;
+                let hit_non_pass = file_outcomes
+                    .iter()
+                    .any(|o| !matches!(o.verdict, Verdict::Pass));
+                outcomes.append(&mut file_outcomes);
+                // `--fail-fast`: after a file that produced a non-pass, don't start the next file.
+                if opts.fail_fast && hit_non_pass {
+                    break;
+                }
+            }
             Err(msg) => {
-                report.push_str(&format!("ERROR {}\n  {msg}\n", file.display()));
-                file_errors += 1;
+                file_error_msgs.push((file.display().to_string(), msg));
+                if opts.fail_fast {
+                    break;
+                }
             }
         }
     }
 
-    // Per-test lines, then a summary.
-    for o in &outcomes {
-        match &o.verdict {
-            Verdict::Pass => report.push_str(&format!("PASS {} ({})\n", o.name, o.file)),
-            Verdict::Fail { line, msg } => {
-                report.push_str(&format!("FAIL {} ({}:{}) {}\n", o.name, o.file, line, msg))
-            }
-            Verdict::Error { line, msg } => {
-                report.push_str(&format!("ERROR {} ({}:{}) {}\n", o.name, o.file, line, msg))
-            }
-            Verdict::OverMemory { msg } => {
-                report.push_str(&format!("OVER-MEMORY {} ({}) {}\n", o.name, o.file, msg))
-            }
-            Verdict::TimedOut { msg } => {
-                report.push_str(&format!("TIMED-OUT {} ({}) {}\n", o.name, o.file, msg))
-            }
-        }
-    }
+    let file_errors = file_error_msgs.len();
     let total = outcomes.len();
     let failed = outcomes
         .iter()
@@ -179,39 +290,197 @@ pub fn run_tests_timed(
         .filter(|o| matches!(o.verdict, Verdict::TimedOut { .. }))
         .count();
     let passed_count = total - failed - errored - over_memory - timed_out;
+    // A filter that matches nothing is NOT a silent "0 tests" — call it out and fail deterministically
+    // (mirrors the zero-discovered rule). Only when the filter is what emptied the run.
+    let filter_no_match = opts.filter.is_some() && total == 0 && file_errors == 0;
+    let no_tests_discovered = opts.filter.is_none() && total == 0 && file_errors == 0;
+    let passed = failed == 0
+        && errored == 0
+        && over_memory == 0
+        && timed_out == 0
+        && file_errors == 0
+        && !no_tests_discovered
+        && !filter_no_match;
+
+    // --- JSON machine output: emit ONLY the document, no human lines (like `check --errors=json`). ---
+    if opts.json {
+        let text = render_json(
+            &outcomes,
+            &file_error_msgs,
+            total,
+            passed_count,
+            failed,
+            errored,
+            over_memory,
+            timed_out,
+            filtered_out,
+        );
+        return TestReport { text, passed };
+    }
+
+    let mut report = String::new();
+    // File-level errors first (unchanged position + shape).
+    for (file, msg) in &file_error_msgs {
+        report.push_str(&format!("ERROR {file}\n  {msg}\n"));
+    }
+
+    match opts.verbosity {
+        Verbosity::Quiet => {
+            // One char per test, then the summary line. No per-test lines.
+            let mut dots = String::new();
+            for o in &outcomes {
+                let (ch, code) = match &o.verdict {
+                    Verdict::Pass => ('.', 32),
+                    Verdict::Fail { .. } => ('F', 31),
+                    Verdict::Error { .. } => ('E', 31),
+                    Verdict::OverMemory { .. } => ('M', 33),
+                    Verdict::TimedOut { .. } => ('T', 33),
+                };
+                dots.push_str(&paint(&ch.to_string(), code, opts.color));
+            }
+            if !dots.is_empty() {
+                report.push_str(&dots);
+                report.push('\n');
+            }
+        }
+        Verbosity::Normal | Verbosity::Verbose => {
+            for o in &outcomes {
+                render_line(&mut report, o, &opts);
+            }
+        }
+    }
+
     report.push_str(&format!(
         "\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored"
     ));
-    // Only surface the over-memory clause when there is one, so the common (cap-off) output stays
-    // byte-identical to the pre-cap runner.
+    // Off-by-default clauses: each stays absent unless its feature fired, so the common output is
+    // byte-identical to the pre-wave runner.
     if over_memory > 0 {
         report.push_str(&format!(", {over_memory} over-memory"));
     }
-    // Same for the timeout clause — off-by-default so a timeout-OFF run is byte-identical.
     if timed_out > 0 {
         report.push_str(&format!(", {timed_out} timed out"));
     }
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
     }
-    // Zero discovered tests with no file errors is a failure, mirroring the "no *_test.chz files
-    // found" exit code above: an accidentally-empty test file (every `test` keyword forgotten) must
-    // not pass silently and read as a green run to a CI gate.
-    let no_tests_discovered = total == 0 && file_errors == 0;
+    if opts.filter.is_some() {
+        report.push_str(&format!(" ({filtered_out} filtered out)"));
+    }
     if no_tests_discovered {
         report.push_str(" — no tests discovered");
+    }
+    if filter_no_match {
+        // Safe: filter is Some here.
+        let pat = opts.filter.as_deref().unwrap_or("");
+        report.push_str(&format!(" — no tests matched '{pat}'"));
+    }
+    // Total timing is `-v`-only (non-deterministic → never in default/quiet, which the gate compares).
+    if opts.verbosity == Verbosity::Verbose {
+        let total_ms: u128 = outcomes.iter().map(|o| o.duration.as_millis()).sum();
+        report.push_str(&format!(" in {total_ms}ms"));
     }
     report.push('\n');
 
     TestReport {
         text: report,
-        passed: failed == 0
-            && errored == 0
-            && over_memory == 0
-            && timed_out == 0
-            && file_errors == 0
-            && !no_tests_discovered,
+        passed,
     }
+}
+
+/// Render one per-test line into `report` for `Normal`/`Verbose`. Colorizes the tag, appends `-v`
+/// timing, and (when `--show-output`) the indented captured stdout under a non-pass line.
+fn render_line(report: &mut String, o: &Outcome, opts: &RunOpts) {
+    let c = opts.color;
+    match &o.verdict {
+        Verdict::Pass => {
+            report.push_str(&format!("{} {} ({})", paint("PASS", 32, c), o.name, o.file))
+        }
+        Verdict::Fail { line, msg } => report.push_str(&format!(
+            "{} {} ({}:{}) {}",
+            paint("FAIL", 31, c),
+            o.name,
+            o.file,
+            line,
+            msg
+        )),
+        Verdict::Error { line, msg } => report.push_str(&format!(
+            "{} {} ({}:{}) {}",
+            paint("ERROR", 31, c),
+            o.name,
+            o.file,
+            line,
+            msg
+        )),
+        Verdict::OverMemory { msg } => report.push_str(&format!(
+            "{} {} ({}) {}",
+            paint("OVER-MEMORY", 33, c),
+            o.name,
+            o.file,
+            msg
+        )),
+        Verdict::TimedOut { msg } => report.push_str(&format!(
+            "{} {} ({}) {}",
+            paint("TIMED-OUT", 33, c),
+            o.name,
+            o.file,
+            msg
+        )),
+    }
+    if opts.verbosity == Verbosity::Verbose {
+        report.push_str(&format!(" ({}ms)", o.duration.as_millis()));
+    }
+    report.push('\n');
+    // `--show-output`: a failing test's captured stdout, indented, for debugging (pytest show-on-fail).
+    if opts.show_output && !matches!(o.verdict, Verdict::Pass) && !o.captured_out.is_empty() {
+        for line in o.captured_out.lines() {
+            report.push_str(&format!("    {line}\n"));
+        }
+    }
+}
+
+/// Build the `--errors=json` document: `{"tests":[{name,file,line?,status,duration_ms},…],"totals":{…}}`.
+/// Diverges from `check`/`run`'s bare array (it needs `totals`), but reuses the flag name + the
+/// suppress-all-human-output behavior for CLI consistency.
+#[allow(clippy::too_many_arguments)]
+fn render_json(
+    outcomes: &[Outcome],
+    file_error_msgs: &[(String, String)],
+    total: usize,
+    passed: usize,
+    failed: usize,
+    errored: usize,
+    over_memory: usize,
+    timed_out: usize,
+    filtered_out: usize,
+) -> String {
+    let mut s = String::from("{\"tests\":[");
+    for (i, o) in outcomes.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"name\":{},\"file\":{},",
+            json_string(&o.name),
+            json_string(&o.file)
+        ));
+        if let Some(line) = verdict_line(&o.verdict) {
+            s.push_str(&format!("\"line\":{line},"));
+        }
+        s.push_str(&format!(
+            "\"status\":{},\"duration_ms\":{}}}",
+            json_string(verdict_status(&o.verdict)),
+            o.duration.as_millis()
+        ));
+    }
+    s.push_str("],\"totals\":{");
+    s.push_str(&format!(
+        "\"total\":{total},\"passed\":{passed},\"failed\":{failed},\"errored\":{errored},\
+         \"over_memory\":{over_memory},\"timed_out\":{timed_out},\"filtered_out\":{filtered_out},\
+         \"file_errors\":{}}}}}\n",
+        file_error_msgs.len()
+    ));
+    s
 }
 
 /// Compile + run one `*_test.chz` file on the selected engine (`parallel`: `false` = cooperative
@@ -222,12 +491,8 @@ pub fn run_tests_timed(
 /// `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000 before faulting recoverably, which overflows the
 /// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
 /// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
-fn run_file(
-    file: &Path,
-    parallel: bool,
-    max_heap: usize,
-    timeout_ms: u64,
-) -> Result<Vec<Outcome>, String> {
+/// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
+fn run_file(file: &Path, parallel: bool, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
@@ -240,8 +505,9 @@ fn run_file(
     let program = crate::compiler::compile_graph(&graph).map_err(|e| e.message)?;
     let program: Arc<Program> = Arc::new(program);
     let file_label = file.display().to_string();
+    let opts = opts.clone();
 
-    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, max_heap, timeout_ms))
+    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, &opts))
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
@@ -252,17 +518,16 @@ fn invoke_all(
     program: Arc<Program>,
     file_label: String,
     parallel: bool,
-    max_heap: usize,
-    timeout_ms: u64,
-) -> Result<Vec<Outcome>, String> {
+    opts: &RunOpts,
+) -> Result<(Vec<Outcome>, usize), String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
     vm.set_parallel(parallel);
     // `--max-heap` cap (0 = off). Per-test reset of the over-memory latch is VM-side (in each invoke
     // entry point), so `run_suite` needs no cap threading — the VM is already configured.
-    vm.set_max_heap(max_heap);
+    vm.set_max_heap(opts.max_heap);
     // `--timeout` cap (0 = off). Like the heap cap it is VM config read at each invoke entry (which
     // arms a fresh deadline), so `run_suite` needs no threading — the VM is already configured.
-    vm.set_timeout(timeout_ms);
+    vm.set_timeout(opts.timeout_ms);
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
         return Err(format!(
@@ -272,51 +537,108 @@ fn invoke_all(
     }
 
     let mut outcomes: Vec<Outcome> = Vec::new();
+    let mut filtered_out = 0usize;
 
     // Free tests, in declaration order.
     for (name, proto) in program.tests.iter() {
+        if filtered(opts, name) {
+            filtered_out += 1;
+            continue;
+        }
+        let start = Instant::now();
         let verdict = match vm.invoke_test(*proto) {
             Ok(()) => Verdict::Pass,
             Err(e) => verdict_from_fault(e),
         };
-        let _ = vm.take_out(); // discard the test's stdout (kept reusable)
+        let duration = start.elapsed();
+        let out = vm.take_out(); // stdout: discarded unless `--show-output` (kept reusable either way)
+        let non_pass = !matches!(verdict, Verdict::Pass);
         outcomes.push(Outcome {
             name: name.clone(),
             file: file_label.clone(),
             verdict,
+            duration,
+            captured_out: if opts.show_output { out } else { String::new() },
         });
+        if opts.fail_fast && non_pass {
+            vm.reap_after_tests();
+            return Ok((outcomes, filtered_out));
+        }
     }
 
     // Suites: construct once, run lifecycle hooks around each test method.
     for suite in program.suites.iter() {
-        run_suite(&mut vm, suite, &file_label, &mut outcomes);
+        run_suite(
+            &mut vm,
+            suite,
+            &file_label,
+            &mut outcomes,
+            opts,
+            &mut filtered_out,
+        );
+        // `--fail-fast`: stop launching further suites once one produced a non-pass.
+        if opts.fail_fast && outcomes.iter().any(|o| !matches!(o.verdict, Verdict::Pass)) {
+            break;
+        }
     }
 
     vm.reap_after_tests();
-    Ok(outcomes)
+    Ok((outcomes, filtered_out))
+}
+
+/// True if `--filter` is active and the displayed test `name` does not contain the substring.
+fn filtered(opts: &RunOpts, name: &str) -> bool {
+    opts.filter
+        .as_deref()
+        .is_some_and(|pat| !name.contains(pat))
 }
 
 /// Drive one suite: construct the instance once, then for each test method run
 /// `before_each?` → method → `after_each?` (always, even on failure, like `defer`), with
 /// `before_all?`/`after_all?` framing the whole suite.
-fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mut Vec<Outcome>) {
+fn run_suite(
+    vm: &mut Vm,
+    suite: &crate::vm::op::SuiteInfo,
+    file: &str,
+    out: &mut Vec<Outcome>,
+    opts: &RunOpts,
+    filtered_out: &mut usize,
+) {
     let hook = |name: &str| suite.hooks.get(name).copied();
+    // A whole-suite setup failure (bad ctor / before_all) is reported as one ERROR per test method —
+    // but a `--filter`ed-out method is skipped (and counted), same as if it had run.
+    let push_all_error =
+        |out: &mut Vec<Outcome>, filtered_out: &mut usize, line: usize, msg: &str| {
+            for (tname, _) in suite.tests.iter() {
+                let name = format!("{}::{}", suite.name, tname);
+                if filtered(opts, &name) {
+                    *filtered_out += 1;
+                    continue;
+                }
+                out.push(Outcome {
+                    name,
+                    file: file.to_string(),
+                    verdict: Verdict::Error {
+                        line,
+                        msg: msg.to_string(),
+                    },
+                    duration: Duration::ZERO,
+                    captured_out: String::new(),
+                });
+            }
+        };
 
     // Construct the instance. A failure here fails every test in the suite (nothing can run). A
     // crashed constructor is setup failure → ERROR-class (the test never ran), whatever the fault.
     let instance = match vm.build_suite_instance(suite.new_thunk) {
         Ok(v) => v,
         Err(e) => {
-            for (tname, _) in suite.tests.iter() {
-                out.push(Outcome {
-                    name: format!("{}::{}", suite.name, tname),
-                    file: file.to_string(),
-                    verdict: Verdict::Error {
-                        line: e.span.line,
-                        msg: format!("suite construction failed: {}", e.message),
-                    },
-                });
-            }
+            push_all_error(
+                out,
+                filtered_out,
+                e.span.line,
+                &format!("suite construction failed: {}", e.message),
+            );
             return;
         }
     };
@@ -326,16 +648,12 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
     if let Some(p) = hook("before_all")
         && let Err(e) = vm.invoke_suite_method(p, instance)
     {
-        for (tname, _) in suite.tests.iter() {
-            out.push(Outcome {
-                name: format!("{}::{}", suite.name, tname),
-                file: file.to_string(),
-                verdict: Verdict::Error {
-                    line: e.span.line,
-                    msg: format!("before_all failed: {}", e.message),
-                },
-            });
-        }
+        push_all_error(
+            out,
+            filtered_out,
+            e.span.line,
+            &format!("before_all failed: {}", e.message),
+        );
         if let Some(ap) = hook("after_all") {
             let _ = vm.invoke_suite_method(ap, instance);
         }
@@ -344,6 +662,12 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
     }
 
     for (tname, proto) in suite.tests.iter() {
+        let name = format!("{}::{}", suite.name, tname);
+        if filtered(opts, &name) {
+            *filtered_out += 1;
+            continue;
+        }
+        let start = Instant::now();
         let mut verdict = Verdict::Pass;
         // before_each? — a failure is the test's failure (the method is skipped); after_each still
         // runs. A hook crash is setup failure → ERROR-class.
@@ -376,12 +700,24 @@ fn run_suite(vm: &mut Vm, suite: &crate::vm::op::SuiteInfo, file: &str, out: &mu
                 };
             }
         }
-        let _ = vm.take_out();
+        let duration = start.elapsed();
+        let captured = vm.take_out();
+        let non_pass = !matches!(verdict, Verdict::Pass);
         out.push(Outcome {
-            name: format!("{}::{}", suite.name, tname),
+            name,
             file: file.to_string(),
             verdict,
+            duration,
+            captured_out: if opts.show_output {
+                captured
+            } else {
+                String::new()
+            },
         });
+        // `--fail-fast`: skip the remaining methods of this suite (after_all still runs below).
+        if opts.fail_fast && non_pass {
+            break;
+        }
     }
 
     // after_all? — runs after the last test method.
@@ -1100,6 +1436,226 @@ struct Suite:
                 report.text
             );
         }
+    }
+
+    // ---- CLI ergonomics wave: filter / fail-fast / show-output / json / verbosity / color ----
+
+    /// A 3-free-test file used by several ergonomics tests: `alpha` passes, `beta` fails (assert
+    /// false), `gamma` passes — in declaration order.
+    fn three_test_file(d: &TmpDir) -> PathBuf {
+        d.write(
+            "abc_test.chz",
+            "test fn alpha():\n    assert true\ntest fn beta():\n    assert false, \"boom\"\ntest fn gamma():\n    assert true\n",
+        )
+    }
+
+    fn opts_with(f: impl FnOnce(&mut RunOpts)) -> RunOpts {
+        let mut o = RunOpts::default();
+        f(&mut o);
+        o
+    }
+
+    #[test]
+    fn filter_runs_only_matching_and_reports_count() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "abg_test.chz",
+            "test fn alpha():\n    assert true\ntest fn beta():\n    assert true\ntest fn gamma():\n    assert true\n",
+        );
+        let report = run_tests_opts(&f, false, opts_with(|o| o.filter = Some("alpha".into())));
+        assert!(report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("PASS alpha"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(!report.text.contains("beta"), "report:\n{}", report.text);
+        assert!(!report.text.contains("gamma"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("(2 filtered out)"),
+            "summary must note the filtered count; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("1 test(s): 1 passed"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn filter_zero_match_is_clear_failure() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "abg2_test.chz",
+            "test fn alpha():\n    assert true\ntest fn beta():\n    assert true\n",
+        );
+        let report = run_tests_opts(&f, false, opts_with(|o| o.filter = Some("zzz".into())));
+        assert!(
+            !report.passed,
+            "a zero-match filter must fail; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("no tests matched 'zzz'"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn fail_fast_stops_at_first_failure() {
+        let d = TmpDir::new();
+        let f = three_test_file(&d);
+        let report = run_tests_opts(&f, false, opts_with(|o| o.fail_fast = true));
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("PASS alpha"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("FAIL beta"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("gamma"),
+            "fail-fast must skip the test after the first failure; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn show_output_surfaces_failing_stdout() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "print_test.chz",
+            "test fn boom():\n    print(\"hello-debug\")\n    assert false\n",
+        );
+        let shown = run_tests_opts(&f, false, opts_with(|o| o.show_output = true));
+        assert!(
+            shown.text.contains("hello-debug"),
+            "--show-output must surface a failing test's stdout; report:\n{}",
+            shown.text
+        );
+        // Control: default discards it.
+        let hidden = run_tests(&f, false);
+        assert!(
+            !hidden.text.contains("hello-debug"),
+            "default must discard stdout; report:\n{}",
+            hidden.text
+        );
+    }
+
+    #[test]
+    fn show_output_not_shown_for_passing_test() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "printok_test.chz",
+            "test fn ok():\n    print(\"secret\")\n    assert true\n",
+        );
+        let report = run_tests_opts(&f, false, opts_with(|o| o.show_output = true));
+        assert!(
+            !report.text.contains("secret"),
+            "a PASSing test's stdout stays discarded (show-on-failure); report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn json_emits_parseable_per_test_and_totals() {
+        let d = TmpDir::new();
+        let f = three_test_file(&d);
+        let report = run_tests_opts(&f, false, opts_with(|o| o.json = true));
+        let t = &report.text;
+        assert!(
+            t.trim_start().starts_with('{'),
+            "json must be an object; got:\n{t}"
+        );
+        assert!(t.contains("\"status\":\"pass\""), "got:\n{t}");
+        assert!(t.contains("\"status\":\"fail\""), "got:\n{t}");
+        assert!(t.contains("\"duration_ms\":"), "got:\n{t}");
+        assert!(t.contains("\"totals\""), "got:\n{t}");
+        assert!(
+            t.contains("\"failed\":1"),
+            "totals must count the fail; got:\n{t}"
+        );
+        assert!(t.contains("\"passed\":2"), "got:\n{t}");
+        // No human PASS/FAIL lines when json (like `check --errors=json`).
+        assert!(
+            !t.contains("PASS "),
+            "json must suppress human lines; got:\n{t}"
+        );
+        assert!(!t.contains("FAIL "), "got:\n{t}");
+        // A fail entry carries a line; count the status occurrences by hand.
+        let pass_hits = t.matches("\"status\":\"pass\"").count();
+        assert_eq!(pass_hits, 2, "got:\n{t}");
+        assert!(
+            t.contains("\"line\":"),
+            "a fail entry must carry its line; got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn verbose_shows_timing_default_does_not() {
+        let d = TmpDir::new();
+        let f = d.write("v_test.chz", "test fn quick():\n    assert true\n");
+        let verbose = run_tests_opts(&f, false, opts_with(|o| o.verbosity = Verbosity::Verbose));
+        assert!(
+            verbose.text.contains("ms"),
+            "-v output must carry timing; report:\n{}",
+            verbose.text
+        );
+        let default = run_tests(&f, false);
+        assert!(
+            !default.text.contains("ms"),
+            "default output must NOT carry timing (byte-identical invariant); report:\n{}",
+            default.text
+        );
+    }
+
+    #[test]
+    fn quiet_renders_dots() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "q_test.chz",
+            "test fn a():\n    assert true\ntest fn b():\n    assert false\n",
+        );
+        let report = run_tests_opts(&f, false, opts_with(|o| o.verbosity = Verbosity::Quiet));
+        assert!(
+            report.text.contains(".F") || report.text.contains(".\nF"),
+            "quiet must render one char per test; report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("PASS a"),
+            "quiet has no per-test lines; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("2 test(s):"),
+            "quiet still prints the summary; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn color_absent_under_harness_present_when_forced() {
+        let d = TmpDir::new();
+        let f = d.write("col_test.chz", "test fn a():\n    assert true\n");
+        let plain = run_tests(&f, false);
+        assert!(
+            !plain.text.contains("\x1b["),
+            "default (color off) must emit no ANSI so the captured harness is stable; report:\n{:?}",
+            plain.text
+        );
+        let colored = run_tests_opts(&f, false, opts_with(|o| o.color = true));
+        assert!(
+            colored.text.contains("\x1b[32m"),
+            "color:true must green the PASS tag; report:\n{:?}",
+            colored.text
+        );
     }
 
     #[test]
