@@ -5685,6 +5685,22 @@ conformance` green.
   serial==M:N parity (full `cargo test` incl. `chz_suite_passes_both_engines`); guard-pinned at 64 B
   (`heap.rs` + `chzstr.rs`). RSS delta measured post-merge.
 
+- **Memory layout #5 — inline small struct `fields`.** `Obj::Struct.fields` was a `Vec<Value>` — a
+  SEPARATE heap malloc per struct instance (2M structs = 2M small buffers, ~61MB RSS on
+  `benches/chz/many_struct.chz`). Replaced with a hand-rolled `Fields` enum in `heap.rs`:
+  `Inline { len: u8, vals: [Value; 3] }` folds ≤3 fields (the vast majority) into the 64B `Obj` slot —
+  **zero second malloc** — while `>3` spill to `Spill(Box<[Value]>)` (exact-length, no `Vec` capacity
+  slack). Fields are FIXED at construction (positional hidden-class layout; no `.push/insert/resize`
+  growth sites), so an inline-or-spill repr with no growth is safe. No new dep (no `smallvec`); `Obj`
+  stays 64B (`size_of::<Fields>() == 32`, guard-pinned `fields_inline_width_fits`). `Fields` exposes a
+  `Vec`-compatible surface (`from_vec`/`len`/`as_slice`/`as_mut_slice`/`iter`/`get`/`get_mut`/`heap_bytes`
+  + `Index`/`IndexMut`) so the ~16 `Obj::Struct` touch sites changed minimally; the field IC's
+  `get`/`get_mut` hot paths and in-place `s.a = s.b` writes are byte-identical (write-through
+  `as_mut_slice`). GC `children()` still traces every field (unused `Inline` nil slots yield no gcref);
+  `live_bytes` counts `Inline`→0, `Spill`→`len*size_of::<Value>()` via `Fields::heap_bytes`. Mechanical
+  VM-only change (checker never names `Obj`); behavior-preserving + serial==M:N parity (full `cargo test`
+  incl. `chz_suite_passes_both_engines` + `conformance`). RSS delta measured post-merge.
+
 **Remaining / blocked levers:**
 
 - **NaN-boxing `Value` is BLOCKED by full 64-bit ints, not "next."** `Value::Int` is a full `i64`; an

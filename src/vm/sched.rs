@@ -2384,7 +2384,7 @@ impl Vm {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let vals: Vec<Value> = fields.clone();
+                        let vals: Vec<Value> = fields.as_slice().to_vec();
                         let mut out = Vec::with_capacity(vals.len());
                         for (i, val) in vals.iter().enumerate() {
                             let k = names
@@ -2771,7 +2771,7 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Struct {
                     name,
                     tid,
-                    fields: Vec::new(),
+                    fields: Fields::from_vec(Vec::new()),
                 });
                 rebuild.insert(id, h);
                 let cloned: Vec<Value> = fields
@@ -2779,7 +2779,7 @@ impl Vm {
                     .map(|(_, val)| self.from_wire_memo(val, rebuild))
                     .collect();
                 match self.heap.get_mut(h) {
-                    Obj::Struct { fields, .. } => *fields = cloned,
+                    Obj::Struct { fields, .. } => *fields = Fields::from_vec(cloned),
                     _ => unreachable!("placeholder was alloc'd as Obj::Struct"),
                 }
                 Value::obj(h)
@@ -3877,12 +3877,12 @@ impl Vm {
             SnapValue::Struct { name, fields } => {
                 // Positional layout: the snap fields are in declaration order (to_snap emits them
                 // so), so rebuild positionally — the carried names are discarded.
-                let f = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
+                let f: Vec<Value> = fields.iter().map(|(_, fv)| self.replay_snap(fv)).collect();
                 let tid = self.struct_tid(name);
                 Value::obj(self.heap.alloc(Obj::Struct {
                     name: name.clone(),
                     tid,
-                    fields: f,
+                    fields: Fields::from_vec(f),
                 }))
             }
             SnapValue::Enum {

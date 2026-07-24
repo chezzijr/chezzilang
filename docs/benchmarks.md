@@ -39,16 +39,21 @@ headroom are untouched by #1.)
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
 (2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
-(after boxing `Module`, `size_of::<Obj>()` is **64B** — capped by `MapData`/`SetData`, `heap.rs`)
-PLUS a separate malloc for its `fields: Vec<Value>` buffer. So 2M structs = the `Slot` array + 2M
-field buffers + the outer 16MB list. `many_list` is only 1.6× because Go also heap-allocates each
-inner slice — the gap shrinks wherever Go can't inline either.
+(after boxing `Module`, `size_of::<Obj>()` is **64B** — capped by `MapData`/`SetData`, `heap.rs`).
+The `fields` buffer's separate malloc is now GONE for ≤3-field structs (lever "inline small `fields`":
+`Fields::Inline` folds them into the 64B `Obj` slot); only `>3`-field structs still spill to a boxed
+slice. So 2M `P{x,y}` (2 fields) = the `Slot` array + the outer 16MB list, no per-struct field buffer.
+`many_list` is only 1.6× because Go also heap-allocates each inner slice — the gap shrinks wherever Go
+can't inline either.
 
 Levers, ranked for this gap:
 - **box `Module`** ✅ DONE (`0100153`) → `size_of::<Obj>()` 88→64B; measured −14%/−9%/−17% RSS on
   many_struct/map/list. Cheap; doesn't close the 4.2× (structural, not slot size).
-- **inline small `fields`** (SmallVec / inline ≤2-3 Values in `Obj::Struct`) → kills the 2M
-  per-struct second malloc. Halves alloc count on struct-heavy code.
+- **inline small `fields`** ✅ DONE → `Obj::Struct.fields` is a hand-rolled `Fields` enum
+  (`Inline { len: u8, vals: [Value; 3] }` folds ≤3 fields into the 64B `Obj` slot, `Spill(Box<[Value]>)`
+  for `>3`), killing the per-struct second malloc for the ≤3-field majority. No `smallvec` dep; `Obj`
+  stays 64B (`size_of::<Fields>() == 32`). Expected: ~61MB off `many_struct` RSS (2M `P{x,y}` = 2 fields
+  → all `Inline`). Re-measure `many_struct`/`many_map` to record the actual close.
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
   change to the every-object-is-a-`GcRef` aliasing model. Its own milestone. See `future.md §4`.
 

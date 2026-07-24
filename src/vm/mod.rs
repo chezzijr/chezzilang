@@ -20,7 +20,7 @@ use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecutorCore, ListenerCore, ReaderCore,
     RwSharedCore, SharedCore, SocketCore, WriterCore,
 };
-use heap::{Heap, MapData, ModuleData, Obj, SetData};
+use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3492,7 +3492,7 @@ impl crate::native::Host for VmHost<'_> {
             return Err(crate::native::HostError::missing_arg(i));
         };
         let struct_fields = match v.as_obj().map(|h| self.vm.heap.get(h)) {
-            Some(Obj::Struct { fields, .. }) => fields.clone(),
+            Some(Obj::Struct { fields, .. }) => fields.as_slice().to_vec(),
             _ => {
                 return Err(crate::native::HostError::arg_type(
                     i,

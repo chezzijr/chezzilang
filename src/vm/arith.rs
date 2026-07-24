@@ -1336,7 +1336,7 @@ impl Vm {
             return false; // already fully cleared (shared DAG node)
         }
         let children: Vec<Value> = match self.heap.get(h) {
-            Obj::Struct { fields, .. } => fields.clone(),
+            Obj::Struct { fields, .. } => fields.as_slice().to_vec(),
             Obj::Enum { payload, .. } => payload.clone(),
             Obj::NewType { inner, .. } => vec![*inner],
             Obj::List(items) | Obj::Tuple(items) => items.clone(),
@@ -1427,7 +1427,7 @@ impl Vm {
                     .map(|&f| self.snapshot_value(f, visited, depth + 1))
                     .collect();
                 if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
-                    *fields = copied;
+                    *fields = Fields::from_vec(copied);
                 }
                 Value::obj(nh)
             }
@@ -1827,8 +1827,8 @@ impl Vm {
                         if na != nb || fa.len() != fb.len() {
                             return Ok(false);
                         }
-                        let fa: Vec<Value> = fa.clone();
-                        let fb: Vec<Value> = fb.clone();
+                        let fa: Vec<Value> = fa.as_slice().to_vec();
+                        let fb: Vec<Value> = fb.as_slice().to_vec();
                         for (va, vb) in fa.iter().zip(&fb) {
                             if !self.values_equal_guarded(*va, *vb, depth + 1, span)? {
                                 return Ok(false);

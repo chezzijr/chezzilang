@@ -156,6 +156,105 @@ pub struct ModuleData {
     pub index: HashMap<Box<str>, u32>,
 }
 
+/// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to a boxed slice.
+/// Fields are FIXED at construction (positional hidden-class layout; no `.push/insert/resize`
+/// growth sites), so this never needs `Vec`'s capacity slot. `Value` is 8B → `[Value; 3]` is 24B,
+/// and the vast majority of structs (≤3 fields) fold their fields into the `Obj` slot itself — zero
+/// second malloc. `>3` fields spill to a boxed slice. Keeps `Obj` at the 64B cap (M19 lever #1).
+#[derive(Debug, Clone)]
+pub enum Fields {
+    /// ≤3 fields folded inline; `vals[len..]` are unused padding holding `Value::nil()`.
+    Inline { len: u8, vals: [Value; 3] },
+    /// >3 fields in a heap-allocated exact-length boxed slice (no spare capacity).
+    Spill(Box<[Value]>),
+}
+
+impl Fields {
+    /// Build from a positional field vec: ≤3 → `Inline`, else `Spill`.
+    #[inline]
+    pub fn from_vec(v: Vec<Value>) -> Self {
+        if v.len() <= 3 {
+            let len = v.len() as u8;
+            let mut vals = [Value::nil(); 3];
+            for (i, x) in v.into_iter().enumerate() {
+                vals[i] = x;
+            }
+            Fields::Inline { len, vals }
+        } else {
+            Fields::Spill(v.into_boxed_slice())
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Fields::Inline { len, .. } => *len as usize,
+            Fields::Spill(s) => s.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[Value] {
+        match self {
+            Fields::Inline { len, vals } => &vals[..*len as usize],
+            Fields::Spill(s) => s,
+        }
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [Value] {
+        match self {
+            Fields::Inline { len, vals } => &mut vals[..*len as usize],
+            Fields::Spill(s) => s,
+        }
+    }
+
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, Value> {
+        self.as_slice().iter()
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<&Value> {
+        self.as_slice().get(i)
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut Value> {
+        self.as_mut_slice().get_mut(i)
+    }
+
+    /// Owned-backing byte footprint for `live_bytes`: `Inline` folds into the `Obj` slot (0 extra
+    /// heap); `Spill` counts its boxed slice's `len * size_of::<Value>()`.
+    #[inline]
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Fields::Inline { .. } => 0,
+            Fields::Spill(s) => s.len() * std::mem::size_of::<Value>(),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for Fields {
+    type Output = Value;
+    #[inline]
+    fn index(&self, i: usize) -> &Value {
+        &self.as_slice()[i]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Fields {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut Value {
+        &mut self.as_mut_slice()[i]
+    }
+}
+
 /// A heap object — the reference half of the value space.
 #[derive(Debug, Clone)]
 pub enum Obj {
@@ -211,7 +310,7 @@ pub enum Obj {
     Struct {
         name: Box<str>,
         tid: u32,
-        fields: Vec<Value>,
+        fields: Fields,
     },
     /// An enum variant instance. M19 memory-layout lever #2 — identified by a dense numeric
     /// `variant_id` (`VariantDef::variant_id`), NOT by per-instance type/variant-name `Box<str>`s:
@@ -568,7 +667,7 @@ impl Heap {
                 Obj::ByteArray(b) => b.capacity(),
                 Obj::Iter { items, .. } => items.capacity() * std::mem::size_of::<Value>(),
                 Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
-                Obj::Struct { fields, .. } => fields.capacity() * std::mem::size_of::<Value>(),
+                Obj::Struct { fields, .. } => fields.heap_bytes(),
                 Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
                 Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
                 Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
@@ -618,6 +717,113 @@ mod iter_obj_tests {
     #[test]
     fn obj_iter_within_size_cap() {
         assert_eq!(std::mem::size_of::<Obj>(), 64);
+    }
+
+    /// M19 lever #1: inline struct fields. `Fields` must fit in ≤32B (`[Value;3]`=24B + len:u8 + the
+    /// discriminant, packed into alignment padding) so `Obj::Struct`'s payload (Box<str>16 + tid 4 +
+    /// Fields) stays within the 56B cap → `Obj` stays 64. If this fails, the inline width is too big;
+    /// STOP rather than widen past `[Value;3]`.
+    #[test]
+    fn fields_inline_width_fits() {
+        assert!(
+            std::mem::size_of::<Fields>() <= 32,
+            "Fields is {}B, must be <= 32B to keep Obj at 64",
+            std::mem::size_of::<Fields>()
+        );
+        assert_eq!(
+            std::mem::size_of::<Obj>(),
+            64,
+            "Fields must not push Obj past 64"
+        );
+    }
+
+    /// `Fields` round-trips a ≤3-field vec as `Inline` and a >3-field vec as `Spill`, preserving
+    /// `len`/`as_slice`; `get` bounds-checks; and a `get_mut`/`IndexMut` write lands in the LIVE
+    /// backing for BOTH variants (catches an aliased-temp-copy bug on the inline array or spill box).
+    #[test]
+    fn fields_inline_and_spill_roundtrip() {
+        // 2 fields → Inline
+        let mut inl = Fields::from_vec(vec![Value::int(10), Value::int(20)]);
+        assert!(matches!(inl, Fields::Inline { .. }));
+        assert_eq!(inl.len(), 2);
+        assert_eq!(inl.as_slice(), &[Value::int(10), Value::int(20)]);
+        assert_eq!(inl.get(1), Some(&Value::int(20)));
+        assert_eq!(inl.get(2), None);
+        *inl.get_mut(0).unwrap() = Value::int(99);
+        inl[1] = Value::int(88);
+        assert_eq!(inl.as_slice(), &[Value::int(99), Value::int(88)]);
+
+        // 4 fields → Spill
+        let mut sp = Fields::from_vec(vec![
+            Value::int(1),
+            Value::int(2),
+            Value::int(3),
+            Value::int(4),
+        ]);
+        assert!(matches!(sp, Fields::Spill(_)));
+        assert_eq!(sp.len(), 4);
+        assert_eq!(
+            sp.as_slice(),
+            &[Value::int(1), Value::int(2), Value::int(3), Value::int(4)]
+        );
+        assert_eq!(sp.get(3), Some(&Value::int(4)));
+        assert_eq!(sp.get(4), None);
+        *sp.get_mut(3).unwrap() = Value::int(77);
+        sp[0] = Value::int(66);
+        assert_eq!(
+            sp.as_slice(),
+            &[Value::int(66), Value::int(2), Value::int(3), Value::int(77)]
+        );
+    }
+
+    /// A `Spill` struct (>3 fields) holding a heap ref must trace that ref in `children()` and count
+    /// its boxed backing in `live_bytes`; an `Inline` struct (≤3 fields) adds 0 extra heap beyond the
+    /// `Obj` slot. Mirrors `live_bytes_counts_list_backing`.
+    #[test]
+    fn struct_gc_and_live_bytes() {
+        let mut h = Heap::new();
+        let elem = h.alloc(Obj::Str("kept".into()));
+        let before = h.live_bytes();
+        // 4-field Spill struct holding the heap Str among its fields.
+        let sp = h.alloc(Obj::Struct {
+            name: "S".into(),
+            tid: crate::vm::op::TID_NONE,
+            fields: Fields::from_vec(vec![
+                Value::int(1),
+                Value::obj(elem),
+                Value::int(3),
+                Value::int(4),
+            ]),
+        });
+        assert!(
+            h.children(sp).contains(&elem),
+            "Spill struct must trace its heap-ref field"
+        );
+        let after = h.live_bytes();
+        assert!(
+            after >= before + std::mem::size_of::<Obj>() + 4 * std::mem::size_of::<Value>(),
+            "Spill backing must register in live_bytes"
+        );
+        // trace survives a mark/sweep
+        h.mark(sp);
+        for c in h.children(sp) {
+            h.mark(c);
+        }
+        h.sweep();
+        assert!(matches!(h.get(elem), Obj::Str(s) if &**s == "kept"));
+
+        // Inline struct (2 fields) adds only the Obj slot — 0 extra heap.
+        let base = h.live_bytes();
+        let _inl = h.alloc(Obj::Struct {
+            name: "I".into(),
+            tid: crate::vm::op::TID_NONE,
+            fields: Fields::from_vec(vec![Value::int(1), Value::int(2)]),
+        });
+        assert_eq!(
+            h.live_bytes(),
+            base + std::mem::size_of::<Obj>(),
+            "Inline struct must add exactly one Obj slot, 0 extra heap"
+        );
     }
 
     /// A cursor is NON-LEAF: `children()` must yield its snapshot's heap refs so a not-yet-consumed

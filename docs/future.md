@@ -570,8 +570,8 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 **Compact aggregate representation — drop per-instance redundancy (the real layout lever):**
 
 1. ✅ **Shared per-type struct layout (hidden-class / `__slots__`) — DONE (2026-06-16).**
-   `Obj::Struct { name: Box<str>, tid, fields: Vec<Value> }` (`heap.rs:162`) now stores fields
-   **positionally** (a flat `Vec<Value>`, declaration-order offsets) — no per-instance field-name
+   `Obj::Struct { name: Box<str>, tid, fields: Fields }` (`heap.rs`; `Fields` was a flat `Vec<Value>`
+   until lever 3b inlined it) now stores fields **positionally** (declaration-order offsets) — no per-instance field-name
    strings. Names live only in `StructDef { fields: Vec<String>, tid }` (`op.rs:378`), resolved on the
    cold path (Display/stringify/probe-miss/wire/snap) by `name`→`StructDef`. Killed the N per-field
    `Box<str>` allocs/instance + the `==`-name-clone (`mod.rs` struct-eq is now a by-position value
@@ -607,6 +607,18 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
    `CapSrc::Captured(parent_slot)`. **−45% (1.83×)** on a closure construct+capture-read micro
    (`benches/chz/closure.chz`), suite-neutral; `Obj::Closure` shrank 88→64 B (Module still caps `Obj`
    at 88 B). Hands the JIT a constant capture offset. See `docs/benchmarks.md`.
+3b. **✅ DONE — Inline small struct `fields` (no per-struct second malloc).** Was `Obj::Struct {
+   fields: Vec<Value> }` — a SEPARATE heap malloc per instance (2M structs = 2M small buffers, ~61MB
+   RSS on `benches/chz/many_struct.chz`). Now `fields: Fields`, a hand-rolled enum in `heap.rs`:
+   `Inline { len: u8, vals: [Value; 3] }` folds ≤3 fields (the vast majority) into the 64B `Obj` slot —
+   **zero second malloc** — while `>3` spill to `Spill(Box<[Value]>)` (exact-length, no `Vec` capacity
+   slack). Fields are FIXED at construction (positional hidden-class layout, item 1; no growth sites), so
+   inline-or-spill with no capacity is safe. No new dep (no `smallvec`); `Obj` stays 64B
+   (`size_of::<Fields>() == 32`, guard-pinned). `Fields` gives a `Vec`-compatible surface
+   (`from_vec`/`len`/`as_slice`/`as_mut_slice`/`iter`/`get`/`get_mut`/`heap_bytes` + `Index`/`IndexMut`)
+   so the ~16 touch sites + the field-IC hot paths + in-place `s.a = s.b` writes stay byte-identical.
+   Mechanical VM-only (checker never names `Obj`); GC `children()` traces every field, `live_bytes`
+   counts `Spill` backing only. RSS delta measured post-merge. See `docs/benchmarks.md`.
 
 **Heap-slot layout (GC-side; principled, low priority — GC moves no bench):**
 

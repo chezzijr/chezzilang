@@ -490,7 +490,7 @@ impl Vm {
                 Value::obj(self.heap.alloc(Obj::Struct {
                     name: name.into_boxed_str(),
                     tid,
-                    fields: fs,
+                    fields: Fields::from_vec(fs),
                 }))
             }
             N::Map(entries) => {
@@ -732,7 +732,7 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Struct {
                     name: key.clone().into_boxed_str(),
                     tid,
-                    fields: field_vals,
+                    fields: Fields::from_vec(field_vals),
                 });
                 Ok(Value::obj(h))
             }
