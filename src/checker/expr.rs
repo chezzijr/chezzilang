@@ -2726,6 +2726,76 @@ impl Checker {
                 // hover (inside the helper) shows the declared `fn(fn(T) -> ?) -> ?` shape, the sig
                 // of record.
                 let elem = (**elem).clone();
+                // Zero-copy READ-view methods on `RwShared[List[E]]` — `len`/`at`/`slice`/`for_each`/
+                // `fold`. They walk the stored heap-independent `WireValue::List` under the read guard
+                // and `from_wire` ONE element at a time (O(1) memory), so a worker can scan/reduce a
+                // shared large list without materializing the whole inner (what `get`/`read` do). E is
+                // NOT nameable in `RwShared[T]`'s harvested `std/concurrency.chz` surface, so these sigs
+                // are ARM-ONLY (hand-built here with E resolved from `T = List[E]`), gated to a list
+                // element: a non-list `T` (`RwShared[int]`) falls to a clean "no method" reject (no
+                // check-OK-then-run-fault). NOTE: the read guard is HELD across the `for_each`/`fold`
+                // closure (that is what makes it zero-copy), so a closure that WRITES the SAME box
+                // deadlocks — the documented same-box reentrancy edge, exactly like `read`/`write`/
+                // `update` (a DIFFERENT box, e.g. an `AtomicInt` accumulator, is fine).
+                if matches!(method, "len" | "at" | "slice" | "for_each" | "fold") {
+                    let Ty::List(e) = &elem else {
+                        self.infer_all(args);
+                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        return Ty::Unknown;
+                    };
+                    let e = (**e).clone();
+                    match method {
+                        "len" => {
+                            self.check_args_range("len", &[], 0, args, span);
+                            return Ty::Int;
+                        }
+                        "at" => {
+                            self.check_args_range("at", &[Ty::Int], 1, args, span);
+                            return e;
+                        }
+                        "slice" => {
+                            self.check_args_range("slice", &[Ty::Int, Ty::Int], 2, args, span);
+                            return Ty::list(e);
+                        }
+                        // `for_each(f: fn(E) -> _) -> nil` — the closure's return is DISCARDED (a
+                        // side-effect scan), so any return is accepted (`Ty::Unknown` ret, like
+                        // `read`/`submit`); a strict `-> nil` would reject the common `fn(x): acc.add(x)`
+                        // whose last expression yields a value.
+                        "for_each" => {
+                            let f = Ty::Func {
+                                params: vec![e],
+                                ret: Box::new(Ty::Unknown),
+                                labels: crate::checker::FnLabels::default(),
+                            };
+                            self.check_args_range("for_each", &[f], 1, args, span);
+                            return Ty::Nil;
+                        }
+                        // `fold[R](init: R, f: fn(R, E) -> R) -> R` — GENUINELY generic (the
+                        // `List.fold[U]` route, not the `read` R-recovery hack): R PINS from the
+                        // concrete `init` accumulator, so `fn(a, x): a + x` solves cleanly. Routed
+                        // through `infer_generic_method` exactly as a harvested generic method is.
+                        _ => {
+                            let r = Ty::Param("R".to_string());
+                            let params = vec![
+                                obj_ty.clone(),
+                                r.clone(),
+                                Ty::Func {
+                                    params: vec![r.clone(), e],
+                                    ret: Box::new(r.clone()),
+                                    labels: crate::checker::FnLabels::default(),
+                                },
+                            ];
+                            let tps = vec![TypeParam {
+                                name: "R".to_string(),
+                                name_span: Span::default(),
+                                bounds: vec![],
+                            }];
+                            return self.infer_generic_method(
+                                "fold", &params, &r, &tps, &obj_ty, type_args, args, span,
+                            );
+                        }
+                    }
+                }
                 match self.resolve_native_handle_method(
                     "RwShared",
                     method,

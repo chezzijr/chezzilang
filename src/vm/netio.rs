@@ -1975,6 +1975,130 @@ impl Vm {
                 *core.v.write().unwrap() = stored;
                 Ok(Value::nil())
             }
+            // Zero-copy READ-view methods on `RwShared[List[E]]` (checker-gated to a list element).
+            // They walk the stored heap-independent `WireValue::List` Vec UNDER the read guard and
+            // `from_wire` ONE element per step — O(1) memory, never materializing the whole inner (what
+            // `get`/`read` do). The guard `g` borrows the cloned `core` Arc (not `self`), so it can be
+            // held across `from_wire`/`invoke_value` (the `cas` precedent). serial == M:N is natural:
+            // the walk reads a heap-independent wire form, so both engines see byte-identical elements.
+            "len" => {
+                self.arity_err("len", args, 0, span)?;
+                let core = self.rwshared_core(h);
+                let g = core.v.read().unwrap();
+                let n = match &*g {
+                    WireValue::List { items, .. } => items.len() as i64,
+                    _ => return Err(self.err("RwShared.len requires a list element".into(), span)),
+                };
+                Ok(self.make_int(n))
+            }
+            "at" => {
+                self.arity_err("at", args, 1, span)?;
+                let i = self.int_of(args[0]);
+                let core = self.rwshared_core(h);
+                let g = core.v.read().unwrap();
+                let ew = match &*g {
+                    WireValue::List { items, .. } => match crate::slice::norm_index(i, items.len())
+                    {
+                        Some(u) => items[u].clone(),
+                        None => {
+                            return Err(self.err(
+                                format!("index {i} out of bounds (len {})", items.len()),
+                                span,
+                            ));
+                        }
+                    },
+                    _ => return Err(self.err("RwShared.at requires a list element".into(), span)),
+                };
+                Ok(self.from_wire(ew))
+            }
+            "slice" => {
+                self.arity_err("slice", args, 2, span)?;
+                let lo = self.int_of(args[0]);
+                let hi = self.int_of(args[1]);
+                let core = self.rwshared_core(h);
+                let g = core.v.read().unwrap();
+                let idxs = match &*g {
+                    WireValue::List { items, .. } => {
+                        crate::slice::slice_indices(Some(lo), Some(hi), None, items.len())
+                            .map_err(|e| self.err(e.to_string(), span))?
+                    }
+                    _ => {
+                        return Err(self.err("RwShared.slice requires a list element".into(), span));
+                    }
+                };
+                // Materialize ONLY [lo:hi] into a fresh list, rooted on the operand stack across the
+                // per-element `from_wire`s (defensive — `from_wire` only allocs and `alloc` never
+                // collects, but rooting matches the list-HOF precedent and is future-proof).
+                let res_h = self.heap.alloc(Obj::List(Vec::new()));
+                self.push(Value::obj(res_h));
+                for idx in idxs {
+                    let ew = match &*g {
+                        WireValue::List { items, .. } => items[idx].clone(),
+                        _ => unreachable!(),
+                    };
+                    let elem = self.from_wire(ew);
+                    if let Obj::List(items) = self.heap.get_mut(res_h) {
+                        items.push(elem);
+                    }
+                }
+                self.pop();
+                Ok(Value::obj(res_h))
+            }
+            "for_each" => {
+                self.arity_err("for_each", args, 1, span)?;
+                let f = args[0];
+                let core = self.rwshared_core(h);
+                // HOLD the shared read guard for the WHOLE walk — this is the zero-copy point (do NOT
+                // clone the value out like `read` does). A closure that WRITES the same box mid-walk
+                // deadlocks (the documented same-box reentrancy edge); a DIFFERENT box is fine.
+                let g = core.v.read().unwrap();
+                let n = match &*g {
+                    WireValue::List { items, .. } => items.len(),
+                    _ => {
+                        return Err(
+                            self.err("RwShared.for_each requires a list element".into(), span)
+                        );
+                    }
+                };
+                self.push(Value::obj(h)); // root the receiver across nested GC
+                for i in 0..n {
+                    let ew = match &*g {
+                        WireValue::List { items, .. } => items[i].clone(),
+                        _ => unreachable!(),
+                    };
+                    let elem = self.from_wire(ew);
+                    self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
+                }
+                self.pop();
+                Ok(Value::nil())
+            }
+            "fold" => {
+                self.arity_err("fold", args, 2, span)?;
+                let init = args[0];
+                let f = args[1];
+                let core = self.rwshared_core(h);
+                let g = core.v.read().unwrap(); // held for the whole reduce (zero-copy)
+                let n = match &*g {
+                    WireValue::List { items, .. } => items.len(),
+                    _ => return Err(self.err("RwShared.fold requires a list element".into(), span)),
+                };
+                self.push(Value::obj(h)); // root the receiver
+                self.push(init); // root the accumulator; its slot sits below every nested frame's base
+                let acc_slot = self.stack.len() - 1;
+                for i in 0..n {
+                    let ew = match &*g {
+                        WireValue::List { items, .. } => items[i].clone(),
+                        _ => unreachable!(),
+                    };
+                    let elem = self.from_wire(ew);
+                    let acc = self.stack[acc_slot];
+                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
+                    self.stack[acc_slot] = new;
+                }
+                let acc = self.pop(); // unroot accumulator
+                self.pop(); // unroot receiver
+                Ok(acc)
+            }
             _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
         }
     }

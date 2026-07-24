@@ -1,0 +1,49 @@
+# Tests for the zero-copy READ-view methods on RwShared[List[E]] — len/at/slice/for_each/fold.
+# These walk the stored heap-independent WireValue::List under the read guard and from_wire ONE
+# element at a time (O(1) memory), so they are naturally serial==M:N byte-identical. The
+# chz_suite_passes_both_engines gate runs this file on BOTH engines and asserts identical verdicts.
+import std.concurrency
+
+# len / at (incl. negative index) / slice, plus an OOB fault caught by recover:.
+test fn read_view_indexing():
+    box := RwShared(List(range(1, 1001)))   # [1, 2, ..., 1000]
+    assert box.len() == 1000
+    assert box.at(0) == 1
+    assert box.at(999) == 1000
+    assert box.at(-1) == 1000
+    assert box.at(-1000) == 1
+    assert box.slice(2, 5) == [3, 4, 5]
+    assert box.slice(0, 0) == []
+    r := recover: box.at(5000)
+    match r:
+        Ok(v): assert false, "expected OOB fault, got " + str(v)
+        Err(e): assert e.message().contains("out of bounds"), e.message()
+
+# for_each: side-effect scan accumulating into an AtomicInt (its own box, no reentrancy).
+test fn read_view_for_each():
+    box := RwShared(List(range(1, 1001)))
+    n := AtomicInt(0)
+    box.for_each(fn(x): n.add(x))
+    assert n.load() == 500500
+
+# fold: reduce; R is inferred from the init accumulator (int here).
+test fn read_view_fold_int():
+    box := RwShared(List(range(1, 1001)))
+    s := box.fold(0, fn(a, x): a + x)
+    assert s == 500500
+
+# fold with a str accumulator — proves R is NOT pinned to int (recovered from init).
+test fn read_view_fold_str():
+    box := RwShared(List(range(1, 4)))   # [1, 2, 3]
+    s := box.fold("", fn(a, x): a + str(x))
+    assert s == "123"
+
+# The real fan-out use case: reduce the shared list from inside a spawned task under parallel:.
+# Assert the scalar reduced value (order-insensitive) so M:N output ordering can't flake.
+test fn read_view_fold_under_parallel():
+    box := RwShared(List(range(1, 1001)))
+    out := AtomicInt(0)
+    parallel:
+        spawn:
+            out.store(box.fold(0, fn(a, x): a + x))
+    assert out.load() == 500500

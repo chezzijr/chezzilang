@@ -9503,6 +9503,37 @@ fn shared_accepts_turbofish() {
 }
 
 #[test]
+fn rwshared_list_view_methods_accept_on_list_element() {
+    // The zero-copy read-view methods (`len`/`at`/`slice`/`for_each`/`fold`) are valid when the box
+    // element is a list. `fold`'s R is inferred from the concrete `init` accumulator.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    print(box.len())\n    print(box.at(0))\n    print(box.slice(0, 2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+    );
+    // R is not pinned to the element type — a str accumulator folds a list of ints to a str.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+    );
+}
+
+#[test]
+fn rwshared_list_view_methods_reject_on_non_list_element() {
+    // Element-shape gate at the CHECKER (no check-OK-then-run-fault): the read-view methods are gated
+    // to a list element, so a non-list `RwShared[int]` cleanly reports "no method".
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "type RwShared[int] has no method 'fold'",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.at(0))\nmain()\n",
+        "type RwShared[int] has no method 'at'",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.len())\nmain()\n",
+        "type RwShared[int] has no method 'len'",
+    );
+}
+
+#[test]
 fn shared_is_sendable() {
     // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
     entry_ok(

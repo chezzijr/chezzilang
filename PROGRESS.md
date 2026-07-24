@@ -276,6 +276,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > stale golden `examples/str_more.expected` (`count("")`=len+1 from the prior commit, golden never
 > updated). Docs: `docs/syntax.md §9c`, `tests/chz/README.md`.
 
+> **✅ CONCURRENCY (2026-07-24, `auto-task/rwshared-readview`) — zero-copy READ-view methods on
+> `RwShared[List[E]]`.** Purely ADDITIVE; `get`/`read`/`write`/`set`/`update` + the `WireValue` storage
+> model untouched; `Shared`/`Atomic`/`Executor` untouched. Five methods: `len() -> int`,
+> `at(i) -> E` (bounds-checked, negative index; OOB = recoverable fault), `slice(lo, hi) -> List[E]`,
+> `for_each(f: fn(E) -> _) -> nil`, `fold(init: R, f: fn(R, E) -> R) -> R` (R inferred from `init` via the
+> `List.fold[U]` generic route through `infer_generic_method` — NOT the `read` R-recovery hack). **The
+> burden fix:** `get`/`read` `from_wire`-materialize the WHOLE stored inner into the caller's heap on every
+> access (fan-out of a 1M-int list to 8 workers ≈ 1587 MB); the read-view walks the heap-independent
+> `WireValue::List` Vec UNDER the read guard and `from_wire`s ONE element at a time → O(1) memory for a
+> reduce. Checker: arm-only sigs at the `Ty::RwShared(elem)` arm (`src/checker/expr.rs`), gated to
+> `elem = List(E)` — a non-list `T` (`RwShared[int].fold`) is a clean "no method" reject (no
+> check-OK-then-run-fault). Runtime: five arms on `rwshared_method` (`src/vm/netio.rs`) holding
+> `core.v.read()` across the `for_each`/`fold` walk (the zero-copy point), mirroring the list-HOF
+> accumulator rooting. **Guard-lifetime edge (documented like `read`/`write`):** a closure that WRITES the
+> SAME box mid-walk deadlocks; a DIFFERENT box (an `AtomicInt`/local accumulator — the real fan-out use
+> case) is fine. serial == M:N byte-identical (walks a heap-independent wire form) — proven by
+> `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes_both_engines`) +
+> checker `rejects`/`ok` pair. Follow-up (explicit, NOT built): `Map`/`Set` visitor methods
+> (`fold_entries`/`for_each_entry`/`get_key`/`has`). Docs: `std/concurrency.chz`, `docs/stdlib.md`,
+> `docs/concurrency.md §6f`.
+
 > **✅ CONCURRENCY (2026-07-22, `auto-task/atomic-int`) — `AtomicInt`, a monomorphic LOCK-FREE int atomic.**
 > Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/future.md
 > §4` (a lock-free fast path on the GENERIC `Atomic[T]` was UNSOUND — VM is type-blind at construction, so
