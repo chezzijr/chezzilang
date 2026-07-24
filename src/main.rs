@@ -38,8 +38,8 @@ FLAGS:
     --threads=N      Worker threads for the OS-thread engine (0 = all cores; env: CHEZZI_THREADS)
     --check-parity   Run the program on BOTH engines (serial oracle + M:N) and report whether their
                      output is byte-identical (exit 0 = parity OK; non-zero = divergence report)
-    --max-heap=N     (`test` only) Hard-abort any test whose live heap exceeds N bytes — a runaway-
-                     allocation guard, bucketed OVER-MEMORY (0/omitted = off; `recover:` can't catch it)
+    --max-heap=N     (`test`, M:N engine only) Hard-abort any test whose live heap exceeds N bytes — a
+                     runaway-alloc guard, bucketed OVER-MEMORY (0/omitted = off; not with --serial)
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --serial` runs the
@@ -566,6 +566,16 @@ fn cmd_test(args: &[String]) -> ExitCode {
     }
     if saw_serial && saw_parallel {
         eprintln!("chezzi test: --serial and --parallel are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
+    // `--max-heap` is the M:N engine ONLY. The cooperative `--serial` engine shares ONE heap across
+    // the parent + every `spawn`/`parallel:` fiber, so a concurrent test's per-heap trip point differs
+    // from M:N's isolated-per-worker heaps — rather than ship that serial≠M:N divergence, restrict the
+    // flag to the default engine. (`--serial` is the parity oracle, slated for post-freeze removal.)
+    if max_heap != 0 && saw_serial {
+        eprintln!(
+            "chezzi test: --max-heap requires the M:N engine and cannot be combined with --serial"
+        );
         return ExitCode::FAILURE;
     }
     let root = path.unwrap_or_else(|| ".".to_string());

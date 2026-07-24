@@ -312,16 +312,19 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    **undermeasures** true RSS and can overshoot ~2× `N` before firing (`next_gc = 2*live`). **The cap is
    PER-HEAP, so its guarantee is: any single execution context (the test's own heap; a `spawn`'d worker's
    heap on M:N) whose live heap exceeds `N` is aborted — a real runaway trips on whichever heap runs it,
-   the SAME verdict on both engines.** A *concurrent* test near the boundary is the one place the two
-   engines can differ: the cooperative engine shares ONE heap across the parent + every `spawn`/`parallel:`
-   fiber (so its `live_bytes` is `parent-baseline + Σ live tasks`), while M:N isolates each worker on its
-   own fresh heap (measured alone). So a program whose allocation is *split* below `N` per-fiber but sums
-   above it (or a single sub-`N` task plus a non-trivial parent baseline) can bucket `OverMemory` on
-   `--serial` yet pass on M:N. This is inherent: the only cross-engine-identical aggregate would be a
-   global RSS-style measure, which is non-deterministic (rejected — it would break the very gate the cap
-   protects), and the M:N aggregate peak is itself non-deterministic (task interleaving). It is the same
-   serial-shared-vs-M:N-isolated tech debt the [serial-engine post-freeze removal](§2b) already tracks —
-   the cap adds no new obligation there. `chezzi run` never sets the cap (test-runner-scoped). k/m/g
+   the SAME verdict for a real runaway.** **M:N ENGINE ONLY — `--max-heap` errors if combined with
+   `--serial`**, which is what makes the cap sound-by-construction. The cooperative `--serial` engine
+   shares ONE heap across the parent + every `spawn`/`parallel:` fiber (so its `live_bytes` is
+   `parent-baseline + Σ live tasks`), while M:N isolates each worker on its own fresh heap (measured
+   alone). So a *concurrent* test near the boundary — allocation *split* below `N` per-fiber but summing
+   above it, or a single sub-`N` task plus a non-trivial parent baseline — would bucket `OverMemory` on
+   `--serial` yet pass on M:N: a serial≠M:N divergence. The only cross-engine-identical aggregate would be
+   a global RSS-style measure, which is non-deterministic (rejected — it would break the very gate the cap
+   protects), and the M:N aggregate peak is itself non-deterministic (task interleaving). Rather than ship
+   that divergence, the flag is **restricted to the default M:N engine**, where the cap is
+   per-worker/per-context and fully deterministic — there is no second engine to disagree. `--serial` is
+   the parity oracle, slated for post-freeze removal ([serial-engine post-freeze removal](§2b)), so the
+   restriction costs nothing real. `chezzi run` never sets the cap (test-runner-scoped). k/m/g
    suffixes, `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`

@@ -1689,15 +1689,15 @@ any other runtime fault as ERROR (summary `P passed, F failed, E errored`). **`-
 memory cap SHIPPED (2026-07-24, §3b #1b):** the deterministic-in-VM runaway-allocation guard — a test
 whose in-VM `Heap::live_bytes()` exceeds `N` is hard-aborted (bypassing `recover:`) and bucketed
 `OVER-MEMORY` (counts as failure); `0`/omitted = OFF, so cap-off output + the dual-engine gate are
-byte-identical (checks the same `lb` computed per `sweep()`, not OS RSS). The cap is **per-heap**: a real
-runaway trips on whichever heap runs it — SAME verdict on both engines (incl. a runaway inside a `spawn`
-task, since `spawn_worker` threads the cap onto the worker heap). The one divergent case is a *concurrent*
-test *near the boundary*: the cooperative engine shares one heap across parent + all fibers (measures
-`baseline + Σ tasks`), M:N isolates each worker (measures a task alone), so allocation *split* below `N`
-per-fiber but summing above can bucket `OVER-MEMORY` on `--serial` yet pass on M:N — inherent (a
-cross-engine aggregate would need non-deterministic global RSS, which would break the gate), the same
-serial-shared-vs-M:N-isolated tech debt the serial-engine post-freeze removal already tracks (v1 also trips
-only at a GC boundary + on `Obj`-count growth — see §3b #1b). Missing: **test filtering** (`chezzi test`
+byte-identical (checks the same `lb` computed per `sweep()`, not OS RSS). The cap is **per-heap** and **M:N-engine-only** (`--max-heap`
+errors if combined with `--serial`): a real runaway trips on whichever worker heap runs it. The flag is
+M:N-only *by construction* to avoid a serial≠M:N divergence — the cooperative `--serial` engine shares one
+heap across parent + all fibers (measures `baseline + Σ tasks`) while M:N isolates each worker (measures a
+task alone), so a *concurrent* test near the boundary (allocation *split* below `N` per-fiber but summing
+above) would bucket `OVER-MEMORY` on `--serial` yet pass on M:N. A cross-engine aggregate would need
+non-deterministic global RSS (rejected — it would break the gate), so rather than ship the divergence the
+cap is restricted to the default engine (`--serial` is the parity oracle, slated for post-freeze removal).
+v1 also trips only at a GC boundary + on `Obj`-count growth — see §3b #1b. Missing: **test filtering** (`chezzi test`
 rejects unknown flags, so on a big suite it's all or nothing — a ~20-line change and the best ratio in
 this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff, parallel execution,
 machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b` follow-ups (CLI

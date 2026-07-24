@@ -40,13 +40,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `over_memory_buckets_across_spawn_on_both_engines`, and `over_memory_defer_is_still_capped_during_unwind`
 > — the hard-abort + parity + defer-bounding proofs); `chz_suite_passes_both_engines` green (runs cap-off).
 > **Guarantee + v1 limits (deterministic, documented in §3b #1b):** the cap is **per-heap** — any single
-> execution context whose live heap exceeds `N` is aborted, so a real runaway trips on whichever heap runs
-> it (SAME verdict on both engines, incl. a runaway inside a `spawn` task). The one divergent case is a
-> *concurrent* test *near the boundary*: `--serial` shares one heap (measures `parent-baseline + Σ tasks`),
-> M:N isolates each worker (measures a task alone), so allocation split below `N` per-fiber but summing
-> above can bucket `OVER-MEMORY` on serial yet pass on M:N — inherent (a cross-engine aggregate needs
-> non-deterministic global RSS, which would break the gate), the same serial-shared-vs-M:N-isolated tech
-> debt the serial-engine post-freeze removal already tracks. The trip also fires only at a GC boundary + on
+> execution context whose live heap exceeds `N` is aborted, so a real runaway trips on whichever worker
+> heap runs it. **`--max-heap` is M:N-ENGINE-ONLY** (errors if combined with `--serial`) — this avoids a
+> serial≠M:N divergence by construction: `--serial` shares one heap (measures `parent-baseline + Σ tasks`),
+> M:N isolates each worker (measures a task alone), so a *concurrent* test near the boundary (allocation
+> split below `N` per-fiber but summing above) would bucket `OVER-MEMORY` on serial yet pass on M:N. A
+> cross-engine aggregate needs non-deterministic global RSS (rejected — would break the gate), so rather
+> than ship the divergence the flag is restricted to the default engine (`--serial` is the parity oracle,
+> slated for post-freeze removal). The trip also fires only at a GC boundary + on
 > `Obj`-count growth (a loop growing a container of inline scalars never sweeps → never trips — push a heap
 > value to guard it), and overshoots ~2×N before firing (`next_gc = 2*live`). k/m/g suffixes, `--timeout`,
 > `chezzi run --max-heap` deliberately out of scope. Verified end-to-end on the release binary both ways
