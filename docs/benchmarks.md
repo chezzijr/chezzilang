@@ -27,15 +27,17 @@ Machine: i5-11400H, x86_64, Linux; Go 1.26.5, rustc 1.97.0 (release).
 The single-big-object benches above are GENTLE — each keeps one heap object alive, so
 Chezzi is near Go parity. The real gap shows with **many separate boxed objects**:
 
-| bench                       |  Go MB | Chezzi base | after #1 (box Module) | ratio now |
-|-----------------------------|-------:|------------:|----------------------:|----------:|
-| many_struct (2M `P{x,y}`)   |   67.4 |       327.6 |    281.9 (−14%)       |     4.2×  |
-| many_map   (1M int→struct)  |   66.9 |       242.9 |    222.1 (−9%)        |     3.3×  |
-| many_list  (2M `[i,i]`)     |  163.1 |       266.5 |    220.7 (−17%)       |     1.4×  |
+| bench                       |  Go MB | base  | after #1 (box Module) | after #2 (inline fields) | cum. vs base | vs Go |
+|-----------------------------|-------:|------:|----------------------:|-------------------------:|-------------:|------:|
+| many_struct (2M `P{x,y}`)   |   67.4 | 327.6 |    281.9 (−14%)       |     220.7 (−22%)         |    −33%      | 3.3×  |
+| many_map   (1M int→struct)  |   66.9 | 242.9 |    222.1 (−9%)        |     194.2 (−13%)         |    −20%      | 2.9×  |
+| many_list  (2M `[i,i]`)     |  163.1 | 266.5 |    220.7 (−17%)       |     220.9 (±0%)          |    −17%      | 1.4×  |
 
-(`Chezzi base` = pre-fix; `after #1` = merged HEAD `0100153`, `Obj` 88→64B. The 27% slot-size cut
-lands as 9–17% off total RSS — slots are only part of RSS; field buffers + outer `Vec` + GC
-headroom are untouched by #1.)
+(`base` = pre-fix; `after #1` = `0100153` (`Obj` 88→64B); `after #2` = `c1f4d0e` (inline ≤3 `fields`).
+#2's −61.2MB off `many_struct` matches the predicted ~61MB field-buffer kill exactly. `many_list` is
+flat under #2 — its elements are lists, not structs, so `Fields` never touches them (scope respected).
+`many_map` also drops under #2 because its *values* are structs. The remaining Go gap is the ~137MB
+`Slot` array (2M × 72B) — only the structural value-struct lever (#3) touches that.)
 
 Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
 (2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own GC `Slot`
@@ -43,8 +45,9 @@ Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the
 The `fields` buffer's separate malloc is now GONE for ≤3-field structs (lever "inline small `fields`":
 `Fields::Inline` folds them into the 64B `Obj` slot); only `>3`-field structs still spill to a boxed
 slice. So 2M `P{x,y}` (2 fields) = the `Slot` array + the outer 16MB list, no per-struct field buffer.
-`many_list` is only 1.6× because Go also heap-allocates each inner slice — the gap shrinks wherever Go
-can't inline either.
+The `Slot` array (2M × 72B ≈ 137MB) is now the dominant remaining cost — only the structural #3 lever
+shrinks it. `many_list` is only 1.4× because Go also heap-allocates each inner slice — the gap shrinks
+wherever Go can't inline either.
 
 Levers, ranked for this gap:
 - **box `Module`** ✅ DONE (`0100153`) → `size_of::<Obj>()` 88→64B; measured −14%/−9%/−17% RSS on
@@ -52,8 +55,9 @@ Levers, ranked for this gap:
 - **inline small `fields`** ✅ DONE → `Obj::Struct.fields` is a hand-rolled `Fields` enum
   (`Inline { len: u8, vals: [Value; 3] }` folds ≤3 fields into the 64B `Obj` slot, `Spill(Box<[Value]>)`
   for `>3`), killing the per-struct second malloc for the ≤3-field majority. No `smallvec` dep; `Obj`
-  stays 64B (`size_of::<Fields>() == 32`). Expected: ~61MB off `many_struct` RSS (2M `P{x,y}` = 2 fields
-  → all `Inline`). Re-measure `many_struct`/`many_map` to record the actual close.
+  stays 64B (`size_of::<Fields>() == 32`). Measured (`c1f4d0e`): −22% (−61.2MB) `many_struct`, −13%
+  `many_map`, ±0% `many_list` — matched the ~61MB prediction. Doesn't close the 3.3× (that's the `Slot`
+  array now, → #3).
 - **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
   change to the every-object-is-a-`GcRef` aliasing model. Its own milestone. See `future.md §4`.
 
