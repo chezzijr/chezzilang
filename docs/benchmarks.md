@@ -6,6 +6,49 @@ re-stamp this table when the runtime changes. The optimization backlog these num
 justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap **M19**
 (`spec.md` / `PROGRESS.md`).
 
+## Memory baseline — Go vs Chezzi — 2026-07-25
+
+Peak process RSS (honest apples-to-apples: full runtime + stacks + heap; the internal
+`CHEZZI_HEAP_STATS=1 peak_live_bytes` probe under-measures — it ignores off-heap `Vec`/`HashMap`
+capacity and the operand/frame stacks). Measured with `benches/maxrss.py` (`os.wait4` ru_maxrss,
+median of 3) against Go twins in `benches/go/` (`go build` first). Chezzi = M:N default `run`.
+
+Machine: i5-11400H, x86_64, Linux; Go 1.26.5, rustc 1.97.0 (release).
+
+| bench  |  Go MB | Chezzi MB | ratio | note                                    |
+|--------|-------:|----------:|------:|-----------------------------------------|
+| empty  |    8.8 |       8.9 | 1.01× | runtime floor — dead even               |
+| loop   |    8.8 |       8.8 | 1.00× | compute, no heap                        |
+| struct |    8.8 |       8.8 | 1.00× | one struct reused in place              |
+| fib    |    8.9 |       8.8 | 0.99× | recursion, stack only                   |
+| list   |   33.3 |      37.8 | 1.14× | 2M-elem `Vec` — inline ints, ONE object |
+| map    |    8.8 |      19.6 | 2.23× | `MapData` index/`Vec` capacity          |
+
+The single-big-object benches above are GENTLE — each keeps one heap object alive, so
+Chezzi is near Go parity. The real gap shows with **many separate boxed objects**:
+
+| bench                       |  Go MB | Chezzi MB | ratio | live_bytes |
+|-----------------------------|-------:|----------:|------:|-----------:|
+| many_struct (2M `P{x,y}`)   |   67.4 |     327.6 | 4.9×  |     224 MB |
+| many_map   (1M int→struct)  |   66.9 |     242.9 | 3.6×  |     129 MB |
+| many_list  (2M `[i,i]`)     |  163.1 |     266.5 | 1.6×  |     224 MB |
+
+Root cause is **structural, not slot padding**: Go stores `P{x,y}` INLINE in the slice
+(2M×16B, zero per-element heap objects). Chezzi boxes every struct as its own 96B GC `Slot`
+(biggest `Obj` variant `Module` = 88B → every slot padded to 96B, `heap.rs`) PLUS a separate
+malloc for its `fields: Vec<Value>` buffer. So 2M structs = ~192MB of `Slot` array + 2M field
+buffers + the outer 16MB list ≈ 224MB live → 327MB RSS. `many_list` is only 1.6× because Go
+also heap-allocates each inner slice — the gap shrinks wherever Go can't inline either.
+
+Levers, ranked for this gap:
+- **box `Module`** → `Slot` 96→64B, 33% off every object (327→~250MB). Cheap; doesn't close 4.9×.
+- **inline small `fields`** (SmallVec / inline ≤2-3 Values in `Obj::Struct`) → kills the 2M
+  per-struct second malloc. Halves alloc count on struct-heavy code.
+- **value-struct representation** (Go-style inline-in-container) → closes 4.9×→~1.5×, but a deep
+  change to the every-object-is-a-`GcRef` aliasing model. Its own milestone. See `future.md §4`.
+
+Re-run `many_struct`/`many_map` after each lever to track the close.
+
 ## Baseline — 2026-06-11
 
 - **Machine:** 11th Gen Intel Core i5-11400H @ 2.70GHz (12 threads)

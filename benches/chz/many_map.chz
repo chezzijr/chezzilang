@@ -1,0 +1,11 @@
+struct P:
+    x: int
+    y: int
+fn main():
+    m := {}
+    i := 0
+    while i < 1000000:
+        m[i] = P(i, i)
+        i += 1
+    print(m.len())
+main()

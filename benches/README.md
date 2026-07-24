@@ -46,6 +46,21 @@ To check a single pair by hand:
 diff <(./target/release/chezzi run benches/chz/loop.chz) <(python3 benches/py/loop.py)
 ```
 
+## Memory baseline (Go vs Chezzi)
+
+`go/` holds Go twins of the memory-relevant benches; `maxrss.py` measures peak process RSS
+(`os.wait4` ru_maxrss, median of N — `RUNS=3` default). Reproduce:
+
+```sh
+for b in empty loop list map struct fib; do go build -o /tmp/$b go/$b.go; done
+RUNS=3 python3 maxrss.py /tmp/map                        # Go
+RUNS=3 python3 maxrss.py ./target/release/chezzi run chz/map.chz   # Chezzi
+```
+
+RSS is the honest number — the internal `CHEZZI_HEAP_STATS=1 peak_live_bytes` probe
+under-measures (ignores off-heap `Vec`/`HashMap` capacity). Baseline table + reading:
+`docs/benchmarks.md` → "Memory baseline — Go vs Chezzi".
+
 ## Notes
 
 - **Ratios, not absolutes.** Wall-clock depends on the machine; the chezzi-÷-python ratio

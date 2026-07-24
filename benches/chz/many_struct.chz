@@ -1,0 +1,11 @@
+struct P:
+    x: int
+    y: int
+fn main():
+    xs := []
+    i := 0
+    while i < 2000000:
+        xs.push(P(i, i))
+        i += 1
+    print(xs.len())
+main()
