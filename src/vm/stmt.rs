@@ -260,7 +260,7 @@ impl Vm {
         let h = self.heap.alloc(Obj::Struct {
             name: name.into(),
             tid: def.tid,
-            fields,
+            fields: Fields::from_vec(fields),
         });
         self.push(Value::obj(h));
         Ok(())
@@ -1954,7 +1954,7 @@ impl Vm {
                     // Positional layout: recover declaration-order field names from the StructDef
                     // (cold display path). Snapshot name + values first to drop the heap borrow.
                     let name = name.clone();
-                    let vals: Vec<Value> = fields.clone();
+                    let vals: Vec<Value> = fields.as_slice().to_vec();
                     // ROOT REDESIGN — render the BARE display name (not the qualified identity key);
                     // `name` is the key the StructDef is stored under. Fall back to stripping the key.
                     let (display, names): (String, Vec<String>) = self

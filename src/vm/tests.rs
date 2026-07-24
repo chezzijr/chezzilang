@@ -1905,7 +1905,7 @@ fn wire_roundtrip_preserves_value_equality() {
     let st = vm.heap.alloc(Obj::Struct {
         name: "P".into(),
         tid: TID_NONE,
-        fields: vec![Value::int(1), Value::obj(s)],
+        fields: crate::vm::heap::Fields::from_vec(vec![Value::int(1), Value::obj(s)]),
     });
     let en = vm.heap.alloc(Obj::Enum {
         // `empty_program` has no variant table, so use the unregistered sentinel (the enum analogue
@@ -8587,10 +8587,10 @@ fn struct_positional_layout_no_per_instance_names() {
     match vm.heap.get(h) {
         Obj::Struct { name, fields, .. } => {
             assert_eq!(name.as_ref(), "<main>::Point");
-            let fields: &Vec<Value> = fields; // positional: NOT Vec<(Box<str>, Value)>
+            // positional: NOT Vec<(Box<str>, Value)>
             assert_eq!(
-                *fields,
-                vec![Value::int(1), Value::int(2)],
+                fields.as_slice(),
+                &[Value::int(1), Value::int(2)],
                 "fields must be positional in declaration order, no per-instance names"
             );
         }
