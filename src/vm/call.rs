@@ -212,6 +212,7 @@ impl Vm {
                             span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         })?;
                         Ok(self.lower_native(ret))
                     }
@@ -330,6 +331,7 @@ impl Vm {
             span,
             is_assert: false,
             is_over_memory: false,
+            is_timed_out: false,
         })?;
         // A streamed `io.print` whose stdout died set `pending_exit` ([`Vm::emit_out`]) — turn it into
         // the same hard-halt sentinel `std.os.exit` returns, so the VM ends the run cleanly. (`os.exit`

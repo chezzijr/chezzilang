@@ -40,6 +40,12 @@ enum Verdict {
     OverMemory {
         msg: String,
     },
+    /// `chezzi test --timeout` — the test ran longer than the wall-clock cap and was hard-aborted at a
+    /// loop back-edge. No meaningful source line (the abort fires at a checkpoint, not a statement).
+    /// M:N-engine-only; counts as failure.
+    TimedOut {
+        msg: String,
+    },
 }
 
 /// One test's result (for the report + summary counts).
@@ -58,7 +64,12 @@ struct Outcome {
 /// parent boundary WITH the error, so a spawned task's runaway aborts on either engine). Else an
 /// `assert` failure → `Fail`, anything else → `Error`.
 fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
-    if e.is_over_memory {
+    // `is_timed_out` checked FIRST. It is mutually exclusive with `is_over_memory` in practice (a
+    // timeout trips at a loop back-edge, over-memory at a GC boundary — a single abort carries one
+    // marker), so the order only fixes a nominal tie; either way the abort buckets, never FAIL/ERROR.
+    if e.is_timed_out {
+        Verdict::TimedOut { msg: e.message }
+    } else if e.is_over_memory {
         Verdict::OverMemory { msg: e.message }
     } else if e.is_assert {
         Verdict::Fail {
@@ -85,6 +96,20 @@ pub fn run_tests(root: &Path, parallel: bool) -> TestReport {
 /// [`Verdict::OverMemory`] (counts as failure). Deterministic-in-VM (not OS RSS), so the serial == M:N
 /// gate holds. With `max_heap == 0` this is byte-identical to the pre-cap runner.
 pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestReport {
+    run_tests_timed(root, parallel, max_heap, 0)
+}
+
+/// Like [`run_tests_capped`], plus the opt-in `--timeout` per-test wall-clock cap (`timeout_ms`: ms,
+/// `0` = OFF). A test running longer than `timeout_ms` is hard-aborted at a loop back-edge (bypassing
+/// `recover:`) and bucketed [`Verdict::TimedOut`] (counts as failure). M:N-engine-only (a wall-clock
+/// trip is non-deterministic → the CLI rejects it with `--serial`). With `timeout_ms == 0` this is
+/// byte-identical to the un-timed runner.
+pub fn run_tests_timed(
+    root: &Path,
+    parallel: bool,
+    max_heap: usize,
+    timeout_ms: u64,
+) -> TestReport {
     let files = match collect_test_files(root) {
         Ok(f) => f,
         Err(e) => {
@@ -109,7 +134,7 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
     let mut file_errors = 0usize;
 
     for file in &files {
-        match run_file(file, parallel, max_heap) {
+        match run_file(file, parallel, max_heap, timeout_ms) {
             Ok(mut file_outcomes) => outcomes.append(&mut file_outcomes),
             Err(msg) => {
                 report.push_str(&format!("ERROR {}\n  {msg}\n", file.display()));
@@ -131,6 +156,9 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
             Verdict::OverMemory { msg } => {
                 report.push_str(&format!("OVER-MEMORY {} ({}) {}\n", o.name, o.file, msg))
             }
+            Verdict::TimedOut { msg } => {
+                report.push_str(&format!("TIMED-OUT {} ({}) {}\n", o.name, o.file, msg))
+            }
         }
     }
     let total = outcomes.len();
@@ -146,7 +174,11 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
         .iter()
         .filter(|o| matches!(o.verdict, Verdict::OverMemory { .. }))
         .count();
-    let passed_count = total - failed - errored - over_memory;
+    let timed_out = outcomes
+        .iter()
+        .filter(|o| matches!(o.verdict, Verdict::TimedOut { .. }))
+        .count();
+    let passed_count = total - failed - errored - over_memory - timed_out;
     report.push_str(&format!(
         "\n{total} test(s): {passed_count} passed, {failed} failed, {errored} errored"
     ));
@@ -154,6 +186,10 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
     // byte-identical to the pre-cap runner.
     if over_memory > 0 {
         report.push_str(&format!(", {over_memory} over-memory"));
+    }
+    // Same for the timeout clause — off-by-default so a timeout-OFF run is byte-identical.
+    if timed_out > 0 {
+        report.push_str(&format!(", {timed_out} timed out"));
     }
     if file_errors > 0 {
         report.push_str(&format!(", {file_errors} file error(s)"));
@@ -172,6 +208,7 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
         passed: failed == 0
             && errored == 0
             && over_memory == 0
+            && timed_out == 0
             && file_errors == 0
             && !no_tests_discovered,
     }
@@ -185,7 +222,12 @@ pub fn run_tests_capped(root: &Path, parallel: bool, max_heap: usize) -> TestRep
 /// `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000 before faulting recoverably, which overflows the
 /// 8 MB main thread but not the 384 MB VM stack). This matches `chezzi run` (both engines run on
 /// [`crate::vm::run_file_with_entry`]'s VM-stack thread), so a `test` verdict mirrors a `run`.
-fn run_file(file: &Path, parallel: bool, max_heap: usize) -> Result<Vec<Outcome>, String> {
+fn run_file(
+    file: &Path,
+    parallel: bool,
+    max_heap: usize,
+    timeout_ms: u64,
+) -> Result<Vec<Outcome>, String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
     if let Err(errs) = crate::checker::check_graph(&graph) {
         // Surface the first type error (matches `chezzi check`'s headline).
@@ -199,7 +241,7 @@ fn run_file(file: &Path, parallel: bool, max_heap: usize) -> Result<Vec<Outcome>
     let program: Arc<Program> = Arc::new(program);
     let file_label = file.display().to_string();
 
-    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, max_heap))
+    crate::vm::on_vm_stack(move || invoke_all(program, file_label, parallel, max_heap, timeout_ms))
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
@@ -211,12 +253,16 @@ fn invoke_all(
     file_label: String,
     parallel: bool,
     max_heap: usize,
+    timeout_ms: u64,
 ) -> Result<Vec<Outcome>, String> {
     let mut vm = Vm::for_program(Arc::clone(&program));
     vm.set_parallel(parallel);
     // `--max-heap` cap (0 = off). Per-test reset of the over-memory latch is VM-side (in each invoke
     // entry point), so `run_suite` needs no cap threading — the VM is already configured.
     vm.set_max_heap(max_heap);
+    // `--timeout` cap (0 = off). Like the heap cap it is VM config read at each invoke entry (which
+    // arms a fresh deadline), so `run_suite` needs no threading — the VM is already configured.
+    vm.set_timeout(timeout_ms);
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
         return Err(format!(
@@ -603,6 +649,8 @@ struct Suite:
                     // A `--max-heap` trip must participate too: a test that trips on one engine but
                     // not the other is a parity bug the gate has to catch, not silently drop.
                     ("OVER-MEMORY", r)
+                } else if let Some(r) = l.strip_prefix("TIMED-OUT ") {
+                    ("TIMED-OUT", r)
                 } else {
                     // ERROR must participate too: a test that ERRORs on one engine but FAILs/PASSes
                     // on the other is a parity bug the gate has to catch, not silently drop.
@@ -792,6 +840,95 @@ struct Suite:
                 report.text
             );
         }
+    }
+
+    // ---- `--timeout` wall-clock cap (M:N-engine-only; tests run parallel=true) ----
+    // Robust to CI timing: a CLEARLY-infinite loop under a SHORT timeout, or a CLEARLY-fast test
+    // under a GENEROUS timeout — never near-boundary.
+
+    #[test]
+    fn timed_out_bucket_for_infinite_loop() {
+        // THE regression test for the prior hang bug: a top-level `while true: pass` runs OUTSIDE the
+        // fiber scheduler (`invoke_test → run_proto → run_until`), so the reds checkpoint never gates
+        // it — only the loop back-edge does. Under a 50ms cap it MUST terminate and bucket TimedOut.
+        let d = TmpDir::new();
+        let f = d.write(
+            "spin_test.chz",
+            "test fn spin():\n    while true:\n        pass\n",
+        );
+        let report = run_tests_timed(&f, true, 0, 50);
+        assert!(
+            !report.passed,
+            "an infinite loop must fail the run; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("TIMED-OUT spin"),
+            "infinite loop must render TIMED-OUT; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("timed out"),
+            "summary must count the bucket; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn timeout_control_passes_under_generous_timeout() {
+        // A trivially-fast test under a 60s cap passes normally — the throttled back-edge check never
+        // false-trips a fast test.
+        let d = TmpDir::new();
+        let f = d.write("fast_test.chz", "test fn quick():\n    assert 1 + 1 == 2\n");
+        let report = run_tests_timed(&f, true, 0, 60_000);
+        assert!(report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("PASS quick"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("timed out"),
+            "a fast test must not surface the timeout clause; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn recover_does_not_catch_timeout() {
+        // The wall-clock abort unwinds PAST `recover:`: `r := recover: <infinite loop>` cannot swallow
+        // it, so control never reaches the trailing `assert false` and the test lands TimedOut.
+        let d = TmpDir::new();
+        let f = d.write(
+            "rectimeout_test.chz",
+            "test fn t():\n    r := recover:\n        while true:\n            pass\n    assert false\n",
+        );
+        let report = run_tests_timed(&f, true, 0, 50);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("TIMED-OUT t"),
+            "recover: must NOT catch a timeout abort; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn timed_out_across_spawn() {
+        // A hang inside a `spawn`ed task must bucket TimedOut on the M:N engine: the worker runs on its
+        // own VM, so the absolute deadline must be threaded onto it, and its loop's back-edge trips the
+        // cap. The `is_timed_out` marker crosses the worker→parent fault boundary.
+        let d = TmpDir::new();
+        let f = d.write(
+            "spawnspin_test.chz",
+            "fn spin() -> int:\n    while true:\n        pass\n    return 0\ntest fn t():\n    parallel:\n        spawn spin()\n",
+        );
+        let report = run_tests_timed(&f, true, 0, 50);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("TIMED-OUT t"),
+            "a spawned task's hang must bucket TIMED-OUT; report:\n{}",
+            report.text
+        );
     }
 
     #[test]

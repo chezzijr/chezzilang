@@ -50,6 +50,7 @@ impl Vm {
             span,
             is_assert: false,
             is_over_memory: false,
+            is_timed_out: false,
         })
     }
 
@@ -126,6 +127,9 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
+            timeout_ms: 0,
+            deadline: None,
+            deadline_tick: 0,
             deferring: 0,
             module_snapshot: None,
             module_faulted: Vec::new(),
@@ -141,6 +145,7 @@ impl Vm {
             span,
             is_assert: false,
             is_over_memory: false,
+            is_timed_out: false,
         }
     }
 
@@ -486,6 +491,7 @@ impl Vm {
             "invoke_test called on a non-test proto"
         );
         self.reset_over_memory();
+        self.arm_deadline();
         let home = self.entry_home();
         self.run_proto(
             proto,
@@ -556,6 +562,7 @@ impl Vm {
         recv: Value,
     ) -> Result<Value, RuntimeError> {
         self.reset_over_memory();
+        self.arm_deadline();
         let home = self.entry_home();
         self.run_proto(
             proto,
@@ -571,6 +578,7 @@ impl Vm {
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
         self.reset_over_memory();
+        self.arm_deadline();
         let home = self.entry_home();
         self.run_proto(
             new_thunk,
@@ -610,6 +618,31 @@ impl Vm {
     /// `docs/future.md §3b`.
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
+    }
+
+    /// `chezzi test --timeout=<MS>` — set the per-test wall-clock cap in ms (`0` = OFF, the default).
+    /// A test running longer than `MS` is hard-aborted (bypassing `recover:`) and bucketed `TimedOut`.
+    /// M:N-engine-only (a wall-clock trip is non-deterministic → no serial==M:N parity); the CLI guard
+    /// rejects `--timeout` with `--serial`. Observed at the loop back-edge (+ spawned fibers).
+    pub fn set_timeout(&mut self, ms: u64) {
+        self.timeout_ms = ms;
+    }
+
+    /// Thread an already-armed absolute deadline onto this VM (an M:N worker inherits the parent's).
+    pub(super) fn set_deadline(&mut self, dl: Option<std::time::Instant>) {
+        self.deadline = dl;
+    }
+
+    /// Arm the per-test wall-clock deadline for the test about to run: `now + timeout_ms`, or `None`
+    /// when the cap is OFF (so the back-edge check reads no clock). Called at every invoke entry point
+    /// beside [`Vm::reset_over_memory`].
+    fn arm_deadline(&mut self) {
+        self.deadline = if self.timeout_ms == 0 {
+            None
+        } else {
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(self.timeout_ms))
+        };
+        self.deadline_tick = 0;
     }
 
     /// Clear the heap `over_cap` latch so a tripped test never taints the next on this reused VM.
@@ -1124,10 +1157,16 @@ impl Vm {
                 // this sibling arm an outer `recover:` would catch the fault and defeat the guard. Re-
                 // stamp the marker onto whatever emerges (a mid-unwind `defer` fault) so it keeps
                 // travelling up.
-                if self.cancelled || rte.is_over_memory {
+                //
+                // `--timeout`: identical treatment for the `is_timed_out` marker — a wall-clock abort
+                // raised at a back-edge in a nested `run_until` (a HOF callback's own loop) bubbles
+                // here and must keep bypassing `recover:` the same way.
+                if self.cancelled || rte.is_over_memory || rte.is_timed_out {
                     let over_mem = rte.is_over_memory;
+                    let timed = rte.is_timed_out;
                     let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
                     let rte = if over_mem { rte.over_memory() } else { rte };
+                    let rte = if timed { rte.timed_out() } else { rte };
                     return Err(rte);
                 }
                 // Capture the stack trace of an uncaught fault now, while the frames are still intact
@@ -1364,9 +1403,29 @@ impl Vm {
     /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
     pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
         let ip = self.frames.last().unwrap().ip;
-        if target < ip && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if target < ip {
+            // `chezzi test --timeout` — observe the wall-clock deadline at THE loop back-edge, the
+            // hottest engine-independent checkpoint. It covers both the top-level test body
+            // (`invoke_test → run_proto → run_until`, which runs OUTSIDE the fiber scheduler) AND a
+            // `spawn`ed fiber (its loop routes through here too), so a single check catches both.
+            // Zero clock reads when the cap is OFF: the `Some` guard short-circuits before any
+            // `Instant::now()`. Throttled to one read per 1024 back-edges (the read is the cost). The
+            // `is_timed_out` marker alone drives the recover-bypass — no `self.cancelled` latch.
+            if let Some(dl) = self.deadline {
+                self.deadline_tick = self.deadline_tick.wrapping_add(1);
+                if self.deadline_tick.is_multiple_of(1024) && std::time::Instant::now() >= dl {
+                    return Err(self
+                        .err(
+                            format!("test exceeded --timeout ({}ms)", self.timeout_ms),
+                            span,
+                        )
+                        .timed_out());
+                }
+            }
+            if self.cancel_requested() {
+                self.cancelled = true;
+                return Err(self.err("cancelled".to_string(), span));
+            }
         }
         self.frames.last_mut().unwrap().ip = target;
         Ok(())
@@ -1516,6 +1575,7 @@ impl Vm {
                     span,
                     is_assert: true,
                     is_over_memory: false,
+                    is_timed_out: false,
                 });
             }
             Op::GetLocal(slot) => {

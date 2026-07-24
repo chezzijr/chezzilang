@@ -325,7 +325,8 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    per-worker/per-context and fully deterministic — there is no second engine to disagree. `--serial` is
    the parity oracle, slated for post-freeze removal ([serial-engine post-freeze removal](§2b)), so the
    restriction costs nothing real. `chezzi run` never sets the cap (test-runner-scoped). k/m/g
-   suffixes, `--timeout`, and `chezzi run --max-heap` are deliberately out of scope (later waves).
+   suffixes and `chezzi run --max-heap` are deliberately out of scope (later waves). (`--timeout` — the
+   wall-clock sibling — has since landed; see #4 below.)
 
 2. **Table-driven subtests (`t.Run`-style).** Today a `for case in cases:` loop inside a `test fn`
    aborts at the first bad case with no per-case verdict. A subtest construct that reports each case
@@ -336,13 +337,34 @@ render ERROR too (whole file, before any test runs), counted separately as `file
    — WIP + platform-gated tests. Cheap; needs a skip signal the runner counts separately (`S skipped`).
 
 **Runner ergonomics + CLI options & output format** (independent of the semantics above; `cmd_test` is
-`src/main.rs:541`, currently accepts only `[path]` + `--serial`/`--parallel`):
+`src/main.rs:541`, accepts `[path]` + `--serial`/`--parallel` + `--max-heap` + `--timeout`):
 
-4. **Per-test timeout.** A `test fn` with an infinite loop hangs the runner (and `cargo test`) forever
-   — no guard today (Rust's own `#[test]` shares this limit). Add `--timeout=<ms>` (0 = off): run each
-   test with a deadline, report a timed-out test as its own bucket (`T timed out`, counts as failure).
-   Interacts with the engine — the M:N default already runs each file's test loop on an `on_vm_stack`
-   thread, so a watchdog/join-with-timeout is the natural seam.
+4. **Per-test timeout (`--timeout=<ms>`) — DONE.** The wall-clock sibling of `--max-heap` (#1b), same
+   arc. Opt-in `chezzi test --timeout=<MS>` (ms; `0`/omitted = OFF, the default): a test running longer
+   than `MS` is **hard-aborted** (bypassing `recover:`) and bucketed `Verdict::TimedOut` (rendered
+   `TIMED-OUT name (file) msg`, counts as failure, exit non-zero; summary appends `, T timed out` only
+   when `T>0` so cap-off output is byte-identical). The abort stamps an **`is_timed_out` marker onto the
+   `RuntimeError`** — the exact machinery `is_over_memory` uses (excluded from `Display` so parity is
+   unaffected; forced back on after every unwind so it crosses native-reentry `run_until` + the
+   worker→parent boundary; the `run_until` Err funnel bypasses `recover:` whenever it is set;
+   `verdict_from_fault` reads it first). **Observation site (the key difference from `--max-heap`):** the
+   deadline is checked at the **loop back-edge** in `jump_checked` — the hottest engine-independent
+   checkpoint, hit every iteration of any `while`/`for` — so it covers BOTH the top-level test body
+   (`invoke_test → run_proto → run_until`, which runs OUTSIDE the fiber scheduler) AND a `spawn`ed task's
+   loop (which routes through the same back-edge). A per-VM `deadline: Option<Instant>` is armed
+   (`now + timeout_ms`) at each invoke entry and threaded onto M:N workers as the SAME absolute instant.
+   **Zero overhead when off:** the check is `if let Some(dl) = self.deadline` FIRST, short-circuiting
+   before any clock read, so a cap-off `chezzi run`/`chezzi test` does ZERO added `Instant::now()` calls
+   on the hot path; when on, the read is throttled to one per 1024 back-edges (a wrapping counter).
+   **M:N ENGINE ONLY — `--timeout` errors if combined with `--serial`** (a wall-clock trip is
+   non-deterministic → no serial==M:N parity; the dual-engine gate runs timeout-OFF and is untouched).
+   VM + runner + `main.rs` flag only — no checker/compiler change. **v1 limits (documented, watchdog-
+   thread follow-up):** the trip is observed only at loop back-edges (+ the M:N reds checkpoint), so a
+   test blocked in a **native call** (a blocking syscall, `Channel.recv` with no traffic) or spinning in
+   **loop-free infinite recursion** (which hits the stack/recursion guard instead) is NOT caught by this
+   v1 — a true watchdog thread that can interrupt a blocked native is the natural next seam. Ms
+   granularity; the abort lands at the next back-edge after the deadline (sub-ms overshoot for a tight
+   loop). k/m/g suffixes and `chezzi run --timeout` are out of scope.
 5. **Name filter.** `chezzi test -k <substr>` / `--filter <pat>` to run a subset by test name (free
    `fn_name`, suite `Suite::method`), like `cargo test <filter>` / pytest `-k` / `go test -run`. Filter
    after discovery, before invoke.

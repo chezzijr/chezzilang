@@ -40,6 +40,8 @@ FLAGS:
                      output is byte-identical (exit 0 = parity OK; non-zero = divergence report)
     --max-heap=N     (`test`, M:N engine only) Hard-abort any test whose live heap exceeds N bytes — a
                      runaway-alloc guard, bucketed OVER-MEMORY (0/omitted = off; not with --serial)
+    --timeout=N      (`test`, M:N engine only) Hard-abort any test running longer than N ms — a
+                     wall-clock guard, bucketed TIMED-OUT (0/omitted = off; not with --serial)
 
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --serial` runs the
@@ -537,6 +539,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     let mut saw_serial = false;
     let mut saw_parallel = false;
     let mut max_heap: usize = 0; // 0 = cap OFF (the default)
+    let mut timeout_ms: u64 = 0; // 0 = cap OFF (the default)
     for arg in args {
         match arg.as_str() {
             "--serial" => saw_serial = true,
@@ -548,6 +551,18 @@ fn cmd_test(args: &[String]) -> ExitCode {
                     Err(_) => {
                         eprintln!(
                             "chezzi test: --max-heap expects a byte count (a non-negative integer), got '{raw}'"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if other.starts_with("--timeout=") => {
+                let raw = &other["--timeout=".len()..];
+                match raw.parse::<u64>() {
+                    Ok(n) => timeout_ms = n,
+                    Err(_) => {
+                        eprintln!(
+                            "chezzi test: --timeout expects a millisecond count (a non-negative integer), got '{raw}'"
                         );
                         return ExitCode::FAILURE;
                     }
@@ -578,11 +593,24 @@ fn cmd_test(args: &[String]) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    // `--timeout` is the M:N engine ONLY: a wall-clock trip is non-deterministic, so it cannot be
+    // parity-tested serial==M:N. Restrict it to the default engine rather than ship that divergence.
+    if timeout_ms != 0 && saw_serial {
+        eprintln!(
+            "chezzi test: --timeout requires the M:N engine and cannot be combined with --serial"
+        );
+        return ExitCode::FAILURE;
+    }
     let root = path.unwrap_or_else(|| ".".to_string());
     // Default engine is the M:N OS-thread VM — matching `chezzi run`, and forward-compatible with the
     // post-JIT-freeze removal of the cooperative serial engine. `--serial` opts into it while it lives;
     // the dual-engine serial==M:N check itself lives in the `cargo test` gate.
-    let report = test_runner::run_tests_capped(std::path::Path::new(&root), !saw_serial, max_heap);
+    let report = test_runner::run_tests_timed(
+        std::path::Path::new(&root),
+        !saw_serial,
+        max_heap,
+        timeout_ms,
+    );
     print!("{}", report.text);
     if report.passed {
         ExitCode::SUCCESS

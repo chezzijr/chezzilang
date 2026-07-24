@@ -50,12 +50,21 @@ use crate::{lexer, parser};
 /// bypasses `recover:` whenever it is set, and `verdict_from_fault` reads it first. Like `is_assert`,
 /// it is excluded from `Display`, so parity (error-string compare) is unaffected. Always `false` on the
 /// common path (`chezzi run`, and `--max-heap` off).
+///
+/// `is_timed_out` marks a `chezzi test --timeout` wall-clock hard-abort. It rides the exact same
+/// machinery as `is_over_memory` — set at the abort site (the loop back-edge in `jump_checked`),
+/// forced back onto whatever error emerges from the unwind, and read first by `verdict_from_fault`
+/// (bucket `TimedOut`). The abort site differs (a back-edge deadline check, not a GC boundary), but
+/// the recover-bypass is identical: the `run_until` Err funnel bypasses `recover:` whenever it is set.
+/// Timeout is M:N-engine-only (a wall-clock trip is non-deterministic → no serial==M:N parity), so
+/// this is always `false` under `--serial` and off the `chezzi test --timeout` path.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuntimeError {
     pub message: String,
     pub span: Span,
     pub is_assert: bool,
     pub is_over_memory: bool,
+    pub is_timed_out: bool,
 }
 
 impl RuntimeError {
@@ -64,6 +73,14 @@ impl RuntimeError {
     /// otherwise replace the marked error with an unmarked one.
     pub(crate) fn over_memory(mut self) -> Self {
         self.is_over_memory = true;
+        self
+    }
+
+    /// Stamp the timed-out marker onto this error (see [`RuntimeError::is_timed_out`]). Sibling of
+    /// [`RuntimeError::over_memory`] — forces the marker back on after an unwind so a mid-unwind
+    /// `defer` fault cannot strip it and let `recover:` catch the abort.
+    pub(crate) fn timed_out(mut self) -> Self {
+        self.is_timed_out = true;
         self
     }
 }
@@ -736,6 +753,20 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// `chezzi test --timeout=<MS>` — the per-test wall-clock cap in ms (`0` = OFF, the default; the
+    /// `chezzi run` engine never sets it). Kept only for the abort message. VM config, NOT part of
+    /// [`FiberCtx`] (not swapped): armed once per invoke entry and threaded onto M:N workers.
+    timeout_ms: u64,
+    /// `chezzi test --timeout` — the absolute wall-clock instant this test must finish by
+    /// (`now + timeout_ms`), or `None` when the cap is OFF. Observed at the loop back-edge
+    /// ([`Vm::jump_checked`]); the `None` guard there short-circuits BEFORE any clock read, so a
+    /// cap-off run does ZERO added `Instant::now()` calls on the hottest dispatch path. Threaded onto
+    /// M:N workers as the SAME absolute instant, so a spawned task shares the parent's deadline.
+    deadline: Option<std::time::Instant>,
+    /// `chezzi test --timeout` — a wrapping back-edge counter throttling the clock read: the deadline
+    /// is checked only every 1024th back-edge (the `Instant::now()` read is the cost; the loop
+    /// back-edge is the hottest path). Only ever touched when `deadline` is `Some`.
+    deadline_tick: u16,
     /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
     /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
     /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must
@@ -2810,6 +2841,7 @@ impl MnSched {
                     span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };
@@ -2960,6 +2992,7 @@ fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span) -> Runtime
         span,
         is_assert: false,
         is_over_memory: false,
+        is_timed_out: false,
     }
 }
 
@@ -3696,6 +3729,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                     span: Span { line: 1, col: 1 },
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 }),
             );
         }
@@ -3710,6 +3744,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 }),
             );
         }
@@ -3724,6 +3759,7 @@ fn run_program_inner(src: &str) -> (String, Result<(), RuntimeError>) {
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 }),
             );
         }
@@ -3773,12 +3809,14 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
                 span: Span { line: 1, col: 1 },
                 is_assert: false,
                 is_over_memory: false,
+                is_timed_out: false,
             })?;
             let module = parser::parse(tokens).map_err(|e| RuntimeError {
                 message: e.message,
                 span: e.span,
                 is_assert: false,
                 is_over_memory: false,
+                is_timed_out: false,
             })?;
             let program =
                 crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
@@ -3786,6 +3824,7 @@ pub fn run_capture_parallel(src: &str) -> Result<String, RuntimeError> {
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.parallel = true;
@@ -3818,6 +3857,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                             span: Span { line: 1, col: 1 },
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                     );
                 }
@@ -3832,6 +3872,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                     );
                 }
@@ -3846,6 +3887,7 @@ pub fn run_program_parallel(src: &str) -> (String, Result<(), RuntimeError>) {
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                     );
                 }
@@ -3887,6 +3929,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                             span: Span { line: 1, col: 1 },
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -3901,6 +3944,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -3915,6 +3959,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -3948,12 +3993,14 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                 span: Span { line: 1, col: 1 },
                 is_assert: false,
                 is_over_memory: false,
+                is_timed_out: false,
             })?;
             let module = parser::parse(tokens).map_err(|e| RuntimeError {
                 message: e.message,
                 span: e.span,
                 is_assert: false,
                 is_over_memory: false,
+                is_timed_out: false,
             })?;
             let program =
                 crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
@@ -3961,6 +4008,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.run()
@@ -3999,6 +4047,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             span: Span { line: 1, col: 1 },
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -4013,6 +4062,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -4027,6 +4077,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             span: e.span,
                             is_assert: false,
                             is_over_memory: false,
+                            is_timed_out: false,
                         }),
                         0,
                     );
@@ -4146,6 +4197,7 @@ fn run_file_inner(
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 })),
                 None,
             );
@@ -4162,6 +4214,7 @@ fn run_file_inner(
                     span: e.span,
                     is_assert: false,
                     is_over_memory: false,
+                    is_timed_out: false,
                 })),
                 None,
             );

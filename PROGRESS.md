@@ -4,6 +4,48 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 **Legend:** ⬜ not started · 🟦 in progress · ✅ done
 
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test --timeout=<ms>` per-test wall-clock cap (docs/future.md
+> §3b item #4; the wall-clock sibling of `--max-heap`).** Opt-in per-test timeout: a `test fn` running
+> longer than `N` ms is **hard-aborted** (un-recoverable — `recover:` CANNOT swallow it) and bucketed in
+> a new `Verdict::TimedOut` (rendered `TIMED-OUT name (file) msg`, counts as failure, exit non-zero;
+> summary appends `, T timed out` only when `T>0` so timeout-off output stays byte-identical). `0`/omitted
+> = OFF, the default. **Mirrors the `--max-heap` arc one-to-one EXCEPT the observation site.** The abort
+> stamps an **`is_timed_out` marker onto the `RuntimeError`** (mirrors `is_over_memory`/`is_assert`,
+> excluded from `Display` so parity strings are byte-identical) and FORCES it back on after every unwind,
+> so it crosses native-reentry `run_until` + the `spawn` worker→parent boundary; the `run_until` Err
+> funnel bypasses `recover:` whenever it is set (EXTENDED the existing `is_over_memory` funnel arm, not a
+> parallel path), and `verdict_from_fault` reads `e.is_timed_out` FIRST. **THE KEY DIFFERENCE (and the
+> fix for a prior hang bug):** the deadline is observed at the **loop back-edge** in `jump_checked` — NOT
+> at the M:N reds checkpoint. The reds checkpoint fires only for scheduler-dispatched fibers, but the
+> top-level test body (`invoke_test → run_proto → run_until`) runs OUTSIDE the fiber scheduler, so a plain
+> `test fn: while true: pass` would hang forever if gated only there. The back-edge runs
+> engine-independently on every loop iteration and covers BOTH the top-level body AND `spawn`ed-task loops
+> (a single check catches both). **Seam 1 (VM):** per-VM config `timeout_ms: u64` + `deadline:
+> Option<Instant>` + `deadline_tick: u16` (NOT swapped by `swap_ctx`); `set_timeout`/`set_deadline`/
+> `arm_deadline` beside `set_max_heap`/`reset_over_memory`; a fresh `now + timeout_ms` armed at each
+> invoke entry (`invoke_test`/`invoke_suite_method`/`build_suite_instance`). **Seam 2 (jump_checked):**
+> inside the existing `target < ip` back-edge branch, `if let Some(dl) = self.deadline` FIRST (zero clock
+> reads when off — the hot-path invariant), throttled to one `Instant::now()` per 1024 back-edges via
+> the wrapping `deadline_tick`; on trip returns `self.err(...).timed_out()`. **Seam 3 (spawn):**
+> `spawn_worker` threads the SAME absolute `deadline` onto the M:N worker (`worker.set_deadline`) beside
+> `set_max_heap`, so a spawned hang trips on the worker's own loop and the marker crosses back. **Seam 4
+> (runner):** `Verdict::TimedOut{msg}`, render arm, summary count/clause, `run_tests_timed(root, parallel,
+> max_heap, timeout_ms)` wrapper (`run_tests_capped` delegates `timeout_ms=0` → existing call sites
+> byte-identical), threaded through `run_file` → `invoke_all` (`vm.set_timeout`), `verdicts()` gate parser
+> learned the `TIMED-OUT ` prefix. **Seam 5 (CLI):** `cmd_test` parses `--timeout=<MS>` (u64; bad value →
+> eprintln + FAILURE) + the **M:N-ENGINE-ONLY guard** (`--timeout` errors with `--serial` — a wall-clock
+> trip is non-deterministic → no serial==M:N parity; the dual-engine gate runs timeout-OFF, untouched) +
+> help line. VM + runner + `main.rs` only — **NO checker/compiler change.** Tests (M:N, robust to CI
+> timing): `timed_out_bucket_for_infinite_loop` (THE regression test — top-level `while true: pass` →
+> TIMED-OUT, proven RED-first: it hung under a `timeout 90` wrapper with the back-edge check disabled,
+> exit 124), `timeout_control_passes_under_generous_timeout` (fast test / 60s cap → PASS, no clause),
+> `recover_does_not_catch_timeout` (`recover:` can't swallow it), `timed_out_across_spawn` (spawned hang →
+> TIMED-OUT). `chz_suite_passes_both_engines` green (runs timeout-off). **v1 limits (watchdog follow-up,
+> §3b #4):** a test blocked in a **native call** (blocking syscall, `Channel.recv` with no traffic) or in
+> **loop-free infinite recursion** (hits the stack guard) is NOT caught — a true watchdog thread is the
+> next seam. Ms granularity; sub-ms overshoot. Verified end-to-end on the release binary (TIMED-OUT + exit
+> 1; `--serial` guard error + exit 1; bad value + exit 1; timeout-off byte-identical PASS).
+>
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test --max-heap=<bytes>` per-test memory cap (docs/future.md
 > §3b item #1b; builds on the FAIL/ERROR bucket infra).** An opt-in runaway-allocation guard: a single
 > test whose in-VM live heap exceeds `N` bytes is **hard-aborted** (un-recoverable — `recover:` CANNOT
@@ -49,8 +91,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > than ship the divergence the flag is restricted to the default engine (`--serial` is the parity oracle,
 > slated for post-freeze removal). The trip also fires only at a GC boundary + on
 > `Obj`-count growth (a loop growing a container of inline scalars never sweeps → never trips — push a heap
-> value to guard it), and overshoots ~2×N before firing (`next_gc = 2*live`). k/m/g suffixes, `--timeout`,
-> `chezzi run --max-heap` deliberately out of scope. Verified end-to-end on the release binary both ways
+> value to guard it), and overshoots ~2×N before firing (`next_gc = 2*live`). k/m/g suffixes and
+> `chezzi run --max-heap` deliberately out of scope (`--timeout` has since landed — see the entry above).
+> Verified end-to-end on the release binary both ways
 > (OVER-MEMORY + exit 1; bad value + exit 1; cap-off byte-identical PASS).
 >
 > **✅ TEST RUNNER (2026-07-24) — `chezzi test` FAIL vs ERROR split (docs/future.md §3b item #1, the

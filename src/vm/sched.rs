@@ -2990,6 +2990,10 @@ impl Vm {
         // documented (`docs/future.md §3b`); a cross-engine aggregate would need non-deterministic global
         // RSS. `0` when the cap is off, so the common path is untouched.
         worker.set_max_heap(self.heap.mem_cap());
+        // `chezzi test --timeout` — thread the SAME absolute deadline onto the worker so a `spawn`/
+        // `parallel:` task's loop trips the wall-clock cap on the M:N engine too (a fresh `Vm::new`
+        // starts with `deadline = None`). `None` when the cap is off, so the common path is untouched.
+        worker.set_deadline(self.deadline);
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
         worker.parallel = self.parallel;

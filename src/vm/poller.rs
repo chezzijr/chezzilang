@@ -511,6 +511,7 @@ mod tests {
             span: Span { line: 1, col: 1 },
             is_assert: false,
             is_over_memory: false,
+            is_timed_out: false,
         }
     }
 

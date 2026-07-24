@@ -1697,11 +1697,22 @@ task alone), so a *concurrent* test near the boundary (allocation *split* below 
 above) would bucket `OVER-MEMORY` on `--serial` yet pass on M:N. A cross-engine aggregate would need
 non-deterministic global RSS (rejected — it would break the gate), so rather than ship the divergence the
 cap is restricted to the default engine (`--serial` is the parity oracle, slated for post-freeze removal).
-v1 also trips only at a GC boundary + on `Obj`-count growth — see §3b #1b. Missing: **test filtering** (`chezzi test`
+v1 also trips only at a GC boundary + on `Obj`-count growth — see §3b #1b. **`--timeout=<ms>`
+wall-clock cap SHIPPED (2026-07-24, §3b #4):** the sibling of `--max-heap` — a test running longer than
+`N` ms is hard-aborted (bypassing `recover:`) and bucketed `TIMED-OUT` (counts as failure); `0`/omitted
+= OFF, so timeout-off output + the dual-engine gate are byte-identical. It rides the same `is_timed_out`
+`RuntimeError` marker machinery, but the trip is observed at the **loop back-edge** (`jump_checked`) — the
+hottest engine-independent checkpoint — so it catches BOTH the top-level test body (which runs outside the
+fiber scheduler) and `spawn`ed-task loops. **Zero clock reads when off** (the `deadline: Option` guard
+short-circuits before any `Instant::now()`; the read is throttled 1/1024 back-edges when on). **M:N-engine-
+only** (`--timeout` errors with `--serial`): a wall-clock trip is non-deterministic → no serial==M:N parity.
+**v1 limit (watchdog follow-up):** a test blocked in a native call (blocking syscall, `Channel.recv` with
+no traffic) or spinning in loop-free infinite recursion (hits the stack guard) is NOT caught — a true
+watchdog thread is the next seam. Missing: **test filtering** (`chezzi test`
 rejects unknown flags, so on a big suite it's all or nothing — a ~20-line change and the best ratio in
 this file), fixtures/setup-teardown, coverage, benchmarks, `assert_eq` with a diff, parallel execution,
 machine-readable output (`go test -json`) — all tracked as `docs/future.md §3b` follow-ups (CLI
-ergonomics + `--timeout` resource cap still to come).
+ergonomics).
 
 **KNOWN-LIMIT — assert inside an FFI callback buckets ERROR, not FAIL (found 2026-07-24, WON'T-FIX).**
 The FAIL/ERROR split reads `RuntimeError.is_assert`, set true only by the `Op::Assert` arm. But when a
