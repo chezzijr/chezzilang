@@ -6492,16 +6492,27 @@ branch names) is in the git log.
   the merged built-in-container dispatch, struct, newtype, and the catch-all where a boxed `BigInt`
   lands), so a user method always wins and an ordinary struct method call pays **zero** added cost
   (`do_method_call` stays a Tier-1 perf target); benches re-measured within run-to-run noise.
-  **The ratchet, worth more than the fix:** `checker::proto::INTRINSIC_PROTO_METHODS` is now the single
-  (protocol, method) table, every intrinsic grant returns through `grant_intrinsic` (which
-  `debug_assert`s registration), and `vm::tests::intrinsic_grants_all_have_vm_arms` runs one Chezzi
-  snippet **per pair on both engines** and asserts the snippet table covers the const exactly — a new
-  grant without a VM arm now fails the suite. One documented carve-out, `Iterator`→`next` on a raw
-  collection (stateful, no cursor position; needs a checker grant-narrowing) is registered in
-  `INTRINSIC_UNPAIRED` with a test asserting it still faults, and filed as **W6-3b**.
-  Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (17 `test fn`, operator-equivalence AND
-  fault-message equality via `recover:`, plus user-method-wins controls), serial==M:N. Docs:
-  `docs/gaps.md` (W6-3 FIXED + new W6-3b), `docs/spec.md`, `docs/syntax.md`.
+  **The ratchet, worth more than the fix** — keyed on **(protocol × receiver KIND)**, because that is the
+  axis W6-3 actually failed on (`compare`/`str` WERE paired; their interceptions were just type-gated
+  narrower than the grant set, which a protocol-keyed table cannot express). Three layers:
+  (1) `satisfies_args_d`'s success type is `checker::proto::Grant`, a token with a private field, so a new
+  early-out written the way every pre-existing one was — a bare `return Ok(())` — **does not compile**; the
+  author must pick `grant_intrinsic` (registers the grant) or `Grant::no_intrinsic_method`;
+  (2) `grant_intrinsic(protocol, ty)` `debug_assert`s that `(protocol, intrinsic_recv_kind(ty))` has a row
+  in `INTRINSIC_PROTO_METHODS` (51 paired rows) or `INTRINSIC_UNPAIRED` (6 carve-out rows);
+  (3) `vm::tests::intrinsic_grants_all_have_vm_arms` sweeps the whole **(protocol × kind) cross product**
+  (165 cells): the accepted-cell set must equal the registered rows, then every paired row's generated
+  call probe RUNS on both engines. Verified RED both ways: a bare `Ok(())` grant fails to compile, and
+  widening `Comparable` to `bytes` (which the earlier protocol-keyed ratchet passed) now fails the suite.
+  Three carve-outs FILED rather than silently shipped: `Iterator`→`next` on a raw collection (**W6-3b**,
+  stateful, no cursor position), `compare` on a **NaN** operand (**W6-3c** — `<` is total but
+  `compare -> int` has no "unordered" value, so it now raises an explicit recoverable
+  `cannot compare NaN (…)` instead of W6-3's own `has no method` symptom), and a numeric `newtype` that
+  DEFINES `add`/`compare` (**W6-3d** — the method form gets the user method, the operator form the
+  underlying's native op; reqs "≡ the operator" and "never shadow a user method" genuinely conflict there).
+  Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn`, operator-equivalence AND
+  fault-message equality via `recover:`, user-method-wins controls, plus the two divergence pins),
+  serial==M:N. Docs: `docs/gaps.md` (W6-3 FIXED + new W6-3b/c/d), `docs/spec.md`, `docs/syntax.md`.
 - **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
   recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth
   (10000) exceeded (cyclic data structure?)` — there is no cyclic *data*, just the compiler letrec's

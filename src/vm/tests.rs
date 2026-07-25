@@ -13631,149 +13631,284 @@ main()
     assert_mc_parity(src, "3\n0\n255\n1\n");
 }
 
-/// **W6-3 structural ratchet — every intrinsic protocol grant must have a runnable VM arm.**
+/// **W6-3 structural ratchet — every intrinsic protocol grant must be CALLABLE at runtime.**
 ///
 /// The checker grants built-ins protocol conformance INTRINSICALLY (no user method) at the
 /// `grant_intrinsic` early-outs in `checker::proto::satisfies_args_d`, and the granted method must
-/// therefore be CALLABLE at runtime from an erased generic body. That pairing was honored for 2 of
-/// ~11 grants and broke the rest (`type int has no method 'add'` after `check: ok`).
+/// therefore be callable from an erased generic body. That pairing was honored for 2 of ~11 grants and
+/// broke the rest (`type int has no method 'add'` after `check: ok`).
 ///
-/// This test pins the pairing: one Chezzi snippet per `(protocol, method)` pair in
-/// `INTRINSIC_PROTO_METHODS`, RUN on both engines (serial oracle + M:N) and asserted identical. The
-/// snippets-cover-the-table assertion is the ratchet: adding a grant without a runnable VM arm fails
-/// HERE instead of shipping a check-OK-then-run-fault.
+/// The rows are keyed on `(protocol, method, receiver-KIND)` because the receiver kind is the axis
+/// W6-3 actually failed on: `compare`/`str` *were* paired, but their interceptions were type-gated
+/// narrower than the checker's grant set. This test generates one probe program PER ROW from a
+/// receiver-literal table and a call template, and RUNS it on both engines. Widening a grant to one
+/// more type therefore cannot pass: `grant_intrinsic`'s `debug_assert` demands the new row, and the
+/// row demands a probe that actually runs.
+///
+/// The probes are deliberately NOT generic — `run_capture` compiles without the checker and the
+/// compiler is type-blind, so `a := <literal>` + `a.<method>(…)` reaches the exact same
+/// `Vm::do_method_call` dispatch an erased `[T: P]` body does, with no bound/type-arg noise. The
+/// generic-body spelling, operator equivalence, and fault-text equality are covered by
+/// `tests/chz/spec/intrinsic_proto_methods_test.chz`.
 #[test]
 fn intrinsic_grants_all_have_vm_arms() {
     use crate::checker::proto::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED};
-    // (protocol, method, program, expected stdout) — each program calls the granted method on a
-    // BUILT-IN receiver through an erased `[T: Protocol]` body.
-    let snippets: &[(&str, &str, &str, &str)] = &[
-        (
-            "Comparable",
-            "compare",
-            "fn f[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nprint(f(1, 2) < 0)\nprint(f(2, 2))\n",
-            "true\n0\n",
+    /// One receiver per kind `Checker::intrinsic_recv_kind` can classify a grant as — the value to
+    /// probe with, plus the literals/types the parameterized bounds need. `"-"` = the kind has no
+    /// grant needing that column. `struct` needs ONE struct satisfying all three struct-granted
+    /// protocols at once: zero fields and no `hash` (intrinsic `Hashable`) plus `next(self) -> int?`
+    /// (`Iterator`, and `Iterable` through it).
+    struct Recv {
+        kind: &'static str,
+        prelude: &'static str,
+        lit: &'static str,
+        key: &'static str,
+        val: &'static str,
+        elem_ty: &'static str,
+        key_ty: &'static str,
+        val_ty: &'static str,
+        slice_ty: &'static str,
+    }
+    let r = |kind, prelude, lit, key, val, elem_ty, key_ty, val_ty, slice_ty| Recv {
+        kind,
+        prelude,
+        lit,
+        key,
+        val,
+        elem_ty,
+        key_ty,
+        val_ty,
+        slice_ty,
+    };
+    let recvs: &[Recv] = &[
+        r("int", "", "7", "-", "-", "-", "-", "-", "-"),
+        r("float", "", "1.5", "-", "-", "-", "-", "-", "-"),
+        r("bool", "", "true", "-", "-", "-", "-", "-", "-"),
+        r("str", "", "\"abc\"", "0", "-", "str", "int", "str", "str"),
+        r(
+            "bytes", "", "b\"abc\"", "0", "-", "int", "int", "int", "bytes",
         ),
-        (
-            "Stringable",
+        r(
+            "bytearray",
+            "",
+            "bytearray(b\"abc\")",
+            "0",
+            "1",
+            "int",
+            "int",
+            "int",
+            "bytearray",
+        ),
+        r(
+            "list",
+            "",
+            "[1, 2, 3]",
+            "0",
+            "9",
+            "int",
+            "int",
+            "int",
+            "List[int]",
+        ),
+        r("set", "", "Set([1, 2])", "-", "-", "int", "-", "-", "-"),
+        r(
+            "map",
+            "",
+            "{\"a\": 1}",
+            "\"a\"",
+            "9",
             "str",
-            "fn f[T: Stringable](a: T) -> str:\n    return a.str()\nprint(f(5))\nprint(f(true))\n",
-            "5\ntrue\n",
+            "str",
+            "int",
+            "-",
         ),
-        (
-            "Hashable",
-            "hash",
-            "fn f[T: Hashable](a: T) -> int:\n    return a.hash()\nprint(f(3) == f(3))\nprint(f(\"a\") != f(\"b\"))\n",
-            "true\ntrue\n",
+        r(
+            "struct",
+            "struct Cur:\n    fn next(self) -> int?:\n        return None\n",
+            "Cur()",
+            "-",
+            "-",
+            "int",
+            "-",
+            "-",
+            "-",
         ),
-        (
-            "Error",
-            "message",
-            "fn f[T: Error](e: T) -> str:\n    return e.message()\nprint(f(\"boom\"))\n",
-            "boom\n",
-        ),
-        (
-            "Iterable",
-            "iter",
-            "fn f[T: Iterable[int]](c: T) -> int:\n    n := 0\n    for x in c.iter():\n        n = n + x\n    return n\nprint(f([1, 2, 3]))\n",
-            "6\n",
-        ),
-        (
-            "Index",
-            "index",
-            "fn f[T: Index[int, int]](c: T) -> int:\n    return c.index(1)\nprint(f([7, 8, 9]))\n",
-            "8\n",
-        ),
-        (
-            "IndexSet",
-            "index",
-            "fn f[T: IndexSet[int, int]](c: T) -> int:\n    return c.index(1)\nprint(f([7, 8, 9]))\n",
-            "8\n",
-        ),
-        (
-            "IndexSet",
-            "set_index",
-            "fn f[T: IndexSet[int, int]](c: T):\n    c.set_index(0, 42)\nxs := [1, 2]\nf(xs)\nprint(xs[0])\n",
-            "42\n",
-        ),
-        (
-            "Slice",
-            "slice",
-            "fn f[T: Slice[List[int]]](c: T) -> List[int]:\n    return c.slice(Some(0), Some(2), None)\nprint(str(f([1, 2, 3])))\n",
-            "[1, 2]\n",
-        ),
-        (
-            "Add",
-            "add",
-            "fn f[T: Add](a: T, b: T) -> T:\n    return a.add(b)\nprint(f(2, 3))\nprint(f(1.5, 0.5))\n",
-            "5\n2.0\n",
-        ),
-        (
-            "Sub",
-            "sub",
-            "fn f[T: Sub](a: T, b: T) -> T:\n    return a.sub(b)\nprint(f(7, 2))\n",
-            "5\n",
-        ),
-        (
-            "Mul",
-            "mul",
-            "fn f[T: Mul](a: T, b: T) -> T:\n    return a.mul(b)\nprint(f(6, 7))\n",
-            "42\n",
-        ),
-        (
-            "Div",
-            "div",
-            "fn f[T: Div](a: T, b: T) -> T:\n    return a.div(b)\nprint(f(9, 2))\n",
-            "4\n",
-        ),
-        (
-            "Mod",
-            "mod",
-            "fn f[T: Mod](a: T, b: T) -> T:\n    return a.mod(b)\nprint(f(9, 2))\n",
-            "1\n",
-        ),
-        (
-            "Neg",
-            "neg",
-            "fn f[T: Neg](a: T) -> T:\n    return a.neg()\nprint(f(5))\nprint(f(-2.5))\n",
-            "-5\n2.5\n",
+        r(
+            "newtype",
+            "newtype NT = int\n",
+            "NT(7)",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
         ),
     ];
-    // The ratchet: the snippet table must cover INTRINSIC_PROTO_METHODS exactly, both ways.
-    for pair in INTRINSIC_PROTO_METHODS {
-        assert!(
-            snippets.iter().any(|(p, m, _, _)| (*p, *m) == *pair),
-            "intrinsic grant {pair:?} has no snippet in intrinsic_grants_all_have_vm_arms — add a \
-             `Vm::intrinsic_proto_method` arm for it AND a snippet here (W6-3)"
-        );
+    // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
+    let calls: &[(&str, &str)] = &[
+        ("compare", "{r}.compare(b)"),
+        ("str", "{r}.str()"),
+        ("hash", "{r}.hash()"),
+        ("message", "{r}.message()"),
+        ("iter", "{r}.iter()"),
+        ("next", "{r}.next()"),
+        ("index", "{r}.index({k})"),
+        ("set_index", "{r}.set_index({k}, {v})"),
+        ("slice", "{r}.slice(Some(0), Some(1), None)"),
+        ("add", "{r}.add(b)"),
+        ("sub", "{r}.sub(b)"),
+        ("mul", "{r}.mul(b)"),
+        ("div", "{r}.div(b)"),
+        ("mod", "{r}.mod(b)"),
+        ("neg", "{r}.neg()"),
+    ];
+    // Build the probe for a row, or `None` if the tables can't express it (which the assertions
+    // below turn into a failure — a row must never be silently skipped).
+    let recv_of = |kind: &str| recvs.iter().find(|r| r.kind == kind);
+    let probe = |method: &str, kind: &str| -> Option<String> {
+        let rv = recv_of(kind)?;
+        let (_, tmpl) = *calls.iter().find(|(m, _)| *m == method)?;
+        // An unfilled ("-") column the template needs = a missing table entry, not a skip.
+        if (tmpl.contains("{k}") && rv.key == "-") || (tmpl.contains("{v}") && rv.val == "-") {
+            return None;
+        }
+        let call = tmpl
+            .replace("{r}", "a")
+            .replace("{k}", rv.key)
+            .replace("{v}", rv.val);
+        // BIND the result: a bare `Option`/`Result`-valued expression statement auto-propagates
+        // (`unhandled error: None`), which would mask the dispatch this probe is about.
+        Some(format!(
+            "{}a := {}\nb := {}\nres := {call}\n",
+            rv.prelude, rv.lit, rv.lit
+        ))
+    };
+    // The CHECKER half: bind the receiver to a `[T: Protocol]` param (no method call needed — the
+    // bound alone forces the conformance decision). Type-checking this per row (a) proves the grant
+    // for that (protocol, receiver-kind) really EXISTS, so a stale row fails, and (b) is what actually
+    // executes `Checker::grant_intrinsic`, whose `debug_assert` fires when a grant has no row — i.e.
+    // this loop is what makes widening a grant to one more TYPE a test failure.
+    let bound_probe = |protocol: &str, kind: &str| -> String {
+        let rv = recv_of(kind).expect("every kind has a receiver");
+        // A parameterized protocol's bound must state its type args (arity is checked), so spell them
+        // from the receiver's own element/key/value/slice types. A `"-"` column means the kind has no
+        // grant for that protocol, so the arg is irrelevant to the (rejecting) answer — `int` stands in
+        // rather than skipping the cell, because a SKIPPED cell is a hole in the matrix.
+        let t = |c: &'static str| if c == "-" { "int" } else { c };
+        let bound = match protocol {
+            "Iterable" | "Iterator" => format!("{protocol}[{}]", t(rv.elem_ty)),
+            "Index" | "IndexSet" => format!("{protocol}[{}, {}]", t(rv.key_ty), t(rv.val_ty)),
+            "Slice" => format!("Slice[{}]", t(rv.slice_ty)),
+            _ => protocol.to_string(),
+        };
+        format!(
+            "{}fn probe[T: {bound}](a: T):\n    pass\nprobe({})\n",
+            rv.prelude, rv.lit
+        )
+    };
+    let type_errors = |src: &str| -> Vec<String> {
+        let tokens = crate::lexer::tokenize(src).expect("probe should lex");
+        let module = crate::parser::parse(tokens).expect("probe should parse");
+        crate::checker::check(&module)
+            .err()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect()
+    };
+    // **The (protocol × receiver-kind) MATRIX — the half that catches a widened grant.** An assert
+    // inside `grant_intrinsic` can only fire on inputs a test actually feeds it, so sweep the FULL
+    // cross product of every registered protocol against every receiver kind, and require the set of
+    // cells the checker ACCEPTS to equal the set of registered rows. Adding `Ty::Bytes` to the
+    // `Comparable` grant (or `Ty::Float` to `Hashable`, or `Ty::Set` to `index_kv`) flips one cell to
+    // accepted and fails HERE — the per-type hole a protocol-keyed table cannot see.
+    let protocols: Vec<&str> = {
+        let mut ps: Vec<&str> = INTRINSIC_PROTO_METHODS
+            .iter()
+            .chain(INTRINSIC_UNPAIRED)
+            .map(|(p, _, _)| *p)
+            .collect();
+        ps.sort_unstable();
+        ps.dedup();
+        ps
+    };
+    let mut accepted: Vec<(&str, &str)> = Vec::new();
+    for p in &protocols {
+        for rv in recvs {
+            let src = bound_probe(p, rv.kind);
+            let errs = type_errors(&src);
+            if errs.is_empty() {
+                accepted.push((p, rv.kind));
+            } else {
+                // A registered row the checker does NOT grant is a stale row (or a broken probe).
+                assert!(
+                    !INTRINSIC_PROTO_METHODS
+                        .iter()
+                        .chain(INTRINSIC_UNPAIRED)
+                        .any(|(tp, _, tk)| tp == p && *tk == rv.kind),
+                    "registered row ({p}, {}) claims an INTRINSIC grant the checker does not give: \
+                     {errs:?}\n--- probe ---\n{src}",
+                    rv.kind
+                );
+            }
+        }
     }
-    for (p, m, _, _) in snippets {
-        assert!(
-            INTRINSIC_PROTO_METHODS.contains(&(*p, *m)),
-            "snippet for ({p:?}, {m:?}) is not a registered intrinsic grant"
-        );
-    }
+    let mut registered: Vec<(&str, &str)> = INTRINSIC_PROTO_METHODS
+        .iter()
+        .chain(INTRINSIC_UNPAIRED)
+        .map(|(p, _, k)| (*p, *k))
+        .collect();
+    registered.sort_unstable();
+    registered.dedup();
+    accepted.sort_unstable();
+    accepted.dedup();
     assert_eq!(
-        snippets.len(),
-        INTRINSIC_PROTO_METHODS.len(),
-        "one snippet per intrinsic (protocol, method) pair"
+        accepted, registered,
+        "the (protocol, receiver-kind) cells the checker grants no longer match \
+         INTRINSIC_PROTO_METHODS ∪ INTRINSIC_UNPAIRED — a grant was widened or narrowed. Add/remove \
+         the row AND make the method callable at runtime (W6-3)"
     );
-    for (p, m, src, want) in snippets {
-        let serial = run_capture(src).unwrap_or_else(|e| {
-            panic!("{p}.{m} intrinsic method faulted on the serial engine: {e}")
+    for (p, m, kind) in INTRINSIC_PROTO_METHODS {
+        let src = probe(m, kind).unwrap_or_else(|| {
+            panic!(
+                "no probe for intrinsic grant ({p}, {m}, {kind}) — add its receiver literal / call \
+                 template to intrinsic_grants_all_have_vm_arms (W6-3)"
+            )
         });
-        assert_eq!(serial, *want, "{p}.{m} intrinsic method (serial)");
-        let mn = run_capture_parallel(src)
-            .unwrap_or_else(|e| panic!("{p}.{m} intrinsic method faulted on the M:N engine: {e}"));
-        assert_eq!(mn, *want, "{p}.{m} intrinsic method (M:N)");
+        for (engine, run) in [
+            (
+                "serial",
+                run_capture as fn(&str) -> Result<String, RuntimeError>,
+            ),
+            ("M:N", run_capture_parallel),
+        ] {
+            if let Err(e) = run(&src) {
+                panic!(
+                    "intrinsic grant ({p}, {m}, {kind}) is NOT callable on the {engine} engine: \
+                     {e}\n--- probe ---\n{src}"
+                );
+            }
+        }
     }
     // The documented carve-out must STAY a fault (see `INTRINSIC_UNPAIRED`) — if a later change makes
-    // it work, the const + its `docs/gaps.md` follow-up entry must be retired with it.
-    assert_eq!(INTRINSIC_UNPAIRED, &[("Iterator", "next")]);
-    let unpaired = "fn f[T: Iterator[int]](c: T):\n    print(str(c.next()))\nf([1, 2, 3])\n";
-    let err = run_capture(unpaired).expect_err("Iterator.next on a raw list still faults");
-    assert!(
-        err.to_string().contains("has no method 'next'"),
-        "unexpected Iterator.next fault: {err}"
-    );
+    // it work, the const + its `docs/gaps.md` W6-3b entry must be retired with it.
+    for (p, m, kind) in INTRINSIC_UNPAIRED {
+        let src = probe(m, kind)
+            .unwrap_or_else(|| panic!("no probe for unpaired grant ({p}, {m}, {kind})"));
+        let Err(err) = run_capture(&src) else {
+            panic!("({p}, {m}, {kind}) is the documented carve-out — it must still fault");
+        };
+        assert!(
+            err.to_string().contains(&format!("has no method '{m}'")),
+            "unexpected ({p}, {m}, {kind}) fault: {err}"
+        );
+    }
+    // No row may appear in both tables (a paired row that also claims to be a carve-out).
+    for row in INTRINSIC_UNPAIRED {
+        assert!(
+            !INTRINSIC_PROTO_METHODS.contains(row),
+            "{row:?} is registered as BOTH paired and unpaired"
+        );
+    }
 }

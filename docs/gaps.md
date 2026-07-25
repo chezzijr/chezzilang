@@ -224,7 +224,7 @@ parked_slot_nonsendable_rejects,in_data_cycle_rejects,unreached_nonsendable_runs
 - **Multi-frame / pending-`defer` suspended generators** — checker-UNREACHABLE (item 3 arms a/c); no valid
   program constructs them. The rejects are defensive guards, not a user-visible limit — nothing to build.
 
-## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 3 FIXED (W6-1, W6-3, W6-4), 15 open + 1 carve-out filed (W6-3b) — 2 never-hunted surfaces swept)
+## Session log — 2026-07-25 (bug-hunt wave 6: 18 findings — 3 FIXED (W6-1, W6-3, W6-4), 15 open + 3 carve-outs filed (W6-3b/c/d) — 2 never-hunted surfaces swept)
 
 Pre-freeze adversarial hunt, 5 disjoint parallel domains, weighted at the two surfaces the wave-5
 residual named as never audited (**FFI**, **GC + `unsafe`**) plus the concurrency code that landed
@@ -367,8 +367,8 @@ code), `neg` → a new `Vm::neg_value` (`Op::Neg`'s body extracted verbatim into
 single-sourced), `hash` → `hash_value` (**the Map/Set key hash** — so `x.hash()` can never disagree with
 `m[x]`/`s.has(x)`, and a zero-field struct routes through `struct_hash`'s
 `fields.is_empty() && !methods.contains_key("hash")` guard, the runtime mirror of `proto.rs`'s grant),
-`compare` → `compare` (the underlying's NATIVE order, which is what `<` uses — never a newtype's own
-`compare` method, per proto.rs's soundness note), `index`/`set_index`/`slice` → `get_index`/`set_index`/
+`compare` → `compare` (the underlying's NATIVE order, which is what `<` uses; see W6-3c/W6-3d for the two
+receivers where `compare` cannot match `<`), `index`/`set_index`/`slice` → `get_index`/`set_index`/
 `get_slice` (with the `Option[int]` → raw `Nil`/`Int` unwrap `Slice`'s protocol signature requires, gated
 on the fixed `VID_SOME`/`VID_NONE_VARIANT` ids). Nothing is reimplemented.
 It is wired at **five MISS sites** in `do_method_call` — inline-scalar miss, the merged built-in-container
@@ -379,20 +379,35 @@ Obj-tagged and never reaches the inline-scalar arm). Miss-only ⇒ a user method
 first) and the added per-call cost for an ordinary struct/handle method call is **zero**; the only
 always-on change is that the three container-dispatch `matches!` probes collapsed into one `match`.
 Benches re-measured: within run-to-run noise (the baseline itself flip-flops `loop` 1.01×↔1.00× and
-`struct` 2.49×↔2.62× between samples); `struct`/`poly_method` neutral-to-better.
+`struct` 2.49×↔2.62× between samples); `struct`/`poly_method` neutral-to-better. Final sample (vs CPython,
+lower is better): `fib` 2.99×, `struct` 2.48×, `poly_method` 3.75×, `list` 2.38×, `primes` 2.16×,
+`str` 2.03×, `map` 1.57×, `loop` 1.07×, startup 4.5× **faster**.
 Full grant↔arm pairing, now machine-checked: `Comparable`→`compare`, `Stringable`→`str`,
 `Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
-`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`…`mod`, `Neg`→`neg`. **The ratchet** (worth more than
-the fix): `checker::proto::INTRINSIC_PROTO_METHODS` is the single table of intrinsic (protocol, method)
-pairs; every intrinsic `return Ok(())` in `satisfies_args_d` now returns through `grant_intrinsic`, which
-`debug_assert`s the protocol is registered, and `vm::tests::intrinsic_grants_all_have_vm_arms` runs one
-Chezzi snippet **per pair on BOTH engines** and asserts its snippet table covers the const exactly — so a
-newly-added grant with no VM arm fails the suite instead of shipping a check-OK-then-run-fault (verified
-by temporarily adding an unpaired pair: the test fails).
-Not shipped: `Iterator`→`next`, filed as **W6-3b** below and registered in `INTRINSIC_UNPAIRED` with a test
-asserting it still faults. Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (17 `test fn` —
+`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`…`mod`, `Neg`→`neg`.
+**The ratchet** (worth more than the fix) is keyed on **(protocol × receiver KIND)**, because that is the
+axis W6-3 actually failed on — `compare`/`str` WERE paired, but their interceptions were type-gated
+narrower than the checker's grant set, so a protocol-keyed table could not have caught it. Three layers:
+1. `checker::proto::Grant` — `satisfies_args_d`'s success type is a token with a private field, so a new
+   early-out written the way every pre-existing one was (`return Ok(())`) does **not compile**; the author
+   must pick `grant_intrinsic` (registers the grant) or `Grant::no_intrinsic_method` (documented as "this
+   grants no callable method"). Verified: adding a bare `Ok(())` grant arm gives
+   `expected \`Grant\`, found \`()\``.
+2. `grant_intrinsic(protocol, ty)` `debug_assert`s that `(protocol, intrinsic_recv_kind(ty))` has a row in
+   `INTRINSIC_PROTO_METHODS` (or `INTRINSIC_UNPAIRED`) — 51 paired rows + 6 carve-out rows.
+3. `vm::tests::intrinsic_grants_all_have_vm_arms` sweeps the **full (protocol × kind) cross product**
+   (15 × 11 = 165 cells): it type-checks a `fn probe[T: P](a: T)` bound probe per cell and asserts the set
+   of cells the checker ACCEPTS equals the registered row set, then RUNS a generated call probe per paired
+   row on BOTH engines (and asserts every carve-out row still faults). Verified RED: adding `Ty::Bytes` to
+   the `Comparable` grant — the review's exact trigger, and a widening the previous protocol-keyed ratchet
+   passed — now fails with `intrinsic conformance granted for (Comparable, bytes) with no row`.
+Not shipped, filed instead of silently held: `Iterator`→`next` on a raw collection (**W6-3b**, registered
+in `INTRINSIC_UNPAIRED`), `compare` on a NaN operand (**W6-3c**), and the numeric-newtype-with-its-own-
+operator-method divergence (**W6-3d**) — all three below.
+Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (19 `test fn` —
 arith/neg/hash/index/set_index/slice/newtype/boxed-scalar/protocol-value, operator-equivalence AND
-fault-message equality via `recover:`, plus user-method-wins controls), serial==M:N.
+fault-message equality via `recover:`, plus user-method-wins controls and the two divergence pins),
+serial==M:N.
 
 ### W6-3b. `Iterator[E]`'s `next` is granted to a RAW collection but has no runtime arm — check-OK-then-run-fault — carved out of W6-3, low
 ```chezzi
@@ -411,6 +426,57 @@ which is what Rust (`IntoIterator` vs `Iterator`) and Go (`range` vs an iterator
 grant-set change, so it was out of W6-3's scope. Registered as `checker::proto::INTRINSIC_UNPAIRED` with
 `vm::tests::intrinsic_grants_all_have_vm_arms` asserting it STILL faults, so the carve-out can't rot: when
 this is fixed, retire the const entry, this section, and the assertion together.
+
+### W6-3c. `Comparable.compare` cannot answer a NaN operand — the protocol has no "unordered" — carved out of W6-3, low
+```chezzi
+fn cmp_m[T: Comparable](a: T, b: T) -> int:
+    return a.compare(b)
+nan := 0.0 / 0.0
+print(nan < 1.0)        # false — the operator form is TOTAL
+print(cmp_m(nan, 1.0))  # runtime error: cannot compare NaN (compare has no unordered result)
+```
+`float` is an intrinsically-granted `Comparable` type, but `compare(self, other) -> int`
+(`std/prelude.chz`) has **no int encoding for "unordered"**: `<`/`<=`/`>`/`>=` all answer `false` for a
+NaN operand (`Vm::ordered_bool`'s `None if both numeric => false`, IEEE-754/Python/Rust parity), and no
+single int makes all four false. So `.compare()` cannot be observationally identical to its operator form.
+Shipped answer: an explicit, RECOVERABLE value-domain fault
+(`cannot compare NaN (compare has no unordered result)`) — same class as `division by zero`, and the same
+position Rust takes (`f64` implements `PartialOrd`, not `Ord`). It replaces what the first W6-3 cut left
+here, which was W6-3's own headline symptom surviving inside the fix (`type float has no method 'compare'`
+after `check: ok` — the arm answered `Ok(None)` and the caller re-raised its name error).
+The real fix is a protocol-level decision, hence out of scope: either `compare -> int?`/an `Ordering`-like
+enum with an unordered case (a prelude + checker change), or narrow the `Comparable` grant to exclude
+`float` (which would break every `[T: Comparable]` generic over floats). Until then a generic
+`min`/`max`/`sort` written with `.compare()` faults on NaN data where the `<` spelling silently orders it
+— pinned by `compare_on_nan_faults_explicitly` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
+(both engines, byte-identical).
+
+### W6-3d. A numeric `newtype` with its OWN `add`/`compare` disagrees with `+`/`<` — carved out of W6-3, low
+```chezzi
+newtype Score = int:
+    fn add(self, o: Score) -> Score:
+        return Score(99)
+    fn compare(self, o: Score) -> int:
+        return 42
+fn twice[T: Add](a: T, b: T) -> T:
+    return a.add(b)
+print(int(twice(Score(1), Score(2))))   # 99   <- the USER method
+print(int(Score(1) + Score(2)))         # 3    <- the underlying's native op
+# `cmp(a, b) == 42` (a > b) while `a < b` is true — a REVERSED order inside one bound
+```
+Pre-dates W6-3 (verified on the base binary, both engines) and is a genuine requirement conflict: the
+intrinsic numeric-newtype grant is UNCONDITIONAL on such a method existing, intrinsic dispatch is
+miss-only so a user method must win (never shadow one — the stronger rule), and the operator form always
+auto-flows to the underlying's native op (a deliberate documented invariant, `docs/syntax.md`: "a
+newtype's own `add`/`div`/`compare` is never dispatched as an operator"). Two spellings of the same
+protocol operation therefore disagree for exactly this receiver.
+Candidate fixes, all grant/design changes: (a) reject a numeric newtype that defines an operator-named
+method (loudest, breaks any existing code that calls `.add()` deliberately); (b) make a numeric newtype's
+own operator method dispatch as the operator too (drops the auto-flow invariant); (c) drop the intrinsic
+grant when such a method exists, so conformance goes structural and BOTH spellings use the method (the
+operator still wouldn't). Pinned as-is by
+`newtype_own_method_wins_and_diverges_from_the_operator` in `tests/chz/spec/intrinsic_proto_methods_test.chz`
+so whichever way it is resolved, the change is visible.
 
 ### W6-4. `std.process` silently CORRUPTS non-UTF-8 child output (`from_utf8_lossy`), with no bytes hatch — the unswept B1/R1 sibling — P0 — **FIXED (2026-07-25)**
 ```chezzi

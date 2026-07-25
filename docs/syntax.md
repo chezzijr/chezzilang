@@ -1534,6 +1534,9 @@ underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`
 intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
 method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
 would silently use the underlying's native ordering, never the method, so the checker rejects it.
+The one sharp edge: a **numeric** newtype that nonetheless defines `add`/`compare`/… keeps both — a
+direct or generic `a.add(b)` calls ITS method (a user method is never shadowed), while `a + b` still
+auto-flows to the native op, so the two spellings disagree. Pick one (`docs/gaps.md` W6-3d).
 
 ```chezzi
 newtype Meters = float:
@@ -1606,8 +1609,12 @@ on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator f
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
 out-of-bounds message), `c.slice(Some(0), Some(2), None)` ≡ `c[0:2]` (the three components are `int?`),
 `x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
-gets its own. Still bound-only, and still one gap: `Iterator`'s `next` on a *raw* collection faults (no
-cursor position) — use `for`, or `.iter()` for a real cursor.
+gets its own. Still bound-only, and with three documented exceptions (`docs/gaps.md` W6-3b/c/d):
+`Iterator`'s `next` on a *raw* collection faults (no cursor position — use `for`, or `.iter()` for a real
+cursor); `a.compare(b)` on a **NaN** operand faults `cannot compare NaN (compare has no unordered
+result)` because `compare -> int` has no "unordered" value while `<` is total; and a numeric `newtype`
+that DEFINES `add`/`compare`/… gets its own method from `a.add(b)` while `a + b` keeps auto-flowing to
+the underlying's native op, so the two spellings disagree for that type only.
 
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether

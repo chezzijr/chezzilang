@@ -1450,9 +1450,11 @@ impl Vm {
                 }
                 // W6-3 — a SCALAR-underlying newtype intrinsically satisfies `Add`/`Sub`/`Mul`/`Div`/
                 // `Mod`/`Comparable` (`proto.rs`: its same-type `+`/`<` auto-flow to the underlying's
-                // native op, with no user method), so `a.add(b)`/`a.compare(b)` in an erased body must
-                // answer with exactly what `a + b` / `a < b` produce. Miss-only: the newtype's own
-                // methods resolved above.
+                // native op, with no user method), so `a.add(b)`/`a.compare(b)` in an erased body
+                // answers with what `a + b` / `a < b` produce. Miss-only, so a newtype that DEFINES
+                // one of those methods got ITS method above (never shadowed) — and for that receiver
+                // the method and operator forms DIVERGE, because the operator always auto-flows to the
+                // underlying's native op. Known, out of scope to reconcile here: `docs/gaps.md` W6-3d.
                 if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
                     self.push(v);
                     return Ok(());
@@ -2347,8 +2349,17 @@ impl Vm {
     /// struct/enum/newtype that DEFINES `add`/`hash`/`index`/… always gets ITS method (it resolves
     /// first) and this costs nothing on any successful dispatch.
     ///
-    /// NOT covered (no VM arm is possible): `Iterator[E]`'s `next` — see `INTRINSIC_UNPAIRED` in
-    /// `src/checker/proto.rs`.
+    /// **Two documented limits on the "≡ the operator form" claim** (both in `docs/gaps.md`):
+    /// * `compare` on a NaN operand — `<` is total, `compare -> int` has no unordered value, so this
+    ///   raises a value-domain fault instead (W6-3c; see the arm below);
+    /// * a numeric `newtype` that DEFINES `add`/`sub`/`mul`/`div`/`mod`/`compare` — being miss-only,
+    ///   the method form correctly dispatches the USER method while `+`/`<` still auto-flow to the
+    ///   underlying's native op, so for THAT receiver the two spellings differ (W6-3d). Never
+    ///   shadowing a user method wins over the equivalence; the divergence pre-dates this function and
+    ///   its real fix is a checker/grant decision.
+    ///
+    /// NOT covered (no VM arm is possible): `Iterator[E]`'s `next` on a raw collection — see
+    /// `INTRINSIC_UNPAIRED` in `src/checker/proto.rs`.
     pub(super) fn intrinsic_proto_method(
         &mut self,
         recv: Value,
@@ -2388,13 +2399,32 @@ impl Vm {
                 self.pop();
                 Ok(Some(n))
             }
-            // `Comparable` — needed for the numeric-NEWTYPE grant (the scalar receivers are already
-            // intercepted before dispatch). `compare` unwraps a newtype to the UNDERLYING's native
-            // ordering, which is exactly what `<` uses (`compare_op`'s same-newtype fast path); the
-            // newtype's own `compare` method is deliberately never an operator (see proto.rs).
-            ("compare", 1) => Ok(self
-                .compare(recv, args[0])
-                .map(|ord| Value::int(ord as i64))),
+            // `Comparable` — needed for the numeric-NEWTYPE grant AND for a NaN operand on a scalar
+            // (the pre-dispatch scalar arm only answers when `compare` returns `Some`). `compare`
+            // unwraps a newtype to the UNDERLYING's native ordering, which is exactly what `<` uses
+            // (`compare_op`'s same-newtype fast path).
+            //
+            // NaN is the ONE intrinsic grant that cannot be made observationally identical to its
+            // operator form: `<`/`<=`/`>`/`>=` are TOTAL for two numerics (`ordered_bool` answers
+            // `false` for every NaN comparison, IEEE-754/Python/Rust parity), but `Comparable`'s
+            // `compare(self, other) -> int` has NO int encoding for "unordered" — any value we
+            // returned would make some of the four ops true. So raise an explicit, RECOVERABLE
+            // value-domain fault (like `division by zero`) instead of a bogus
+            // `type float has no method 'compare'`, which was W6-3's own symptom surviving inside the
+            // fix. Rust takes the same position (`f64` implements `PartialOrd`, not `Ord`).
+            // `docs/gaps.md` W6-3c tracks the protocol-level fix (an unordered result).
+            ("compare", 1) => match self.compare(recv, args[0]) {
+                Some(ord) => Ok(Some(Value::int(ord as i64))),
+                None if self.numeric_unwrapped(recv) && self.numeric_unwrapped(args[0]) => {
+                    Err(self.err(
+                        "cannot compare NaN (compare has no unordered result)".to_string(),
+                        span,
+                    ))
+                }
+                // Genuinely incomparable TYPES (unreachable from well-typed source): leave the
+                // caller's `has no method` error standing, exactly as before.
+                None => Ok(None),
+            },
             ("index", 1) => {
                 self.push(recv);
                 self.push(args[0]);
@@ -2425,6 +2455,19 @@ impl Vm {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Is `v` numeric AFTER unwrapping any `newtype` layers? The predicate `Vm::ordered_bool` applies
+    /// to decide "a `None` from `compare` means NaN, not incomparable types" — but applied to the
+    /// values as `compare` sees them (it recurses through `Obj::NewType`, and `compare_op` unwraps a
+    /// same-newtype pair before calling `ordered_bool`), so `newtype M = float` answers like `float`.
+    fn numeric_unwrapped(&self, v: Value) -> bool {
+        if let Some(h) = v.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(h)
+        {
+            return self.numeric_unwrapped(*inner);
+        }
+        self.is_numeric(v)
     }
 
     /// `Option[int]` → the raw `Nil`/`Int` slice component `Vm::get_slice` expects. Gated on the

@@ -301,3 +301,60 @@ test fn user_struct_index_methods_still_win():
     assert ix_li(c, 1) == 2
     si_li(c, 1, 9)
     assert c.xs == [1, 9, 3]
+
+# ---- NaN: the ONE arm that cannot equal its operator form (W6-3c) ----
+#
+# `<`/`<=`/`>`/`>=` are TOTAL on two numerics (every NaN comparison is `false`, IEEE-754/Python/Rust
+# parity), but `Comparable`'s `compare(self, other) -> int` has no int encoding for "unordered" — any
+# value would make some of the four ops true. So `.compare()` raises an explicit, RECOVERABLE
+# value-domain fault (like `division by zero`) rather than answering wrong, and — the point — rather
+# than re-raising the bogus `type float has no method 'compare'` that was W6-3's own symptom.
+
+fn nan() -> float:
+    z := 0.0
+    return z / z
+
+test fn compare_on_nan_faults_explicitly():
+    n := nan()
+    # the operator form stays total and unfaulting
+    assert (n < 1.0) == false
+    assert (n > 1.0) == false
+    assert (n <= 1.0) == false
+    assert (n >= 1.0) == false
+    # the method form faults — with a NAMED value-domain message, never `has no method`
+    r := recover: cmp_m(n, 1.0)
+    assert msg_of(r, "cmp_m(nan)") == "cannot compare NaN (compare has no unordered result)"
+    r = recover: cmp_m(1.0, n)
+    assert msg_of(r, "cmp_m(_, nan)") == "cannot compare NaN (compare has no unordered result)"
+    # a numeric newtype over float behaves identically (its `<` unwraps to the underlying)
+    m := Meters(nan())
+    assert (m < Meters(1.0)) == false
+    r = recover: cmp_m(m, Meters(1.0))
+    assert msg_of(r, "cmp_m(Meters(nan))") == "cannot compare NaN (compare has no unordered result)"
+    # non-NaN floats still compare normally
+    assert (cmp_m(1.0, 2.0) < 0) == (1.0 < 2.0)
+
+# ---- a numeric newtype with its OWN operator-named method: method != operator (W6-3d) ----
+#
+# The intrinsic numeric-newtype grant is UNCONDITIONAL on such a method existing, and intrinsic
+# dispatch is miss-only, so `a.add(b)` gets the USER method (never shadowed — that is the stronger
+# rule) while `a + b` always auto-flows to the underlying's native op (documented in syntax.md: a
+# newtype's own `add`/`compare` is never dispatched as an operator). The two spellings therefore
+# DIVERGE for this one receiver. Pinned here so the real behaviour is asserted rather than assumed
+# equal; reconciling it is a checker/grant decision (docs/gaps.md W6-3d).
+
+newtype Score = int:
+    fn add(self, o: Score) -> Score:
+        return Score(99)
+    fn compare(self, o: Score) -> int:
+        return 42
+
+test fn newtype_own_method_wins_and_diverges_from_the_operator():
+    a := Score(1)
+    b := Score(2)
+    assert int(add_m(a, b)) == 99, "the user method is dispatched, never shadowed"
+    assert int(a + b) == 3, "the operator auto-flows to the underlying's native op"
+    assert cmp_m(a, b) == 42, "the user compare is dispatched"
+    assert (a < b) == true, "the operator orders by the underlying"
+    # the divergence is the point: these two are NOT equal for this receiver
+    assert (cmp_m(a, b) < 0) != (a < b)

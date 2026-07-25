@@ -575,10 +575,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `index`/`set_index`/`slice` on `list`/`map`/`str`/`bytes`/`bytearray`. Each dispatches to the **same
   primitive its operator form uses**, so `a.add(b)` ≡ `a + b`, `c.index(k)` ≡ `c[k]`, `c.slice(…)` ≡
   `c[a:b:c]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
-  The checker↔VM pairing is machine-checked (`checker::proto::INTRINSIC_PROTO_METHODS` +
-  `vm::tests::intrinsic_grants_all_have_vm_arms`), so a future grant cannot ship without its arm. One
-  documented carve-out: `Iterator`'s stateful `next` on a *raw* collection still faults (a raw
-  collection has no cursor position) — see `docs/gaps.md` W6-3b.
+  The checker↔runtime pairing is machine-checked per **(protocol × receiver type)**
+  (`checker::proto::INTRINSIC_PROTO_METHODS` + `vm::tests::intrinsic_grants_all_have_vm_arms`, which
+  sweeps the whole cross product), and a bare `return Ok(())` grant no longer compiles — so neither a
+  new grant nor a WIDENED one can ship without its arm. Three documented exceptions: `Iterator`'s
+  stateful `next` on a *raw* collection (no cursor position, W6-3b), `compare` on a NaN operand (no
+  "unordered" int, W6-3c), and a numeric `newtype` that defines its own operator-named method (the
+  method form gets the user method, the operator form the underlying's native op, W6-3d).
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
   via a new `NativeArg::Map` so the headers form stays blocking-pool-offloadable under `--parallel`;
@@ -909,8 +912,20 @@ The intrinsic grants and their methods are: `Comparable`→`compare`, `Stringabl
 `Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
-Known gap: `Iterator`'s `next` on a *raw* collection is granted but faults — a raw collection holds no
-cursor position (`docs/gaps.md` W6-3b); iterate it with `for`, or call `.iter()` for a real cursor.
+
+**Three documented exceptions to the equivalence** (each with a `docs/gaps.md` entry):
+
+- `Iterator`'s `next` on a *raw* collection is granted but faults — a raw collection holds no cursor
+  position (W6-3b); iterate it with `for`, or call `.iter()` for a real cursor.
+- `a.compare(b)` with a **NaN** operand raises `cannot compare NaN (compare has no unordered result)`.
+  `<`/`<=`/`>`/`>=` are total on floats (every NaN comparison is `false`), but `compare(self, other) ->
+  int` has no encoding for "unordered", so the method faults rather than answer wrong — a recoverable
+  value-domain fault like `division by zero`, same position Rust takes (`f64` is `PartialOrd`, not
+  `Ord`). Order NaN-bearing data with the operators, or filter NaN first (W6-3c).
+- A numeric `newtype` that **defines** `add`/`sub`/`mul`/`div`/`mod`/`compare` diverges: the method form
+  dispatches ITS method (never shadowed — that rule wins) while `+`/`<` still auto-flow to the
+  underlying's native op (see the newtype note in `docs/syntax.md`). Don't write both spellings over
+  such a type (W6-3d).
 
 **What does NOT exist (current boundaries):**
 
